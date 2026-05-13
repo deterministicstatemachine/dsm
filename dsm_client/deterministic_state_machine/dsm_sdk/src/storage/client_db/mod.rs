@@ -126,16 +126,14 @@ pub fn init_database() -> Result<()> {
         info!("[DSM_SDK] Database connection opened successfully");
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
         create_schema(&conn)?;
-        replace_incompatible_transactions_schema(&conn)?;
+        replace_transactions_schema_without_unix_ts(&conn)?;
         ensure_vault_records_lineage_columns(&conn)?;
         ensure_bitcoin_accounts_active_receive_index(&conn)?;
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
-        ensure_stitched_receipts_sig_b_nullable(&conn)?;
+        ensure_stitched_receipts_dual_signature_schema(&conn)?;
         ensure_bilateral_sessions_created_at_step(&conn)?;
         ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
-        migrate_legacy_withdrawal_states(&conn)?;
-
         {
             let mut guard = DB_CONNECTION
                 .write()
@@ -394,7 +392,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         -- Per-relationship chain state archive (§2.2/§4.2).
         -- Authoritative per-advance history keyed by chain_tip (h_{n+1}).
-        -- The legacy device-monolith `bcr_states` table is fully removed —
+        -- The device-monolith `bcr_states` table is fully removed —
         -- canonical history lives here, current head lives in
         -- `bcr_device_heads` below.
         CREATE TABLE IF NOT EXISTS bcr_chain_states(
@@ -424,9 +422,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             updated_at  INTEGER NOT NULL
         );
 
-        -- Legacy device-monolith table removed (§4.3): no state counter, no
-        -- monolithic snapshot keyed by hash. Drop any pre-migration rows so
-        -- they cannot be read accidentally during the transition.
+        -- Device head storage is BCR-only (§4.3): no state counter and no
+        -- monolithic snapshot keyed by hash.
         DROP TABLE IF EXISTS bcr_states;
         DROP INDEX IF EXISTS idx_bcr_states_device_published;
 
@@ -627,7 +624,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             device_id_a   BLOB NOT NULL,
             device_id_b   BLOB NOT NULL,
             sig_a         BLOB NOT NULL,
-            sig_b         BLOB,
+            sig_b         BLOB NOT NULL,
             receipt_commit BLOB NOT NULL,
             smt_root_pre  BLOB,
             smt_root_post BLOB
@@ -772,7 +769,7 @@ fn ensure_bilateral_sessions_stitched_receipt_bytes(conn: &Connection) -> Result
     Ok(())
 }
 
-fn replace_incompatible_transactions_schema(conn: &Connection) -> Result<()> {
+fn replace_transactions_schema_without_unix_ts(conn: &Connection) -> Result<()> {
     let mut has_created_at = false;
     let mut has_unix_ts = false;
 
@@ -791,7 +788,7 @@ fn replace_incompatible_transactions_schema(conn: &Connection) -> Result<()> {
     }
 
     warn!(
-        "Replacing incompatible transactions schema (created_at={}, unix_ts={})",
+        "Replacing transactions schema without unix_ts (created_at={}, unix_ts={})",
         has_created_at, has_unix_ts
     );
     conn.execute_batch(
@@ -987,45 +984,25 @@ fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> 
     Ok(())
 }
 
-fn migrate_legacy_withdrawal_states(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "UPDATE in_flight_withdrawals
-         SET state = 'finalized'
-         WHERE state = 'settled'",
-        [],
-    )?;
-    conn.execute(
-        "UPDATE in_flight_withdrawals
-         SET state = 'committed'
-         WHERE state = 'partial_failure'",
-        [],
-    )?;
-    Ok(())
-}
-
-/// Migrate existing `stitched_receipts` tables where `sig_b` was created as `NOT NULL`.
-/// Fresh schemas (post-solo-signature) define `sig_b BLOB` (nullable), but
-/// `CREATE TABLE IF NOT EXISTS` is a no-op on existing databases. SQLite does not
-/// support `ALTER COLUMN`, so we recreate the table if `sig_b` is still NOT NULL.
-fn ensure_stitched_receipts_sig_b_nullable(conn: &Connection) -> Result<()> {
+fn ensure_stitched_receipts_dual_signature_schema(conn: &Connection) -> Result<()> {
     // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
     let mut stmt = conn.prepare("PRAGMA table_info(stitched_receipts)")?;
-    let mut sig_b_notnull = false;
+    let mut sig_b_required = false;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(1)?, row.get::<_, i32>(3)?))
     })?;
     for row in rows {
         let (name, notnull) = row?;
         if name == "sig_b" {
-            sig_b_notnull = notnull != 0;
+            sig_b_required = notnull != 0;
             break;
         }
     }
-    if !sig_b_notnull {
-        return Ok(()); // Already nullable or table doesn't exist yet
+    if sig_b_required {
+        return Ok(());
     }
 
-    log::info!("[DSM_SDK] Migrating stitched_receipts: sig_b NOT NULL → nullable");
+    log::info!("[DSM_SDK] Rebuilding stitched_receipts with dual-signature enforcement");
     conn.execute_batch(
         "BEGIN;
          ALTER TABLE stitched_receipts RENAME TO _stitched_receipts_old;
@@ -1036,7 +1013,7 @@ fn ensure_stitched_receipts_sig_b_nullable(conn: &Connection) -> Result<()> {
              device_id_a   BLOB NOT NULL,
              device_id_b   BLOB NOT NULL,
              sig_a         BLOB NOT NULL,
-             sig_b         BLOB,
+             sig_b         BLOB NOT NULL,
              receipt_commit BLOB NOT NULL,
              smt_root_pre  BLOB,
              smt_root_post BLOB
@@ -1044,13 +1021,14 @@ fn ensure_stitched_receipts_sig_b_nullable(conn: &Connection) -> Result<()> {
          INSERT INTO stitched_receipts
              SELECT tx_hash, h_n, h_n1, device_id_a, device_id_b,
                     sig_a, sig_b, receipt_commit, smt_root_pre, smt_root_post
-             FROM _stitched_receipts_old;
+             FROM _stitched_receipts_old
+             WHERE sig_b IS NOT NULL AND length(sig_b) > 0;
          DROP TABLE _stitched_receipts_old;
          CREATE INDEX IF NOT EXISTS idx_stitched_receipts_devid_a ON stitched_receipts(device_id_a);
          CREATE INDEX IF NOT EXISTS idx_stitched_receipts_devid_b ON stitched_receipts(device_id_b);
          COMMIT;",
     )?;
-    log::info!("[DSM_SDK] stitched_receipts sig_b migration complete");
+    log::info!("[DSM_SDK] stitched_receipts dual-signature schema ready");
     Ok(())
 }
 
@@ -1133,7 +1111,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_replace_incompatible_transactions_schema_removes_unix_ts_column() {
+    fn test_replace_transactions_schema_without_unix_ts_removes_unix_ts_column() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1167,14 +1145,14 @@ mod tests {
                 tx_id, tx_hash, from_device, to_device, amount, tx_type, status,
                 chain_height, step_index, commitment_hash, proof_data, metadata, unix_ts
             ) VALUES (
-                'legacy-tx', 'hash', 'from', 'to', 1, 'legacy', 'confirmed',
+                'old-schema-tx', 'hash', 'from', 'to', 1, 'schema-replaced', 'confirmed',
                 1, 1, NULL, NULL, NULL, 123
             );
             "#,
         )
-        .expect("seed legacy transactions table");
+        .expect("seed old transactions table");
 
-        replace_incompatible_transactions_schema(&conn).expect("replace transactions schema");
+        replace_transactions_schema_without_unix_ts(&conn).expect("replace transactions schema");
 
         let mut stmt = conn
             .prepare("PRAGMA table_info(transactions)")
@@ -1190,7 +1168,7 @@ mod tests {
         let tx_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
             .expect("count transactions");
-        assert_eq!(tx_count, 0, "legacy transactions should be dropped");
+        assert_eq!(tx_count, 0, "old-schema transactions should be dropped");
 
         drop(stmt);
         drop(conn);
@@ -1211,75 +1189,6 @@ mod tests {
             created_at: 0,
         })
         .expect("store transaction with replacement schema");
-    }
-
-    #[test]
-    #[serial]
-    fn test_migrate_legacy_withdrawal_states_rewrites_settled_and_partial_failure() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let binding = get_connection().expect("db connection");
-        let conn = binding.lock().expect("db lock");
-        conn.execute(
-            "INSERT INTO in_flight_withdrawals(
-                withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
-                state, burn_token_id, burn_amount_sats, created_at, updated_at
-            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-            params![
-                "legacy-settled",
-                "device-a",
-                1_000i64,
-                "tb1qlegacy",
-                crate::policy::builtins::DBTC_POLICY_COMMIT.as_slice(),
-                "settled",
-                "dBTC",
-                1_000i64,
-                1i64
-            ],
-        )
-        .expect("insert settled row");
-        conn.execute(
-            "INSERT INTO in_flight_withdrawals(
-                withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
-                state, burn_token_id, burn_amount_sats, created_at, updated_at
-            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-            params![
-                "legacy-partial",
-                "device-a",
-                2_000i64,
-                "tb1qlegacy",
-                crate::policy::builtins::DBTC_POLICY_COMMIT.as_slice(),
-                "partial_failure",
-                "dBTC",
-                2_000i64,
-                2i64
-            ],
-        )
-        .expect("insert partial_failure row");
-
-        migrate_legacy_withdrawal_states(&conn).expect("migrate legacy withdrawal states");
-
-        let settled_state: String = conn
-            .query_row(
-                "SELECT state FROM in_flight_withdrawals WHERE withdrawal_id = 'legacy-settled'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("load settled row");
-        let partial_state: String = conn
-            .query_row(
-                "SELECT state FROM in_flight_withdrawals WHERE withdrawal_id = 'legacy-partial'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("load partial row");
-
-        assert_eq!(settled_state, "finalized");
-        assert_eq!(partial_state, "committed");
     }
 
     #[test]
@@ -2058,7 +1967,7 @@ mod tests {
         let device_id = [0x11u8; 32];
         let original_tip = [0x22u8; 32];
         let original = ContactRecord {
-            contact_id: "legacy-contact".to_string(),
+            contact_id: "original-contact".to_string(),
             device_id: device_id.to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0x33u8; 32].to_vec(),
@@ -2102,7 +2011,7 @@ mod tests {
         let stored = get_contact_by_device_id(&device_id)
             .expect("load repaired contact")
             .expect("contact exists");
-        assert_eq!(stored.contact_id, "legacy-contact");
+        assert_eq!(stored.contact_id, "original-contact");
         assert_eq!(stored.alias, "peer-fixed");
         assert_eq!(stored.genesis_hash, [0x55u8; 32].to_vec());
         assert_eq!(stored.public_key, vec![0x66u8; 64]);
