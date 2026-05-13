@@ -1361,7 +1361,7 @@ git commit -m "test(bilateral): modal-SMT exclusion mock surface — [implemente
 
 **Step 1: Write the README**
 
-Short (80–120 lines) covering:
+Short (80-120 lines) covering:
 - Purpose: device-free bilateral tests
 - Components: `TestPeer`, `PeerPair`, `FakeNetwork`, `Faults`, `NetworkTap`
 - AppState is process-global → harness tests must be `#[serial_test::serial]`
@@ -1422,7 +1422,7 @@ Do not proceed to Phase 2 (audit) without Brandon's review. Phase 1 exit is:
 
 ## Done means
 
-- ~13–16 commits, one per task.
+- ~13-16 commits, one per task.
 - `tests/bilateral_harness_smoke.rs` exists with at least: happy-path
   (manual-accept driven), drop, reorder, partition+heal, corrupt, tap,
   delay, manual-accept-guard, simulate-restart.

@@ -70,7 +70,7 @@ following amendments apply:
    correctness tests exist.
 
 These amendments rewrite the audit lane ordering below. The phase
-structure (1–6) and checkpoint gates remain unchanged.
+structure (1-6) and checkpoint gates remain unchanged.
 
 ---
 
@@ -192,8 +192,8 @@ reusable and extend.
 
 ### Phase 1 — Deterministic BLE harness ✋
 
-Deliverable: harness module + 5–8 smoke tests proving it can drive a happy-
-path 3-phase commit end-to-end without Android, and 2–3 fault-injection
+Deliverable: harness module + 5-8 smoke tests proving it can drive a happy-
+path 3-phase commit end-to-end without Android, and 2-3 fault-injection
 tests proving the fault API works.
 
 Gate: Brandon reviews harness API before Phase 2.
@@ -263,7 +263,7 @@ For each picked finding:
 3. Verify the test now passes and no regressions.
 
 Plus: general concurrency test coverage independent of specific findings,
-organized by the Lane A–G audit targets, using tokio multi-threaded
+organized by the Lane A-G audit targets, using tokio multi-threaded
 runtime. `loom` is **not** applied to the orchestration/storage/global-
 state surface (wrong tool). It is only applied to a small extracted
 synchronization unit if one is cleanly isolated in its own module with
