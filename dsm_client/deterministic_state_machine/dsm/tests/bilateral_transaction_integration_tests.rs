@@ -118,32 +118,29 @@ async fn test_complete_bilateral_transaction_flow() {
         .await
         .expect("handle contact request");
 
-    let mut smt_bob = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     let (_ok, contact_response) = bob_manager
         .accept_contact_request_with_response(
             &request_hash,
             Some("Welcome Alice!".to_string()),
-            &mut smt_bob,
         )
         .await
         .expect("accept contact");
 
-    let mut smt_alice = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     alice_manager
-        .handle_contact_establishment_response(contact_response, &mut smt_alice)
+        .handle_contact_establishment_response(contact_response)
         .await
         .expect("alice finalize contact");
 
     // 2) Relationship establishment
     let alice_relationship = alice_manager
         .get_bilateral_tx_manager_mut()
-        .establish_relationship(&bob_device_id, &mut smt_alice)
+        .establish_relationship(&bob_device_id)
         .await
         .expect("alice establish relationship");
 
     let bob_relationship = bob_manager
         .get_bilateral_tx_manager_mut()
-        .establish_relationship(&alice_device_id, &mut smt_bob)
+        .establish_relationship(&alice_device_id)
         .await
         .expect("bob establish relationship");
 

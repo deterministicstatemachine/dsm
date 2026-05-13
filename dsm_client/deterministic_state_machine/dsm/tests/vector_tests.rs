@@ -75,7 +75,7 @@ fn discover_cases(root: &PathBuf) -> Result<Vec<PathBuf>> {
 
 fn map_reject_from_real_impl(wire: &[u8]) -> RejectCode {
     let resp = dsm::core::bridge::handle_envelope_universal(wire);
-    let env = match gp::Envelope::decode(resp.as_slice()) {
+    let env = match dsm::envelope::from_canonical_bytes(resp.as_slice()) {
         Ok(e) => e,
         Err(_) => return RejectCode::DecodeError,
     };

@@ -85,7 +85,7 @@ fn universal_faucet_claim_invoke_routes_to_approuter_claim() {
         .unwrap_or_else(|e| panic!("install app router failed: {e}"));
 
     let resp_bytes = dsm::core::bridge::handle_envelope_universal(&env.encode_to_vec());
-    let resp_env = gp::Envelope::decode(resp_bytes.as_slice())
+    let resp_env = dsm::envelope::from_canonical_bytes(resp_bytes.as_slice())
         .unwrap_or_else(|e| panic!("decode response envelope failed: {e}"));
 
     match resp_env.payload {

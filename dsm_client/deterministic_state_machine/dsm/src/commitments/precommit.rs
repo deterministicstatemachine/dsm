@@ -242,12 +242,19 @@ impl PreCommitment {
             .into());
         }
 
-        Ok(canonical_lp::hash_lp3(
-            DOM_PRECOMMIT_COMMITMENT_HASH,
-            parent_tip,
-            payload,
-            entropy,
-        ))
+        Ok(Self::branch_commitment_hash(parent_tip, payload, entropy))
+    }
+
+    /// Canonical v2 branch commitment without allocation bounds checks.
+    ///
+    /// This is the single live hash primitive for bilateral `C_pre`:
+    /// `H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
+    pub fn branch_commitment_hash(
+        parent_tip: &[u8; 32],
+        payload: &[u8],
+        entropy: &[u8],
+    ) -> [u8; 32] {
+        canonical_lp::hash_lp3(DOM_PRECOMMIT_COMMITMENT_HASH, parent_tip, payload, entropy)
     }
 
     fn encode_fork_candidates(

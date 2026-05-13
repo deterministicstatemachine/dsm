@@ -12,7 +12,8 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use tracing::{info, error};
 
 use crate::core::contact_manager::DsmContactManager;
-use crate::core::chain_tip_store::{ChainTipStore, noop_chain_tip_store};
+use crate::commitments::precommit::PreCommitment as CanonicalPreCommitment;
+use crate::core::chain_tip_store::{noop_chain_tip_store, ChainTipStore};
 use crate::core::state_machine::bilateral::BilateralStateManager;
 use crate::core::state_machine::relationship::RelationshipStatePair as StatePair;
 use crate::crypto::canonical_lp;
@@ -150,13 +151,11 @@ pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
     bytes32(h.finalize().as_bytes())
 }
 
-/// §16.6: C_pre = BLAKE3("DSM/pre\0" || h_n || op || e) — pre-commit digest
+/// Canonical bilateral pre-commit digest.
+///
+/// `C_pre = H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
 pub fn compute_precommit(h_n: &[u8; 32], op_bytes: &[u8], entropy: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/pre");
-    h.update(h_n);
-    h.update(op_bytes);
-    h.update(entropy);
-    bytes32(h.finalize().as_bytes())
+    CanonicalPreCommitment::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
 /// §16.6: h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || e || σ) — successor shared tip
@@ -666,7 +665,6 @@ impl BilateralTransactionManager {
     pub async fn establish_relationship(
         &mut self,
         remote_device_id: &[u8; 32],
-        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<BilateralRelationshipAnchor, DsmError> {
         info!(
             "[BTM] establish_relationship: device={}",
@@ -720,14 +718,6 @@ impl BilateralTransactionManager {
             labeling::hash_to_short_id(&tip),
             contact_chain_tip.is_some()
         );
-        // §2.2 canonical SMT (DeviceState.smt) auto-seeds on first advance
-        // via `DeviceState::advance`'s `initial_chain_tip` branch. The `smt`
-        // argument here is a legacy per-handler local SMT that no longer
-        // feeds any acceptance path — seed it for internal consistency only.
-        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
-        smt.update_leaf(&smt_key, &tip)
-            .map_err(|e| DsmError::merkle(format!("Failed to seed legacy local SMT leaf: {e}")))?;
-
         anchor.chain_tip = tip;
         self.relationships.insert(*remote_device_id, anchor.clone());
 
@@ -1314,8 +1304,8 @@ impl BilateralTransactionManager {
             entropy,
         )?;
         let current_tip = anchor.chain_tip;
-        // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || entropy) — symmetric,
-        // both parties derive identical h_{n+1} from the same shared inputs.
+        // C_pre uses the canonical precommit v2 branch formula; both parties
+        // derive identical h_{n+1} from the same shared inputs.
         let receipt_sigma = compute_precommit(&current_tip, &pre.operation.to_bytes(), &entropy);
         let new_tip = compute_successor_tip(
             &current_tip,
@@ -1477,8 +1467,7 @@ impl BilateralTransactionManager {
 
     /// Non-mutating preview of the sender's post-finalize SHARED chain tip hash.
     ///
-    /// Computes h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || entropy || σ) where
-    /// σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || entropy).
+    /// Computes h_{n+1} from h_n, operation bytes, entropy, and canonical C_pre.
     /// Both parties compute the same h_{n+1} from these shared inputs (§16.6).
     /// Used by the BLE handler to pre-compute the sender's post-finalize tip
     /// for inclusion in the BilateralCommitRequest.
@@ -1652,8 +1641,7 @@ mod tests {
     async fn establish_relationship_missing_contact() {
         let (mut manager, _kp) = make_manager();
         let remote = make_remote_ids().0;
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let res = manager.establish_relationship(&remote, &mut smt).await;
+        let res = manager.establish_relationship(&remote).await;
         assert!(res.is_err());
     }
 
@@ -1663,10 +1651,7 @@ mod tests {
         let contact = make_verified_contact("Alice", true, false);
         // Add contact (pre-verified API allows any, but BTM enforces on use)
         manager.add_verified_contact(contact.clone()).expect("add");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let res = manager
-            .establish_relationship(&contact.device_id, &mut smt)
-            .await;
+        let res = manager.establish_relationship(&contact.device_id).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
@@ -1678,9 +1663,8 @@ mod tests {
         let remote_genesis = contact.genesis_hash;
         manager.add_verified_contact(contact).expect("add");
 
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let anchor = manager
-            .establish_relationship(&remote_id, &mut smt)
+            .establish_relationship(&remote_id)
             .await
             .expect("establish");
         assert_eq!(anchor.local_device_id, make_manager_ids().0);
@@ -1723,9 +1707,8 @@ mod tests {
         let contact = make_verified_contact("Carol", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .establish_relationship(&remote_id, &mut smt)
+            .establish_relationship(&remote_id)
             .await
             .expect("establish");
 
@@ -1748,9 +1731,8 @@ mod tests {
         let remote_id = contact.device_id;
         let remote_genesis = contact.genesis_hash;
         manager.add_verified_contact(contact).expect("add");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let anchor = manager
-            .establish_relationship(&remote_id, &mut smt)
+            .establish_relationship(&remote_id)
             .await
             .expect("establish");
         // Establish relationship now uses deterministic initial relationship tip (h_0)
@@ -1808,9 +1790,8 @@ mod tests {
         let contact = make_verified_contact("RemoteTip", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .establish_relationship(&remote_id, &mut smt)
+            .establish_relationship(&remote_id)
             .await
             .expect("establish");
 
@@ -1836,9 +1817,8 @@ mod tests {
         let contact = make_verified_contact("Eve", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .establish_relationship(&remote_id, &mut smt)
+            .establish_relationship(&remote_id)
             .await
             .expect("establish");
         let op = signed_transfer_op(&manager.signature_keypair, "m", 4);
@@ -1868,8 +1848,7 @@ mod tests {
         let contact = make_verified_contact("Frank", false, true); // no public key
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let res = manager.establish_relationship(&remote_id, &mut smt).await;
+        let res = manager.establish_relationship(&remote_id).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
