@@ -51,9 +51,8 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
 
     let mut manager =
         BilateralTransactionManager::new(contact_manager, keypair, local_device, genesis_hash);
-    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     manager
-        .establish_relationship(&remote_device, &mut smt)
+        .establish_relationship(&remote_device)
         .await
         .unwrap();
     let manager = Arc::new(RwLock::new(manager));

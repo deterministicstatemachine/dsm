@@ -375,9 +375,8 @@ fn trace_bilateral_precommit_tripwire(
             .initial_relationship_tip_for(&remote_device_id)
             .expect("initial relationship tip");
 
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         match manager
-            .establish_relationship(&remote_device_id, &mut smt)
+            .establish_relationship(&remote_device_id)
             .await
         {
             Ok(anchor) => {
@@ -579,9 +578,8 @@ fn trace_bilateral_precomputed_finalize_hash(
             Err(e) => return vec![e],
         };
 
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         if let Err(e) = manager
-            .establish_relationship(&remote_device_id, &mut smt)
+            .establish_relationship(&remote_device_id)
             .await
         {
             return vec![format!("establish_relationship failed: {e}")];
@@ -683,8 +681,21 @@ fn trace_djte_emission_happy_path(
     let mut failures = Vec::new();
 
     let (prev, next, jap, receipt) = build_djte_transition(10, 1);
+    let witness = match dsm::emissions::EmissionWitness::from_states(&prev, &next, &jap) {
+        Ok(w) => w,
+        Err(e) => {
+            failures.push(format!("EmissionWitness::from_states errored on happy path: {e}"));
+            return ImplementationTraceResult {
+                trace_name: "djte_emission_happy_path".into(),
+                steps: 0,
+                passed: false,
+                failures,
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+            };
+        }
+    };
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => {}
         Ok(false) => failures.push("verify_emission returned false on the happy path".into()),
         Err(e) => failures.push(format!("verify_emission errored on happy path: {e}")),
@@ -730,7 +741,9 @@ fn trace_djte_repeated_emission_alignment(
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
-    match verify_emission(&initial, &after_first, &jap_a, &receipt_a) {
+    match dsm::emissions::EmissionWitness::from_states(&initial, &after_first, &jap_a)
+        .and_then(|w| verify_emission(&initial, &after_first, &jap_a, &receipt_a, &w))
+    {
         Ok(true) => {}
         Ok(false) => failures.push("first repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("first repeated-emission transition errored: {e}")),
@@ -749,7 +762,9 @@ fn trace_djte_repeated_emission_alignment(
 
     let jap_b = build_test_jap(0x7B, 0x0A);
     let (after_second, receipt_b) = apply_djte_transition(&after_first, &jap_b, emission_amount);
-    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b) {
+    match dsm::emissions::EmissionWitness::from_states(&after_first, &after_second, &jap_b)
+        .and_then(|w| verify_emission(&after_first, &after_second, &jap_b, &receipt_b, &w))
+    {
         Ok(true) => {}
         Ok(false) => failures.push("second repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("second repeated-emission transition errored: {e}")),
@@ -812,7 +827,9 @@ fn trace_djte_supply_underflow_rejection(
 
     let (prev, next, jap, receipt) = build_djte_transition(1, 2);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    match dsm::emissions::EmissionWitness::from_states(&prev, &next, &jap)
+        .and_then(|w| verify_emission(&prev, &next, &jap, &receipt, &w))
+    {
         Ok(true) => failures.push("verify_emission accepted a supply-underflow transition".into()),
         Ok(false) => {
             failures.push("verify_emission returned false instead of a concrete rejection".into())
@@ -1472,9 +1489,8 @@ fn trace_bilateral_full_offline_finality(
             .initial_relationship_tip_for(&remote_device_id)
             .expect("initial relationship tip");
 
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         match manager
-            .establish_relationship(&remote_device_id, &mut smt)
+            .establish_relationship(&remote_device_id)
             .await
         {
             Ok(anchor) => {
@@ -1691,13 +1707,11 @@ fn trace_bilateral_pair_non_interference(
         };
 
         // Step 1: Establish both relationships
-        let mut smt1 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let tip1_init = match manager1.establish_relationship(&remote1, &mut smt1).await {
+        let tip1_init = match manager1.establish_relationship(&remote1).await {
             Ok(anchor) => anchor.chain_tip,
             Err(e) => return vec![format!("manager1 establish failed: {e}")],
         };
-        let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let tip2_init = match manager2.establish_relationship(&remote2, &mut smt2).await {
+        let tip2_init = match manager2.establish_relationship(&remote2).await {
             Ok(anchor) => anchor.chain_tip,
             Err(e) => return vec![format!("manager2 establish failed: {e}")],
         };

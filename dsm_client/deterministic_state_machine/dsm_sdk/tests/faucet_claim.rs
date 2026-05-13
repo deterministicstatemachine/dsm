@@ -3,8 +3,8 @@
 
 use prost::Message;
 
-use dsm::types::proto as generated;
 use dsm_sdk::runtime;
+use dsm_sdk::generated;
 use dsm_sdk::init::SdkConfig;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::bridge::{AppInvoke, AppQuery, AppRouter};
@@ -117,7 +117,7 @@ fn faucet_claim_increases_era_balance() {
     // Decode FramedEnvelopeV3 response
     assert!(!qres.data.is_empty(), "response bytes must not be empty");
     assert_eq!(qres.data[0], 0x03, "expected FramedEnvelopeV3 prefix");
-    let env = generated::Envelope::decode(&qres.data[1..]).expect("decode Envelope");
+    let env = dsm_sdk::envelope::from_canonical_bytes(&qres.data[1..]).expect("decode Envelope");
     assert_eq!(env.version, 3);
     let list = match env.payload {
         Some(generated::envelope::Payload::BalancesListResponse(r)) => r,

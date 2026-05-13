@@ -416,7 +416,7 @@ fn get_era_balance(resp: &proto::BalancesListResponse) -> Option<u64> {
 fn decode_framed_envelope(bytes: &[u8], label: &str) -> proto::Envelope {
     assert!(!bytes.is_empty(), "{label}: empty response bytes");
     assert_eq!(bytes[0], 0x03, "{label}: expected FramedEnvelopeV3 prefix");
-    proto::Envelope::decode(&bytes[1..]).expect("decode Envelope")
+    dsm_sdk::envelope::from_canonical_bytes(&bytes[1..]).expect("decode Envelope")
 }
 
 async fn ensure_b0x_tokens(router: &AppRouterImpl, endpoints: &[String]) {
