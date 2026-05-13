@@ -21,7 +21,6 @@ pub mod object_list;
 pub mod object_store;
 pub mod paidk;
 pub mod policy;
-pub mod rate_limit;
 pub mod recovery_capsule;
 pub mod registry;
 pub mod registry_scaling;

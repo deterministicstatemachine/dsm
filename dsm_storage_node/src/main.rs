@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{http::HeaderValue, middleware, Extension, Router};
+use axum::{http::HeaderValue, Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
 
 use clap::Parser;
@@ -23,6 +23,8 @@ use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+
+use dsm_sdk::util::text_id;
 
 // Prometheus metrics handle (installed once per-process)
 static PROM_HANDLE: OnceCell<metrics_exporter_prometheus::PrometheusHandle> = OnceCell::new();
@@ -42,8 +44,6 @@ struct Opts {
     node_index: Option<usize>,
     #[clap(long, help = "Use automatic network detection instead of config file")]
     auto_detect: bool,
-    #[clap(long, help = "Disable rate limiting for throughput benchmarking")]
-    benchmark_mode: bool,
 }
 
 struct ServerConfig {
@@ -151,11 +151,13 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .unwrap_or_else(|_| {
             // Generate deterministic node ID from hostname and port
             let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
-            let id_hash = blake3::hash(&[hostname.as_bytes(), &port.to_le_bytes()].concat());
-            format!(
-                "storage-node-{:x}",
-                u64::from_le_bytes(id_hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
-            )
+            let mut material = Vec::new();
+            material.extend_from_slice(hostname.as_bytes());
+            material.extend_from_slice(&port.to_be_bytes());
+            text_id::encode_base32_crockford(&api::hardening::blake3_tagged(
+                "DSM/node-id",
+                &material,
+            ))
         });
 
     Ok(ServerConfig {
@@ -173,24 +175,12 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
 }
 
 /// Build the app and return `Router<()>`.
-fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: bool) -> Router<()> {
-    let public_rate_limiter = if benchmark_mode {
-        log::info!("BENCHMARK MODE: rate limiting disabled for all public endpoints");
-        Arc::new(api::rate_limit::RateLimiter::new_bypass())
-    } else {
-        Arc::new(api::rate_limit::RateLimiter::new())
-    };
-    let public_rate_layer = middleware::from_fn_with_state(
-        public_rate_limiter.clone(),
-        api::rate_limit::rate_limit_by_ip,
-    );
-
+fn build_router(state: Arc<AppState>, config: &ServerConfig) -> Router<()> {
     // Start with deterministic storage APIs you already have
     // (merge only the routers that are public & compile cleanly).
     // Object store reads (GET) are public; writes (PUT/DELETE) are behind device_auth
     // to prevent unauthenticated deletion or modification of vault advertisements.
-    let object_read_router =
-        api::object_store::create_router(state.clone()).layer(public_rate_layer.clone());
+    let object_read_router = api::object_store::create_router(state.clone());
     let object_write_auth_state = Arc::new(auth::AuthState {
         db_pool: state.db_pool.clone(),
     });
@@ -200,41 +190,30 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
             auth::device_auth,
         ))
         .layer(Extension(state.clone()));
-    let object_list_router =
-        api::object_list::create_router(state.clone()).layer(public_rate_layer.clone());
-    let registry_router =
-        api::registry::create_router(state.clone()).layer(public_rate_layer.clone());
+    let object_list_router = api::object_list::create_router(state.clone());
+    let registry_router = api::registry::create_router(state.clone());
     // Policy router is transport-only and signature-free; safe to expose.
-    let policy_router = api::policy::create_router(state.clone()).layer(public_rate_layer.clone());
+    let policy_router = api::policy::create_router(state.clone());
     // Identity mirrors
-    let devtree_router =
-        api::identity_devtree::create_router(state.clone()).layer(public_rate_layer.clone());
-    let tips_router =
-        api::identity_tips::create_router(state.clone()).layer(public_rate_layer.clone());
+    let devtree_router = api::identity_devtree::create_router(state.clone());
+    let tips_router = api::identity_tips::create_router(state.clone());
     // Genesis mirror
-    let genesis_router =
-        api::genesis::create_router(state.clone()).layer(public_rate_layer.clone());
+    let genesis_router = api::genesis::create_router(state.clone());
     // DLV slot + Recovery Capsule
-    let dlv_slot_router =
-        api::dlv_slot::create_router(state.clone()).layer(public_rate_layer.clone());
-    let recovery_capsule_router =
-        api::recovery_capsule::create_router(state.clone()).layer(public_rate_layer.clone());
+    let dlv_slot_router = api::dlv_slot::create_router(state.clone());
+    let recovery_capsule_router = api::recovery_capsule::create_router(state.clone());
     // Device registration
-    let device_router =
-        api::device_api::create_router(state.clone()).layer(public_rate_layer.clone());
+    let device_router = api::device_api::create_router(state.clone());
     // PaidK spend-gate
-    let paidk_router = api::paidk::create_router(state.clone()).layer(public_rate_layer.clone());
+    let paidk_router = api::paidk::create_router(state.clone());
     // Registry scaling (signals, applicants, registry queries)
-    let registry_scaling_router =
-        api::registry_scaling::create_router(state.clone()).layer(public_rate_layer.clone());
+    let registry_scaling_router = api::registry_scaling::create_router(state.clone());
     // DrainProof & stake exit
-    let drain_proof_router =
-        api::drain_proof::create_router(state.clone()).layer(public_rate_layer.clone());
+    let drain_proof_router = api::drain_proof::create_router(state.clone());
     // Gossip protocol for replication
     let gossip_router = api::gossip::gossip_routes(state.clone());
     // Node discovery for SDK auto-discovery
-    let discovery_router =
-        api::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
+    let discovery_router = api::discovery::create_router(state.clone());
 
     // Admin endpoints (cleanup, etc.)
     let admin_router = api::admin::router(state.clone());
@@ -279,8 +258,7 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
         .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
         .layer(TraceLayer::new_for_http())
-        .layer(Extension(state))
-        .layer(Extension(public_rate_limiter));
+        .layer(Extension(state));
 
     app
 }
@@ -422,7 +400,7 @@ async fn async_main() -> Result<()> {
 
     let app_state = Arc::new(state.clone());
 
-    let mut app = build_router(app_state.clone(), &server_config, opts.benchmark_mode);
+    let mut app = build_router(app_state.clone(), &server_config);
 
     // NOTE: No wall-clock maintenance loop. Maintenance cycles are invoked explicitly
     // via admin tooling with deterministic tick inputs.
