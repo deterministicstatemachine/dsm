@@ -75,9 +75,12 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
     let addr1 = {
         use dsm_sdk::util::text_id;
         use dsm_storage_node::api::hardening::blake3_tagged;
+        use dsm_storage_node::replication::StorageNodeId;
 
         // addr := H("DSM/obj-bytecommit\0" || node_id_32 || t || dt)
-        let node_id_32 = blake3_tagged("DSM/node-id", state.node_id.as_bytes());
+        let node_id =
+            StorageNodeId::from_base32_or_derive(&state.node_id, state.node_id.as_bytes());
+        let node_id_32 = *node_id.as_bytes();
         let mut body = Vec::new();
         body.extend_from_slice(&node_id_32);
         body.extend_from_slice(&1u64.to_be_bytes());

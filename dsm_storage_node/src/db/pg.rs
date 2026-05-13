@@ -330,7 +330,7 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
     client
         .batch_execute(
             r#"CREATE TABLE IF NOT EXISTS bytecommit_chain (
-                    node_id      TEXT NOT NULL,
+                    node_id      BYTEA NOT NULL,
                     cycle_index  BIGINT NOT NULL,
                     digest       BYTEA NOT NULL,
                     PRIMARY KEY(node_id, cycle_index)
@@ -460,7 +460,7 @@ pub async fn get_current_cycle_stats(pool: &Pool) -> Result<([u8; 32], u64)> {
 }
 
 /// Get the last recorded ByteCommit digest for `node_id`, if any.
-pub async fn get_last_bytecommit_hash(pool: &Pool, node_id: &str) -> Result<Option<[u8; 32]>> {
+pub async fn get_last_bytecommit_hash(pool: &Pool, node_id: &[u8]) -> Result<Option<[u8; 32]>> {
     let client = pool.get().await?;
     let row = client
         .query_opt(
@@ -482,7 +482,7 @@ pub async fn get_last_bytecommit_hash(pool: &Pool, node_id: &str) -> Result<Opti
 /// Record a ByteCommit digest at a cycle index (idempotent).
 pub async fn record_bytecommit_hash(
     pool: &Pool,
-    node_id: &str,
+    node_id: &[u8],
     cycle_index: u64,
     digest: &[u8; 32],
 ) -> Result<()> {
@@ -1497,7 +1497,7 @@ pub async fn get_drain_proof_for_node(pool: &Pool, node_id: &[u8]) -> Result<Opt
 /// Returns the count of consecutive empty cycles found starting from start_cycle.
 pub async fn verify_bytecommit_chain_empty(
     pool: &Pool,
-    node_id_text: &str,
+    node_id: &[u8],
     start_cycle: i64,
     required_d: i64,
 ) -> Result<bool> {
@@ -1509,7 +1509,7 @@ pub async fn verify_bytecommit_chain_empty(
         .query_one(
             "SELECT COUNT(*)::BIGINT FROM bytecommit_chain
              WHERE node_id = $1 AND cycle_index >= $2 AND cycle_index < $2 + $3",
-            &[&node_id_text, &start_cycle, &required_d],
+            &[&node_id, &start_cycle, &required_d],
         )
         .await?;
     let count: i64 = row.get(0);

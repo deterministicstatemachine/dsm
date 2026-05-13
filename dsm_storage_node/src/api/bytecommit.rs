@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use super::hardening::{blake3_tagged, mirror_set_w, window_index, B_GLOBAL};
 use crate::db;
+use crate::replication::StorageNodeId;
 use crate::AppState;
 use dsm_sdk::util::text_id;
 
@@ -257,16 +258,15 @@ pub async fn emit_cycle_commitment(
 ) -> Result<[u8; 32], anyhow::Error> {
     let pool = &*state.db_pool;
 
-    // Convert configured node_id string to a canonical 32-byte identifier.
-    // For production, this should be a content-addressed 32B digest (per spec §7).
-    let node_id_32 = blake3_tagged("DSM/node-id", state.node_id.as_bytes());
+    let node_id = StorageNodeId::from_base32_or_derive(&state.node_id, state.node_id.as_bytes());
+    let node_id_32 = *node_id.as_bytes();
 
     // 1) Compute node storage stats (SMT root + bytes_used) over current served objects.
     let (smt_root, bytes_used) = db::get_current_cycle_stats(pool).await?;
 
     // 2) Parent digest for chain continuity.
     // Spec chain link uses dt = H("DSM/bytecommit\0" || Bt).
-    let parent_digest = db::get_last_bytecommit_hash(pool, state.node_id.as_str())
+    let parent_digest = db::get_last_bytecommit_hash(pool, &node_id_32)
         .await?
         .unwrap_or([0u8; 32]);
 
@@ -305,7 +305,7 @@ pub async fn emit_cycle_commitment(
     )
     .await?;
     // Record chain pointer after the object is durably stored.
-    db::record_bytecommit_hash(pool, state.node_id.as_str(), cycle_index, &dt).await?;
+    db::record_bytecommit_hash(pool, &node_id_32, cycle_index, &dt).await?;
 
     Ok(dt)
 }
@@ -316,7 +316,7 @@ pub(crate) fn _test_bytecommit_addr(node_id: &[u8; 32], cycle_index: u64, dt: &[
     bytecommit_addr(node_id, cycle_index, dt)
 }
 
-/// Fetch raw bytes by deterministic address (hex string)
+/// Fetch raw bytes by deterministic Base32 Crockford address.
 pub async fn get_by_addr(
     Extension(state): Extension<Arc<crate::AppState>>,
     Path(addr): Path<String>,
