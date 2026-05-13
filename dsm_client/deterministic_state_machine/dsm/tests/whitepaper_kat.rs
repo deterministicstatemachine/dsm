@@ -39,7 +39,10 @@ fn parse_hex_32(s: &str) -> [u8; 32] {
     assert_eq!(s.len(), 64, "expected 64 hex chars (32 bytes)");
     let mut out = [0u8; 32];
     for i in 0..32 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("invalid hex");
+        out[i] = match u8::from_str_radix(&s[i * 2..i * 2 + 2], 16) {
+            Ok(byte) => byte,
+            Err(_) => panic!("invalid hex"),
+        };
     }
     out
 }

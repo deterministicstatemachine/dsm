@@ -1297,7 +1297,12 @@ mod tests {
             }
         }
         rt.block_on(async {
-            match bilateral_mgr.write().await.establish_relationship(&cp).await {
+            match bilateral_mgr
+                .write()
+                .await
+                .establish_relationship(&cp)
+                .await
+            {
                 Ok(_) => {}
                 Err(e) => panic!("establish_relationship failed in test: {}", e),
             }

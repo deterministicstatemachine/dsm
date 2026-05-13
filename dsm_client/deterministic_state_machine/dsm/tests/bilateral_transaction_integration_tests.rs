@@ -119,10 +119,7 @@ async fn test_complete_bilateral_transaction_flow() {
         .expect("handle contact request");
 
     let (_ok, contact_response) = bob_manager
-        .accept_contact_request_with_response(
-            &request_hash,
-            Some("Welcome Alice!".to_string()),
-        )
+        .accept_contact_request_with_response(&request_hash, Some("Welcome Alice!".to_string()))
         .await
         .expect("accept contact");
 

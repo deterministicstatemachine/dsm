@@ -5226,7 +5226,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id.clone(),
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5244,7 +5243,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id,
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5274,7 +5272,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: "nonexistent-plan-id".to_string(),
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5375,7 +5372,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id.clone(),
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5457,7 +5453,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id,
                     destination_address: "tb1q_DIFFERENT_ADDRESS".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5553,7 +5548,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id.clone(),
                     destination_address: "tb1qpolicy".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;

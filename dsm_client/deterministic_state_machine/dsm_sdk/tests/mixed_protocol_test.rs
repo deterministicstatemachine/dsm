@@ -268,9 +268,7 @@ async fn test_mixed_protocol_modal_lock() {
         ble_address: None,
     };
     alice_offline.add_verified_contact(bob_contact).unwrap();
-    let anchor = alice_offline
-        .establish_relationship(&bob_device_id)
-        .await;
+    let anchor = alice_offline.establish_relationship(&bob_device_id).await;
     let initial_tip = anchor.unwrap().chain_tip;
     store_online_capable_contact(bob_device_id, bob_genesis_hash, "Bob");
     restore_finalized_bilateral_chain_tip(&bob_device_id, &initial_tip).unwrap();

@@ -375,10 +375,7 @@ fn trace_bilateral_precommit_tripwire(
             .initial_relationship_tip_for(&remote_device_id)
             .expect("initial relationship tip");
 
-        match manager
-            .establish_relationship(&remote_device_id)
-            .await
-        {
+        match manager.establish_relationship(&remote_device_id).await {
             Ok(anchor) => {
                 if anchor.chain_tip != expected_initial_tip {
                     failures
@@ -578,10 +575,7 @@ fn trace_bilateral_precomputed_finalize_hash(
             Err(e) => return vec![e],
         };
 
-        if let Err(e) = manager
-            .establish_relationship(&remote_device_id)
-            .await
-        {
+        if let Err(e) = manager.establish_relationship(&remote_device_id).await {
             return vec![format!("establish_relationship failed: {e}")];
         }
 
@@ -684,7 +678,9 @@ fn trace_djte_emission_happy_path(
     let witness = match dsm::emissions::EmissionWitness::from_states(&prev, &next, &jap) {
         Ok(w) => w,
         Err(e) => {
-            failures.push(format!("EmissionWitness::from_states errored on happy path: {e}"));
+            failures.push(format!(
+                "EmissionWitness::from_states errored on happy path: {e}"
+            ));
             return ImplementationTraceResult {
                 trace_name: "djte_emission_happy_path".into(),
                 steps: 0,
@@ -1489,10 +1485,7 @@ fn trace_bilateral_full_offline_finality(
             .initial_relationship_tip_for(&remote_device_id)
             .expect("initial relationship tip");
 
-        match manager
-            .establish_relationship(&remote_device_id)
-            .await
-        {
+        match manager.establish_relationship(&remote_device_id).await {
             Ok(anchor) => {
                 if anchor.chain_tip != initial_tip {
                     failures.push("establish_relationship produced unexpected initial tip".into());

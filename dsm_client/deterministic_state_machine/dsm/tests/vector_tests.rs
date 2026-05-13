@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use dsm::types::proto as gp;
-use prost::Message;
 
 const VECTOR_REJECT_PROOF_TOO_LARGE: u32 = 470;
 const VECTOR_REJECT_INVALID_PROOF: u32 = 471;

@@ -1152,7 +1152,6 @@ endpoint = "http://127.0.0.1:8080"
                 is_recoverable: false,
                 debug_b32: String::new(),
             })),
-            ..Default::default()
         };
         let mut framed = vec![0x03];
         framed.extend_from_slice(&request_env.encode_to_vec());
@@ -1204,7 +1203,6 @@ endpoint = "http://127.0.0.1:8080"
                 is_recoverable: false,
                 debug_b32: String::new(),
             })),
-            ..Default::default()
         };
         let mut framed = vec![0x03];
         framed.extend_from_slice(&request_env.encode_to_vec());

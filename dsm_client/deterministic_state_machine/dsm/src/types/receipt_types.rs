@@ -260,8 +260,8 @@ fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
         offset = end;
     }
 
-    for tag in 1..=7 {
-        if !seen[tag] {
+    for (tag, present) in seen.iter().enumerate().take(8).skip(1) {
+        if !present {
             return Err(DsmError::invalid_operation(format!(
                 "receipt wire: missing required field {tag}"
             )));
