@@ -2,8 +2,8 @@
 //!
 //! Pins one BLAKE3 digest per normative domain tag in whitepaper §2/§4/§11/§12/§13.
 //! Catches accidental tag renames or preimage byte-order changes that would
-//! silently break compatibility. See GitHub issue #320 for the audit that
-//! produced this battery.
+//! silently break canonical digest equivalence. See GitHub issue #320 for the
+//! audit that produced this battery.
 //!
 //! Each test independently:
 //!   1. Recomputes the spec-canonical digest via `spec_digest(tag, input)`.
@@ -273,18 +273,18 @@ fn kat_dsm_ek_derivation_seed() {
 }
 
 // =============================================================================
-// §11.1 — Receipt-to-session binding (Item 7 forward hardening)
+// §11.1 — Receipt-to-session binding
 // =============================================================================
 
-/// Pins the canonical session-binding signing target. The per-step EK signing
+/// Pins the canonical receipt challenge-response target. The per-step EK
 /// helper uses this domain when the caller supplies the bilateral session's
-/// `commitment_hash` — `sig_a` / `sig_b` then sign over
+/// `commitment_hash`; `sig_a` / `sig_b` then sign over
 ///   target = BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
 ///                   commitment_hash)
 /// instead of over `receipt_commitment` directly. Cryptographically binds the
 /// signature to a specific bilateral session, defeating cross-session receipt
 /// substitution. The §4.2.1 canonical commit form stays unchanged — binding is
-/// added at the signing target level only.
+/// added at the response-target level only.
 #[test]
 fn kat_dsm_receipt_bind_session() {
     let receipt_commitment = [0xAA_u8; 32];
