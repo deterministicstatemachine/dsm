@@ -65,10 +65,8 @@ import com.dsm.wallet.security.AccessLevel
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
 import dsm.types.proto.BiometricAuthorizeResult
-import dsm.types.proto.NativeHostRequest
 import dsm.types.proto.NativeHostEvent
 import dsm.types.proto.NativeHostEventKind
-import dsm.types.proto.NativeHostRequestKind
 import dsm.types.proto.QrScanResultPayload
 import dsm.types.proto.SessionHardwareFactsProto
 import java.io.ByteArrayInputStream
@@ -993,20 +991,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return
             }
 
-            val isLongRunningNativeHostRequest = if (method == "nativeHostRequest") {
-                try {
-                    NativeHostRequest.parseFrom(body).kind ==
-                        NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE
-                } catch (_: Throwable) {
-                    false
-                }
-            } else {
-                false
-            }
+            val isLongRunningGenesisRequest = method == "createGenesis"
 
-            // Device-binding capture includes silicon fingerprint enrollment (~60s on first boot).
+            // C-DBRW genesis can include silicon fingerprint enrollment (~60s on first boot).
             // Run it on the dedicated executor to avoid starving the general bridge worker pool.
-            if (isLongRunningNativeHostRequest) {
+            if (isLongRunningGenesisRequest) {
                 genesisExecutor.execute {
                     val respBytes: ByteArray = try {
                         SinglePathWebViewBridge.handleBinaryRpc(method, body)
@@ -1022,12 +1011,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
                         port.postMessage(WebMessageCompat(responseWithId))
                     }
-                    // After device-binding capture finalizes, Rust SDK_READY flips to true
-                    // and BOOTSTRAP_SECURING flips to false. Publish a fresh session snapshot
-                    // so React can transition securing_device → wallet_ready without waiting
-                    // for the next lifecycle event (resume/pause/etc). Without this push the
-                    // UI stays stuck on the progress screen until the user exits and returns.
-                    runOnUiThread { publishSessionState("deviceBindingCapture") }
+                    // After C-DBRW genesis finalizes, Rust SDK_READY flips to true and
+                    // BOOTSTRAP_SECURING flips to false. Publish a fresh session snapshot
+                    // so React can transition securing_device -> wallet_ready immediately.
+                    runOnUiThread { publishSessionState("createGenesis") }
                 }
                 return
             }
@@ -1680,7 +1667,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         dispatchDsmEventOnUi("dsm-bridge-ready", ByteArray(0))
         // Publish session state at 100 ms, 500 ms, and 1500 ms.
         // Redundant deliveries are harmless — the snapshot is idempotent.
-        // This covers any JS-side port-setup race without a frontend fallback timer;
+        // This covers any JS-side port-setup race without a frontend retry timer;
         // if one delivery races with the JS engine not yet ready, a later one wins.
         webView.postDelayed({ publishSessionState("bridgeReady") }, 100)
         webView.postDelayed({ publishSessionState("bridgeReady.r1") }, 500)
@@ -1937,13 +1924,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         startActivity(intent)
                         return false
                     }
-                    // Fallback: create a temporary WebView to capture the URL
+                    // Secondary path: create a temporary WebView to capture the URL
                     val tempWebView = WebView(view?.context ?: this@MainActivity)
                     tempWebView.webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
                             val uri = request?.url
                             if (uri != null) {
-                                Log.i(tag, "window.open fallback — opening in system browser: ${uri.host}")
+                                Log.i(tag, "window.open secondary path: opening in system browser: ${uri.host}")
                                 val intent = Intent(Intent.ACTION_VIEW, uri)
                                 startActivity(intent)
                             }

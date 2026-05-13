@@ -282,9 +282,8 @@ internal object BridgeIdentityHandler {
      * to refresh the trust snapshot.
      *
      * If the anchor cache is missing (e.g. prefs were wiped but the bin file
-     * survived, or the app is upgrading from the old Kotlin enrollment path)
-     * we fall back to a fresh enrollment — expensive but correct, and the
-     * anchor is re-cached so the next boot takes the fast path again.
+     * survived), we run fresh enrollment and cache the anchor before accepting
+     * restored spend authority.
      */
     private fun resumeCdbrwTrust(
         context: Context,
@@ -310,7 +309,7 @@ internal object BridgeIdentityHandler {
             try {
                 AntiCloneGate.measureTrust(context, cachedAnchor)
             } catch (e: AntiCloneGateException) {
-                Log.e(logTag, "resumeCdbrwTrust: measure_trust failed, falling back to fresh enrollment", e)
+                Log.e(logTag, "resumeCdbrwTrust: measure_trust failed; running fresh enrollment", e)
                 reenrollAndCache(context, prefs, logTag, deviceIdBytes, genesisHashBytes)
             }
         } else {
@@ -406,7 +405,7 @@ internal object BridgeIdentityHandler {
             null
         }
         if (cachedAnchor == null) {
-            Log.i(logTag, "restoreIdentityContextDirect: cached anchor unavailable; falling back")
+            Log.i(logTag, "restoreIdentityContextDirect: cached anchor unavailable; bootstrap required")
             return false
         }
 
@@ -443,7 +442,7 @@ internal object BridgeIdentityHandler {
             )
             true
         } catch (t: Throwable) {
-            Log.w(logTag, "restoreIdentityContextDirect failed; falling back to bootstrap", t)
+            Log.w(logTag, "restoreIdentityContextDirect failed; bootstrap required", t)
             false
         }
     }
@@ -452,6 +451,7 @@ internal object BridgeIdentityHandler {
         locale: String,
         networkId: String,
         entropyBytes: ByteArray,
+        measurements: BootstrapMeasurements,
     ): ByteArray {
         val args = ArgPack.newBuilder()
             .setCodec(Codec.CODEC_PROTO)
@@ -461,6 +461,9 @@ internal object BridgeIdentityHandler {
                         .setLocale(locale)
                         .setNetworkId(networkId)
                         .setDeviceEntropy(ByteString.copyFrom(entropyBytes))
+                        .setCdbrwHwEntropy(ByteString.copyFrom(measurements.hwEntropy))
+                        .setCdbrwEnvFingerprint(ByteString.copyFrom(measurements.envEntropy))
+                        .setCdbrwSalt(ByteString.copyFrom(measurements.dbrwSalt))
                         .build()
                         .toByteArray()
                 )
@@ -485,7 +488,6 @@ internal object BridgeIdentityHandler {
     }
 
     private fun installGenesisEnvelope(
-        context: Context,
         prefs: SharedPreferences,
         sdkContextInitialized: AtomicBoolean,
         logTag: String,
@@ -494,6 +496,7 @@ internal object BridgeIdentityHandler {
         keyGenesisEnvelope: String,
         keyDbrwSalt: String,
         installInput: GenesisEnvelopeInstallInput,
+        measurements: BootstrapMeasurements,
     ): ByteArray {
         val envelopeBytes = installInput.envelopeBytes
         Log.i(logTag, "installGenesisEnvelope: envelope size=${envelopeBytes.size}")
@@ -541,23 +544,6 @@ internal object BridgeIdentityHandler {
                 .setDeviceId(ByteString.copyFrom(deviceIdBytes))
                 .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
                 .build()
-        )
-
-        ensureGenesisNotInvalidated(
-            prefs = prefs,
-            sdkContextInitialized = sdkContextInitialized,
-            logTag = logTag,
-            keyDeviceId = keyDeviceId,
-            keyGenesisHash = keyGenesisHash,
-            keyGenesisEnvelope = keyGenesisEnvelope,
-            keyDbrwSalt = keyDbrwSalt,
-        )
-
-        val measurements = collectBootstrapMeasurements(
-            context = context,
-            prefs = prefs,
-            logTag = logTag,
-            keyDbrwSalt = keyDbrwSalt,
         )
 
         ensureGenesisNotInvalidated(
@@ -713,14 +699,35 @@ internal object BridgeIdentityHandler {
                 prefs.edit().clear().apply()
             }
 
-            val envelopeBytes = requestGenesisEnvelopeViaIngress(locale, networkId, entropyBytes)
+            val measurements = collectBootstrapMeasurements(
+                context = context,
+                prefs = prefs,
+                logTag = logTag,
+                keyDbrwSalt = keyDbrwSalt,
+            )
+
+            ensureGenesisNotInvalidated(
+                prefs = prefs,
+                sdkContextInitialized = sdkContextInitialized,
+                logTag = logTag,
+                keyDeviceId = keyDeviceId,
+                keyGenesisHash = keyGenesisHash,
+                keyGenesisEnvelope = keyGenesisEnvelope,
+                keyDbrwSalt = keyDbrwSalt,
+            )
+
+            val envelopeBytes = requestGenesisEnvelopeViaIngress(
+                locale,
+                networkId,
+                entropyBytes,
+                measurements,
+            )
             if (envelopeBytes.isEmpty()) {
                 Log.e(logTag, "createGenesis: ingress returned empty envelope")
                 return ByteArray(0)
             }
             val installInput = parseGenesisEnvelopeInstallInput(envelopeBytes)
             val finalizeEnvelope = installGenesisEnvelope(
-                context = context,
                 prefs = prefs,
                 sdkContextInitialized = sdkContextInitialized,
                 logTag = logTag,
@@ -729,6 +736,7 @@ internal object BridgeIdentityHandler {
                 keyGenesisEnvelope = keyGenesisEnvelope,
                 keyDbrwSalt = keyDbrwSalt,
                 installInput = installInput,
+                measurements = measurements,
             )
             val finalize = decodeBootstrapFinalizeResponseEnvelope(finalizeEnvelope)
             if (finalize.result != BootstrapFinalizeResponse.Result.BOOTSTRAP_RESULT_READY) {
@@ -737,17 +745,15 @@ internal object BridgeIdentityHandler {
             envelopeBytes
         } catch (t: Throwable) {
             Log.e(logTag, "createGenesis failed", t)
-            if (genesisLifecycleInvalidated.get()) {
-                clearGenesisArtifacts(
-                    prefs = prefs,
-                    sdkContextInitialized = sdkContextInitialized,
-                    keyDeviceId = keyDeviceId,
-                    keyGenesisHash = keyGenesisHash,
-                    keyGenesisEnvelope = keyGenesisEnvelope,
-                    keyDbrwSalt = keyDbrwSalt,
-                    logTag = logTag,
-                )
-            }
+            clearGenesisArtifacts(
+                prefs = prefs,
+                sdkContextInitialized = sdkContextInitialized,
+                keyDeviceId = keyDeviceId,
+                keyGenesisHash = keyGenesisHash,
+                keyGenesisEnvelope = keyGenesisEnvelope,
+                keyDbrwSalt = keyDbrwSalt,
+                logTag = logTag,
+            )
             if (t is GenesisInterruptedException || t is DsmNativeException || t is SecurityException) {
                 throw t
             }
@@ -759,67 +765,4 @@ internal object BridgeIdentityHandler {
         return result
     }
 
-    fun captureDeviceBindingForGenesisEnvelope(
-        context: Context,
-        prefs: SharedPreferences,
-        sdkContextInitialized: AtomicBoolean,
-        logTag: String,
-        keyDeviceId: String,
-        keyGenesisHash: String,
-        keyGenesisEnvelope: String,
-        keyDbrwSalt: String,
-        genesisEnvelopeBytes: ByteArray,
-    ): ByteArray {
-        genesisLifecycleInFlight.set(true)
-        genesisLifecycleInvalidated.set(false)
-
-        val result = try {
-            val cachedDevId = prefs.getString(keyDeviceId, null)
-            val cachedGenHash = prefs.getString(keyGenesisHash, null)
-            if (!cachedDevId.isNullOrEmpty() && !cachedGenHash.isNullOrEmpty()) {
-                Log.i(logTag, "captureDeviceBindingForGenesisEnvelope: identity already exists, clearing for fresh install")
-                prefs.edit().clear().apply()
-            }
-
-            val installInput = parseGenesisEnvelopeInstallInput(genesisEnvelopeBytes)
-            val installedEnvelope = installGenesisEnvelope(
-                context = context,
-                prefs = prefs,
-                sdkContextInitialized = sdkContextInitialized,
-                logTag = logTag,
-                keyDeviceId = keyDeviceId,
-                keyGenesisHash = keyGenesisHash,
-                keyGenesisEnvelope = keyGenesisEnvelope,
-                keyDbrwSalt = keyDbrwSalt,
-                installInput = installInput,
-            )
-            val errorCode = getFramedErrorEnvelopeCode(installedEnvelope)
-            if (errorCode != 0) {
-                throw IllegalStateException("captureDeviceBindingForGenesisEnvelope: refusing to install error envelope code=$errorCode")
-            }
-            installedEnvelope
-        } catch (t: Throwable) {
-            Log.e(logTag, "captureDeviceBindingForGenesisEnvelope failed", t)
-            if (genesisLifecycleInvalidated.get()) {
-                clearGenesisArtifacts(
-                    prefs = prefs,
-                    sdkContextInitialized = sdkContextInitialized,
-                    keyDeviceId = keyDeviceId,
-                    keyGenesisHash = keyGenesisHash,
-                    keyGenesisEnvelope = keyGenesisEnvelope,
-                    keyDbrwSalt = keyDbrwSalt,
-                    logTag = logTag,
-                )
-            }
-            if (t is GenesisInterruptedException || t is DsmNativeException || t is SecurityException) {
-                throw t
-            }
-            throw IllegalStateException("captureDeviceBindingForGenesisEnvelope failed: ${t.message}", t)
-        } finally {
-            genesisLifecycleInFlight.set(false)
-            genesisLifecycleInvalidated.set(false)
-        }
-
-        return result
-    }
 }

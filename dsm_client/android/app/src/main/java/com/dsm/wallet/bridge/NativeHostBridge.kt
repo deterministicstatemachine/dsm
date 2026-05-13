@@ -13,7 +13,6 @@ import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.BiometricAuthorizePayload
 import dsm.types.proto.BleTransportSendChunksPayload
 import dsm.types.proto.BleTransportSendChunksResult
-import dsm.types.proto.DeviceBindingCapturePayload
 import dsm.types.proto.HostPermissionsRequestPayload
 import dsm.types.proto.HostPermissionsResult
 import dsm.types.proto.NativeHostAck
@@ -93,7 +92,6 @@ internal object NativeHostBridge {
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST)
-                            .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD)
                             .addSupportedRequests(NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD)
@@ -212,26 +210,6 @@ internal object NativeHostBridge {
                         .build()
                         .toByteArray()
                 )
-            }
-
-            NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE -> {
-                val payload = try {
-                    DeviceBindingCapturePayload.parseFrom(request.payload)
-                } catch (e: InvalidProtocolBufferException) {
-                    return errorResponse(400, "device_binding.capture: invalid payload: ${e.message}")
-                }
-                val result = BridgeIdentityHandler.captureDeviceBindingForGenesisEnvelope(
-                    context = context,
-                    prefs = prefs,
-                    sdkContextInitialized = sdkContextInitialized,
-                    logTag = logTag,
-                    keyDeviceId = keyDeviceId,
-                    keyGenesisHash = keyGenesisHash,
-                    keyGenesisEnvelope = keyGenesisEnvelope,
-                    keyDbrwSalt = keyDbrwSalt,
-                    genesisEnvelopeBytes = payload.genesisEnvelope.toByteArray(),
-                )
-                okBytes(result)
             }
 
             NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE -> {
