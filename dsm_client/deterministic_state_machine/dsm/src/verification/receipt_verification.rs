@@ -11,8 +11,8 @@ use crate::types::receipt_types::{
 use crate::verification::proof_primitives::{
     verify_device_tree_inclusion_proof_bytes, verify_smt_inclusion_proof_bytes,
 };
-use crate::verification::smt_replace_witness::verify_tripwire_smt_replace;
 use crate::verification::smt_replace_witness::compute_smt_key;
+use crate::verification::smt_replace_witness::verify_tripwire_smt_replace;
 
 /// Verify a stitched receipt against all acceptance predicates
 ///
@@ -54,28 +54,24 @@ pub fn verify_stitched_receipt(
         }
     };
 
-    // Rule 2: Verify signatures over commitment.
-    // Solo-signature model: sig_a (sender) is mandatory. sig_b (receiver) is optional —
-    // hash chain adjacency + Tripwire fork-exclusion prevent double-spend without
-    // requiring a counter-signature (analogous to Ethereum/Bitcoin where recipients
-    // don't sign transactions).
+    // Rule 2: Verify both bilateral signatures over the commitment.
     if receipt.sig_a.is_empty() {
         return Ok(ReceiptAcceptance::reject(
             "Missing sender signature (sig_a)".to_string(),
         ));
     }
+    if receipt.sig_b.is_empty() {
+        return Ok(ReceiptAcceptance::reject(
+            "Missing receiver signature (sig_b)".to_string(),
+        ));
+    }
 
-    // Verify SPHINCS+ signature A (mandatory)
     if !verify_sphincs_signature(&commitment, &receipt.sig_a, &ctx.pubkey_a)? {
         return Ok(ReceiptAcceptance::reject(
             "Signature A verification failed".to_string(),
         ));
     }
-
-    // Verify SPHINCS+ signature B (optional — only if present)
-    if !receipt.sig_b.is_empty()
-        && !verify_sphincs_signature(&commitment, &receipt.sig_b, &ctx.pubkey_b)?
-    {
+    if !verify_sphincs_signature(&commitment, &receipt.sig_b, &ctx.pubkey_b)? {
         return Ok(ReceiptAcceptance::reject(
             "Signature B verification failed".to_string(),
         ));
@@ -110,29 +106,29 @@ pub fn verify_stitched_receipt(
         }
         Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_a error: {}", e))),
     }
-    if let Some(chain_head) = &ctx.chain_head_pubkey_b {
-        // Cert B is only required when sig_b is present (counter-signed receipt).
-        if !receipt.sig_b.is_empty() {
-            if receipt.ek_cert_b.is_empty() {
-                return Ok(ReceiptAcceptance::reject(
-                    "Missing ek_cert_b (sig_b present but cert chain required)".to_string(),
-                ));
-            }
-            match crate::crypto::ephemeral_key::verify_ek_cert(
-                chain_head,
-                &ctx.pubkey_b,
-                &receipt.parent_tip,
-                &receipt.ek_cert_b,
-            ) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(ReceiptAcceptance::reject(
-                        "ek_cert_b verification failed".to_string(),
-                    ))
-                }
-                Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_b error: {}", e))),
-            }
+    let Some(chain_head) = &ctx.chain_head_pubkey_b else {
+        return Ok(ReceiptAcceptance::reject(
+            "Missing chain_head_pubkey_b (C-DBRW EK cert chain required)".to_string(),
+        ));
+    };
+    if receipt.ek_cert_b.is_empty() {
+        return Ok(ReceiptAcceptance::reject(
+            "Missing ek_cert_b (C-DBRW EK cert chain required)".to_string(),
+        ));
+    }
+    match crate::crypto::ephemeral_key::verify_ek_cert(
+        chain_head,
+        &ctx.pubkey_b,
+        &receipt.parent_tip,
+        &receipt.ek_cert_b,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(ReceiptAcceptance::reject(
+                "ek_cert_b verification failed".to_string(),
+            ))
         }
+        Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_b error: {}", e))),
     }
 
     // Rule 3: Verify inclusion proofs
@@ -301,6 +297,40 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_receipt_rejects_missing_receiver_signature() {
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let mut receipt = StitchedReceiptV2::new(
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let commitment = receipt.compute_commitment().unwrap();
+        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
+
+        let ctx = ReceiptVerificationContext::new(
+            [0u8; 32],
+            [0u8; 32],
+            keypair_a.public_key().to_vec(),
+            vec![],
+        );
+        let mut tracker = ParentConsumptionTracker::new();
+
+        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        assert!(!result.valid);
+        assert!(result
+            .reason
+            .unwrap()
+            .contains("Missing receiver signature"));
+    }
+
+    #[test]
     fn test_parent_uniqueness_enforcement() {
         use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
 
@@ -334,8 +364,12 @@ mod tests {
         receipt.add_sig_a(sig_a);
         receipt.add_sig_b(sig_b);
         let (chain_head_pk, chain_head_sk) = generate_ephemeral_keypair(&[0xA5; 32]).unwrap();
+        let (chain_head_b_pk, chain_head_b_sk) = generate_ephemeral_keypair(&[0xB5; 32]).unwrap();
         receipt.set_ek_cert_a(
             sign_ek_cert(&chain_head_sk, keypair_a.public_key(), &[0xaa; 32]).unwrap(),
+        );
+        receipt.set_ek_cert_b(
+            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
         );
 
         // Create context with the public keys
@@ -345,7 +379,8 @@ mod tests {
             keypair_a.public_key().to_vec(),
             keypair_b.public_key().to_vec(),
         )
-        .with_chain_head_a(chain_head_pk);
+        .with_chain_head_a(chain_head_pk)
+        .with_chain_head_b(chain_head_b_pk);
         let mut tracker = ParentConsumptionTracker::new();
 
         // Manually mark parent as consumed first
@@ -367,10 +402,11 @@ mod tests {
     /// cert and bypass AK-rooted authorization for the per-step EK.
     #[test]
     fn test_missing_ek_cert_a_rejected_when_chain_head_set() {
-        use crate::crypto::ephemeral_key::generate_ephemeral_keypair;
+        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
 
-        // Build a receipt with valid sig_a but NO ek_cert_a.
+        // Build a receipt with valid signatures but no ek_cert_a.
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -384,20 +420,26 @@ mod tests {
             vec![],
         );
         let commitment = receipt.compute_commitment().unwrap();
-        let sig_a = keypair_a.sign(&commitment).unwrap();
-        receipt.add_sig_a(sig_a);
+        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
+        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
         // Deliberately do NOT call set_ek_cert_a.
 
         // Build a chain head pubkey (any valid SPHINCS+ key works).
         let (chain_head_pk, _) = generate_ephemeral_keypair(&[0xCC; 32]).expect("keygen");
+        let (chain_head_b_pk, chain_head_b_sk) =
+            generate_ephemeral_keypair(&[0xBC; 32]).expect("keygen");
+        receipt.set_ek_cert_b(
+            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
+        );
 
         let ctx = ReceiptVerificationContext::new(
             [0u8; 32],
             [0u8; 32],
             keypair_a.public_key().to_vec(),
-            vec![],
+            keypair_b.public_key().to_vec(),
         )
-        .with_chain_head_a(chain_head_pk);
+        .with_chain_head_a(chain_head_pk)
+        .with_chain_head_b(chain_head_b_pk);
 
         let mut tracker = ParentConsumptionTracker::new();
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
@@ -418,6 +460,7 @@ mod tests {
         use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
 
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -432,9 +475,12 @@ mod tests {
         );
         let commitment = receipt.compute_commitment().unwrap();
         receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
+        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
 
         // The legitimate chain head.
         let (legit_head_pk, _) = generate_ephemeral_keypair(&[0x01; 32]).expect("keygen");
+        let (legit_head_b_pk, legit_head_b_sk) =
+            generate_ephemeral_keypair(&[0x02; 32]).expect("keygen");
         // The attacker's keypair (NOT the chain head).
         let (_, attacker_sk) = generate_ephemeral_keypair(&[0x99; 32]).expect("keygen");
 
@@ -446,14 +492,18 @@ mod tests {
         )
         .expect("forge cert");
         receipt.set_ek_cert_a(forged);
+        receipt.set_ek_cert_b(
+            sign_ek_cert(&legit_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
+        );
 
         let ctx = ReceiptVerificationContext::new(
             [0u8; 32],
             [0u8; 32],
             keypair_a.public_key().to_vec(),
-            vec![],
+            keypair_b.public_key().to_vec(),
         )
-        .with_chain_head_a(legit_head_pk);
+        .with_chain_head_a(legit_head_pk)
+        .with_chain_head_b(legit_head_b_pk);
 
         let mut tracker = ParentConsumptionTracker::new();
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
@@ -472,7 +522,10 @@ mod tests {
     #[test]
     fn test_no_chain_head_rejects_receipt_authorization() {
         // Reuse the parent_uniqueness test setup but without consuming the parent.
+        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
+
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
             [0; 32],
             [0; 32],
@@ -487,14 +540,21 @@ mod tests {
         );
         let commitment = receipt.compute_commitment().unwrap();
         receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
-        // No ek_cert_a set, no chain head in context.
+        receipt.add_sig_b(keypair_b.sign(&commitment).unwrap());
+        receipt.set_ek_cert_a(vec![0xAA; 32]);
+        let (chain_head_b_pk, chain_head_b_sk) =
+            generate_ephemeral_keypair(&[0xD1; 32]).expect("keygen");
+        receipt.set_ek_cert_b(
+            sign_ek_cert(&chain_head_b_sk, keypair_b.public_key(), &[0xaa; 32]).unwrap(),
+        );
 
         let ctx = ReceiptVerificationContext::new(
             [0u8; 32],
             [0u8; 32],
             keypair_a.public_key().to_vec(),
-            vec![],
-        );
+            keypair_b.public_key().to_vec(),
+        )
+        .with_chain_head_b(chain_head_b_pk);
         let mut tracker = ParentConsumptionTracker::new();
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
         assert!(!result.valid, "missing chain head must reject");
