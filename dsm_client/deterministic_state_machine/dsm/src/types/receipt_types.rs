@@ -124,6 +124,19 @@ pub struct StitchedReceiptV2 {
     /// Per-step Kyber ciphertext for party B's contribution.
     /// Mirrors `kyber_ct_a` but encapsulated by B against A's Kyber pubkey.
     pub kyber_ct_b: Vec<u8>,
+
+    /// Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
+    ///
+    /// `Some` when the successor was stitched under the fork-aware precommit
+    /// family (multiple candidates committed under `C_pre^root`); `None`
+    /// otherwise. Wire-only — explicitly excluded from the canonical commit
+    /// preimage (§4.2.1) so the frozen ten-field commit form is preserved.
+    ///
+    /// The recipient verifier rebuilds `C_pre^j` for every unselected branch
+    /// under the canonical v2 domain and checks
+    /// `pi_inv == invalidation_proof_commitment(unselected_C_pre^j)`
+    /// before parent-consumption Tripwire admits the successor.
+    pub fork_witness: Option<crate::types::proto::ForkAwareWitness>,
 }
 
 fn receipt_commit_field_limit(tag: u32) -> Option<Option<usize>> {
@@ -293,7 +306,14 @@ impl StitchedReceiptV2 {
             ek_pk_b: Vec::new(),
             kyber_ct_a: Vec::new(),
             kyber_ct_b: Vec::new(),
+            fork_witness: None,
         }
+    }
+
+    /// Attach a fork-aware finalization witness. Set only when the successor
+    /// was stitched under the fork-aware precommit family.
+    pub fn set_fork_witness(&mut self, witness: crate::types::proto::ForkAwareWitness) {
+        self.fork_witness = Some(witness);
     }
 
     /// Set the relationship SMT replace witness bytes.
@@ -304,8 +324,10 @@ impl StitchedReceiptV2 {
     /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs).
     /// Proto3 omits empty bytes → encode_to_vec() produces fields 1-11 only.
     /// Per §4.2.1 the canonical commit form is FROZEN at 10 fields plus the
-    /// rel_replace_witness (field 11). Signatures (12, 13) and ephemeral-key
-    /// certs (14, 15) live in the envelope only and are explicitly empty here.
+    /// rel_replace_witness (field 11). Signatures (12, 13), ephemeral-key
+    /// certs (14, 15), EK pubkeys (16, 17), Kyber cts (18, 19), and the
+    /// fork-aware finalization witness (20) live in the envelope only and
+    /// are explicitly absent here.
     fn to_proto_canonical(&self) -> crate::types::proto::ReceiptCommit {
         crate::types::proto::ReceiptCommit {
             genesis: self.genesis.to_vec(),
@@ -327,10 +349,11 @@ impl StitchedReceiptV2 {
             ek_pk_b: vec![],
             kyber_ct_a: vec![],
             kyber_ct_b: vec![],
+            fork_witness: None,
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct + fork witness).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
@@ -341,6 +364,7 @@ impl StitchedReceiptV2 {
         proto.ek_pk_b.clone_from(&self.ek_pk_b);
         proto.kyber_ct_a.clone_from(&self.kyber_ct_a);
         proto.kyber_ct_b.clone_from(&self.kyber_ct_b);
+        proto.fork_witness.clone_from(&self.fork_witness);
         proto
     }
 
@@ -394,6 +418,9 @@ impl StitchedReceiptV2 {
         }
         if !rc.kyber_ct_b.is_empty() {
             receipt.set_kyber_ct_b(rc.kyber_ct_b);
+        }
+        if let Some(witness) = rc.fork_witness {
+            receipt.set_fork_witness(witness);
         }
         Ok(receipt)
     }

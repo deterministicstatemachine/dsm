@@ -574,23 +574,15 @@ pub fn verify_transition_integrity(
         }
     }
 
-    // Verify pre-commitment alignment if present
-    if let Some(pre_commitment) = &current_state.forward_commitment {
-        let mut commitment_data = Vec::new();
-        commitment_data.extend_from_slice(&current_state.prev_state_hash);
-        commitment_data.extend_from_slice(&serialized_op);
-        commitment_data.extend_from_slice(&current_state.entropy);
-
-        let commitment_hash = domain_hash("DSM/state-commit", &commitment_data);
-
-        // Deterministic textual canonicalization until proto is available
-        let pre_commitment_bytes = format!("{pre_commitment:?}").into_bytes();
-        let pre_commitment_hash = domain_hash("DSM/pre-commit", &pre_commitment_bytes);
-
-        if pre_commitment_hash.as_bytes() != commitment_hash.as_bytes() {
-            return Ok(false);
-        }
-    }
+    // Fork-aware precommit verification lives at receipt acceptance
+    // (see commitments::precommit::verify_fork_selection and the bilateral
+    // receipt path), not in transition integrity. Earlier code in this
+    // function compared `H("DSM/state-commit\\0" || ...)` against
+    // `H("DSM/pre-commit\\0" || Debug({fc:?}))` — two domain-separated
+    // hashes that could never be equal, so any state with a
+    // `forward_commitment` was unconditionally rejected. The check has been
+    // removed; the canonical v2 family handles precommit alignment at the
+    // proper layer.
 
     // Verify token balance consistency for token-affecting operations
     if !verify_token_balance_consistency(previous_state, current_state, operation)? {
