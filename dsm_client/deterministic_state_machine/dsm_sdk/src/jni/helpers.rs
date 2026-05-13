@@ -9,44 +9,60 @@ use crate::generated as pb;
 
 use prost::Message;
 
+fn strict_headers() -> pb::Headers {
+    pb::Headers {
+        device_id: vec![0u8; 32],
+        chain_tip: vec![0u8; 32],
+        genesis_hash: vec![0u8; 32],
+        seq: 0,
+    }
+}
+
+fn strict_message_id(payload: &pb::envelope::Payload) -> Vec<u8> {
+    let seed = pb::Envelope {
+        version: 3,
+        headers: Some(strict_headers()),
+        message_id: vec![0u8; 16],
+        payload: Some(payload.clone()),
+    }
+    .encode_to_vec();
+    dsm::crypto::blake3::domain_hash_bytes("DSM/jni-envelope-message-id/v1", &seed)[..16].to_vec()
+}
+
+pub fn encode_payload_transport(payload: pb::envelope::Payload) -> pb::Envelope {
+    let message_id = strict_message_id(&payload);
+    pb::Envelope {
+        version: 3,
+        headers: Some(strict_headers()),
+        message_id,
+        payload: Some(payload),
+    }
+}
+
 /// Encode a deterministic transport-level error as an Envelope v3.
-/// Uses `Default` to remain schema-stable across minor proto changes.
 pub fn encode_error_transport(code: u32, msg: &str) -> pb::Envelope {
-    // Build the error without the debug field first to compute canonical bytes
     let mut err = pb::Error {
         code,
         message: msg.to_string(),
         ..Default::default()
     };
 
-    // Encode canonical error bytes (without debug field) and compute Base32-Crockford debug string
     let mut tmp = Vec::new();
     if err.encode(&mut tmp).is_ok() {
         let dbg = base32::encode(base32::Alphabet::Crockford, &tmp);
         err.debug_b32 = dbg;
     } else {
-        // Alternate path: compute base32 over UTF-8 textual representation
         let textual = format!("{}:{}", code, msg);
         err.debug_b32 = base32::encode(base32::Alphabet::Crockford, textual.as_bytes());
     }
 
-    pb::Envelope {
-        version: 3,
-        payload: Some(pb::envelope::Payload::Error(err)),
-        ..Default::default()
-    }
+    encode_payload_transport(pb::envelope::Payload::Error(err))
 }
 
-/// Optional success shim if you later wrap raw bytes under a universal channel.
-/// Currently returns an empty `UniversalRx`.
 pub fn encode_universal_ok() -> pb::Envelope {
-    pb::Envelope {
-        version: 3,
-        payload: Some(pb::envelope::Payload::UniversalRx(pb::UniversalRx {
-            ..Default::default()
-        })),
+    encode_payload_transport(pb::envelope::Payload::UniversalRx(pb::UniversalRx {
         ..Default::default()
-    }
+    }))
 }
 
 #[cfg(target_os = "android")]

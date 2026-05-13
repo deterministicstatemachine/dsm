@@ -64,17 +64,10 @@ fn sdk_send_status_from_router_status(
 
 /// Derive the local device-tree commitment for receipt construction (§2.3).
 ///
-/// Primary source: `AppState::get_device_tree_commitment()` which is set during
-/// SDK initialisation via `set_identity_info`.  Fall-back: compute directly from
-/// `device_id` using a single-device Merkle tree.  For the single-device case
-/// these are identical, so the fall-back is always correct.
-///
-/// Using the fall-back instead of returning `None` ensures BLE bilateral receipts
-/// can always be built even when AppState has not yet been fully populated (e.g.,
-/// on a fresh app start before the first storage.sync completes).  Without this,
-/// `build_bilateral_receipt_with_smt` returns `None` → `proof_data` in the
-/// settlement context is `None` → settlement fails → receiver balance and history
-/// are never updated.
+/// Primary source: `AppState::get_device_tree_commitment()`, set during SDK
+/// initialization via `set_identity_info`. If AppState is not populated yet,
+/// compute the same single-device Merkle root directly from `device_id`; for
+/// this case the two roots are identical.
 fn local_device_tree_commitment(
     device_id: &[u8; 32],
 ) -> dsm::types::receipt_types::DeviceTreeAcceptanceCommitment {
@@ -184,7 +177,7 @@ impl BilateralBleHandler {
     /// `commitment_hash` is the bilateral session's commitment hash for
     /// this transition — the session-level precommit that BOTH the
     /// per-step EK derivation context (HKDF "DSM/ek" salt input) AND the
-    /// per-step EK signing target (BLAKE3 "DSM/receipt-bind-session"
+    /// receipt challenge-response target (BLAKE3 "DSM/receipt-bind-session"
     /// preimage, whitepaper §11.1 Item 7) bind to. The whitepaper uses
     /// the symbol `C_pre` for this same value at the protocol layer; we
     /// use `commitment_hash` here to make the session-equivalence
@@ -252,15 +245,12 @@ impl BilateralBleHandler {
             k_dbrw: &k_dbrw_arr,
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &recipient_kyber_pk,
-            // §11.1 Item 7: bind the per-step EK signature to this
+            // §11.1 Item 7: bind the per-step EK response to this
             // bilateral session via the BLAKE3 "DSM/receipt-bind-session"
-            // domain-separated signing target. Using the same
-            // commitment_hash value here as in `c_pre` is intentional
-            // defense-in-depth: HKDF makes EK_pk session-unique,
-            // session_binding makes sig session-unique, and the two
-            // domain tags (DSM/ek vs DSM/receipt-bind-session) keep the
-            // layers cryptographically independent.
-            session_binding: Some(&commitment_hash),
+            // domain-separated challenge-response target. Using the same
+            // commitment_hash value here as in `c_pre` keeps EK derivation
+            // and receipt authorization on the same proposed transition.
+            session_binding: &commitment_hash,
         };
         let signing_out = crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)?;
 
@@ -705,23 +695,19 @@ impl BilateralBleHandler {
                 )
             })?;
 
-        let receipt = generated::ReceiptCommit::decode(confirm_request.stitched_receipt.as_slice())
-            .map_err(|e| {
-                DsmError::serialization_error(
-                    "decode_persisted_confirm_receipt",
-                    "protobuf",
-                    Some(e.to_string()),
-                    Some(e),
-                )
-            })?;
-        let expected_parent_tip: [u8; 32] =
-            receipt.parent_tip.as_slice().try_into().map_err(|_| {
-                DsmError::invalid_operation("persisted confirm receipt parent_tip must be 32 bytes")
-            })?;
-        let receipt_child_tip: [u8; 32] =
-            receipt.child_tip.as_slice().try_into().map_err(|_| {
-                DsmError::invalid_operation("persisted confirm receipt child_tip must be 32 bytes")
-            })?;
+        let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            confirm_request.stitched_receipt.as_slice(),
+        )
+        .map_err(|e| {
+            DsmError::serialization_error(
+                "decode_persisted_confirm_receipt",
+                "protobuf",
+                Some(e.to_string()),
+                None::<std::io::Error>,
+            )
+        })?;
+        let expected_parent_tip = receipt.parent_tip;
+        let receipt_child_tip = receipt.child_tip;
         if receipt_child_tip != shared_chain_tip_new {
             return Err(DsmError::invalid_operation(
                 "persisted confirm receipt child_tip mismatch",
@@ -992,8 +978,9 @@ impl BilateralBleHandler {
     /// Interrupted bilateral sessions are not resumed after restart. Any
     /// non-terminal persisted session is marked `failed` so the frontend can
     /// surface retry-required state, but no in-memory session is restored.
-    /// The return value remains a compatibility no-op; callers should inspect
-    /// persisted session state instead of relying on a restoration count.
+    /// The return value is the count of sessions restored into memory. Current
+    /// startup policy marks interrupted sessions failed instead of resuming them,
+    /// so callers should inspect persisted session state for failure details.
     /// Restore bilateral sessions from SQLite at startup.
     ///
     /// **Concurrency invariant — startup-only entry point.**
@@ -1353,7 +1340,7 @@ impl BilateralBleHandler {
                         alias: "self".to_string(),
                         device_id: self.device_id,
                         genesis_hash: mgr.local_genesis_hash(),
-                        public_key: vec![7u8; 32], // test-only placeholder; not used for signing
+                        public_key: vec![7u8; 32], // deterministic loopback test key
                         genesis_material: vec![],
                         chain_tip: None,
                         chain_tip_smt_proof: None,
@@ -1367,10 +1354,7 @@ impl BilateralBleHandler {
                     let _ = mgr.add_verified_contact(contact);
                 }
                 if mgr.get_relationship(&counterparty_device_id).is_none() {
-                    let mut smt = self.per_device_smt.write().await;
-                    let _ = mgr
-                        .establish_relationship(&counterparty_device_id, &mut smt)
-                        .await;
+                    let _ = mgr.establish_relationship(&counterparty_device_id).await;
                 }
                 drop(mgr);
             } else {
@@ -1511,9 +1495,10 @@ impl BilateralBleHandler {
             let mut mgr = self.bilateral_tx_manager.write().await;
             if let Some(contact) = mgr.get_contact(&counterparty_device_id).cloned() {
                 // Try to get chain tip from SQLite storage first (most up-to-date)
-                // IMPORTANT: Use the raw variant (no genesis_hash compatibility root).
+                // IMPORTANT: Use the raw variant so a missing chain_tip does
+                // not get silently replaced by genesis_hash.
                 // For a fresh contact, get_contact_chain_tip returns the genesis_hash as a
-                // "compatibility" root when chain_tip is NULL, which would set
+                // root when chain_tip is NULL, which would set
                 // remote_chain_tip = B.genesis_hash.  But the receiver seeds its local tip
                 // as initial_relationship_chain_tip(A,B) — a completely different value —
                 // causing a guaranteed mismatch on every first transaction.
@@ -2043,7 +2028,7 @@ impl BilateralBleHandler {
                 dsm::core::utility::labeling::hash_to_short_id(&counterparty_device_id),
                 is_verified
             );
-            // Fallback: if not in memory, try loading from SQLite (handles boot race)
+            // Load from SQLite when the in-memory contact cache is not populated yet.
             if !is_verified {
                 log::warn!(
                     "[BilateralBleHandler] 🔄 Contact not in BLE memory — checking SQLite root"
@@ -2271,8 +2256,7 @@ impl BilateralBleHandler {
             }
 
             if mgr.get_relationship(&counterparty_device_id).is_none() {
-                let mut smt = self.per_device_smt.write().await;
-                mgr.establish_relationship(&counterparty_device_id, &mut smt)
+                mgr.establish_relationship(&counterparty_device_id)
                     .await
                     .map_err(|e| {
                         DsmError::relationship(format!("Failed to establish relationship: {e}"))
@@ -3142,8 +3126,7 @@ impl BilateralBleHandler {
                 .ok_or_else(|| DsmError::invalid_operation("No chain tip for confirm"))?
         };
         let op_bytes = session.operation.to_bytes();
-        // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || entropy) — symmetric.
-        // Uses compute_precommit (domain "DSM/pre") so BLE and online paths produce the same formula.
+        // Canonical C_pre is symmetric over h_n, operation bytes, and entropy.
         let receipt_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
             &h_n,
             &op_bytes,
@@ -3617,7 +3600,7 @@ impl BilateralBleHandler {
                             crate::sdk::receipts::BilateralSide::B,
                             &expected_prev_pk,
                             &counter_signed.parent_tip,
-                            Some(&commitment_hash),
+                            &commitment_hash,
                         )?;
 
                         let snapshot_for_persist: BilateralBleSession;
@@ -3976,10 +3959,10 @@ impl BilateralBleHandler {
                         crate::sdk::receipts::BilateralSide::A,
                         &expected_prev_pk,
                         &receipt.parent_tip,
-                        // §11.1 Item 7: receipt's sig_a must verify
-                        // under the session-bound signing target
-                        // (commitment_hash for this bilateral session).
-                        Some(&commitment_hash),
+                        // §11.1 Item 7: receipt's sig_a must verify under
+                        // the challenge-response target for this bilateral
+                        // session's commitment_hash.
+                        &commitment_hash,
                     )?;
                     info!(
                         "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
@@ -5646,8 +5629,7 @@ mod tests {
         {
             let mut mgr = bilateral_manager.write().await;
             mgr.add_verified_contact(contact).expect("add contact");
-            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-            mgr.establish_relationship(&counterparty_device_id, &mut smt)
+            mgr.establish_relationship(&counterparty_device_id)
                 .await
                 .expect("establish relationship");
         }
@@ -5765,8 +5747,7 @@ mod tests {
         {
             let mut mgr = bilateral_manager.write().await;
             mgr.add_verified_contact(contact).expect("add contact");
-            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-            mgr.establish_relationship(&counterparty_device_id, &mut smt)
+            mgr.establish_relationship(&counterparty_device_id)
                 .await
                 .expect("establish relationship");
         }
@@ -5988,7 +5969,7 @@ mod tests {
             .restore_sessions_from_storage()
             .await
             .expect("restore sessions");
-        assert_eq!(restored, 0, "restore remains a compatibility no-op count");
+        assert_eq!(restored, 0, "interrupted sessions are marked failed");
 
         let inflight_after = crate::storage::client_db::get_bilateral_session(&[0xA1; 32])
             .expect("load inflight")

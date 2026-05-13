@@ -1217,8 +1217,7 @@ mod tests {
                 let _ = mgr.add_verified_contact(contact);
             }
             if mgr.get_relationship(&counterparty).is_none() {
-                let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-                let _ = mgr.establish_relationship(&counterparty, &mut smt).await;
+                let _ = mgr.establish_relationship(&counterparty).await;
             }
         }
 
@@ -1298,13 +1297,7 @@ mod tests {
             }
         }
         rt.block_on(async {
-            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-            match bilateral_mgr
-                .write()
-                .await
-                .establish_relationship(&cp, &mut smt)
-                .await
-            {
+            match bilateral_mgr.write().await.establish_relationship(&cp).await {
                 Ok(_) => {}
                 Err(e) => panic!("establish_relationship failed in test: {}", e),
             }

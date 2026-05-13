@@ -19,7 +19,7 @@
 //!
 //! - Input: raw protobuf bytes (no framing prefix on request).
 //! - Output: `[0x03][Envelope v3 protobuf bytes]` — always framed.
-//! - Decode responses with `strip 0x03 prefix -> Envelope::decode()`.
+//! - Decode responses with `strip 0x03 prefix -> strict Envelope v3 decode`.
 //!
 //! ## Safety
 //!
@@ -113,6 +113,26 @@ fn error_byte_array<'a>(env: &'a JNIEnv<'a>, code: u32, msg: &str) -> JByteArray
         Ok(arr) => arr,
         Err(e) => {
             log::error!("JVM failed to allocate error byte array: {}", e);
+            empty_byte_array_or_empty(env)
+        }
+    }
+}
+
+fn framed_payload_byte_array<'a>(
+    env: &'a JNIEnv<'a>,
+    payload: pb::envelope::Payload,
+) -> JByteArray<'a> {
+    let envelope = crate::jni::helpers::encode_payload_transport(payload);
+    let mut out = Vec::new();
+    out.push(0x03);
+    if let Err(e) = envelope.encode(&mut out) {
+        log::error!("JVM failed to encode response envelope: {}", e);
+        return empty_byte_array_or_empty(env);
+    }
+    match env.byte_array_from_slice(&out) {
+        Ok(arr) => arr,
+        Err(e) => {
+            log::error!("JVM failed to allocate response byte array: {}", e);
             empty_byte_array_or_empty(env)
         }
     }
@@ -398,25 +418,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalance
 
             let respond_envelope =
                 |payload: pb::envelope::Payload, env: &mut JNIEnv| -> jni::sys::jbyteArray {
-                    let envelope = pb::Envelope {
-                        version: 3,
-                        headers: Some(pb::Headers {
-                            device_id: vec![0u8; 32],
-                            chain_tip: vec![0u8; 32],
-                            genesis_hash: vec![],
-                            seq: 0,
-                        }),
-                        message_id: vec![],
-                        payload: Some(payload),
-                    };
-                    let mut out = Vec::new();
-                    out.push(0x03);
-                    if envelope.encode(&mut out).is_err() {
-                        return empty_byte_array_or_empty(env).into_raw();
-                    }
-                    env.byte_array_from_slice(&out)
-                        .map(|a| a.into_raw())
-                        .unwrap_or_else(|_| empty_byte_array_or_empty(env).into_raw())
+                    framed_payload_byte_array(env, payload).into_raw()
                 };
 
             let respond_error = |env: &mut JNIEnv, code: u32, msg: &str| -> jni::sys::jbyteArray {
@@ -538,37 +540,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
 
             let respond =
                 |payload: pb::envelope::Payload, env: &mut JNIEnv| -> jni::sys::jbyteArray {
-                    let envelope = pb::Envelope {
-                        version: 3,
-                        headers: Some(pb::Headers {
-                            device_id: vec![0u8; 32],
-                            chain_tip: vec![0u8; 32],
-                            genesis_hash: vec![],
-                            seq: 0,
-                        }),
-                        message_id: vec![],
-                        payload: Some(payload),
-                    };
-                    let mut out = Vec::new();
-                    out.push(0x03); // Canonical framing byte for FramedEnvelopeV3
-                    if envelope.encode(&mut out).is_err() {
-                        return error_byte_array(
-                            env,
-                            helpers::JniErrorCode::EncodingFailed as u32,
-                            "failed to encode envelope",
-                        )
-                        .into_raw();
-                    }
-                    env.byte_array_from_slice(&out)
-                        .map(|a| a.into_raw())
-                        .unwrap_or(
-                            error_byte_array(
-                                env,
-                                helpers::JniErrorCode::EncodingFailed as u32,
-                                "failed to allocate return bytes",
-                            )
-                            .into_raw(),
-                        )
+                    framed_payload_byte_array(env, payload).into_raw()
                 };
 
             if base.is_empty() {
@@ -639,25 +611,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getWalletHist
 
             let respond_envelope =
                 |payload: pb::envelope::Payload, env: &mut JNIEnv| -> jni::sys::jbyteArray {
-                    let envelope = pb::Envelope {
-                        version: 3,
-                        headers: Some(pb::Headers {
-                            device_id: vec![0u8; 32],
-                            chain_tip: vec![0u8; 32],
-                            genesis_hash: vec![],
-                            seq: 0,
-                        }),
-                        message_id: vec![],
-                        payload: Some(payload),
-                    };
-                    let mut out = Vec::new();
-                    out.push(0x03);
-                    if envelope.encode(&mut out).is_err() {
-                        return empty_byte_array_or_empty(env).into_raw();
-                    }
-                    env.byte_array_from_slice(&out)
-                        .map(|a| a.into_raw())
-                        .unwrap_or_else(|_| empty_byte_array_or_empty(env).into_raw())
+                    framed_payload_byte_array(env, payload).into_raw()
                 };
 
             let respond_error = |env: &mut JNIEnv, code: u32, msg: &str| -> jni::sys::jbyteArray {
@@ -1292,7 +1246,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isErrorEnvelo
 Strict Envelope v3 processing (JNI export)
 ============================================================================= */
 
-/// Backward-compatible wrapper — existing call sites (diagnostics, pairing) use this.
+/// Wrapper used by diagnostics and pairing call sites.
 #[inline]
 fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
     process_envelope_v3_impl(req, None)
@@ -1910,18 +1864,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_processNfcTag(
             atomic: true,
         };
 
-        // Construct Envelope
-        let envelope = pb::Envelope {
-            version: 3,
-            headers: Some(pb::Headers {
-                device_id: vec![0; 32], // Dummy
-                chain_tip: vec![0; 32], // Dummy
-                genesis_hash: vec![],
-                seq: 0,
-            }),
-            message_id: vec![],
-            payload: Some(pb::envelope::Payload::UniversalTx(tx)),
-        };
+        let envelope =
+            crate::jni::helpers::encode_payload_transport(pb::envelope::Payload::UniversalTx(tx));
 
         let mut env_bytes = Vec::new();
         env_bytes.push(0x03); // Canonical framing byte for FramedEnvelopeV3
@@ -1984,7 +1928,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_processNfcTag(
 /// Initialize bilateral SDK preconditions (context + handler + calibration).
 /// Call this after genesis creation and SDK context initialization.
 /// Returns true on success, false on failure.
-/// Note: JNI symbol name retained for Kotlin ABI compatibility.
+/// Note: JNI symbol name retained for the Kotlin entry point.
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub extern "system" fn Java_com_dsm_native_DsmNative_initializeBilateralSdk(
@@ -2219,17 +2163,50 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
         use prost::Message;
         use dsm::types::proto as gp;
 
+        fn gp_zero_headers() -> gp::Headers {
+            gp::Headers {
+                device_id: vec![0u8; 32],
+                chain_tip: vec![0u8; 32],
+                genesis_hash: vec![0u8; 32],
+                seq: 0,
+            }
+        }
+
+        fn gp_envelope(payload: gp::envelope::Payload) -> gp::Envelope {
+            let seed = gp::Envelope {
+                version: 3,
+                headers: Some(gp_zero_headers()),
+                message_id: vec![0u8; 16],
+                payload: Some(payload.clone()),
+            }
+            .encode_to_vec();
+            let message_id =
+                dsm::crypto::blake3::domain_hash_bytes("DSM/jni-core-envelope-message-id/v1", &seed)
+                    [..16]
+                    .to_vec();
+            gp::Envelope {
+                version: 3,
+                headers: Some(gp_zero_headers()),
+                message_id,
+                payload: Some(payload),
+            }
+        }
+
+        fn gp_error_bytes(code: u32, message: impl Into<String>) -> Vec<u8> {
+            gp_envelope(gp::envelope::Payload::Error(gp::Error {
+                code,
+                message: message.into(),
+                ..Default::default()
+            }))
+            .encode_to_vec()
+        }
+
         // 1. Decode envelope
         let envelope = match dsm::envelope::from_canonical_bytes(&*bytes) {
             Ok(env) => env,
             Err(e) => {
                 log::error!("[bilateralOfflineSend] envelope decode failed: {e}");
-                return gp::Envelope {
-                    version: 3, headers: None, message_id: vec![],
-                    payload: Some(gp::envelope::Payload::Error(gp::Error {
-                        code: 460, message: format!("invalid envelope: {e}"), ..Default::default()
-                    })),
-                }.encode_to_vec();
+                return gp_error_bytes(460, format!("invalid envelope: {e}"));
             }
         };
 
@@ -2237,12 +2214,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
         let headers = match envelope.headers.as_ref() {
             Some(h) if h.device_id.len() == 32 && !h.device_id.iter().all(|b| *b == 0) => h,
             _ => {
-                return gp::Envelope {
-                    version: 3, headers: None, message_id: vec![],
-                    payload: Some(gp::envelope::Payload::Error(gp::Error {
-                        code: 461, message: "missing or invalid headers".into(), ..Default::default()
-                    })),
-                }.encode_to_vec();
+                return gp_error_bytes(461, "missing or invalid headers");
             }
         };
 
@@ -2250,12 +2222,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
         let uni_tx = match envelope.payload.as_ref() {
             Some(gp::envelope::Payload::UniversalTx(tx)) => tx,
             _ => {
-                return gp::Envelope {
-                    version: 3, headers: None, message_id: vec![],
-                    payload: Some(gp::envelope::Payload::Error(gp::Error {
-                        code: 464, message: "payload must be UniversalTx".into(), ..Default::default()
-                    })),
-                }.encode_to_vec();
+                return gp_error_bytes(464, "payload must be UniversalTx");
             }
         };
 
@@ -2270,17 +2237,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
             Ok(c) => c,
             Err(e) => {
                 log::error!("[bilateralOfflineSend] BLE coordinator not ready: {e}");
-                return gp::Envelope {
-                    version: 3,
-                    headers: None,
-                    message_id: vec![],
-                    payload: Some(gp::envelope::Payload::Error(gp::Error {
-                        code: 503,
-                        message: format!("BLE coordinator not ready: {e}"),
-                        ..Default::default()
-                    })),
-                }
-                .encode_to_vec();
+                return gp_error_bytes(503, format!("BLE coordinator not ready: {e}"));
             }
         };
 
@@ -3628,8 +3585,9 @@ mod unified_protobuf_bridge_tests {
 
     #[test]
     fn wrong_version_ble_frame_is_unspecified() {
-        let mut env = pb::Envelope::decode(build_bilateral_confirm_envelope().as_slice())
-            .expect("decode bilateral confirm envelope");
+        let mut env =
+            crate::envelope::from_canonical_bytes(build_bilateral_confirm_envelope().as_slice())
+                .expect("decode bilateral confirm envelope");
         env.version = 2;
         let raw = env.encode_to_vec();
 
@@ -3654,7 +3612,8 @@ mod unified_protobuf_bridge_tests {
         let err = route_query_via_ingress(&req_id, "wallet.balance".to_string(), Vec::new());
         assert_eq!(&err[..8], &req_id);
         assert_eq!(err[8], 0x03);
-        let envelope = pb::Envelope::decode(&err[9..]).expect("decode error envelope");
+        let envelope =
+            crate::envelope::from_canonical_bytes(&err[9..]).expect("decode error envelope");
         match envelope.payload {
             Some(pb::envelope::Payload::Error(error)) => {
                 assert_eq!(
@@ -3677,7 +3636,8 @@ mod unified_protobuf_bridge_tests {
         unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
         let err = route_invoke_via_ingress_bytes("wallet.send".to_string(), Vec::new());
         assert_eq!(err.first(), Some(&0x03));
-        let envelope = pb::Envelope::decode(&err[1..]).expect("decode invoke error");
+        let envelope =
+            crate::envelope::from_canonical_bytes(&err[1..]).expect("decode invoke error");
         match envelope.payload {
             Some(pb::envelope::Payload::Error(error)) => {
                 assert_eq!(
@@ -3690,7 +3650,7 @@ mod unified_protobuf_bridge_tests {
     }
 
     #[test]
-    fn hardware_facts_wrapper_matches_previous_session_manager_bytes() {
+    fn hardware_facts_wrapper_matches_session_manager_bytes() {
         let _guard = setup_test_env();
         let facts = pb::SessionHardwareFactsProto {
             app_foreground: true,
@@ -3706,7 +3666,7 @@ mod unified_protobuf_bridge_tests {
         };
         let expected =
             crate::sdk::session_manager::update_hardware_and_snapshot(&facts.encode_to_vec())
-                .expect("legacy snapshot bytes");
+                .expect("session snapshot bytes");
         let actual = route_hardware_facts_via_ingress(facts).expect("ingress snapshot bytes");
         assert_eq!(actual, expected);
     }
@@ -3716,6 +3676,12 @@ mod unified_protobuf_bridge_tests {
         let _guard = setup_test_env();
         let request = pb::Envelope {
             version: 3,
+            headers: Some(pb::Headers {
+                device_id: vec![1; 32],
+                chain_tip: vec![2; 32],
+                genesis_hash: vec![3; 32],
+                seq: 0,
+            }),
             message_id: vec![4; 16],
             payload: Some(pb::envelope::Payload::Error(pb::Error {
                 code: 123,
@@ -3730,7 +3696,8 @@ mod unified_protobuf_bridge_tests {
         let response =
             dispatch_envelope_via_ingress(&request.encode_to_vec()).expect("dispatch via ingress");
         assert_eq!(response.first(), Some(&0x03));
-        let decoded = pb::Envelope::decode(&response[1..]).expect("decode framed response");
+        let decoded =
+            crate::envelope::from_canonical_bytes(&response[1..]).expect("decode response");
         assert_eq!(decoded.version, 3);
     }
 }
@@ -5010,14 +4977,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapIn
                 }
             };
 
-            // Build response — actual deposit initiation happens via process_envelope_v3
-            // For now, encode as an envelope and route through the universal handler.
-            let envelope = pb::Envelope {
-                version: 3,
-                headers: None,
-                message_id: vec![],
-                payload: Some(pb::envelope::Payload::DepositRequest(deposit_req)),
-            };
+            let envelope = crate::jni::helpers::encode_payload_transport(
+                pb::envelope::Payload::DepositRequest(deposit_req),
+            );
             let mut env_bytes = Vec::new();
             if let Err(e) = envelope.encode(&mut env_bytes) {
                 return error_byte_array(
@@ -5099,12 +5061,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapCo
                 }
             };
 
-            let envelope = pb::Envelope {
-                version: 3,
-                headers: None,
-                message_id: vec![],
-                payload: Some(pb::envelope::Payload::DepositCompleteRequest(complete_req)),
-            };
+            let envelope = crate::jni::helpers::encode_payload_transport(
+                pb::envelope::Payload::DepositCompleteRequest(complete_req),
+            );
             let mut env_bytes = Vec::new();
             if let Err(e) = envelope.encode(&mut env_bytes) {
                 return error_byte_array(
@@ -5186,12 +5145,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapRe
                 }
             };
 
-            let envelope = pb::Envelope {
-                version: 3,
-                headers: None,
-                message_id: vec![],
-                payload: Some(pb::envelope::Payload::DepositRefundRequest(refund_req)),
-            };
+            let envelope = crate::jni::helpers::encode_payload_transport(
+                pb::envelope::Payload::DepositRefundRequest(refund_req),
+            );
             let mut env_bytes = Vec::new();
             if let Err(e) = envelope.encode(&mut env_bytes) {
                 return error_byte_array(
@@ -5273,12 +5229,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapSt
                 }
             };
 
-            let envelope = pb::Envelope {
-                version: 3,
-                headers: None,
-                message_id: vec![],
-                payload: Some(pb::envelope::Payload::DepositStatusRequest(status_req)),
-            };
+            let envelope = crate::jni::helpers::encode_payload_transport(
+                pb::envelope::Payload::DepositStatusRequest(status_req),
+            );
             let mut env_bytes = Vec::new();
             if let Err(e) = envelope.encode(&mut env_bytes) {
                 return error_byte_array(
@@ -5394,33 +5347,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinVerify
                 funding_txid: String::new(),
             };
 
-            let envelope = pb::Envelope {
-                version: 3,
-                headers: None,
-                message_id: vec![],
-                payload: Some(pb::envelope::Payload::DepositResponse(response)),
-            };
-
-            let mut out = Vec::new();
-            out.push(0x03);
-            if let Err(e) = envelope.encode(&mut out) {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("bitcoinVerifyPayment: encode failed: {e}"),
-                )
-                .into_raw();
-            }
-
-            env.byte_array_from_slice(&out)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
+            framed_payload_byte_array(&env, pb::envelope::Payload::DepositResponse(response))
+                .into_raw()
         }),
     )
 }
 
 /// Generate a Bitcoin HTLC P2WSH address for a deposit.
-/// Input: protobuf-encoded DepositRequest (hash_lock + btc_pubkey fields used)
+/// Input: protobuf-encoded DepositRequest.
 /// Output: framed V3 envelope with DepositResponse (htlc_script + htlc_address)
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress(
@@ -5465,6 +5399,22 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenera
         )
         .into_raw();
     }
+    if deposit_req.btc_pubkey.len() != 33 {
+        return error_byte_array(
+            &mut env,
+            helpers::JniErrorCode::ProcessingFailed as u32,
+            "bitcoinGenerateAddress: btc_pubkey must be 33 bytes",
+        )
+        .into_raw();
+    }
+    if deposit_req.refund_btc_pubkey.len() != 33 {
+        return error_byte_array(
+            &mut env,
+            helpers::JniErrorCode::ProcessingFailed as u32,
+            "bitcoinGenerateAddress: refund_btc_pubkey must be 33 bytes",
+        )
+        .into_raw();
+    }
 
     let mut hash_lock = [0u8; 32];
     hash_lock.copy_from_slice(&deposit_req.hash_lock);
@@ -5477,16 +5427,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenera
     );
     let refund_hash_lock = dsm::bitcoin::script::sha256_hash_lock(&refund_key);
 
-    // Use testnet by default for address generation; the counterparty verifies the script
     let network = dsm::bitcoin::types::BitcoinNetwork::Testnet;
 
-    // btc_pubkey serves as both claimer and refund for address generation
-    // (counterparty will construct the full HTLC with proper pubkeys)
     let result = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::generate_htlc_address(
         &hash_lock,
         &refund_hash_lock,
         &deposit_req.btc_pubkey,
-        &deposit_req.btc_pubkey, // placeholder refund key
+        &deposit_req.refund_btc_pubkey,
         network,
     );
 
@@ -5514,27 +5461,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenera
         funding_txid: String::new(),
     };
 
-    let envelope = pb::Envelope {
-        version: 3,
-        headers: None,
-        message_id: vec![],
-        payload: Some(pb::envelope::Payload::DepositResponse(response)),
-    };
-
-    let mut out = Vec::new();
-    out.push(0x03);
-    if let Err(e) = envelope.encode(&mut out) {
-        return error_byte_array(
-            &mut env,
-            helpers::JniErrorCode::ProcessingFailed as u32,
-            &format!("bitcoinGenerateAddress: encode failed: {e}"),
-        )
-        .into_raw();
-    }
-
-    env.byte_array_from_slice(&out)
-        .map(|a| a.into_raw())
-        .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
+    framed_payload_byte_array(&env, pb::envelope::Payload::DepositResponse(response)).into_raw()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5708,7 +5635,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getPendingRec
     )
 }
 
-/// Prepare NFC write payload: wraps capsule bytes into an NDEF-compatible record.
+/// Prepare NFC write payload: wraps capsule bytes into an NDEF record.
 /// Input: raw encrypted capsule bytes.
 /// Output: NDEF message bytes ready for `Ndef.writeNdefMessage()`.
 ///
