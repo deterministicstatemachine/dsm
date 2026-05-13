@@ -3,16 +3,16 @@
 
 use dsm::types::proto as generated;
 
+use super::app_router_impl::AppRouterImpl;
+use super::response_helpers::{err, pack_bytes_ok, pack_envelope_ok};
 use crate::bridge::{AppQuery, AppResult};
 use crate::sdk::identity_sdk::IdentitySDK;
-use super::app_router_impl::AppRouterImpl;
-use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
 
 impl AppRouterImpl {
     /// Dispatch handler for all `identity.*` query routes.
     pub(crate) async fn handle_identity_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
-            // ---------- identity.transport_headers_v3 (PURE BYTES) ----------
+            // ---------- identity.transport_headers_v3 ----------
             "identity.transport_headers_v3" => {
                 // SDK may bootstrap context if headers are requested early.
                 if !crate::is_sdk_context_initialized() {
@@ -27,10 +27,7 @@ impl AppRouterImpl {
                 }
 
                 match crate::get_transport_headers_v3_bytes() {
-                    Ok(bytes) => pack_bytes_ok(
-                        bytes,
-                        generated::Hash32 { v: vec![0u8; 32] }, // schema hash not applicable for raw header bytes
-                    ),
+                    Ok(bytes) => pack_bytes_ok(bytes, generated::Hash32 { v: vec![0u8; 32] }),
                     Err(e) => err(format!("identity.transport_headers_v3 failed: {e}")),
                 }
             }
@@ -66,7 +63,6 @@ impl AppRouterImpl {
                             key: "pairing".into(),
                             value: Some(s),
                         };
-                        // NEW: Return as Envelope.appStateResponse (field 22)
                         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
                     }
                     Err(e) => err(format!("identity.pairing_compact failed: {e}")),
@@ -134,7 +130,12 @@ mod tests {
     fn envelope_framing_byte_is_0x03() {
         let envelope = generated::Envelope {
             version: 3,
-            headers: None,
+            headers: Some(generated::Headers {
+                device_id: vec![0u8; 32],
+                chain_tip: vec![0u8; 32],
+                genesis_hash: vec![0u8; 32],
+                seq: 0,
+            }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::AppStateResponse(
                 generated::AppStateResponse {
@@ -148,7 +149,7 @@ mod tests {
         envelope.encode(&mut buf).unwrap();
 
         assert_eq!(buf[0], 0x03, "framing byte must be 0x03 for v3");
-        let decoded = generated::Envelope::decode(&buf[1..]).expect("decode sans framing byte");
+        let decoded = dsm::envelope::from_canonical_bytes(&buf[1..]).expect("decode envelope");
         assert_eq!(decoded.version, 3);
     }
 

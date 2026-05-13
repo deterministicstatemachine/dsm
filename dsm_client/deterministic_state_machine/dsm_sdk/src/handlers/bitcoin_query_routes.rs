@@ -880,8 +880,7 @@ impl AppRouterImpl {
                     htlc_address,
                     entry_header: vault.entry_header.map(|h| h.to_vec()).unwrap_or_default(),
                     created_at_state: vault.created_at_state,
-                    // 32-byte salted-BLAKE3 commitment (Issue #184 F2 —
-                    // was previously the classical-commitment hash field).
+                    // 32-byte salted-BLAKE3 commitment for the withdrawal plan content.
                     content_commitment: vault.content_commitment.to_vec(),
                     vault_op_id,
                 };
@@ -969,7 +968,6 @@ impl AppRouterImpl {
                     .await;
                 }
 
-                #[allow(deprecated)]
                 let resp = generated::BitcoinWithdrawalPlanResponse {
                     plan_id: plan.plan_id,
                     plan_class: plan.plan_class,
@@ -1001,9 +999,6 @@ impl AppRouterImpl {
                             reason: vault.reason,
                         })
                         .collect(),
-                    route_commitment_id: vec![],
-                    route_commitment_key: String::new(),
-                    selector_snapshot_hash: vec![],
                     policy_commit: plan.policy_commit.to_vec(),
                     available_dbtc_sats: plan.available_dbtc_sats,
                 };
@@ -1087,7 +1082,7 @@ mod tests {
     fn decode_framed_envelope(bytes: &[u8], route: &str) -> generated::Envelope {
         assert!(!bytes.is_empty(), "{route}: empty response bytes");
         assert_eq!(bytes[0], 0x03, "{route}: expected FramedEnvelopeV3 prefix");
-        generated::Envelope::decode(&bytes[1..])
+        dsm::envelope::from_canonical_bytes(&bytes[1..])
             .unwrap_or_else(|e| panic!("{route}: failed to decode envelope: {e}"))
     }
 
