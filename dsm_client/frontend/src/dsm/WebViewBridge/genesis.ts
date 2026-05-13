@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Genesis creation + secondary device + persisted genesis envelope routes.
 
-import {
-  ArgPack,
-  BootstrapFinalizeResponse_Result,
-  Codec,
-  SystemGenesisRequest,
-} from "../../proto/dsm_app_pb";
+import { SystemGenesisRequest } from "../../proto/dsm_app_pb";
+import { bridgeGate } from "../BridgeGate";
 import { decodeFramedEnvelopeV3 } from "../decoding";
-import { captureDeviceBindingForGenesisEnvelope } from "../NativeHostBridge";
-import { invokeRouterEnvelope, queryRouterEnvelope, toBytes } from "./transportCore";
-
-const ENVELOPE_V3 = 3 as const;
+import {
+  callBin,
+  invokeRouterEnvelope,
+  maybeThrowOnEmpty,
+  toBytes,
+} from "./transportCore";
 
 export async function createGenesisViaRouter(
   locale: string,
@@ -24,36 +22,15 @@ export async function createGenesisViaRouter(
     networkId: String(networkId ?? ""),
     deviceEntropy: new Uint8Array(entropy),
   });
-  const argPack = new ArgPack({
-    codec: Codec.PROTO,
-    body: new Uint8Array(req.toBinary()),
-  });
-  const { bytes: res, envelope: env } = await queryRouterEnvelope(
-    "system.genesis",
-    argPack.toBinary()
+  const res = await maybeThrowOnEmpty(
+    await bridgeGate.enqueue(() => callBin("createGenesis", req.toBinary())),
   );
+  const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === "error") {
     return res;
   }
   if (env.payload.case !== "genesisCreatedResponse") {
     throw new Error(`system.genesis returned unexpected payload: ${env.payload.case}`);
-  }
-  // Internal state-binding capture is not part of the public router contract,
-  // so we keep using the host bridge directly here.
-  void ENVELOPE_V3;
-  const finalizeEnvelopeBytes = await captureDeviceBindingForGenesisEnvelope(res);
-  const finalizeEnvelope = decodeFramedEnvelopeV3(finalizeEnvelopeBytes);
-  if (finalizeEnvelope.payload.case !== "bootstrapFinalizeResponse") {
-    throw new Error(
-      `device binding capture returned unexpected payload: ${finalizeEnvelope.payload.case}`
-    );
-  }
-  const finalize = finalizeEnvelope.payload.value;
-  if (finalize.result !== BootstrapFinalizeResponse_Result.BOOTSTRAP_RESULT_READY) {
-    throw new Error(finalize.message || `bootstrap finalize failed with result ${finalize.result}`);
-  }
-  if (finalize.deviceId.length !== 32 || finalize.genesisHash.length !== 32) {
-    throw new Error("bootstrap finalize returned incomplete identity");
   }
   return res;
 }

@@ -1007,11 +1007,6 @@ export enum NativeHostRequestKind {
   /**
    * platform_primitive.*
    *
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101;
-   */
-  PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
    */
   PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102,
@@ -1064,7 +1059,6 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
   { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
-  { no: 101, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE" },
   { no: 102, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE" },
   { no: 103, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY" },
   { no: 104, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN" },
@@ -2779,6 +2773,13 @@ export class DepositRequest extends Message<DepositRequest> {
    */
   destinationAddress = "";
 
+  /**
+   * Refund path Bitcoin compressed pubkey
+   *
+   * @generated from field: bytes refund_btc_pubkey = 10;
+   */
+  refundBtcPubkey = new Uint8Array(0);
+
   constructor(data?: PartialMessage<DepositRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -2796,6 +2797,7 @@ export class DepositRequest extends Message<DepositRequest> {
     { no: 7, name: "btc_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "refund_iterations", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 9, name: "destination_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "refund_btc_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DepositRequest {
@@ -4807,24 +4809,6 @@ export class BitcoinWithdrawalPlanResponse extends Message<BitcoinWithdrawalPlan
   blockedVaults: BitcoinWithdrawalBlockedVault[] = [];
 
   /**
-   * @generated from field: bytes route_commitment_id = 10 [deprecated = true];
-   * @deprecated
-   */
-  routeCommitmentId = new Uint8Array(0);
-
-  /**
-   * @generated from field: string route_commitment_key = 11 [deprecated = true];
-   * @deprecated
-   */
-  routeCommitmentKey = "";
-
-  /**
-   * @generated from field: bytes selector_snapshot_hash = 12 [deprecated = true];
-   * @deprecated
-   */
-  selectorSnapshotHash = new Uint8Array(0);
-
-  /**
    * @generated from field: bytes policy_commit = 13;
    */
   policyCommit = new Uint8Array(0);
@@ -4851,9 +4835,6 @@ export class BitcoinWithdrawalPlanResponse extends Message<BitcoinWithdrawalPlan
     { no: 7, name: "shortfall_sats", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "legs", kind: "message", T: BitcoinWithdrawalPlanLeg, repeated: true },
     { no: 9, name: "blocked_vaults", kind: "message", T: BitcoinWithdrawalBlockedVault, repeated: true },
-    { no: 10, name: "route_commitment_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 11, name: "route_commitment_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 12, name: "selector_snapshot_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 14, name: "available_dbtc_sats", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
@@ -4885,27 +4866,9 @@ export class BitcoinWithdrawalExecuteRequest extends Message<BitcoinWithdrawalEx
   planId = "";
 
   /**
-   * @generated from field: uint64 requested_net_sats = 2 [deprecated = true];
-   * @deprecated
-   */
-  requestedNetSats = protoInt64.zero;
-
-  /**
    * @generated from field: string destination_address = 3;
    */
   destinationAddress = "";
-
-  /**
-   * @generated from field: bytes route_commitment_id = 4 [deprecated = true];
-   * @deprecated
-   */
-  routeCommitmentId = new Uint8Array(0);
-
-  /**
-   * @generated from field: string route_commitment_key = 5 [deprecated = true];
-   * @deprecated
-   */
-  routeCommitmentKey = "";
 
   constructor(data?: PartialMessage<BitcoinWithdrawalExecuteRequest>) {
     super();
@@ -4916,10 +4879,7 @@ export class BitcoinWithdrawalExecuteRequest extends Message<BitcoinWithdrawalEx
   static readonly typeName = "dsm.BitcoinWithdrawalExecuteRequest";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "plan_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "requested_net_sats", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 3, name: "destination_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "route_commitment_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "route_commitment_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BitcoinWithdrawalExecuteRequest {
@@ -5099,18 +5059,6 @@ export class BitcoinWithdrawalExecuteResponse extends Message<BitcoinWithdrawalE
    */
   blockedVaults: BitcoinWithdrawalBlockedVault[] = [];
 
-  /**
-   * @generated from field: bytes route_commitment_id = 12 [deprecated = true];
-   * @deprecated
-   */
-  routeCommitmentId = new Uint8Array(0);
-
-  /**
-   * @generated from field: string route_commitment_key = 13 [deprecated = true];
-   * @deprecated
-   */
-  routeCommitmentKey = "";
-
   constructor(data?: PartialMessage<BitcoinWithdrawalExecuteResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -5130,8 +5078,6 @@ export class BitcoinWithdrawalExecuteResponse extends Message<BitcoinWithdrawalE
     { no: 9, name: "shortfall_sats", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 10, name: "executed_legs", kind: "message", T: BitcoinWithdrawalExecutionLeg, repeated: true },
     { no: 11, name: "blocked_vaults", kind: "message", T: BitcoinWithdrawalBlockedVault, repeated: true },
-    { no: 12, name: "route_commitment_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 13, name: "route_commitment_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BitcoinWithdrawalExecuteResponse {
@@ -11634,9 +11580,8 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   senderChainTip?: Hash32;
 
   /**
-   * Transfer intent fields — if operation_data is empty, Rust builds it from
-   * these. Callers should set these instead of building operation_data in the
-   * frontend. operation_data takes precedence if non-empty (backward compat).
+   * Transfer intent fields. Rust builds canonical operation_data from these
+   * when operation_data is empty.
    *
    * amount in token base units
    *
@@ -12346,9 +12291,8 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
    * stitched receipt with B-side per-step EK signing artifacts
    * (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
    * sender's A-side fields. Sender verifies this on receipt and persists
-   * a fully co-signed copy to its own archive. Empty for pre-feature
-   * sessions (transitional fail-open until set_strict_cert_chain_mode
-   * is on).
+   * a fully co-signed copy to its own archive. This field is required for
+   * offline receipt authorization.
    *
    * @generated from field: bytes counter_signed_receipt = 6;
    */
@@ -12578,7 +12522,11 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   relReplaceWitness = new Uint8Array(0);
 
   /**
-   * Dual SPHINCS+ signatures — NOT part of canonical commit preimage.
+   * Dual SPHINCS+ signatures. These are the receipt challenge responses.
+   * The challenge is the proposed transition context carried by fields 1-11
+   * plus the bilateral session binding. Each response signs that context with
+   * the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+   * NOT part of canonical commit preimage.
    * Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
    *
    * SPHINCS+ sig from party A
@@ -12600,9 +12548,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    * Carried in the envelope alongside sig_a/sig_b. NOT in canonical commit
    * preimage (§4.2.1 freezes the 10-field commit form). The cert binds the
    * per-step EK to the prior chain head (AK at n=0, else EK_n) and lets a
-   * verifier walk the chain back to the device-attested AK_pk. Empty bytes
-   * are omitted by proto3, so receipts without a valid chain-head context
-   * (e.g., at session genesis) can leave these unset.
+   * verifier walk the chain back to the device-attested AK_pk.
    *
    * @generated from field: bytes ek_cert_a = 14;
    */
@@ -12618,9 +12564,10 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    * is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
    * where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
    * The verifier uses these to verify sig_a/sig_b without needing them
-   * out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only — same
-   * placement rationale as ek_cert_a/b. Empty bytes omitted by proto3 for
-   * legacy receipts that pre-date the per-step EK abstraction.
+   * out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
+   * same placement rationale as ek_cert_a/b.
+   * A copied database can carry old public EK material, but cannot derive the
+   * next EK on different hardware because K_DBRW is not serialized.
    *
    * @generated from field: bytes ek_pk_a = 16;
    */
@@ -21191,7 +21138,7 @@ export class CdbrwVerifyRequest extends Message<CdbrwVerifyRequest> {
  * cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
  * Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
  * reference histogram, ε_intra, and attractor commitment AC_D, and persists
- * the `dsm_silicon_fp_v4.bin` binary compatible with load_cdbrw_enrollment.
+ * the `dsm_silicon_fp_v4.bin` binary loaded by load_cdbrw_enrollment.
  *
  * @generated from message dsm.CdbrwEnrollRequest
  */
@@ -24897,43 +24844,6 @@ export class HostPermissionsResult extends Message<HostPermissionsResult> {
 
   static equals(a: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined, b: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined): boolean {
     return proto3.util.equals(HostPermissionsResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.DeviceBindingCapturePayload
- */
-export class DeviceBindingCapturePayload extends Message<DeviceBindingCapturePayload> {
-  /**
-   * @generated from field: bytes genesis_envelope = 1;
-   */
-  genesisEnvelope = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<DeviceBindingCapturePayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DeviceBindingCapturePayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceBindingCapturePayload {
-    return new DeviceBindingCapturePayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceBindingCapturePayload {
-    return new DeviceBindingCapturePayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceBindingCapturePayload {
-    return new DeviceBindingCapturePayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DeviceBindingCapturePayload | PlainMessage<DeviceBindingCapturePayload> | undefined, b: DeviceBindingCapturePayload | PlainMessage<DeviceBindingCapturePayload> | undefined): boolean {
-    return proto3.util.equals(DeviceBindingCapturePayload, a, b);
   }
 }
 
