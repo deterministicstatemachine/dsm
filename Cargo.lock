@@ -374,7 +374,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "regex",
@@ -909,7 +909,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
- "itertools 0.13.0",
+ "itertools",
  "num-traits",
  "oorandom",
  "page_size",
@@ -930,7 +930,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
 dependencies = [
  "cast",
- "itertools 0.13.0",
+ "itertools",
 ]
 
 [[package]]
@@ -998,9 +998,9 @@ dependencies = [
 
 [[package]]
 name = "ctor"
-version = "1.0.3"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c24d2b2b7c12a2fffb7c5c8fd0dcda7ca14b4600fa2d3701b6079aefb6fa180"
+checksum = "378f0974ae2468eaf63aa036dbe9c926b0dc7ea64c156f2ea618bc2f75b934f0"
 dependencies = [
  "link-section",
  "linktime-proc-macro",
@@ -1229,7 +1229,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "pbkdf2",
  "proptest",
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-build 0.14.3",
  "prost-types 0.14.3",
  "protoc-bin-vendored",
@@ -1303,7 +1303,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.5",
  "proptest",
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-build 0.14.3",
  "prost-types 0.14.3",
  "protoc-bin-vendored",
@@ -1359,7 +1359,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "ml-kem",
  "once_cell",
- "prost 0.13.5",
+ "prost 0.14.3",
  "rand 0.8.6",
  "reqwest",
  "rusqlite",
@@ -1389,7 +1389,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dsm",
- "prost 0.13.5",
+ "prost 0.14.3",
 ]
 
 [[package]]
@@ -1398,7 +1398,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dsm",
- "prost 0.13.5",
+ "prost 0.14.3",
  "walkdir",
 ]
 
@@ -1411,7 +1411,7 @@ dependencies = [
  "clap",
  "dsm",
  "instant",
- "prost 0.13.5",
+ "prost 0.14.3",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "regex",
@@ -2032,13 +2032,13 @@ dependencies = [
 
 [[package]]
 name = "hostname"
-version = "0.3.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c731c3e10504cc8ed35cfe2f1db4c9274c3d35fa486e3b31df46f068ef3e867"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
 dependencies = [
+ "cfg-if",
  "libc",
- "match_cfg",
- "winapi",
+ "windows-link",
 ]
 
 [[package]]
@@ -2337,15 +2337,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2558,9 +2549,9 @@ dependencies = [
 
 [[package]]
 name = "link-section"
-version = "0.15.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4641b91711debb59c61b07eb5e30521ed6d9e2bdd9fd04f934e7da3a5bc386d4"
+checksum = "5c8600ca3dbe044f07955b443ff606c50f45295b863289bbe7d0844d50cf11e4"
 
 [[package]]
 name = "linktime-proc-macro"
@@ -2635,12 +2626,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "match_cfg"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffbee8634e0d45d258acb448e7eaab3fce7a0a467395d4d9f228e3c1f01fb2e4"
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2667,9 +2652,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-sd"
-version = "0.18.2"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d797ab3274a16f4940f9650a29838e940223aeff31773df5c2827ad82150182f"
+checksum = "c2bb8ce26633738d98ffcef71ec58bff967c6675be50229823c2835f6316e67e"
 dependencies = [
  "fastrand",
  "flume",
@@ -3401,7 +3386,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "multimap",
  "once_cell",
@@ -3421,7 +3406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -3440,7 +3425,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn",
@@ -3453,7 +3438,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn",
@@ -4761,9 +4746,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.2"
+version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "110a78583f19d5cdb2c5ccf321d1290344e71313c6c37d43520d386027d18386"
+checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "bytes",
  "libc",

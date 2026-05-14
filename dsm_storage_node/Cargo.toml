@@ -8,7 +8,7 @@ description = "Storage node for the Deterministic State Machine (DSM)"
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1.51.0", features = ["full"] }
+tokio = { version = "1.52.3", features = ["full"] }
 futures = "0.3.31"
 
 # HTTP server
@@ -67,7 +67,7 @@ dsm = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_mach
 dsm_sdk = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
 
 # Protobuf support
-prost = "0.13"
+prost = "0.14"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 once_cell = "1.19"
@@ -91,5 +91,5 @@ path = "src/main.rs"
 
 [dev-dependencies]
 hyper = { version = "1.8", features = ["full"] }
-prost = "0.13"
+prost = "0.14"
 serial_test = "3"
