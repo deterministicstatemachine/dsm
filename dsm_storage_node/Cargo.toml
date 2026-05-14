@@ -27,7 +27,7 @@ anyhow = "1.0.75"
 # Cryptography (quantum-resistant)
 blake3 = "1.4.0"
 ml-kem = "0.2.0"
-rand = "0.8.5"
+rand = "0.10.1"
 zeroize = { version = "1.6.0", features = ["derive"] }
 subtle = "2"
 
