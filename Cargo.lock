@@ -1234,7 +1234,7 @@ dependencies = [
  "prost-types 0.14.3",
  "protoc-bin-vendored",
  "quickcheck",
- "rand 0.10.1",
+ "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rocksdb",
  "rstest",
@@ -1308,7 +1308,7 @@ dependencies = [
  "prost-types 0.14.3",
  "protoc-bin-vendored",
  "quickcheck",
- "rand 0.10.1",
+ "rand 0.8.6",
  "rand_chacha 0.3.1",
  "rcgen",
  "reqwest",
@@ -1360,7 +1360,7 @@ dependencies = [
  "ml-kem",
  "once_cell",
  "prost 0.14.3",
- "rand 0.10.1",
+ "rand 0.8.6",
  "reqwest",
  "rusqlite",
  "rustls",
@@ -1412,7 +1412,7 @@ dependencies = [
  "dsm",
  "instant",
  "prost 0.14.3",
- "rand 0.10.1",
+ "rand 0.8.6",
  "rand_chacha 0.3.1",
  "regex",
  "reqwest",
@@ -3639,6 +3639,17 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "rand"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+dependencies = [
+ "libc",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
 
 [[package]]
 name = "rand"
