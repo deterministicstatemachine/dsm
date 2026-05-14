@@ -1133,6 +1133,8 @@ fn trace_receipt_verifier_tripwire(
 
     let keypair_a =
         SignatureKeyPair::generate_from_entropy(b"implementation-trace-receipt-a").expect("kp a");
+    let keypair_b =
+        SignatureKeyPair::generate_from_entropy(b"implementation-trace-receipt-b").expect("kp b");
 
     let genesis = *domain_hash("DSM/trace-genesis", b"receipt").as_bytes();
     let devid_a = *domain_hash("DSM/trace-device", b"receipt-a").as_bytes();
@@ -1157,7 +1159,7 @@ fn trace_receipt_verifier_tripwire(
         child_tip_a,
         dev_proof.clone(),
         &keypair_a,
-        None,
+        Some(&keypair_b),
     );
     let receipt_b = build_signed_receipt(
         genesis,
@@ -1167,16 +1169,17 @@ fn trace_receipt_verifier_tripwire(
         child_tip_b,
         dev_proof,
         &keypair_a,
-        None,
+        Some(&keypair_b),
     );
 
     let ctx = ReceiptVerificationContext::new(
         dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
         receipt_a.parent_root,
         keypair_a.public_key.clone(),
-        Vec::new(),
+        keypair_b.public_key.clone(),
     )
-    .with_chain_head_a(keypair_a.public_key.clone());
+    .with_chain_head_a(keypair_a.public_key.clone())
+    .with_chain_head_b(keypair_b.public_key.clone());
     let mut tracker = ParentConsumptionTracker::new();
 
     match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
@@ -1224,6 +1227,7 @@ fn trace_receipt_verifier_tripwire(
     let mut malformed_replace = receipt_a.clone();
     malformed_replace.set_rel_replace_witness(Vec::new());
     malformed_replace.sig_a.clear();
+    malformed_replace.sig_b.clear();
     let malformed_commitment = match malformed_replace.compute_commitment() {
         Ok(commitment) => commitment,
         Err(e) => {
@@ -1237,6 +1241,12 @@ fn trace_receipt_verifier_tripwire(
         match keypair_a.sign(&malformed_commitment) {
             Ok(sig) => malformed_replace.add_sig_a(sig),
             Err(e) => failures.push(format!("failed to resign malformed receipt: {e}")),
+        }
+        match keypair_b.sign(&malformed_commitment) {
+            Ok(sig) => malformed_replace.add_sig_b(sig),
+            Err(e) => failures.push(format!(
+                "failed to resign malformed receipt with sig_b: {e}"
+            )),
         }
 
         match verify_stitched_receipt(&malformed_replace, &ctx, &mut tracker) {
@@ -1286,6 +1296,9 @@ fn trace_tripwire_first_contact_binding(
     let keypair_a =
         SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-a")
             .expect("first-contact keypair a");
+    let keypair_b =
+        SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-b")
+            .expect("first-contact keypair b");
 
     let genesis = *domain_hash("DSM/trace-genesis", b"first-contact").as_bytes();
     let devid_a = *domain_hash("DSM/trace-device", b"first-contact-a").as_bytes();
@@ -1311,7 +1324,7 @@ fn trace_tripwire_first_contact_binding(
         first_child,
         dev_proof.clone(),
         &keypair_a,
-        None,
+        Some(&keypair_b),
     );
     let extension_receipt = build_signed_receipt(
         genesis,
@@ -1321,7 +1334,7 @@ fn trace_tripwire_first_contact_binding(
         extension_child,
         dev_proof.clone(),
         &keypair_a,
-        None,
+        Some(&keypair_b),
     );
     let alternate_first_receipt = build_signed_receipt(
         genesis,
@@ -1331,23 +1344,25 @@ fn trace_tripwire_first_contact_binding(
         alternate_first_child,
         dev_proof,
         &keypair_a,
-        None,
+        Some(&keypair_b),
     );
 
     let first_ctx = ReceiptVerificationContext::new(
         dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
         first_receipt.parent_root,
         keypair_a.public_key.clone(),
-        Vec::new(),
+        keypair_b.public_key.clone(),
     )
-    .with_chain_head_a(keypair_a.public_key.clone());
+    .with_chain_head_a(keypair_a.public_key.clone())
+    .with_chain_head_b(keypair_b.public_key.clone());
     let extension_ctx = ReceiptVerificationContext::new(
         dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
         extension_receipt.parent_root,
         keypair_a.public_key.clone(),
-        Vec::new(),
+        keypair_b.public_key.clone(),
     )
-    .with_chain_head_a(keypair_a.public_key.clone());
+    .with_chain_head_a(keypair_a.public_key.clone())
+    .with_chain_head_b(keypair_b.public_key.clone());
     let mut tracker = ParentConsumptionTracker::new();
 
     match verify_stitched_receipt(&first_receipt, &first_ctx, &mut tracker) {
@@ -2266,6 +2281,11 @@ fn build_signed_receipt(
     let cert_a =
         sign_ek_cert(&keypair_a.secret_key, &keypair_a.public_key, &parent_tip).expect("ek cert a");
     receipt.set_ek_cert_a(cert_a);
+    if let Some(keypair_b) = keypair_b {
+        let cert_b = sign_ek_cert(&keypair_b.secret_key, &keypair_b.public_key, &parent_tip)
+            .expect("ek cert b");
+        receipt.set_ek_cert_b(cert_b);
+    }
 
     let commitment = receipt.compute_commitment().expect("receipt commitment");
     receipt.add_sig_a(keypair_a.sign(&commitment).expect("sig a"));
