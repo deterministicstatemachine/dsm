@@ -491,7 +491,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processBleIde
             };
 
             // Decode protobuf Envelope
-            let envelope = match pb::Envelope::decode(raw) {
+            let envelope = match crate::envelope::from_canonical_bytes(raw) {
                 Ok(env) => env,
                 Err(e) => {
                     log::error!("processBleIdentityEnvelope: envelope decode failed: {e}");

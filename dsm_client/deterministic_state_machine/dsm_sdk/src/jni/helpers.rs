@@ -297,7 +297,6 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isCommitEnvelope(
         std::panic::AssertUnwindSafe(|| {
             use jni::objects::JByteArray;
             use jni::sys::{JNI_FALSE, JNI_TRUE};
-            use prost::Message;
 
             let envelope_obj = unsafe { JByteArray::from_raw(envelope_bytes) };
             let bytes = match env.convert_byte_array(envelope_obj) {
@@ -312,7 +311,7 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isCommitEnvelope(
             };
 
             // Decode envelope
-            let envelope = match crate::generated::Envelope::decode(&bytes[..]) {
+            let envelope = match crate::envelope::from_canonical_bytes(&bytes[..]) {
                 Ok(e) => e,
                 Err(e) => {
                     log::debug!("[JNI] isCommitEnvelope: failed to decode envelope: {}", e);
@@ -352,7 +351,6 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isRejectEnvelope(
         "isRejectEnvelope",
         std::panic::AssertUnwindSafe(|| {
             use jni::objects::JByteArray;
-            use prost::Message;
 
             let envelope_obj = unsafe { JByteArray::from_raw(envelope_bytes) };
             let bytes = match env.convert_byte_array(envelope_obj) {
@@ -369,7 +367,7 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isRejectEnvelope(
                 }
             };
 
-            let envelope = match crate::generated::Envelope::decode(&bytes[..]) {
+            let envelope = match crate::envelope::from_canonical_bytes(&bytes[..]) {
                 Ok(e) => e,
                 Err(e) => {
                     log::debug!("[JNI] isRejectEnvelope: failed to decode envelope: {}", e);

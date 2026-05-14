@@ -57,11 +57,11 @@ clean_logs() {
 
 # 3) Start dev nodes if requested
 start_nodes() {
-  if [[ ! -x "dsm_storage_node/start_dev_nodes.sh" ]]; then
-    die "dsm_storage_node/start_dev_nodes.sh not found or not executable."
+  if [[ ! -x "dsm_storage_node/scripts/dev/start_dev_nodes.sh" ]]; then
+    die "dsm_storage_node/scripts/dev/start_dev_nodes.sh not found or not executable."
   fi
   log "Starting 5 storage dev nodes (8080..8084)"
-  (cd dsm_storage_node && ./start_dev_nodes.sh)
+  (cd dsm_storage_node && ./scripts/dev/start_dev_nodes.sh)
 }
 
 # 4) Health check

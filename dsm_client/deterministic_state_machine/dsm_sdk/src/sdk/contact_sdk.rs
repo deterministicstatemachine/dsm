@@ -327,6 +327,7 @@ impl ContactManager {
                 last_seen_online_counter: 0,
                 last_seen_ble_counter: 0,
                 public_key: signing_public_key.clone(),
+                kyber_public_key: Vec::new(),
                 previous_chain_tip: None,
             };
 
@@ -632,6 +633,7 @@ impl ContactManager {
                 last_seen_online_counter: 0,
                 last_seen_ble_counter: 0,
                 public_key: signing_public_key.clone(),
+                kyber_public_key: Vec::new(),
                 previous_chain_tip: None,
             };
 
@@ -1241,6 +1243,7 @@ mod tests {
             alias: "Persisted Tip".to_string(),
             genesis_hash: contact_genesis.to_vec(),
             public_key: vec![0xAB; 32],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(persisted_tip.to_vec()),
             added_at: 1,
             verified: true,

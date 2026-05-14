@@ -5,7 +5,7 @@
 //! check operations with retry logic.
 //!
 //! The local node set runs on ports 8080-8084, with each node configured via
-//! `config-dev-node{1-5}.toml`. Health is verified via HTTP GET to
+//! `config/dev/node{1-5}.toml`. Health is verified via HTTP GET to
 //! `/api/v2/health` on each node.
 
 use std::path::{Path, PathBuf};

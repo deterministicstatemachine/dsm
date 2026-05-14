@@ -9,6 +9,7 @@ Consolidated troubleshooting guide covering all layers: Build, Runtime, BLE, Bit
 ### Rust
 
 **`cargo build` fails with "linker not found"**
+
 ```bash
 # macOS
 xcode-select --install
@@ -18,6 +19,7 @@ sudo apt install build-essential
 ```
 
 **`cargo build` fails with "protoc not found"**
+
 ```bash
 # macOS
 brew install protobuf
@@ -27,6 +29,7 @@ sudo apt install protobuf-compiler
 ```
 
 **`cargo build` fails with dependency errors**
+
 ```bash
 rustup update stable
 cargo clean
@@ -38,6 +41,7 @@ cargo build --locked --workspace --all-features
 Use `.\scripts\dev.ps1` instead — the Makefile is macOS/Linux only.
 
 **PowerShell script execution disabled**
+
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
@@ -123,11 +127,13 @@ cd dsm_client/frontend && npm run lint
 **TypeScript errors after proto changes**
 
 Regenerate proto types:
+
 ```bash
 cd dsm_client/frontend && npm run proto:gen
 ```
 
 **Webpack build fails with missing loader**
+
 ```bash
 cd dsm_client/frontend && pnpm add -D <missing-loader>
 ```
@@ -141,6 +147,7 @@ cd dsm_client/frontend && pnpm add -D <missing-loader>
 **Bridge timeout (30 seconds)**
 
 The bridge timeout is 30000ms. If operations consistently timeout:
+
 1. Check that the SDK bootstrapped successfully (look for `SDK_READY` in logs)
 2. Verify the native `.so` was loaded: `adb logcat -s DSM:* | grep loadLibrary`
 3. Ensure genesis was created: `adb logcat -s DSM:* | grep genesis`
@@ -148,12 +155,14 @@ The bridge timeout is 30000ms. If operations consistently timeout:
 **Envelope framing error**
 
 Genesis responses have a `0x03` prefix byte. If you see decode errors on genesis:
+
 - Use `decodeFramedEnvelopeV3()` not raw `Envelope.fromBinary()`
 - This is implemented in `useGenesisFlow.ts`
 
 **"SDK not ready" errors**
 
 The `SDK_READY` atomic flag must be set before any post-bootstrap operations. Check:
+
 1. Was `sdkBootstrap` called? (happens during app init)
 2. Did bootstrap complete successfully? Check logs for errors
 3. Is the device identity valid? (DBRW binding must match)
@@ -167,7 +176,7 @@ The `SDK_READY` atomic flag must be set before any post-bootstrap operations. Ch
 curl http://localhost:8080/api/v2/health
 
 # Restart
-cd dsm_storage_node && ./scripts/stop_dev_nodes.sh && ./start_dev_nodes.sh
+cd dsm_storage_node && ./scripts/dev/stop_dev_nodes.sh && ./scripts/dev/start_dev_nodes.sh
 ```
 
 **`make test-rust` fails in SDK integration tests that contact the default storage network**
@@ -206,7 +215,7 @@ bash scripts/setup_dev_db.sh
 lsof -i :8080-8084
 
 # Stop local dev nodes and clean up
-cd dsm_storage_node && ./scripts/stop_dev_nodes.sh
+cd dsm_storage_node && ./scripts/dev/stop_dev_nodes.sh
 rm -f dev-node*.pid
 
 # Force kill if needed
@@ -217,9 +226,9 @@ pkill -f dsm_storage_node
 
 ```bash
 cd dsm_storage_node
-./scripts/stop_dev_nodes.sh
+./scripts/dev/stop_dev_nodes.sh
 ./scripts/setup_dev_db.sh    # recreates databases
-./start_dev_nodes.sh
+./scripts/dev/start_dev_nodes.sh
 ```
 
 **"role dsm does not exist"**
@@ -265,6 +274,7 @@ The BLE backend must be registered during SDK initialization. This happens autom
 **App shows "mempool client init failed" or "tx_status failed"**
 
 Check in order:
+
 1. Is `bitcoin_network = "signet"` set in the active env config?
 2. Can the device reach the internet / configured mempool backend?
 3. Was the APK rebuilt after config changes? `make android`
@@ -272,6 +282,7 @@ Check in order:
 **Integration tests fail with "connection refused"**
 
 Tests no longer depend on a local Bitcoin Core node. Re-run the signet-oriented suite:
+
 ```bash
 cargo test --package dsm_sdk --test bitcoin_tap_e2e -- --test-threads=1 --nocapture
 ```
@@ -283,6 +294,7 @@ Check that `bitcoin_network = "signet"` is set in config. Legacy addresses mean 
 **HTLC claim fails: "script execution failed"**
 
 The preimage doesn't match the hashlock. Verify both sides use the same 32-byte secret:
+
 ```bash
 echo -n "<hex_preimage>" | xxd -r -p | sha256sum
 ```
@@ -323,6 +335,7 @@ sudo apt install adb
 **App shows "connection error" on phone**
 
 Run the `adb reverse` commands:
+
 ```bash
 adb reverse tcp:8080 tcp:8080
 adb reverse tcp:8081 tcp:8081
@@ -344,11 +357,13 @@ adb reverse tcp:8084 tcp:8084
 **App crashes on launch**
 
 Check logs for the root cause:
+
 ```bash
 adb logcat -s DSM:* DsmNative:* AndroidRuntime:E | head -50
 ```
 
 Common causes:
+
 - Missing native lib → rebuild with `make android-libs`
 - JNI method not found → verify symbol count (87+)
 - DBRW initialization failure → clear app data and retry
@@ -356,6 +371,7 @@ Common causes:
 **"run-as: Package is not debuggable"**
 
 The app must be a debug build. Release builds block `run-as`. Build with:
+
 ```bash
 cd dsm_client/android && ./gradlew :app:assembleDebug
 ```
@@ -367,6 +383,7 @@ cd dsm_client/android && ./gradlew :app:assembleDebug
 **CI scan finds banned patterns (TODO, FIXME, HACK, XXX)**
 
 These are banned in production code. Search and remove:
+
 ```bash
 git grep -rn "TODO\|FIXME\|HACK\|XXX"
 ```
@@ -374,6 +391,7 @@ git grep -rn "TODO\|FIXME\|HACK\|XXX"
 **Proto guard fails**
 
 Regenerate proto types:
+
 ```bash
 cd dsm_client/frontend && npm run proto:gen
 ```
@@ -383,6 +401,7 @@ Then commit the regenerated files.
 **Clippy warnings fail CI**
 
 Fix all warnings — CI runs with `-D warnings`:
+
 ```bash
 cargo clippy --all-targets -- -D warnings
 ```

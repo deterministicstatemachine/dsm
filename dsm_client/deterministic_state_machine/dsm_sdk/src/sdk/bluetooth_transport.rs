@@ -52,8 +52,6 @@ use rand::{rngs::OsRng, RngCore};
 
 use crate::generated as pb;
 use dsm::types::error::DsmError;
-use prost::Message;
-
 /// High-level local BLE bridge event type (not on-wire; wire is `pb::DsmBtMessage`).
 #[derive(Debug, Clone)]
 pub enum BleBridgeEvent {
@@ -468,9 +466,11 @@ impl<L: BleLink> BluetoothTransport<L> {
                 encrypted_bytes
             };
 
-            pb::Envelope::decode(bytes.as_slice()).map_err(|e| DsmError::Transport {
-                context: "prost decode Envelope".into(),
-                source: Some(Box::new(e)),
+            crate::envelope::from_canonical_bytes(bytes.as_slice()).map_err(|e| {
+                DsmError::Transport {
+                    context: format!("strict Envelope v3 decode failed: {e}"),
+                    source: None,
+                }
             })
         }))
     }

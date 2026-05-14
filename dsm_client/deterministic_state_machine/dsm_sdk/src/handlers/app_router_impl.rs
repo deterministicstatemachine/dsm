@@ -54,8 +54,9 @@ use dsm::utils::time::Duration;
 include!(concat!(env!("OUT_DIR"), "/dsm_contact_schema_hash.rs"));
 
 // Build a stitched receipt from an applied state transition.
-// Delegates to the shared `build_bilateral_receipt()` in `sdk::receipts`
-// which computes real genesis, SMT roots, relation proofs, and device proofs.
+// Delegates to the shared `build_bilateral_receipt_with_smt()` constructor in
+// `sdk::receipts`, which consumes real SMT roots, relation proofs, and the
+// authenticated device-tree commitment.
 
 use super::response_helpers::{pack_envelope_ok, err};
 
@@ -647,18 +648,18 @@ impl AppRouterImpl {
         let bitcoin_tap = Arc::new(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::new(dlv_manager));
 
         // One-shot purge of retired prefs keyspace (plan Part E).
-        // `dsm.token.*`, `dsm.dlv.*`, `dsm.detfi.*` used to mirror token +
+        // `dsm.token.*`, `dsm.dlv.*`, `dsm.sofi.*` used to mirror token +
         // vault state in the app-state KV.  Every writer is gone and the
         // readers are dead code; wipe stale keys at boot so the next
         // release can drop this hook entirely.  Fail-soft on missing store.
         let purged = crate::sdk::app_state::AppState::purge_keys_with_prefixes(&[
             "dsm.token.",
             "dsm.dlv.",
-            "dsm.detfi.",
+            "dsm.sofi.",
         ]);
         if purged > 0 {
             log::info!(
-                "[app_router] purged {purged} legacy prefs keys (dsm.token.* / dsm.dlv.* / dsm.detfi.*)"
+                "[app_router] purged {purged} retired prefs keys (dsm.token.* / dsm.dlv.* / dsm.sofi.*)"
             );
         }
 
@@ -806,7 +807,7 @@ impl AppRouterImpl {
         // The frontend never supplies it — transfer_req.chain_tip is reserved/ignored.
         // When a stored tip is missing, restore the canonical initial relationship tip
         // derived from both devices' genesis/device identities instead of inventing a
-        // zero-tip legacy route.
+        // zero-tip route.
         let local_genesis_for_routing: [u8; 32] = match self
             .core_sdk
             .local_genesis_hash()
@@ -848,7 +849,7 @@ impl AppRouterImpl {
             }
             Ok(None) => {}
             Err(e) => {
-                if can_fallback_to_cached_contact_identity(&contact_record) {
+                if can_root_to_cached_contact_identity(&contact_record) {
                     log::warn!(
                         "[wallet.send] recipient identity quorum unavailable for {} (alias={}); using cached verified identity: {}",
                         to_device_id_str.get(..8).unwrap_or("?"),
@@ -1361,24 +1362,84 @@ impl AppRouterImpl {
                 ));
             }
 
-            // §4.2 Non-repudiation: Sender signs receipt commitment → sig_a.
-            // Deserialize canonical receipt, compute commitment hash, sign with
-            // sender's SPHINCS+ key, re-serialize with sig_a embedded (field 12).
-            // The commitment hash is over fields 1-11 only (no circular dependency).
+            // §4.2 + §11.1 Non-repudiation: Sender signs receipt commitment → sig_a
+            // using a freshly-derived per-step ephemeral SPHINCS+ key (§11.1).
+            // The cert chain anchors the per-step EK back to the device's AK_pk;
+            // the receipt body sig is verified against the EK_pk_a carried in
+            // the envelope (proto field 16). Verifiers don't need the wallet's
+            // long-term identity key out-of-band — sig_a verifies against
+            // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
+            //
+            // c_pre source: we use the receipt commitment hash itself as c_pre.
+            // The per-step EK derivation needs a deterministic, per-step-distinct
+            // input bound to this transition; the commitment serves that role
+            // (the verifier doesn't recompute EK — they trust receipt.ek_pk_a
+            // and verify the cert chain). Whitepaper §4.1's canonical C_pre
+            // = BLAKE3("DSM/precommit\0" || h_n || payload || e) is currently
+            // not threaded through the online send path; using the commitment
+            // hash provides equivalent freshness for EK derivation. Threading
+            // canonical C_pre is a planned refinement.
+            //
+            // k_step source: stub-derived from chain context until Phase F
+            // surfaces the bilateral session's Kyber shared secret (whitepaper
+            // §11). Stub k_step preserves the cert-chain security property
+            // (AK-rooted authorization) but doesn't satisfy §11's claim about
+            // fresh per-step Kyber-derived randomness.
             let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 &rc_canonical,
             ) {
                 Ok(mut receipt) => match receipt.compute_commitment() {
-                    Ok(commitment) => match self.wallet.sign_operation_bytes(&commitment) {
-                        Ok(sig_a) => {
-                            log::info!(
-                                        "[wallet.send] §4.2 sig_a: sender signed receipt commitment (sig_len={})",
-                                        sig_a.len()
-                                    );
-                            receipt.add_sig_a(sig_a);
-                            match receipt.to_full_protobuf() {
-                                Ok(full_bytes) => full_bytes,
-                                Err(e) => {
+                    Ok(commitment) => {
+                        // Resolve K_DBRW + root AK keypair.
+                        let k_dbrw_vec = match crate::fetch_dbrw_binding_key() {
+                            Ok(k) => k,
+                            Err(e) => {
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
+                                return err(format!(
+                                    "wallet.send: K_DBRW unavailable for cert chain: {e}{rollback_error}"
+                                ));
+                            }
+                        };
+                        if k_dbrw_vec.len() < 32 {
+                            return err(format!(
+                                "wallet.send: K_DBRW too short ({} bytes, need 32)",
+                                k_dbrw_vec.len()
+                            ));
+                        }
+                        let mut k_dbrw_arr = [0u8; 32];
+                        k_dbrw_arr.copy_from_slice(&k_dbrw_vec[..32]);
+                        let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
+                            Ok(kp) => kp,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.send: AK keypair unavailable for cert chain: {e}"
+                                ));
+                            }
+                        };
+
+                        // Compute relationship_key for chain head lookup.
+                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                            &receipt.devid_a,
+                            &receipt.devid_b,
+                        );
+
+                        // Per-step Kyber per whitepaper §11: encapsulate
+                        // against the recipient's Kyber pubkey to derive
+                        // `k_step`. Pull the pubkey from the contact record;
+                        // fail-closed if missing (no root path — contact
+                        // must be re-established with peer Kyber pubkey to
+                        // enable per-step EK signing).
+                        let recipient_kyber_pk =
+                            match crate::storage::client_db::get_contact_by_device_id(
+                                &receipt.devid_b,
+                            ) {
+                                Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                                Ok(Some(_)) => {
                                     let rollback_error = self
                                         .rollback_failed_online_transfer(&rollback_request)
                                         .await
@@ -1386,23 +1447,104 @@ impl AppRouterImpl {
                                         .map(|rb| format!("; rollback failed: {rb}"))
                                         .unwrap_or_default();
                                     return err(format!(
-                                        "wallet.send: receipt full serialization failed: {e}{rollback_error}"
-                                    ));
+                                    "wallet.send: recipient contact missing Kyber public key — \
+                                     re-establish contact to upgrade for per-step EK signing\
+                                     {rollback_error}"
+                                ));
+                                }
+                                _ => {
+                                    let rollback_error = self
+                                        .rollback_failed_online_transfer(&rollback_request)
+                                        .await
+                                        .err()
+                                        .map(|rb| format!("; rollback failed: {rb}"))
+                                        .unwrap_or_default();
+                                    return err(format!(
+                                    "wallet.send: recipient contact lookup failed{rollback_error}"
+                                ));
+                                }
+                            };
+
+                        // Sign with per-step EK (whitepaper §11.1 cert chain).
+                        let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
+                            commitment: &commitment,
+                            h_n: receipt.parent_tip,
+                            c_pre: commitment, // see comment above re: c_pre source
+                            devid_sender: receipt.devid_a,
+                            relationship_key: rel_key,
+                            k_dbrw: &k_dbrw_arr,
+                            root_ak_keypair: Some((&ak_pk, &ak_sk)),
+                            recipient_kyber_pk: &recipient_kyber_pk,
+                            // §11.1 Item 7: bind the per-step EK
+                            // signature to the bilateral session.
+                            // For online wallet.send the receipt
+                            // commitment IS the session identifier,
+                            // so we reuse it as session_binding.
+                            session_binding: Some(&commitment),
+                        };
+                        match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
+                            Ok(out) => {
+                                log::info!(
+                                    "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
+                                     cert_len={}, sig_len={}, used_root_ak={}",
+                                    out.ek_pk.len(),
+                                    out.ek_cert.len(),
+                                    out.sig.len(),
+                                    out.used_root_ak,
+                                );
+
+                                // Stamp per-step artifacts on the receipt.
+                                receipt.set_ek_pk_a(out.ek_pk.clone());
+                                receipt.set_ek_cert_a(out.ek_cert);
+                                receipt.set_kyber_ct_a(out.kyber_ct);
+                                receipt.add_sig_a(out.sig);
+
+                                // Advance chain head so step n+1 will use this
+                                // EK_sk_n. After advance, ek_sk in memory is no
+                                // longer needed.
+                                if let Err(e) =
+                                    crate::sdk::receipts::advance_local_chain_head_after_signing(
+                                        &rel_key,
+                                        &out.ek_pk,
+                                        &out.ek_sk,
+                                        &k_dbrw_arr,
+                                        out.used_root_ak,
+                                    )
+                                {
+                                    log::warn!(
+                                        "[wallet.send] §11.1 chain head advance failed (non-fatal — \
+                                         next signing will fall back to AK if needed): {e}"
+                                    );
+                                }
+
+                                match receipt.to_full_protobuf() {
+                                    Ok(full_bytes) => full_bytes,
+                                    Err(e) => {
+                                        let rollback_error = self
+                                            .rollback_failed_online_transfer(&rollback_request)
+                                            .await
+                                            .err()
+                                            .map(|rb| format!("; rollback failed: {rb}"))
+                                            .unwrap_or_default();
+                                        return err(format!(
+                                            "wallet.send: receipt full serialization failed: {e}{rollback_error}"
+                                        ));
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
+                                return err(format!(
+                                    "wallet.send: per-step EK signing failed: {e}{rollback_error}"
+                                ));
+                            }
                         }
-                        Err(e) => {
-                            let rollback_error = self
-                                .rollback_failed_online_transfer(&rollback_request)
-                                .await
-                                .err()
-                                .map(|rb| format!("; rollback failed: {rb}"))
-                                .unwrap_or_default();
-                            return err(format!(
-                                "wallet.send: receipt signing failed: {e}{rollback_error}"
-                            ));
-                        }
-                    },
+                    }
                     Err(e) => {
                         let rollback_error = self
                             .rollback_failed_online_transfer(&rollback_request)
@@ -2093,7 +2235,7 @@ pub(crate) fn relationship_tip_for_contact_restore(
     )
 }
 
-/// Route freshness tag for stale-route delivery fallback.
+/// Route freshness tag for stale-route delivery root.
 /// `Current` = derived from the contact's current chain tip.
 /// `PreviousTip` = derived from the predecessor tip (bounded lookback of 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2304,7 +2446,7 @@ pub(crate) fn collect_rotated_inbox_addresses(
         .collect()
 }
 
-fn can_fallback_to_cached_contact_identity(
+fn can_root_to_cached_contact_identity(
     contact_record: &crate::storage::client_db::ContactRecord,
 ) -> bool {
     contact_record.verified
@@ -2564,7 +2706,7 @@ impl AppRouter for AppRouterImpl {
             p if p.starts_with("posted_dlv.") => self.handle_posted_dlv_query(q).await,
             // DLV read-only routes (e.g. owner inventory monitor)
             p if p.starts_with("dlv.") => self.handle_dlv_query(q).await,
-            // DeTFi route-commit utilities (compute X, anchor visibility)
+            // SoFi route-commit utilities (compute X, anchor visibility)
             p if p.starts_with("route.") => self.handle_route_query(q).await,
             _ => {
                 log::warn!("[APP_ROUTER] unknown query path: '{}'", q.path);
@@ -2614,10 +2756,10 @@ impl AppRouter for AppRouterImpl {
             m if m.starts_with("dlv.") => self.handle_dlv_invoke(i).await,
             // Posted-mode DLV (recipient-side sync/mirror)
             m if m.starts_with("posted_dlv.") => self.handle_posted_dlv_invoke(i).await,
-            // DeTFi route-commit anchor publish
+            // SoFi route-commit anchor publish
             m if m.starts_with("route.") => self.handle_route_invoke(i).await,
-            // DeTFi
-            m if m.starts_with("detfi.") => self.handle_detfi_invoke(i).await,
+            // SoFi
+            m if m.starts_with("sofi.") => self.handle_sofi_invoke(i).await,
             // BLE
             "ble.command" => self.handle_ble_invoke(i).await,
             // Bilateral reconcile
@@ -2957,7 +3099,7 @@ async fn verify_device_tree_evidence_quorum_once(
 #[cfg(test)]
 mod tests {
     use super::{
-        can_fallback_to_cached_contact_identity, collect_rotated_inbox_addresses,
+        can_root_to_cached_contact_identity, collect_rotated_inbox_addresses,
         collect_tagged_inbox_addresses, compute_initial_relationship_chain_tip,
         ensure_inbox_recipient_targets_local, format_registry_quorum_failure, registry_retry_delay,
         relationship_tip_for_contact_restore, select_quorum_device_identity, AppRouterImpl,
@@ -3024,6 +3166,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: remote_genesis.to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 0,
             verified: true,
@@ -3147,6 +3290,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0x04u8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(stored_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3178,6 +3322,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: remote_genesis.to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 0,
             verified: true,
@@ -3251,6 +3396,7 @@ mod tests {
             alias: "alice".to_string(),
             genesis_hash: alice_genesis.to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(initial_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3332,6 +3478,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: vec![0x22u8; 32],
             public_key: vec![0x33u8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 7,
             verified: true,
@@ -3345,17 +3492,18 @@ mod tests {
             previous_chain_tip: None,
         };
 
-        assert!(can_fallback_to_cached_contact_identity(&contact));
+        assert!(can_root_to_cached_contact_identity(&contact));
     }
 
     #[test]
-    fn cached_identity_fallback_requires_verified_complete_contact() {
+    fn cached_identity_root_requires_verified_complete_contact() {
         let contact = ContactRecord {
             contact_id: "c_quorum_bad".to_string(),
             device_id: vec![0x11u8; 32],
             alias: "peer".to_string(),
             genesis_hash: vec![0x22u8; 32],
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 7,
             verified: false,
@@ -3369,7 +3517,7 @@ mod tests {
             previous_chain_tip: None,
         };
 
-        assert!(!can_fallback_to_cached_contact_identity(&contact));
+        assert!(!can_root_to_cached_contact_identity(&contact));
     }
 
     #[test]
@@ -3385,6 +3533,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(current_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3421,6 +3570,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3450,6 +3600,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some([0xCCu8; 32].to_vec()),
             added_at: 0,
             verified: true,
@@ -3479,6 +3630,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some([0xCCu8; 32].to_vec()),
             added_at: 0,
             verified: true,

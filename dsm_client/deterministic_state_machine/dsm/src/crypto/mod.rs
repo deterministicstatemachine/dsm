@@ -9,9 +9,29 @@
 //! | BLAKE3-256 | [`blake3`] | All hashing, domain-separated via `BLAKE3-256("DSM/<name>\0" \|\| data)` |
 //! | SPHINCS+ (BLAKE3-only) | [`sphincs`], [`signatures`] | Post-quantum EUF-CMA digital signatures |
 //! | ML-KEM-768 (Kyber) | [`kyber`] | Post-quantum key encapsulation mechanism |
-//! | Pedersen commitments | [`pedersen`] | Hiding + binding cryptographic commitments |
+//! | Salted-BLAKE3 commitments | [`blake3`] (`dsm_domain_hasher`) | Hiding + binding via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` (e.g. `dlv_content_commitment` in `vault::limbo_vault`) |
 //! | C-DBRW | [`cdbrw_binding`] | Challenge-seeded DBRW anti-cloning (post-quantum) |
 //! | ChaCha20-Poly1305 / AES-256-GCM | [`kyber`] (AES helpers) | Authenticated symmetric encryption |
+//!
+//! # Removed: classical group-based commitment module
+//!
+//! A previous version of this crypto layer included a commitment
+//! module implementing a classical construction over `Z_p^*` whose
+//! security reduces to the discrete-logarithm problem (broken in
+//! polynomial time by Shor). It was mislabeled "Quantum-Resistant"
+//! but provided no post-quantum guarantee.
+//!
+//! It was used as a content-commitment fingerprint in
+//! `vault::limbo_vault`, but no DSM code path required the
+//! distinguishing property of group-based commitments (additive
+//! homomorphism `Com(a)·Com(b) = Com(a+b)`). The replacement — a
+//! salted BLAKE3 commitment — delivers identical hiding + binding
+//! properties under post-quantum-secure assumptions, with a 32-byte
+//! fixed size and zero big-int dependencies.
+//!
+//! Resolves Issue #184 Finding #2. Reintroducing the removed module
+//! (or any classical commitment scheme labeled "post-quantum") is
+//! flagged by the CI ban-list — see `scripts/ci_scan.sh`.
 //!
 //! # Domain Separation Convention
 //!
@@ -25,7 +45,7 @@
 //! - **Core hashing**: [`blake3`], [`hash`], [`canonical_lp`]
 //! - **Signatures**: [`sphincs`] (low-level), [`signatures`] (high-level API), [`streaming_signature`]
 //! - **Key exchange**: [`kyber`] (ML-KEM-768 + AES-GCM helpers)
-//! - **Commitments**: [`pedersen`]
+//! - **Commitments**: salted BLAKE3 (no dedicated module — call `blake3::dsm_domain_hasher` with a per-purpose tag; canonical pattern lives at `vault::limbo_vault::dlv_content_commitment`)
 //! - **Anti-cloning**: [`cdbrw_binding`]
 //! - **RNG**: [`rng`] (OS and deterministic random byte generation)
 //! - **Privacy**: [`random_walk_privacy`]
@@ -42,8 +62,11 @@ pub mod cdbrw_binding;
 pub mod device_memory_manager;
 pub mod ephemeral_key;
 pub mod hash;
+pub mod hkdf;
 pub mod kyber;
-pub mod pedersen;
+// Classical group-based commitment module REMOVED — Issue #184 F2.
+// See module docs above for rationale; replacement is a salted BLAKE3
+// commitment in `vault::limbo_vault::dlv_content_commitment`.
 pub mod random_walk_privacy;
 pub mod rng;
 pub mod signatures;
@@ -75,8 +98,7 @@ pub use kyber::{
     kyber_encapsulate, EncapsulationResult, KyberKeyPair,
 };
 
-// Pedersen
-pub use pedersen::{PedersenCommitment, PedersenParams, SecurityLevel};
+// Classical commitment re-exports REMOVED — see module-level removal note above.
 
 // SPHINCS+ low-level (when you need direct control)
 pub use sphincs::SphincsKeyPair;

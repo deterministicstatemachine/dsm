@@ -1,77 +1,76 @@
 # DSM Storage Node Dockerfile
-# Optimized for distributed policy storage with quantum resistance
-# Implements declarative containerization to replace imperative shell scripts
+# Workspace-aware local/prod image with baked runtime hardening.
 
-# -----------------------------------------------------------------------------
-# Stage 1: Build environment with dependency caching
-# -----------------------------------------------------------------------------
-FROM rust:1.76-slim-bullseye AS builder-base
+# Build from workspace root:
+#   docker build -f dsm_storage_node/Dockerfile -t dsm-storage-node:local .
 
-# Install build dependencies
+# ---------------------------------------------------------------------------
+# Stage 1: Rust builder
+# ---------------------------------------------------------------------------
+FROM rust:1.91-slim-bookworm AS builder
+
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
-    librocksdb-dev \
-    openssl \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a new empty project for caching dependencies
-WORKDIR /usr/src/dsm
-RUN cargo new --bin dsm-storage-node
-WORKDIR /usr/src/dsm/dsm-storage-node
+WORKDIR /build
 
-# Copy the manifests
-COPY dsm-storage-node/Cargo.toml .
-COPY Cargo.toml /usr/src/dsm/
-COPY cargo.toml /usr/src/dsm/
-COPY Cargo.lock /usr/src/dsm/
+# Workspace manifests (for caching)
+COPY Cargo.toml Cargo.lock ./
+COPY dsm_storage_node/Cargo.toml dsm_storage_node/Cargo.toml
+COPY dsm_client/deterministic_state_machine/dsm/Cargo.toml dsm_client/deterministic_state_machine/dsm/Cargo.toml
+COPY dsm_client/deterministic_state_machine/dsm_sdk/Cargo.toml dsm_client/deterministic_state_machine/dsm_sdk/Cargo.toml
+COPY tools/vector_runner/Cargo.toml tools/vector_runner/Cargo.toml
+COPY tools/vector_builder/Cargo.toml tools/vector_builder/Cargo.toml
+COPY tools/vertical_validation/Cargo.toml tools/vertical_validation/Cargo.toml
 
-# Build dependencies
-RUN mkdir -p src && \
-    echo "fn main() {println!(\"dependency placeholder\");}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
+# Stub sources so dependency build can cache.
+RUN mkdir -p dsm_storage_node/src && echo 'fn main(){}' > dsm_storage_node/src/main.rs && echo '' > dsm_storage_node/src/lib.rs
+RUN mkdir -p dsm_client/deterministic_state_machine/dsm/src && echo '' > dsm_client/deterministic_state_machine/dsm/src/lib.rs
+RUN mkdir -p dsm_client/deterministic_state_machine/dsm_sdk/src && echo '' > dsm_client/deterministic_state_machine/dsm_sdk/src/lib.rs
+RUN mkdir -p tools/vector_runner/src && echo 'fn main(){}' > tools/vector_runner/src/main.rs
+RUN mkdir -p tools/vector_builder/src && echo 'fn main(){}' > tools/vector_builder/src/main.rs
+RUN mkdir -p tools/vertical_validation/src && echo 'fn main(){}' > tools/vertical_validation/src/main.rs
 
-# -----------------------------------------------------------------------------
-# Stage 2: Build the application
-# -----------------------------------------------------------------------------
-FROM builder-base AS builder
+# Proto + build scripts required by workspace crates.
+COPY proto/ proto/
+COPY dsm_client/deterministic_state_machine/dsm/build.rs dsm_client/deterministic_state_machine/dsm/build.rs
+COPY dsm_client/deterministic_state_machine/dsm_sdk/build.rs dsm_client/deterministic_state_machine/dsm_sdk/build.rs
 
-# Copy the source code
-COPY dsm-storage-node/src /usr/src/dsm/dsm-storage-node/src
-COPY dsm-storage-node/bin /usr/src/dsm/dsm-storage-node/bin
+# Prebuild dependencies (cache warm-up).
+RUN cargo build --release --package dsm_storage_node 2>/dev/null || true
 
-# Copy required workspace dependencies
-COPY dsm/src/types /usr/src/dsm/dsm/src/types
-COPY dsm/src/crypto /usr/src/dsm/dsm/src/crypto
-COPY dsm/src/policy /usr/src/dsm/dsm/src/policy
+# Real sources
+COPY dsm_storage_node/src/ dsm_storage_node/src/
+COPY dsm_client/deterministic_state_machine/dsm/src/ dsm_client/deterministic_state_machine/dsm/src/
+COPY dsm_client/deterministic_state_machine/dsm_sdk/src/ dsm_client/deterministic_state_machine/dsm_sdk/src/
 
-# Build the application
-RUN RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C link-arg=-s -C lto=thin -C codegen-units=1" \
-    cargo build --release --bin storage-node --bin storage-cli
+ENV DSM_PROTO_ROOT=/build/proto
+RUN cargo build --release --package dsm_storage_node
 
-# -----------------------------------------------------------------------------
-# Stage 3: Create minimal runtime image with baked-in configuration
-# -----------------------------------------------------------------------------
-FROM debian:bullseye-slim AS runtime
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime image
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
 
-# Add non-root user
-RUN groupadd -r dsm && useradd -r -g dsm dsm
-
-# Install runtime dependencies including OpenSSL for certificate generation
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl1.1 \
-    librocksdb6.11 \
+    libssl3 \
     openssl \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled binaries
-COPY --from=builder /usr/src/dsm/target/release/storage-node /usr/local/bin/
-COPY --from=builder /usr/src/dsm/target/release/storage-cli /usr/local/bin/
+# Add non-root user.
+RUN groupadd -r dsm && useradd -r -g dsm dsm
 
-# Create secure directory structure (baked into container)
+# Copy the compiled binary.
+COPY --from=builder /build/target/release/storage_node /usr/local/bin/storage_node
+RUN chmod 550 /usr/local/bin/storage_node
+
+# Create secure directory structure.
 RUN mkdir -p /var/lib/dsm-storage/data \
              /var/lib/dsm-storage/config \
              /var/lib/dsm-storage/keys/production \
@@ -85,7 +84,7 @@ RUN mkdir -p /var/lib/dsm-storage/data \
     && chmod 750 /var/lib/dsm-storage/logs/secure \
     && chmod 770 /var/lib/dsm-storage/data
 
-# Generate self-signed TLS certificates during build (baked into container)
+# Generate self-signed TLS certificates during build.
 RUN openssl genrsa -out /var/lib/dsm-storage/keys/ca/ca.key 4096 && \
     openssl req -new -x509 -days 365 -key /var/lib/dsm-storage/keys/ca/ca.key \
         -subj "/C=US/ST=State/L=City/O=DSM/CN=DSM-CA" \
@@ -105,13 +104,12 @@ RUN openssl genrsa -out /var/lib/dsm-storage/keys/ca/ca.key 4096 && \
     chmod 644 /var/lib/dsm-storage/keys/production/node.crt && \
     chmod 644 /var/lib/dsm-storage/keys/ca/ca.crt
 
-# Create environment configuration template
+# Create environment configuration template.
 RUN echo '# DSM Storage Node - Production Environment Configuration' > /var/lib/dsm-storage/.env.template && \
     echo '# Copy this file to .env and fill in your production values' >> /var/lib/dsm-storage/.env.template && \
     echo '' >> /var/lib/dsm-storage/.env.template && \
     echo '# Node Security' >> /var/lib/dsm-storage/.env.template && \
     echo 'DSM_NODE_PRIVATE_KEY_PATH="/var/lib/dsm-storage/keys/production/node.key"' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_NODE_PUBLIC_KEY_PATH="/var/lib/dsm-storage/keys/production/node.pub"' >> /var/lib/dsm-storage/.env.template && \
     echo 'DSM_TLS_CERT_PATH="/var/lib/dsm-storage/keys/production/node.crt"' >> /var/lib/dsm-storage/.env.template && \
     echo 'DSM_TLS_KEY_PATH="/var/lib/dsm-storage/keys/production/node.key"' >> /var/lib/dsm-storage/.env.template && \
     echo '' >> /var/lib/dsm-storage/.env.template && \
@@ -122,49 +120,30 @@ RUN echo '# DSM Storage Node - Production Environment Configuration' > /var/lib/
     echo '# Network Security' >> /var/lib/dsm-storage/.env.template && \
     echo 'DSM_RATE_LIMIT_PER_MINUTE="60"' >> /var/lib/dsm-storage/.env.template && \
     echo 'DSM_MAX_CONNECTIONS="500"' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_CONNECTION_TIMEOUT="15"' >> /var/lib/dsm-storage/.env.template && \
-    echo '' >> /var/lib/dsm-storage/.env.template && \
-    echo '# API Security' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_API_SECRET_KEY=""' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_CORS_ORIGINS="https://yourdomain.com"' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_MAX_BODY_SIZE="5242880"' >> /var/lib/dsm-storage/.env.template && \
-    echo '' >> /var/lib/dsm-storage/.env.template && \
-    echo '# Staking Security (if enabled)' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_STAKING_PRIVATE_KEY=""' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_STAKING_ADDRESS=""' >> /var/lib/dsm-storage/.env.template && \
-    echo 'DSM_VALIDATOR_ID=""' >> /var/lib/dsm-storage/.env.template
+    echo 'DSM_CONNECTION_TIMEOUT="15"' >> /var/lib/dsm-storage/.env.template
 
-# Default config (TOML only; protobuf transport, no JSON)
-COPY dsm-storage-node/config/local.toml /var/lib/dsm-storage/config/config.toml
+# Default config (TOML only; protobuf transport, no JSON).
+COPY dsm_storage_node/config/production.toml /var/lib/dsm-storage/config/config.toml
 RUN chown dsm:dsm /var/lib/dsm-storage/config/config.toml
 
-# Set working directory
 WORKDIR /var/lib/dsm-storage
 
-# Set environment variables
 ENV DSM_STORAGE_CONFIG_PATH=/var/lib/dsm-storage/config/config.toml
 ENV DSM_STORAGE_DATA_DIR=/var/lib/dsm-storage/data
 ENV RUST_BACKTRACE=1
 
-# Apply security hardening
-RUN chmod 550 /usr/local/bin/storage-node /usr/local/bin/storage-cli
-
-# Switch to non-root user
 USER dsm
 
-# Health check (human-readable; no JSON)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/storage-cli", "status"] || exit 1
+# Health check via local endpoint (TLS, self-signed cert).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -sf --insecure https://localhost:8080/api/v2/health || exit 1
 
-# Expose ports for P2P communication (baked into container networking)
 EXPOSE 8080 8081 9090
 
-# Default command
-ENTRYPOINT ["/usr/local/bin/storage-node"]
+ENTRYPOINT ["/usr/local/bin/storage_node"]
 CMD ["--config", "/var/lib/dsm-storage/config/config.toml"]
 
-# Labels
 LABEL org.opencontainers.image.title="DSM Storage Node"
-LABEL org.opencontainers.image.description="Decentralized storage node for DSM policy and state storage - Containerized with baked-in security setup"
+LABEL org.opencontainers.image.description="Decentralized storage node for DSM policy and state storage"
 LABEL org.opencontainers.image.version="0.1.0"
 LABEL org.opencontainers.image.authors="DSM Development Team"

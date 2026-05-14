@@ -35,7 +35,7 @@
 //! ## Module Organization
 //!
 //! - [`core`] — State machine, bridge traits, bilateral management, identity, token subsystem
-//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, Pedersen, DBRW, ChaCha20-Poly1305
+//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, DBRW, ChaCha20-Poly1305 (salted-BLAKE3 commitments via `dsm_domain_hasher`)
 //! - [`types`] — All protocol types: [`types::state_types::State`], [`types::error::DsmError`], identifiers, tokens
 //! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees
@@ -73,7 +73,14 @@ pub mod common;
 pub mod core;
 pub mod cpta;
 pub mod crypto;
-pub mod crypto_verification;
+// A separate dead-code attestation module previously lived here
+// (Issue #185 — all 4 findings). It exported types with zero
+// production callers anywhere in `dsm/` or `dsm_sdk/` (verified by
+// source inspection); the audit findings were all on a never-
+// executed path. Module removed entirely. If a real hardware-bound
+// attestation surface is later needed, the C-DBRW infrastructure in
+// `crypto::cdbrw_binding` is already wired through the SDK and is
+// the canonical entry point — see Issue #213.
 pub mod dlv;
 pub mod emissions;
 pub mod envelope;
@@ -150,16 +157,21 @@ fn get_enabled_features() -> Vec<String> {
 }
 
 /// Expose core trustless genesis creation to SDK consumers.
+///
+/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
+/// `k_dbrw` is the device's DBRW binding per whitepaper §12 def.3 —
+/// callers obtain it from
+/// `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    threshold: usize,
+    k_dbrw: [u8; 32],
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, threshold, metadata, storage)
+    identity::create_trustless_genesis(device_id, storage_nodes, k_dbrw, metadata, storage)
         .await
         .map_err(DsmError::from)
 }

@@ -422,7 +422,21 @@ impl Balance {
         }
     }
 
-    /// Get the available balance (total minus locked)
+    /// Returns the full token amount.
+    ///
+    /// Per whitepaper §8 (balance binding), DSM uses a **single-value**
+    /// balance model: token-affecting operations are enforced through
+    /// atomic DSM state transitions, not by subtracting a separately
+    /// tracked "locked" amount at display/accounting time. Subtracting
+    /// `locked` here was a historical bug — the whitepaper explicitly
+    /// fixes it by treating `Balance` as a single canonical value.
+    ///
+    /// **Do NOT change this to `self.value - self.locked`.** That
+    /// regression has been intentionally rejected; locked-amount
+    /// semantics live in higher-level vault/HTLC machinery, not in the
+    /// canonical balance type.
+    ///
+    /// Closes Issue #188.
     pub fn available(&self) -> u64 {
         self.value
     }

@@ -46,12 +46,12 @@ Storage Node (Rust / Axum)
 
 ### Replication Parameters
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| N | 6 | Total replica count |
-| K | 3 | Minimum replicas for durability |
-| U_up | 0.85 | Upscale utilization threshold |
-| U_down | 0.35 | Downscale utilization threshold |
+| Parameter | Value | Description                     |
+| --------- | ----- | ------------------------------- |
+| N         | 6     | Total replica count             |
+| K         | 3     | Minimum replicas for durability |
+| U_up      | 0.85  | Upscale utilization threshold   |
+| U_down    | 0.35  | Downscale utilization threshold |
 
 Replica placement uses keyed Fisher-Yates shuffle (deterministic, no coordination required).
 
@@ -61,13 +61,13 @@ Replica placement uses keyed Fisher-Yates shuffle (deterministic, no coordinatio
 
 The default app configuration connects to 6 production storage nodes across 3 AWS regions:
 
-| Node | Region | IP | Endpoint |
-|------|--------|----|----------|
-| dsm-node-1 | us-east-1 | 13.218.83.69 | `https://13.218.83.69:8080` |
-| dsm-node-2 | us-east-1 | 44.223.31.184 | `https://44.223.31.184:8080` |
-| dsm-node-3 | eu-west-1 | 54.74.145.172 | `https://54.74.145.172:8080` |
-| dsm-node-4 | eu-west-1 | 3.249.79.215 | `https://3.249.79.215:8080` |
-| dsm-node-5 | ap-southeast-1 | 18.141.56.252 | `https://18.141.56.252:8080` |
+| Node       | Region         | IP             | Endpoint                      |
+| ---------- | -------------- | -------------- | ----------------------------- |
+| dsm-node-1 | us-east-1      | 13.218.83.69   | `https://13.218.83.69:8080`   |
+| dsm-node-2 | us-east-1      | 44.223.31.184  | `https://44.223.31.184:8080`  |
+| dsm-node-3 | eu-west-1      | 54.74.145.172  | `https://54.74.145.172:8080`  |
+| dsm-node-4 | eu-west-1      | 3.249.79.215   | `https://3.249.79.215:8080`   |
+| dsm-node-5 | ap-southeast-1 | 18.141.56.252  | `https://18.141.56.252:8080`  |
 | dsm-node-6 | ap-southeast-1 | 13.215.175.231 | `https://13.215.175.231:8080` |
 
 The config file (`dsm_env_config.toml`) ships with these nodes. With outbound internet access, no local setup, PostgreSQL, or port forwarding is required.
@@ -91,7 +91,7 @@ cd dsm_storage_node
 ./scripts/setup_dev_db.sh
 
 # 2. Start 5 local storage nodes
-./start_dev_nodes.sh
+./scripts/dev/start_dev_nodes.sh
 
 # 3. Verify all nodes
 for port in 8080 8081 8082 8083 8084; do
@@ -106,7 +106,7 @@ PIDs are saved in `dev-node*.pid`, logs in `logs/`.
 ### Stop the Local Development Nodes
 
 ```bash
-./scripts/stop_dev_nodes.sh
+./scripts/dev/stop_dev_nodes.sh
 ```
 
 ### Using Makefile
@@ -158,16 +158,16 @@ Returns: `ok`
 
 ### Operational (protobuf-only)
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/v2/envelope` | POST | Submit Envelope v3 (protobuf bytes) |
-| `/api/v2/genesis/entropy` | GET/POST | Genesis entropy contribution |
-| `/api/v2/bytecommit` | POST | ByteCommit anchoring |
-| `/api/v2/dlv/slot` | POST | DLV slot management |
-| `/api/v2/unilateral` | POST | Unilateral (b0x) transport |
-| `/api/v2/recovery/capsule` | POST | Recovery capsule storage |
-| `/api/v2/identity` | GET/POST | Identity and Device Tree queries |
-| `/api/v2/gossip` | POST | Inter-node state sync |
+| Endpoint                   | Method   | Purpose                             |
+| -------------------------- | -------- | ----------------------------------- |
+| `/api/v2/envelope`         | POST     | Submit Envelope v3 (protobuf bytes) |
+| `/api/v2/genesis/entropy`  | GET/POST | Genesis entropy contribution        |
+| `/api/v2/bytecommit`       | POST     | ByteCommit anchoring                |
+| `/api/v2/dlv/slot`         | POST     | DLV slot management                 |
+| `/api/v2/unilateral`       | POST     | Unilateral (b0x) transport          |
+| `/api/v2/recovery/capsule` | POST     | Recovery capsule storage            |
+| `/api/v2/identity`         | GET/POST | Identity and Device Tree queries    |
+| `/api/v2/gossip`           | POST     | Inter-node state sync               |
 
 ---
 
@@ -228,11 +228,11 @@ Deploy a 6-node storage-node replica set across 3 AWS regions from a single mach
 
 ### Cloud Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Terraform | >= 1.5 | `brew install terraform` |
-| AWS CLI | v2 | `brew install awscli` |
-| Docker | Desktop or Engine | [docker.com](https://www.docker.com/products/docker-desktop/) |
+| Tool      | Version           | Install                                                       |
+| --------- | ----------------- | ------------------------------------------------------------- |
+| Terraform | >= 1.5            | `brew install terraform`                                      |
+| AWS CLI   | v2                | `brew install awscli`                                         |
+| Docker    | Desktop or Engine | [docker.com](https://www.docker.com/products/docker-desktop/) |
 
 ### AWS Account Setup
 
@@ -254,6 +254,7 @@ bash deploy/provision_aws.sh --ssh-key ~/.ssh/dsm-deploy
 ```
 
 This single command:
+
 1. Provisions 6 EC2 instances across 3 regions via Terraform
 2. Waits for SSH readiness (~2-3 minutes)
 3. Generates per-node TLS certificates and configs
@@ -290,12 +291,12 @@ Each node runs:
 
 ### Estimated Cost
 
-| Resource | Spec | Monthly |
-|----------|------|---------|
-| 6x EC2 t3.small | 2 vCPU, 2GB RAM | ~$75 |
-| 6x 20GB gp3 EBS | SSD storage | ~$10 |
-| Data transfer | Inter-region gossip | ~$5 |
-| **Total** | | **~$90/month** |
+| Resource        | Spec                | Monthly        |
+| --------------- | ------------------- | -------------- |
+| 6x EC2 t3.small | 2 vCPU, 2GB RAM     | ~$75           |
+| 6x 20GB gp3 EBS | SSD storage         | ~$10           |
+| Data transfer   | Inter-region gossip | ~$5            |
+| **Total**       |                     | **~$90/month** |
 
 ### Cloud Commands
 
@@ -336,13 +337,13 @@ module "ap_southeast_1" { ... node_count = 2; global_node_offset = 4; }
 
 See [Chapter 13 — Troubleshooting](13-troubleshooting.md) for the full troubleshooting guide. Quick fixes:
 
-| Problem | Fix |
-|---------|-----|
-| Database connection failed | Start PostgreSQL: `brew services start postgresql@15` |
-| Port already in use | `./scripts/stop_dev_nodes.sh && rm -f dev-node*.pid` |
-| Schema drift | `./scripts/setup_dev_db.sh` (recreates databases) |
-| Docker platform mismatch | Script uses `--platform linux/amd64` for EC2 |
-| SSH timeout on deploy | Instances take 1-3 minutes; check `/var/log/cloud-init-output.log` |
+| Problem                    | Fix                                                                |
+| -------------------------- | ------------------------------------------------------------------ |
+| Database connection failed | Start PostgreSQL: `brew services start postgresql@15`              |
+| Port already in use        | `./scripts/dev/stop_dev_nodes.sh && rm -f dev-node*.pid`           |
+| Schema drift               | `./scripts/setup_dev_db.sh` (recreates databases)                  |
+| Docker platform mismatch   | Script uses `--platform linux/amd64` for EC2                       |
+| SSH timeout on deploy      | Instances take 1-3 minutes; check `/var/log/cloud-init-output.log` |
 
 ---
 

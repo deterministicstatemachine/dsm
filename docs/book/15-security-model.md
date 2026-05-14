@@ -199,7 +199,7 @@ This runs in the core crate (pure Rust, no I/O) and cannot be bypassed by the SD
 
 ## AMM Vault Manipulation Resistance
 
-DeTFi AMM vaults use constant-product pricing. Each vault is its own market — there is no global price tape, no cross-vault aggregator, and no external oracle feed. This bounds the manipulation surface in a structurally specific way.
+SoFi AMM vaults use constant-product pricing. Each vault is its own market — there is no global price tape, no cross-vault aggregator, and no external oracle feed. This bounds the manipulation surface in a structurally specific way.
 
 ### Per-Vault Pricing Function
 
@@ -233,7 +233,7 @@ The manipulation surface is bounded to "the specific vault you're trading agains
 
 ### Trader-Side Protection
 
-A trader cannot be tricked by a manipulated vault. The chunks #1–#7 AMM re-simulation gate (`verify_amm_swap_against_reserves` in the routing path) re-runs the constant-product math against the vault's current reserves at unlock time. The trader's signed route commit references specific reserves; if the vault's reserves have moved since the trader's quote (manipulated or not), the gate produces `OutputMismatch` and rejects. The trade fails safely — no funds move, no state advances.
+A trader cannot be tricked by a manipulated vault. The chunks #1-#7 AMM re-simulation gate (`verify_amm_swap_against_reserves` in the routing path) re-runs the constant-product math against the vault's current reserves at unlock time. The trader's signed route commit references specific reserves; if the vault's reserves have moved since the trader's quote (manipulated or not), the gate produces `OutputMismatch` and rejects. The trade fails safely — no funds move, no state advances.
 
 When intent-bounds (Tier 2) lands, the trader will additionally specify `min_out`, `max_fee`, and expiry on the route commit. Even if the vault's quoted output passes the constant-product math, `min_out` provides an explicit slippage envelope set by the trader.
 

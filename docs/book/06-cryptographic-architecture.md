@@ -12,7 +12,7 @@ DSM's post-quantum cryptographic stack for contributors and integrators.
 | Signatures | SPHINCS+ | Post-quantum digital signatures (EUF-CMA) | `crypto/sphincs.rs` |
 | Key Exchange | ML-KEM-768 (Kyber) | Post-quantum key encapsulation | `crypto/kyber.rs` |
 | Anti-Cloning | DBRW | Dual-factor: silicon fingerprint + env binding | `crypto/dbrw.rs` |
-| Commitments | Pedersen | Hiding + binding commitments | `crypto/pedersen.rs` |
+| Commitments | Salted BLAKE3 | Hiding + binding commitments via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` | `crypto/blake3.rs` (primitive); per-use call sites |
 | Storage Encryption | ChaCha20-Poly1305 | At-rest encryption | — |
 | Key Derivation | BLAKE3 keyed | Domain-separated KDF | Per-use domain |
 | Policy Anchors | CPTA | Token policy content addressing | `cpta/mod.rs` |
@@ -131,15 +131,42 @@ During PBI (Platform Boot Identity) bootstrap, the DBRW hash is computed and bou
 
 ---
 
-## Pedersen Commitments
+## Commitments — Salted BLAKE3
 
-Pedersen commitments provide both hiding and binding properties:
-- **Hiding** — the commitment reveals nothing about the committed value
-- **Binding** — the committer cannot change the value after committing
+DSM uses salted BLAKE3 hashes for commitments (hiding + binding):
+
+```text
+commitment := BLAKE3-256("DSM/<purpose>\0" || blinding || value)
+```
+
+where `blinding` is 32 bytes from a CSPRNG, used once per commit and
+discarded. This delivers:
+
+- **Hiding** — under uniform 32-byte blinding, the commitment leaks
+  nothing about the value (random-oracle assumption)
+- **Binding** — under BLAKE3-256 collision resistance (~256-bit
+  classical, ~128-bit Grover-bounded post-quantum)
 
 Used in:
-- **Token conservation proofs** — proving balance changes sum correctly without revealing individual balances
-- **DLV vault state** — committing to vault parameters before revealing them
+
+- **DLV vault content commitment** —
+  `vault::limbo_vault::dlv_content_commitment` with the
+  `DSM/dlv-content-commit` domain tag
+
+### Why not Pedersen?
+
+A previous version of this codebase carried a `crypto/pedersen` module
+labeled "Quantum-Resistant Pedersen Commitments." The implementation
+was a classical Pedersen commitment over `Z_p^*` whose security
+reduces to the discrete-logarithm problem — broken in polynomial time
+by Shor's algorithm. Despite the label, it was **not** post-quantum.
+
+DSM has no code path that requires Pedersen's distinguishing property
+(additive homomorphism `Com(a)·Com(b) = Com(a+b)`). Without that,
+salted BLAKE3 delivers identical hiding + binding under
+post-quantum-secure assumptions, with a fixed 32-byte size and zero
+big-int dependencies. The Pedersen module was removed in commit
+`e3f2c5b` (Issue #184 Finding #2 + reintroduction-prevention CI gate).
 
 ---
 
