@@ -761,7 +761,7 @@ mod tests {
         next.remaining_supply = prev.remaining_supply - receipt_amount;
 
         next.add_activation(&jap).unwrap();
-        next.spent_smt.mark_spent(jap_hash);
+        next.spent_smt.mark_spent(jap_hash).unwrap();
 
         let receipt_digest = receipt.digest();
         let count_root = next.count_smt.root();
@@ -798,7 +798,7 @@ mod tests {
         next.emission_index = emission_index;
         next.remaining_supply = prev.remaining_supply - 2;
         next.add_activation(&jap).unwrap();
-        next.spent_smt.mark_spent(jap_hash);
+        next.spent_smt.mark_spent(jap_hash).unwrap();
 
         let receipt = EmissionReceipt {
             emission_index,

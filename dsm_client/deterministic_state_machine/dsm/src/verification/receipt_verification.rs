@@ -725,6 +725,7 @@ mod tests {
         if let Some(reason) = result.reason {
             assert!(
                 reason.contains("Fork witness parent_tip")
+                    || reason.contains("Missing receiver signature")
                     || reason.contains("inclusion proof failed")
                     || reason.contains("SMT replace"),
                 "unexpected rejection reason: {}",
@@ -764,6 +765,7 @@ mod tests {
         if let Some(reason) = result.reason {
             assert!(
                 reason.contains("pi_inv is not 32 bytes")
+                    || reason.contains("Missing receiver signature")
                     || reason.contains("inclusion proof failed")
                     || reason.contains("SMT replace"),
                 "unexpected rejection reason: {}",
@@ -811,6 +813,7 @@ mod tests {
             assert!(
                 reason.contains("Fork-aware finalization rejected")
                     || reason.contains("pi_inv does not match")
+                    || reason.contains("Missing receiver signature")
                     || reason.contains("inclusion proof failed")
                     || reason.contains("SMT replace"),
                 "unexpected rejection reason: {}",

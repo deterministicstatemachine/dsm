@@ -34,15 +34,23 @@ impl SpentProofSmt {
         }
     }
 
-    pub fn mark_spent(&mut self, jap_hash: [u8; 32]) {
+    pub fn mark_spent(&mut self, jap_hash: [u8; 32]) -> Result<(), DsmError> {
         if self.spent.contains_key(&jap_hash) {
-            return;
+            return Ok(());
         }
-        self.spent.insert(jap_hash, true);
         let value = spent_leaf_value(&jap_hash);
         self.tree
             .update_leaf(&jap_hash, &value)
-            .expect("spent proof SMT update must not fail");
+            .map_err(|e| {
+                DsmError::internal::<std::io::Error>(
+                    format!("spent proof SMT update failed: {e}"),
+                    None,
+                )
+            })?;
+        // Insert into the index map only after the underlying SMT update
+        // succeeded, so a failed update doesn't leave inconsistent state.
+        self.spent.insert(jap_hash, true);
+        Ok(())
     }
 
     pub fn is_spent(&self, jap_hash: &[u8; 32]) -> bool {
@@ -124,7 +132,7 @@ mod tests {
         let jap = [0xAA; 32];
 
         assert!(!smt.is_spent(&jap));
-        smt.mark_spent(jap);
+        smt.mark_spent(jap).unwrap();
         assert!(smt.is_spent(&jap));
         assert_eq!(smt.len(), 1);
         assert!(!smt.is_empty());
@@ -141,8 +149,8 @@ mod tests {
     fn multiple_marks_are_idempotent_on_len() {
         let mut smt = SpentProofSmt::new();
         let jap = [0x42; 32];
-        smt.mark_spent(jap);
-        smt.mark_spent(jap);
+        smt.mark_spent(jap).unwrap();
+        smt.mark_spent(jap).unwrap();
         assert_eq!(smt.len(), 1);
         assert!(smt.is_spent(&jap));
     }
@@ -159,11 +167,11 @@ mod tests {
         let mut smt = SpentProofSmt::new();
         let root_empty = smt.root();
 
-        smt.mark_spent([0x01; 32]);
+        smt.mark_spent([0x01; 32]).unwrap();
         let root_one = smt.root();
         assert_ne!(root_empty, root_one);
 
-        smt.mark_spent([0x02; 32]);
+        smt.mark_spent([0x02; 32]).unwrap();
         let root_two = smt.root();
         assert_ne!(root_one, root_two);
     }
@@ -178,7 +186,7 @@ mod tests {
         assert!(SpentProofSmt::verify_absent(&absent, &absent_root, &jap));
         assert!(!SpentProofSmt::verify_spent(&absent, &absent_root, &jap));
 
-        smt.mark_spent(jap);
+        smt.mark_spent(jap).unwrap();
         let spent_root = smt.root();
         let spent = smt.proof(&jap).unwrap();
         assert!(SpentProofSmt::verify_spent(&spent, &spent_root, &jap));
@@ -188,12 +196,12 @@ mod tests {
     #[test]
     fn root_is_order_independent() {
         let mut smt_a = SpentProofSmt::new();
-        smt_a.mark_spent([0x01; 32]);
-        smt_a.mark_spent([0x02; 32]);
+        smt_a.mark_spent([0x01; 32]).unwrap();
+        smt_a.mark_spent([0x02; 32]).unwrap();
 
         let mut smt_b = SpentProofSmt::new();
-        smt_b.mark_spent([0x02; 32]);
-        smt_b.mark_spent([0x01; 32]);
+        smt_b.mark_spent([0x02; 32]).unwrap();
+        smt_b.mark_spent([0x01; 32]).unwrap();
 
         assert_eq!(
             smt_a.root(),
@@ -205,10 +213,10 @@ mod tests {
     #[test]
     fn root_differs_for_different_keys() {
         let mut smt_a = SpentProofSmt::new();
-        smt_a.mark_spent([0xAA; 32]);
+        smt_a.mark_spent([0xAA; 32]).unwrap();
 
         let mut smt_b = SpentProofSmt::new();
-        smt_b.mark_spent([0xBB; 32]);
+        smt_b.mark_spent([0xBB; 32]).unwrap();
 
         assert_ne!(smt_a.root(), smt_b.root());
     }
@@ -219,7 +227,7 @@ mod tests {
         for i in 0..100u8 {
             let mut key = [0u8; 32];
             key[0] = i;
-            smt.mark_spent(key);
+            smt.mark_spent(key).unwrap();
         }
         assert_eq!(smt.len(), 100);
 
