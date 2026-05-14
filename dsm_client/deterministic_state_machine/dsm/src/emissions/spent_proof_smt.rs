@@ -39,14 +39,12 @@ impl SpentProofSmt {
             return Ok(());
         }
         let value = spent_leaf_value(&jap_hash);
-        self.tree
-            .update_leaf(&jap_hash, &value)
-            .map_err(|e| {
-                DsmError::internal::<std::io::Error>(
-                    format!("spent proof SMT update failed: {e}"),
-                    None,
-                )
-            })?;
+        self.tree.update_leaf(&jap_hash, &value).map_err(|e| {
+            DsmError::internal::<std::io::Error>(
+                format!("spent proof SMT update failed: {e}"),
+                None,
+            )
+        })?;
         // Insert into the index map only after the underlying SMT update
         // succeeded, so a failed update doesn't leave inconsistent state.
         self.spent.insert(jap_hash, true);
