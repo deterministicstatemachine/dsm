@@ -10,7 +10,10 @@ import SettingsMainScreen from './screens/SettingsMainScreen';
 import DevDlvScreen from './screens/DevDlvScreen';
 import DevCdbrwScreen from './screens/DevCdbrwScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
-import DevDeTfiLaunchScreen from './screens/DevDeTfiLaunchScreen';
+import DevSoFiLaunchScreen from './screens/DevSoFiLaunchScreen';
+import SofiHubScreen from './screens/SofiHubScreen';
+import LiquidityScreen from './screens/LiquidityScreen';
+import MailScreen from './screens/MailScreen';
 import LockSetupScreen from './screens/LockSetupScreen';
 import QRCodeScannerScreen from './screens/QRCodeScannerScreen';
 import MyContactInfoScreen from './screens/MyContactInfoScreen';
@@ -27,7 +30,10 @@ const MemoSettings = React.memo(SettingsMainScreen);
 const MemoDevDlv = React.memo(DevDlvScreen);
 const MemoDevCdbrw = React.memo(DevCdbrwScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
-const MemoDevDeTfiLaunch = React.memo(DevDeTfiLaunchScreen);
+const MemoDevSoFiLaunch = React.memo(DevSoFiLaunchScreen);
+const MemoSofi = React.memo(SofiHubScreen);
+const MemoLiquidity = React.memo(LiquidityScreen);
+const MemoMail = React.memo(MailScreen);
 const MemoLockSetup = React.memo(LockSetupScreen);
 const MemoQR = React.memo(QRCodeScannerScreen);
 const MemoMyContact = React.memo(MyContactInfoScreen);
@@ -76,8 +82,14 @@ export default function AppScreenRouter({
       return <MemoDevCdbrw />;
     case 'dev_policy':
       return <MemoDevPolicy />;
-    case 'dev_detfi_launch':
-      return <MemoDevDeTfiLaunch />;
+    case 'dev_sofi_launch':
+      return <MemoDevSoFiLaunch />;
+    case 'sofi':
+      return <MemoSofi onNavigate={onNavigate} />;
+    case 'liquidity':
+      return <MemoLiquidity onNavigate={onNavigate} />;
+    case 'mail':
+      return <MemoMail onNavigate={onNavigate} />;
     case 'lock_setup':
       return <MemoLockSetup onNavigate={onNavigate} />;
     case 'qr':

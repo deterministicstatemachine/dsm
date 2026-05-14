@@ -28,7 +28,7 @@ assert_pattern() {
 }
 
 FRONT_TX="dsm_client/frontend/src/dsm/transactions.ts"
-FRONT_BRIDGE="dsm_client/frontend/src/dsm/WebViewBridge.ts"
+FRONT_BRIDGE="dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts"
 FRONT_NBB="dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts"
 FRONT_EVENT="dsm_client/frontend/src/dsm/EventBridge.ts"
 FRONT_PORT="dsm_client/frontend/public/index.html"

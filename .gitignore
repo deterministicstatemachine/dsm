@@ -231,7 +231,6 @@ tools/ios_ingress_smoke/
 
 # Claude IDE
 .claude/
-/.github/instructions
 /.github/copilot-instructions.md
 /.github/workflows/archive/
 
@@ -248,6 +247,7 @@ Agent-Refinement-System-Final.md
 # ---------------------------------------------------------------------------
 .agents/
 .claude/
+docs/plans/
 .claude-plugin/
 .clinerules/
 .cursor/
@@ -261,3 +261,4 @@ plugins/caveman/
 rules/caveman-*.md
 skills/
 desktop-extensions/
+WEBSITE_ROADMAP.md

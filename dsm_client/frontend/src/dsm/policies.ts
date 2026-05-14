@@ -8,6 +8,7 @@ import {
 } from './WebViewBridge';
 import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { emitWalletRefresh } from './events';
 
 export async function createToken(details: any): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
@@ -146,8 +147,25 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
       ? encodeBase32Crockford(resp.policyAnchor)
       : published.anchorBase32;
     const tokenId = resp.tokenId || undefined;
+    const success = Boolean(resp.success);
+    // Notify the wallet UI that a new token has been registered so
+    // `TokenManagementScreen` (and any other listener) can re-fetch
+    // its balances + metadata cache without the user having to pull-
+    // to-refresh.  Single canonical refresh event per
+    // `events.ts::DSM_WALLET_REFRESH_EVENT`.
+    if (success) {
+      try {
+        emitWalletRefresh({
+          source: 'token.create',
+          tokenId: tokenId ?? '',
+          anchorBase32: anchorB32 ?? '',
+        });
+      } catch (e) {
+        console.warn('createToken: emitWalletRefresh failed (non-fatal):', e);
+      }
+    }
     return {
-      success: Boolean(resp.success),
+      success,
       tokenId,
       anchorBase32: anchorB32,
       message: resp.message || undefined,

@@ -1250,7 +1250,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_getTransportHeadersV3Pack(
 }
 
 fn is_error_envelope_bytes(bytes: &[u8]) -> Option<u32> {
-    match pb::Envelope::decode(bytes) {
+    match crate::envelope::from_canonical_bytes(bytes) {
         Ok(env) => match env.payload {
             Some(pb::envelope::Payload::Error(e)) => Some(e.code),
             _ => None,
@@ -1317,7 +1317,7 @@ fn process_envelope_v3_impl(
     } else {
         req
     };
-    if let Ok(env) = pb::Envelope::decode(raw) {
+    if let Ok(env) = crate::envelope::from_canonical_bytes(raw) {
         if let Some(pb::envelope::Payload::BleEvent(ref ble)) = env.payload {
             if let Some(pb::ble_event::Ev::IdentityObserved(ref obs)) = ble.ev {
                 return handle_ble_identity_observed_from_envelope(obs).map_err(|message| {
@@ -2220,7 +2220,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
         use dsm::types::proto as gp;
 
         // 1. Decode envelope
-        let envelope = match gp::Envelope::decode(&*bytes) {
+        let envelope = match dsm::envelope::from_canonical_bytes(&*bytes) {
             Ok(env) => env,
             Err(e) => {
                 log::error!("[bilateralOfflineSend] envelope decode failed: {e}");
@@ -2789,7 +2789,7 @@ fn strip_envelope_v3_framing(bytes: &[u8]) -> &[u8] {
 fn detect_ble_frame_type_from_bytes(bytes: &[u8]) -> i32 {
     let raw = strip_envelope_v3_framing(bytes);
 
-    if let Ok(env) = pb::Envelope::decode(raw) {
+    if let Ok(env) = crate::envelope::from_canonical_bytes(raw) {
         return match env.payload {
             Some(pb::envelope::Payload::BilateralPrepareResponse(_)) => {
                 pb::BleFrameType::BilateralPrepareResponse as i32
@@ -3627,6 +3627,20 @@ mod unified_protobuf_bridge_tests {
     }
 
     #[test]
+    fn wrong_version_ble_frame_is_unspecified() {
+        let mut env = pb::Envelope::decode(build_bilateral_confirm_envelope().as_slice())
+            .expect("decode bilateral confirm envelope");
+        env.version = 2;
+        let raw = env.encode_to_vec();
+
+        assert_eq!(
+            detect_ble_frame_type_from_bytes(&raw),
+            pb::BleFrameType::Unspecified as i32
+        );
+        assert_eq!(is_error_envelope_bytes(&raw), None);
+    }
+
+    #[test]
     fn query_frame_preserves_req_id_on_success_and_error() {
         let _guard = setup_test_env();
         let req_id = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -4189,7 +4203,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_extractGenesisIdentity(
                 return empty_byte_array_or_empty(&mut env).into_raw();
             }
 
-            let envelope = match pb::Envelope::decode(raw) {
+            let envelope = match crate::envelope::from_canonical_bytes(raw) {
                 Ok(e) => e,
                 Err(e) => {
                     log::error!(

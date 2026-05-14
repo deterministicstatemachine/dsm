@@ -354,7 +354,7 @@ pub extern "C" fn dsm_initialize_sdk_context(
 /// Process envelope with native protobuf handling (internal function)
 fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
     // 1) Decode Envelope from raw protobuf bytes
-    let message_id = match Envelope::decode(input_bytes) {
+    let message_id = match crate::envelope::from_canonical_bytes(input_bytes) {
         Ok(envelope_in) => envelope_in.message_id,
         Err(e) => {
             error!("iOS transport: Envelope decode failed: {}", e);

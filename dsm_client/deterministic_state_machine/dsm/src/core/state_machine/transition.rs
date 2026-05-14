@@ -74,21 +74,17 @@ impl StateTransition {
         encapsulated_entropy: Option<Vec<u8>>,
         device_id: &[u8; 32],
     ) -> Self {
-        // For protocol compliance, require proof_of_authorization and signature to be provided/generated
-        let proof_of_authorization = match operation.get_proof_of_authorization() {
-            Some(proof) => proof,
-            None => {
-                log::warn!("No proof_of_authorization provided for operation");
-                vec![]
-            }
-        };
-        let signature = match operation.get_signature() {
-            Some(sig) => sig,
-            None => {
-                log::warn!("No signature provided for operation");
-                vec![]
-            }
-        };
+        // The constructor itself does not enforce authorization presence —
+        // some operation types (Genesis, Noop, Receive) legitimately carry no
+        // signature, and tests need to construct invalid states for negative
+        // testing. Authorization-presence enforcement lives in
+        // `enforce_operation_authorization()` and is called by every
+        // production code path that builds a transition for acceptance:
+        // `create_transition` and `RelationshipManager::execute_relationship_transition`.
+        // Defaults below are inert for ops that do not require them and are
+        // validated for ops that do.
+        let proof_of_authorization = operation.get_proof_of_authorization().unwrap_or_default();
+        let signature = operation.get_signature().unwrap_or_default();
 
         // Determine deterministic logical tick once.
         // crate::utils::deterministic_time::tick() returns (hash: [u8;32], tick: u64).
@@ -372,6 +368,142 @@ pub fn generate_position_sequence(
     Ok(sequence)
 }
 
+/// Enforce that an Operation carries the authorization material required by
+/// its protocol semantics — non-empty signature for device-key-signed ops,
+/// non-empty proof_of_authorization for Mint, non-empty proof_of_ownership
+/// for Burn, etc.
+///
+/// This is the canonical rule. Any code path that builds a `StateTransition`
+/// destined for acceptance MUST call this helper before applying the
+/// transition. Currently called by:
+///
+/// - `create_transition` (single-device state advance)
+/// - `RelationshipManager::execute_relationship_transition` (relationship-bound advance)
+///
+/// Operations that legitimately carry no signature (`Genesis`, `Noop`,
+/// `Receive`) pass unconditionally.
+pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmError> {
+    match operation {
+        // Bilateral / paired operations carry both proof and signature.
+        Operation::Transfer {
+            signature,
+            recipient: _,
+            ..
+        } => {
+            // Transfer's get_proof_of_authorization returns the signature
+            // when it is non-empty, so `signature.is_empty()` is the single
+            // gate we need.
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "Transfer missing signature (and therefore proof_of_authorization)",
+                ));
+            }
+        }
+        Operation::Mint {
+            proof_of_authorization,
+            ..
+        } => {
+            if proof_of_authorization.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "Mint missing proof_of_authorization",
+                ));
+            }
+        }
+        Operation::Burn {
+            proof_of_ownership, ..
+        } => {
+            if proof_of_ownership.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "Burn missing proof_of_ownership",
+                ));
+            }
+        }
+        // Device-key signed operations.
+        Operation::CreateToken { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("CreateToken missing signature"));
+            }
+        }
+        Operation::Lock { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("Lock missing signature"));
+            }
+        }
+        Operation::Unlock { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("Unlock missing signature"));
+            }
+        }
+        Operation::LockToken { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("LockToken missing signature"));
+            }
+        }
+        Operation::UnlockToken { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("UnlockToken missing signature"));
+            }
+        }
+        Operation::Generic { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("Generic missing signature"));
+            }
+        }
+        // DLV operations (embedded-key signed).
+        Operation::DlvCreate { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("DlvCreate missing signature"));
+            }
+        }
+        Operation::DlvUnlock { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("DlvUnlock missing signature"));
+            }
+        }
+        Operation::DlvClaim { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("DlvClaim missing signature"));
+            }
+        }
+        Operation::DlvInvalidate { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "DlvInvalidate missing signature",
+                ));
+            }
+        }
+        // Identity / structural operations carry a `proof` field.
+        Operation::Create { proof, .. }
+        | Operation::Update { proof, .. }
+        | Operation::AddRelationship { proof, .. }
+        | Operation::CreateRelationship { proof, .. }
+        | Operation::RemoveRelationship { proof, .. }
+        | Operation::Delete { proof, .. }
+        | Operation::Link { proof, .. }
+        | Operation::Unlink { proof, .. }
+        | Operation::Invalidate { proof, .. } => {
+            if proof.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "operation missing required proof",
+                ));
+            }
+        }
+        Operation::Recovery {
+            compromise_proof, ..
+        } => {
+            if compromise_proof.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "Recovery missing compromise_proof",
+                ));
+            }
+        }
+        // Operations that legitimately carry no authorization material at the
+        // transition layer.
+        Operation::Genesis | Operation::Noop | Operation::Receive { .. } => {}
+    }
+    Ok(())
+}
+
 /// Create a new state transition with random walk positions
 pub fn create_transition(
     current_state: &State,
@@ -390,76 +522,8 @@ pub fn create_transition(
     );
 
     // Fail-closed: operations that require authorization must carry it.
-    // Every signed operation type must have a non-empty signature.
-    match &transition.operation {
-        Operation::Transfer { .. } => {
-            log::info!(
-                "[create_transition] Transfer: proof_of_auth.len={} signature.len={}",
-                transition.proof_of_authorization.len(),
-                transition.signature.len()
-            );
-            if transition.proof_of_authorization.is_empty() {
-                log::error!("[create_transition] Transfer missing proof_of_authorization");
-                return Err(DsmError::invalid_operation(
-                    "Transfer missing proof_of_authorization (signature)",
-                ));
-            }
-            if transition.signature.is_empty() {
-                log::error!("[create_transition] Transfer missing signature");
-                return Err(DsmError::invalid_operation("Transfer missing signature"));
-            }
-        }
-        Operation::Mint {
-            proof_of_authorization,
-            ..
-        } if proof_of_authorization.is_empty() => {
-            return Err(DsmError::invalid_operation(
-                "Mint missing proof_of_authorization",
-            ));
-        }
-        Operation::Burn {
-            proof_of_ownership, ..
-        } if proof_of_ownership.is_empty() => {
-            return Err(DsmError::invalid_operation(
-                "Burn missing proof_of_ownership",
-            ));
-        }
-        // Device-key signed operations
-        Operation::CreateToken { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("CreateToken missing signature"));
-        }
-        Operation::Lock { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("Lock missing signature"));
-        }
-        Operation::Unlock { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("Unlock missing signature"));
-        }
-        Operation::LockToken { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("LockToken missing signature"));
-        }
-        Operation::UnlockToken { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("UnlockToken missing signature"));
-        }
-        Operation::Generic { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("Generic missing signature"));
-        }
-        // DLV operations (embedded-key signed)
-        Operation::DlvCreate { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("DlvCreate missing signature"));
-        }
-        Operation::DlvUnlock { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("DlvUnlock missing signature"));
-        }
-        Operation::DlvClaim { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation("DlvClaim missing signature"));
-        }
-        Operation::DlvInvalidate { signature, .. } if signature.is_empty() => {
-            return Err(DsmError::invalid_operation(
-                "DlvInvalidate missing signature",
-            ));
-        }
-        _ => {}
-    }
+    // Centralized rule — see `enforce_operation_authorization` below.
+    enforce_operation_authorization(&transition.operation)?;
 
     // Set position sequence
     transition.position_sequence = Some(positions);
@@ -1025,9 +1089,12 @@ fn apply_token_balance_delta(
                 })?
                 .to_string();
             // §8 Atomicity: all token ops MUST apply balance deltas in the
-            // same state transition. resolve_policy_commit handles both
-            // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            // same state transition. resolve_policy_commit returns the
+            // builtin policy_commit (ERA/dBTC) or fails closed for
+            // CPTA-anchored custom tokens — those flow via the
+            // `execute_on_relationship` path with policy_commit carried
+            // on the `BalanceDelta`, not through this direct-op path.
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let is_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
 
@@ -1116,7 +1183,7 @@ fn apply_token_balance_delta(
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Mint has malformed or empty token_id"))?
                 .to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1144,7 +1211,7 @@ fn apply_token_balance_delta(
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Burn has malformed or empty token_id"))?
                 .to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,

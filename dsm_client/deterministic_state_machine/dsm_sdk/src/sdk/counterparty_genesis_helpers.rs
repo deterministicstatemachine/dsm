@@ -212,7 +212,7 @@ pub fn create_genesis_binding(
 }
 
 // create_bilateral_branch + get_branch_tip_id deleted alongside HashChainSDK:
-// both were TODO-stubs that took a HashChainSDK but either ignored it
+// both were placeholder stubs that took a HashChainSDK but either ignored it
 // (`_hashchain_sdk`) or called `hashchain_sdk.merkle_root()` whose underlying
 // state-history tree is superseded by DeviceState's per-relationship SMT.
 // Zero external callers for either function.
@@ -233,8 +233,12 @@ pub async fn fetch_genesis_state(
     // Use a fixed small set of test nodes (deterministic; no network dependency)
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
-    // Threshold pinned to production minimum (3)
-    create_genesis_via_blind_mpc(device_id_arr, nodes, 3, None).await
+    // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
+    let k_dbrw = crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key(
+        "counterparty_genesis_helpers",
+    )
+    .map_err(dsm::types::error::DsmError::invalid_operation)?;
+    create_genesis_via_blind_mpc(device_id_arr, nodes, k_dbrw, None).await
 }
 
 /// Verify a Genesis state against known storage nodes
@@ -263,7 +267,6 @@ mod tests {
         GS {
             hash,
             initial_entropy: [0u8; 32],
-            threshold: 2,
             participants: Default::default(),
             merkle_root: None,
             device_id: Some([0x01; 32]),

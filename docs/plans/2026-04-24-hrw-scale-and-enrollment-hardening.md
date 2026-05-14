@@ -198,7 +198,7 @@ pub fn hrw_top_n<T: Clone>(addr: &[u8], nodes: &[T], n: usize, node_id_of: impl 
 - `hrw_top_n_returns_all_when_registry_smaller`: 2 nodes, n=6 → 2 entries.
 - `hrw_top_n_handles_empty`: empty nodes → empty result.
 - `hrw_top_n_tiebreak_uses_node_id`: synthetic case where two nodes produce equal scores (use a controlled mock by directly constructing entries with crafted inputs); verify node_id ascending wins.
-- **Bounded churn property** (the key property): 1000 random addresses, registry of 100 nodes; remove one node; assert that the set of addresses whose top-N changed is in [5, 30] (expected ~10 = 100 addresses × 1/N where N=10 not relevant here — recompute: with 100 nodes and N=6 replicas, removing one node should change top-6 for addrs where it was in top 7 — expected fraction 6/100 = 6% → ~60 of 1000). Adjust bounds to a generous interval [30, 90] to allow for variance.
+- **Bounded churn property** (the key property): 1000 random addresses, registry of 100 nodes, N=6 replicas; remove one node and assert that the set of addresses whose top-N changed is within `[30, 90]`. Rationale: under HRW with a uniform hash, removing one node from a registry of 100 changes the top-N set only for addresses where that node was previously in the top-(N+1), i.e. roughly an expected fraction of 6/100 = 6% (~60 of 1000); the `[30, 90]` interval accounts for sampling variance at this batch size.
 
 **Step 4.** Run `cargo test -p dsm_storage_node placement::tests` — all pass.
 
@@ -267,7 +267,7 @@ pub async fn get_replication_targets(&self, object_key: &str) -> Vec<pb::Storage
 
 ### Task 1.8 — Verify no remaining placement call sites use `permute_unbiased`
 
-**Step 1.** Run `Grep -n "permute_unbiased"` across the entire repo.
+**Step 1.** Run `grep -rn "permute_unbiased" .` across the entire repo (or `rg permute_unbiased` if ripgrep is available).
 
 **Step 2.** For each remaining usage, classify: (a) test code that intentionally tests `permute_unbiased` itself — leave alone, the function may be retained as a utility; (b) production code path for placement — migrate to HRW; (c) production code path for some non-placement randomization — leave alone.
 

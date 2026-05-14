@@ -35,7 +35,7 @@
 //! ## Module Organization
 //!
 //! - [`core`] — State machine, bridge traits, bilateral management, identity, token subsystem
-//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, Pedersen, DBRW, ChaCha20-Poly1305
+//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, DBRW, ChaCha20-Poly1305 (salted-BLAKE3 commitments via `dsm_domain_hasher`)
 //! - [`types`] — All protocol types: [`types::state_types::State`], [`types::error::DsmError`], identifiers, tokens
 //! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees
@@ -73,7 +73,15 @@ pub mod common;
 pub mod core;
 pub mod cpta;
 pub mod crypto;
-pub mod crypto_verification;
+// A separate dead-code attestation module previously lived here
+// (Issue #185 — all 4 findings). It exported types with zero
+// production callers anywhere in `dsm/` or `dsm_sdk/` (verified by
+// source inspection); the audit findings were all on a never-
+// executed path. Module removed entirely. If a real hardware-bound
+// attestation surface is later needed, the C-DBRW infrastructure in
+// `crypto::cdbrw_binding` is already wired through the SDK and is
+// the canonical entry point — see Issue #213.
+pub mod dlv;
 pub mod emissions;
 pub mod envelope;
 pub mod merkle;
@@ -96,6 +104,10 @@ use crate::types::error::DsmError;
 
 pub use crate::core::identity::TrustlessGenesisArtifacts;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUST_VERSION: &str = env!("DSM_RUSTC_VERSION");
+const TARGET: &str = env!("DSM_BUILD_TARGET");
+
 /// Returns the version of the SDK
 ///
 /// Retrieves the current version of the DSM SDK from cargo package metadata.
@@ -104,15 +116,15 @@ pub use crate::core::identity::TrustlessGenesisArtifacts;
 ///
 /// A string containing the version number in semver format (e.g., "0.1.0")
 pub fn version() -> String {
-    std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
+    VERSION.to_string()
 }
 
 /// Build information for debugging and support
 pub fn build_info() -> BuildInfo {
     BuildInfo {
-        version: std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-        rust_version: std::env::var("RUSTC_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-        target: std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string()),
+        version: VERSION.to_string(),
+        rust_version: RUST_VERSION.to_string(),
+        target: TARGET.to_string(),
         features: get_enabled_features(),
     }
 }
@@ -145,16 +157,21 @@ fn get_enabled_features() -> Vec<String> {
 }
 
 /// Expose core trustless genesis creation to SDK consumers.
+///
+/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
+/// `k_dbrw` is the device's DBRW binding per whitepaper §12 def.3 —
+/// callers obtain it from
+/// `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    threshold: usize,
+    k_dbrw: [u8; 32],
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, threshold, metadata, storage)
+    identity::create_trustless_genesis(device_id, storage_nodes, k_dbrw, metadata, storage)
         .await
         .map_err(DsmError::from)
 }
@@ -162,3 +179,20 @@ pub async fn create_trustless_genesis<
 // verify_trustless_identity wrapper deleted: zero external callers, and
 // the underlying impl was deleted (it relied on state_number reads
 // reconstructed from `state.hash[0] as u64` after §4.3 — meaningless).
+
+#[cfg(test)]
+mod tests {
+    use super::{build_info, version, VERSION};
+
+    #[test]
+    fn build_info_is_compile_time_stamped() {
+        let info = build_info();
+
+        assert_eq!(version(), VERSION);
+        assert_eq!(info.version, VERSION);
+        assert_ne!(info.rust_version, "unknown");
+        assert!(!info.rust_version.is_empty());
+        assert_ne!(info.target, "unknown");
+        assert!(!info.target.is_empty());
+    }
+}

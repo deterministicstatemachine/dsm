@@ -15,7 +15,7 @@ Terminology reference for the DSM protocol.
 | **CPTA** | Content-Addressed Token Policy Anchor. Binds token policies to their canonical content hash: `BLAKE3("DSM/cpta\0" \|\| canonical_bytes)`. |
 | **dBTC** | Deterministic Bitcoin. A 1:1 Bitcoin-backed token inside DSM. Bridge uses HTLCs on Bitcoin and DLVs on DSM. |
 | **DBRW** | Device-Bound Random Walk. Anti-cloning mechanism using dual-factor binding: silicon fingerprint + environment entropy. |
-| **DeTFi** | Decentralized Token Finance. DSM's framework for programmable token operations including DLVs, smart commitments, and atomic swaps. |
+| **SoFi** | Decentralized Token Finance. DSM's framework for programmable token operations including DLVs, smart commitments, and atomic swaps. |
 | **Device Tree** | Hierarchical structure aggregating per-device Sparse Merkle Trees into a global tree for cross-device verification. |
 | **DJTE** | Deterministic Join-Triggered Emissions. Token emission model where new tokens are minted deterministically when new participants join. |
 | **DLV** | Deterministic Limbo Vault. Time-locked vault with lifecycle states (PendingActive → Active → PendingClosure → Claimed). Used for Bitcoin bridge, atomic swaps, and conditional transfers. |
@@ -33,7 +33,7 @@ Terminology reference for the DSM protocol.
 | **ML-KEM-768** | Module-Lattice Key Encapsulation Mechanism (formerly Kyber). Post-quantum key exchange used for BLE sessions and TLS. |
 | **MPC** | Multi-Party Computation. Used for genesis creation — the MPC service contributes entropy that no single party controls. |
 | **PBI** | Platform Boot Identity. The bootstrap process that establishes device identity from DBRW entropy, device ID, and genesis hash. |
-| **Pedersen Commitment** | Cryptographic commitment scheme with hiding and binding properties. Used for token conservation proofs. |
+| **Salted-BLAKE3 Commitment** | Hiding + binding cryptographic commitment of the form `BLAKE3-256("DSM/<purpose>\0" \|\| blinding \|\| value)` where `blinding` is 32 bytes of CSPRNG output used once per commit. Replaces the previously-used (and misnamed) "Quantum-Resistant Pedersen" commitments — see Issue #184 Finding #2. Used for DLV vault content commitments via `vault::limbo_vault::dlv_content_commitment`. |
 | **PRLSM** | Partitioned Replicated Lightweight State Machine. DSM's approach to statelessness across the network. |
 | **Signet** | Bitcoin's shared test network. Public test coins, public blocks, and realistic confirmation flow without using mainnet funds. |
 | **SDK_READY** | Atomic flag in the Rust SDK that gates all post-bootstrap operations. Set after successful PBI initialization. |

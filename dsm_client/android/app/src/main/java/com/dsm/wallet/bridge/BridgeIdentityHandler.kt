@@ -710,7 +710,15 @@ internal object BridgeIdentityHandler {
 
             if (!cachedDevId.isNullOrEmpty() && !cachedGenHash.isNullOrEmpty()) {
                 Log.i(logTag, "createGenesis: identity already exists, clearing for fresh genesis")
-                prefs.edit().clear().apply()
+                clearGenesisArtifacts(
+                    prefs = prefs,
+                    sdkContextInitialized = sdkContextInitialized,
+                    keyDeviceId = keyDeviceId,
+                    keyGenesisHash = keyGenesisHash,
+                    keyGenesisEnvelope = keyGenesisEnvelope,
+                    keyDbrwSalt = keyDbrwSalt,
+                    logTag = logTag,
+                )
             }
 
             val envelopeBytes = requestGenesisEnvelopeViaIngress(locale, networkId, entropyBytes)
@@ -778,7 +786,15 @@ internal object BridgeIdentityHandler {
             val cachedGenHash = prefs.getString(keyGenesisHash, null)
             if (!cachedDevId.isNullOrEmpty() && !cachedGenHash.isNullOrEmpty()) {
                 Log.i(logTag, "captureDeviceBindingForGenesisEnvelope: identity already exists, clearing for fresh install")
-                prefs.edit().clear().apply()
+                clearGenesisArtifacts(
+                    prefs = prefs,
+                    sdkContextInitialized = sdkContextInitialized,
+                    keyDeviceId = keyDeviceId,
+                    keyGenesisHash = keyGenesisHash,
+                    keyGenesisEnvelope = keyGenesisEnvelope,
+                    keyDbrwSalt = keyDbrwSalt,
+                    logTag = logTag,
+                )
             }
 
             val installInput = parseGenesisEnvelopeInstallInput(genesisEnvelopeBytes)

@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task.
 
-> **Companion plan:** `~/.claude/plans/glittery-singing-treehouse.md` covers HRW migration, storage-node scale wiring, and multi-device enrollment hardening. **That plan's Phase 3 (enrollment) sits on top of THIS plan.** Do not start Phase 3 of the companion plan until Phases A and B of this plan are complete.
+> **Companion plan:** [`docs/plans/2026-04-24-hrw-scale-and-enrollment-hardening.md`](./2026-04-24-hrw-scale-and-enrollment-hardening.md) covers HRW migration, storage-node scale wiring, and multi-device enrollment hardening. **That plan's Phase 3 (enrollment) sits on top of THIS plan.** Do not start Phase 3 of the companion plan until Phases A and B of this plan are complete.
 
 ---
 

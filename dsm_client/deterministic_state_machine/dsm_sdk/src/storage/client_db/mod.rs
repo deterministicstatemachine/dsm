@@ -21,6 +21,7 @@ mod bilateral_sessions;
 pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
+pub mod cert_chain;
 mod contacts;
 mod dlv_receipts;
 mod export;
@@ -49,6 +50,7 @@ pub use bcr::*;
 pub use bilateral_sessions::*;
 pub use bitcoin_accounts::*;
 pub use ble_chunk_buffer::*;
+pub use cert_chain::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
 pub use export::*;
@@ -130,6 +132,8 @@ pub fn init_database() -> Result<()> {
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
         ensure_stitched_receipts_sig_b_nullable(&conn)?;
+        ensure_bilateral_sessions_created_at_step(&conn)?;
+        ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
         migrate_legacy_withdrawal_states(&conn)?;
 
         {
@@ -295,6 +299,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             alias                       TEXT NOT NULL,
             genesis_hash                BLOB NOT NULL,
             public_key                  BLOB,
+            kyber_public_key            BLOB,
             chain_tip                   BLOB,
             added_at                    INTEGER NOT NULL,
             verified                    INTEGER NOT NULL,
@@ -435,7 +440,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             counterparty_signature    BLOB,
             created_at_step           INTEGER NOT NULL,
             sender_ble_address        TEXT,
-            updated_at                INTEGER NOT NULL
+            updated_at                INTEGER NOT NULL,
+            stitched_receipt_bytes    BLOB
         );
 
         -- §5.3 Atomic bilateral commit: persists the confirm envelope atomically
@@ -668,6 +674,33 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_in_flight_withdrawal_legs_withdrawal
             ON in_flight_withdrawal_legs(withdrawal_id, state);
+
+        -- Per-relationship cert chain heads (whitepaper §11.1 ek-cert chain).
+        -- One row per (relationship_key, side). `side` is 0 for the local
+        -- device's chain head (used to sign outgoing certs and to advance
+        -- after acceptance) and 1 for the counterparty's chain head (used
+        -- to verify incoming certs).
+        --
+        -- chain_head_pubkey is the SPHINCS+ public key of the prior signer:
+        -- AK_pk at step 0, EK_pk_n for n > 0.
+        --
+        -- chain_head_sk_encrypted is the ChaCha20-Poly1305 ciphertext of
+        -- the corresponding SECRET key (for Local rows only; NULL for
+        -- Counterparty), encrypted under a key derived from K_DBRW so
+        -- extracted ciphertext cannot be used on a different device.
+        -- Used at receipt creation time to sign cert_{n+1}; wiped after
+        -- consumption when chain_head advances.
+        --
+        -- step_count tracks the current chain length for this relationship.
+        CREATE TABLE IF NOT EXISTS cert_chain_heads(
+            relationship_key        BLOB NOT NULL,
+            side                    INTEGER NOT NULL CHECK(side IN (0, 1)),
+            chain_head_pubkey       BLOB NOT NULL,
+            chain_head_sk_encrypted BLOB,
+            step_count              INTEGER NOT NULL DEFAULT 0,
+            updated_at              INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, side)
+        );
         "#,
         );
         match res {
@@ -714,6 +747,26 @@ fn ensure_bilateral_sessions_created_at_step(conn: &Connection) -> Result<()> {
 
     conn.execute(
         "ALTER TABLE bilateral_sessions ADD COLUMN created_at_step INTEGER NOT NULL DEFAULT 0;",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Add the `stitched_receipt_bytes` column to existing `bilateral_sessions`
+/// tables created before per-step EK signing landed. The column carries the
+/// sender-side cached signed receipt so post-crash recovery can reuse it
+/// verbatim — see `BilateralSessionRecord::stitched_receipt_bytes`.
+fn ensure_bilateral_sessions_stitched_receipt_bytes(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(bilateral_sessions)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in cols {
+        if col? == "stitched_receipt_bytes" {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        "ALTER TABLE bilateral_sessions ADD COLUMN stitched_receipt_bytes BLOB;",
         [],
     )?;
     Ok(())
@@ -1462,6 +1515,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: genesis_hash.to_vec(),
             public_key: vec![7u8; 32],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 1,
             verified: true,
@@ -2009,6 +2063,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0x33u8; 32].to_vec(),
             public_key: vec![0x44u8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(original_tip.to_vec()),
             added_at: 7,
             verified: true,
@@ -2029,6 +2084,7 @@ mod tests {
             alias: "peer-fixed".to_string(),
             genesis_hash: [0x55u8; 32].to_vec(),
             public_key: vec![0x66u8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 999,
             verified: true,

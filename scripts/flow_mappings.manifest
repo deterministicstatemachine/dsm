@@ -5,8 +5,8 @@ dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.send'|fronte
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendSmart'|frontend smart online transfer maps to wallet.sendSmart
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('message.send'|frontend online message maps to message.send
 dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
-dsm_client/frontend/src/dsm/WebViewBridge.ts|buildRouterInvokeIngressRequest|bridge builds routerInvoke via ingress helper
-dsm_client/frontend/src/dsm/WebViewBridge.ts|buildRouterQueryIngressRequest|bridge builds routerQuery via ingress helper
+dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts|buildRouterInvokeIngressRequest|bridge builds routerInvoke via ingress helper
+dsm_client/frontend/src/dsm/WebViewBridge/transportCore.ts|buildRouterQueryIngressRequest|bridge builds routerQuery via ingress helper
 dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|case: 'routerInvoke'|ingress routerInvoke payload case exists
 dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|case: 'routerQuery'|ingress routerQuery payload case exists
 dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|nativeBoundaryIngress|native boundary ingress dispatch method exists

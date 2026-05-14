@@ -16,7 +16,6 @@ Use `.\scripts\dev.ps1` on Windows instead of `make`.
 
 | Workflow | macOS | Linux | Windows |
 |----------|-------|-------|---------|
-| Rust, frontend, `dsm-gen` | Yes | Yes | Yes |
 | Android APK build/install | Yes | Yes | WSL2 |
 | Local storage nodes (optional) | Yes | Yes | Yes |
 | Bash/Zsh helper scripts | Yes | Yes | WSL2 |
@@ -30,7 +29,6 @@ Windows contributors can do normal development natively. Use WSL2 when you need 
 - App configured to connect to 6 production AWS storage nodes (no local setup required)
 - Base Rust/frontend toolchain validated with the supported onboarding commands
 - Optional Android APK build and device install
-- Optional `dsm-gen` verification for spec-first work
 
 ## Storage Nodes
 

@@ -206,8 +206,9 @@ pub fn derive_progress_u64(context: &[u8]) -> u64 {
 
     // Default path for uninitialized state or lock contention
     let hash = derive_progress_hash(context);
-    #[allow(clippy::unwrap_used)]
-    u64::from_le_bytes(hash[..8].try_into().unwrap())
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&hash[..8]);
+    u64::from_le_bytes(bytes)
 }
 
 /// ---- BACKWARD COMPATIBILITY APIS ----
@@ -314,9 +315,11 @@ mod tests {
 
         let hash = derive_progress_hash(b"test");
         let u64_val = derive_progress_u64(b"test");
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&hash[..8]);
 
         // Should still work with default path
         assert_ne!(hash, [0u8; 32]);
-        assert_eq!(u64_val, u64::from_le_bytes(hash[..8].try_into().unwrap()));
+        assert_eq!(u64_val, u64::from_le_bytes(bytes));
     }
 }
