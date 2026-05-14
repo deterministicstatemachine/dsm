@@ -2106,7 +2106,9 @@ fn apply_djte_transition(
     next.remaining_supply = prev.remaining_supply.saturating_sub(emission_amount);
     next.add_activation(jap)
         .expect("DJTE activation for next state");
-    next.spent_smt.mark_spent(jap_hash);
+    next.spent_smt
+        .mark_spent(jap_hash)
+        .expect("DJTE spent_smt mark_spent");
 
     let receipt_digest = receipt.digest();
     let count_root = next.count_smt.root();
