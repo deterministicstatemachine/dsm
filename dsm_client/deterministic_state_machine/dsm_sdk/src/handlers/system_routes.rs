@@ -72,7 +72,15 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             .map_err(|e| format!("MPC genesis failed (strict; no alternate path): {e}"))?;
 
         let device_id = res.genesis_device_id.clone();
-        let genesis_hash = res.genesis_hash.clone().unwrap_or_else(|| vec![0u8; 32]);
+        let genesis_hash = res.genesis_hash.clone().ok_or_else(|| {
+            "system.genesis: storage SDK returned missing genesis_hash".to_string()
+        })?;
+        if genesis_hash.len() != 32 {
+            return Err(format!(
+                "system.genesis: storage SDK returned invalid genesis_hash length {}, expected 32",
+                genesis_hash.len()
+            ));
+        }
         crate::install_canonical_binding_key(k_dbrw.to_vec())
             .map_err(|e| format!("system.genesis: install C-DBRW binding failed: {e}"))?;
         #[cfg(all(target_os = "android", feature = "jni"))]
@@ -107,18 +115,16 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             verification_step: None,
         };
 
-        match crate::storage::client_db::store_genesis_record_with_verification(&genesis_record) {
-            Ok(_) => log::info!("system.genesis: genesis record stored successfully"),
-            Err(e) => log::warn!("system.genesis: failed to store genesis record: {}", e),
-        }
+        crate::storage::client_db::store_genesis_record_with_verification(&genesis_record)
+            .map_err(|e| format!("system.genesis: failed to store genesis record: {e}"))?;
+        log::info!("system.genesis: genesis record stored successfully");
 
-        match crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32) {
-            Ok(_) => log::info!(
-                "system.genesis: wallet_state ensured for device={}",
-                &device_id_b32[..8]
-            ),
-            Err(e) => log::warn!("system.genesis: failed to ensure wallet_state: {}", e),
-        }
+        crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32)
+            .map_err(|e| format!("system.genesis: failed to ensure wallet_state: {e}"))?;
+        log::info!(
+            "system.genesis: wallet_state ensured for device={}",
+            &device_id_b32[..8]
+        );
 
         let resp = generated::GenesisCreated {
             device_id: device_id.clone(),

@@ -50,7 +50,6 @@ pub use error::DsmCoreError;
 
 // Re-export bridge types for convenience
 pub use bridge::{
-    AppRouter, UnilateralHandler, BilateralHandler, BootstrapHandler, install_app_router,
-    install_unilateral_handler, install_bilateral_handler, install_bootstrap_handler,
-    handle_envelope_universal,
+    AppRouter, UnilateralHandler, BilateralHandler, install_app_router, install_unilateral_handler,
+    install_bilateral_handler, handle_envelope_universal,
 };
