@@ -68,7 +68,7 @@ async fn register_test_device(state: &AppState, device_b32: &str) {
 async fn t_a_unpaid_device_rejected() {
     let state = make_state().await;
     let device_b32 = b32_of(&[0xAA; 32]);
-    let err = dsm_storage_node::api::paidk::require_paidk(&state, &device_b32)
+    let err = dsm_storage_node::api::vault::paidk::require_paidk(&state, &device_b32)
         .await
         .expect_err("unpaid device must be rejected");
     assert_eq!(err, StatusCode::PAYMENT_REQUIRED);
@@ -83,7 +83,7 @@ async fn t_b_paid_device_accepted() {
     db::mark_paidk_satisfied(&state.db_pool, &device_b32)
         .await
         .expect("mark_paidk_satisfied");
-    dsm_storage_node::api::paidk::require_paidk(&state, &device_b32)
+    dsm_storage_node::api::vault::paidk::require_paidk(&state, &device_b32)
         .await
         .expect("paid device must pass the gate");
 }
@@ -96,7 +96,7 @@ async fn t_c_malformed_receipt_does_not_unlock_gate() {
     let device_b32 = b32_of(&[0xCC; 32]);
 
     // Confirm baseline: unpaid.
-    let err = dsm_storage_node::api::paidk::require_paidk(&state, &device_b32)
+    let err = dsm_storage_node::api::vault::paidk::require_paidk(&state, &device_b32)
         .await
         .expect_err("baseline unpaid");
     assert_eq!(err, StatusCode::PAYMENT_REQUIRED);
@@ -111,7 +111,7 @@ async fn t_c_malformed_receipt_does_not_unlock_gate() {
     );
 
     // And the gate still rejects.
-    let err2 = dsm_storage_node::api::paidk::require_paidk(&state, &device_b32)
+    let err2 = dsm_storage_node::api::vault::paidk::require_paidk(&state, &device_b32)
         .await
         .expect_err("still unpaid after malformed attempt");
     assert_eq!(err2, StatusCode::PAYMENT_REQUIRED);
@@ -130,7 +130,7 @@ async fn t_d_idempotent_already_paid() {
     db::mark_paidk_satisfied(&state.db_pool, &device_b32)
         .await
         .expect("second mark_paidk_satisfied (idempotent)");
-    dsm_storage_node::api::paidk::require_paidk(&state, &device_b32)
+    dsm_storage_node::api::vault::paidk::require_paidk(&state, &device_b32)
         .await
         .expect("paid device must still pass after idempotent re-mark");
 }
@@ -145,7 +145,7 @@ async fn t_e_cross_endpoint_sweep_unpaid_rejects() {
     // Five sweeps stand in for the three gated handlers calling the helper
     // (object put, object delete, b0x submit) plus headroom.
     for _ in 0..5 {
-        let err = dsm_storage_node::api::paidk::require_paidk(&state, &device_b32)
+        let err = dsm_storage_node::api::vault::paidk::require_paidk(&state, &device_b32)
             .await
             .expect_err("every invocation of the helper must reject unpaid");
         assert_eq!(err, StatusCode::PAYMENT_REQUIRED);

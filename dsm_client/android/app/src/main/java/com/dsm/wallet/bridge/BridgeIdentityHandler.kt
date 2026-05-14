@@ -696,7 +696,15 @@ internal object BridgeIdentityHandler {
 
             if (!cachedDevId.isNullOrEmpty() && !cachedGenHash.isNullOrEmpty()) {
                 Log.i(logTag, "createGenesis: identity already exists, clearing for fresh genesis")
-                prefs.edit().clear().apply()
+                clearGenesisArtifacts(
+                    prefs = prefs,
+                    sdkContextInitialized = sdkContextInitialized,
+                    keyDeviceId = keyDeviceId,
+                    keyGenesisHash = keyGenesisHash,
+                    keyGenesisEnvelope = keyGenesisEnvelope,
+                    keyDbrwSalt = keyDbrwSalt,
+                    logTag = logTag,
+                )
             }
 
             val measurements = collectBootstrapMeasurements(

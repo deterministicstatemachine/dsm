@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{http::HeaderValue, Extension, Router};
+use axum::{http::HeaderValue, middleware, Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
 
 use clap::Parser;
@@ -31,7 +31,7 @@ static PROM_HANDLE: OnceCell<metrics_exporter_prometheus::PrometheusHandle> = On
 
 use dsm_storage_node::{api, auth, db, replication, AppState};
 
-use api::network_config::NetworkDetector;
+use api::infra::network_config::NetworkDetector;
 
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "DSM Core Team")]
@@ -44,6 +44,8 @@ struct Opts {
     node_index: Option<usize>,
     #[clap(long, help = "Use automatic network detection instead of config file")]
     auto_detect: bool,
+    #[clap(long, help = "Disable rate limiting for throughput benchmarking")]
+    benchmark_mode: bool,
 }
 
 struct ServerConfig {
@@ -154,7 +156,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             let mut material = Vec::new();
             material.extend_from_slice(hostname.as_bytes());
             material.extend_from_slice(&port.to_be_bytes());
-            text_id::encode_base32_crockford(&api::hardening::blake3_tagged(
+            text_id::encode_base32_crockford(&api::infra::hardening::blake3_tagged(
                 "DSM/node-id",
                 &material,
             ))
@@ -175,52 +177,77 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
 }
 
 /// Build the app and return `Router<()>`.
-fn build_router(state: Arc<AppState>, config: &ServerConfig) -> Router<()> {
+fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: bool) -> Router<()> {
+    let public_rate_limiter = if benchmark_mode {
+        log::info!("BENCHMARK MODE: rate limiting disabled for all public endpoints");
+        Arc::new(api::infra::rate_limit::RateLimiter::new_bypass())
+    } else {
+        Arc::new(api::infra::rate_limit::RateLimiter::new())
+    };
+    let public_rate_layer = middleware::from_fn_with_state(
+        public_rate_limiter.clone(),
+        api::infra::rate_limit::rate_limit_by_ip,
+    );
+
     // Start with deterministic storage APIs you already have
     // (merge only the routers that are public & compile cleanly).
     // Object store reads (GET) are public; writes (PUT/DELETE) are behind device_auth
     // to prevent unauthenticated deletion or modification of vault advertisements.
-    let object_read_router = api::object_store::create_router(state.clone());
+    let object_read_router =
+        api::objects::store::create_router(state.clone()).layer(public_rate_layer.clone());
     let object_write_auth_state = Arc::new(auth::AuthState {
         db_pool: state.db_pool.clone(),
     });
-    let object_write_router = api::object_store::create_write_router()
+    let object_write_router = api::objects::store::create_write_router()
         .layer(axum::middleware::from_fn_with_state(
             object_write_auth_state,
             auth::device_auth,
         ))
         .layer(Extension(state.clone()));
-    let object_list_router = api::object_list::create_router(state.clone());
-    let registry_router = api::registry::create_router(state.clone());
+    let object_list_router =
+        api::objects::list::create_router(state.clone()).layer(public_rate_layer.clone());
+    let registry_router =
+        api::registry::core::create_router(state.clone()).layer(public_rate_layer.clone());
     // Policy router is transport-only and signature-free; safe to expose.
-    let policy_router = api::policy::create_router(state.clone());
+    let policy_router =
+        api::vault::policy::create_router(state.clone()).layer(public_rate_layer.clone());
     // Identity mirrors
-    let devtree_router = api::identity_devtree::create_router(state.clone());
-    let tips_router = api::identity_tips::create_router(state.clone());
+    let devtree_router =
+        api::identity::devtree::create_router(state.clone()).layer(public_rate_layer.clone());
+    let tips_router =
+        api::identity::tips::create_router(state.clone()).layer(public_rate_layer.clone());
     // Genesis mirror
-    let genesis_router = api::genesis::create_router(state.clone());
+    let genesis_router =
+        api::identity::genesis::create_router(state.clone()).layer(public_rate_layer.clone());
     // DLV slot + Recovery Capsule
-    let dlv_slot_router = api::dlv_slot::create_router(state.clone());
-    let recovery_capsule_router = api::recovery_capsule::create_router(state.clone());
+    let dlv_slot_router =
+        api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
+    let recovery_capsule_router =
+        api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
     // Device registration
-    let device_router = api::device_api::create_router(state.clone());
+    let device_router =
+        api::identity::device_api::create_router(state.clone()).layer(public_rate_layer.clone());
     // PaidK spend-gate
-    let paidk_router = api::paidk::create_router(state.clone());
+    let paidk_router =
+        api::vault::paidk::create_router(state.clone()).layer(public_rate_layer.clone());
     // Registry scaling (signals, applicants, registry queries)
-    let registry_scaling_router = api::registry_scaling::create_router(state.clone());
+    let registry_scaling_router =
+        api::registry::scaling::create_router(state.clone()).layer(public_rate_layer.clone());
     // DrainProof & stake exit
-    let drain_proof_router = api::drain_proof::create_router(state.clone());
+    let drain_proof_router =
+        api::registry::drain::create_router(state.clone()).layer(public_rate_layer.clone());
     // Gossip protocol for replication
-    let gossip_router = api::gossip::gossip_routes(state.clone());
+    let gossip_router = api::transport::gossip::gossip_routes(state.clone());
     // Node discovery for SDK auto-discovery
-    let discovery_router = api::discovery::create_router(state.clone());
+    let discovery_router =
+        api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
 
     // Admin endpoints (cleanup, etc.)
-    let admin_router = api::admin::router(state.clone());
+    let admin_router = api::infra::admin::router(state.clone());
     // Registry scaling admin endpoints (update trigger, seed)
-    let registry_admin_router = api::registry_scaling::admin_router(state.clone()); // Compose routes and layers, then install `state`.
-                                                                                    // Returning `Router<()>` here is important (see Axum docs).
-                                                                                    // Request metrics for Prometheus scraping
+    let registry_admin_router = api::registry::scaling::admin_router(state.clone()); // Compose routes and layers, then install `state`.
+                                                                                     // Returning `Router<()>` here is important (see Axum docs).
+                                                                                     // Request metrics for Prometheus scraping
 
     let app = Router::new()
         // Health check endpoint (lightweight, no DB access)
@@ -294,7 +321,7 @@ async fn async_main() -> Result<()> {
     let opts = Opts::parse();
 
     // Enforce production safety in release builds.
-    if let Err(msg) = api::hardening::enforce_release_safety(&opts.config) {
+    if let Err(msg) = api::infra::hardening::enforce_release_safety(&opts.config) {
         anyhow::bail!(msg);
     }
 
@@ -406,7 +433,7 @@ async fn async_main() -> Result<()> {
 
     let app_state = Arc::new(state.clone());
 
-    let mut app = build_router(app_state.clone(), &server_config);
+    let mut app = build_router(app_state.clone(), &server_config, opts.benchmark_mode);
 
     // NOTE: No wall-clock maintenance loop. Maintenance cycles are invoked explicitly
     // via admin tooling with deterministic tick inputs.
@@ -416,7 +443,7 @@ async fn async_main() -> Result<()> {
     let auth_state = Arc::new(auth::AuthState {
         db_pool: db_pool.clone(),
     });
-    let b0x_router = api::unilateral_api::router(Arc::new(state.clone()), auth_state);
+    let b0x_router = api::transport::b0x::router(Arc::new(state.clone()), auth_state);
     app = app.merge(b0x_router);
 
     info!(

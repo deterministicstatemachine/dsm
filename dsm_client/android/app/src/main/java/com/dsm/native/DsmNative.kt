@@ -20,27 +20,6 @@ object DsmNative {
     }
 
     /**
-     * Create genesis via MPC (strict, no local alternate path).
-     * Implemented in dsm_sdk/src/jni/create_genesis.rs
-     * @param locale User locale (e.g., "en-US")
-     * @param networkId Network identifier (e.g., "dev", "prod")
-     * @param deviceEntropy 32-byte device-specific entropy
-     * @return Protobuf-encoded Envelope with GenesisCreated payload, or empty array on error
-     */
-    @JvmStatic
-    external fun createGenesis(locale: String, networkId: String, deviceEntropy: ByteArray): ByteArray
-
-    @JvmStatic
-    fun createGenesisStrict(locale: String, networkId: String, deviceEntropy: ByteArray): ByteArray {
-        val out = createGenesis(locale, networkId, deviceEntropy)
-        if (out.isEmpty()) {
-            throw DsmNativeException("createGenesis returned empty bytes")
-        }
-        return out
-    }
-    
-
-    /**
      * Initialize the UnilateralSDK and inject it into the bilateral handler.
      * Must be called after genesis creation and SDK context initialization.
      * Implemented in dsm_sdk/src/jni/unified_protobuf_bridge.rs
@@ -49,13 +28,6 @@ object DsmNative {
     @JvmStatic
     external fun initializeBilateralSdk(): Boolean
 
-    @JvmStatic
-    fun initializeBilateralSdkStrict() {
-        if (!initializeBilateralSdk()) {
-            throw DsmNativeException("initializeBilateralSdk returned false")
-        }
-    }
-
     /**
      * Extract device_id and genesis_hash from a GenesisCreated envelope
      * @param envelopeBytes Protobuf-encoded envelope
@@ -63,15 +35,6 @@ object DsmNative {
      */
     @JvmStatic
     external fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray
-
-    @JvmStatic
-    fun extractGenesisIdentityStrict(envelopeBytes: ByteArray): ByteArray {
-        val out = extractGenesisIdentity(envelopeBytes)
-        if (out.size != 64) {
-            throw DsmNativeException("extractGenesisIdentity returned ${out.size} bytes")
-        }
-        return out
-    }
 }
 
 class DsmNativeException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

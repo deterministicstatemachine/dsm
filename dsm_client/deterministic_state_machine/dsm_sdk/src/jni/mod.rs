@@ -53,7 +53,6 @@ pub mod unified_protobuf_bridge;
 
 /// Create genesis via MPC (Android only)
 #[cfg(target_os = "android")]
-pub mod create_genesis;
 #[cfg(target_os = "android")]
 pub mod secondary_device;
 
@@ -66,7 +65,6 @@ pub use crate::sdk::session_manager::set_sdk_ready;
 
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
-pub use self::create_genesis::*;
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
 pub use self::secondary_device::*;

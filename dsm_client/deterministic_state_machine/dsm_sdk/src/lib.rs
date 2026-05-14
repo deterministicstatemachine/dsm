@@ -102,7 +102,7 @@
 pub mod policy;
 
 #[allow(dead_code)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn _dsm_builtins_guard() {
     // Zero-cost unless placeholder commit replaced; hash runs once on load.
     crate::policy::builtins::assert_builtins_sound();

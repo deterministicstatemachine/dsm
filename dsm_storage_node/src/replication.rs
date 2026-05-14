@@ -12,7 +12,7 @@
 //! - Network partition tolerance
 //! - Clockless operation using deterministic ticks
 
-use crate::api::hardening::{blake3_tagged, permute_unbiased};
+use crate::api::infra::hardening::{blake3_tagged, permute_unbiased};
 use crate::db;
 use crate::AppState;
 use dsm::types::proto as pb;

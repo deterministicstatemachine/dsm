@@ -3252,7 +3252,7 @@ mod tests {
             id: [0x55; 32],
             creator_public_key: vec![0x11; 32],
             reference_state_hash: [0x22; 32],
-            ..LimboVault::default()
+            ..Default::default()
         };
 
         // Round-trip via the wire types — exactly what loading from disk does.

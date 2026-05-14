@@ -98,13 +98,6 @@ object Unified {
     @Keep @JvmStatic fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray =
         UnifiedNativeApi.processEnvelopeV3WithAddress(envelope, deviceAddress)
     /**
-     * Extract device_id and genesis_hash from a GenesisCreated envelope
-     * Returns byte array: [device_id 32 bytes][genesis_hash 32 bytes] or empty on error
-     */
-    @Keep @JvmStatic fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray =
-        UnifiedNativeApi.extractGenesisIdentity(envelopeBytes)
-
-    /**
      * Fetch all token balances (strict, protobuf-encoded).
      * Returns: ByteArray (protobuf-encoded TokenBalanceView[])
      */

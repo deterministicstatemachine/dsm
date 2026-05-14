@@ -1,7 +1,7 @@
 //! Storage node DB layer (clean, DLV-only)
 //! Minimal schema + helpers used by the DLV-backed object store.
 
-use crate::api::hardening::{BBYTES, BEV};
+use crate::api::infra::hardening::{BBYTES, BEV};
 use crate::timing::TimingStrategy;
 use anyhow::{anyhow, Result};
 use deadpool_postgres::Runtime; // Added Runtime import

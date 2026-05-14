@@ -10,8 +10,6 @@
 //! - **Bilateral invocations** (`bilateral.*`) are decoded into their specific protobuf
 //!   request types and forwarded to the [`BilateralHandler`].
 //! - **Recovery operations** are delegated to the [`RecoveryHandler`].
-//! - **Bootstrap operations** (`system.genesis`) use the [`BootstrapHandler`] for early
-//!   genesis flows before the full SDK runtime is available.
 //!
 //! Handlers are installed at runtime via `install_*` functions, stored in global `RwLock`
 //! slots, and retrieved on each dispatch. This allows the SDK to upgrade from a bootstrap
@@ -34,8 +32,6 @@ static UNILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn UnilateralHandler>>>> =
 static BILATERAL_HANDLER: Lazy<RwLock<Option<Arc<dyn BilateralHandler>>>> =
     Lazy::new(|| RwLock::new(None));
 static RECOVERY_HANDLER: Lazy<RwLock<Option<Arc<dyn RecoveryHandler>>>> =
-    Lazy::new(|| RwLock::new(None));
-static BOOTSTRAP_HANDLER: Lazy<RwLock<Option<Arc<dyn BootstrapHandler>>>> =
     Lazy::new(|| RwLock::new(None));
 
 /// Error code returned when a vector proof exceeds the maximum allowed byte size.
@@ -174,11 +170,6 @@ pub trait RecoveryHandler: Send + Sync {
     ) -> Result<gp::OpResult, String>;
 }
 
-/// Bootstrap handler trait for early genesis/system operations before SDK is ready
-pub trait BootstrapHandler: Send + Sync {
-    fn handle_system_genesis(&self, req: gp::SystemGenesisRequest) -> Result<Vec<u8>, String>;
-}
-
 /// Install (or replace) an application router for integrations that rely on the core crate.
 pub fn install_app_router(router: Arc<dyn AppRouter>) -> Result<(), DsmError> {
     let mut guard = APP_ROUTER.write().map_err(|_| DsmError::LockError)?;
@@ -249,23 +240,6 @@ pub fn install_recovery_handler(handler: Arc<dyn RecoveryHandler>) {
     }
 }
 
-/// Install a bootstrap handler for early system.genesis operations.
-pub fn install_bootstrap_handler(handler: Arc<dyn BootstrapHandler>) {
-    let mut guard = match BOOTSTRAP_HANDLER.write() {
-        Ok(g) => g,
-        Err(_) => {
-            log::warn!("[BRIDGE] Bootstrap handler lock poisoned");
-            return;
-        }
-    };
-    if guard.is_none() {
-        *guard = Some(handler);
-        log::info!("[BRIDGE] Bootstrap handler installed successfully");
-    } else {
-        log::warn!("[BRIDGE] Bootstrap handler already installed (idempotent call)");
-    }
-}
-
 #[inline]
 fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
@@ -301,11 +275,6 @@ fn recovery_handler() -> Option<Arc<dyn RecoveryHandler>> {
     RECOVERY_HANDLER.read().ok()?.clone()
 }
 
-#[inline]
-fn bootstrap_handler() -> Option<Arc<dyn BootstrapHandler>> {
-    BOOTSTRAP_HANDLER.read().ok()?.clone()
-}
-
 /// Reset all bridge handlers for testing.
 ///
 /// This is compiled only when the `testing` feature is enabled in `dsm`.
@@ -321,9 +290,6 @@ pub fn reset_bridge_handlers_for_tests() {
         *guard = None;
     }
     if let Ok(mut guard) = RECOVERY_HANDLER.write() {
-        *guard = None;
-    }
-    if let Ok(mut guard) = BOOTSTRAP_HANDLER.write() {
         *guard = None;
     }
 }
@@ -596,17 +562,6 @@ fn envelope_error(code: u32, message: &str) -> gp::Envelope {
     }
 }
 
-// System.genesis handler - delegates to bootstrap handler if available
-fn handle_system_genesis(req: &gp::SystemGenesisRequest) -> Result<Vec<u8>, String> {
-    if let Some(handler) = bootstrap_handler() {
-        log::info!("[BRIDGE] Routing system.genesis to bootstrap handler");
-        handler.handle_system_genesis(req.clone())
-    } else {
-        log::error!("[BRIDGE] system.genesis called but no bootstrap handler installed!");
-        Err("No bootstrap handler installed".to_string())
-    }
-}
-
 /// Handle universal envelopes within the core crate.
 ///
 /// The real runtime dispatcher lives in the SDK. The core returns structured
@@ -635,7 +590,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                 let op_id = op.op_id.clone();
 
                 let result = match op.kind {
-                    // -------- Query routing (app + special-case system.genesis) --------
+                    // -------- Query routing --------
                     Some(gp::universal_op::Kind::Query(query)) => {
                         log::info!(
                             "[BRIDGE] Query received: path='{}' (len={}) bytes={:?}",
@@ -643,76 +598,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                             query.path.len(),
                             query.path.as_bytes()
                         );
-                        // Special-case "system.genesis" to allow MPC-only bootstrap from tests.
-                        if query.path == "system.genesis" {
-                            // Decode ArgPack first, then parse the body as SystemGenesisRequest
-                            let arg_bytes = query
-                                .params
-                                .as_ref()
-                                .map(|p| p.encode_to_vec())
-                                .unwrap_or_default();
-                            log::info!(
-                                "[BRIDGE] system.genesis query received, ArgPack bytes len={}",
-                                arg_bytes.len()
-                            );
-
-                            match gp::ArgPack::decode(arg_bytes.as_slice()) {
-                                Ok(arg_pack) => {
-                                    let body: Vec<u8> = arg_pack.body;
-                                    log::info!(
-                                        "[BRIDGE] ArgPack decoded: body len={} (codec={:?})",
-                                        body.len(),
-                                        arg_pack.codec
-                                    );
-                                    match gp::SystemGenesisRequest::decode(body.as_slice()) {
-                                        Ok(req) => {
-                                            log::info!(
-                                                "[BRIDGE] Decoded SystemGenesisRequest: locale={}, network_id={}, entropy_len={}",
-                                                req.locale, req.network_id, req.device_entropy.len()
-                                            );
-                                            match handle_system_genesis(&req) {
-                                                Ok(body) => op_success(
-                                                    op_id,
-                                                    body,
-                                                    None,
-                                                    None,
-                                                    gp::Codec::Proto,
-                                                ),
-                                                Err(e) => op_error(
-                                                    op_id,
-                                                    500,
-                                                    &format!("system.genesis failed: {e}"),
-                                                ),
-                                            }
-                                        }
-                                        Err(e) => {
-                                            log::error!(
-                                                "[BRIDGE] system.genesis body decode failed: {} (body len={})",
-                                                e,
-                                                body.len()
-                                            );
-                                            op_error(
-                                                op_id,
-                                                400,
-                                                &format!("system.genesis decode failed: {e}"),
-                                            )
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "[BRIDGE] ArgPack decode failed for system.genesis: {} (ArgPack bytes len={})",
-                                        e,
-                                        arg_bytes.len()
-                                    );
-                                    op_error(
-                                        op_id,
-                                        400,
-                                        &format!("system.genesis ArgPack decode failed: {e}"),
-                                    )
-                                }
-                            }
-                        } else if query.path == "sys.tick" {
+                        if query.path == "sys.tick" {
                             // Deterministic, protobuf-only logical clock exposed even if the SDK
                             // app router has not been installed yet. This keeps the WebView intro
                             // flow unblocked during early bootstrap and avoids the "not

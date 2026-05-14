@@ -57,7 +57,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getTransportHeadersV3(): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray
-    @Keep @JvmStatic external fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun getWalletHistoryStrict(): ByteArray
     @Keep @JvmStatic external fun bilateralOfflineSend(envelopeBytes: ByteArray, bleAddress: String): ByteArray
