@@ -215,6 +215,14 @@ pub async fn put_object(
     // Compute deterministic address
     let addr = compute_object_address(&dlv_id_b, &path, &body);
 
+    // PaidK spend-gate (whitepaper §16): device-initiated writes require
+    // PaidK satisfaction. Production routes are mounted under device_auth
+    // so ctx is always Some. Test fixtures that bypass auth (ctx None) skip
+    // the gate — see api::paidk::require_paidk for the rationale.
+    if let Some(Extension(device_ctx)) = ctx.as_ref() {
+        crate::api::vault::paidk::require_paidk(&state, &device_ctx.device_id).await?;
+    }
+
     // Store with atomic capacity check (prevents race conditions)
     let new_size: i64 = body.len() as i64;
     db::upsert_object_with_capacity_check(pool, &addr, body.as_ref(), &dlv_id_b, new_size)
@@ -296,6 +304,12 @@ pub async fn delete_object_proto(
     // authenticate simple params
     if req.dlv_id.len() != 32 || req.path.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // PaidK spend-gate (§16): authenticated device must be PaidK-satisfied
+    // before a delete mutates state. See api::paidk::require_paidk.
+    if let Some(Extension(device_ctx)) = ctx.as_ref() {
+        crate::api::vault::paidk::require_paidk(&state, &device_ctx.device_id).await?;
     }
 
     let pool = &*state.db_pool;

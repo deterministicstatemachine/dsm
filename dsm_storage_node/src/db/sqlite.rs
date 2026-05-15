@@ -230,7 +230,7 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     WHERE expires_at_iter IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS bytecommit_chain (
-                    node_id      TEXT NOT NULL,
+                    node_id      BLOB NOT NULL,
                     cycle_index  INTEGER NOT NULL,
                     digest       BLOB NOT NULL,
                     PRIMARY KEY(node_id, cycle_index)
@@ -417,8 +417,8 @@ pub async fn get_current_cycle_stats(pool: &DBPool) -> Result<([u8; 32], u64)> {
     .await
 }
 
-pub async fn get_last_bytecommit_hash(pool: &DBPool, node_id: &str) -> Result<Option<[u8; 32]>> {
-    let node_id = node_id.to_string();
+pub async fn get_last_bytecommit_hash(pool: &DBPool, node_id: &[u8]) -> Result<Option<[u8; 32]>> {
+    let node_id = node_id.to_vec();
     with_conn(pool, move |conn| {
         let result: Option<Vec<u8>> = conn
             .query_row(
@@ -440,11 +440,11 @@ pub async fn get_last_bytecommit_hash(pool: &DBPool, node_id: &str) -> Result<Op
 
 pub async fn record_bytecommit_hash(
     pool: &DBPool,
-    node_id: &str,
+    node_id: &[u8],
     cycle_index: u64,
     digest: &[u8; 32],
 ) -> Result<()> {
-    let node_id = node_id.to_string();
+    let node_id = node_id.to_vec();
     let digest = digest.to_vec();
     with_conn(pool, move |conn| {
         conn.execute(
@@ -1395,16 +1395,16 @@ pub async fn get_drain_proof_for_node(pool: &DBPool, node_id: &[u8]) -> Result<O
 
 pub async fn verify_bytecommit_chain_empty(
     pool: &DBPool,
-    node_id_text: &str,
+    node_id: &[u8],
     start_cycle: i64,
     required_d: i64,
 ) -> Result<bool> {
-    let node_id_text = node_id_text.to_string();
+    let node_id = node_id.to_vec();
     with_conn(pool, move |conn| {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM bytecommit_chain
              WHERE node_id = ?1 AND cycle_index >= ?2 AND cycle_index < ?2 + ?3",
-            params![node_id_text, start_cycle, required_d],
+            params![node_id, start_cycle, required_d],
             |row| row.get(0),
         )?;
         Ok(count >= required_d)

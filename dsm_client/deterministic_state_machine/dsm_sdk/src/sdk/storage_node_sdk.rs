@@ -1465,12 +1465,19 @@ impl StorageNodeSDK {
 
         let next_state = state_number + 1;
 
-        // Build canonical precommitment preimage as bytes: state_hash || params_proto || next_state(le)
+        // SDK-internal bilateral-entry tracking hash. This is NOT the protocol
+        // precommit (which lives under the canonical v2 family in
+        // dsm::commitments::precommit). The preimage shape
+        // `state_hash || params_proto || next_state(le)` is SDK-specific and
+        // distinct from the protocol's `h_n || payload_i || e_i`; the domain
+        // tag is therefore SDK-scoped to prevent collision with the protocol
+        // precommit family.
         let mut preimage: Vec<u8> = Vec::with_capacity(32 + params_bytes.len() + 8);
         preimage.extend_from_slice(&state_hash_bytes);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&next_state.to_le_bytes());
-        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
+        let pre_commitment_hash =
+            dsm::crypto::blake3::domain_hash("DSM/sdk/bilateral-entry/v1", &preimage);
 
         // transaction_payload is the canonical proto bytes for parameters
         let transaction_payload = params_bytes.clone();
@@ -1539,7 +1546,10 @@ impl StorageNodeSDK {
         expected_preimage.extend_from_slice(&state_hash_bytes);
         expected_preimage.extend_from_slice(&params_bytes);
         expected_preimage.extend_from_slice(&next_state.to_le_bytes());
-        let expected_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &expected_preimage);
+        // Match the SDK-internal domain used by submit_bilateral_entry above;
+        // this is intentionally distinct from the protocol precommit family.
+        let expected_hash =
+            dsm::crypto::blake3::domain_hash("DSM/sdk/bilateral-entry/v1", &expected_preimage);
 
         if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
             bilateral_entry.status = BilateralTransactionStatus::Rejected;
@@ -2992,7 +3002,7 @@ mod tests {
         preimage.extend_from_slice(&state_hash_bytes_for_test);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&2u64.to_le_bytes());
-        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
+        let expected = dsm::crypto::blake3::domain_hash("DSM/sdk/bilateral-entry/v1", &preimage);
         assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
         assert_eq!(entry.state_number, 1);
         assert_eq!(entry.status, BilateralTransactionStatus::Pending);

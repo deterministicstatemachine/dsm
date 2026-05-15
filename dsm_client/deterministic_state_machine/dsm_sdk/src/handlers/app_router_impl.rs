@@ -360,9 +360,6 @@ impl AppRouterImpl {
     }
 
     pub fn new(config: SdkConfig) -> Result<Self, dsm::types::error::DsmError> {
-        // Prefer canonical device id from AppState (32 bytes persisted at genesis).
-        // Fall back to a deterministic hash of config.node_id only if AppState is not yet initialized.
-        // Only consult AppState if storage base dir was configured; otherwise, fall back to a stable hash of node_id.
         // Device identity MUST come from persisted AppState (post-genesis). Any alternate path
         // hashing would route online transfers to the wrong inbox. Abort early if the
         // persisted device id is missing or malformed to avoid silent misrouting.
@@ -508,7 +505,7 @@ impl AppRouterImpl {
         let device_id_b32_for_storage =
             crate::util::text_id::encode_base32_crockford(&device_id_bytes);
 
-        // CoreSDK init with the actual device identity (not the placeholder "default_device").
+        // CoreSDK init uses the persisted device identity.
         // Note: AppRouterImpl is only installed AFTER genesis creation via BootstrapAdapter.
         // Genesis state must exist before this constructor is called (MPC flow enforces this).
         let public_key = crate::sdk::app_state::AppState::get_public_key().ok_or_else(|| {
@@ -839,7 +836,7 @@ impl AppRouterImpl {
                 }
             };
         match fetch_quorum_device_identity(&storage_endpoints, to_device_id).await {
-            Ok(Some(authoritative)) => {
+            Ok(authoritative) => {
                 if let Err(e) = self
                     .repair_contact_identity_from_quorum(contact_record, &authoritative)
                     .await
@@ -847,20 +844,10 @@ impl AppRouterImpl {
                     return err(format!("wallet.send: {e}"));
                 }
             }
-            Ok(None) => {}
             Err(e) => {
-                if can_root_to_cached_contact_identity(&contact_record) {
-                    log::warn!(
-                        "[wallet.send] recipient identity quorum unavailable for {} (alias={}); using cached verified identity: {}",
-                        to_device_id_str.get(..8).unwrap_or("?"),
-                        contact_record.alias,
-                        e
-                    );
-                } else {
-                    return err(format!(
-                        "wallet.send: recipient identity quorum could not be established ({e})"
-                    ));
-                }
+                return err(format!(
+                    "wallet.send: recipient identity quorum could not be established ({e})"
+                ));
             }
         }
         let preflight_sync = generated::StorageSyncRequest {
@@ -1254,7 +1241,7 @@ impl AppRouterImpl {
         // Execute local state update using the pre-built signed Operation directly.
         // This bypasses execute_signed_transfer which would reconstruct a different
         // Operation (empty nonce, different Balance) causing signature verification failure.
-        // Returns the compat State view plus the AdvanceOutcome whose smt_proofs
+        // Returns the display State view plus the AdvanceOutcome whose smt_proofs
         // / parent_r_a / child_r_a drive the canonical ReceiptCommit build below.
         let (new_state, advance_outcome) = match self.wallet.send_transfer_op(signed_op, &signed_tx)
         {
@@ -1279,7 +1266,7 @@ impl AppRouterImpl {
             memo: Some(&transfer_req.memo),
         };
 
-        // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || nonce) — symmetric, shared inputs only.
+        // Canonical C_pre is symmetric over h_n, payload bytes, and nonce.
         // Both sender and receiver derive identical h_{n+1} from the same envelope fields.
         let op_bytes = op_bytes_for_tip;
         let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
@@ -1362,29 +1349,17 @@ impl AppRouterImpl {
                 ));
             }
 
-            // §4.2 + §11.1 Non-repudiation: Sender signs receipt commitment → sig_a
-            // using a freshly-derived per-step ephemeral SPHINCS+ key (§11.1).
+            // §4.2 + §11.1 Non-repudiation: Sender answers the receipt
+            // challenge as sig_a using a freshly-derived per-step ephemeral
+            // SPHINCS+ key (§11.1).
             // The cert chain anchors the per-step EK back to the device's AK_pk;
-            // the receipt body sig is verified against the EK_pk_a carried in
+            // the receipt response is verified against the EK_pk_a carried in
             // the envelope (proto field 16). Verifiers don't need the wallet's
             // long-term identity key out-of-band — sig_a verifies against
             // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
             //
-            // c_pre source: we use the receipt commitment hash itself as c_pre.
-            // The per-step EK derivation needs a deterministic, per-step-distinct
-            // input bound to this transition; the commitment serves that role
-            // (the verifier doesn't recompute EK — they trust receipt.ek_pk_a
-            // and verify the cert chain). Whitepaper §4.1's canonical C_pre
-            // = BLAKE3("DSM/precommit\0" || h_n || payload || e) is currently
-            // not threaded through the online send path; using the commitment
-            // hash provides equivalent freshness for EK derivation. Threading
-            // canonical C_pre is a planned refinement.
-            //
-            // k_step source: stub-derived from chain context until Phase F
-            // surfaces the bilateral session's Kyber shared secret (whitepaper
-            // §11). Stub k_step preserves the cert-chain security property
-            // (AK-rooted authorization) but doesn't satisfy §11's claim about
-            // fresh per-step Kyber-derived randomness.
+            // The receipt challenge is signed by a per-step EK derived from
+            // canonical C_pre, fresh Kyber k_step material, and K_DBRW.
             let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 &rc_canonical,
             ) {
@@ -1469,18 +1444,16 @@ impl AppRouterImpl {
                         let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
                             commitment: &commitment,
                             h_n: receipt.parent_tip,
-                            c_pre: commitment, // see comment above re: c_pre source
+                            c_pre: receipt_sigma,
                             devid_sender: receipt.devid_a,
                             relationship_key: rel_key,
                             k_dbrw: &k_dbrw_arr,
                             root_ak_keypair: Some((&ak_pk, &ak_sk)),
                             recipient_kyber_pk: &recipient_kyber_pk,
-                            // §11.1 Item 7: bind the per-step EK
-                            // signature to the bilateral session.
-                            // For online wallet.send the receipt
-                            // commitment IS the session identifier,
-                            // so we reuse it as session_binding.
-                            session_binding: Some(&commitment),
+                            // §11.1 Item 7: bind the per-step EK response
+                            // to the receipt commitment for this online
+                            // wallet.send transition.
+                            session_binding: &commitment,
                         };
                         match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
                             Ok(out) => {
@@ -1511,10 +1484,15 @@ impl AppRouterImpl {
                                         out.used_root_ak,
                                     )
                                 {
-                                    log::warn!(
-                                        "[wallet.send] §11.1 chain head advance failed (non-fatal — \
-                                         next signing will fall back to AK if needed): {e}"
-                                    );
+                                    let rollback_error = self
+                                        .rollback_failed_online_transfer(&rollback_request)
+                                        .await
+                                        .err()
+                                        .map(|rb| format!("; rollback failed: {rb}"))
+                                        .unwrap_or_default();
+                                    return err(format!(
+                                        "wallet.send: §11.1 chain head advance failed: {e}{rollback_error}"
+                                    ));
                                 }
 
                                 match receipt.to_full_protobuf() {
@@ -2433,8 +2411,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
     addresses
 }
 
-/// Backward-compatible wrapper: returns plain address strings (current-tip only
-/// behavior preserved for callers like `storage.sync` that auto-apply items).
+/// String-address projection for callers that auto-apply inbox items.
 pub(crate) fn collect_rotated_inbox_addresses(
     local_genesis: [u8; 32],
     local_device_id: [u8; 32],
@@ -2444,15 +2421,6 @@ pub(crate) fn collect_rotated_inbox_addresses(
         .into_iter()
         .map(|t| t.address)
         .collect()
-}
-
-fn can_root_to_cached_contact_identity(
-    contact_record: &crate::storage::client_db::ContactRecord,
-) -> bool {
-    contact_record.verified
-        && contact_record.device_id.len() == 32
-        && contact_record.genesis_hash.len() == 32
-        && contact_record.public_key.len() >= 32
 }
 
 fn select_quorum_device_identity(
@@ -2473,15 +2441,14 @@ fn select_quorum_device_identity(
 async fn fetch_quorum_device_identity(
     storage_endpoints: &[String],
     device_id: [u8; 32],
-) -> Result<Option<QuorumDeviceIdentity>, String> {
+) -> Result<QuorumDeviceIdentity, String> {
     if storage_endpoints.is_empty() {
-        return Ok(None);
+        return Err("device identity quorum requires configured storage endpoints".to_string());
     }
 
     let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
     let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
     let mut candidates = Vec::new();
-    let mut supported_response_seen = false;
     let mut last_error: Option<String> = None;
 
     for endpoint in storage_endpoints {
@@ -2492,7 +2459,6 @@ async fn fetch_quorum_device_identity(
         );
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                supported_response_seen = true;
                 let bytes = resp
                     .bytes()
                     .await
@@ -2531,13 +2497,21 @@ async fn fetch_quorum_device_identity(
                 if resp.status() == reqwest::StatusCode::NOT_FOUND
                     || resp.status() == reqwest::StatusCode::BAD_REQUEST =>
             {
-                // Older storage nodes do not expose this route yet; fall back to cached contact data.
+                last_error = Some(format!(
+                    "device identity lookup HTTP {} from {}",
+                    resp.status(),
+                    endpoint
+                ));
             }
             Ok(resp)
                 if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
                     || resp.status() == reqwest::StatusCode::NOT_IMPLEMENTED =>
             {
-                // Mixed-version replica set: sender cannot require lookup yet.
+                last_error = Some(format!(
+                    "device identity lookup HTTP {} from {}",
+                    resp.status(),
+                    endpoint
+                ));
             }
             Ok(resp) => {
                 last_error = Some(format!(
@@ -2556,16 +2530,12 @@ async fn fetch_quorum_device_identity(
     }
 
     if let Some(identity) = select_quorum_device_identity(candidates) {
-        return Ok(Some(identity));
+        return Ok(identity);
     }
 
-    if supported_response_seen {
-        return Err(last_error.unwrap_or_else(|| {
-            "device identity quorum unavailable across storage endpoints".to_string()
-        }));
-    }
-
-    Ok(None)
+    Err(last_error.unwrap_or_else(|| {
+        "device identity quorum unavailable across storage endpoints".to_string()
+    }))
 }
 
 #[async_trait]
@@ -2792,13 +2762,7 @@ impl AppRouter for AppRouterImpl {
     }
 }
 
-// Wrap raw bytes into an ArgPack and return as AppResult success.
-// RETIRED: Use pack_envelope_ok() for new responses.
-//
-// NEW: Build Envelope with proper payload oneof (no ArgPack wrapper)
-// Returns FramedEnvelopeV3: [0x03] || Envelope(version=3, payload=...)
-//
-// Convenience: return an error AppResult with message.
+// Response helpers build canonical Envelope v3 payloads.
 
 // Vault transfer via bilateral was removed — vaults live on storage nodes (dBTC §3.1, §7.3).
 // Withdrawal discovers vaults from storage nodes at exit time (dBTC §6.2).
@@ -3099,11 +3063,11 @@ async fn verify_device_tree_evidence_quorum_once(
 #[cfg(test)]
 mod tests {
     use super::{
-        can_root_to_cached_contact_identity, collect_rotated_inbox_addresses,
-        collect_tagged_inbox_addresses, compute_initial_relationship_chain_tip,
-        ensure_inbox_recipient_targets_local, format_registry_quorum_failure, registry_retry_delay,
-        relationship_tip_for_contact_restore, select_quorum_device_identity, AppRouterImpl,
-        QuorumDeviceIdentity, RegistryQuorumAttemptStats, RouteFreshness,
+        collect_rotated_inbox_addresses, collect_tagged_inbox_addresses,
+        compute_initial_relationship_chain_tip, ensure_inbox_recipient_targets_local,
+        format_registry_quorum_failure, registry_retry_delay, relationship_tip_for_contact_restore,
+        select_quorum_device_identity, AppRouterImpl, QuorumDeviceIdentity,
+        RegistryQuorumAttemptStats, RouteFreshness,
     };
     use crate::storage::client_db::ContactRecord;
     use dsm::utils::time::Duration;
@@ -3471,56 +3435,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_verified_contact_identity_can_backstop_quorum_lookup() {
-        let contact = ContactRecord {
-            contact_id: "c_quorum_ok".to_string(),
-            device_id: vec![0x11u8; 32],
-            alias: "peer".to_string(),
-            genesis_hash: vec![0x22u8; 32],
-            public_key: vec![0x33u8; 64],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
-            added_at: 7,
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            previous_chain_tip: None,
-        };
-
-        assert!(can_root_to_cached_contact_identity(&contact));
-    }
-
-    #[test]
-    fn cached_identity_root_requires_verified_complete_contact() {
-        let contact = ContactRecord {
-            contact_id: "c_quorum_bad".to_string(),
-            device_id: vec![0x11u8; 32],
-            alias: "peer".to_string(),
-            genesis_hash: vec![0x22u8; 32],
-            public_key: vec![],
-            kyber_public_key: Vec::new(),
-            current_chain_tip: None,
-            added_at: 7,
-            verified: false,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            last_seen_online_counter: 0,
-            last_seen_ble_counter: 0,
-            previous_chain_tip: None,
-        };
-
-        assert!(!can_root_to_cached_contact_identity(&contact));
-    }
-
-    #[test]
     fn collect_tagged_includes_previous_tip_address() {
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
@@ -3620,12 +3534,12 @@ mod tests {
     }
 
     #[test]
-    fn collect_rotated_backward_compat_returns_all_addresses() {
+    fn collect_rotated_inbox_addresses_returns_all_addresses() {
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
 
         let contact = ContactRecord {
-            contact_id: "c_compat".to_string(),
+            contact_id: "c_projection".to_string(),
             device_id: [0xEEu8; 32].to_vec(),
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
@@ -3645,7 +3559,6 @@ mod tests {
         };
 
         let strings = collect_rotated_inbox_addresses(genesis, device, &[contact]);
-        // Backward-compat wrapper returns all addresses (current + previous) as plain strings
         assert_eq!(strings.len(), 2);
     }
 }

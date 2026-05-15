@@ -7,43 +7,48 @@
 //! - Non-membership proof under `spent_root_e` that `jap_hash` is absent (before)
 //! - Membership proof under `spent_root_{e+1}` that `jap_hash → 1` is present (after)
 //!
-//! # Current Implementation
-//!
-//! Uses a flat `HashMap<[u8; 32], bool>` with sorted-concatenation root.
-//! This is a placeholder — it does not produce real SMT inclusion/non-inclusion proofs.
-//!
-//! # Planned Upgrade
-//!
-//! Convert to a proper 256-bit SMT using `merkle::sparse_merkle_tree::SparseMerkleTree`
-//! with DJTE-specific domain separation (`DJTE/spent-leaf`, `DJTE/spent-node`).
-//! The 256-bit key SMT is the correct structure here since `jap_hash` values are
-//! 32-byte BLAKE3 digests.
-//!
 //! # Storage
 //!
 //! These trees live on storage nodes (as part of the Source DLV state),
 //! not locally on devices. Devices verify proofs against committed roots.
 
-use crate::crypto::blake3::dsm_domain_hasher;
+use crate::crypto::blake3::domain_hash_bytes;
+use crate::merkle::sparse_merkle_tree::{SparseMerkleTree, SmtInclusionProof, ZERO_LEAF};
+use crate::types::error::DsmError;
 use std::collections::HashMap;
 
 /// Spent Proof SMT
 ///
-/// Maps jap_hash -> 1 (represented as a deterministic commitment over sorted keys).
-#[derive(Clone, Debug)]
+/// Maps jap_hash -> a deterministic spent marker in a 256-bit sparse Merkle tree.
+#[derive(Clone)]
 pub struct SpentProofSmt {
     pub spent: HashMap<[u8; 32], bool>,
+    tree: SparseMerkleTree,
 }
 
 impl SpentProofSmt {
     pub fn new() -> Self {
         Self {
             spent: HashMap::new(),
+            tree: SparseMerkleTree::new(usize::MAX),
         }
     }
 
-    pub fn mark_spent(&mut self, jap_hash: [u8; 32]) {
+    pub fn mark_spent(&mut self, jap_hash: [u8; 32]) -> Result<(), DsmError> {
+        if self.spent.contains_key(&jap_hash) {
+            return Ok(());
+        }
+        let value = spent_leaf_value(&jap_hash);
+        self.tree.update_leaf(&jap_hash, &value).map_err(|e| {
+            DsmError::internal::<std::io::Error>(
+                format!("spent proof SMT update failed: {e}"),
+                None,
+            )
+        })?;
+        // Insert into the index map only after the underlying SMT update
+        // succeeded, so a failed update doesn't leave inconsistent state.
         self.spent.insert(jap_hash, true);
+        Ok(())
     }
 
     pub fn is_spent(&self, jap_hash: &[u8; 32]) -> bool {
@@ -58,28 +63,45 @@ impl SpentProofSmt {
         self.spent.is_empty()
     }
 
-    /// Compute a deterministic root commitment over sorted spent keys.
-    ///
-    /// NOTE: This is NOT a proper SMT root — it's a sorted-concatenation hash.
-    /// See module-level "Planned Upgrade" for the upgrade path.
     pub fn root(&self) -> [u8; 32] {
-        let mut keys: Vec<[u8; 32]> = self.spent.keys().cloned().collect();
-        keys.sort();
+        *self.tree.root()
+    }
 
-        let mut hasher = dsm_domain_hasher("DSM/djte-spent-proof");
-        for k in keys {
-            hasher.update(&k);
-        }
-        let res = hasher.finalize();
-        let mut h = [0u8; 32];
-        h.copy_from_slice(res.as_bytes());
-        h
+    pub fn proof(&self, jap_hash: &[u8; 32]) -> Result<SmtInclusionProof, DsmError> {
+        self.tree
+            .get_inclusion_proof(jap_hash, 256)
+            .map_err(|e| DsmError::Verification(format!("SpentProofSMT proof failed: {e}")))
+    }
+
+    pub fn verify_absent(proof: &SmtInclusionProof, root: &[u8; 32], jap_hash: &[u8; 32]) -> bool {
+        proof.key == *jap_hash
+            && proof.value == Some(ZERO_LEAF)
+            && SparseMerkleTree::verify_proof_against_root(proof, root)
+    }
+
+    pub fn verify_spent(proof: &SmtInclusionProof, root: &[u8; 32], jap_hash: &[u8; 32]) -> bool {
+        proof.key == *jap_hash
+            && proof.value == Some(spent_leaf_value(jap_hash))
+            && SparseMerkleTree::verify_proof_against_root(proof, root)
     }
 }
 
 impl Default for SpentProofSmt {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn spent_leaf_value(jap_hash: &[u8; 32]) -> [u8; 32] {
+    domain_hash_bytes("DJTE.SPENT", jap_hash)
+}
+
+impl std::fmt::Debug for SpentProofSmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpentProofSmt")
+            .field("spent_len", &self.spent.len())
+            .field("root", &self.root())
+            .finish()
     }
 }
 
@@ -108,7 +130,7 @@ mod tests {
         let jap = [0xAA; 32];
 
         assert!(!smt.is_spent(&jap));
-        smt.mark_spent(jap);
+        smt.mark_spent(jap).unwrap();
         assert!(smt.is_spent(&jap));
         assert_eq!(smt.len(), 1);
         assert!(!smt.is_empty());
@@ -125,8 +147,8 @@ mod tests {
     fn multiple_marks_are_idempotent_on_len() {
         let mut smt = SpentProofSmt::new();
         let jap = [0x42; 32];
-        smt.mark_spent(jap);
-        smt.mark_spent(jap);
+        smt.mark_spent(jap).unwrap();
+        smt.mark_spent(jap).unwrap();
         assert_eq!(smt.len(), 1);
         assert!(smt.is_spent(&jap));
     }
@@ -143,24 +165,41 @@ mod tests {
         let mut smt = SpentProofSmt::new();
         let root_empty = smt.root();
 
-        smt.mark_spent([0x01; 32]);
+        smt.mark_spent([0x01; 32]).unwrap();
         let root_one = smt.root();
         assert_ne!(root_empty, root_one);
 
-        smt.mark_spent([0x02; 32]);
+        smt.mark_spent([0x02; 32]).unwrap();
         let root_two = smt.root();
         assert_ne!(root_one, root_two);
     }
 
     #[test]
+    fn spent_proofs_verify_absent_then_spent() {
+        let jap = [0x33; 32];
+        let mut smt = SpentProofSmt::new();
+
+        let absent_root = smt.root();
+        let absent = smt.proof(&jap).unwrap();
+        assert!(SpentProofSmt::verify_absent(&absent, &absent_root, &jap));
+        assert!(!SpentProofSmt::verify_spent(&absent, &absent_root, &jap));
+
+        smt.mark_spent(jap).unwrap();
+        let spent_root = smt.root();
+        let spent = smt.proof(&jap).unwrap();
+        assert!(SpentProofSmt::verify_spent(&spent, &spent_root, &jap));
+        assert!(!SpentProofSmt::verify_absent(&spent, &spent_root, &jap));
+    }
+
+    #[test]
     fn root_is_order_independent() {
         let mut smt_a = SpentProofSmt::new();
-        smt_a.mark_spent([0x01; 32]);
-        smt_a.mark_spent([0x02; 32]);
+        smt_a.mark_spent([0x01; 32]).unwrap();
+        smt_a.mark_spent([0x02; 32]).unwrap();
 
         let mut smt_b = SpentProofSmt::new();
-        smt_b.mark_spent([0x02; 32]);
-        smt_b.mark_spent([0x01; 32]);
+        smt_b.mark_spent([0x02; 32]).unwrap();
+        smt_b.mark_spent([0x01; 32]).unwrap();
 
         assert_eq!(
             smt_a.root(),
@@ -172,10 +211,10 @@ mod tests {
     #[test]
     fn root_differs_for_different_keys() {
         let mut smt_a = SpentProofSmt::new();
-        smt_a.mark_spent([0xAA; 32]);
+        smt_a.mark_spent([0xAA; 32]).unwrap();
 
         let mut smt_b = SpentProofSmt::new();
-        smt_b.mark_spent([0xBB; 32]);
+        smt_b.mark_spent([0xBB; 32]).unwrap();
 
         assert_ne!(smt_a.root(), smt_b.root());
     }
@@ -186,7 +225,7 @@ mod tests {
         for i in 0..100u8 {
             let mut key = [0u8; 32];
             key[0] = i;
-            smt.mark_spent(key);
+            smt.mark_spent(key).unwrap();
         }
         assert_eq!(smt.len(), 100);
 

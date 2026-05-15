@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // ExternalCommit v2 vector suite (strict, deterministic)
-// - No legacy `source` string
+// - Canonical `source_id` bytes only
 // - commit_id = H(source_id || payload || evidence_hash) via canonical core implementation
 // - v1 bytes rejected
 // - NFC routing guard rejects mismatched commit_id
@@ -9,7 +9,7 @@
 // NOTE: This suite is intentionally "vector-like" but does NOT hardcode expected digests,
 // because the canonical commit_id function (domain separation, length framing, etc.) must be
 // the single source of truth. What we lock in is: determinism, sensitivity, and rejection
-// of legacy encodings.
+// of non-canonical encodings.
 //
 // Run: cargo test -p dsm_sdk --test external_commit_v2_vectors
 
@@ -19,6 +19,8 @@
 use prost::Message;
 
 use dsm::commitments::{create_external_commitment, external_evidence_hash, ExternalCommitment};
+use dsm::types::proto as core_generated;
+use dsm_sdk::generated as sdk_generated;
 use dsm_sdk::sdk::external_commitment_sdk::ExternalCommitmentSdk;
 use dsm_sdk::wire::pb;
 
@@ -250,22 +252,23 @@ fn v1_bytes_are_rejected_strictly() {
 }
 
 #[test]
-fn legacy_source_string_bytes_do_not_set_source_id() {
+fn noncanonical_source_string_bytes_do_not_set_source_id() {
     setup_test();
-    // Field 4 (legacy `source` string) is ignored by v2 decode; source_id must remain unset.
+    // Field 4 string is not the canonical source_id field and must not populate it.
     // Protobuf wire: tag = (field_number << 3) | wire_type = (4 << 3) | 2 = 0x22.
-    let legacy_source = b"legacy";
-    let mut legacy = vec![0x22, legacy_source.len() as u8];
-    legacy.extend_from_slice(legacy_source);
+    let noncanonical_source = b"source";
+    let mut noncanonical = vec![0x22, noncanonical_source.len() as u8];
+    noncanonical.extend_from_slice(noncanonical_source);
 
-    let decoded = pb::ExternalCommit::decode(legacy.as_slice()).expect("decode legacy bytes");
+    let decoded =
+        pb::ExternalCommit::decode(noncanonical.as_slice()).expect("decode noncanonical bytes");
     assert!(
         decoded
             .source_id
             .as_ref()
             .map(|h| h.v.is_empty())
             .unwrap_or(true),
-        "legacy source string must not populate source_id"
+        "noncanonical source string must not populate source_id"
     );
 }
 
@@ -334,13 +337,13 @@ fn envelope_transport_roundtrip_for_external_commit() {
     framed.push(0x03);
     framed.extend_from_slice(&env_bytes);
 
-    // Decode framed envelope
     assert_eq!(framed[0], 0x03);
-    let decoded = pb::Envelope::decode(&framed[1..]).expect("decode framed envelope v3");
+    let decoded =
+        dsm_sdk::envelope::from_canonical_bytes(&framed[1..]).expect("decode envelope v3");
     assert_eq!(decoded.version, 3);
     assert!(matches!(
         decoded.payload,
-        Some(pb::envelope::Payload::UniversalTx(_))
+        Some(sdk_generated::envelope::Payload::UniversalTx(_))
     ));
 
     // Re-encode should be stable across decode/encode
@@ -398,9 +401,9 @@ fn nfc_commit_id_mismatch_rejected_by_bridge() {
     };
 
     let resp_bytes = dsm::core::bridge::handle_envelope_universal(&env.encode_to_vec());
-    let resp = pb::Envelope::decode(resp_bytes.as_slice()).expect("decode response");
+    let resp = dsm::envelope::from_canonical_bytes(resp_bytes.as_slice()).expect("decode response");
     match resp.payload {
-        Some(pb::envelope::Payload::UniversalRx(rx)) => {
+        Some(core_generated::envelope::Payload::UniversalRx(rx)) => {
             assert_eq!(rx.results.len(), 1);
             let err = rx.results[0].error.as_ref().expect("error must be set");
             assert_eq!(err.code, 400);

@@ -967,7 +967,8 @@ async fn storage_sync(router: &AppRouterImpl) -> proto::StorageSyncResponse {
 fn decode_framed_envelope(bytes: &[u8], label: &str) -> proto::Envelope {
     assert!(!bytes.is_empty(), "{label}: empty response bytes");
     assert_eq!(bytes[0], 0x03, "{label}: expected FramedEnvelopeV3 prefix");
-    proto::Envelope::decode(&bytes[1..]).unwrap_or_else(|e| panic!("decode Envelope failed: {e}"))
+    dsm_sdk::envelope::from_canonical_bytes(&bytes[1..])
+        .unwrap_or_else(|e| panic!("decode Envelope failed: {e}"))
 }
 
 async fn ensure_b0x_tokens(router: &AppRouterImpl, endpoints: &[String]) {

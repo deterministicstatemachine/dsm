@@ -56,7 +56,13 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
         )
         .expect("Failed to create replication manager"),
     );
-    let state = AppState::new(unique_node_id(), None, Arc::new(pool), replication_manager);
+    let state = AppState::new(
+        unique_node_id(),
+        "http://localhost:8080",
+        None,
+        Arc::new(pool),
+        replication_manager,
+    );
 
     // Ensure DLV slot exists for bytecommit namespace.
     // Deterministic, small capacity.
@@ -77,7 +83,7 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
         use dsm_storage_node::api::infra::hardening::blake3_tagged;
 
         // addr := H("DSM/obj-bytecommit\0" || node_id_32 || t || dt)
-        let node_id_32 = blake3_tagged("DSM/node-id", state.node_id.as_bytes());
+        let node_id_32 = *state.node_id.as_bytes();
         let mut body = Vec::new();
         body.extend_from_slice(&node_id_32);
         body.extend_from_slice(&1u64.to_be_bytes());

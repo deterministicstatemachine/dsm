@@ -1429,6 +1429,15 @@ from ACD via the chain in Equation (17). This ensures that:
 Corollary 8.2 (Receipt-Device Binding). A valid stitched receipt τA↔B can only have been
 produced by the physical device DA whose attractor generated ACDA , under the assumptions of
 Theorem 5.1 and Definition 5.3.
+
+Receipt challenge response. The offline receipt challenge is the proposed transition context,
+including h_n, C_pre, k_step, both device identifiers, both Per-Device SMT roots, and the
+receipt commitment. The response is the per-step EK signature and certificate chain generated
+for that exact context. The EK key is not static. It is regenerated for each accepted transition
+from h_n, C_pre, k_step, and KDBRW, then certified by the previous signer. This makes cloned
+database state insufficient to spend. The clone can copy public receipt state, but it cannot
+recover KDBRW or the encrypted next signing secret on different hardware, so it cannot produce
+the next valid response for the same parent h_n.
 9 Implementation Architecture
 9.1 Three-Layer Execution Model
 The C-DBRW protocol interfaces with the DSM runtime across three layers:

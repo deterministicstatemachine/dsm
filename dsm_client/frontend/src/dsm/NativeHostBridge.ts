@@ -13,7 +13,6 @@ import {
   BridgeRpcRequest,
   BridgeRpcResponse,
   BytesPayload,
-  DeviceBindingCapturePayload,
   EmptyPayload,
   HostPermissionsRequestPayload,
   NativeHostAck,
@@ -179,16 +178,6 @@ export async function requestHostPermissions(permissions: string[]): Promise<voi
   const payload = new HostPermissionsRequestPayload({ permissions });
   await hostRequestOk(
     buildHostRequest(NativeHostRequestKind.HOST_CONTROL_PERMISSIONS_REQUEST, payload.toBinary()),
-  );
-}
-
-export async function captureDeviceBindingForGenesisEnvelope(genesisEnvelope: Uint8Array): Promise<Uint8Array> {
-  const payload = new DeviceBindingCapturePayload({ genesisEnvelope: new Uint8Array(genesisEnvelope) });
-  return hostRequestOk(
-    buildHostRequest(
-      NativeHostRequestKind.PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE,
-      payload.toBinary(),
-    ),
   );
 }
 

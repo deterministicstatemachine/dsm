@@ -2,8 +2,8 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use dsm::types::proto as generated;
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
+use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
@@ -59,19 +59,15 @@ fn faucet_clean_returns_ok() {
         res.error_message
     );
 
-    // Decode AppStateResponse. New router returns a framed Envelope v3 (leading 0x03)
-    // while older code returned an ArgPack/ResultPack. Support both for tests.
-    let resp: generated::AppStateResponse = if !res.data.is_empty() && res.data[0] == 0x03 {
-        // Framed Envelope v3: first byte is 0x03
-        let env = generated::Envelope::decode(&res.data[1..]).expect("decode Envelope v3");
-        match env.payload.expect("envelope payload") {
-            generated::envelope::Payload::AppStateResponse(r) => r,
-            other => panic!("unexpected envelope payload: {:?}", other),
-        }
-    } else {
-        // Fallback: legacy ResultPack/ArgPack body
-        let pack = generated::ResultPack::decode(&*res.data).expect("decode ResultPack");
-        generated::AppStateResponse::decode(&*pack.body).expect("decode AppStateResponse")
+    assert_eq!(
+        res.data.first(),
+        Some(&0x03),
+        "expected FramedEnvelopeV3 prefix"
+    );
+    let env = dsm_sdk::envelope::from_canonical_bytes(&res.data[1..]).expect("decode Envelope v3");
+    let resp: generated::AppStateResponse = match env.payload.expect("envelope payload") {
+        generated::envelope::Payload::AppStateResponse(r) => r,
+        other => panic!("unexpected envelope payload: {:?}", other),
     };
     assert_eq!(resp.key, "faucet.clean");
     assert_eq!(resp.value.as_deref(), Some("cleanup_completed"));

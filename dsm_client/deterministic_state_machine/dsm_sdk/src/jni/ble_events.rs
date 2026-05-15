@@ -63,12 +63,9 @@ fn empty(env: &mut JNIEnv<'_>) -> jni::sys::jbyteArray {
 }
 
 fn build_app_state_envelope(resp: pb::AppStateResponse) -> Result<Vec<u8>, String> {
-    let envelope = pb::Envelope {
-        version: 3,
-        headers: None,
-        message_id: vec![0u8; 16],
-        payload: Some(pb::envelope::Payload::AppStateResponse(resp)),
-    };
+    let envelope = crate::jni::helpers::encode_payload_transport(
+        pb::envelope::Payload::AppStateResponse(resp),
+    );
     let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
     buf.push(0x03);
     envelope
@@ -756,17 +753,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_finalizeScann
 /// Build a framed Envelope with BleEvent as the direct payload.
 /// Uses the dedicated Payload::BleEvent field (proto schema v2.4+).
 pub(crate) fn build_ble_event_envelope(ble_event: BleEvent) -> Result<Vec<u8>, String> {
-    let envelope = pb::Envelope {
-        version: 3,
-        headers: Some(pb::Headers {
-            device_id: vec![0u8; 32],
-            chain_tip: vec![0u8; 32],
-            genesis_hash: vec![],
-            seq: 0,
-        }),
-        message_id: vec![],
-        payload: Some(pb::envelope::Payload::BleEvent(ble_event)),
-    };
+    let envelope =
+        crate::jni::helpers::encode_payload_transport(pb::envelope::Payload::BleEvent(ble_event));
 
     let mut buf = Vec::new();
     buf.push(0x03); // Canonical framing byte for FramedEnvelopeV3
@@ -1510,12 +1498,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createNfcReco
                 }
             };
             let capsule = pb::NfcRecoveryCapsule { payload };
-            let envelope = pb::Envelope {
-                version: 3,
-                headers: None,
-                message_id: vec![0u8; 16],
-                payload: Some(pb::envelope::Payload::NfcRecoveryCapsule(capsule)),
-            };
+            let envelope = crate::jni::helpers::encode_payload_transport(
+                pb::envelope::Payload::NfcRecoveryCapsule(capsule),
+            );
             let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
             buf.push(0x03); // Canonical framing byte for FramedEnvelopeV3
             if let Err(e) = envelope.encode(&mut buf) {

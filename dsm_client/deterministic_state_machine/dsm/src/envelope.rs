@@ -186,7 +186,7 @@ fn validate_headers_wire(bytes: &[u8]) -> Result<HeaderScan, DsmError> {
 
 /// Validate raw Envelope v3 protobuf bytes before prost decoding.
 ///
-/// This catches unknown/deprecated fields and malformed required byte lengths
+/// This catches unknown or reserved fields and malformed required byte lengths
 /// that prost would otherwise drop or coerce into defaults.
 pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError> {
     let mut cursor = 0usize;
@@ -289,7 +289,6 @@ pub fn validate_canonical_envelope_v3_bytes(bytes: &[u8]) -> Result<(), DsmError
 
 /// Encode an Envelope to transport protobuf bytes
 pub fn to_canonical_bytes(envelope: &Envelope) -> Vec<u8> {
-    // Back-compat: keep the function name but clarify semantics in docs
     envelope.encode_to_vec()
 }
 

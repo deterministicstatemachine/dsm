@@ -126,6 +126,7 @@ mod tests {
         );
         let state = AppState::new(
             "test-node".into(),
+            "http://localhost:8080",
             None,
             std::sync::Arc::new(pool),
             replication_manager,

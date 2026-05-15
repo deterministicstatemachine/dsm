@@ -257,5 +257,9 @@ fn build_receipt_commit(case_id: &str) -> Result<gp::ReceiptCommit> {
         // Per-step Kyber ciphertexts (whitepaper §11) — wire-only.
         kyber_ct_a: vec![],
         kyber_ct_b: vec![],
+        // Fork-aware finalization witness (whitepaper §4.1.1) — wire-only.
+        // Vector builder produces single-candidate fixtures; no fork
+        // witness is attached.
+        fork_witness: None,
     })
 }

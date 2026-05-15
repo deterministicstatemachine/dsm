@@ -363,52 +363,22 @@ fn try_handle_vector_envelope(envelope: &gp::Envelope) -> Option<Vec<u8>> {
         return Some(envelope_error(400, "vector: args codec must be PROTO").encode_to_vec());
     }
 
-    let receipt = match gp::ReceiptCommit::decode(args.body.as_slice()) {
+    let receipt = match crate::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        args.body.as_slice(),
+    ) {
         Ok(r) => r,
         Err(_) => {
             return Some(envelope_error(400, "vector: receipt decode failed").encode_to_vec())
         }
     };
 
-    let to_arr32 = |bytes: &[u8], label: &str| -> Result<[u8; 32], Vec<u8>> {
-        if bytes.len() != 32 {
-            return Err(
-                envelope_error(400, &format!("vector: {label} must be 32 bytes")).encode_to_vec(),
-            );
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(bytes);
-        Ok(out)
-    };
-
-    let genesis_root = match to_arr32(&receipt.genesis, "genesis") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
-    let devid_a = match to_arr32(&receipt.devid_a, "devid_a") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
-    let devid_b = match to_arr32(&receipt.devid_b, "devid_b") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
-    let parent_tip = match to_arr32(&receipt.parent_tip, "parent_tip") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
-    let child_tip = match to_arr32(&receipt.child_tip, "child_tip") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
-    let parent_root = match to_arr32(&receipt.parent_root, "parent_root") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
-    let child_root = match to_arr32(&receipt.child_root, "child_root") {
-        Ok(v) => v,
-        Err(e) => return Some(e),
-    };
+    let genesis_root = receipt.genesis;
+    let devid_a = receipt.devid_a;
+    let devid_b = receipt.devid_b;
+    let parent_tip = receipt.parent_tip;
+    let child_tip = receipt.child_tip;
+    let parent_root = receipt.parent_root;
+    let child_root = receipt.child_root;
 
     let proof_caps = [
         ("rel_proof_parent", receipt.rel_proof_parent.as_slice()),
@@ -563,26 +533,23 @@ fn op_success(
 
 #[inline]
 fn envelope_error(code: u32, message: &str) -> gp::Envelope {
-    // Generate meaningful error context instead of dummy data
     let error_context = format!("error:{}:{}", code, message);
-    let error_hash =
-        *crate::crypto::blake3::domain_hash("DSM/error-envelope", error_context.as_bytes())
-            .as_bytes();
+    let device_hash =
+        crate::crypto::blake3::domain_hash("DSM/error-envelope/device", error_context.as_bytes());
+    let chain_hash =
+        crate::crypto::blake3::domain_hash("DSM/error-envelope/chain", error_context.as_bytes());
+    let genesis_hash =
+        crate::crypto::blake3::domain_hash("DSM/error-envelope/genesis", error_context.as_bytes());
 
     gp::Envelope {
         version: 3,
         headers: Some(gp::Headers {
-            device_id: error_hash[..32].to_vec(), // Hash of error context for meaningful device_id
-            chain_tip: error_hash[32..].to_vec(), // Remaining bytes for chain_tip
-            genesis_hash: crate::crypto::blake3::domain_hash(
-                "DSM/error-envelope",
-                b"DSM_ERROR_GENESIS",
-            )
-            .as_bytes()
-            .to_vec(), // Fixed error genesis
-            seq: code as u64,                     // Use error code as sequence number
+            device_id: device_hash.as_bytes().to_vec(),
+            chain_tip: chain_hash.as_bytes().to_vec(),
+            genesis_hash: genesis_hash.as_bytes().to_vec(),
+            seq: code as u64,
         }),
-        message_id: vec![],
+        message_id: device_hash.as_bytes()[..16].to_vec(),
         payload: Some(gp::envelope::Payload::Error(gp::Error {
             code,
             message: message.to_string(),
@@ -802,10 +769,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                         // Application invocations (non-unilateral/bilateral) go to AppRouter.
                         } else if let Some(router) = app_router() {
                             // Pass the FULL ArgPack bytes to the AppRouter (protobuf-only boundary).
-                            // Previously this forwarded only ArgPack.body, which caused the SDK
-                            // to attempt decoding an ArgPack from a raw message body and fail with
-                            // "ArgPack.schema_hash: buffer underflow". Queries already pass the
-                            // encoded ArgPack; do the same for invokes here.
                             let args_bytes: Vec<u8> = invoke
                                 .args
                                 .as_ref()
@@ -1454,7 +1417,7 @@ pub fn handle_bilateral_offline_send(env_bytes: &[u8], ble_address: &str) -> Vec
                         return envelope_error(465, "BilateralPrepare.operation_data empty")
                             .encode_to_vec();
                     }
-                    // Offline send must be bound to a concrete peer address (no empty / placeholder).
+                    // Offline send must be bound to a concrete peer address.
                     if ble_address.is_empty() {
                         return envelope_error(466, "ble_address missing").encode_to_vec();
                     }
@@ -1640,6 +1603,10 @@ mod tests {
     use super::*;
     use prost::Message;
 
+    fn decode_response_envelope(bytes: &[u8]) -> gp::Envelope {
+        crate::envelope::from_canonical_bytes(bytes).expect("decode response envelope")
+    }
+
     #[test]
     fn offline_send_valid_prepare_yields_commitment_response() {
         // Build a minimal BilateralPrepare operation
@@ -1690,8 +1657,7 @@ mod tests {
         };
         let bytes = env.encode_to_vec();
         let resp_bytes = handle_bilateral_offline_send(&bytes, "AA:BB:CC:DD:EE:FF");
-        let resp_env =
-            gp::Envelope::decode(resp_bytes.as_slice()).expect("response envelope decodes");
+        let resp_env = decode_response_envelope(resp_bytes.as_slice());
         match resp_env.payload {
             Some(gp::envelope::Payload::UniversalRx(rx)) => {
                 assert_eq!(rx.results.len(), 1);
@@ -1769,8 +1735,7 @@ mod tests {
         };
         let bytes = env.encode_to_vec();
         let resp_bytes = handle_bilateral_offline_send(&bytes, "ZZ");
-        let resp_env =
-            gp::Envelope::decode(resp_bytes.as_slice()).expect("decode response envelope");
+        let resp_env = decode_response_envelope(resp_bytes.as_slice());
         match resp_env.payload {
             Some(gp::envelope::Payload::Error(err)) => {
                 assert_eq!(err.code, 465);
@@ -1802,7 +1767,7 @@ mod tests {
         };
 
         let resp_bytes = handle_envelope_universal(&env.encode_to_vec());
-        let resp_env = gp::Envelope::decode(resp_bytes.as_slice()).expect("decode response");
+        let resp_env = decode_response_envelope(resp_bytes.as_slice());
 
         match resp_env.payload {
             Some(gp::envelope::Payload::Error(err)) => {
@@ -1866,8 +1831,7 @@ mod tests {
         };
         let bytes = env.encode_to_vec();
         let resp_bytes = handle_bilateral_offline_send(&bytes, "DD:EE:FF");
-        let resp_env =
-            gp::Envelope::decode(resp_bytes.as_slice()).expect("decode response envelope");
+        let resp_env = decode_response_envelope(resp_bytes.as_slice());
         match resp_env.payload {
             Some(gp::envelope::Payload::Error(err)) => {
                 assert_eq!(err.code, 467);
@@ -1927,8 +1891,7 @@ mod tests {
         };
         let bytes = env.encode_to_vec();
         let resp_bytes = handle_bilateral_offline_send(&bytes, "AA:BB:CC");
-        let resp_env =
-            gp::Envelope::decode(resp_bytes.as_slice()).expect("decode response envelope");
+        let resp_env = decode_response_envelope(resp_bytes.as_slice());
         match resp_env.payload {
             Some(gp::envelope::Payload::Error(err)) => {
                 assert_eq!(err.code, 463);
@@ -1992,8 +1955,7 @@ mod tests {
         };
 
         let response_bytes = handle_envelope_universal(&envelope.encode_to_vec());
-        let response =
-            gp::Envelope::decode(response_bytes.as_slice()).expect("response should decode");
+        let response = decode_response_envelope(response_bytes.as_slice());
 
         match response.payload {
             Some(gp::envelope::Payload::UniversalRx(rx)) => {

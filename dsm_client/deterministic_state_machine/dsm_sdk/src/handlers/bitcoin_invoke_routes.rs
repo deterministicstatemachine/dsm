@@ -881,7 +881,6 @@ impl AppRouterImpl {
                             withdrawal_id
                         );
                     }
-                    #[allow(deprecated)]
                     return Ok(generated::BitcoinWithdrawalExecuteResponse {
                         plan_id: plan.plan_id,
                         plan_class: plan.plan_class,
@@ -914,8 +913,6 @@ impl AppRouterImpl {
                                 reason: vault.reason,
                             })
                             .collect(),
-                        route_commitment_id: vec![],
-                        route_commitment_key: String::new(),
                     });
                 }
             }
@@ -929,7 +926,6 @@ impl AppRouterImpl {
         crate::storage::client_db::set_withdrawal_state(&withdrawal_id, "committed")
             .map_err(|e| format!("withdrawal commit transition failed: {e}"))?;
 
-        #[allow(deprecated)]
         Ok(generated::BitcoinWithdrawalExecuteResponse {
             plan_id: plan.plan_id,
             plan_class: plan.plan_class,
@@ -953,8 +949,6 @@ impl AppRouterImpl {
                     reason: vault.reason,
                 })
                 .collect(),
-            route_commitment_id: vec![],
-            route_commitment_key: String::new(),
         })
     }
 
@@ -4944,7 +4938,7 @@ mod tests {
     fn decode_framed_envelope(bytes: &[u8], route: &str) -> generated::Envelope {
         assert!(!bytes.is_empty(), "{route}: empty response bytes");
         assert_eq!(bytes[0], 0x03, "{route}: expected FramedEnvelopeV3 prefix");
-        generated::Envelope::decode(&bytes[1..])
+        dsm::envelope::from_canonical_bytes(&bytes[1..])
             .unwrap_or_else(|e| panic!("{route}: failed to decode envelope: {e}"))
     }
 
@@ -5232,7 +5226,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id.clone(),
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5250,7 +5243,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id,
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5280,7 +5272,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: "nonexistent-plan-id".to_string(),
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5381,7 +5372,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id.clone(),
                     destination_address: "tb1qdestination".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5463,7 +5453,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id,
                     destination_address: "tb1q_DIFFERENT_ADDRESS".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;
@@ -5559,7 +5548,6 @@ mod tests {
                 args: pack_proto(&generated::BitcoinWithdrawalExecuteRequest {
                     plan_id: plan_resp.plan_id.clone(),
                     destination_address: "tb1qpolicy".to_string(),
-                    ..Default::default()
                 }),
             })
             .await;

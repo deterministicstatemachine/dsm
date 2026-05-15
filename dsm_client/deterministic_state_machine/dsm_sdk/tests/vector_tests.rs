@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use dsm::types::proto as gp;
-use prost::Message;
 
 const VECTOR_REJECT_PROOF_TOO_LARGE: u32 = 470;
 const VECTOR_REJECT_INVALID_PROOF: u32 = 471;
@@ -75,7 +74,7 @@ fn discover_cases(root: &PathBuf) -> Result<Vec<PathBuf>> {
 
 fn map_reject_from_sdk_impl(wire: &[u8]) -> RejectCode {
     let resp = dsm::core::bridge::handle_envelope_universal(wire);
-    let env = match gp::Envelope::decode(resp.as_slice()) {
+    let env = match dsm::envelope::from_canonical_bytes(resp.as_slice()) {
         Ok(e) => e,
         Err(_) => return RejectCode::DecodeError,
     };

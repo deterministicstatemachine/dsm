@@ -177,7 +177,7 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     let device_id = report.device_id.clone();
     let genesis_hash = report.genesis_hash.clone();
 
-    // Strict enforcement — no feature gate, no default-allow fallback.
+    // Strict enforcement: no feature gate and no default-allow path.
     // A ReadOnly trust level from the bootstrap measurement means the device
     // failed the C-DBRW entropy health test and MUST NOT be allowed to proceed
     // through genesis creation. The caller surface returns a BootstrapResultReadOnly
@@ -667,7 +667,7 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(),
     Ok(())
 }
 
-fn ensure_identity_context_compatible(
+fn ensure_identity_context_matches(
     device_id: &[u8],
     genesis_hash: &[u8],
 ) -> Result<bool, pb::Error> {
@@ -741,7 +741,7 @@ fn install_identity_context_core(
         ));
     }
 
-    if ensure_identity_context_compatible(&device_id, &genesis_hash)? {
+    if ensure_identity_context_matches(&device_id, &genesis_hash)? {
         crate::install_canonical_binding_key(binding_key.clone()).map_err(|e| {
             ingress_error(
                 ERROR_CODE_INVALID_INPUT,
@@ -1163,7 +1163,8 @@ endpoint = "http://127.0.0.1:8080"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert_eq!(ok_bytes.first(), Some(&0x03));
-        let decoded = Envelope::decode(&ok_bytes[1..]).expect("decode framed envelope");
+        let decoded =
+            crate::envelope::from_canonical_bytes(&ok_bytes[1..]).expect("decode envelope");
         assert_eq!(decoded.version, 3);
     }
 
@@ -1293,7 +1294,8 @@ endpoint = "http://127.0.0.1:8080"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert_eq!(ok_bytes.first(), Some(&0x03));
-        let envelope = Envelope::decode(&ok_bytes[1..]).expect("decode snapshot envelope");
+        let envelope =
+            crate::envelope::from_canonical_bytes(&ok_bytes[1..]).expect("decode envelope");
         match envelope.payload {
             Some(pb::envelope::Payload::SessionStateResponse(snapshot)) => {
                 let hardware = snapshot.hardware_status.expect("hardware status");

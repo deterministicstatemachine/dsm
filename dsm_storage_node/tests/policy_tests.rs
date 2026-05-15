@@ -48,6 +48,7 @@ async fn build_policy_app() -> Option<axum::Router> {
     };
     let state = AppState::new(
         "test-node".to_string(),
+        "http://localhost:8080",
         None,
         Arc::new(pool),
         replication_manager,

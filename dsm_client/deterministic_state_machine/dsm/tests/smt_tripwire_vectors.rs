@@ -34,7 +34,8 @@ fn to_b32(b: &[u8]) -> String {
 const GOLDEN_SMT_NODE: &str = "5SVQDKVDYN3E4T4VQ4BJ3ET09WM7DH5ZABDX3SQT2WHA65HP6KHG";
 const GOLDEN_SMT_LEAF: &str = "353NDPGJG210GSZA40PMY9YRJX56XZV4AZ40KHEF1HHP96D495P0";
 const GOLDEN_SMT_KEY: &str = "6WQ5V974ZVJ32GJH38XKVXR500BCJA3D2ZXJREFSX1S86KDVHV7G";
-const GOLDEN_PRECOMMIT: &str = "6D6FFAX2FMPB9FP8VJ8KNY4EQ343GBZ8T32YRDR8RGBDJ7PWEJS0";
+const GOLDEN_PRECOMMIT: &str = "2GZG1YC3YRC7AM6EZH0VZT01SQ4401S7X7ZJ1HW3NG4T9ADSYF6G";
+const PRE_V2_PRECOMMIT: &str = "6D6FFAX2FMPB9FP8VJ8KNY4EQ343GBZ8T32YRDR8RGBDJ7PWEJS0";
 const GOLDEN_SUCCESSOR_TIP: &str = "83BWY3QWZ349189XV1GPE2K2EX2REYNSXG445K7SPGSRQZWZF300";
 const GOLDEN_EMPTY_ROOT_32: &str = "E1JERDTXVWR09YMPW1FVGV12GBTB0RNT36P0TNQCWQD4JK4JDG90";
 const GOLDEN_DEFAULT_NODE_0: &str = "NVM9HGMZVHS8FR2CMTBEX8S5QHNQX03WM91QSSGAZ471189S2120";
@@ -98,6 +99,19 @@ fn golden_tag_precommit() {
         to_b32(&result),
         GOLDEN_PRECOMMIT,
         "compute_precommit drifted — pre-commitment digest changed"
+    );
+}
+
+#[test]
+fn golden_tag_precommit_is_v2_only() {
+    let h_n = [0xAAu8; 32];
+    let op_bytes: &[u8] = &[0x01];
+    let entropy = [0x02u8; 32];
+    let result = compute_precommit(&h_n, op_bytes, &entropy);
+    assert_ne!(
+        to_b32(&result),
+        PRE_V2_PRECOMMIT,
+        "pre-v2 precommit output must not be accepted as the canonical digest"
     );
 }
 

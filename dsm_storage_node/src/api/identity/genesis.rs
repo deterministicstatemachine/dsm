@@ -67,7 +67,7 @@ async fn forward_genesis_create(
     let resp = match client
         .post(&url)
         .header("content-type", "application/octet-stream")
-        .header("x-dsm-node-id", state.node_id.as_str())
+        .header("x-dsm-node-id", state.node_id.to_base32())
         .body(body.to_vec())
         .send()
         .await

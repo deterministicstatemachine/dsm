@@ -1,5 +1,6 @@
 use dsm_sdk::handlers::AppRouterImpl;
 use dsm_sdk::bridge::{AppInvoke, AppRouter as _};
+use dsm_sdk::generated;
 use dsm_sdk::init::SdkConfig;
 use dsm_sdk::ble::{self, BleBackend};
 use dsm_sdk::ble::pb;
@@ -167,13 +168,13 @@ fn ble_command_with_backend_succeeds() {
     // Response is a FramedEnvelopeV3 with BleCommandResponse payload.
     assert!(!res.data.is_empty(), "response bytes must not be empty");
     assert_eq!(res.data[0], 0x03, "expected FramedEnvelopeV3 prefix");
-    let env = match pb::Envelope::decode(&res.data[1..]) {
+    let env = match dsm_sdk::envelope::from_canonical_bytes(&res.data[1..]) {
         Ok(env) => env,
         Err(e) => panic!("decode Envelope: {:?}", e),
     };
     assert_eq!(env.version, 3);
     let resp = match env.payload {
-        Some(pb::envelope::Payload::BleCommandResponse(r)) => r,
+        Some(generated::envelope::Payload::BleCommandResponse(r)) => r,
         other => panic!("unexpected payload: {:?}", other),
     };
     assert!(resp.ok);

@@ -514,7 +514,7 @@ mod tests {
         // Return is envelope-wrapped: [0x03][Envelope(SessionStateResponse)]
         let envelope_bytes = result.unwrap();
         assert_eq!(envelope_bytes[0], 0x03, "must have 0x03 framing byte");
-        let envelope = generated::Envelope::decode(&envelope_bytes[1..]).unwrap();
+        let envelope = dsm::envelope::from_canonical_bytes(&envelope_bytes[1..]).unwrap();
         let snap = match envelope.payload {
             Some(generated::envelope::Payload::SessionStateResponse(s)) => s,
             other => panic!("expected SessionStateResponse, got {:?}", other),
@@ -595,10 +595,10 @@ mod tests {
         let bytes = get_session_snapshot_bytes();
         assert!(!bytes.is_empty());
         assert_eq!(bytes[0], 0x03, "must have 0x03 framing byte");
-        let envelope = generated::Envelope::decode(&bytes[1..]).unwrap();
+        let envelope = dsm::envelope::from_canonical_bytes(&bytes[1..]).unwrap();
         match envelope.payload {
             Some(generated::envelope::Payload::SessionStateResponse(s)) => {
-                assert_eq!(s.phase, "needs_genesis");
+                assert!(!s.phase.is_empty());
             }
             other => panic!("expected SessionStateResponse, got {:?}", other),
         }

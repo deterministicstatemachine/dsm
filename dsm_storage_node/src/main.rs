@@ -24,6 +24,8 @@ use std::sync::Once;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
+use dsm_sdk::util::text_id;
+
 // Prometheus metrics handle (installed once per-process)
 static PROM_HANDLE: OnceCell<metrics_exporter_prometheus::PrometheusHandle> = OnceCell::new();
 
@@ -151,11 +153,13 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .unwrap_or_else(|_| {
             // Generate deterministic node ID from hostname and port
             let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
-            let id_hash = blake3::hash(&[hostname.as_bytes(), &port.to_le_bytes()].concat());
-            format!(
-                "storage-node-{:x}",
-                u64::from_le_bytes(id_hash.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
-            )
+            let mut material = Vec::new();
+            material.extend_from_slice(hostname.as_bytes());
+            material.extend_from_slice(&port.to_be_bytes());
+            text_id::encode_base32_crockford(&api::infra::hardening::blake3_tagged(
+                "DSM/node-id",
+                &material,
+            ))
         });
 
     Ok(ServerConfig {
@@ -281,8 +285,7 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
         .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
         .layer(TraceLayer::new_for_http())
-        .layer(Extension(state))
-        .layer(Extension(public_rate_limiter));
+        .layer(Extension(state));
 
     app
 }
@@ -415,8 +418,14 @@ async fn async_main() -> Result<()> {
         )
     };
 
+    let bind_addr_str = format!(
+        "https://{}:{}",
+        server_config.bind_addr.ip(),
+        server_config.bind_addr.port()
+    );
     let state = AppState::new(
         server_config.node_id.clone(),
+        &bind_addr_str,
         server_config.hsts_max_age,
         db_pool.clone(),
         replication_manager,

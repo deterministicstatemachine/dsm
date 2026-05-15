@@ -257,16 +257,17 @@ pub async fn emit_cycle_commitment(
 ) -> Result<[u8; 32], anyhow::Error> {
     let pool = &*state.db_pool;
 
-    // Convert configured node_id string to a canonical 32-byte identifier.
-    // For production, this should be a content-addressed 32B digest (per spec §7).
-    let node_id_32 = blake3_tagged("DSM/node-id", state.node_id.as_bytes());
+    // Canonical 32-byte operator identity (single source of truth via AppState).
+    // Per spec §7, ByteCommit carries the same canonical node_id used in gossip
+    // and replica placement; no separate derivation is performed here.
+    let node_id_32 = *state.node_id.as_bytes();
 
     // 1) Compute node storage stats (SMT root + bytes_used) over current served objects.
     let (smt_root, bytes_used) = db::get_current_cycle_stats(pool).await?;
 
     // 2) Parent digest for chain continuity.
     // Spec chain link uses dt = H("DSM/bytecommit\0" || Bt).
-    let parent_digest = db::get_last_bytecommit_hash(pool, state.node_id.as_str())
+    let parent_digest = db::get_last_bytecommit_hash(pool, &node_id_32)
         .await?
         .unwrap_or([0u8; 32]);
 
@@ -305,7 +306,7 @@ pub async fn emit_cycle_commitment(
     )
     .await?;
     // Record chain pointer after the object is durably stored.
-    db::record_bytecommit_hash(pool, state.node_id.as_str(), cycle_index, &dt).await?;
+    db::record_bytecommit_hash(pool, &node_id_32, cycle_index, &dt).await?;
 
     Ok(dt)
 }
@@ -316,7 +317,7 @@ pub(crate) fn _test_bytecommit_addr(node_id: &[u8; 32], cycle_index: u64, dt: &[
     bytecommit_addr(node_id, cycle_index, dt)
 }
 
-/// Fetch raw bytes by deterministic address (hex string)
+/// Fetch raw bytes by deterministic Base32 Crockford address.
 pub async fn get_by_addr(
     Extension(state): Extension<Arc<crate::AppState>>,
     Path(addr): Path<String>,

@@ -18,29 +18,27 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
     dsm::crypto::blake3::domain_hash_bytes("DSM/relationship-key", counterparty_pk)
 }
 
-/// Compute the per-step EK signing target.
+/// Compute the receipt challenge-response target.
 ///
-/// The signing target is what `sig_a` / `sig_b` actually sign over. Production
-/// bilateral flows pass the session `commitment_hash` so the target becomes
+/// `sig_a` and `sig_b` are the responses to the proposed transition
+/// challenge. The canonical receipt commitment carries the transition facts;
+/// production bilateral flows also pass the session `commitment_hash`, so the
+/// target becomes
 /// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
-/// commitment_hash)`. This binds the per-step EK signature to a specific
-/// bilateral session and prevents cross-session receipt substitution.
+/// commitment_hash)`. The fresh EK key that signs this target is derived from
+/// h_n, C_pre, k_step, and K_DBRW, so a copied database cannot answer the
+/// next receipt challenge on different hardware.
 ///
 /// The §4.2.1 canonical commit form remains unchanged in both modes — the
-/// binding is added at the signing target level, not in the receipt body.
-pub fn compute_per_step_signing_target(
+/// session binding is added at the response-target level, not in the receipt body.
+pub fn compute_receipt_challenge_response_target(
     receipt_commitment: &[u8; 32],
-    session_binding: Option<&[u8; 32]>,
+    session_binding: &[u8; 32],
 ) -> [u8; 32] {
-    match session_binding {
-        Some(commitment_hash) => {
-            let mut input = Vec::with_capacity(64);
-            input.extend_from_slice(receipt_commitment);
-            input.extend_from_slice(commitment_hash);
-            dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-bind-session", &input)
-        }
-        None => *receipt_commitment,
-    }
+    let mut input = Vec::with_capacity(64);
+    input.extend_from_slice(receipt_commitment);
+    input.extend_from_slice(session_binding);
+    dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-bind-session", &input)
 }
 
 /// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1).
@@ -152,12 +150,13 @@ pub fn derive_kyber_k_step_for_verify(
 ///
 /// The helper handles the full whitepaper §11.1 per-step signing flow:
 /// loading the prior chain head SK (or the root AK at relationship genesis), deriving a
-/// fresh `EK_{n+1}` keypair, signing the cert, signing the receipt body,
+/// fresh `EK_{n+1}` keypair, signing the cert, answering the receipt challenge,
 /// and returning all artifacts. Callers do post-acceptance advancement
 /// separately via `advance_local_chain_head_after_signing`.
 pub struct PerStepSigningInputs<'a> {
     /// The receipt commitment hash (output of
-    /// `StitchedReceiptV2::compute_commitment`) — what gets signed by EK_sk.
+    /// `StitchedReceiptV2::compute_commitment`) — the transition commitment
+    /// fed into the receipt challenge-response target.
     pub commitment: &'a [u8; 32],
     /// Parent tip h_n — the bilateral chain tip before this transition.
     pub h_n: [u8; 32],
@@ -182,16 +181,15 @@ pub struct PerStepSigningInputs<'a> {
     /// established with peer Kyber pubkey before per-step EK signing
     /// can run.
     pub recipient_kyber_pk: &'a [u8],
-    /// Bilateral session binding (whitepaper §11.1 Item 7 forward
-    /// hardening). When `Some(commitment_hash)`, the per-step EK
-    /// signature is computed over a session-bound signing target —
+    /// Bilateral session binding (whitepaper §11.1 Item 7). The per-step EK
+    /// signature is computed over a session-bound receipt challenge-response target:
     /// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
-    /// commitment_hash)` — instead of over `commitment` directly.
+    /// commitment_hash)`.
     /// Cryptographically binds `sig_a` / `sig_b` to a specific bilateral
     /// session, defeating cross-session receipt substitution.
     ///
-    /// The §4.2.1 canonical commit form stays unchanged in both modes.
-    pub session_binding: Option<&'a [u8; 32]>,
+    /// The §4.2.1 canonical commit form stays unchanged.
+    pub session_binding: &'a [u8; 32],
 }
 
 /// Output of the high-level per-step EK signing helper.
@@ -206,7 +204,7 @@ pub struct PerStepSigningOutput {
     /// Cert chaining `EK_pk` back to the prior chain head — caller should
     /// set this on `receipt.ek_cert_a` (or `ek_cert_b`).
     pub ek_cert: Vec<u8>,
-    /// SPHINCS+ signature over the receipt commitment using `EK_sk` —
+    /// SPHINCS+ response over the receipt challenge target using `EK_sk` —
     /// caller passes this to `receipt.add_sig_a` (or `add_sig_b`).
     pub sig: Vec<u8>,
     /// Per-step Kyber ciphertext that travels in `receipt.kyber_ct_a`
@@ -221,7 +219,7 @@ pub struct PerStepSigningOutput {
     pub used_root_ak: bool,
 }
 
-/// Sign a receipt body with a per-step ephemeral SPHINCS+ key, building
+/// Sign a receipt challenge target with a per-step ephemeral SPHINCS+ key, building
 /// the cert chain back to the device's AK in the process (whitepaper §11.1).
 ///
 /// Flow:
@@ -283,15 +281,14 @@ pub fn sign_receipt_with_per_step_ek(
     // 4. Sign cert.
     let cert = sign_ek_cert(&prior_sk, &ek_pk, &inputs.h_n)?;
 
-    // 5. Sign the per-step signing target with the new EK_sk.
-    //    When `session_binding` is `Some`, this folds the bilateral
-    //    `commitment_hash` into the signed target via the
-    //    "DSM/receipt-bind-session" domain tag — Item 7 forward
-    //    hardening that defeats cross-session receipt substitution.
-    let signing_target = compute_per_step_signing_target(inputs.commitment, inputs.session_binding);
+    // 5. Answer the receipt challenge with the new EK_sk. The bilateral
+    //    `commitment_hash` is part of the response target via the
+    //    "DSM/receipt-bind-session" domain tag.
+    let signing_target =
+        compute_receipt_challenge_response_target(inputs.commitment, inputs.session_binding);
     let sig = sphincs_sign(&ek_sk, &signing_target).map_err(|e| {
         DsmError::crypto(
-            format!("per-step receipt body sign failed: {e}"),
+            format!("per-step receipt challenge response sign failed: {e}"),
             None::<String>,
         )
     })?;
@@ -377,12 +374,11 @@ pub enum BilateralSide {
 ///    genesis (step 0) or `EK_pk_{n-1}` for steady-state transitions, loaded
 ///    from `cert_chain_heads`.
 ///
-/// 2. **Receipt signature**: `sig_{side}` is a valid SPHINCS+ signature by
-///    `ek_pk_{side}` over the per-step signing target —
-///    `compute_per_step_signing_target(receipt.compute_commitment(),
-///    session_binding)`. When `session_binding` is `Some`, the signed target
-///    binds to the bilateral session's `commitment_hash` (Item 7 forward
-///    hardening). When `None`, the canonical receipt commitment is used.
+/// 2. **Receipt response**: `sig_{side}` is a valid SPHINCS+ signature by
+///    `ek_pk_{side}` over
+///    `compute_receipt_challenge_response_target(receipt.compute_commitment(),
+///    session_binding)`. The signed target binds to the bilateral session's
+///    `commitment_hash`.
 ///
 /// Returns `Ok(())` on success and a structured `DsmError` on the first
 /// failed check (cert link error vs. signature error are distinguished in the
@@ -394,13 +390,13 @@ pub enum BilateralSide {
 /// sender's A-side signing before applying the advance, and symmetrically
 /// from the sender's commit-response handler when the protocol carries the
 /// counter-signed receipt back. Both BLE handler call sites should pass
-/// `Some(&commitment_hash)` for the session binding.
+/// `&commitment_hash` for the session binding.
 pub fn verify_per_step_ek_signing(
     receipt: &StitchedReceiptV2,
     side: BilateralSide,
     expected_prev_pk: &[u8],
     h_n: &[u8; 32],
-    session_binding: Option<&[u8; 32]>,
+    session_binding: &[u8; 32],
 ) -> Result<(), DsmError> {
     use dsm::crypto::ephemeral_key::verify_ek_cert;
     use dsm::crypto::sphincs::sphincs_verify;
@@ -446,11 +442,11 @@ pub fn verify_per_step_ek_signing(
         )));
     }
 
-    // Step 2: receipt signature using ek_pk over the per-step signing
+    // Step 2: receipt response using ek_pk over the challenge-response
     // target. Bilateral ingress requires a session binding so signatures
     // cannot be replayed across sessions.
     let commitment = receipt.compute_commitment()?;
-    let signing_target = compute_per_step_signing_target(&commitment, session_binding);
+    let signing_target = compute_receipt_challenge_response_target(&commitment, session_binding);
     let sig_ok = sphincs_verify(ek_pk, &signing_target, sig).map_err(|e| {
         DsmError::crypto(
             format!("verify_per_step_ek_signing: sig verify error ({label}-side): {e}"),
@@ -460,11 +456,8 @@ pub fn verify_per_step_ek_signing(
     if !sig_ok {
         return Err(DsmError::invalid_operation(format!(
             "verify_per_step_ek_signing: sig_{label} does NOT verify under ek_pk_{label} \
-             over per-step signing target — receipt is unauthenticated{}",
-            match session_binding {
-                Some(_) => " (session-bound mode: check that signer used the same commitment_hash)",
-                None => "",
-            }
+             over receipt challenge-response target — check that signer used the same \
+             commitment_hash"
         )));
     }
 
@@ -487,7 +480,7 @@ pub fn verify_per_step_ek_signing_strict_aware(
     side: BilateralSide,
     expected_prev_pk: &[u8],
     h_n: &[u8; 32],
-    session_binding: Option<&[u8; 32]>,
+    session_binding: &[u8; 32],
 ) -> Result<PerStepEkVerifyOutcome, DsmError> {
     let (ek_pk, ek_cert, sig, label) = match side {
         BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
@@ -499,12 +492,6 @@ pub fn verify_per_step_ek_signing_strict_aware(
         return Err(DsmError::invalid_operation(format!(
             "receipt carries no §11.1 per-step EK {label}-side artifacts \
              (ek_pk_{label} / ek_cert_{label} / sig_{label}); rejecting"
-        )));
-    }
-
-    if session_binding.is_none() {
-        return Err(DsmError::invalid_operation(format!(
-            "receipt {label}-side verification requires a bilateral session binding"
         )));
     }
 
@@ -524,8 +511,10 @@ pub fn verify_per_step_ek_signing_strict_aware(
 ///
 /// Cert chain verification (whitepaper §11.1): the sender chain head is
 /// required for offline receipt acceptance. Parent/root inclusion proves state
-/// consistency; the sender EK cert chain proves live C-DBRW-bound spend
-/// authorization for the proposed transition.
+/// consistency, but it is not spend authority. The receipt challenge is the
+/// proposed transition context. The response is `sig_a` or `sig_b` under the
+/// fresh EK key derived from h_n, C_pre, k_step, and K_DBRW, with `ek_cert`
+/// linking that key to AK at step 0 or the prior EK on later steps.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_stitched_receipt(
     receipt: &StitchedReceiptV2,
@@ -991,6 +980,8 @@ mod tests {
     use dsm::types::device_state::DeviceState;
     use dsm::types::operations::Operation;
 
+    const TEST_SESSION_BINDING: [u8; 32] = [0x5A; 32];
+
     // ── derive_per_step_ek (whitepaper §11.1) ──
 
     fn ek_ctx() -> PerStepEkContext {
@@ -1181,12 +1172,12 @@ mod tests {
             k_dbrw,
             root_ak_keypair: Some((ak_pk, ak_sk)),
             recipient_kyber_pk,
-            session_binding: None,
+            session_binding: &TEST_SESSION_BINDING,
         }
     }
 
     /// First-ever signing for a relationship: helper falls back to AK,
-    /// uses it to sign cert; receipt body is signed by the new EK_sk.
+    /// uses it to sign cert; the receipt challenge is answered by the new EK_sk.
     /// Returned cert verifies against AK_pk.
     #[test]
     #[serial_test::serial]
@@ -1220,8 +1211,10 @@ mod tests {
             "cert must verify against AK pubkey when root AK is used"
         );
 
-        // The receipt-body signature must verify against the per-step EK pubkey.
-        let sig_ok = sphincs_verify(&out.ek_pk, &commitment, &out.sig).unwrap();
+        // The receipt response must verify against the per-step EK pubkey.
+        let response_target =
+            compute_receipt_challenge_response_target(&commitment, inputs.session_binding);
+        let sig_ok = sphincs_verify(&out.ek_pk, &response_target, &out.sig).unwrap();
         assert!(sig_ok, "sig_a must verify against the per-step EK pubkey");
     }
 
@@ -1300,8 +1293,9 @@ mod tests {
 
         // Cert step 0 chains EK_0 → AK.
         assert!(verify_ek_cert(&ak_pk, &out0.ek_pk, &inputs0.h_n, &out0.ek_cert).unwrap());
-        // Receipt body verifies under EK_0.
-        assert!(sphincs_verify(&out0.ek_pk, &commit0, &out0.sig).unwrap());
+        // Receipt response verifies under EK_0.
+        let target0 = compute_receipt_challenge_response_target(&commit0, inputs0.session_binding);
+        assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
 
         // Persist EK_0 as new chain head.
         advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &k_dbrw, true)
@@ -1319,8 +1313,9 @@ mod tests {
         assert!(verify_ek_cert(&out0.ek_pk, &out1.ek_pk, &inputs1.h_n, &out1.ek_cert).unwrap());
         // Step-1 cert MUST NOT verify against AK (proves we walked the chain).
         assert!(!verify_ek_cert(&ak_pk, &out1.ek_pk, &inputs1.h_n, &out1.ek_cert).unwrap());
-        // Receipt body at step 1 verifies under EK_1.
-        assert!(sphincs_verify(&out1.ek_pk, &commit1, &out1.sig).unwrap());
+        // Receipt response at step 1 verifies under EK_1.
+        let target1 = compute_receipt_challenge_response_target(&commit1, inputs1.session_binding);
+        assert!(sphincs_verify(&out1.ek_pk, &target1, &out1.sig).unwrap());
 
         // Distinct EK at step 1 vs step 0.
         assert_ne!(out0.ek_pk, out1.ek_pk);
@@ -1341,7 +1336,7 @@ mod tests {
     ///   (P3) For n >= 1, step n's cert does NOT verify against
     ///        step (n-2)'s pubkey (when it exists) — adjacent chain
     ///        only, no skip-level authorization.
-    ///   (P4) Each step's receipt-body sig verifies against that
+    ///   (P4) Each step's receipt response verifies against that
     ///        step's EK_pk (and only that step's EK_pk).
     ///   (P5) All EK_pks across the chain are distinct.
     ///   (P6) Cert chain integrity is preserved across distinct
@@ -1392,7 +1387,7 @@ mod tests {
                     k_dbrw: &k_dbrw,
                     root_ak_keypair: Some((&ak_pk, &ak_sk)),
                     recipient_kyber_pk: &kyber_pk,
-                    session_binding: None,
+                    session_binding: &TEST_SESSION_BINDING,
                 };
                 let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
@@ -1465,11 +1460,15 @@ mod tests {
                 );
             }
 
-            // (P4) Each step's receipt-body sig verifies against that
+            // (P4) Each step's receipt response verifies against that
             //      step's EK_pk only.
             for i in 0..chain_length {
+                let response_target = compute_receipt_challenge_response_target(
+                    &chain_commits[i],
+                    &TEST_SESSION_BINDING,
+                );
                 assert!(
-                    sphincs_verify(&chain_pubkeys[i], &chain_commits[i], &chain_sigs[i]).unwrap(),
+                    sphincs_verify(&chain_pubkeys[i], &response_target, &chain_sigs[i]).unwrap(),
                     "P4 violated at len={}, step={}",
                     chain_length,
                     i
@@ -1477,7 +1476,7 @@ mod tests {
                 // And NOT under the previous step's EK_pk.
                 if i > 0 {
                     assert!(
-                        !sphincs_verify(&chain_pubkeys[i - 1], &chain_commits[i], &chain_sigs[i])
+                        !sphincs_verify(&chain_pubkeys[i - 1], &response_target, &chain_sigs[i])
                             .unwrap(),
                         "P4 violated at len={}, step={}: sig verifies under \
                          WRONG EK_pk (the prior step's)",
@@ -1520,7 +1519,7 @@ mod tests {
             k_dbrw: &k_dbrw,
             root_ak_keypair: None,
             recipient_kyber_pk: &[],
-            session_binding: None,
+            session_binding: &TEST_SESSION_BINDING,
         };
         let result = sign_receipt_with_per_step_ek(&inputs);
         assert!(result.is_err());
@@ -1575,7 +1574,7 @@ mod tests {
             k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
+            session_binding: &TEST_SESSION_BINDING,
         };
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
@@ -1602,8 +1601,14 @@ mod tests {
     fn verify_per_step_ek_signing_accepts_well_formed_a_side() {
         let (receipt, ak_pk, h_n) =
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xA1; 32]);
-        verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-            .expect("a freshly-signed A-side receipt must verify under AK + h_n");
+        verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect("a freshly-signed A-side receipt must verify under AK + h_n");
     }
 
     #[test]
@@ -1611,8 +1616,14 @@ mod tests {
     fn verify_per_step_ek_signing_accepts_well_formed_b_side() {
         let (receipt, ak_pk, h_n) =
             build_signed_receipt_for_verifier_test(BilateralSide::B, &[0xB1; 32]);
-        verify_per_step_ek_signing(&receipt, BilateralSide::B, &ak_pk, &h_n, None)
-            .expect("a freshly-signed B-side receipt must verify under AK + h_n");
+        verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::B,
+            &ak_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect("a freshly-signed B-side receipt must verify under AK + h_n");
     }
 
     /// Tampering the receipt commitment after signing must invalidate sig.
@@ -1623,12 +1634,18 @@ mod tests {
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xA2; 32]);
 
         // Mutate a field that participates in commitment computation. The
-        // cert-link check still passes (the EK→AK chain is unaffected by
-        // the receipt body), but the receipt-body signature must fail.
+        // cert-link check still passes (the EK->AK chain is unaffected by
+        // the receipt contents), but the receipt response must fail.
         receipt.parent_root = [0xDE; 32];
 
-        let err = verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-            .expect_err("tampered commitment must fail signature verification");
+        let err = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect_err("tampered commitment must fail signature verification");
         let msg = err.to_string();
         assert!(
             msg.contains("sig_A does NOT verify"),
@@ -1648,8 +1665,14 @@ mod tests {
         // was signed by the real AK_sk, not by this attacker key, so the
         // cert link check must reject.
         let attacker_pk = vec![0x99u8; 32];
-        let err = verify_per_step_ek_signing(&receipt, BilateralSide::A, &attacker_pk, &h_n, None)
-            .expect_err("cert chained to AK must NOT verify against an attacker pubkey");
+        let err = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &attacker_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect_err("cert chained to AK must NOT verify against an attacker pubkey");
         let msg = err.to_string();
         assert!(
             msg.contains("does NOT chain") || msg.contains("cert chain"),
@@ -1665,8 +1688,14 @@ mod tests {
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xA4; 32]);
 
         let wrong_h_n = [0xEE; 32];
-        let err = verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &wrong_h_n, None)
-            .expect_err("cert pinned to a different h_n must not verify");
+        let err = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &wrong_h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect_err("cert pinned to a different h_n must not verify");
         let msg = err.to_string();
         assert!(
             msg.contains("does NOT chain") || msg.contains("cert chain"),
@@ -1680,11 +1709,9 @@ mod tests {
     /// expected_prev_pk is loaded from `cert_chain_heads.Counterparty`
     /// (now the fresh EK_pk_0, not the stale AK_pk).
     ///
-    /// This is the unit-level analogue of the BLE handler fix from the
-    /// Stage-6 adversarial critique — without the post-commit
-    /// `advance_cert_chain_head(Counterparty, …)` call, this test would
-    /// fail at step 1 because the cert chains to EK_pk_0 but the
-    /// verifier would still be reading AK_pk.
+    /// Without the post-commit `advance_cert_chain_head(Counterparty, ...)`
+    /// call, this test fails at step 1 because the cert chains to EK_pk_0
+    /// while the verifier still reads AK_pk.
     #[test]
     #[serial_test::serial]
     fn verify_per_step_ek_signing_multi_step_with_counterparty_advance() {
@@ -1738,7 +1765,7 @@ mod tests {
             k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: Some(&session0),
+            session_binding: &session0,
         };
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         receipt_step0.set_ek_pk_a(out0.ek_pk.clone());
@@ -1774,12 +1801,11 @@ mod tests {
             BilateralSide::A,
             &prev_pk_loaded,
             &[0xAA; 32],
-            Some(&session0),
+            &session0,
         )
         .expect("step 0 must verify under freshly-seeded Counterparty AK_pk");
 
         // ────── Critical post-commit step: advance Counterparty ──────
-        // This is the missing call that the Stage-6 critique caught.
         // After verifying A-side, the receiver MUST mirror the sender's
         // outbound chain head in their own Counterparty row so step 1+
         // verification finds the fresh prev_pk (EK_pk_0), not the stale
@@ -1812,10 +1838,10 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: sender_rel_key,
             k_dbrw: &k_dbrw,
-            // Fallback AK shouldn't be used now — chain head exists.
+            // The existing chain head must be selected before the root AK.
             root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: Some(&session1),
+            session_binding: &session1,
         };
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
         assert!(
@@ -1845,46 +1871,35 @@ mod tests {
             BilateralSide::A,
             &prev_pk_loaded_step1,
             &[0xCC; 32],
-            Some(&session1),
+            &session1,
         )
-        .expect(
-            "step 1 must verify against the advanced Counterparty chain head — \
-             this is the Stage-6 critique fix",
-        );
+        .expect("step 1 must verify against the advanced Counterparty chain head");
 
-        // Negative regression: if we try to verify step 1 against the
-        // STALE AK_pk (the relationship-genesis state, before our
-        // advance), it MUST fail. This is exactly the bug the fix
-        // closes.
+        // If step 1 is checked against the relationship-genesis AK_pk
+        // instead of the advanced chain head, verification must fail.
         let stale_check = verify_per_step_ek_signing_strict_aware(
             &receipt_step1,
             BilateralSide::A,
             &sender_ak_pk,
             &[0xCC; 32],
-            None,
+            &session1,
         );
         assert!(
             stale_check.is_err(),
-            "step 1 against stale AK_pk MUST fail — proves the test exercises the right path"
+            "step 1 against the genesis AK_pk must fail"
         );
     }
 
-    /// Item 7 — cross-session receipt substitution must fail under
-    /// session-bound signing.
+    /// Item 7 — cross-session receipt substitution must fail under the
+    /// receipt challenge-response target.
     ///
-    /// Sign a receipt under `session_binding = Some(C1)` and verify:
-    ///   1. Same session_binding (Some(C1)) → verifies.
-    ///   2. Different session_binding (Some(C2)) → REJECTS (the receipt
-    ///      sig is cryptographically bound to C1, not C2).
-    ///   3. session_binding = None on a Some-signed sig rejects.
-    /// And the contrapositive: an unbound receipt signature under
-    /// any session_binding=Some(_) must also reject.
+    /// Sign a receipt under `session_binding = C1` and verify:
+    ///   1. Same session binding verifies.
+    ///   2. Different session binding rejects because the signature is
+    ///      cryptographically bound to C1, not C2.
     ///
-    /// This is the cryptographic invariant Gemini's Stage-6 critique
-    /// flagged as a forward-hardening gap (boundary_condition_failure
-    /// on receipts not self-binding to commitment_hash). With Item 7
-    /// in place, the invariant holds at the signature level —
-    /// canonical commit form per §4.2.1 stays unchanged.
+    /// This is the receipt challenge-response invariant: the same receipt
+    /// body cannot be replayed into another proposed transition.
     #[test]
     #[serial_test::serial]
     fn item7_session_binding_rejects_cross_session_substitution() {
@@ -1913,7 +1928,7 @@ mod tests {
         let session_c1: [u8; 32] = [0xC1; 32];
         let session_c2: [u8; 32] = [0xC2; 32];
 
-        // Sign with session_binding = Some(C1).
+        // Sign with session_binding = C1.
         let inputs = PerStepSigningInputs {
             commitment: &commitment,
             h_n: [0xAA; 32],
@@ -1923,7 +1938,7 @@ mod tests {
             k_dbrw: &[0xE1; 32],
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: Some(&session_c1),
+            session_binding: &session_c1,
         };
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
         receipt.set_ek_pk_a(out.ek_pk.clone());
@@ -1932,14 +1947,8 @@ mod tests {
         receipt.add_sig_a(out.sig);
 
         // (1) Same session_binding → verifies.
-        verify_per_step_ek_signing(
-            &receipt,
-            BilateralSide::A,
-            &ak_pk,
-            &[0xAA; 32],
-            Some(&session_c1),
-        )
-        .expect("session_binding C1 must verify the C1-bound sig");
+        verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &[0xAA; 32], &session_c1)
+            .expect("session_binding C1 must verify the C1-bound sig");
 
         // (2) Different session_binding → rejects.
         let cross = verify_per_step_ek_signing(
@@ -1947,71 +1956,12 @@ mod tests {
             BilateralSide::A,
             &ak_pk,
             &[0xAA; 32],
-            Some(&session_c2),
+            &session_c2,
         );
         assert!(
             cross.is_err(),
             "session_binding C2 must NOT verify a sig bound to C1 — \
              this is the cross-session substitution invariant Item 7 enforces"
-        );
-
-        // (3) None on a session-bound sig rejects.
-        let unbound_check =
-            verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &[0xAA; 32], None);
-        assert!(
-            unbound_check.is_err(),
-            "unbound verification must not accept a session-bound sig"
-        );
-
-        let mut receipt_unbound = StitchedReceiptV2::new(
-            [0x01; 32],
-            [0x02; 32],
-            [0x03; 32],
-            [0xAA; 32],
-            [0x14; 32], // child_tip differs to force a different commit hash
-            [0x15; 32],
-            [0x16; 32],
-            vec![0x17; 16],
-            vec![0x18; 16],
-            vec![0x19; 16],
-        );
-        let unbound_commitment = receipt_unbound.compute_commitment().unwrap();
-        let unbound_inputs = PerStepSigningInputs {
-            commitment: &unbound_commitment,
-            h_n: [0xAA; 32],
-            c_pre: [0xBB; 32],
-            devid_sender: [0x11; 32],
-            relationship_key: [0xD2; 32],
-            k_dbrw: &[0xE2; 32],
-            root_ak_keypair: Some((&ak_pk, &ak_sk)),
-            recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
-        };
-        let unbound_out = sign_receipt_with_per_step_ek(&unbound_inputs).unwrap();
-        receipt_unbound.set_ek_pk_a(unbound_out.ek_pk.clone());
-        receipt_unbound.set_ek_cert_a(unbound_out.ek_cert);
-        receipt_unbound.set_kyber_ct_a(unbound_out.kyber_ct);
-        receipt_unbound.add_sig_a(unbound_out.sig);
-
-        verify_per_step_ek_signing(
-            &receipt_unbound,
-            BilateralSide::A,
-            &ak_pk,
-            &[0xAA; 32],
-            None,
-        )
-        .expect("unbound signing target round-trips at the low-level verifier");
-
-        let upgrade_check = verify_per_step_ek_signing(
-            &receipt_unbound,
-            BilateralSide::A,
-            &ak_pk,
-            &[0xAA; 32],
-            Some(&session_c1),
-        );
-        assert!(
-            upgrade_check.is_err(),
-            "unbound sig must not verify under any session_binding"
         );
     }
 
@@ -2067,7 +2017,7 @@ mod tests {
             k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
+            session_binding: &TEST_SESSION_BINDING,
         };
         let a_out = sign_receipt_with_per_step_ek(&a_inputs).unwrap();
         receipt.set_ek_pk_a(a_out.ek_pk.clone());
@@ -2087,7 +2037,7 @@ mod tests {
             k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&receiver_ak_pk, &receiver_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
+            session_binding: &TEST_SESSION_BINDING,
         };
         let b_out = sign_receipt_with_per_step_ek(&b_inputs).unwrap();
         receipt.set_ek_pk_b(b_out.ek_pk.clone());
@@ -2099,14 +2049,20 @@ mod tests {
 
         // Both sides must verify independently against their respective
         // AK pubkeys.
-        verify_per_step_ek_signing(&receipt, BilateralSide::A, &sender_ak_pk, &[0xAA; 32], None)
-            .expect("A-side must verify under sender's AK");
+        verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &sender_ak_pk,
+            &[0xAA; 32],
+            &TEST_SESSION_BINDING,
+        )
+        .expect("A-side must verify under sender's AK");
         verify_per_step_ek_signing(
             &receipt,
             BilateralSide::B,
             &receiver_ak_pk,
             &[0xAA; 32],
-            None,
+            &TEST_SESSION_BINDING,
         )
         .expect("B-side must verify under receiver's AK");
 
@@ -2117,7 +2073,7 @@ mod tests {
             BilateralSide::A,
             &receiver_ak_pk,
             &[0xAA; 32],
-            None,
+            &TEST_SESSION_BINDING,
         );
         assert!(
             cross_a.is_err(),
@@ -2128,7 +2084,7 @@ mod tests {
             BilateralSide::B,
             &sender_ak_pk,
             &[0xAA; 32],
-            None,
+            &TEST_SESSION_BINDING,
         );
         assert!(cross_b.is_err(), "B-side must NOT verify under sender's AK");
     }
@@ -2139,8 +2095,8 @@ mod tests {
     /// transitions, exercising both A and B chains advancing in
     /// parallel under strict cert-chain mode. This is the integration
     /// analogue of Lean's `extendChain_preserves_validity` (Theorem 7)
-    /// and proves the post-Stage-6-fix BLE wiring keeps both chains
-    /// consistent across multi-step.
+    /// and proves the BLE receipt wiring keeps both chains consistent across
+    /// multiple steps.
     ///
     /// Per step n we drive:
     ///   1. Sender (Device A) signs receipt with A-side per-step EK
@@ -2153,7 +2109,7 @@ mod tests {
     ///   3. Sender verifies B-side under their mirror of receiver's
     ///      chain (Counterparty row from A's POV).
     ///   4. Both sides advance their respective Counterparty mirrors
-    ///      to the just-verified EK_pk (the Stage-6 fix).
+    ///      to the just-verified EK_pk.
     ///
     /// Asserts at every step:
     ///   - A-side and B-side verifications both pass (Verified outcome).
@@ -2239,7 +2195,7 @@ mod tests {
                 k_dbrw: &k_dbrw,
                 root_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
                 recipient_kyber_pk: &kyber_pk,
-                session_binding: Some(&session_binding),
+                session_binding: &session_binding,
             };
             let a_out = sign_receipt_with_per_step_ek(&a_inputs).unwrap();
             // Step 0 must use root AK; step 1+ must use chain head.
@@ -2292,7 +2248,7 @@ mod tests {
                 BilateralSide::A,
                 &prev_pk_a_loaded,
                 &h_n_a,
-                Some(&session_binding),
+                &session_binding,
             )
             .unwrap_or_else(|e| panic!("step {step} A-side verify failed: {e}"));
 
@@ -2315,7 +2271,7 @@ mod tests {
                 k_dbrw: &k_dbrw,
                 root_ak_keypair: Some((&ak_pk_b, &ak_sk_b)),
                 recipient_kyber_pk: &kyber_pk,
-                session_binding: Some(&session_binding),
+                session_binding: &session_binding,
             };
             let b_out = sign_receipt_with_per_step_ek(&b_inputs).unwrap();
             if step == 0 {
@@ -2358,11 +2314,11 @@ mod tests {
                 BilateralSide::B,
                 &prev_pk_b_loaded,
                 &h_n_b,
-                Some(&session_binding),
+                &session_binding,
             )
             .unwrap_or_else(|e| panic!("step {step} B-side verify failed: {e}"));
 
-            // ─── Post-commit Counterparty advances (Stage-6 fix) ───
+            // ─── Post-commit Counterparty advances ───
             // Both devices advance their mirrors of the other's chain.
             let new_step_a =
                 advance_cert_chain_head(&rel_a, CertChainSide::Counterparty, &a_out.ek_pk)
@@ -2391,8 +2347,8 @@ mod tests {
         // Build a fresh step-2 receipt, sign A-side with rel_a's
         // current chain head (which after the loop is EK_pk_a_2),
         // then assert it does NOT verify under any earlier step's
-        // chain head. This cryptographically pins the chain
-        // freshness invariant the Stage-6 fix is supposed to enforce.
+        // chain head. This cryptographically pins the chain freshness
+        // invariant.
         let mut substitution_check_receipt = StitchedReceiptV2::new(
             [0x01; 32],
             [0x02; 32],
@@ -2415,7 +2371,7 @@ mod tests {
             k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
+            session_binding: &TEST_SESSION_BINDING,
         };
         let sub_out = sign_receipt_with_per_step_ek(&sub_inputs).unwrap();
         substitution_check_receipt.set_ek_pk_a(sub_out.ek_pk.clone());
@@ -2432,33 +2388,16 @@ mod tests {
                 BilateralSide::A,
                 stale_pk,
                 &[0xAF; 32],
-                None,
+                &TEST_SESSION_BINDING,
             );
             assert!(
                 result.is_err(),
-                "substitution check {idx}: stale chain head MUST reject — \
-                 this is the Stage-6 anti-substitution invariant"
+                "substitution check {idx}: stale chain head MUST reject"
             );
         }
     }
 
     // ── verify_per_step_ek_signing_strict_aware ────────────────────────
-
-    /// A receipt with artifacts must also carry the bilateral session binding.
-    #[test]
-    #[serial_test::serial]
-    fn required_verifier_rejects_missing_session_binding() {
-        let (receipt, ak_pk, h_n) =
-            build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC1; 32]);
-
-        let err =
-            verify_per_step_ek_signing_strict_aware(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-                .expect_err("missing session binding must reject");
-        assert!(
-            err.to_string().contains("session binding"),
-            "error must reference the missing session binding, got: {err}"
-        );
-    }
 
     /// Session-bound verification accepts a correctly signed receipt.
     #[test]
@@ -2493,7 +2432,7 @@ mod tests {
             k_dbrw: &[0xE8; 32],
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_kp.public_key,
-            session_binding: Some(&session_binding),
+            session_binding: &session_binding,
         };
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
         receipt.set_ek_pk_a(out.ek_pk);
@@ -2506,7 +2445,7 @@ mod tests {
             BilateralSide::A,
             &ak_pk,
             &[0xAA; 32],
-            Some(&session_binding),
+            &session_binding,
         )
         .expect("session-bound A-side must verify");
         assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
@@ -2537,7 +2476,7 @@ mod tests {
             BilateralSide::A,
             &[0x99u8; 32],
             &[0xAA; 32],
-            Some(&[0xFE; 32]),
+            &[0xFE; 32],
         )
         .expect_err("missing artifacts must reject");
         let msg = err.to_string();
@@ -2556,13 +2495,18 @@ mod tests {
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC3; 32]);
         receipt.parent_root = [0xDE; 32];
 
-        let err =
-            verify_per_step_ek_signing_strict_aware(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-                .expect_err("missing session binding rejects before crypto check");
+        let err = verify_per_step_ek_signing_strict_aware(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect_err("tampered receipt must fail receipt response verification");
         let msg = err.to_string();
         assert!(
-            msg.contains("session binding"),
-            "error must surface the missing session binding, got: {msg}"
+            msg.contains("sig_A does NOT verify"),
+            "error must surface the signature failure, got: {msg}"
         );
     }
 
@@ -2578,13 +2522,25 @@ mod tests {
 
         // Drop sig_a — receipt now has cert + ek_pk but no signature.
         receipt.sig_a = vec![];
-        let err = verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-            .expect_err("empty sig_a must fail-closed");
+        let err = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect_err("empty sig_a must fail-closed");
         assert!(err.to_string().contains("missing sig_A"));
 
         // B-side never signed for this receipt, so all B fields are empty.
-        let err_b = verify_per_step_ek_signing(&receipt, BilateralSide::B, &ak_pk, &h_n, None)
-            .expect_err("requesting B-side verification on an A-only receipt must fail-closed");
+        let err_b = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::B,
+            &ak_pk,
+            &h_n,
+            &TEST_SESSION_BINDING,
+        )
+        .expect_err("requesting B-side verification on an A-only receipt must fail-closed");
         assert!(err_b.to_string().contains("missing ek_pk_B"));
     }
 

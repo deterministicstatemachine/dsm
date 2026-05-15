@@ -6,13 +6,10 @@ package com.dsm.wallet.bridge
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import java.util.Locale
-import com.dsm.native.DsmNative
 import com.dsm.native.DsmNativeException
 import java.util.concurrent.atomic.AtomicBoolean
 import com.dsm.wallet.bridge.ble.BleCoordinator
-import com.dsm.wallet.security.AntiCloneGate
-import com.dsm.wallet.security.AccessLevel
+import dsm.types.proto.SystemGenesisRequest
 
 // ============================================================================
 // DSM APP INTEGRATION BOUNDARY -- WebView RPC Dispatcher
@@ -29,7 +26,7 @@ import com.dsm.wallet.security.AccessLevel
 // METHOD ROUTING (grouped by boundary):
 //   Shared boundary: "nativeBoundaryStartup", "nativeBoundaryIngress"
 //   Private host boundary: "nativeHostRequest"
-//   Legacy native helpers that still back non-WebView callers remain internal only.
+//   Platform-bound helpers stay behind the same binary MessagePort dispatcher.
 //
 // ERROR CODES (returned in response envelope):
 //   0 = success
@@ -333,6 +330,23 @@ class SinglePathWebViewBridge(private val context: Context) {
                     } catch (_: Throwable) {
                         ByteArray(0)
                     }
+                }
+
+                "createGenesis" -> {
+                    val req = SystemGenesisRequest.parseFrom(payload)
+                    BridgeIdentityHandler.createGenesis(
+                        context = inst.context,
+                        prefs = inst.prefs(),
+                        sdkContextInitialized = sdkContextInitialized,
+                        logTag = TAG,
+                        keyDeviceId = KEY_DEVICE_ID,
+                        keyGenesisHash = KEY_GENESIS_HASH,
+                        keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
+                        keyDbrwSalt = KEY_DBRW_SALT,
+                        locale = req.locale,
+                        networkId = req.networkId,
+                        entropyBytes = req.deviceEntropy.toByteArray(),
+                    )
                 }
 
                 // strict balances (JNI). Returns FramedEnvelopeV3 bytes or empty on error.

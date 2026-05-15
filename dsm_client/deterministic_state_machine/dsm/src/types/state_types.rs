@@ -286,13 +286,11 @@ impl DeviceInfo {
     }
 }
 
-/// **DEPRECATED**: Legacy compatibility view. All instances are now derived
-/// from [`DeviceState`](crate::types::device_state::DeviceState).
+/// SDK-facing state projection derived from
+/// [`DeviceState`](crate::types::device_state::DeviceState).
 ///
-/// Use `DeviceState` for the canonical device head, and
-/// `RelationshipChainState` for per-chain state. This struct exists only
-/// to support callers that haven't migrated yet. It will be deleted once
-/// all readers use the canonical types directly.
+/// Use `DeviceState` for the canonical device head and
+/// `RelationshipChainState` for per-chain state.
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 pub struct State {
@@ -1451,7 +1449,7 @@ pub struct SerializableMerkleProof {
     /// Proof elements
     pub proof: Vec<Vec<u8>>,
 
-    /// Root hash for backward compatibility
+    /// Root hash committed by the proof
     pub root_hash: SerializableHash,
 }
 

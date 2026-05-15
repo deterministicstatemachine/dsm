@@ -32,6 +32,7 @@ pub use shard_count_smt::ShardCountSmt;
 pub use spent_proof_smt::SpentProofSmt;
 
 use crate::crypto::blake3::domain_hash_bytes;
+use crate::merkle::sparse_merkle_tree::SmtInclusionProof;
 use crate::types::error::DsmError;
 
 const DEFAULT_HALVING_STEPS: u32 = 64;
@@ -120,7 +121,7 @@ impl EmissionSchedule {
 }
 
 /// Root witness supplied with an emission transition.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct EmissionWitness {
     pub policy_digest: [u8; 32],
     pub prev_count_root: [u8; 32],
@@ -129,6 +130,8 @@ pub struct EmissionWitness {
     pub next_spent_root: [u8; 32],
     pub prev_shard_roots_commitment: [u8; 32],
     pub next_shard_roots_commitment: [u8; 32],
+    pub prev_spent_non_membership_proof: SmtInclusionProof,
+    pub next_spent_membership_proof: SmtInclusionProof,
     pub activation_shard: u64,
     pub activated_leaf: [u8; 32],
 }
@@ -138,10 +141,11 @@ impl EmissionWitness {
         prev_state: &SourceDlvState,
         next_state: &SourceDlvState,
         jap: &JoinActivationProof,
-    ) -> Self {
+    ) -> Result<Self, DsmError> {
         let shard_hash = domain_hash_bytes("DJTE.SHARD", &jap.id);
         let activation_shard = extract_shard_index(&shard_hash, prev_state.count_smt.shard_depth);
-        Self {
+        let jap_hash = jap.digest();
+        Ok(Self {
             policy_digest: prev_state.policy.digest(),
             prev_count_root: prev_state.count_smt.root(),
             next_count_root: next_state.count_smt.root(),
@@ -149,9 +153,11 @@ impl EmissionWitness {
             next_spent_root: next_state.spent_smt.root(),
             prev_shard_roots_commitment: shard_roots_commitment(prev_state),
             next_shard_roots_commitment: shard_roots_commitment(next_state),
+            prev_spent_non_membership_proof: prev_state.spent_smt.proof(&jap_hash)?,
+            next_spent_membership_proof: next_state.spent_smt.proof(&jap_hash)?,
             activation_shard,
             activated_leaf: domain_hash_bytes("DJTE.ACTIVE", &jap.id),
-        }
+        })
     }
 }
 
@@ -388,11 +394,6 @@ pub fn select_winner_for_event(
         .ok_or_else(|| DsmError::Verification("Leaf not found".into()))
 }
 
-/// Backwards-compatible wrapper: uses state.emission_index as the event index.
-pub fn select_winner(state: &SourceDlvState, jap_hash: &[u8; 32]) -> Result<[u8; 32], DsmError> {
-    select_winner_for_event(state, state.emission_index, jap_hash)
-}
-
 fn compute_next_tip(
     prev_tip: &[u8; 32],
     receipt_digest: &[u8; 32],
@@ -463,6 +464,24 @@ pub fn verify_emission(
     {
         return Err(DsmError::Verification(
             "Emission witness spent root mismatch".into(),
+        ));
+    }
+    if !SpentProofSmt::verify_absent(
+        &witness.prev_spent_non_membership_proof,
+        &witness.prev_spent_root,
+        &receipt.jap_hash,
+    ) {
+        return Err(DsmError::Verification(
+            "Emission witness previous spent non-membership proof mismatch".into(),
+        ));
+    }
+    if !SpentProofSmt::verify_spent(
+        &witness.next_spent_membership_proof,
+        &witness.next_spent_root,
+        &receipt.jap_hash,
+    ) {
+        return Err(DsmError::Verification(
+            "Emission witness next spent membership proof mismatch".into(),
         ));
     }
     if witness.prev_shard_roots_commitment != shard_roots_commitment(prev_state)
@@ -742,7 +761,7 @@ mod tests {
         next.remaining_supply = prev.remaining_supply - receipt_amount;
 
         next.add_activation(&jap).unwrap();
-        next.spent_smt.mark_spent(jap_hash);
+        next.spent_smt.mark_spent(jap_hash).unwrap();
 
         let receipt_digest = receipt.digest();
         let count_root = next.count_smt.root();
@@ -755,7 +774,7 @@ mod tests {
             &spent_root,
             &shard_commit,
         );
-        let witness = EmissionWitness::from_states(&prev, &next, &jap);
+        let witness = EmissionWitness::from_states(&prev, &next, &jap).unwrap();
 
         assert_eq!(
             _winner_leaf,
@@ -779,7 +798,7 @@ mod tests {
         next.emission_index = emission_index;
         next.remaining_supply = prev.remaining_supply - 2;
         next.add_activation(&jap).unwrap();
-        next.spent_smt.mark_spent(jap_hash);
+        next.spent_smt.mark_spent(jap_hash).unwrap();
 
         let receipt = EmissionReceipt {
             emission_index,
@@ -798,7 +817,7 @@ mod tests {
             &spent_root,
             &shard_commit,
         );
-        let witness = EmissionWitness::from_states(&prev, &next, &jap);
+        let witness = EmissionWitness::from_states(&prev, &next, &jap).unwrap();
 
         let err = verify_emission(&prev, &next, &jap, &receipt, &witness)
             .expect_err("arbitrary amount must be rejected");

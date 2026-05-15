@@ -379,7 +379,6 @@ impl BilateralRelationshipManager {
         &mut self,
         request_hash: &[u8; 32],
         response_message: Option<String>,
-        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<DsmVerifiedContact, DsmError> {
         info!("Accepting contact establishment request");
 
@@ -429,7 +428,7 @@ impl BilateralRelationshipManager {
         // Establish bilateral relationship (strict)
         let _relationship = self
             .bilateral_tx_manager
-            .establish_relationship(&request.local_device_id, smt)
+            .establish_relationship(&request.local_device_id)
             .await?;
 
         self.establishment_states.insert(
@@ -455,7 +454,6 @@ impl BilateralRelationshipManager {
         &mut self,
         request_hash: &[u8; 32],
         response_message: Option<String>,
-        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<(DsmVerifiedContact, ContactEstablishmentResponse), DsmError> {
         info!("Accepting contact establishment request (with response)");
 
@@ -503,7 +501,7 @@ impl BilateralRelationshipManager {
 
         let _relationship = self
             .bilateral_tx_manager
-            .establish_relationship(&request.local_device_id, smt)
+            .establish_relationship(&request.local_device_id)
             .await?;
 
         self.establishment_states.insert(
@@ -576,7 +574,6 @@ impl BilateralRelationshipManager {
     pub async fn handle_contact_establishment_response(
         &mut self,
         response: ContactEstablishmentResponse,
-        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<Option<DsmVerifiedContact>, DsmError> {
         info!("Handling contact establishment response");
 
@@ -629,7 +626,7 @@ impl BilateralRelationshipManager {
 
             let _relationship = self
                 .bilateral_tx_manager
-                .establish_relationship(&response.responding_device_id, smt)
+                .establish_relationship(&response.responding_device_id)
                 .await?;
 
             self.establishment_states.insert(

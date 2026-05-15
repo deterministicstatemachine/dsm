@@ -408,14 +408,52 @@ fn create_error_envelope_bytes(message: &str) -> Vec<u8> {
     envelope.encode_to_vec()
 }
 
-/// Create error envelope with specified message ID and error details
+fn hash32(domain: &str, preimage: &[u8]) -> Vec<u8> {
+    dsm::crypto::blake3::domain_hash(domain, preimage)
+        .as_bytes()
+        .to_vec()
+}
+
+fn bytes32_or_hash(value: Option<Vec<u8>>, domain: &str, preimage: &[u8]) -> Vec<u8> {
+    value
+        .filter(|bytes| bytes.len() == 32)
+        .unwrap_or_else(|| hash32(domain, preimage))
+}
+
+fn canonical_message_id(input: Vec<u8>, preimage: &[u8]) -> Vec<u8> {
+    if input.len() == 16 {
+        input
+    } else {
+        hash32("DSM/ios/error/message-id", preimage)[..16].to_vec()
+    }
+}
+
+/// Create strict Envelope v3 error response.
 fn create_error_envelope(message_id: Vec<u8>, code: u32, message: &str) -> Envelope {
     use prost::bytes::Bytes;
 
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(&code.to_le_bytes());
+    preimage.extend_from_slice(message.as_bytes());
+    preimage.extend_from_slice(&message_id);
+
     Envelope {
         version: 3,
-        headers: None,
-        message_id,
+        headers: Some(crate::generated::Headers {
+            device_id: bytes32_or_hash(
+                crate::sdk::app_state::AppState::get_device_id(),
+                "DSM/ios/error/device",
+                &preimage,
+            ),
+            chain_tip: hash32("DSM/ios/error/chain-tip", &preimage),
+            genesis_hash: bytes32_or_hash(
+                crate::sdk::app_state::AppState::get_genesis_hash(),
+                "DSM/ios/error/genesis",
+                &preimage,
+            ),
+            seq: code as u64,
+        }),
+        message_id: canonical_message_id(message_id, &preimage),
         payload: Some(crate::generated::envelope::Payload::Error(
             crate::generated::Error {
                 code,
@@ -433,15 +471,16 @@ fn create_error_envelope(message_id: Vec<u8>, code: u32, message: &str) -> Envel
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated::{envelope, Envelope};
+    use crate::generated::envelope;
 
     #[test]
     fn test_error_envelope_creation() {
-        let message_id = vec![1, 2, 3, 4];
+        let message_id = vec![1; 16];
         let envelope = create_error_envelope(message_id.clone(), 500, "test error");
 
         assert_eq!(envelope.version, 3);
         assert_eq!(envelope.message_id, message_id);
+        assert!(envelope.headers.is_some());
 
         if let Some(envelope::Payload::Error(err)) = envelope.payload {
             assert_eq!(err.code, 500);
@@ -460,8 +499,7 @@ mod tests {
         // Should return error envelope bytes
         assert!(!result.is_empty());
 
-        // Should be decodable as an envelope
-        let decoded = match Envelope::decode(&result[..]) {
+        let decoded = match crate::envelope::from_canonical_bytes(&result[..]) {
             Ok(v) => v,
             Err(e) => panic!("Should decode to error envelope: {e}"),
         };

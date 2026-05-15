@@ -9,6 +9,7 @@
 //! - Domain-separated BLAKE3 hashing
 //! - Dual SPHINCS+ signatures (both parties)
 //! - Inclusion proofs for old/new leaves and device binding
+//! - Per-step C-DBRW receipt response through EK derivation and cert chaining
 
 use crate::types::error::DsmError;
 use std::collections::HashMap;
@@ -75,10 +76,13 @@ pub struct StitchedReceiptV2 {
     /// Domain separation for node hashing lives in the SMT verifier.
     pub rel_replace_witness: Vec<u8>,
 
-    /// SPHINCS+ signature from party A over canonical commit bytes
+    /// SPHINCS+ response from party A for this receipt challenge.
+    ///
+    /// The challenge is the proposed transition context. The signer answers
+    /// with the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
     pub sig_a: Vec<u8>,
 
-    /// SPHINCS+ signature from party B over canonical commit bytes
+    /// SPHINCS+ response from party B for this receipt challenge.
     pub sig_b: Vec<u8>,
 
     /// Ephemeral-key certificate for party A's per-step EK (whitepaper §11.1).
@@ -91,8 +95,7 @@ pub struct StitchedReceiptV2 {
     /// authorization for the per-step EK that signed `sig_a`.
     pub ek_cert_a: Vec<u8>,
 
-    /// Ephemeral-key certificate for party B's per-step EK (counterparty).
-    /// Optional — only present when `sig_b` is present (counter-signed receipts).
+    /// Ephemeral-key certificate for party B's per-step EK.
     pub ek_cert_b: Vec<u8>,
 
     /// Per-step ephemeral SPHINCS+ public key for party A (whitepaper §11.1).
@@ -102,26 +105,170 @@ pub struct StitchedReceiptV2 {
     ///
     /// Carried in the envelope alongside `sig_a` so verifiers don't need
     /// the per-step EK out-of-band. NOT in canonical commit form (§4.2.1).
-    /// Empty for legacy receipts signed by the wallet's long-term key.
+    /// Required for accepted offline bilateral receipts.
+    /// The key changes each transition and is linked to the previous key by
+    /// `ek_cert_a`, so copied public receipt state is not spend authority.
     pub ek_pk_a: Vec<u8>,
 
-    /// Per-step ephemeral SPHINCS+ public key for party B (counterparty).
-    /// Same semantics as `ek_pk_a`. Empty when sig_b is empty or for
-    /// legacy receipts.
+    /// Per-step ephemeral SPHINCS+ public key for party B.
+    /// Same semantics as `ek_pk_a`.
     pub ek_pk_b: Vec<u8>,
 
     /// Per-step Kyber/ML-KEM ciphertext for party A's contribution to
     /// `k_step` (whitepaper §11). The sender encapsulates with deterministic
     /// coins against the recipient's Kyber pubkey; the resulting ct travels
     /// here. Recipient decapsulates with their Kyber sk to recover `ss`
-    /// and derive `k_step = BLAKE3("DSM/kyber-ss\0" || ss)`. Empty for
-    /// legacy receipts that pre-date per-step Kyber.
+    /// and derive `k_step = BLAKE3("DSM/kyber-ss\0" || ss)`.
     pub kyber_ct_a: Vec<u8>,
 
-    /// Per-step Kyber ciphertext for party B (counterparty's contribution).
+    /// Per-step Kyber ciphertext for party B's contribution.
     /// Mirrors `kyber_ct_a` but encapsulated by B against A's Kyber pubkey.
-    /// Empty when sig_b is empty or for legacy receipts.
     pub kyber_ct_b: Vec<u8>,
+
+    /// Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
+    ///
+    /// `Some` when the successor was stitched under the fork-aware precommit
+    /// family (multiple candidates committed under `C_pre^root`); `None`
+    /// otherwise. Wire-only — explicitly excluded from the canonical commit
+    /// preimage (§4.2.1) so the frozen ten-field commit form is preserved.
+    ///
+    /// The recipient verifier rebuilds `C_pre^j` for every unselected branch
+    /// under the canonical v2 domain and checks
+    /// `pi_inv == invalidation_proof_commitment(unselected_C_pre^j)`
+    /// before parent-consumption Tripwire admits the successor.
+    pub fork_witness: Option<crate::types::proto::ForkAwareWitness>,
+}
+
+fn receipt_commit_field_limit(tag: u32) -> Option<Option<usize>> {
+    match tag {
+        1..=7 => Some(Some(32)),
+        8..=11 => Some(Some(128 * 1024)),
+        12..=17 => Some(Some(65_535)),
+        18..=19 => Some(Some(2_048)),
+        _ => None,
+    }
+}
+
+fn encode_varint(mut value: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+    out
+}
+
+fn read_canonical_varint(bytes: &[u8], offset: &mut usize, what: &str) -> Result<u64, DsmError> {
+    let start = *offset;
+    let mut value = 0u64;
+    let mut shift = 0u32;
+
+    for _ in 0..10 {
+        if *offset >= bytes.len() {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: truncated {what} varint"
+            )));
+        }
+        let byte = bytes[*offset];
+        *offset += 1;
+
+        let low = (byte & 0x7f) as u64;
+        if shift >= 64 || (shift == 63 && low > 1) {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: {what} varint overflow"
+            )));
+        }
+        value |= low << shift;
+
+        if byte & 0x80 == 0 {
+            let encoded = encode_varint(value);
+            if encoded.as_slice() != &bytes[start..*offset] {
+                return Err(DsmError::invalid_operation(format!(
+                    "receipt wire: non-canonical {what} varint"
+                )));
+            }
+            return Ok(value);
+        }
+
+        shift += 7;
+    }
+
+    Err(DsmError::invalid_operation(format!(
+        "receipt wire: {what} varint too long"
+    )))
+}
+
+fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
+    let mut offset = 0usize;
+    let mut seen = [false; 20];
+
+    while offset < bytes.len() {
+        let key = read_canonical_varint(bytes, &mut offset, "field key")?;
+        let tag = (key >> 3) as u32;
+        let wire_type = (key & 0x07) as u8;
+
+        if wire_type != 2 {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: field {tag} has wire type {wire_type}, expected length-delimited"
+            )));
+        }
+
+        let Some(limit) = receipt_commit_field_limit(tag) else {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: unknown field {tag}"
+            )));
+        };
+
+        let seen_idx = tag as usize;
+        if seen[seen_idx] {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: duplicate field {tag}"
+            )));
+        }
+        seen[seen_idx] = true;
+
+        let len = read_canonical_varint(bytes, &mut offset, "field length")? as usize;
+        let Some(end) = offset.checked_add(len) else {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: field {tag} length exceeds remaining input"
+            )));
+        };
+        if end > bytes.len() {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: field {tag} length exceeds remaining input"
+            )));
+        }
+
+        if let Some(limit) = limit {
+            if tag <= 7 && len != limit {
+                return Err(DsmError::invalid_operation(format!(
+                    "receipt wire: field {tag} must be {limit} bytes, got {len}"
+                )));
+            }
+            if tag > 7 && len > limit {
+                return Err(DsmError::invalid_operation(format!(
+                    "receipt wire: field {tag} exceeds max length {limit}, got {len}"
+                )));
+            }
+        }
+
+        offset = end;
+    }
+
+    for (tag, present) in seen.iter().enumerate().take(8).skip(1) {
+        if !present {
+            return Err(DsmError::invalid_operation(format!(
+                "receipt wire: missing required field {tag}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 impl StitchedReceiptV2 {
@@ -159,7 +306,14 @@ impl StitchedReceiptV2 {
             ek_pk_b: Vec::new(),
             kyber_ct_a: Vec::new(),
             kyber_ct_b: Vec::new(),
+            fork_witness: None,
         }
+    }
+
+    /// Attach a fork-aware finalization witness. Set only when the successor
+    /// was stitched under the fork-aware precommit family.
+    pub fn set_fork_witness(&mut self, witness: crate::types::proto::ForkAwareWitness) {
+        self.fork_witness = Some(witness);
     }
 
     /// Set the relationship SMT replace witness bytes.
@@ -170,8 +324,10 @@ impl StitchedReceiptV2 {
     /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs).
     /// Proto3 omits empty bytes → encode_to_vec() produces fields 1-11 only.
     /// Per §4.2.1 the canonical commit form is FROZEN at 10 fields plus the
-    /// rel_replace_witness (field 11). Signatures (12, 13) and ephemeral-key
-    /// certs (14, 15) live in the envelope only and are explicitly empty here.
+    /// rel_replace_witness (field 11). Signatures (12, 13), ephemeral-key
+    /// certs (14, 15), EK pubkeys (16, 17), Kyber cts (18, 19), and the
+    /// fork-aware finalization witness (20) live in the envelope only and
+    /// are explicitly absent here.
     fn to_proto_canonical(&self) -> crate::types::proto::ReceiptCommit {
         crate::types::proto::ReceiptCommit {
             genesis: self.genesis.to_vec(),
@@ -193,10 +349,11 @@ impl StitchedReceiptV2 {
             ek_pk_b: vec![],
             kyber_ct_a: vec![],
             kyber_ct_b: vec![],
+            fork_witness: None,
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct + fork witness).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
@@ -207,6 +364,7 @@ impl StitchedReceiptV2 {
         proto.ek_pk_b.clone_from(&self.ek_pk_b);
         proto.kyber_ct_a.clone_from(&self.kyber_ct_a);
         proto.kyber_ct_b.clone_from(&self.kyber_ct_b);
+        proto.fork_witness.clone_from(&self.fork_witness);
         proto
     }
 
@@ -261,18 +419,31 @@ impl StitchedReceiptV2 {
         if !rc.kyber_ct_b.is_empty() {
             receipt.set_kyber_ct_b(rc.kyber_ct_b);
         }
+        if let Some(witness) = rc.fork_witness {
+            receipt.set_fork_witness(witness);
+        }
         Ok(receipt)
     }
 
     /// Decode a `StitchedReceiptV2` from protobuf bytes (canonical or full).
     ///
-    /// Uses prost-generated `ReceiptCommit::decode()`. Accepts both canonical
-    /// (fields 1-11) and full (fields 1-13 with sigs) encodings.
+    /// Runs raw protobuf validation before prost decoding. Accepts canonical
+    /// fields 1-11 and the defined wire-only receipt authorization fields,
+    /// but rejects unknown fields, duplicate fields, wrong fixed lengths, and
+    /// non-canonical encodings.
     pub fn from_canonical_protobuf(bytes: &[u8]) -> Result<Self, DsmError> {
         use prost::Message;
+        validate_receipt_commit_wire(bytes)?;
         let rc = crate::types::proto::ReceiptCommit::decode(bytes)
             .map_err(|e| DsmError::invalid_operation(format!("receipt decode: {e}")))?;
-        Self::from_proto(rc)
+        let receipt = Self::from_proto(rc)?;
+        let reencoded = receipt.to_full_protobuf()?;
+        if reencoded != bytes {
+            return Err(DsmError::invalid_operation(
+                "receipt wire: non-canonical field ordering or encoding",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Returns the canonical protobuf bytes for hashing/signing.
@@ -391,7 +562,6 @@ impl StitchedReceiptV2 {
     /// In the canonical format, sequence is encoded in the tip hash chain
     pub fn t(&self) -> u64 {
         // The sequence number is implicitly in the tip hash chain
-        // For compatibility, extract from last 8 bytes of parent_tip
         u64::from_le_bytes([
             self.parent_tip[24],
             self.parent_tip[25],
@@ -461,9 +631,8 @@ pub struct ReceiptVerificationContext {
     /// parent/root inclusion alone is not spend authority.
     pub chain_head_pubkey_a: Option<Vec<u8>>,
 
-    /// Per-relationship cert chain head for party B (counterparty).
-    /// Same semantics as `chain_head_pubkey_a`. Only consulted when `sig_b`
-    /// is present on the receipt.
+    /// Per-relationship cert chain head for party B.
+    /// Same semantics as `chain_head_pubkey_a`.
     pub chain_head_pubkey_b: Option<Vec<u8>>,
 
     /// Set of previously consumed parent tips (for uniqueness check)
@@ -560,7 +729,6 @@ impl ParentConsumptionTracker {
 
     #[allow(dead_code)]
     pub fn with_capacity(_capacity: usize) -> Self {
-        // Capacity is ignored, kept for API compatibility
         Self::new()
     }
 
@@ -773,6 +941,105 @@ mod tests {
             .unwrap();
         let commit_signed = decoded.compute_commitment().unwrap();
         assert_eq!(commit_unsigned, commit_signed);
+    }
+
+    #[test]
+    fn receipt_decode_rejects_unknown_field() {
+        let receipt = StitchedReceiptV2::new(
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            [4u8; 32],
+            [5u8; 32],
+            [6u8; 32],
+            [7u8; 32],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mut bytes = receipt.to_canonical_protobuf().unwrap();
+        bytes.extend_from_slice(&[0xA2, 0x01, 0x01, 0x00]); // tag 20, len 1
+
+        let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
+        assert!(err.to_string().contains("unknown field 20"));
+    }
+
+    #[test]
+    fn receipt_decode_rejects_duplicate_field() {
+        let receipt = StitchedReceiptV2::new(
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            [4u8; 32],
+            [5u8; 32],
+            [6u8; 32],
+            [7u8; 32],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mut bytes = receipt.to_canonical_protobuf().unwrap();
+        bytes.push(0x0A); // tag 1
+        bytes.push(0x20); // len 32
+        bytes.extend_from_slice(&[9u8; 32]);
+
+        let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
+        assert!(err.to_string().contains("duplicate field 1"));
+    }
+
+    #[test]
+    fn receipt_decode_rejects_bad_fixed_length() {
+        let mut bytes = vec![0x0A, 0x1F];
+        bytes.extend_from_slice(&[1u8; 31]);
+
+        let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
+        assert!(err.to_string().contains("field 1 must be 32 bytes"));
+    }
+
+    #[test]
+    fn receipt_decode_rejects_non_canonical_varint() {
+        let receipt = StitchedReceiptV2::new(
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            [4u8; 32],
+            [5u8; 32],
+            [6u8; 32],
+            [7u8; 32],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mut bytes = receipt.to_canonical_protobuf().unwrap();
+        bytes[1] = 0xA0;
+        bytes.insert(2, 0x00);
+
+        let err = StitchedReceiptV2::from_canonical_protobuf(&bytes).unwrap_err();
+        assert!(err.to_string().contains("non-canonical field length"));
+    }
+
+    #[test]
+    fn receipt_decode_rejects_out_of_order_fields() {
+        let receipt = StitchedReceiptV2::new(
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            [4u8; 32],
+            [5u8; 32],
+            [6u8; 32],
+            [7u8; 32],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let bytes = receipt.to_canonical_protobuf().unwrap();
+        let mut reordered = bytes[34..].to_vec();
+        reordered.extend_from_slice(&bytes[..34]);
+
+        let err = StitchedReceiptV2::from_canonical_protobuf(&reordered).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("non-canonical field ordering or encoding"));
     }
 
     #[test]

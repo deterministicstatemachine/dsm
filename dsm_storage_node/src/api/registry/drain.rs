@@ -58,11 +58,9 @@ pub async fn submit_drain_proof(
     let start_cycle = *proof.cycle_indices.first().unwrap_or(&0) as i64;
     let end_cycle = *proof.cycle_indices.last().unwrap_or(&0) as i64;
 
-    // Advisory local check: does bytecommit_chain have these cycles?
-    let node_id_text = text_id::encode_base32_crockford(&proof.node_id);
     let pool = &*state.db_pool;
     let verified_local =
-        db::verify_bytecommit_chain_empty(pool, &node_id_text, start_cycle, DRAIN_PROOF_D)
+        db::verify_bytecommit_chain_empty(pool, &proof.node_id, start_cycle, DRAIN_PROOF_D)
             .await
             .unwrap_or(false);
 
@@ -84,6 +82,7 @@ pub async fn submit_drain_proof(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let node_id_text = text_id::encode_base32_crockford(&proof.node_id);
     info!(
         "drain.proof: addr={addr} node={node_id_text} cycles={start_cycle}-{end_cycle} verified_local={verified_local}"
     );
@@ -139,13 +138,13 @@ pub async fn verify_drain(
     let pool = &*state.db_pool;
 
     // Find the latest bytecommit cycle for this node
-    let last_hash = db::get_last_bytecommit_hash(pool, &node_id_b32)
+    let last_hash = db::get_last_bytecommit_hash(pool, &node_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let verified = if last_hash.is_some() {
         // Check from cycle 0 as a basic advisory (full verification is client-side)
-        db::verify_bytecommit_chain_empty(pool, &node_id_b32, 0, DRAIN_PROOF_D)
+        db::verify_bytecommit_chain_empty(pool, &node_id, 0, DRAIN_PROOF_D)
             .await
             .unwrap_or(false)
     } else {

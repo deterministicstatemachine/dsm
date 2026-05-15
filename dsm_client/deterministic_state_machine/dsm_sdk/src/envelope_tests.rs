@@ -22,13 +22,9 @@ fn envelope_roundtrip_preserves_fields() {
         payload: None, // Test with minimal payload
     };
 
-    // Serialize
     let bytes = input.encode_to_vec();
+    let parsed = crate::envelope::from_canonical_bytes(&bytes).unwrap();
 
-    // Deserialize
-    let parsed = Envelope::decode(&*bytes).unwrap();
-
-    // Validate all fields preserved
     assert_eq!(parsed.version, 3);
     assert_eq!(parsed.headers.as_ref().unwrap().device_id, &[0x01; 32]);
     assert_eq!(parsed.headers.as_ref().unwrap().chain_tip, &[0x02; 32]);
@@ -42,7 +38,6 @@ fn envelope_roundtrip_preserves_fields() {
 
 #[test]
 fn envelope_v3_validation() {
-    // Valid envelope
     let valid = Envelope {
         version: 3,
         headers: Some(Headers {
@@ -54,29 +49,26 @@ fn envelope_v3_validation() {
         message_id: vec![0x04; 16],
         payload: None,
     };
-    assert_eq!(valid.version, 3);
+    assert!(crate::envelope::from_canonical_bytes(&valid.encode_to_vec()).is_ok());
 
-    // Invalid: wrong version
     let invalid_version = Envelope {
         version: 2,
         ..valid.clone()
     };
-    assert_ne!(invalid_version.version, 3);
+    assert!(crate::envelope::from_canonical_bytes(&invalid_version.encode_to_vec()).is_err());
 
-    // Invalid: missing headers
     let missing_headers = Envelope {
         version: 3,
         headers: None,
         message_id: vec![0x04; 16],
         payload: None,
     };
-    assert!(missing_headers.headers.is_none());
+    assert!(crate::envelope::from_canonical_bytes(&missing_headers.encode_to_vec()).is_err());
 
-    // Invalid: wrong field sizes
     let wrong_size = Envelope {
         version: 3,
         headers: Some(Headers {
-            device_id: vec![0x01; 16], // Should be 32
+            device_id: vec![0x01; 16],
             chain_tip: vec![0x02; 32],
             genesis_hash: vec![0x03; 32],
             seq: 1,
@@ -84,5 +76,5 @@ fn envelope_v3_validation() {
         message_id: vec![0x04; 16],
         payload: None,
     };
-    assert_eq!(wrong_size.headers.as_ref().unwrap().device_id.len(), 16);
+    assert!(crate::envelope::from_canonical_bytes(&wrong_size.encode_to_vec()).is_err());
 }

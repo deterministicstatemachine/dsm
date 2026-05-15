@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // DSM Core Protocol — Schema 2.4.0 (2026-02-08) | Envelope wire v3
 // Single canonical path: no alternate paths, no wall clocks, no non-deterministic maps in hashed preimages.
-// After editing, run `pnpm --filter dsm-wallet run proto:gen` to keep dsm_app_pb.js current.
+// After editing, run `npm --prefix dsm_client/frontend run proto:gen` to keep dsm_app_pb.ts current.
+//
+// Codegen plugin pin: dsm_client/frontend/package.json holds an EXACT pin
+// `"@bufbuild/protoc-gen-es": "1.10.1"`. The v1 plugin emits the class-based
+// runtime API that matches @bufbuild/protobuf ^1.7.2 and the existing
+// frontend service-layer call sites. v2+ emits a different runtime
+// (typeName-keyed schemas, create(Schema, ...)) and requires migrating
+// @bufbuild/protobuf to ^2 plus rewriting every proto consumer. Do not
+// loosen the pin without doing that migration in lockstep — otherwise
+// `proto:gen` silently breaks `npm run type-check`.
 
 syntax = "proto3";
 package dsm;
@@ -238,6 +247,7 @@ message DepositRequest {
   bytes  btc_pubkey = 7 [(dsm_max_len)=33]; // Counterparty's Bitcoin compressed pubkey
   uint64 refund_iterations = 8; // DSM-side iteration timeout
   string destination_address = 9; // BTC destination for dbtc_to_btc withdrawals (bech32)
+  bytes  refund_btc_pubkey = 10 [(dsm_max_len)=33]; // Refund path Bitcoin compressed pubkey
 }
 
 message DepositResponse {
@@ -486,6 +496,7 @@ message BitcoinWithdrawalPlanLeg {
 }
 
 message BitcoinWithdrawalPlanResponse {
+  reserved 10, 11, 12;
   string plan_id = 1;
   string plan_class = 2;
   uint64 requested_net_sats = 3;
@@ -495,19 +506,14 @@ message BitcoinWithdrawalPlanResponse {
   uint64 shortfall_sats = 7;
   repeated BitcoinWithdrawalPlanLeg legs = 8;
   repeated BitcoinWithdrawalBlockedVault blocked_vaults = 9;
-  bytes route_commitment_id = 10 [deprecated = true];
-  string route_commitment_key = 11 [deprecated = true];
-  bytes selector_snapshot_hash = 12 [deprecated = true];
   bytes policy_commit = 13 [(dsm_fixed_len)=32];
   uint64 available_dbtc_sats = 14;
 }
 
 message BitcoinWithdrawalExecuteRequest {
+  reserved 2, 4, 5;
   string plan_id = 1;
-  uint64 requested_net_sats = 2 [deprecated = true];
   string destination_address = 3;
-  bytes route_commitment_id = 4 [deprecated = true];
-  string route_commitment_key = 5 [deprecated = true];
 }
 
 message BitcoinWithdrawalExecutionLeg {
@@ -525,6 +531,7 @@ message BitcoinWithdrawalExecutionLeg {
 }
 
 message BitcoinWithdrawalExecuteResponse {
+  reserved 12, 13;
   string plan_id = 1;
   string plan_class = 2;
   string status = 3;
@@ -536,8 +543,6 @@ message BitcoinWithdrawalExecuteResponse {
   uint64 shortfall_sats = 9;
   repeated BitcoinWithdrawalExecutionLeg executed_legs = 10;
   repeated BitcoinWithdrawalBlockedVault blocked_vaults = 11;
-  bytes route_commitment_id = 12 [deprecated = true];
-  string route_commitment_key = 13 [deprecated = true];
 }
 
 message DbtcVaultAdvertisementV1 {
@@ -1494,9 +1499,8 @@ message BilateralPrepareRequest {
   bytes  sender_device_id       = 8 [(dsm_fixed_len)=32]; // Sender's device ID for relationship binding
   Hash32 sender_genesis_hash    = 9; // Sender's genesis hash for relationship anchor
   Hash32 sender_chain_tip       = 10; // Sender's current chain tip for state synchronization
-  // Transfer intent fields — if operation_data is empty, Rust builds it from
-  // these. Callers should set these instead of building operation_data in the
-  // frontend. operation_data takes precedence if non-empty (backward compat).
+  // Transfer intent fields. Rust builds canonical operation_data from these
+  // when operation_data is empty.
   uint64 transfer_amount         = 11; // amount in token base units
   string token_id_hint           = 12; // token ID (e.g. "ERA")
   string memo_hint               = 13; // optional transfer memo
@@ -1638,7 +1642,11 @@ message ReceiptCommit {
   // Tripwire-critical witness material: MUST be committed into ReceiptCommit.
   // Verifiers recompute child_root from parent_root by applying a single-leaf replace.
   bytes rel_replace_witness = 11 [(dsm_max_len)=131072];
-  // Dual SPHINCS+ signatures — NOT part of canonical commit preimage.
+  // Dual SPHINCS+ signatures. These are the receipt challenge responses.
+  // The challenge is the proposed transition context carried by fields 1-11
+  // plus the bilateral session binding. Each response signs that context with
+  // the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+  // NOT part of canonical commit preimage.
   // Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
   bytes sig_a = 12 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
   bytes sig_b = 13 [(dsm_max_len)=65535]; // SPHINCS+ sig from party B
@@ -1656,6 +1664,8 @@ message ReceiptCommit {
   // The verifier uses these to verify sig_a/sig_b without needing them
   // out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
   // same placement rationale as ek_cert_a/b.
+  // A copied database can carry old public EK material, but cannot derive the
+  // next EK on different hardware because K_DBRW is not serialized.
   bytes ek_pk_a = 16 [(dsm_max_len)=65535];
   bytes ek_pk_b = 17 [(dsm_max_len)=65535];
   // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
@@ -1671,6 +1681,57 @@ message ReceiptCommit {
   // commit form (§4.2.1).
   bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
   bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
+  // Fork-aware finalization witness (whitepaper §4.1.1 + §4.3). Present only
+  // when the successor was stitched under the fork-aware precommit family
+  // (multiple candidates committed under C_pre^root). Carried in the envelope
+  // ONLY — explicitly excluded from the canonical commit preimage so that the
+  // §4.2.1 ten-field commit form is preserved unchanged. The recipient's
+  // verifier rebuilds C_pre^j for every unselected branch and checks
+  //   pi_inv == invalidation_proof_commitment(C_pre^j for j != selected)
+  // before parent-consumption Tripwire admits the successor.
+  ForkAwareWitness fork_witness = 20;
+}
+
+// Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).
+//
+// A successor stitched under the fork-aware precommit family is acceptable
+// iff (a) the selected branch's `C_pre^i` is a member of the committed
+// candidate set under `C_pre^root`, and (b) the supplied `pi_inv`
+// byte-exactly matches `H("DSM/precommit/invalidation-proof/v2\0" ||
+// enc(unselected C_pre^j))`.
+//
+// The witness rides in the receipt envelope (not in the canonical commit
+// preimage). For a non-fork (single-candidate) successor this message is
+// omitted entirely.
+message ForkAwareWitness {
+  // Parent tip h_n that anchors the C_pre^i derivation. MUST equal the
+  // receipt's parent_tip; encoded here so the verifier can independently
+  // recompute the canonical branch commitments without consulting state.
+  bytes parent_tip = 1 [(dsm_fixed_len)=32];
+  // Full ordered candidate set committed under C_pre^root. The verifier
+  // rebuilds each candidate's C_pre^i under the canonical v2 domain
+  // `DSM/precommit/commitment-hash/v2\0`. At least one entry; in practice
+  // bounded by the operator's deterministic state-machine fan-out.
+  repeated ForkAwareCandidate candidates = 2;
+  // The fork_id of the selected candidate. MUST match exactly one entry in
+  // `candidates`; otherwise the witness is rejected.
+  string selected_fork_id = 3 [(dsm_max_len)=128];
+  // Canonical invalidation-proof commitment over the C_pre^j of every
+  // unselected branch (i.e. all candidates except `selected_fork_id`).
+  bytes pi_inv = 4 [(dsm_fixed_len)=32];
+}
+
+// Single candidate inside a fork-aware precommit family.
+//
+// `fork_id` is a deterministic short label (bounded to MAX_ID_LEN) and is
+// the same id used at construction time (`select_fork`). `payload` and
+// `entropy` reproduce the inputs to `branch_commitment_hash` so the
+// verifier can recompute `C_pre^i = H("DSM/precommit/commitment-hash/v2\0"
+// || parent_tip || payload || entropy)`.
+message ForkAwareCandidate {
+  string fork_id = 1 [(dsm_max_len)=128];
+  bytes payload = 2 [(dsm_max_len)=262144];
+  bytes entropy = 3 [(dsm_max_len)=65536];
 }
 
 
@@ -2744,7 +2805,7 @@ message CdbrwVerifyRequest {
 // cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
 // Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
 // reference histogram, ε_intra, and attractor commitment AC_D, and persists
-// the `dsm_silicon_fp_v4.bin` binary compatible with load_cdbrw_enrollment.
+// the `dsm_silicon_fp_v4.bin` binary loaded by load_cdbrw_enrollment.
 message CdbrwEnrollRequest {
   bytes env_bytes                 = 1 [(dsm_max_len)=1024];
   repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=64]; // K ≥ 16 per §6.1
@@ -3228,6 +3289,8 @@ message StartupResponse {
 
 // Project-private native host boundary for WebView <-> platform host control.
 enum NativeHostRequestKind {
+  reserved 101;
+
   NATIVE_HOST_REQUEST_KIND_UNSPECIFIED = 0;
 
   // host_control.*
@@ -3243,7 +3306,6 @@ enum NativeHostRequestKind {
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
 
   // platform_primitive.*
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103;
   NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104;
@@ -3297,10 +3359,6 @@ message HostPermissionsRequestPayload {
 message HostPermissionsResult {
   repeated string granted_permissions = 1;
   bool all_granted = 2;
-}
-
-message DeviceBindingCapturePayload {
-  bytes genesis_envelope = 1 [(dsm_max_len)=65535];
 }
 
 message BiometricAuthorizePayload {

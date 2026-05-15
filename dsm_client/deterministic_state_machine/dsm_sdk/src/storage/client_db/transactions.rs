@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn unilateral_history_suppresses_legacy_proof_data() {
+    fn unilateral_history_suppresses_proof_data() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1003,7 +1003,7 @@ mod tests {
 
         assert!(
             unilateral.proof_data.is_none(),
-            "legacy unilateral proof_data should not surface in history"
+            "unilateral proof_data should not surface in history"
         );
     }
 }

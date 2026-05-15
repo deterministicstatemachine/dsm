@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Path},
+    extract::Path,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -31,20 +31,6 @@ use dsm_sdk::util::text_id;
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;
 
-#[derive(Clone)]
-struct RateLimiter;
-
-impl RateLimiter {
-    fn new() -> Self {
-        Self
-    }
-
-    async fn check_rate_limit(&self, key: &str) -> Result<(), StatusCode> {
-        let _ = key;
-        Ok(())
-    }
-}
-
 fn valid_spool_key(value: &str) -> bool {
     matches!(
         text_id::decode_base32_crockford(value),
@@ -52,9 +38,78 @@ fn valid_spool_key(value: &str) -> bool {
     )
 }
 
-pub fn router(app: Arc<AppState>, auth: Arc<AuthState>) -> Router<()> {
-    let rate_limiter = Arc::new(RateLimiter::new());
+fn read_batch_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, StatusCode> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *bytes.get(*cursor).ok_or(StatusCode::BAD_REQUEST)?;
+        *cursor += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err(StatusCode::BAD_REQUEST)
+}
 
+fn read_batch_len<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], StatusCode> {
+    let len = read_batch_varint(bytes, cursor)?;
+    let len = usize::try_from(len).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let end = cursor.checked_add(len).ok_or(StatusCode::BAD_REQUEST)?;
+    if end > bytes.len() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let out = &bytes[*cursor..end];
+    *cursor = end;
+    Ok(out)
+}
+
+fn validate_batch_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
+    let mut cursor = 0usize;
+    let mut last_field = 0u32;
+    let mut batch_signature_seen = false;
+    let mut atomic_execution_seen = false;
+
+    while cursor < bytes.len() {
+        let key = read_batch_varint(bytes, &mut cursor)?;
+        let field = u32::try_from(key >> 3).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let wire_type = key & 0x07;
+
+        if field < last_field {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        last_field = field;
+
+        match field {
+            1 => {
+                if wire_type != 2 {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                let envelope = read_batch_len(bytes, &mut cursor)?;
+                dsm::envelope::validate_canonical_envelope_v3_bytes(envelope)
+                    .map_err(|_| StatusCode::BAD_REQUEST)?;
+            }
+            2 => {
+                if wire_type != 2 || batch_signature_seen {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                batch_signature_seen = true;
+                read_batch_len(bytes, &mut cursor)?;
+            }
+            3 => {
+                if wire_type != 0 || atomic_execution_seen {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                atomic_execution_seen = true;
+                read_batch_varint(bytes, &mut cursor)?;
+            }
+            _ => return Err(StatusCode::BAD_REQUEST),
+        }
+    }
+
+    Ok(())
+}
+
+pub fn router(app: Arc<AppState>, auth: Arc<AuthState>) -> Router<()> {
     Router::new()
         .route("/api/v2/b0x/submit", post(submit_b0x_envelope))
         .route("/api/v2/b0x/retrieve", get(retrieve_b0x_batch))
@@ -73,7 +128,6 @@ pub fn router(app: Arc<AppState>, auth: Arc<AuthState>) -> Router<()> {
         ))
         .layer(Extension(app))
         .layer(Extension(auth))
-        .layer(Extension(rate_limiter))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             MAX_ENVELOPE_BYTES,
         ))
@@ -104,18 +158,13 @@ fn require_protobuf(headers: &HeaderMap) -> Result<(), StatusCode> {
 /// The envelope is stored in the recipient's inbox spool (keyed by x-dsm-recipient).
 /// Ordering is deterministic via BIGSERIAL. No wall-clock markers, no genesis_hash persistence.
 async fn submit_b0x_envelope(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Extension(app): Extension<Arc<AppState>>,
     Extension(_auth): Extension<Arc<AuthState>>,
     Extension(_ctx): Extension<DeviceContext>,
-    Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    log::info!("b0x submit: recv from={} bytes={}", addr.ip(), body.len());
-    // Deterministic admission context; no wall-clock throttling
-    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&admission_key).await?;
+    log::info!("b0x submit: recv bytes={}", body.len());
 
     require_protobuf(&headers)?;
 
@@ -139,6 +188,11 @@ async fn submit_b0x_envelope(
     }
 
     let env = dsm::envelope::from_canonical_bytes(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // PaidK spend-gate (whitepaper §16): b0x submission is a device-initiated
+    // write that stores an artifact addressed to the recipient. The sender
+    // device must have satisfied PaidK before its envelope is admitted.
+    crate::api::vault::paidk::require_paidk(&app, &_ctx.device_id).await?;
 
     // NOTE: Storage nodes are dumb mirrors.
     // Do NOT validate SmartPolicy / protocol semantics here (clients verify).
@@ -207,19 +261,13 @@ async fn submit_b0x_envelope(
 
 /// Retrieve a batch of Envelopes for the given b0x key, encoded as BatchEnvelope bytes.
 /// Returns BatchEnvelope (protobuf), up to MAX_BATCH_RETRIEVE items in deterministic order.
-/// Compatibility endpoint for older clients - does not return sequence numbers.
+/// This endpoint returns only envelope payloads; use the sequenced endpoint when callers need cursors.
 async fn retrieve_b0x_batch(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Extension(app): Extension<Arc<AppState>>,
     Extension(_auth): Extension<Arc<AuthState>>,
     Extension(_ctx): Extension<DeviceContext>,
-    Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    // Deterministic admission context; no wall-clock throttling
-    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&admission_key).await?;
-
     // Fetch unacked envelopes for this device
     let device_id = _ctx.device_id.clone();
 
@@ -300,17 +348,11 @@ async fn retrieve_b0x_batch(
 /// Supports idempotent retrieval - same envelopes can be retrieved multiple times safely.
 async fn retrieve_b0x_batch_from_seq(
     axum::extract::Path(from_seq): axum::extract::Path<i64>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Extension(app): Extension<Arc<AppState>>,
     Extension(_auth): Extension<Arc<AuthState>>,
     Extension(_ctx): Extension<DeviceContext>,
-    Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    // Deterministic admission context; no wall-clock throttling
-    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&admission_key).await?;
-
     let device_id = _ctx.device_id.clone();
 
     // §16.4: If x-dsm-b0x-address header is present, use it as the inbox lookup key.
@@ -405,19 +447,14 @@ async fn retrieve_b0x_batch_from_seq(
 /// This enables deterministic per-key acknowledgements while keeping authentication and replay
 /// proofs enforced by the middleware.
 async fn ack_b0x_batch(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Extension(app): Extension<Arc<AppState>>,
     Extension(_auth): Extension<Arc<AuthState>>,
     Extension(_ctx): Extension<DeviceContext>,
-    Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Deterministic admission context; no wall-clock throttling
-    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&admission_key).await?;
-
     require_protobuf(&headers)?;
+    validate_batch_envelope_bytes(body.as_ref())?;
     let batch =
         dsm::types::proto::BatchEnvelope::decode(&*body).map_err(|_| StatusCode::BAD_REQUEST)?;
     // Determine ACK scope: prefer the explicit rotated routing key, else an explicit
@@ -461,16 +498,11 @@ async fn ack_b0x_batch(
 }
 
 async fn get_b0x_message_status(
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Extension(app): Extension<Arc<AppState>>,
     Extension(_auth): Extension<Arc<AuthState>>,
     Extension(_ctx): Extension<DeviceContext>,
-    Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&admission_key).await?;
-
     let msg_id_bytes = text_id::decode_base32_crockford(&message_id)
         .filter(|bytes| bytes.len() == 16)
         .ok_or(StatusCode::BAD_REQUEST)?;
@@ -577,6 +609,7 @@ mod tests {
         );
         let app_state = Arc::new(AppState::new(
             "test-node".to_string(),
+            "http://localhost:8080",
             None,
             db_pool.clone(),
             replication_manager,
@@ -860,10 +893,7 @@ mod tests {
 
         // Ack as receiver.
         let mut ack_batch = dsm::types::proto::BatchEnvelope::default();
-        ack_batch.envelopes.push(dsm::types::proto::Envelope {
-            message_id: vec![7u8; 16],
-            ..Default::default()
-        });
+        ack_batch.envelopes.push(make_env(&receiver_dev, &tip, 16));
         let mut ack_body = Vec::with_capacity(ack_batch.encoded_len());
         ack_batch
             .encode(&mut ack_body)

@@ -46,12 +46,29 @@ impl StorageNodeId {
         Self::from_base32(value).unwrap_or_else(|| Self::derive(stable_bytes))
     }
 
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     pub fn to_base32(self) -> String {
         dsm_sdk::util::text_id::encode_base32_crockford(&self.0)
+    }
+}
+
+impl std::fmt::Display for StorageNodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base32())
+    }
+}
+
+impl std::str::FromStr for StorageNodeId {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_base32(s).ok_or("invalid base32-crockford StorageNodeId")
     }
 }
 
@@ -121,7 +138,7 @@ fn create_pinned_client(
 #[derive(Clone)]
 pub struct ReplicationManager {
     config: ReplicationConfig,
-    local_node_id: String,
+    local_node_id: StorageNodeId,
     #[allow(dead_code)]
     local_address: String,
     node_states: Arc<std::sync::RwLock<HashMap<String, pb::StorageNodeInfoV1>>>,
@@ -138,10 +155,14 @@ impl ReplicationManager {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
         let local_info = canonical_node_info(local_node_id, local_address.clone(), 0);
-        let local_node_id = local_info.node_id.clone();
+        // `canonical_node_info` always sets `node_id = StorageNodeId::to_base32(...)`,
+        // so decode must succeed. Fall back to deriving from the address if the
+        // invariant is somehow violated rather than panicking in production.
+        let local_node_id = StorageNodeId::from_base32(&local_info.node_id)
+            .unwrap_or_else(|| StorageNodeId::derive(local_info.address.as_bytes()));
 
         // Initialize with local node
-        node_states.insert(local_node_id.clone(), local_info);
+        node_states.insert(local_info.node_id.clone(), local_info);
 
         // Seed peers from config so gossip has nodes to talk to on startup.
         // §10.3: Replica placement uses a Fisher-Yates permutation over {nodeID}.
@@ -175,8 +196,12 @@ impl ReplicationManager {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
         let local_info = canonical_node_info(local_node_id, local_address.clone(), 0);
-        let local_node_id = local_info.node_id.clone();
-        node_states.insert(local_node_id.clone(), local_info);
+        // `canonical_node_info` always sets `node_id = StorageNodeId::to_base32(...)`,
+        // so decode must succeed. Fall back to deriving from the address if the
+        // invariant is somehow violated rather than panicking in production.
+        let local_node_id = StorageNodeId::from_base32(&local_info.node_id)
+            .unwrap_or_else(|| StorageNodeId::derive(local_info.address.as_bytes()));
+        node_states.insert(local_info.node_id.clone(), local_info);
 
         let client = Client::builder().build()?;
 
@@ -187,6 +212,11 @@ impl ReplicationManager {
             node_states: Arc::new(std::sync::RwLock::new(node_states)),
             client,
         })
+    }
+
+    /// Accessor for the local node's canonical 32-byte identity.
+    pub fn local_node_id(&self) -> StorageNodeId {
+        self.local_node_id
     }
 
     /// Get the current set of alive nodes
@@ -252,8 +282,9 @@ impl ReplicationManager {
         // Create idempotency key based on object key and current tick
         let idempotency_key = format!("{}_{}", object_key, now_tick);
 
+        let local_b32 = self.local_node_id.to_base32();
         for target in targets {
-            if target.node_id == self.local_node_id {
+            if target.node_id == local_b32 {
                 // Local storage - already done
                 continue;
             }
@@ -342,13 +373,14 @@ impl ReplicationManager {
             }
         };
 
+        let local_b32 = self.local_node_id.to_base32();
         for remote_info in gossip.node_states {
             let node_id = StorageNodeId::from_base32_or_derive(
                 &remote_info.node_id,
                 remote_info.address.as_bytes(),
             )
             .to_base32();
-            if node_id == self.local_node_id {
+            if node_id == local_b32 {
                 continue; // Don't update our own state from gossip
             }
             let mut remote_info = remote_info;
@@ -391,9 +423,10 @@ impl ReplicationManager {
         }
 
         // Select gossip targets
+        let local_b32 = self.local_node_id.to_base32();
         let gossip_targets: Vec<_> = alive_nodes
             .into_iter()
-            .filter(|node| node.node_id != self.local_node_id)
+            .filter(|node| node.node_id != local_b32)
             .take(self.config.gossip_fanout)
             .collect();
 
@@ -410,7 +443,7 @@ impl ReplicationManager {
             let mut nodes: Vec<pb::StorageNodeInfoV1> = states.values().cloned().collect();
             nodes.sort_by_key(node_sort_key);
             let gossip_msg = pb::GossipMessageV1 {
-                sender_node_id: self.local_node_id.clone(),
+                sender_node_id: local_b32.clone(),
                 sender_tick: now_tick,
                 node_states: nodes,
             };
@@ -624,7 +657,8 @@ mod tests {
         assert_eq!(alive.len(), 2);
         let ids: Vec<&str> = alive.iter().map(|n| n.node_id.as_str()).collect();
         let alive_id = node_id_for_addr("http://127.0.0.1:8083");
-        assert!(ids.contains(&mgr.local_node_id.as_str()));
+        let local_b32 = mgr.local_node_id.to_base32();
+        assert!(ids.contains(&local_b32.as_str()));
         assert!(ids.contains(&alive_id.as_str()));
     }
 
@@ -661,7 +695,7 @@ mod tests {
         let mgr = make_manager("node-a", "http://127.0.0.1:8080");
         {
             let mut states = must(mgr.node_states.write());
-            let local_node_id = mgr.local_node_id.clone();
+            let local_node_id = mgr.local_node_id.to_base32();
             must_some(states.get_mut(&local_node_id), "local node should exist").status =
                 pb::StorageNodeStatus::Dead as i32;
         }
@@ -724,7 +758,7 @@ mod tests {
             sender_node_id: "node-remote".to_string(),
             sender_tick: 10,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: mgr.local_node_id.clone(),
+                node_id: mgr.local_node_id.to_base32(),
                 address: "http://attacker:6666".to_string(),
                 last_seen_tick: 10,
                 status: pb::StorageNodeStatus::Dead as i32,

@@ -7,9 +7,9 @@ use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::bridge::AppResult;
+use crate::sdk::app_state::AppState;
 
 /// Wrap raw bytes into an ArgPack and return as AppResult success.
-/// RETIRED: Use pack_envelope_ok() for new responses.
 pub(crate) fn pack_bytes_ok(body: Vec<u8>, schema_hash: generated::Hash32) -> AppResult {
     let arg = generated::ArgPack {
         schema_hash: Some(schema_hash),
@@ -25,13 +25,35 @@ pub(crate) fn pack_bytes_ok(body: Vec<u8>, schema_hash: generated::Hash32) -> Ap
     }
 }
 
-/// NEW: Build Envelope with proper payload oneof (no ArgPack wrapper)
-/// Returns FramedEnvelopeV3: [0x03] || Envelope(version=3, payload=...)
+fn bytes32_or_zero(value: Option<Vec<u8>>) -> Vec<u8> {
+    value
+        .filter(|bytes| bytes.len() == 32)
+        .unwrap_or_else(|| vec![0u8; 32])
+}
+
+fn app_state_bytes32_or_zero(load: fn() -> Option<Vec<u8>>) -> Vec<u8> {
+    if crate::storage_utils::get_storage_base_dir().is_none() {
+        return vec![0u8; 32];
+    }
+    bytes32_or_zero(load())
+}
+
+fn response_headers() -> generated::Headers {
+    generated::Headers {
+        device_id: app_state_bytes32_or_zero(AppState::get_device_id),
+        chain_tip: vec![0u8; 32],
+        genesis_hash: app_state_bytes32_or_zero(AppState::get_genesis_hash),
+        seq: 0,
+    }
+}
+
+/// Build a strict Envelope v3 response.
+/// Returns FramedEnvelopeV3: [0x03] || Envelope(version=3, headers=..., payload=...)
 pub(crate) fn pack_envelope_ok(payload: generated::envelope::Payload) -> AppResult {
     let envelope = generated::Envelope {
         version: 3,
-        headers: None,             // Router queries don't need full headers
-        message_id: vec![0u8; 16], // Empty message_id for stateless queries
+        headers: Some(response_headers()),
+        message_id: vec![0u8; 16],
         payload: Some(payload),
     };
     let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
@@ -111,9 +133,10 @@ mod tests {
             value: None,
         });
         let result = pack_envelope_ok(payload);
-        let envelope = generated::Envelope::decode(&result.data[1..]).unwrap();
+        let envelope = dsm::envelope::from_canonical_bytes(&result.data[1..]).unwrap();
         assert_eq!(envelope.version, 3);
         assert_eq!(envelope.message_id, vec![0u8; 16]);
+        assert!(envelope.headers.is_some());
         assert!(envelope.payload.is_some());
     }
 

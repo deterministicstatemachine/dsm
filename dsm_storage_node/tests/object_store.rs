@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use axum::{body::Bytes, http::StatusCode, Extension};
+use dsm_sdk::util::text_id;
 use dsm_storage_node::{
     api, db,
     replication::{ReplicationConfig, ReplicationManager},
@@ -40,6 +41,7 @@ async fn build_object_app() -> Option<axum::Router> {
     );
     let state = AppState::new(
         "test-node".to_string(),
+        "http://localhost:8080",
         None,
         Arc::new(pool),
         replication_manager,
@@ -99,17 +101,14 @@ async fn put_requires_slot_or_bootstrap_headers() {
     // Generate random DLV ID to avoid collisions
     let mut rng = rand::thread_rng();
     let dlv_bytes: [u8; 32] = rng.gen();
-    let dlv_hex = dlv_bytes
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
+    let dlv_id = text_id::encode_base32_crockford(&dlv_bytes);
 
     // Without capacity/stake and slot absent -> 428 Precondition Required
     let req = axum::http::Request::builder()
         .method("POST")
         .uri("/api/v2/object/put")
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-        .header("x-dlv-id", &dlv_hex)
+        .header("x-dlv-id", &dlv_id)
         .header("x-path", "foo/bar")
         .body(axum::body::Body::from(Bytes::from_static(b"hello")))
         .unwrap_or_else(|e| panic!("request build failed: {e}"));
@@ -121,14 +120,15 @@ async fn put_requires_slot_or_bootstrap_headers() {
     assert_eq!(resp.status(), StatusCode::PRECONDITION_REQUIRED);
 
     // With capacity+stake -> creates slot and returns 200 with x-object-address
+    let stake_hash = text_id::encode_base32_crockford(&[0x22; 32]);
     let req2 = axum::http::Request::builder()
         .method("POST")
         .uri("/api/v2/object/put")
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-        .header("x-dlv-id", &dlv_hex)
+        .header("x-dlv-id", &dlv_id)
         .header("x-path", "foo/bar")
         .header("x-capacity-bytes", "1024")
-        .header("x-stake-hash", &"22".repeat(32))
+        .header("x-stake-hash", &stake_hash)
         .body(axum::body::Body::from(Bytes::from_static(b"hello")))
         .unwrap_or_else(|e| panic!("request build failed: {e}"));
     let resp2 = app

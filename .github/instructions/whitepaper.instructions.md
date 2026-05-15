@@ -914,8 +914,33 @@ Hek-cert EKpk
 n+1 ∥hn. (15)
 Sign the receipt body with EKsk
 n+1.
-Verification (normative). checks inclusion proofs (Sec. 4.2).
-Verification replays the chain of certificates back to AKpk and
+Receipt challenge response (normative). For offline acceptance, parent and
+root inclusion are necessary but not spend authority. The receipt challenge is
+the proposed transition context:
+
+  challenge_receipt = (G, DevID_A, DevID_B, h_n, C_pre, k_step,
+                       parent_root, child_root, receipt_commit)
+
+The response is the side signature under the freshly derived EK key for that
+same transition:
+
+  E_{n+1} = HKDF-BLAKE3("DSM/ek\0", h_n || C_pre || k_step || K_DBRW)
+  EK_{n+1} = SPHINCS+.KeyGen(E_{n+1})
+  sig_side = Sign_{EKsk_{n+1}}(receipt_commit or session-bound target)
+
+K_DBRW is never serialized. A copied wallet database may contain public
+receipts, encrypted chain-head records, and prior public keys, but it does not
+contain the live device binding needed to decrypt the next signer or derive the
+next EK. A second physical device therefore cannot answer the receipt challenge
+for the same parent h_n. The next key is different every transition, and the
+keys remain connected by cert_{n+1}, which is signed by AK at step 0 or by the
+previous EK on later steps.
+
+Verification (normative). Verification checks inclusion proofs (Sec. 4.2),
+recomputes the parent-to-child SMT replace, verifies sig_side under EKpk_{n+1},
+and replays cert_{n+1} back to AKpk. A verifier MUST reject a receipt that has
+valid parent/root inclusion but lacks the C-DBRW-derived per-step EK signature
+and certificate chain for the proposed transition.
 11.2 Identity Pre-commitment
 Let P0 be a provisioning seed; define Pi = BLAKE3-256("DSM/provision\0" ∥Pi−1). Under
 collision resistance, adversaries cannot forge a different identity chain consistent with {Pi}

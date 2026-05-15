@@ -7,10 +7,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use blake3;
+use dsm_sdk::util::text_id;
 use log::{debug, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::process::Command;
+
+use super::hardening::blake3_tagged;
 
 #[derive(Debug, Clone)]
 pub struct AutoNetworkConfig {
@@ -48,11 +50,7 @@ impl NetworkDetector {
         let preferred = base_port + node_index as u16;
         let port = Self::find_available_port(preferred)?;
 
-        let node_id = format!(
-            "node-{}-{}",
-            node_index + 1,
-            Self::generate_node_suffix(&primary_ip)
-        );
+        let node_id = Self::generate_node_id(&primary_ip, node_index, port);
         let scheme = if tls_enabled { "https" } else { "http" };
         let public_endpoint = format!("{scheme}://{primary_ip}:{port}");
 
@@ -246,11 +244,13 @@ impl NetworkDetector {
         TcpListener::bind(("0.0.0.0", port)).is_ok()
     }
 
-    /// Deterministic node suffix from IP (no wall clocks).
-    fn generate_node_suffix(ip: &IpAddr) -> String {
-        let h = blake3::hash(ip.to_string().as_bytes());
-        let b = h.as_bytes();
-        format!("{:02x}{:02x}{:02x}", b[0], b[1], b[2])
+    /// Deterministic node ID from stable local identity material.
+    fn generate_node_id(ip: &IpAddr, node_index: usize, port: u16) -> String {
+        let mut material = Vec::new();
+        material.extend_from_slice(ip.to_string().as_bytes());
+        material.extend_from_slice(&(node_index as u64).to_be_bytes());
+        material.extend_from_slice(&port.to_be_bytes());
+        text_id::encode_base32_crockford(&blake3_tagged("DSM/node-id", &material))
     }
 
     /// Deterministic peer list for local dev nodes (same host).

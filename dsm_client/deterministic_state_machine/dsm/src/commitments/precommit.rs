@@ -242,12 +242,19 @@ impl PreCommitment {
             .into());
         }
 
-        Ok(canonical_lp::hash_lp3(
-            DOM_PRECOMMIT_COMMITMENT_HASH,
-            parent_tip,
-            payload,
-            entropy,
-        ))
+        Ok(Self::branch_commitment_hash(parent_tip, payload, entropy))
+    }
+
+    /// Canonical v2 branch commitment without allocation bounds checks.
+    ///
+    /// This is the single live hash primitive for bilateral `C_pre`:
+    /// `H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
+    pub fn branch_commitment_hash(
+        parent_tip: &[u8; 32],
+        payload: &[u8],
+        entropy: &[u8],
+    ) -> [u8; 32] {
+        canonical_lp::hash_lp3(DOM_PRECOMMIT_COMMITMENT_HASH, parent_tip, payload, entropy)
     }
 
     fn encode_fork_candidates(
@@ -315,6 +322,79 @@ impl PreCommitment {
             encoded.extend_from_slice(&hash);
         }
         canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &encoded)
+    }
+
+    /// Finalization-time verification of a fork-aware precommit witness
+    /// (whitepaper §4.1.1 + §4.3 acceptance predicates).
+    ///
+    /// A successor stitched under the fork-aware family is acceptable iff,
+    /// given the full candidate set committed under `C_pre^root`:
+    ///
+    /// 1. The selected branch's `C_pre^i` is a member of the committed
+    ///    candidate set (membership relative to `enc(candidates)`).
+    /// 2. The supplied `pi_inv` byte-exactly matches
+    ///    `invalidation_proof_commitment` over the `C_pre^j` of every
+    ///    unselected branch.
+    ///
+    /// This function is the canonical recipient-side check that runs at
+    /// receipt acceptance. It is independent of the `select_fork` flow
+    /// (which produces these values at construction time on the sender
+    /// side) and must succeed before parent-consumption Tripwire (§6.1)
+    /// admits the successor.
+    ///
+    /// Returns `Ok(())` on success, `Err` with a context string otherwise.
+    pub fn verify_finalization_witness(
+        parent_tip: &[u8; 32],
+        candidates: &[ForkCandidate],
+        selected_fork_id: &str,
+        pi_inv: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        validate_id(selected_fork_id, "selected_fork_id")?;
+        if candidates.is_empty() {
+            return Err(CommitmentError::Verification {
+                context: "verify_finalization_witness: candidate set is empty".into(),
+            }
+            .into());
+        }
+        // Witness must reference a branch that was actually committed.
+        let selected = candidates
+            .iter()
+            .find(|c| c.fork_id == selected_fork_id)
+            .ok_or_else(|| CommitmentError::Verification {
+                context: format!(
+                    "verify_finalization_witness: selected_fork_id `{selected_fork_id}` is not a \
+                     member of the committed candidate set"
+                ),
+            })?;
+        // (1) Recompute the selected `C_pre^i`. This existing call enforces
+        //     the canonical v2 domain `DSM/precommit/commitment-hash/v2\0`
+        //     and the deterministic `h_n || payload_i || e_i` encoding.
+        //     If the witness's `selected_fork_id` resolves to a candidate
+        //     here, that candidate's `C_pre^i` is by construction inside
+        //     `enc(candidates)` consumed by `fork_root_for_candidates`,
+        //     i.e. it is a member under `C_pre^root`. No separate inclusion
+        //     proof is needed because the candidate set is canonically
+        //     enumerated, not Merkle-summarised.
+        let _selected_c_pre_i =
+            Self::commitment_hash_for_payload(parent_tip, &selected.payload, &selected.entropy)?;
+
+        // (2) Recompute `pi_inv` over the canonical-ordered C_pre^j of every
+        //     unselected branch and compare byte-exactly.
+        let unselected_hashes: Result<Vec<[u8; 32]>, DsmError> = candidates
+            .iter()
+            .filter(|c| c.fork_id != selected_fork_id)
+            .map(|c| Self::commitment_hash_for_payload(parent_tip, &c.payload, &c.entropy))
+            .collect();
+        let expected_pi_inv = Self::invalidation_proof_commitment(&unselected_hashes?);
+        if expected_pi_inv != *pi_inv {
+            return Err(CommitmentError::Verification {
+                context: "verify_finalization_witness: pi_inv does not match canonical \
+                     invalidation-proof commitment over unselected branches"
+                    .into(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     pub fn new(hash: [u8; 32]) -> Self {
@@ -1207,5 +1287,153 @@ mod tests {
 
         let third = PreCommitment::invalidation_proof_commitment(&[a, c]);
         assert_ne!(first, third);
+    }
+
+    // ----------------------------------------------------------------
+    // K1-K4: Known-answer tests for the canonical v2 precommit family
+    // and the finalization-time fork witness verifier.
+    // ----------------------------------------------------------------
+
+    /// Legacy single-tag domain pinned for K4. The protocol no longer
+    /// emits hashes under this domain; this constant exists solely so K4
+    /// can prove the v2 verifier rejects legacy-domain inputs.
+    const LEGACY_V1_DOMAIN: &[u8] = b"DSM/precommit\0";
+
+    /// K1 — v2 positive vector: `branch_commitment_hash` for a fixed
+    /// `(h_n, payload, e)` triple is byte-stable and matches a recomputed
+    /// hash under the canonical domain. This vector locks in the canonical
+    /// `H("DSM/precommit/commitment-hash/v2\0" || h_n || payload || e)`
+    /// formula and would fail if the domain tag or length-prefixing rule
+    /// drifted.
+    #[test]
+    fn k1_v2_positive_branch_commitment_hash() {
+        let h_n: [u8; 32] = [0x11; 32];
+        let payload = b"payload-A";
+        let entropy = b"entropy-A";
+        let got = PreCommitment::commitment_hash_for_payload(&h_n, payload, entropy)
+            .expect("commitment_hash_for_payload");
+        let expected =
+            canonical_lp::hash_lp3(DOM_PRECOMMIT_COMMITMENT_HASH, &h_n, payload, entropy);
+        assert_eq!(
+            got, expected,
+            "v2 branch commitment hash diverged from canonical lp3 form"
+        );
+        // Stability across calls (no hidden state).
+        let again = PreCommitment::commitment_hash_for_payload(&h_n, payload, entropy)
+            .expect("commitment_hash_for_payload (replay)");
+        assert_eq!(got, again, "v2 commitment hash is not deterministic");
+    }
+
+    fn k_candidate(id: &str, payload: &[u8], entropy: &[u8]) -> ForkCandidate {
+        ForkCandidate {
+            fork_id: id.to_string(),
+            payload: payload.to_vec(),
+            entropy: entropy.to_vec(),
+        }
+    }
+
+    /// K2 — fork-verify positive: a witness over the canonical candidate
+    /// set with the correct `pi_inv` for the unselected branches is
+    /// accepted by `verify_finalization_witness`.
+    #[test]
+    fn k2_finalization_witness_positive() {
+        let h_n: [u8; 32] = [0x22; 32];
+        let candidates = vec![
+            k_candidate("branch-0", b"p0", b"e0"),
+            k_candidate("branch-1", b"p1", b"e1"),
+            k_candidate("branch-2", b"p2", b"e2"),
+        ];
+        // Select branch-1; the unselected hashes are the C_pre^i of the
+        // remaining branches under the canonical domain.
+        let c_pre_b0 =
+            PreCommitment::commitment_hash_for_payload(&h_n, b"p0", b"e0").expect("c_pre^0");
+        let c_pre_b2 =
+            PreCommitment::commitment_hash_for_payload(&h_n, b"p2", b"e2").expect("c_pre^2");
+        let pi_inv = PreCommitment::invalidation_proof_commitment(&[c_pre_b0, c_pre_b2]);
+
+        PreCommitment::verify_finalization_witness(&h_n, &candidates, "branch-1", &pi_inv)
+            .expect("v2 fork-aware witness must accept the canonical pi_inv");
+    }
+
+    /// K3 — fork-verify negative (wrong `pi_inv`): a single-byte mutation
+    /// of `pi_inv` causes `verify_finalization_witness` to reject.
+    #[test]
+    fn k3_finalization_witness_rejects_wrong_pi_inv() {
+        let h_n: [u8; 32] = [0x33; 32];
+        let candidates = vec![
+            k_candidate("branch-0", b"p0", b"e0"),
+            k_candidate("branch-1", b"p1", b"e1"),
+            k_candidate("branch-2", b"p2", b"e2"),
+        ];
+        let c_pre_b0 =
+            PreCommitment::commitment_hash_for_payload(&h_n, b"p0", b"e0").expect("c_pre^0");
+        let c_pre_b2 =
+            PreCommitment::commitment_hash_for_payload(&h_n, b"p2", b"e2").expect("c_pre^2");
+        let mut pi_inv = PreCommitment::invalidation_proof_commitment(&[c_pre_b0, c_pre_b2]);
+        pi_inv[0] ^= 0x01;
+
+        let err =
+            PreCommitment::verify_finalization_witness(&h_n, &candidates, "branch-1", &pi_inv)
+                .expect_err("forged pi_inv must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pi_inv does not match"),
+            "expected pi_inv mismatch error, got: {msg}"
+        );
+
+        // Also: selecting a branch that was not in the candidate set is rejected.
+        let pi_inv2 = PreCommitment::invalidation_proof_commitment(&[c_pre_b0, c_pre_b2]);
+        let err2 =
+            PreCommitment::verify_finalization_witness(&h_n, &candidates, "branch-999", &pi_inv2)
+                .expect_err("unknown selected_fork_id must be rejected");
+        assert!(format!("{err2}").contains("not a member"));
+    }
+
+    /// K4 — legacy-domain reject: a hash computed under the legacy single-tag
+    /// `"DSM/precommit\0"` domain is never equal to a v2 branch commitment
+    /// hash for the same `(h_n, payload, entropy)` input. The v2 finalization
+    /// verifier rebuilds `C_pre^j` under the canonical v2 domain only, so a
+    /// witness that smuggles a legacy-domain hash into `pi_inv` produces the
+    /// expected non-match — i.e. the legacy domain cannot satisfy a v2 check.
+    #[test]
+    fn k4_legacy_v1_domain_is_not_accepted_by_v2_verifier() {
+        let h_n: [u8; 32] = [0x44; 32];
+        let payload = b"p-legacy";
+        let entropy = b"e-legacy";
+
+        // Construct the legacy single-tag hash (`"DSM/precommit\0" || payload`
+        // — the protocol no longer emits this shape, see Eq. 4 in the
+        // whitepaper §4.1).
+        let mut legacy_preimage = Vec::new();
+        legacy_preimage.extend_from_slice(&h_n);
+        legacy_preimage.extend_from_slice(payload);
+        legacy_preimage.extend_from_slice(entropy);
+        let legacy = canonical_lp::hash_lp1(LEGACY_V1_DOMAIN, &legacy_preimage);
+
+        let v2 = PreCommitment::commitment_hash_for_payload(&h_n, payload, entropy)
+            .expect("v2 commitment hash");
+
+        assert_ne!(
+            legacy, v2,
+            "the v2 family must produce a different digest than the legacy single-tag domain"
+        );
+
+        // Smuggle the legacy hash into pi_inv and ensure the v2 verifier
+        // rejects: the verifier rebuilds pi_inv from canonical-v2 branch
+        // hashes, so a pi_inv carrying a legacy-domain leaf cannot match.
+        let candidates = vec![
+            k_candidate("branch-0", payload, entropy),
+            k_candidate("branch-1", b"p1", b"e1"),
+        ];
+        let forged_pi_inv = PreCommitment::invalidation_proof_commitment(&[legacy]);
+
+        let err = PreCommitment::verify_finalization_witness(
+            &h_n,
+            &candidates,
+            "branch-0",
+            &forged_pi_inv,
+        )
+        .expect_err("v2 verifier must reject pi_inv built from legacy-domain hashes");
+        assert!(format!("{err}").contains("pi_inv does not match"));
     }
 }
