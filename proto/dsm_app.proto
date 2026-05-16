@@ -1462,6 +1462,99 @@ message GenesisCreated {
   string locale       = 10;
 }
 
+// ======================= Genesis MPC Session Protocol (spec §5) ====
+//
+// Real threshold-MPC genesis creation across distinct storage nodes.
+// All hashes are BLAKE3-256 with explicit domain separation per the
+// "DSM/<tag>\0" convention (tag bytes followed by a single NUL).
+//
+// Session flow (root device perspective):
+//   1. Offer: build GenesisMpcSessionV1, POST to ≥ threshold+1 candidates.
+//   2. Accept: each candidate persists the session, responds with its
+//      MPC public key.
+//   3. Commit phase: each accepting node independently generates a
+//      32-byte entropy e_i, publishes
+//         commit_digest_i = H("DSM/genesis-commit\0"
+//                             || session_id || contributor_id || e_i)
+//      signed by its MPC participation key.
+//   4. Bias-resistance gate: a node MUST observe ≥ threshold-1 other
+//      commits before revealing its own e_i.
+//   5. Reveal phase: each contributor releases e_i, signed.
+//   6. Combine (root device only):
+//        D_commit = H_concat( commit_digest_i for i sorted by contributor_id )
+//        D_reveal = H_concat( e_i for i sorted by contributor_id )
+//        eta_0    = H("DSM/anchor/eta\0" || D_commit || D_reveal)
+//        A_0      = ProtoDet( contributor_id || initiator_pk
+//                             || initiator_cdbrw || D_reveal )
+//        G        = H("DSM/genesis\0" || A_0)
+//
+// `H_concat` is byte concatenation of the sorted hashes (no separator,
+// no length prefix — each element is fixed 32 bytes). Sort is ascending
+// lexicographic over contributor_id bytes, matching the existing core
+// MPC orchestration in dsm/src/core/identity/genesis_mpc.rs.
+
+message GenesisMpcSessionV1 {
+  // 32 bytes. Derivation:
+  //   H("DSM/genesis-mpc-session\0" || initiator_device_id
+  //     || initiator_nonce || initiator_cdbrw)
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+  // Root device's DevID.
+  bytes initiator_device_id = 2 [(dsm_fixed_len)=32];
+  // Root device's SPHINCS+ public key (pk_1).
+  bytes initiator_pk = 3 [(dsm_max_len)=65535];
+  // CDBRW digest of root device (silicon-bound anchor).
+  bytes initiator_cdbrw = 4 [(dsm_fixed_len)=32];
+  // Minimum contributors required. Spec leaves unspecified; recommend
+  // 3 for a 6-node deployment. MUST be ≥ 3.
+  uint32 threshold = 5;
+  // Deterministic deadline (cycle index), not a wall clock.
+  uint64 deadline_cycle = 6;
+}
+
+message GenesisMpcCommitV1 {
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+  // Storage node ID (the storage_node_id, 32 bytes).
+  bytes contributor_id = 2 [(dsm_fixed_len)=32];
+  // commit_digest = H("DSM/genesis-commit\0"
+  //                    || session_id || contributor_id || entropy_i)
+  bytes commit_digest = 3 [(dsm_fixed_len)=32];
+  // SPHINCS+ sig over the canonical-protobuf bytes of fields 1-3,
+  // signed by the storage node's MPC participation key.
+  bytes node_signature = 4 [(dsm_max_len)=65535];
+}
+
+message GenesisMpcRevealV1 {
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+  bytes contributor_id = 2 [(dsm_fixed_len)=32];
+  // 32-byte entropy that hashes to the prior commit_digest.
+  bytes entropy = 3 [(dsm_fixed_len)=32];
+  // SPHINCS+ sig over fields 1-3 (same canonical encoding rule).
+  bytes node_signature = 4 [(dsm_max_len)=65535];
+}
+
+message GenesisMpcCombinedV1 {
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+  // ≥ threshold valid reveals (each tied to a prior commit).
+  repeated GenesisMpcRevealV1 reveals = 2;
+  // H("DSM/device-commit\0" || initiator_pk || initiator_cdbrw)
+  bytes initiator_device_commitment = 3 [(dsm_fixed_len)=32];
+  // G = H("DSM/genesis\0" || ProtoDet(A_0))
+  bytes computed_g = 4 [(dsm_fixed_len)=32];
+  // eta_0 = H("DSM/anchor/eta\0" || D_commit || D_reveal)
+  bytes computed_eta_0 = 5 [(dsm_fixed_len)=32];
+}
+
+// Status envelope for client polling of MPC session progress.
+message GenesisMpcStatusV1 {
+  bytes session_id = 1 [(dsm_fixed_len)=32];
+  // "offered" | "committing" | "revealing" | "combined" | "expired" | "failed"
+  string state = 2;
+  uint32 collected_commits_count = 3;
+  uint32 collected_reveals_count = 4;
+  // Populated on terminal "failed". Empty on success / in-progress.
+  string error_message = 5;
+}
+
 // Secondary device initialization (binds to existing genesis via QR scan)
 message SecondaryDeviceRequest {
   bytes genesis_hash = 1 [(dsm_fixed_len)=32]; // Scanned from root device QR
@@ -2652,6 +2745,97 @@ message DeviceTreeEntry {
   bytes parent_hash = 3 [(dsm_fixed_len)=32];
   uint32 tree_depth = 4;
   repeated bytes merkle_proof = 5 [(dsm_fixed_len)=32];
+}
+
+// ========================= Device Tree V1 (Merkle, spec §2) =========================
+//
+// Canonical Merkle construction (must agree byte-for-byte with the
+// existing dsm/src/common/device_tree.rs library — that library is
+// already production-ready with full test coverage, so the canonical
+// definition follows the library, not the other way around):
+//
+//   1. Leaves are sorted ascending by device_id (lexicographic over
+//      the 32 raw bytes). Duplicates collapse (idempotent add).
+//   2. Leaf hash:
+//        H_leaf(leaf) = BLAKE3("DSM/dev-leaf\0" || leaf.device_id)
+//      NOTE: the device_id alone is hashed at the leaf level, not the
+//      full DeviceLeafV1 proto. The pk + cdbrw + admitted_at_version
+//      fields are CARRIED in DeviceLeafV1 for the validator to verify
+//      against the RootBindingRecord and per-device DBRW binding, but
+//      they do NOT enter the Merkle root computation. This keeps the
+//      root stable under metadata edits that don't change the device
+//      set.
+//   3. Internal node hash:
+//        H_node(left, right) = BLAKE3("DSM/dev-merkle\0" || left || right)
+//   4. Odd-count handling at any level: the missing right child is
+//      replaced with the canonical pad leaf:
+//        pad_leaf = BLAKE3("DSM/dev-tree-pad\0")
+//      (NOT last-leaf-duplication; this avoids a known second-preimage
+//      pitfall — Issue #182 Finding #4.)
+//   5. Empty tree sentinel: BLAKE3("DSM/dev-empty\0") (NOT 32×0x00).
+//   6. Tree version is monotonic: +1 per accepted DeviceTreeRootUpdateV1.
+//
+// All four domain tags above are normative. Changing any of them is a
+// hard fork.
+
+message DeviceLeafV1 {
+  bytes device_id = 1 [(dsm_fixed_len)=32];        // DevID_N
+  bytes device_pk = 2 [(dsm_max_len)=65535];       // SPHINCS+ public key
+  bytes cdbrw = 3 [(dsm_fixed_len)=32];            // CDBRW digest
+  uint64 admitted_at_version = 4;                  // R_G version on admission
+}
+
+message DeviceTreeV1 {
+  // Canonical: sorted ascending by device_id, deduplicated.
+  repeated DeviceLeafV1 leaves = 1;
+  // Monotonic; increments per accepted update.
+  uint64 version = 2;
+}
+
+// PUT body for /api/v2/identity/{genesis}/devtree/root.
+// Storage-node validator recomputes the Merkle root from `new_tree`
+// using the construction above and verifies it equals `proposed_root`.
+message DeviceTreeRootUpdateV1 {
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
+  // 32-byte Merkle root of `new_tree` per the construction above.
+  bytes proposed_root = 2 [(dsm_fixed_len)=32];
+  uint64 prior_version = 3;
+  uint64 new_version = 4;
+  // Required for additions/removals; omitted for the bootstrap
+  // (prior_version == 0) case where the tree contains exactly the
+  // primary device and pk_1 == RootBindingRecord.pk_1.
+  optional SecondaryDeviceAuthV1 authorization = 5;
+  // The full tree the validator must recompute against.
+  DeviceTreeV1 new_tree = 6;
+}
+
+// GET response for /api/v2/identity/{genesis}/devtree/proof?device_id=...
+// Derived ON DEMAND from the current DeviceTreeV1 — the storage node
+// does NOT persist proofs separately. Verifier recomputes the root
+// from `leaf` + `proof` siblings/path_bits and compares against
+// `computed_root`.
+message DeviceInclusionProofV1 {
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  uint64 tree_version = 3;
+  bytes computed_root = 4 [(dsm_fixed_len)=32];
+  // Low-level Merkle proof (siblings + path_bits) per the existing
+  // DeviceTreeProof shape.
+  DeviceTreeProof proof = 5;
+  // The leaf being proven; verifier hashes leaf.device_id under
+  // "DSM/dev-leaf\0" and walks the path to `computed_root`.
+  DeviceLeafV1 leaf = 6;
+}
+
+// Authorization payload that grants a secondary device admission to a
+// genesis's device tree. Defined in detail by companion plan Task 3.10
+// (multi-device enrollment hardening). Stub declared here so
+// DeviceTreeRootUpdateV1.authorization compiles; companion plan will
+// populate the field set (root-device signature, mailbox handshake
+// reference, etc.) once the enrollment flow lands.
+message SecondaryDeviceAuthV1 {
+  // Field tags 1..15 are reserved for companion-plan Task 3.10.
+  reserved 1 to 15;
 }
 
 // ========================= Storage Object Messages =========================

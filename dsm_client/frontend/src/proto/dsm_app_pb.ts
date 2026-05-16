@@ -11331,6 +11331,346 @@ export class GenesisCreated extends Message<GenesisCreated> {
 }
 
 /**
+ * @generated from message dsm.GenesisMpcSessionV1
+ */
+export class GenesisMpcSessionV1 extends Message<GenesisMpcSessionV1> {
+  /**
+   * 32 bytes. Derivation:
+   *   H("DSM/genesis-mpc-session\0" || initiator_device_id
+   *     || initiator_nonce || initiator_cdbrw)
+   *
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * Root device's DevID.
+   *
+   * @generated from field: bytes initiator_device_id = 2;
+   */
+  initiatorDeviceId = new Uint8Array(0);
+
+  /**
+   * Root device's SPHINCS+ public key (pk_1).
+   *
+   * @generated from field: bytes initiator_pk = 3;
+   */
+  initiatorPk = new Uint8Array(0);
+
+  /**
+   * CDBRW digest of root device (silicon-bound anchor).
+   *
+   * @generated from field: bytes initiator_cdbrw = 4;
+   */
+  initiatorCdbrw = new Uint8Array(0);
+
+  /**
+   * Minimum contributors required. Spec leaves unspecified; recommend
+   * 3 for a 6-node deployment. MUST be ≥ 3.
+   *
+   * @generated from field: uint32 threshold = 5;
+   */
+  threshold = 0;
+
+  /**
+   * Deterministic deadline (cycle index), not a wall clock.
+   *
+   * @generated from field: uint64 deadline_cycle = 6;
+   */
+  deadlineCycle = protoInt64.zero;
+
+  constructor(data?: PartialMessage<GenesisMpcSessionV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.GenesisMpcSessionV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "initiator_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "initiator_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "initiator_cdbrw", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "deadline_cycle", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcSessionV1 {
+    return new GenesisMpcSessionV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GenesisMpcSessionV1 {
+    return new GenesisMpcSessionV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GenesisMpcSessionV1 {
+    return new GenesisMpcSessionV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GenesisMpcSessionV1 | PlainMessage<GenesisMpcSessionV1> | undefined, b: GenesisMpcSessionV1 | PlainMessage<GenesisMpcSessionV1> | undefined): boolean {
+    return proto3.util.equals(GenesisMpcSessionV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.GenesisMpcCommitV1
+ */
+export class GenesisMpcCommitV1 extends Message<GenesisMpcCommitV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * Storage node ID (the storage_node_id, 32 bytes).
+   *
+   * @generated from field: bytes contributor_id = 2;
+   */
+  contributorId = new Uint8Array(0);
+
+  /**
+   * commit_digest = H("DSM/genesis-commit\0"
+   *                    || session_id || contributor_id || entropy_i)
+   *
+   * @generated from field: bytes commit_digest = 3;
+   */
+  commitDigest = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ sig over the canonical-protobuf bytes of fields 1-3,
+   * signed by the storage node's MPC participation key.
+   *
+   * @generated from field: bytes node_signature = 4;
+   */
+  nodeSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<GenesisMpcCommitV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.GenesisMpcCommitV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "contributor_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "commit_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "node_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcCommitV1 {
+    return new GenesisMpcCommitV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GenesisMpcCommitV1 {
+    return new GenesisMpcCommitV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GenesisMpcCommitV1 {
+    return new GenesisMpcCommitV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GenesisMpcCommitV1 | PlainMessage<GenesisMpcCommitV1> | undefined, b: GenesisMpcCommitV1 | PlainMessage<GenesisMpcCommitV1> | undefined): boolean {
+    return proto3.util.equals(GenesisMpcCommitV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.GenesisMpcRevealV1
+ */
+export class GenesisMpcRevealV1 extends Message<GenesisMpcRevealV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes contributor_id = 2;
+   */
+  contributorId = new Uint8Array(0);
+
+  /**
+   * 32-byte entropy that hashes to the prior commit_digest.
+   *
+   * @generated from field: bytes entropy = 3;
+   */
+  entropy = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ sig over fields 1-3 (same canonical encoding rule).
+   *
+   * @generated from field: bytes node_signature = 4;
+   */
+  nodeSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<GenesisMpcRevealV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.GenesisMpcRevealV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "contributor_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "node_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcRevealV1 {
+    return new GenesisMpcRevealV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GenesisMpcRevealV1 {
+    return new GenesisMpcRevealV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GenesisMpcRevealV1 {
+    return new GenesisMpcRevealV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GenesisMpcRevealV1 | PlainMessage<GenesisMpcRevealV1> | undefined, b: GenesisMpcRevealV1 | PlainMessage<GenesisMpcRevealV1> | undefined): boolean {
+    return proto3.util.equals(GenesisMpcRevealV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.GenesisMpcCombinedV1
+ */
+export class GenesisMpcCombinedV1 extends Message<GenesisMpcCombinedV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * ≥ threshold valid reveals (each tied to a prior commit).
+   *
+   * @generated from field: repeated dsm.GenesisMpcRevealV1 reveals = 2;
+   */
+  reveals: GenesisMpcRevealV1[] = [];
+
+  /**
+   * H("DSM/device-commit\0" || initiator_pk || initiator_cdbrw)
+   *
+   * @generated from field: bytes initiator_device_commitment = 3;
+   */
+  initiatorDeviceCommitment = new Uint8Array(0);
+
+  /**
+   * G = H("DSM/genesis\0" || ProtoDet(A_0))
+   *
+   * @generated from field: bytes computed_g = 4;
+   */
+  computedG = new Uint8Array(0);
+
+  /**
+   * eta_0 = H("DSM/anchor/eta\0" || D_commit || D_reveal)
+   *
+   * @generated from field: bytes computed_eta_0 = 5;
+   */
+  computedEta0 = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<GenesisMpcCombinedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.GenesisMpcCombinedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "reveals", kind: "message", T: GenesisMpcRevealV1, repeated: true },
+    { no: 3, name: "initiator_device_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "computed_g", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "computed_eta_0", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcCombinedV1 {
+    return new GenesisMpcCombinedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GenesisMpcCombinedV1 {
+    return new GenesisMpcCombinedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GenesisMpcCombinedV1 {
+    return new GenesisMpcCombinedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GenesisMpcCombinedV1 | PlainMessage<GenesisMpcCombinedV1> | undefined, b: GenesisMpcCombinedV1 | PlainMessage<GenesisMpcCombinedV1> | undefined): boolean {
+    return proto3.util.equals(GenesisMpcCombinedV1, a, b);
+  }
+}
+
+/**
+ * Status envelope for client polling of MPC session progress.
+ *
+ * @generated from message dsm.GenesisMpcStatusV1
+ */
+export class GenesisMpcStatusV1 extends Message<GenesisMpcStatusV1> {
+  /**
+   * @generated from field: bytes session_id = 1;
+   */
+  sessionId = new Uint8Array(0);
+
+  /**
+   * "offered" | "committing" | "revealing" | "combined" | "expired" | "failed"
+   *
+   * @generated from field: string state = 2;
+   */
+  state = "";
+
+  /**
+   * @generated from field: uint32 collected_commits_count = 3;
+   */
+  collectedCommitsCount = 0;
+
+  /**
+   * @generated from field: uint32 collected_reveals_count = 4;
+   */
+  collectedRevealsCount = 0;
+
+  /**
+   * Populated on terminal "failed". Empty on success / in-progress.
+   *
+   * @generated from field: string error_message = 5;
+   */
+  errorMessage = "";
+
+  constructor(data?: PartialMessage<GenesisMpcStatusV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.GenesisMpcStatusV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "state", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "collected_commits_count", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "collected_reveals_count", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcStatusV1 {
+    return new GenesisMpcStatusV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GenesisMpcStatusV1 {
+    return new GenesisMpcStatusV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GenesisMpcStatusV1 {
+    return new GenesisMpcStatusV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GenesisMpcStatusV1 | PlainMessage<GenesisMpcStatusV1> | undefined, b: GenesisMpcStatusV1 | PlainMessage<GenesisMpcStatusV1> | undefined): boolean {
+    return proto3.util.equals(GenesisMpcStatusV1, a, b);
+  }
+}
+
+/**
  * Secondary device initialization (binds to existing genesis via QR scan)
  *
  * @generated from message dsm.SecondaryDeviceRequest
@@ -20451,6 +20791,312 @@ export class DeviceTreeEntry extends Message<DeviceTreeEntry> {
 
   static equals(a: DeviceTreeEntry | PlainMessage<DeviceTreeEntry> | undefined, b: DeviceTreeEntry | PlainMessage<DeviceTreeEntry> | undefined): boolean {
     return proto3.util.equals(DeviceTreeEntry, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.DeviceLeafV1
+ */
+export class DeviceLeafV1 extends Message<DeviceLeafV1> {
+  /**
+   * DevID_N
+   *
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ public key
+   *
+   * @generated from field: bytes device_pk = 2;
+   */
+  devicePk = new Uint8Array(0);
+
+  /**
+   * CDBRW digest
+   *
+   * @generated from field: bytes cdbrw = 3;
+   */
+  cdbrw = new Uint8Array(0);
+
+  /**
+   * R_G version on admission
+   *
+   * @generated from field: uint64 admitted_at_version = 4;
+   */
+  admittedAtVersion = protoInt64.zero;
+
+  constructor(data?: PartialMessage<DeviceLeafV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceLeafV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "cdbrw", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "admitted_at_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceLeafV1 {
+    return new DeviceLeafV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceLeafV1 {
+    return new DeviceLeafV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceLeafV1 {
+    return new DeviceLeafV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceLeafV1 | PlainMessage<DeviceLeafV1> | undefined, b: DeviceLeafV1 | PlainMessage<DeviceLeafV1> | undefined): boolean {
+    return proto3.util.equals(DeviceLeafV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.DeviceTreeV1
+ */
+export class DeviceTreeV1 extends Message<DeviceTreeV1> {
+  /**
+   * Canonical: sorted ascending by device_id, deduplicated.
+   *
+   * @generated from field: repeated dsm.DeviceLeafV1 leaves = 1;
+   */
+  leaves: DeviceLeafV1[] = [];
+
+  /**
+   * Monotonic; increments per accepted update.
+   *
+   * @generated from field: uint64 version = 2;
+   */
+  version = protoInt64.zero;
+
+  constructor(data?: PartialMessage<DeviceTreeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "leaves", kind: "message", T: DeviceLeafV1, repeated: true },
+    { no: 2, name: "version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeV1 {
+    return new DeviceTreeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeV1 {
+    return new DeviceTreeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeV1 {
+    return new DeviceTreeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeV1 | PlainMessage<DeviceTreeV1> | undefined, b: DeviceTreeV1 | PlainMessage<DeviceTreeV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeV1, a, b);
+  }
+}
+
+/**
+ * PUT body for /api/v2/identity/{genesis}/devtree/root.
+ * Storage-node validator recomputes the Merkle root from `new_tree`
+ * using the construction above and verifies it equals `proposed_root`.
+ *
+ * @generated from message dsm.DeviceTreeRootUpdateV1
+ */
+export class DeviceTreeRootUpdateV1 extends Message<DeviceTreeRootUpdateV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * 32-byte Merkle root of `new_tree` per the construction above.
+   *
+   * @generated from field: bytes proposed_root = 2;
+   */
+  proposedRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 prior_version = 3;
+   */
+  priorVersion = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 new_version = 4;
+   */
+  newVersion = protoInt64.zero;
+
+  /**
+   * Required for additions/removals; omitted for the bootstrap
+   * (prior_version == 0) case where the tree contains exactly the
+   * primary device and pk_1 == RootBindingRecord.pk_1.
+   *
+   * @generated from field: optional dsm.SecondaryDeviceAuthV1 authorization = 5;
+   */
+  authorization?: SecondaryDeviceAuthV1;
+
+  /**
+   * The full tree the validator must recompute against.
+   *
+   * @generated from field: dsm.DeviceTreeV1 new_tree = 6;
+   */
+  newTree?: DeviceTreeV1;
+
+  constructor(data?: PartialMessage<DeviceTreeRootUpdateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeRootUpdateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "proposed_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "prior_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "new_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "authorization", kind: "message", T: SecondaryDeviceAuthV1, opt: true },
+    { no: 6, name: "new_tree", kind: "message", T: DeviceTreeV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeRootUpdateV1 {
+    return new DeviceTreeRootUpdateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeRootUpdateV1 {
+    return new DeviceTreeRootUpdateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeRootUpdateV1 {
+    return new DeviceTreeRootUpdateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeRootUpdateV1 | PlainMessage<DeviceTreeRootUpdateV1> | undefined, b: DeviceTreeRootUpdateV1 | PlainMessage<DeviceTreeRootUpdateV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeRootUpdateV1, a, b);
+  }
+}
+
+/**
+ * GET response for /api/v2/identity/{genesis}/devtree/proof?device_id=...
+ * Derived ON DEMAND from the current DeviceTreeV1 — the storage node
+ * does NOT persist proofs separately. Verifier recomputes the root
+ * from `leaf` + `proof` siblings/path_bits and compares against
+ * `computed_root`.
+ *
+ * @generated from message dsm.DeviceInclusionProofV1
+ */
+export class DeviceInclusionProofV1 extends Message<DeviceInclusionProofV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 tree_version = 3;
+   */
+  treeVersion = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes computed_root = 4;
+   */
+  computedRoot = new Uint8Array(0);
+
+  /**
+   * Low-level Merkle proof (siblings + path_bits) per the existing
+   * DeviceTreeProof shape.
+   *
+   * @generated from field: dsm.DeviceTreeProof proof = 5;
+   */
+  proof?: DeviceTreeProof;
+
+  /**
+   * The leaf being proven; verifier hashes leaf.device_id under
+   * "DSM/dev-leaf\0" and walks the path to `computed_root`.
+   *
+   * @generated from field: dsm.DeviceLeafV1 leaf = 6;
+   */
+  leaf?: DeviceLeafV1;
+
+  constructor(data?: PartialMessage<DeviceInclusionProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceInclusionProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "tree_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "computed_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "proof", kind: "message", T: DeviceTreeProof },
+    { no: 6, name: "leaf", kind: "message", T: DeviceLeafV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceInclusionProofV1 {
+    return new DeviceInclusionProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceInclusionProofV1 {
+    return new DeviceInclusionProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceInclusionProofV1 {
+    return new DeviceInclusionProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined, b: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined): boolean {
+    return proto3.util.equals(DeviceInclusionProofV1, a, b);
+  }
+}
+
+/**
+ * Authorization payload that grants a secondary device admission to a
+ * genesis's device tree. Defined in detail by companion plan Task 3.10
+ * (multi-device enrollment hardening). Stub declared here so
+ * DeviceTreeRootUpdateV1.authorization compiles; companion plan will
+ * populate the field set (root-device signature, mailbox handshake
+ * reference, etc.) once the enrollment flow lands.
+ *
+ * @generated from message dsm.SecondaryDeviceAuthV1
+ */
+export class SecondaryDeviceAuthV1 extends Message<SecondaryDeviceAuthV1> {
+  constructor(data?: PartialMessage<SecondaryDeviceAuthV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SecondaryDeviceAuthV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecondaryDeviceAuthV1 {
+    return new SecondaryDeviceAuthV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecondaryDeviceAuthV1 {
+    return new SecondaryDeviceAuthV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecondaryDeviceAuthV1 {
+    return new SecondaryDeviceAuthV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SecondaryDeviceAuthV1 | PlainMessage<SecondaryDeviceAuthV1> | undefined, b: SecondaryDeviceAuthV1 | PlainMessage<SecondaryDeviceAuthV1> | undefined): boolean {
+    return proto3.util.equals(SecondaryDeviceAuthV1, a, b);
   }
 }
 
