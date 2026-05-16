@@ -257,6 +257,9 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // for SDK clients orchestrating genesis MPC sessions.
     let node_info_router =
         api::registry::node_info::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Genesis MPC commit-reveal endpoints (spec §5; strict N-of-N).
+    let genesis_mpc_router = api::identity::genesis_mpc::create_router(state.clone())
+        .layer(public_rate_layer.clone());
 
     // Admin endpoints (cleanup, etc.)
     let admin_router = api::infra::admin::router(state.clone());
@@ -297,6 +300,7 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(gossip_router) // Gossip protocol endpoints
         .merge(discovery_router) // Node discovery for SDK auto-discovery
         .merge(node_info_router) // Per-node MPC public key + identity
+        .merge(genesis_mpc_router) // Genesis MPC commit-reveal (spec §5)
         .nest("/admin", admin_router) // Admin endpoints under /admin/*
         .nest("/admin", registry_admin_router) // Registry update/seed under /admin/*
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))

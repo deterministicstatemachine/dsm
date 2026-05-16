@@ -293,6 +293,51 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     proof_bytes    BLOB NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_drain_proofs_node ON drain_proofs(node_id);
+
+                -- Genesis MPC sessions (spec §5 / plan Task A.3).
+                -- A row exists only while a session is live (offer
+                -- accepted; awaiting reveal or already revealed).
+                -- Rows are deleted when the deadline+grace window
+                -- expires (purge_expired_genesis_mpc_sessions).
+                --
+                -- N-of-N protocol: there is NO threshold column. The
+                -- `participants_blob` is the concatenation of all N
+                -- 32-byte participant IDs (sorted ascending lex);
+                -- `participants_blob.len() / 32` recovers N. All N
+                -- participants are required to commit AND reveal —
+                -- spec §5 says withholding cannot bias, only DoS.
+                CREATE TABLE IF NOT EXISTS genesis_mpc_sessions (
+                    session_id           BLOB PRIMARY KEY,   -- 32 bytes
+                    initiator_device_id  BLOB NOT NULL,      -- 32 bytes
+                    initiator_pk         BLOB NOT NULL,      -- SPHINCS+ pk
+                    initiator_cdbrw      BLOB NOT NULL,      -- 32 bytes
+                    participants_blob    BLOB NOT NULL,      -- N × 32 bytes, sorted
+                    deadline_cycle       INTEGER NOT NULL,
+                    state                TEXT NOT NULL,      -- "offered" | "revealed" | "expired"
+                    created_at_cycle     INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_deadline
+                    ON genesis_mpc_sessions(deadline_cycle);
+
+                -- Genesis MPC contributions known to this node for a
+                -- given session. Each row is one contributor (this node
+                -- OR another participant whose commit was supplied in a
+                -- /reveal request body). `revealed_entropy` and
+                -- `reveal_signature` are NULL until reveal phase.
+                -- `own_entropy` is non-NULL only on this node's own row
+                -- (the secret we keep until bias-resistance gate passes).
+                CREATE TABLE IF NOT EXISTS genesis_mpc_contributions (
+                    session_id          BLOB NOT NULL,
+                    contributor_id      BLOB NOT NULL,
+                    commit_digest       BLOB NOT NULL,    -- 32 bytes
+                    commit_signature    BLOB NOT NULL,    -- SPHINCS+ sig
+                    own_entropy         BLOB,             -- 32 bytes, only for own row
+                    revealed_entropy    BLOB,             -- 32 bytes once revealed
+                    reveal_signature    BLOB,             -- SPHINCS+ sig over reveal
+                    PRIMARY KEY (session_id, contributor_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_contrib_session
+                    ON genesis_mpc_contributions(session_id);
             "#,
         )?;
         Ok(())
@@ -1408,6 +1453,278 @@ pub async fn verify_bytecommit_chain_empty(
             |row| row.get(0),
         )?;
         Ok(count >= required_d)
+    })
+    .await
+}
+
+// =================== Genesis MPC (Task A.3) ===================
+
+/// Row stored in `genesis_mpc_sessions`. `participants_blob` is the
+/// concatenation of the N declared participants' 32-byte IDs in
+/// ascending lex order; recover N as `participants_blob.len() / 32`.
+/// There is no `threshold` field — Genesis MPC is strict N-of-N
+/// (whitepaper §2.5 / spec §5).
+#[derive(Debug, Clone)]
+pub struct GenesisMpcSessionRow {
+    pub session_id: Vec<u8>,
+    pub initiator_device_id: Vec<u8>,
+    pub initiator_pk: Vec<u8>,
+    pub initiator_cdbrw: Vec<u8>,
+    pub participants_blob: Vec<u8>,
+    pub deadline_cycle: i64,
+    pub state: String,
+    pub created_at_cycle: i64,
+}
+
+/// Row stored in `genesis_mpc_contributions`. `own_entropy` is non-NULL
+/// only for this node's own row; `revealed_entropy` / `reveal_signature`
+/// are non-NULL only after the reveal phase.
+#[derive(Debug, Clone)]
+pub struct GenesisMpcContributionRow {
+    pub session_id: Vec<u8>,
+    pub contributor_id: Vec<u8>,
+    pub commit_digest: Vec<u8>,
+    pub commit_signature: Vec<u8>,
+    pub own_entropy: Option<Vec<u8>>,
+    pub revealed_entropy: Option<Vec<u8>>,
+    pub reveal_signature: Option<Vec<u8>>,
+}
+
+/// Insert a new MPC session. Fails (returns Err) if the session_id
+/// already exists — sessions are write-once.
+///
+/// SQLite's `INSERT` (no `OR IGNORE`) fails on duplicate PK with a
+/// constraint violation; we surface that as an `anyhow` error rather
+/// than letting the rusqlite error escape, so the API layer can map it
+/// uniformly to a 409 Conflict.
+pub async fn genesis_mpc_session_insert(
+    pool: &DBPool,
+    session: GenesisMpcSessionRow,
+) -> Result<()> {
+    with_conn(pool, move |conn| {
+        match conn.execute(
+            "INSERT INTO genesis_mpc_sessions
+             (session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
+              participants_blob, deadline_cycle, state, created_at_cycle)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                session.session_id,
+                session.initiator_device_id,
+                session.initiator_pk,
+                session.initiator_cdbrw,
+                session.participants_blob,
+                session.deadline_cycle,
+                session.state,
+                session.created_at_cycle,
+            ],
+        ) {
+            Ok(0) => Err(anyhow!(
+                "genesis_mpc_session_insert: no row inserted (race?)"
+            )),
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(anyhow!(
+                    "genesis_mpc_session_insert: session_id already exists"
+                ))
+            }
+            Err(e) => Err(anyhow::Error::from(e)),
+        }
+    })
+    .await
+}
+
+pub async fn genesis_mpc_session_get(
+    pool: &DBPool,
+    session_id: &[u8],
+) -> Result<Option<GenesisMpcSessionRow>> {
+    let session_id = session_id.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
+                        participants_blob, deadline_cycle, state, created_at_cycle
+                 FROM genesis_mpc_sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok(GenesisMpcSessionRow {
+                        session_id: row.get(0)?,
+                        initiator_device_id: row.get(1)?,
+                        initiator_pk: row.get(2)?,
+                        initiator_cdbrw: row.get(3)?,
+                        participants_blob: row.get(4)?,
+                        deadline_cycle: row.get(5)?,
+                        state: row.get(6)?,
+                        created_at_cycle: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// Update a session's state field (e.g. "offered" → "revealed").
+pub async fn genesis_mpc_session_set_state(
+    pool: &DBPool,
+    session_id: &[u8],
+    new_state: &str,
+) -> Result<()> {
+    let session_id = session_id.to_vec();
+    let new_state = new_state.to_string();
+    with_conn(pool, move |conn| {
+        conn.execute(
+            "UPDATE genesis_mpc_sessions SET state = ?1 WHERE session_id = ?2",
+            params![new_state, session_id],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+/// Purge sessions whose deadline + grace < cutoff_cycle. Returns the
+/// number of session rows removed (cascading contribution rows are
+/// removed explicitly via the same call).
+pub async fn genesis_mpc_session_purge_expired(
+    pool: &DBPool,
+    cutoff_cycle: i64,
+) -> Result<usize> {
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM genesis_mpc_contributions
+             WHERE session_id IN (
+                 SELECT session_id FROM genesis_mpc_sessions
+                 WHERE deadline_cycle < ?1
+             )",
+            params![cutoff_cycle],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM genesis_mpc_sessions WHERE deadline_cycle < ?1",
+            params![cutoff_cycle],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    })
+    .await
+}
+
+/// Upsert a contribution row. Idempotent on (session_id, contributor_id).
+/// `own_entropy` is preserved if a previous row had it and the new row
+/// doesn't (avoids accidentally clearing the secret on a peer-commit
+/// upsert that arrives via a reveal-request's commit set).
+pub async fn genesis_mpc_contribution_upsert(
+    pool: &DBPool,
+    contribution: GenesisMpcContributionRow,
+) -> Result<()> {
+    with_conn(pool, move |conn| {
+        conn.execute(
+            "INSERT INTO genesis_mpc_contributions
+             (session_id, contributor_id, commit_digest, commit_signature,
+              own_entropy, revealed_entropy, reveal_signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(session_id, contributor_id) DO UPDATE SET
+                commit_digest      = excluded.commit_digest,
+                commit_signature   = excluded.commit_signature,
+                own_entropy        = COALESCE(excluded.own_entropy, own_entropy),
+                revealed_entropy   = COALESCE(excluded.revealed_entropy, revealed_entropy),
+                reveal_signature   = COALESCE(excluded.reveal_signature, reveal_signature)",
+            params![
+                contribution.session_id,
+                contribution.contributor_id,
+                contribution.commit_digest,
+                contribution.commit_signature,
+                contribution.own_entropy,
+                contribution.revealed_entropy,
+                contribution.reveal_signature,
+            ],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+pub async fn genesis_mpc_contribution_get(
+    pool: &DBPool,
+    session_id: &[u8],
+    contributor_id: &[u8],
+) -> Result<Option<GenesisMpcContributionRow>> {
+    let session_id = session_id.to_vec();
+    let contributor_id = contributor_id.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT session_id, contributor_id, commit_digest, commit_signature,
+                        own_entropy, revealed_entropy, reveal_signature
+                 FROM genesis_mpc_contributions
+                 WHERE session_id = ?1 AND contributor_id = ?2",
+                params![session_id, contributor_id],
+                |row| {
+                    Ok(GenesisMpcContributionRow {
+                        session_id: row.get(0)?,
+                        contributor_id: row.get(1)?,
+                        commit_digest: row.get(2)?,
+                        commit_signature: row.get(3)?,
+                        own_entropy: row.get(4)?,
+                        revealed_entropy: row.get(5)?,
+                        reveal_signature: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+pub async fn genesis_mpc_contribution_list(
+    pool: &DBPool,
+    session_id: &[u8],
+) -> Result<Vec<GenesisMpcContributionRow>> {
+    let session_id = session_id.to_vec();
+    with_conn(pool, move |conn| {
+        let mut stmt = conn.prepare_cached(
+            "SELECT session_id, contributor_id, commit_digest, commit_signature,
+                    own_entropy, revealed_entropy, reveal_signature
+             FROM genesis_mpc_contributions
+             WHERE session_id = ?1
+             ORDER BY contributor_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok(GenesisMpcContributionRow {
+                    session_id: row.get(0)?,
+                    contributor_id: row.get(1)?,
+                    commit_digest: row.get(2)?,
+                    commit_signature: row.get(3)?,
+                    own_entropy: row.get(4)?,
+                    revealed_entropy: row.get(5)?,
+                    reveal_signature: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+    .await
+}
+
+/// Count distinct contributors for a session — used for the
+/// bias-resistance gate (must observe ≥ threshold-1 OTHER commits
+/// before revealing).
+pub async fn genesis_mpc_contribution_count(
+    pool: &DBPool,
+    session_id: &[u8],
+) -> Result<i64> {
+    let session_id = session_id.to_vec();
+    with_conn(pool, move |conn| {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM genesis_mpc_contributions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(n)
     })
     .await
 }

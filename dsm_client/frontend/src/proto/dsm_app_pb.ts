@@ -11437,12 +11437,15 @@ export class GenesisMpcSessionV1 extends Message<GenesisMpcSessionV1> {
   initiatorCdbrw = new Uint8Array(0);
 
   /**
-   * Minimum contributors required. Spec leaves unspecified; recommend
-   * 3 for a 6-node deployment. MUST be ≥ 3.
+   * The full N-of-N participant set: each entry is a 32-byte storage
+   * node ID. MUST be sorted ascending lex order with no duplicates.
+   * MUST have length ≥ 3 (spec §5 minimum to call this MPC). Every
+   * listed participant is required to commit AND reveal; there is NO
+   * threshold subset that can complete on behalf of the rest.
    *
-   * @generated from field: uint32 threshold = 5;
+   * @generated from field: repeated bytes participants = 5;
    */
-  threshold = 0;
+  participants: Uint8Array[] = [];
 
   /**
    * Deterministic deadline (cycle index), not a wall clock.
@@ -11463,7 +11466,7 @@ export class GenesisMpcSessionV1 extends Message<GenesisMpcSessionV1> {
     { no: 2, name: "initiator_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "initiator_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "initiator_cdbrw", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "participants", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 6, name: "deadline_cycle", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
@@ -11616,7 +11619,11 @@ export class GenesisMpcCombinedV1 extends Message<GenesisMpcCombinedV1> {
   sessionId = new Uint8Array(0);
 
   /**
-   * ≥ threshold valid reveals (each tied to a prior commit).
+   * Exactly N valid reveals (one per participant from the session's
+   * declared participant set), each tied to a prior commit. This is
+   * N-of-N — there is no threshold; a missing reveal means combine
+   * fails and the session must be retried with a fresh participant
+   * set.
    *
    * @generated from field: repeated dsm.GenesisMpcRevealV1 reveals = 2;
    */

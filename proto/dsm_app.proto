@@ -1483,22 +1483,37 @@ message GenesisCreated {
 
 // ======================= Genesis MPC Session Protocol (spec §5) ====
 //
-// Real threshold-MPC genesis creation across distinct storage nodes.
+// Real N-of-N MPC genesis creation across distinct storage nodes.
+//
+// IMPORTANT: this is NOT (t,n)-threshold cryptography. The "b_1,…,b_n"
+// notation in whitepaper §2.5 is an index over ALL n contributions —
+// every declared participant must commit AND reveal. A contributor who
+// commits but withholds their reveal can DoS the session but cannot
+// bias the outcome (the commit pins their entropy pre-reveal; see
+// spec §5: "withholding a reveal cannot bias ordering post-commit").
+// There is no t-of-n DKG, no Shamir share recovery.
+//
 // All hashes are BLAKE3-256 with explicit domain separation per the
 // "DSM/<tag>\0" convention (tag bytes followed by a single NUL).
 //
 // Session flow (root device perspective):
-//   1. Offer: build GenesisMpcSessionV1, POST to ≥ threshold+1 candidates.
-//   2. Accept: each candidate persists the session, responds with its
-//      MPC public key.
-//   3. Commit phase: each accepting node independently generates a
-//      32-byte entropy e_i, publishes
-//         commit_digest_i = H("DSM/genesis-commit\0"
-//                             || session_id || contributor_id || e_i)
-//      signed by its MPC participation key.
-//   4. Bias-resistance gate: a node MUST observe ≥ threshold-1 other
-//      commits before revealing its own e_i.
-//   5. Reveal phase: each contributor releases e_i, signed.
+//   1. Offer: build GenesisMpcSessionV1 with the declared N-of-N
+//      participant set (n ≥ 3 distinct storage node IDs, sorted
+//      ascending lex). POST to every participant.
+//   2. Accept: each participant verifies its own node_id is in the
+//      participant set, persists the session, returns its own signed
+//      commit (commit_digest_i) — generated locally from a fresh
+//      32-byte e_i it does NOT yet release.
+//   3. Commit fan-out: the orchestrator collects all n commits and
+//      pushes each peer commit to every other participant via the
+//      /commit endpoint. Each node stores peer commits idempotently
+//      (commit_digest as-received; no cross-verification here —
+//      orchestrator is trusted to forward genuine commits, and any
+//      forgery is caught at combine when D_commit derivation diverges).
+//   4. Bias-resistance gate: a node MUST observe stored commits from
+//      ALL OTHER n-1 declared participants before releasing its e_i.
+//   5. Reveal phase: orchestrator POSTs /reveal to each node; each
+//      node returns its signed GenesisMpcRevealV1.
 //   6. Combine (root device only):
 //        D_commit = H_concat( commit_digest_i for i sorted by contributor_id )
 //        D_reveal = H_concat( e_i for i sorted by contributor_id )
@@ -1523,9 +1538,12 @@ message GenesisMpcSessionV1 {
   bytes initiator_pk = 3 [(dsm_max_len)=65535];
   // CDBRW digest of root device (silicon-bound anchor).
   bytes initiator_cdbrw = 4 [(dsm_fixed_len)=32];
-  // Minimum contributors required. Spec leaves unspecified; recommend
-  // 3 for a 6-node deployment. MUST be ≥ 3.
-  uint32 threshold = 5;
+  // The full N-of-N participant set: each entry is a 32-byte storage
+  // node ID. MUST be sorted ascending lex order with no duplicates.
+  // MUST have length ≥ 3 (spec §5 minimum to call this MPC). Every
+  // listed participant is required to commit AND reveal; there is NO
+  // threshold subset that can complete on behalf of the rest.
+  repeated bytes participants = 5 [(dsm_fixed_len)=32];
   // Deterministic deadline (cycle index), not a wall clock.
   uint64 deadline_cycle = 6;
 }
@@ -1553,7 +1571,11 @@ message GenesisMpcRevealV1 {
 
 message GenesisMpcCombinedV1 {
   bytes session_id = 1 [(dsm_fixed_len)=32];
-  // ≥ threshold valid reveals (each tied to a prior commit).
+  // Exactly N valid reveals (one per participant from the session's
+  // declared participant set), each tied to a prior commit. This is
+  // N-of-N — there is no threshold; a missing reveal means combine
+  // fails and the session must be retried with a fresh participant
+  // set.
   repeated GenesisMpcRevealV1 reveals = 2;
   // H("DSM/device-commit\0" || initiator_pk || initiator_cdbrw)
   bytes initiator_device_commitment = 3 [(dsm_fixed_len)=32];

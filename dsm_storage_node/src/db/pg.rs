@@ -421,11 +421,263 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     proof_bytes    BYTEA NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_drain_proofs_node ON drain_proofs(node_id);
+
+                -- N-of-N (spec §5): no threshold column. The
+                -- participants_blob is the concatenation of all N
+                -- 32-byte participant IDs (sorted ascending lex);
+                -- participants_blob length / 32 recovers N.
+                CREATE TABLE IF NOT EXISTS genesis_mpc_sessions (
+                    session_id           BYTEA PRIMARY KEY,
+                    initiator_device_id  BYTEA NOT NULL,
+                    initiator_pk         BYTEA NOT NULL,
+                    initiator_cdbrw      BYTEA NOT NULL,
+                    participants_blob    BYTEA NOT NULL,
+                    deadline_cycle       BIGINT  NOT NULL,
+                    state                TEXT NOT NULL,
+                    created_at_cycle     BIGINT  NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_deadline
+                    ON genesis_mpc_sessions(deadline_cycle);
+
+                CREATE TABLE IF NOT EXISTS genesis_mpc_contributions (
+                    session_id        BYTEA NOT NULL,
+                    contributor_id    BYTEA NOT NULL,
+                    commit_digest     BYTEA NOT NULL,
+                    commit_signature  BYTEA NOT NULL,
+                    own_entropy       BYTEA,
+                    revealed_entropy  BYTEA,
+                    reveal_signature  BYTEA,
+                    PRIMARY KEY (session_id, contributor_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_contrib_session
+                    ON genesis_mpc_contributions(session_id);
             "#,
         )
         .await?;
 
     Ok(())
+}
+
+// =================== Genesis MPC (Task A.3) ===================
+
+/// Row stored in `genesis_mpc_sessions`. Mirrors the sqlite shape.
+/// N-of-N: no `threshold`. `participants_blob` is concatenation of
+/// the N declared participant IDs (32 bytes each, sorted lex).
+#[derive(Debug, Clone)]
+pub struct GenesisMpcSessionRow {
+    pub session_id: Vec<u8>,
+    pub initiator_device_id: Vec<u8>,
+    pub initiator_pk: Vec<u8>,
+    pub initiator_cdbrw: Vec<u8>,
+    pub participants_blob: Vec<u8>,
+    pub deadline_cycle: i64,
+    pub state: String,
+    pub created_at_cycle: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenesisMpcContributionRow {
+    pub session_id: Vec<u8>,
+    pub contributor_id: Vec<u8>,
+    pub commit_digest: Vec<u8>,
+    pub commit_signature: Vec<u8>,
+    pub own_entropy: Option<Vec<u8>>,
+    pub revealed_entropy: Option<Vec<u8>>,
+    pub reveal_signature: Option<Vec<u8>>,
+}
+
+pub async fn genesis_mpc_session_insert(
+    pool: &Pool,
+    session: GenesisMpcSessionRow,
+) -> Result<()> {
+    let client = pool.get().await?;
+    let n = client
+        .execute(
+            "INSERT INTO genesis_mpc_sessions
+             (session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
+              participants_blob, deadline_cycle, state, created_at_cycle)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (session_id) DO NOTHING",
+            &[
+                &session.session_id,
+                &session.initiator_device_id,
+                &session.initiator_pk,
+                &session.initiator_cdbrw,
+                &session.participants_blob,
+                &session.deadline_cycle,
+                &session.state,
+                &session.created_at_cycle,
+            ],
+        )
+        .await?;
+    if n == 0 {
+        return Err(anyhow::anyhow!(
+            "genesis_mpc_session_insert: session_id already exists"
+        ));
+    }
+    Ok(())
+}
+
+pub async fn genesis_mpc_session_get(
+    pool: &Pool,
+    session_id: &[u8],
+) -> Result<Option<GenesisMpcSessionRow>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
+                    participants_blob, deadline_cycle, state, created_at_cycle
+             FROM genesis_mpc_sessions WHERE session_id = $1",
+            &[&session_id],
+        )
+        .await?;
+    Ok(row.map(|r| GenesisMpcSessionRow {
+        session_id: r.get::<_, Vec<u8>>(0),
+        initiator_device_id: r.get::<_, Vec<u8>>(1),
+        initiator_pk: r.get::<_, Vec<u8>>(2),
+        initiator_cdbrw: r.get::<_, Vec<u8>>(3),
+        participants_blob: r.get::<_, Vec<u8>>(4),
+        deadline_cycle: r.get(5),
+        state: r.get(6),
+        created_at_cycle: r.get(7),
+    }))
+}
+
+pub async fn genesis_mpc_session_set_state(
+    pool: &Pool,
+    session_id: &[u8],
+    new_state: &str,
+) -> Result<()> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "UPDATE genesis_mpc_sessions SET state = $1 WHERE session_id = $2",
+            &[&new_state, &session_id],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn genesis_mpc_session_purge_expired(
+    pool: &Pool,
+    cutoff_cycle: i64,
+) -> Result<usize> {
+    let mut client = pool.get().await?;
+    let tx = client.transaction().await?;
+    tx.execute(
+        "DELETE FROM genesis_mpc_contributions
+         WHERE session_id IN (
+             SELECT session_id FROM genesis_mpc_sessions
+             WHERE deadline_cycle < $1
+         )",
+        &[&cutoff_cycle],
+    )
+    .await?;
+    let n = tx
+        .execute(
+            "DELETE FROM genesis_mpc_sessions WHERE deadline_cycle < $1",
+            &[&cutoff_cycle],
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(n as usize)
+}
+
+pub async fn genesis_mpc_contribution_upsert(
+    pool: &Pool,
+    contribution: GenesisMpcContributionRow,
+) -> Result<()> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO genesis_mpc_contributions
+             (session_id, contributor_id, commit_digest, commit_signature,
+              own_entropy, revealed_entropy, reveal_signature)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (session_id, contributor_id) DO UPDATE SET
+                commit_digest      = EXCLUDED.commit_digest,
+                commit_signature   = EXCLUDED.commit_signature,
+                own_entropy        = COALESCE(EXCLUDED.own_entropy, genesis_mpc_contributions.own_entropy),
+                revealed_entropy   = COALESCE(EXCLUDED.revealed_entropy, genesis_mpc_contributions.revealed_entropy),
+                reveal_signature   = COALESCE(EXCLUDED.reveal_signature, genesis_mpc_contributions.reveal_signature)",
+            &[
+                &contribution.session_id,
+                &contribution.contributor_id,
+                &contribution.commit_digest,
+                &contribution.commit_signature,
+                &contribution.own_entropy,
+                &contribution.revealed_entropy,
+                &contribution.reveal_signature,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn genesis_mpc_contribution_get(
+    pool: &Pool,
+    session_id: &[u8],
+    contributor_id: &[u8],
+) -> Result<Option<GenesisMpcContributionRow>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT session_id, contributor_id, commit_digest, commit_signature,
+                    own_entropy, revealed_entropy, reveal_signature
+             FROM genesis_mpc_contributions
+             WHERE session_id = $1 AND contributor_id = $2",
+            &[&session_id, &contributor_id],
+        )
+        .await?;
+    Ok(row.map(|r| GenesisMpcContributionRow {
+        session_id: r.get(0),
+        contributor_id: r.get(1),
+        commit_digest: r.get(2),
+        commit_signature: r.get(3),
+        own_entropy: r.get(4),
+        revealed_entropy: r.get(5),
+        reveal_signature: r.get(6),
+    }))
+}
+
+pub async fn genesis_mpc_contribution_list(
+    pool: &Pool,
+    session_id: &[u8],
+) -> Result<Vec<GenesisMpcContributionRow>> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT session_id, contributor_id, commit_digest, commit_signature,
+                    own_entropy, revealed_entropy, reveal_signature
+             FROM genesis_mpc_contributions
+             WHERE session_id = $1
+             ORDER BY contributor_id ASC",
+            &[&session_id],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| GenesisMpcContributionRow {
+            session_id: r.get(0),
+            contributor_id: r.get(1),
+            commit_digest: r.get(2),
+            commit_signature: r.get(3),
+            own_entropy: r.get(4),
+            revealed_entropy: r.get(5),
+            reveal_signature: r.get(6),
+        })
+        .collect())
+}
+
+pub async fn genesis_mpc_contribution_count(pool: &Pool, session_id: &[u8]) -> Result<i64> {
+    let client = pool.get().await?;
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM genesis_mpc_contributions WHERE session_id = $1",
+            &[&session_id],
+        )
+        .await?;
+    Ok(row.get(0))
 }
 
 /// Compute deterministic "current cycle" stats over all stored objects.
