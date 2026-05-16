@@ -49,7 +49,7 @@ pub mod counterparty_genesis_helpers;
 pub mod dlv_sdk;
 pub mod external_commitment_sdk;
 pub mod genesis_mpc_transport; // HTTP-backed real Genesis MPC transport (Task A.4)
-// pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
+                               // pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
 pub mod identity_sdk;
 pub mod inbox_poller;
 pub mod policy_cache;
