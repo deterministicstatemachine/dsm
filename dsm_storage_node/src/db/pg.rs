@@ -439,14 +439,15 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_deadline
                     ON genesis_mpc_sessions(deadline_cycle);
 
+                -- Storage nodes do NOT sign (spec §5 / whitepaper §2.5).
+                -- The commit_digest binds the entropy via hash; no
+                -- signature column exists.
                 CREATE TABLE IF NOT EXISTS genesis_mpc_contributions (
                     session_id        BYTEA NOT NULL,
                     contributor_id    BYTEA NOT NULL,
                     commit_digest     BYTEA NOT NULL,
-                    commit_signature  BYTEA NOT NULL,
                     own_entropy       BYTEA,
                     revealed_entropy  BYTEA,
-                    reveal_signature  BYTEA,
                     PRIMARY KEY (session_id, contributor_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_genesis_mpc_contrib_session
@@ -480,10 +481,8 @@ pub struct GenesisMpcContributionRow {
     pub session_id: Vec<u8>,
     pub contributor_id: Vec<u8>,
     pub commit_digest: Vec<u8>,
-    pub commit_signature: Vec<u8>,
     pub own_entropy: Option<Vec<u8>>,
     pub revealed_entropy: Option<Vec<u8>>,
-    pub reveal_signature: Option<Vec<u8>>,
 }
 
 pub async fn genesis_mpc_session_insert(
@@ -591,23 +590,19 @@ pub async fn genesis_mpc_contribution_upsert(
     client
         .execute(
             "INSERT INTO genesis_mpc_contributions
-             (session_id, contributor_id, commit_digest, commit_signature,
-              own_entropy, revealed_entropy, reveal_signature)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             (session_id, contributor_id, commit_digest,
+              own_entropy, revealed_entropy)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (session_id, contributor_id) DO UPDATE SET
                 commit_digest      = EXCLUDED.commit_digest,
-                commit_signature   = EXCLUDED.commit_signature,
                 own_entropy        = COALESCE(EXCLUDED.own_entropy, genesis_mpc_contributions.own_entropy),
-                revealed_entropy   = COALESCE(EXCLUDED.revealed_entropy, genesis_mpc_contributions.revealed_entropy),
-                reveal_signature   = COALESCE(EXCLUDED.reveal_signature, genesis_mpc_contributions.reveal_signature)",
+                revealed_entropy   = COALESCE(EXCLUDED.revealed_entropy, genesis_mpc_contributions.revealed_entropy)",
             &[
                 &contribution.session_id,
                 &contribution.contributor_id,
                 &contribution.commit_digest,
-                &contribution.commit_signature,
                 &contribution.own_entropy,
                 &contribution.revealed_entropy,
-                &contribution.reveal_signature,
             ],
         )
         .await?;
@@ -622,8 +617,8 @@ pub async fn genesis_mpc_contribution_get(
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT session_id, contributor_id, commit_digest, commit_signature,
-                    own_entropy, revealed_entropy, reveal_signature
+            "SELECT session_id, contributor_id, commit_digest,
+                    own_entropy, revealed_entropy
              FROM genesis_mpc_contributions
              WHERE session_id = $1 AND contributor_id = $2",
             &[&session_id, &contributor_id],
@@ -633,10 +628,8 @@ pub async fn genesis_mpc_contribution_get(
         session_id: r.get(0),
         contributor_id: r.get(1),
         commit_digest: r.get(2),
-        commit_signature: r.get(3),
-        own_entropy: r.get(4),
-        revealed_entropy: r.get(5),
-        reveal_signature: r.get(6),
+        own_entropy: r.get(3),
+        revealed_entropy: r.get(4),
     }))
 }
 
@@ -647,8 +640,8 @@ pub async fn genesis_mpc_contribution_list(
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT session_id, contributor_id, commit_digest, commit_signature,
-                    own_entropy, revealed_entropy, reveal_signature
+            "SELECT session_id, contributor_id, commit_digest,
+                    own_entropy, revealed_entropy
              FROM genesis_mpc_contributions
              WHERE session_id = $1
              ORDER BY contributor_id ASC",
@@ -661,10 +654,8 @@ pub async fn genesis_mpc_contribution_list(
             session_id: r.get(0),
             contributor_id: r.get(1),
             commit_digest: r.get(2),
-            commit_signature: r.get(3),
-            own_entropy: r.get(4),
-            revealed_entropy: r.get(5),
-            reveal_signature: r.get(6),
+            own_entropy: r.get(3),
+            revealed_entropy: r.get(4),
         })
         .collect())
 }

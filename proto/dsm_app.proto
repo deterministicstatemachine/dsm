@@ -1174,25 +1174,6 @@ message StorageNodeInfoV1 {
   StorageNodeStatus status = 4;
 }
 
-// Response for GET /api/v2/node/info. Used by SDK clients to discover
-// MPC genesis participants — the `mpc_public_key` here is what the
-// SDK installs into the local GenesisMpcTransport when offering a
-// session. See docs/plans/2026-04-24-genesis-mpc-and-device-tree.md
-// Task A.2.
-message NodeMpcInfoV1 {
-  // Canonical Base32-Crockford node id (matches the gossip
-  // StorageNodeInfoV1.node_id encoding).
-  string node_id = 1;
-  // SPHINCS+ public key (SPX256f variant). Used by clients to verify
-  // this node's commit/reveal signatures in MPC sessions.
-  bytes mpc_public_key = 2 [(dsm_max_len)=65535];
-  // Advertised free capacity in bytes. -1 if not exposed.
-  int64 capacity_bytes = 3;
-  // Schema fingerprint of the MPC protocol this node speaks. Bumps
-  // on hard fork. Current: 1.
-  uint32 mpc_protocol_version = 4;
-}
-
 message GossipMessageV1 {
   string sender_node_id = 1;
   int64  sender_tick    = 2; // deterministic counter (transport/admin only)
@@ -1548,6 +1529,11 @@ message GenesisMpcSessionV1 {
   uint64 deadline_cycle = 6;
 }
 
+// Storage nodes do NOT sign. The hash binds the entropy to the
+// commit, and the contributor_id identifies the source — that is the
+// full integrity story (whitepaper §2.5 / spec §5 contain no signature
+// in the η₀ formula, and dsm/src/core/identity/genesis_mpc.rs verifies
+// commits by recomputing the hash, not by checking a signature).
 message GenesisMpcCommitV1 {
   bytes session_id = 1 [(dsm_fixed_len)=32];
   // Storage node ID (the storage_node_id, 32 bytes).
@@ -1555,18 +1541,15 @@ message GenesisMpcCommitV1 {
   // commit_digest = H("DSM/genesis-commit\0"
   //                    || session_id || contributor_id || entropy_i)
   bytes commit_digest = 3 [(dsm_fixed_len)=32];
-  // SPHINCS+ sig over the canonical-protobuf bytes of fields 1-3,
-  // signed by the storage node's MPC participation key.
-  bytes node_signature = 4 [(dsm_max_len)=65535];
 }
 
 message GenesisMpcRevealV1 {
   bytes session_id = 1 [(dsm_fixed_len)=32];
   bytes contributor_id = 2 [(dsm_fixed_len)=32];
-  // 32-byte entropy that hashes to the prior commit_digest.
+  // 32-byte entropy that hashes to the prior commit_digest. Recipient
+  // re-derives commit_digest and rejects on mismatch — no signature
+  // path exists.
   bytes entropy = 3 [(dsm_fixed_len)=32];
-  // SPHINCS+ sig over fields 1-3 (same canonical encoding rule).
-  bytes node_signature = 4 [(dsm_max_len)=65535];
 }
 
 message GenesisMpcCombinedV1 {

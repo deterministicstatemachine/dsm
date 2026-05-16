@@ -22,24 +22,23 @@
 //! On acceptance the node generates a fresh 32-byte entropy `e_self`,
 //! computes
 //!   `commit = H("DSM/genesis-commit\0" || session_id || self_node_id || e_self)`,
-//! signs the canonical `GenesisMpcCommitV1` (with `node_signature`
-//! cleared) with its persistent MPC participation key, and persists
-//! the session row plus its own contribution row (`own_entropy =
-//! Some(e_self)`, `revealed_entropy = None`).
+//! and persists the session row plus its own contribution row
+//! (`own_entropy = Some(e_self)`, `revealed_entropy = None`). Storage
+//! nodes do NOT sign — the hash binds the entropy to the commit
+//! (whitepaper §2.5 / spec §5).
 //!
 //! `POST /api/v2/genesis/mpc/commit/{session_id}`
-//!   body: `GenesisMpcCommitV1` (a peer's signed commit, fanned out
-//!         by the orchestrator so every participant can satisfy its
+//!   body: `GenesisMpcCommitV1` (a peer's commit, fanned out by the
+//!         orchestrator so every participant can satisfy its
 //!         bias-resistance gate)
 //!   resp: `204 No Content`
 //!
-//! The storage node stores peer commits idempotently. It does NOT
-//! cross-verify a peer's signature against any registry pubkey here
-//! — that bridge is the orchestrator's responsibility at combine
-//! time. Local checks: session must exist, body's `session_id` must
-//! match the URL, peer's `contributor_id` must appear in the
-//! session's declared participant set, and `contributor_id` MUST
-//! NOT equal our own node id (that row is created by /offer).
+//! The storage node stores peer commits idempotently. Local checks:
+//! session must exist, body's `session_id` must match the URL,
+//! peer's `contributor_id` must appear in the session's declared
+//! participant set, and `contributor_id` MUST NOT equal our own
+//! node id (that row is created by /offer). No signature checks
+//! exist — there is no signature.
 //!
 //! `POST /api/v2/genesis/mpc/reveal/{session_id}`
 //!   body: empty (the orchestrator simply asks this node to reveal)
@@ -49,8 +48,8 @@
 //! stored commits from ALL OTHER N-1 declared participants before
 //! releasing its `e_self`. We check `contribution_count(session_id)
 //! == N` (one row for this node + N-1 peer rows). If short, return
-//! `412 Precondition Failed`. Once the gate passes, sign and return
-//! the `GenesisMpcRevealV1`, mark the own row as revealed, and
+//! `412 Precondition Failed`. Once the gate passes, return the
+//! `GenesisMpcRevealV1`, mark the own row as revealed, and
 //! transition the session state to `"revealed"`.
 //!
 //! Idempotency: a second /reveal call returns the same envelope.
@@ -76,30 +75,38 @@ use axum::Router;
 use prost::Message;
 
 use dsm::crypto::blake3::domain_hash_bytes;
-use dsm::crypto::sphincs::{self, SphincsVariant};
+use dsm::crypto::sphincs;
 use dsm::types::proto as pb;
 
 use crate::db;
 use crate::replication::StorageNodeId;
 use crate::AppState;
 
-const MPC_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-
 /// Minimum participant count to call this MPC (spec §5: "≥3").
 const MIN_PARTICIPANTS: usize = 3;
 
-/// Generous upper bound to avoid pathological session-offer payloads.
-/// A SPHINCS+ SPX256f public key is 64 bytes; combined with up to 64
-/// 32-byte participant IDs and the four 32-byte identifying fields,
-/// 16 KiB leaves plenty of headroom.
+/// Generous upper bound for the session-offer payload. The largest
+/// field is `initiator_pk` (SPHINCS+ device key — the device DOES sign
+/// later in genesis, even though storage nodes do not). 16 KiB leaves
+/// plenty of headroom for up to ~64 participant IDs.
 const MAX_OFFER_BODY: usize = 16 * 1024;
 
-/// Upper bound on the /commit body. SPHINCS+ SPX256f signature is
-/// 49_856 bytes; with the other commit fields, 64 KiB is comfortable.
-const MAX_COMMIT_BODY: usize = 64 * 1024;
+/// Upper bound on the /commit body. The body is just three 32-byte
+/// hash fields, but we keep the limit generous to absorb future
+/// schema growth without a hot redeploy.
+const MAX_COMMIT_BODY: usize = 4 * 1024;
 
-/// Domain tag for the commit digest (matches whitepaper §2.5 / spec §5).
+/// Domain tag for the commit digest (matches whitepaper §2.5 / spec §5
+/// and `dsm/src/core/identity/genesis_mpc.rs`).
 const COMMIT_DOMAIN: &str = "DSM/genesis-commit";
+
+/// SPHINCS+ SPX256f public-key length — used to shape-check the
+/// initiator's `pk_1` in the offer envelope. Storage nodes do NOT
+/// sign; this is the device's signing key, carried in the offer so
+/// downstream layers can bind G to pk_1.
+fn initiator_pk_len() -> usize {
+    sphincs::public_key_bytes(sphincs::SphincsVariant::SPX256f)
+}
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
@@ -133,8 +140,7 @@ async fn offer(
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let expected_pk_len = sphincs::public_key_bytes(MPC_VARIANT);
-    if session.initiator_pk.len() != expected_pk_len {
+    if session.initiator_pk.len() != initiator_pk_len() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -144,9 +150,6 @@ async fn offer(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // The node must require its own MPC key to be loaded before
-    // accepting any offer (test harnesses without a key get 503).
-    let mpc_key = state.mpc_key.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let self_id = *state.node_id.as_bytes();
 
     // Must be in the declared participant set.
@@ -176,17 +179,6 @@ async fn offer(
     input.extend_from_slice(&e_self);
     let commit_digest = domain_hash_bytes(COMMIT_DOMAIN, &input);
 
-    // Sign the canonical commit envelope with `node_signature` cleared.
-    let unsigned_commit = pb::GenesisMpcCommitV1 {
-        session_id: session.session_id.clone(),
-        contributor_id: self_id.to_vec(),
-        commit_digest: commit_digest.to_vec(),
-        node_signature: Vec::new(),
-    };
-    let signing_bytes = unsigned_commit.encode_to_vec();
-    let commit_sig = sphincs::sign(MPC_VARIANT, mpc_key.secret_key_bytes(), &signing_bytes)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     // Persist session + own contribution. Insert-then-upsert under one
     // logical "accept" — if the session_id is already known we return
     // 409. The DB layer surfaces this as anyhow with a specific
@@ -215,22 +207,19 @@ async fn offer(
             session_id: session.session_id.clone(),
             contributor_id: self_id.to_vec(),
             commit_digest: commit_digest.to_vec(),
-            commit_signature: commit_sig.clone(),
             own_entropy: Some(e_self.to_vec()),
             revealed_entropy: None,
-            reveal_signature: None,
         },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let signed_commit = pb::GenesisMpcCommitV1 {
+    let commit = pb::GenesisMpcCommitV1 {
         session_id: session.session_id,
         contributor_id: self_id.to_vec(),
         commit_digest: commit_digest.to_vec(),
-        node_signature: commit_sig,
     };
-    Ok(proto_response(StatusCode::OK, &signed_commit))
+    Ok(proto_response(StatusCode::OK, &commit))
 }
 
 // -------------------- /commit (peer fan-in) --------------------
@@ -252,9 +241,6 @@ async fn observe_peer_commit(
         return Err(StatusCode::BAD_REQUEST);
     }
     if commit.contributor_id.len() != 32 || commit.commit_digest.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    if commit.node_signature.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -294,10 +280,8 @@ async fn observe_peer_commit(
             session_id: session_id.to_vec(),
             contributor_id: contributor_id.to_vec(),
             commit_digest: commit.commit_digest,
-            commit_signature: commit.node_signature,
             own_entropy: None,
             revealed_entropy: None,
-            reveal_signature: None,
         },
     )
     .await
@@ -313,8 +297,6 @@ async fn reveal(
     Path(session_id_b32): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let session_id = decode_session_id_path(&session_id_b32)?;
-
-    let mpc_key = state.mpc_key.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let session = db::genesis_mpc_session_get(&state.db_pool, &session_id)
         .await
@@ -348,15 +330,11 @@ async fn reveal(
 
     // Idempotent re-reveal: if we already published our reveal, return
     // the cached envelope so retries are safe.
-    if let (Some(entropy), Some(sig)) = (
-        own_row.revealed_entropy.as_ref(),
-        own_row.reveal_signature.as_ref(),
-    ) {
+    if let Some(entropy) = own_row.revealed_entropy.as_ref() {
         let envelope = pb::GenesisMpcRevealV1 {
             session_id: session_id.to_vec(),
             contributor_id: self_id.to_vec(),
             entropy: entropy.clone(),
-            node_signature: sig.clone(),
         };
         return Ok(proto_response(StatusCode::OK, &envelope));
     }
@@ -377,30 +355,16 @@ async fn reveal(
         return Err(StatusCode::PRECONDITION_FAILED);
     }
 
-    // Sign the canonical reveal envelope with `node_signature` cleared.
-    let unsigned_reveal = pb::GenesisMpcRevealV1 {
-        session_id: session_id.to_vec(),
-        contributor_id: self_id.to_vec(),
-        entropy: e_self.clone(),
-        node_signature: Vec::new(),
-    };
-    let signing_bytes = unsigned_reveal.encode_to_vec();
-    let reveal_sig = sphincs::sign(MPC_VARIANT, mpc_key.secret_key_bytes(), &signing_bytes)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     // Persist reveal in our own row + advance session state. Re-upsert
-    // own_row preserves commit_digest/commit_signature/own_entropy via
-    // COALESCE in the DB helper.
+    // preserves commit_digest/own_entropy via COALESCE in the DB helper.
     db::genesis_mpc_contribution_upsert(
         &state.db_pool,
         db::GenesisMpcContributionRow {
             session_id: session_id.to_vec(),
             contributor_id: self_id.to_vec(),
             commit_digest: own_row.commit_digest,
-            commit_signature: own_row.commit_signature,
             own_entropy: Some(e_self.clone()),
             revealed_entropy: Some(e_self.clone()),
-            reveal_signature: Some(reveal_sig.clone()),
         },
     )
     .await
@@ -414,7 +378,6 @@ async fn reveal(
         session_id: session_id.to_vec(),
         contributor_id: self_id.to_vec(),
         entropy: e_self,
-        node_signature: reveal_sig,
     };
     Ok(proto_response(StatusCode::OK, &envelope))
 }
@@ -533,7 +496,6 @@ fn _self_id_for(state: &AppState) -> StorageNodeId {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::identity::load_or_generate_mpc_key;
     use crate::replication::{ReplicationConfig, ReplicationManager};
     use axum::body::Body;
     use axum::http::Request;
@@ -559,24 +521,19 @@ mod tests {
     }
 
     /// Build a test AppState whose `node_id` is at a known position in
-    /// a participant set sorted ascending. The MPC key is loaded from a
-    /// tempdir so each test is hermetic.
-    async fn test_state_for_node(
-        node_seed: &str,
-    ) -> (Arc<AppState>, tempfile::TempDir) {
+    /// a participant set sorted ascending. Storage nodes are
+    /// signature-free — no key material to load.
+    async fn test_state_for_node(node_seed: &str) -> Arc<AppState> {
         let pool = db::create_pool(":memory:", true).expect("test pool");
         db::init_db(&pool).await.expect("init_db");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let key = load_or_generate_mpc_key(dir.path()).expect("mpc key");
         let state = AppState::new(
             node_seed.to_string(),
             &format!("http://{}.test", node_seed),
             None,
             Arc::new(pool),
             test_replication_manager(),
-        )
-        .with_mpc_key(Arc::new(key));
-        (Arc::new(state), dir)
+        );
+        Arc::new(state)
     }
 
     fn make_session_proto(
@@ -584,9 +541,9 @@ mod tests {
         deadline_cycle: u64,
         participants: &[[u8; 32]],
     ) -> Vec<u8> {
-        // SPHINCS+ SPX256f pk size — we don't need a real key, just the
-        // right length so the shape validation passes.
-        let pk_len = sphincs::public_key_bytes(MPC_VARIANT);
+        // initiator_pk shape-check only: the storage node never sees
+        // this key signing anything, but it MUST be the right length.
+        let pk_len = initiator_pk_len();
         let session = pb::GenesisMpcSessionV1 {
             session_id: session_id.to_vec(),
             initiator_device_id: vec![0x11u8; 32],
@@ -623,8 +580,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offer_accepted_returns_signed_commit() {
-        let (state, _td) = test_state_for_node("offer-accepted").await;
+    async fn offer_accepted_returns_own_commit() {
+        let state = test_state_for_node("offer-accepted").await;
         let participants = participants_including(&state, 3);
         let body = make_session_proto(&[7u8; 32], 1_000, &participants);
 
@@ -649,10 +606,6 @@ mod tests {
         assert_eq!(commit.session_id.len(), 32);
         assert_eq!(commit.contributor_id, state.node_id.as_bytes().to_vec());
         assert_eq!(commit.commit_digest.len(), 32);
-        assert_eq!(
-            commit.node_signature.len(),
-            sphincs::signature_bytes(MPC_VARIANT)
-        );
 
         // Storage side-effect: a session row + an own contribution row
         // with `own_entropy` are persisted.
@@ -677,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn offer_rejected_when_node_not_in_participants() {
-        let (state, _td) = test_state_for_node("offer-not-in-set").await;
+        let state = test_state_for_node("offer-not-in-set").await;
         // Participants set that deliberately excludes our self_id.
         let participants: Vec<[u8; 32]> = (0u8..3u8)
             .map(|i| {
@@ -707,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn offer_rejected_on_duplicate_session_id() {
-        let (state, _td) = test_state_for_node("offer-dup").await;
+        let state = test_state_for_node("offer-dup").await;
         let participants = participants_including(&state, 3);
         let session_id = [42u8; 32];
         let body = make_session_proto(&session_id, 1_000, &participants);
@@ -742,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn offer_rejected_below_minimum_participants() {
-        let (state, _td) = test_state_for_node("offer-too-few").await;
+        let state = test_state_for_node("offer-too-few").await;
         let participants = participants_including(&state, 2);
         let body = make_session_proto(&[9u8; 32], 1_000, &participants);
 
@@ -762,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_commit_stored_and_appears_in_status() {
-        let (state, _td) = test_state_for_node("peer-commit").await;
+        let state = test_state_for_node("peer-commit").await;
         let participants = participants_including(&state, 3);
         let session_id = [21u8; 32];
         let body = make_session_proto(&session_id, 1_000, &participants);
@@ -788,15 +741,12 @@ mod tests {
             .find(|p| *p != &self_id)
             .expect("at least one peer");
 
-        // Build a peer commit. The signature contents don't need to
-        // verify for this test — only shape rules are enforced
-        // server-side at /commit; cross-verification is the
-        // orchestrator's job at combine time.
+        // Build a peer commit. Storage nodes do not sign — only
+        // shape rules are enforced server-side.
         let peer_commit = pb::GenesisMpcCommitV1 {
             session_id: session_id.to_vec(),
             contributor_id: peer_id.to_vec(),
             commit_digest: vec![0x33u8; 32],
-            node_signature: vec![0x44u8; 64],
         };
         let url = format!(
             "/api/v2/genesis/mpc/commit/{}",
@@ -842,7 +792,7 @@ mod tests {
 
     #[tokio::test]
     async fn reveal_rejected_when_peer_commits_short() {
-        let (state, _td) = test_state_for_node("reveal-gated").await;
+        let state = test_state_for_node("reveal-gated").await;
         let participants = participants_including(&state, 3);
         let session_id = [55u8; 32];
         let body = make_session_proto(&session_id, 1_000, &participants);
@@ -881,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn reveal_succeeds_after_all_peer_commits_observed_and_is_idempotent() {
-        let (state, _td) = test_state_for_node("reveal-ok").await;
+        let state = test_state_for_node("reveal-ok").await;
         let participants = participants_including(&state, 3);
         let session_id = [66u8; 32];
         let body = make_session_proto(&session_id, 1_000, &participants);
@@ -906,7 +856,6 @@ mod tests {
                 session_id: session_id.to_vec(),
                 contributor_id: p.to_vec(),
                 commit_digest: vec![0x77u8; 32],
-                node_signature: vec![0x88u8; 64],
             };
             let url = format!(
                 "/api/v2/genesis/mpc/commit/{}",
@@ -950,10 +899,6 @@ mod tests {
         assert_eq!(r1.session_id, session_id.to_vec());
         assert_eq!(r1.contributor_id, self_id.to_vec());
         assert_eq!(r1.entropy.len(), 32);
-        assert_eq!(
-            r1.node_signature.len(),
-            sphincs::signature_bytes(MPC_VARIANT)
-        );
 
         // Session row should now be "revealed".
         let row = db::genesis_mpc_session_get(&state.db_pool, &session_id)
@@ -979,12 +924,11 @@ mod tests {
             .expect("read");
         let r2 = pb::GenesisMpcRevealV1::decode(second_bytes.as_ref()).expect("decode r2");
         assert_eq!(r2.entropy, r1.entropy);
-        assert_eq!(r2.node_signature, r1.node_signature);
     }
 
     #[tokio::test]
     async fn purge_removes_expired_session_and_contributions() {
-        let (state, _td) = test_state_for_node("purge").await;
+        let state = test_state_for_node("purge").await;
         let participants = participants_including(&state, 3);
         let session_id = [99u8; 32];
         let body = make_session_proto(&session_id, 50, &participants);
@@ -1023,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_session_404_when_unknown() {
-        let (state, _td) = test_state_for_node("get-404").await;
+        let state = test_state_for_node("get-404").await;
         let app = create_router(state);
         let url = format!(
             "/api/v2/genesis/mpc/session/{}",

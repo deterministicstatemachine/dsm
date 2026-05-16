@@ -8666,78 +8666,6 @@ export class StorageNodeInfoV1 extends Message<StorageNodeInfoV1> {
 }
 
 /**
- * Response for GET /api/v2/node/info. Used by SDK clients to discover
- * MPC genesis participants — the `mpc_public_key` here is what the
- * SDK installs into the local GenesisMpcTransport when offering a
- * session. See docs/plans/2026-04-24-genesis-mpc-and-device-tree.md
- * Task A.2.
- *
- * @generated from message dsm.NodeMpcInfoV1
- */
-export class NodeMpcInfoV1 extends Message<NodeMpcInfoV1> {
-  /**
-   * Canonical Base32-Crockford node id (matches the gossip
-   * StorageNodeInfoV1.node_id encoding).
-   *
-   * @generated from field: string node_id = 1;
-   */
-  nodeId = "";
-
-  /**
-   * SPHINCS+ public key (SPX256f variant). Used by clients to verify
-   * this node's commit/reveal signatures in MPC sessions.
-   *
-   * @generated from field: bytes mpc_public_key = 2;
-   */
-  mpcPublicKey = new Uint8Array(0);
-
-  /**
-   * Advertised free capacity in bytes. -1 if not exposed.
-   *
-   * @generated from field: int64 capacity_bytes = 3;
-   */
-  capacityBytes = protoInt64.zero;
-
-  /**
-   * Schema fingerprint of the MPC protocol this node speaks. Bumps
-   * on hard fork. Current: 1.
-   *
-   * @generated from field: uint32 mpc_protocol_version = 4;
-   */
-  mpcProtocolVersion = 0;
-
-  constructor(data?: PartialMessage<NodeMpcInfoV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NodeMpcInfoV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "node_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "mpc_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "capacity_bytes", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
-    { no: 4, name: "mpc_protocol_version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NodeMpcInfoV1 {
-    return new NodeMpcInfoV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NodeMpcInfoV1 {
-    return new NodeMpcInfoV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NodeMpcInfoV1 {
-    return new NodeMpcInfoV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NodeMpcInfoV1 | PlainMessage<NodeMpcInfoV1> | undefined, b: NodeMpcInfoV1 | PlainMessage<NodeMpcInfoV1> | undefined): boolean {
-    return proto3.util.equals(NodeMpcInfoV1, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.GossipMessageV1
  */
 export class GossipMessageV1 extends Message<GossipMessageV1> {
@@ -11488,6 +11416,12 @@ export class GenesisMpcSessionV1 extends Message<GenesisMpcSessionV1> {
 }
 
 /**
+ * Storage nodes do NOT sign. The hash binds the entropy to the
+ * commit, and the contributor_id identifies the source — that is the
+ * full integrity story (whitepaper §2.5 / spec §5 contain no signature
+ * in the η₀ formula, and dsm/src/core/identity/genesis_mpc.rs verifies
+ * commits by recomputing the hash, not by checking a signature).
+ *
  * @generated from message dsm.GenesisMpcCommitV1
  */
 export class GenesisMpcCommitV1 extends Message<GenesisMpcCommitV1> {
@@ -11511,14 +11445,6 @@ export class GenesisMpcCommitV1 extends Message<GenesisMpcCommitV1> {
    */
   commitDigest = new Uint8Array(0);
 
-  /**
-   * SPHINCS+ sig over the canonical-protobuf bytes of fields 1-3,
-   * signed by the storage node's MPC participation key.
-   *
-   * @generated from field: bytes node_signature = 4;
-   */
-  nodeSignature = new Uint8Array(0);
-
   constructor(data?: PartialMessage<GenesisMpcCommitV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11530,7 +11456,6 @@ export class GenesisMpcCommitV1 extends Message<GenesisMpcCommitV1> {
     { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "contributor_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "commit_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "node_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcCommitV1 {
@@ -11565,18 +11490,13 @@ export class GenesisMpcRevealV1 extends Message<GenesisMpcRevealV1> {
   contributorId = new Uint8Array(0);
 
   /**
-   * 32-byte entropy that hashes to the prior commit_digest.
+   * 32-byte entropy that hashes to the prior commit_digest. Recipient
+   * re-derives commit_digest and rejects on mismatch — no signature
+   * path exists.
    *
    * @generated from field: bytes entropy = 3;
    */
   entropy = new Uint8Array(0);
-
-  /**
-   * SPHINCS+ sig over fields 1-3 (same canonical encoding rule).
-   *
-   * @generated from field: bytes node_signature = 4;
-   */
-  nodeSignature = new Uint8Array(0);
 
   constructor(data?: PartialMessage<GenesisMpcRevealV1>) {
     super();
@@ -11589,7 +11509,6 @@ export class GenesisMpcRevealV1 extends Message<GenesisMpcRevealV1> {
     { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "contributor_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "node_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenesisMpcRevealV1 {

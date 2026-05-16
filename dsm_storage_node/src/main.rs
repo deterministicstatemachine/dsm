@@ -59,11 +59,6 @@ struct ServerConfig {
     hsts_max_age: Option<u64>,
     database_url: String,
     seed_peers: Vec<String>,
-    /// Directory holding the node's persistent identity material —
-    /// MPC participation key, AEAD salt, etc. Created (mode 0700) on
-    /// first startup if absent. Defaults to `${HOME}/.dsm/storage-node`
-    /// or `./dsm-state` if `HOME` is unset.
-    state_dir: std::path::PathBuf,
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
@@ -121,11 +116,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .filter_map(|v| v.into_string().ok())
         .collect();
 
-    let state_dir = settings
-        .get_string("storage.state_dir")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| dsm_storage_node::identity::mpc_key::default_state_dir());
-
     if opts.auto_detect {
         let node_index = opts.node_index.unwrap_or(0);
         let detected = NetworkDetector::detect_network_config_with_tls(node_index, tls_enabled)?;
@@ -142,7 +132,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             hsts_max_age,
             database_url,
             seed_peers,
-            state_dir,
         });
     }
 
@@ -184,7 +173,6 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         hsts_max_age,
         database_url,
         seed_peers,
-        state_dir,
     })
 }
 
@@ -253,10 +241,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // Node discovery for SDK auto-discovery
     let discovery_router =
         api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Per-node MPC participation info (public key + node_id + capacity)
-    // for SDK clients orchestrating genesis MPC sessions.
-    let node_info_router =
-        api::registry::node_info::create_router(state.clone()).layer(public_rate_layer.clone());
     // Genesis MPC commit-reveal endpoints (spec §5; strict N-of-N).
     let genesis_mpc_router = api::identity::genesis_mpc::create_router(state.clone())
         .layer(public_rate_layer.clone());
@@ -299,7 +283,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(drain_proof_router) // DrainProof & stake exit
         .merge(gossip_router) // Gossip protocol endpoints
         .merge(discovery_router) // Node discovery for SDK auto-discovery
-        .merge(node_info_router) // Per-node MPC public key + identity
         .merge(genesis_mpc_router) // Genesis MPC commit-reveal (spec §5)
         .nest("/admin", admin_router) // Admin endpoints under /admin/*
         .nest("/admin", registry_admin_router) // Registry update/seed under /admin/*
@@ -444,28 +427,16 @@ async fn async_main() -> Result<()> {
         server_config.bind_addr.ip(),
         server_config.bind_addr.port()
     );
-    // Load (or generate, on first startup) this node's persistent
-    // SPHINCS+ keypair for Genesis-MPC participation signatures.
-    // Per Task A.2: each storage node has a stable MPC keypair; the
-    // public key is advertised via /api/v2/node/info.
-    let mpc_key = std::sync::Arc::new(
-        dsm_storage_node::identity::load_or_generate_mpc_key(&server_config.state_dir)
-            .map_err(|e| anyhow::anyhow!("failed to load MPC participation key: {e}"))?,
-    );
-    info!(
-        "Genesis-MPC participation key loaded (pubkey len = {} bytes; state_dir = {})",
-        mpc_key.public_key.len(),
-        server_config.state_dir.display(),
-    );
-
+    // Storage nodes are dumb mirrors (whitepaper §2.5 / spec §5).
+    // No long-lived signing key — the bilateral commit-reveal binding
+    // is by hash, not by signature.
     let state = AppState::new(
         server_config.node_id.clone(),
         &bind_addr_str,
         server_config.hsts_max_age,
         db_pool.clone(),
         replication_manager,
-    )
-    .with_mpc_key(mpc_key);
+    );
 
     let app_state = Arc::new(state.clone());
 

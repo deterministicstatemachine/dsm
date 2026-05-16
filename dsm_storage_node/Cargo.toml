@@ -30,9 +30,6 @@ ml-kem = "0.2.0"
 rand = "0.8.6"
 zeroize = { version = "1.6.0", features = ["derive"] }
 subtle = "2"
-# AEAD for at-rest encryption of the MPC participation key. Matches the
-# primitive used in dsm_sdk's cert_chain encrypted-SK storage.
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 
 # Configuration
 clap = { version = "4.6.1", features = ["derive"] }

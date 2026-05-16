@@ -321,19 +321,18 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
 
                 -- Genesis MPC contributions known to this node for a
                 -- given session. Each row is one contributor (this node
-                -- OR another participant whose commit was supplied in a
-                -- /reveal request body). `revealed_entropy` and
-                -- `reveal_signature` are NULL until reveal phase.
-                -- `own_entropy` is non-NULL only on this node's own row
-                -- (the secret we keep until bias-resistance gate passes).
+                -- OR another participant whose commit was fanned in via
+                -- /commit). Storage nodes do NOT sign — the hash binds
+                -- (whitepaper §2.5 / spec §5). `revealed_entropy` is
+                -- NULL until the reveal phase; `own_entropy` is the
+                -- node's own secret (non-NULL only on its own row),
+                -- kept until the bias-resistance gate passes.
                 CREATE TABLE IF NOT EXISTS genesis_mpc_contributions (
                     session_id          BLOB NOT NULL,
                     contributor_id      BLOB NOT NULL,
                     commit_digest       BLOB NOT NULL,    -- 32 bytes
-                    commit_signature    BLOB NOT NULL,    -- SPHINCS+ sig
                     own_entropy         BLOB,             -- 32 bytes, only for own row
                     revealed_entropy    BLOB,             -- 32 bytes once revealed
-                    reveal_signature    BLOB,             -- SPHINCS+ sig over reveal
                     PRIMARY KEY (session_id, contributor_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_genesis_mpc_contrib_session
@@ -1477,17 +1476,16 @@ pub struct GenesisMpcSessionRow {
 }
 
 /// Row stored in `genesis_mpc_contributions`. `own_entropy` is non-NULL
-/// only for this node's own row; `revealed_entropy` / `reveal_signature`
-/// are non-NULL only after the reveal phase.
+/// only for this node's own row; `revealed_entropy` is non-NULL only
+/// after the reveal phase. Storage nodes do not sign — there is no
+/// signature column.
 #[derive(Debug, Clone)]
 pub struct GenesisMpcContributionRow {
     pub session_id: Vec<u8>,
     pub contributor_id: Vec<u8>,
     pub commit_digest: Vec<u8>,
-    pub commit_signature: Vec<u8>,
     pub own_entropy: Option<Vec<u8>>,
     pub revealed_entropy: Option<Vec<u8>>,
-    pub reveal_signature: Option<Vec<u8>>,
 }
 
 /// Insert a new MPC session. Fails (returns Err) if the session_id
@@ -1612,9 +1610,9 @@ pub async fn genesis_mpc_session_purge_expired(
 }
 
 /// Upsert a contribution row. Idempotent on (session_id, contributor_id).
-/// `own_entropy` is preserved if a previous row had it and the new row
-/// doesn't (avoids accidentally clearing the secret on a peer-commit
-/// upsert that arrives via a reveal-request's commit set).
+/// `own_entropy` and `revealed_entropy` are preserved if a previous row
+/// had them and the new row doesn't (COALESCE), so a peer-commit
+/// upsert can't accidentally clear our own secret.
 pub async fn genesis_mpc_contribution_upsert(
     pool: &DBPool,
     contribution: GenesisMpcContributionRow,
@@ -1622,23 +1620,19 @@ pub async fn genesis_mpc_contribution_upsert(
     with_conn(pool, move |conn| {
         conn.execute(
             "INSERT INTO genesis_mpc_contributions
-             (session_id, contributor_id, commit_digest, commit_signature,
-              own_entropy, revealed_entropy, reveal_signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             (session_id, contributor_id, commit_digest,
+              own_entropy, revealed_entropy)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(session_id, contributor_id) DO UPDATE SET
                 commit_digest      = excluded.commit_digest,
-                commit_signature   = excluded.commit_signature,
                 own_entropy        = COALESCE(excluded.own_entropy, own_entropy),
-                revealed_entropy   = COALESCE(excluded.revealed_entropy, revealed_entropy),
-                reveal_signature   = COALESCE(excluded.reveal_signature, reveal_signature)",
+                revealed_entropy   = COALESCE(excluded.revealed_entropy, revealed_entropy)",
             params![
                 contribution.session_id,
                 contribution.contributor_id,
                 contribution.commit_digest,
-                contribution.commit_signature,
                 contribution.own_entropy,
                 contribution.revealed_entropy,
-                contribution.reveal_signature,
             ],
         )?;
         Ok(())
@@ -1656,8 +1650,8 @@ pub async fn genesis_mpc_contribution_get(
     with_conn(pool, move |conn| {
         let row = conn
             .query_row(
-                "SELECT session_id, contributor_id, commit_digest, commit_signature,
-                        own_entropy, revealed_entropy, reveal_signature
+                "SELECT session_id, contributor_id, commit_digest,
+                        own_entropy, revealed_entropy
                  FROM genesis_mpc_contributions
                  WHERE session_id = ?1 AND contributor_id = ?2",
                 params![session_id, contributor_id],
@@ -1666,10 +1660,8 @@ pub async fn genesis_mpc_contribution_get(
                         session_id: row.get(0)?,
                         contributor_id: row.get(1)?,
                         commit_digest: row.get(2)?,
-                        commit_signature: row.get(3)?,
-                        own_entropy: row.get(4)?,
-                        revealed_entropy: row.get(5)?,
-                        reveal_signature: row.get(6)?,
+                        own_entropy: row.get(3)?,
+                        revealed_entropy: row.get(4)?,
                     })
                 },
             )
@@ -1686,8 +1678,8 @@ pub async fn genesis_mpc_contribution_list(
     let session_id = session_id.to_vec();
     with_conn(pool, move |conn| {
         let mut stmt = conn.prepare_cached(
-            "SELECT session_id, contributor_id, commit_digest, commit_signature,
-                    own_entropy, revealed_entropy, reveal_signature
+            "SELECT session_id, contributor_id, commit_digest,
+                    own_entropy, revealed_entropy
              FROM genesis_mpc_contributions
              WHERE session_id = ?1
              ORDER BY contributor_id ASC",
@@ -1698,10 +1690,8 @@ pub async fn genesis_mpc_contribution_list(
                     session_id: row.get(0)?,
                     contributor_id: row.get(1)?,
                     commit_digest: row.get(2)?,
-                    commit_signature: row.get(3)?,
-                    own_entropy: row.get(4)?,
-                    revealed_entropy: row.get(5)?,
-                    reveal_signature: row.get(6)?,
+                    own_entropy: row.get(3)?,
+                    revealed_entropy: row.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
