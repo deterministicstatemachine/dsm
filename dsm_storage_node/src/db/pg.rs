@@ -426,18 +426,24 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 -- participants_blob is the concatenation of all N
                 -- 32-byte participant IDs (sorted ascending lex);
                 -- participants_blob length / 32 recovers N.
+                --
+                -- Purge by admin tooling against created_at_cycle.
+                -- Spec §1 is clockless — no protocol-level deadline.
+                -- initiator_signature stores the SPHINCS+ sig the node
+                -- verified on /offer (audit trail; storage nodes
+                -- never sign per spec §1 + §2).
                 CREATE TABLE IF NOT EXISTS genesis_mpc_sessions (
                     session_id           BYTEA PRIMARY KEY,
                     initiator_device_id  BYTEA NOT NULL,
-                    initiator_pk         BYTEA NOT NULL,
+                    initiator_pk_attest  BYTEA NOT NULL,
                     initiator_cdbrw      BYTEA NOT NULL,
                     participants_blob    BYTEA NOT NULL,
-                    deadline_cycle       BIGINT  NOT NULL,
+                    initiator_signature  BYTEA NOT NULL,
                     state                TEXT NOT NULL,
                     created_at_cycle     BIGINT  NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_deadline
-                    ON genesis_mpc_sessions(deadline_cycle);
+                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_created_at
+                    ON genesis_mpc_sessions(created_at_cycle);
 
                 -- Storage nodes do NOT sign (spec §5 / whitepaper §2.5).
                 -- The commit_digest binds the entropy via hash; no
@@ -468,10 +474,10 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
 pub struct GenesisMpcSessionRow {
     pub session_id: Vec<u8>,
     pub initiator_device_id: Vec<u8>,
-    pub initiator_pk: Vec<u8>,
+    pub initiator_pk_attest: Vec<u8>,
     pub initiator_cdbrw: Vec<u8>,
     pub participants_blob: Vec<u8>,
-    pub deadline_cycle: i64,
+    pub initiator_signature: Vec<u8>,
     pub state: String,
     pub created_at_cycle: i64,
 }
@@ -485,25 +491,22 @@ pub struct GenesisMpcContributionRow {
     pub revealed_entropy: Option<Vec<u8>>,
 }
 
-pub async fn genesis_mpc_session_insert(
-    pool: &Pool,
-    session: GenesisMpcSessionRow,
-) -> Result<()> {
+pub async fn genesis_mpc_session_insert(pool: &Pool, session: GenesisMpcSessionRow) -> Result<()> {
     let client = pool.get().await?;
     let n = client
         .execute(
             "INSERT INTO genesis_mpc_sessions
-             (session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
-              participants_blob, deadline_cycle, state, created_at_cycle)
+             (session_id, initiator_device_id, initiator_pk_attest, initiator_cdbrw,
+              participants_blob, initiator_signature, state, created_at_cycle)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (session_id) DO NOTHING",
             &[
                 &session.session_id,
                 &session.initiator_device_id,
-                &session.initiator_pk,
+                &session.initiator_pk_attest,
                 &session.initiator_cdbrw,
                 &session.participants_blob,
-                &session.deadline_cycle,
+                &session.initiator_signature,
                 &session.state,
                 &session.created_at_cycle,
             ],
@@ -524,8 +527,8 @@ pub async fn genesis_mpc_session_get(
     let client = pool.get().await?;
     let row = client
         .query_opt(
-            "SELECT session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
-                    participants_blob, deadline_cycle, state, created_at_cycle
+            "SELECT session_id, initiator_device_id, initiator_pk_attest, initiator_cdbrw,
+                    participants_blob, initiator_signature, state, created_at_cycle
              FROM genesis_mpc_sessions WHERE session_id = $1",
             &[&session_id],
         )
@@ -533,10 +536,10 @@ pub async fn genesis_mpc_session_get(
     Ok(row.map(|r| GenesisMpcSessionRow {
         session_id: r.get::<_, Vec<u8>>(0),
         initiator_device_id: r.get::<_, Vec<u8>>(1),
-        initiator_pk: r.get::<_, Vec<u8>>(2),
+        initiator_pk_attest: r.get::<_, Vec<u8>>(2),
         initiator_cdbrw: r.get::<_, Vec<u8>>(3),
         participants_blob: r.get::<_, Vec<u8>>(4),
-        deadline_cycle: r.get(5),
+        initiator_signature: r.get::<_, Vec<u8>>(5),
         state: r.get(6),
         created_at_cycle: r.get(7),
     }))
@@ -557,24 +560,21 @@ pub async fn genesis_mpc_session_set_state(
     Ok(())
 }
 
-pub async fn genesis_mpc_session_purge_expired(
-    pool: &Pool,
-    cutoff_cycle: i64,
-) -> Result<usize> {
+pub async fn genesis_mpc_session_purge_expired(pool: &Pool, cutoff_cycle: i64) -> Result<usize> {
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
     tx.execute(
         "DELETE FROM genesis_mpc_contributions
          WHERE session_id IN (
              SELECT session_id FROM genesis_mpc_sessions
-             WHERE deadline_cycle < $1
+             WHERE created_at_cycle < $1
          )",
         &[&cutoff_cycle],
     )
     .await?;
     let n = tx
         .execute(
-            "DELETE FROM genesis_mpc_sessions WHERE deadline_cycle < $1",
+            "DELETE FROM genesis_mpc_sessions WHERE created_at_cycle < $1",
             &[&cutoff_cycle],
         )
         .await?;

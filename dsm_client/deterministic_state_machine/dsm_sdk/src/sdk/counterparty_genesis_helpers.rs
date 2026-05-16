@@ -217,44 +217,57 @@ pub fn create_genesis_binding(
 // state-history tree is superseded by DeviceState's per-relationship SMT.
 // Zero external callers for either function.
 
-/// Fetch a Genesis state from a storage node (network operation)
+/// Fetch a counterparty's published Genesis state. After Task A.4
+/// the canonical publication path is `SdkGenesisPublisher` with a
+/// content-addressed `PublishableGenesisV1` artifact at
+/// `addr = H("DSM/genesis-mirror\0" || G)`. This helper used to
+/// synthesise a fake MPC-style genesis locally; that placeholder is
+/// gone. Callers must now wire a real `SdkGenesisPublisher` and
+/// resolve by `(G, storage_sdk)` — see the publisher's `retrieve`
+/// method.
+///
+/// Returning an error here (rather than synthesising) is the
+/// load-bearing change: counterparty acceptance can no longer be
+/// satisfied by locally-fabricated genesis bytes (whitepaper §2.5
+/// "publicly recomputable" — a synthesised counterparty genesis
+/// fails that property by construction).
 pub async fn fetch_genesis_state(
     device_id: &str,
     _storage_endpoint: &str,
 ) -> Result<GenesisState, DsmError> {
-    // In a real implementation, this would make an HTTP request to the storage node
-    // For now (tests/utilities), synthesize a MPC-style Genesis using the strict path
-    use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
-    use dsm::types::identifiers::NodeId;
-
-    // Derive a deterministic 32-byte device id from the provided string
-    let device_id_arr = crate::util::domain_helpers::device_id_hash(device_id);
-
-    // Use a fixed small set of test nodes (deterministic; no network dependency)
-    let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-
-    // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
-    let k_dbrw = crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key(
-        "counterparty_genesis_helpers",
-    )
-    .map_err(dsm::types::error::DsmError::invalid_operation)?;
-    create_genesis_via_blind_mpc(device_id_arr, nodes, k_dbrw, None).await
+    let _ = device_id;
+    Err(DsmError::invalid_operation(
+        "counterparty_genesis_helpers::fetch_genesis_state: \
+         placeholder synthesis removed (Task A.4). Use \
+         dsm_sdk::sdk::genesis_publisher::SdkGenesisPublisher::retrieve \
+         with the counterparty's `G` and a configured storage_sdk \
+         instead.",
+    ))
 }
 
-/// Verify a Genesis state against known storage nodes
+/// Verify a published Genesis state by recomputing `G` from its
+/// public inputs (whitepaper §2.5) and comparing to the field. The
+/// `_storage_endpoints` parameter is retained for backwards-compat
+/// of the signature; verification is purely device-side.
+///
+/// Returns:
+/// - `Ok(true)` iff the stored `genesis_state.hash` matches
+///   `H("DSM/genesis\0" || device_entropy || mpc_1..n || A)`.
+/// - `Ok(false)` on mismatch or missing structural invariants.
+///
+/// Until A.4 this returned `Ok(true)` unconditionally — that was a
+/// load-bearing placeholder masking actual counterparty trust.
 pub async fn verify_genesis_state(
-    _genesis_state: &GenesisState,
+    genesis_state: &GenesisState,
     _storage_endpoints: &[&str],
 ) -> Result<bool, DsmError> {
-    // In a real implementation, this would verify the Genesis state with multiple storage nodes
-    // For now, always return true
-    Ok(true)
+    dsm::core::identity::verify_genesis_state(genesis_state)
 }
 
-/// Generate a hash of a Genesis state
+/// Return the genesis hash bytes as a `Vec<u8>`. The supplied
+/// `genesis_state.hash` is already the canonical `G` per
+/// whitepaper §2.5 — no re-derivation, no domain reapplication.
 pub fn hash_genesis_state(genesis_state: &GenesisState) -> Vec<u8> {
-    // In a real implementation, this would compute a cryptographic hash
-    // For now, just return the existing hash
     genesis_state.hash.to_vec()
 }
 

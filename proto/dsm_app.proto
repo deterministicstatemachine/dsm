@@ -1522,17 +1522,39 @@ message GenesisCreated {
 // future combine implementation. Down-stream code that lands first
 // MUST pin them in core, then update this comment to match.
 
+// Session offer envelope from the orchestrator (device) to one storage
+// node. Authenticated by a SPHINCS+ signature over canonical-encoded
+// fields 1-5 (with `initiator_signature` cleared). Closes the offer
+// front-running attack on deterministic session_ids: an attacker who
+// learns a victim's device_id can pre-compute `session_id` but cannot
+// produce a valid signature without `sk_attest`.
+//
+// Storage nodes verify but never sign (spec §1 + §2). Signature
+// verification IS shape-checking — same precedent as stitched
+// receipts (spec §4.2).
+//
+// Field 6 (deadline_cycle) is permanently removed: spec §1 is
+// clockless, and session purge is operator policy on `created_at_cycle`,
+// not a protocol invariant.
 message GenesisMpcSessionV1 {
-  // Opaque 32-byte session id chosen by the orchestrator (the device).
-  // The existing core MPC at dsm/src/core/identity/genesis_mpc.rs uses
-  // 32 random bytes; storage nodes treat this field as opaque and
-  // never recompute it. Uniqueness is the only invariant the storage
-  // node enforces (write-once on insert; duplicates return 409).
+  // Opaque 32-byte session id. Production callers derive it as
+  //   session_id = H("DSM/genesis-mpc-session\0" || R_reg || device_id)
+  // — publicly derivable from registry root + device_id so the
+  // orchestrator cannot grind a participant set. Storage nodes treat
+  // it as opaque (write-once primary key).
   bytes session_id = 1 [(dsm_fixed_len)=32];
-  // Root device's DevID.
+  // Root device's DevID = H("DSM/device\0" || pk_attest || attest_blob).
+  // Storage nodes recompute this from `initiator_pk_attest` and reject
+  // on mismatch.
   bytes initiator_device_id = 2 [(dsm_fixed_len)=32];
-  // Root device's SPHINCS+ public key (pk_1).
-  bytes initiator_pk = 3 [(dsm_max_len)=65535];
+  // Device's platform-attestation SPHINCS+ public key (`pk_attest`).
+  // IS computable pre-G because device_id derives from it. Storage
+  // node verifies the offer signature with this key.
+  //
+  // NOTE: this is the DEVICE's pre-genesis attestation key, NOT
+  // `pk_1` (which is derived post-G per whitepaper §11.1 eq.13 and
+  // ships in the post-MPC `PublishableGenesisV1`).
+  bytes initiator_pk_attest = 3 [(dsm_max_len)=65535];
   // CDBRW digest of root device (silicon-bound anchor).
   bytes initiator_cdbrw = 4 [(dsm_fixed_len)=32];
   // The full N-of-N participant set: each entry is a 32-byte storage
@@ -1541,8 +1563,30 @@ message GenesisMpcSessionV1 {
   // listed participant is required to commit AND reveal; there is NO
   // threshold subset that can complete on behalf of the rest.
   repeated bytes participants = 5 [(dsm_fixed_len)=32];
-  // Deterministic deadline (cycle index), not a wall clock.
-  uint64 deadline_cycle = 6;
+  // SPHINCS+ signature by `sk_attest` over the canonical-encoded
+  // bytes of this message with `initiator_signature` cleared. The
+  // storage node verifies this against `initiator_pk_attest` before
+  // accepting the offer. Signature length is SPHINCS+ SPX256f
+  // signature size — but the field stays `bytes` so future variants
+  // can rotate without proto breakage.
+  bytes initiator_signature = 6 [(dsm_max_len)=65535];
+}
+
+// Reveal request envelope: device asks `target_node_id` to release its
+// stored entropy. Authenticated by the same `pk_attest` family as the
+// /offer; storage node verifies the signature before releasing the
+// reveal. Defeats arbitrary parties triggering a reveal by knowing
+// only the deterministic `session_id`.
+message GenesisMpcRevealRequestV1 {
+  bytes session_id          = 1 [(dsm_fixed_len)=32];
+  // Same `pk_attest` the storage node accepted on /offer; the
+  // session row stores it for cross-check.
+  bytes initiator_pk_attest = 2 [(dsm_max_len)=65535];
+  // SPHINCS+ signature by `sk_attest` over
+  //   "DSM/genesis-mpc-reveal\0" || session_id
+  // — bound to the session and to the "reveal" intent so an /offer
+  // signature can't be replayed on /reveal.
+  bytes initiator_signature = 3 [(dsm_max_len)=65535];
 }
 
 // Storage nodes do NOT sign. The hash binds the entropy to the
@@ -2686,7 +2730,68 @@ message OnlineMessageResponse {
 }
 
 // =================== Discovery / Publish Diagnostics =================
-message DiscoverLocalResponse { repeated string discovered_nodes = 1; string discovery_method = 2; uint64 event_counter = 3; }
+
+// One discovered node, including its claimed 32-byte node_id alongside
+// the address. The orchestrator cross-verifies the claimed id by
+// hitting `/api/v2/node/identity` on the address and rejecting on
+// mismatch — defeats the simplest "lie about your id" Sybil.
+message DiscoveredNodeV1 {
+  string address = 1;
+  bytes  node_id = 2 [(dsm_fixed_len)=32];
+}
+
+message DiscoverLocalResponse {
+  // Legacy address-only list (kept populated for backwards compat with
+  // anything that still expects address-only).
+  repeated string discovered_nodes = 1;
+  string discovery_method = 2;
+  uint64 event_counter = 3;
+  // Address+node_id pairs for new callers that need to pick
+  // participants by 32-byte node_id rather than by URL.
+  repeated DiscoveredNodeV1 discovered_node_infos = 4;
+}
+
+// Node's self-reported 32-byte node_id, returned by
+// `GET /api/v2/node/identity`. The orchestrator cross-verifies a
+// discovered (address, node_id) pair by GET-ing this endpoint at the
+// address and confirming the returned id matches.
+message NodeIdentityV1 {
+  bytes node_id = 1 [(dsm_fixed_len)=32];
+}
+
+// Fully-self-describing genesis artifact for content-addressed
+// publication. Every field needed for an external verifier to
+// independently recompute
+//   G = H("DSM/genesis\0" || device_entropy || mpc_1 || ... || mpc_n
+//                          || canonical_a(device_id,
+//                                         sorted_participants,
+//                                         metadata))
+// per whitepaper §2.5. `K_DBRW` is intentionally absent (silicon
+// binding stays device-local per §11.1 / §12).
+//
+// Stored at `addr = H("DSM/genesis-mirror\0" || G)` per spec §6's
+// content-addressing scheme. Storage nodes accept anonymous PUTs at
+// this path family — the address-recompute check IS the shape
+// enforcement (spec §18). PaidK gating on this path is future work.
+message PublishableGenesisV1 {
+  bytes  genesis_hash       = 1 [(dsm_fixed_len)=32];  // G
+  bytes  device_id          = 2 [(dsm_fixed_len)=32];
+  bytes  device_entropy     = 3 [(dsm_fixed_len)=32];  // b_0 (whitepaper §2.5)
+  // b_1..b_n in canonical participant order (sorted ascending lex
+  // on 32-byte node_id). The verifier reconstructs the same order
+  // from `participants` and feeds entropies in that order.
+  repeated bytes mpc_entropies = 4 [(dsm_fixed_len)=32];
+  // Sorted ascending lex on raw 32-byte node_id.
+  repeated bytes participants  = 5 [(dsm_fixed_len)=32];
+  // The `A` metadata bytes (the third input to `canonical_a` per
+  // dsm/src/core/identity/genesis_mpc.rs::canonical_a).
+  bytes  metadata           = 6 [(dsm_max_len)=65535];
+  // Post-G keys derived per whitepaper §11.1 eq.13 (so counterparties
+  // can verify device-side signatures without re-running the MPC).
+  bytes  initiator_pk_post_genesis = 7 [(dsm_max_len)=65535];
+  bytes  initiator_kyber_pk = 8 [(dsm_max_len)=65535];
+}
+
 message PublishGenesisResponse { bool success = 1; bool published = 2; string key = 3; uint32 published_to_nodes = 4; uint64 event_counter = 5; }
 
 message TokenPolicyCacheEntry {

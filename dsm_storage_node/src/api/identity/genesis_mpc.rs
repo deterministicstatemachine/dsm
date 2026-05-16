@@ -5,27 +5,34 @@
 //! Endpoints (protobuf-only, no JSON / hex / base64 in bodies):
 //!
 //! `POST /api/v2/genesis/mpc/offer`
-//!   body: `GenesisMpcSessionV1` (the orchestrator's offer)
-//!   resp: `GenesisMpcCommitV1`  (this node's own signed commit)
+//!   body: `GenesisMpcSessionV1` (the orchestrator's signed offer)
+//!   resp: `GenesisMpcCommitV1`  (this node's own commit)
 //!
 //! Acceptance rules:
 //!
 //! - `participants.len() ≥ 3` (spec §5 minimum for "real" MPC).
 //! - participants strictly sorted, 32 bytes each, no duplicates.
 //! - this node's `StorageNodeId` must be in `participants`.
-//! - `deadline_cycle` must be strictly greater than the current
-//!   deterministic tick (no wall clock).
-//! - `session_id` must not already exist (write-once).
+//! - `session_id` must not already exist (write-once primary key).
 //! - `initiator_device_id`, `initiator_cdbrw` must each be 32 bytes;
-//!   `initiator_pk` must match SPHINCS+ SPX256f public-key length.
+//!   `initiator_pk_attest` must match SPHINCS+ SPX256f public-key
+//!   length; `initiator_signature` must SPHINCS+-verify against the
+//!   canonical offer-envelope preimage under
+//!   `DSM/genesis-mpc-offer\0` domain.
+//!
+//! Spec §1 + §2 alignment: storage nodes never SIGN, but they DO
+//! verify device signatures (the existing stitched-receipt path
+//! does the same — verifying does not equal signing). The signature
+//! check is the offer-envelope shape predicate; without it a node
+//! could be flooded with valid-shape garbage offers under any
+//! deterministic `session_id` an attacker can grind.
 //!
 //! On acceptance the node generates a fresh 32-byte entropy `e_self`,
 //! computes
-//!   `commit = H("DSM/genesis-commit\0" || session_id || self_node_id || e_self)`,
+//!   `commit = H("DSM/genesis-commit\0" || session_id || e_self)`,
 //! and persists the session row plus its own contribution row
-//! (`own_entropy = Some(e_self)`, `revealed_entropy = None`). Storage
-//! nodes do NOT sign — the hash binds the entropy to the commit
-//! (whitepaper §2.5 / spec §5).
+//! (`own_entropy = Some(e_self)`, `revealed_entropy = None`). The
+//! hash binds the entropy to the commit (whitepaper §2.5 / spec §5).
 //!
 //! `POST /api/v2/genesis/mpc/commit/{session_id}`
 //!   body: `GenesisMpcCommitV1` (a peer's commit, fanned out by the
@@ -37,11 +44,18 @@
 //! session must exist, body's `session_id` must match the URL,
 //! peer's `contributor_id` must appear in the session's declared
 //! participant set, and `contributor_id` MUST NOT equal our own
-//! node id (that row is created by /offer). No signature checks
-//! exist — there is no signature.
+//! node id (that row is created by /offer). Peer commits are not
+//! signed by the peer; they are signed by the orchestrator at the
+//! /offer round and bound to the session_id by the orchestrator's
+//! initial signature.
 //!
 //! `POST /api/v2/genesis/mpc/reveal/{session_id}`
-//!   body: empty (the orchestrator simply asks this node to reveal)
+//!   body: `GenesisMpcRevealRequestV1` carrying `pk_attest` plus a
+//!         SPHINCS+ signature over `H("DSM/genesis-mpc-reveal\0" ||
+//!         session_id)`. The node verifies the signature against
+//!         the `pk_attest` stored on the session row (must match
+//!         byte-for-byte). Defeats arbitrary parties triggering a
+//!         reveal on a publicly-derivable `session_id`.
 //!   resp: `GenesisMpcRevealV1`
 //!
 //! Bias-resistance gate (spec §5, strict N-of-N): the node MUST have
@@ -52,7 +66,8 @@
 //! `GenesisMpcRevealV1`, mark the own row as revealed, and
 //! transition the session state to `"revealed"`.
 //!
-//! Idempotency: a second /reveal call returns the same envelope.
+//! Idempotency: a second /reveal call (with a valid signed body)
+//! returns the same envelope.
 //!
 //! `GET /api/v2/genesis/mpc/session/{session_id}`
 //!   resp: `GenesisMpcStatusV1`
@@ -62,6 +77,10 @@
 //! `session_id` in URL paths is base32-Crockford of the 32-byte
 //! session_id (the only place we encode it as text — matches the
 //! existing `/api/v2/identity/{genesis}/devtree/*` convention).
+//!
+//! Per spec §1 ("clockless"), there is no `deadline_cycle` field in
+//! the protocol. Sessions are purged by operator policy against
+//! `created_at_cycle` via the admin router — not by the handler.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -86,26 +105,72 @@ use crate::AppState;
 const MIN_PARTICIPANTS: usize = 3;
 
 /// Generous upper bound for the session-offer payload. The largest
-/// field is `initiator_pk` (SPHINCS+ device key — the device DOES sign
-/// later in genesis, even though storage nodes do not). 16 KiB leaves
-/// plenty of headroom for up to ~64 participant IDs.
-const MAX_OFFER_BODY: usize = 16 * 1024;
+/// fields are `initiator_pk_attest` (SPHINCS+ device attestation pk)
+/// and `initiator_signature` (SPHINCS+ sig). SPHINCS+ signatures for
+/// SPX256f are ~50 KiB on the wire, so the cap leaves headroom plus
+/// participants. 96 KiB accommodates up to ~64 participants.
+const MAX_OFFER_BODY: usize = 96 * 1024;
 
 /// Upper bound on the /commit body. The body is just three 32-byte
 /// hash fields, but we keep the limit generous to absorb future
-/// schema growth without a hot redeploy.
-const MAX_COMMIT_BODY: usize = 4 * 1024;
+/// schema growth without a hot redeploy. The /reveal body carries a
+/// signed `GenesisMpcRevealRequestV1` whose largest field is the
+/// SPHINCS+ signature (~50 KiB).
+const MAX_COMMIT_BODY: usize = 96 * 1024;
 
 /// Domain tag for the commit digest (matches whitepaper §2.5 / spec §5
 /// and `dsm/src/core/identity/genesis_mpc.rs`).
 const COMMIT_DOMAIN: &str = "DSM/genesis-commit";
 
+/// Domain tag for the offer-envelope signature preimage. MUST stay
+/// in lock-step with
+/// `dsm::core::identity::genesis_mpc::OFFER_SIG_DOMAIN`.
+const OFFER_SIG_DOMAIN: &str = "DSM/genesis-mpc-offer";
+
+/// Domain tag for the reveal-request signature preimage.
+const REVEAL_SIG_DOMAIN: &str = "DSM/genesis-mpc-reveal";
+
 /// SPHINCS+ SPX256f public-key length — used to shape-check the
-/// initiator's `pk_1` in the offer envelope. Storage nodes do NOT
-/// sign; this is the device's signing key, carried in the offer so
-/// downstream layers can bind G to pk_1.
-fn initiator_pk_len() -> usize {
+/// initiator's `pk_attest` in the offer envelope. Storage nodes do
+/// NOT sign; they verify device signatures (spec §1 + §2).
+fn initiator_pk_attest_len() -> usize {
     sphincs::public_key_bytes(sphincs::SphincsVariant::SPX256f)
+}
+
+/// Recompute the canonical offer-envelope preimage (must match
+/// `dsm::core::identity::genesis_mpc::compute_offer_sig_preimage`
+/// byte-for-byte).
+fn compute_offer_sig_preimage(
+    session_id: &[u8; 32],
+    initiator_device_id: &[u8; 32],
+    initiator_cdbrw: &[u8; 32],
+    participants: &[[u8; 32]],
+    pk_attest: &[u8],
+) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(OFFER_SIG_DOMAIN);
+    h.update(session_id);
+    h.update(initiator_device_id);
+    h.update(initiator_cdbrw);
+    h.update(&(participants.len() as u32).to_le_bytes());
+    for p in participants {
+        h.update(p);
+    }
+    h.update(&(pk_attest.len() as u32).to_le_bytes());
+    h.update(pk_attest);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// Recompute the canonical reveal-request preimage (must match
+/// `dsm::core::identity::genesis_mpc::compute_reveal_sig_preimage`
+/// byte-for-byte).
+fn compute_reveal_sig_preimage(session_id: &[u8; 32]) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(REVEAL_SIG_DOMAIN);
+    h.update(session_id);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
@@ -130,8 +195,8 @@ async fn offer(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let session = pb::GenesisMpcSessionV1::decode(body.as_ref())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session =
+        pb::GenesisMpcSessionV1::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // Required field shape checks.
     if session.session_id.len() != 32
@@ -140,8 +205,13 @@ async fn offer(
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if session.initiator_pk.len() != initiator_pk_len() {
+    if session.initiator_pk_attest.len() != initiator_pk_attest_len() {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    // Empty signature short-circuits — verification would always
+    // reject, but bailing early avoids an unnecessary SPHINCS+ op.
+    if session.initiator_signature.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // Participant set validation.
@@ -157,11 +227,41 @@ async fn offer(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Deadline must be in the future (strict greater than current
-    // deterministic tick; no wall clock).
-    let now_cycle = state.current_tick.load(Ordering::SeqCst);
-    if (session.deadline_cycle as i64) <= now_cycle {
-        return Err(StatusCode::BAD_REQUEST);
+    // SPHINCS+-verify the offer envelope. Storage nodes verify, never
+    // sign (spec §1 + §2). Per the adversarial-stage-6 fix, this
+    // signature is the front-running defense against a
+    // deterministically-derived `session_id`: an attacker who
+    // pre-computes a victim's session_id still cannot produce a
+    // valid signature without `sk_attest`.
+    let session_id_arr: [u8; 32] = session
+        .session_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let initiator_device_id_arr: [u8; 32] = session
+        .initiator_device_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let initiator_cdbrw_arr: [u8; 32] = session
+        .initiator_cdbrw
+        .as_slice()
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let preimage = compute_offer_sig_preimage(
+        &session_id_arr,
+        &initiator_device_id_arr,
+        &initiator_cdbrw_arr,
+        &participants,
+        &session.initiator_pk_attest,
+    );
+    match sphincs::sphincs_verify(
+        &session.initiator_pk_attest,
+        &preimage,
+        &session.initiator_signature,
+    ) {
+        Ok(true) => {}
+        _ => return Err(StatusCode::UNAUTHORIZED),
     }
 
     // Fresh, secret entropy for this node's contribution.
@@ -184,6 +284,8 @@ async fn offer(
     input.extend_from_slice(&e_self);
     let commit_digest = domain_hash_bytes(COMMIT_DOMAIN, &input);
 
+    let now_cycle = state.current_tick.load(Ordering::SeqCst);
+
     // Persist session + own contribution. Insert-then-upsert under one
     // logical "accept" — if the session_id is already known we return
     // 409. The DB layer surfaces this as anyhow with a specific
@@ -191,10 +293,10 @@ async fn offer(
     let row = db::GenesisMpcSessionRow {
         session_id: session.session_id.clone(),
         initiator_device_id: session.initiator_device_id.clone(),
-        initiator_pk: session.initiator_pk.clone(),
+        initiator_pk_attest: session.initiator_pk_attest.clone(),
         initiator_cdbrw: session.initiator_cdbrw.clone(),
         participants_blob: flatten_participants(&participants),
-        deadline_cycle: session.deadline_cycle as i64,
+        initiator_signature: session.initiator_signature.clone(),
         state: "offered".to_string(),
         created_at_cycle: now_cycle,
     };
@@ -240,8 +342,8 @@ async fn observe_peer_commit(
 
     let session_id = decode_session_id_path(&session_id_b32)?;
 
-    let commit = pb::GenesisMpcCommitV1::decode(body.as_ref())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let commit =
+        pb::GenesisMpcCommitV1::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
     if commit.session_id != session_id {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -254,16 +356,11 @@ async fn observe_peer_commit(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Reject peer commits past the deadline (the session is effectively
-    // dead — purge will remove the row, but until it does we don't
-    // accept new contributions).
-    let now_cycle = state.current_tick.load(Ordering::SeqCst);
-    if now_cycle >= row.deadline_cycle {
-        return Err(StatusCode::GONE);
-    }
+    // No deadline check (spec §1 clockless). The session exists
+    // until purged by operator policy on `created_at_cycle`.
 
-    let participants = parse_participants_blob(&row.participants_blob)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let participants =
+        parse_participants_blob(&row.participants_blob).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let contributor_id: [u8; 32] = commit
         .contributor_id
         .as_slice()
@@ -300,19 +397,40 @@ async fn observe_peer_commit(
 async fn reveal(
     Extension(state): Extension<Arc<AppState>>,
     Path(session_id_b32): Path<String>,
+    body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
+    if body.len() > MAX_COMMIT_BODY {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     let session_id = decode_session_id_path(&session_id_b32)?;
+
+    let req = pb::GenesisMpcRevealRequestV1::decode(body.as_ref())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if req.session_id != session_id {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let session = db::genesis_mpc_session_get(&state.db_pool, &session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Past deadline → reveal is no longer valid; the orchestrator must
-    // start a new session with a fresh participant set.
-    let now_cycle = state.current_tick.load(Ordering::SeqCst);
-    if now_cycle >= session.deadline_cycle {
-        return Err(StatusCode::GONE);
+    // Reveal request MUST carry the same `pk_attest` the session was
+    // offered with — defeats key-substitution at reveal time.
+    if req.initiator_pk_attest != session.initiator_pk_attest {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    // SPHINCS+-verify the reveal-request signature against the
+    // canonical reveal preimage. Domain-separated from offer so an
+    // /offer signature can't be replayed as a /reveal.
+    let preimage = compute_reveal_sig_preimage(&session_id);
+    match sphincs::sphincs_verify(
+        &session.initiator_pk_attest,
+        &preimage,
+        &req.initiator_signature,
+    ) {
+        Ok(true) => {}
+        _ => return Err(StatusCode::UNAUTHORIZED),
     }
 
     let participants = parse_participants_blob(&session.participants_blob)
@@ -442,8 +560,8 @@ fn proto_response<M: prost::Message>(status: StatusCode, msg: &M) -> impl IntoRe
 }
 
 fn decode_session_id_path(s: &str) -> Result<[u8; 32], StatusCode> {
-    let bytes = dsm_sdk::util::text_id::decode_base32_crockford(s)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let bytes =
+        dsm_sdk::util::text_id::decode_base32_crockford(s).ok_or(StatusCode::BAD_REQUEST)?;
     bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)
 }
 
@@ -458,7 +576,10 @@ fn decode_participants(raw: &[Vec<u8>]) -> Result<Vec<[u8; 32]>, StatusCode> {
         if entry.len() != 32 {
             return Err(StatusCode::BAD_REQUEST);
         }
-        let arr: [u8; 32] = entry.as_slice().try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+        let arr: [u8; 32] = entry
+            .as_slice()
+            .try_into()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
         if let Some(last) = out.last() {
             // strictly ascending: equal → duplicate, less → unsorted
             if &arr <= last {
@@ -541,23 +662,54 @@ mod tests {
         Arc::new(state)
     }
 
-    fn make_session_proto(
+    /// Build a properly-signed offer envelope and return its bytes
+    /// plus the orchestrator's keypair so the test can also build
+    /// a matching /reveal request body.
+    fn make_signed_session_proto(
         session_id: &[u8; 32],
-        deadline_cycle: u64,
         participants: &[[u8; 32]],
-    ) -> Vec<u8> {
-        // initiator_pk shape-check only: the storage node never sees
-        // this key signing anything, but it MUST be the right length.
-        let pk_len = initiator_pk_len();
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let initiator_device_id = [0x11u8; 32];
+        let initiator_cdbrw = [0x22u8; 32];
+        let (pk_attest, sk_attest) =
+            sphincs::generate_sphincs_keypair().expect("test: sphincs keypair");
+
+        let preimage = compute_offer_sig_preimage(
+            session_id,
+            &initiator_device_id,
+            &initiator_cdbrw,
+            participants,
+            &pk_attest,
+        );
+        let initiator_signature =
+            sphincs::sphincs_sign(&sk_attest, &preimage).expect("test: sphincs sign");
+
         let session = pb::GenesisMpcSessionV1 {
             session_id: session_id.to_vec(),
-            initiator_device_id: vec![0x11u8; 32],
-            initiator_pk: vec![0u8; pk_len],
-            initiator_cdbrw: vec![0x22u8; 32],
+            initiator_device_id: initiator_device_id.to_vec(),
+            initiator_pk_attest: pk_attest.clone(),
+            initiator_cdbrw: initiator_cdbrw.to_vec(),
             participants: participants.iter().map(|p| p.to_vec()).collect(),
-            deadline_cycle,
+            initiator_signature,
         };
-        session.encode_to_vec()
+        (session.encode_to_vec(), pk_attest, sk_attest)
+    }
+
+    /// Build a signed /reveal request body for `session_id` using
+    /// the same `sk_attest` the orchestrator used at /offer time.
+    fn make_signed_reveal_body(
+        session_id: &[u8; 32],
+        pk_attest: &[u8],
+        sk_attest: &[u8],
+    ) -> Vec<u8> {
+        let preimage = compute_reveal_sig_preimage(session_id);
+        let sig = sphincs::sphincs_sign(sk_attest, &preimage).expect("test: sphincs sign reveal");
+        let req = pb::GenesisMpcRevealRequestV1 {
+            session_id: session_id.to_vec(),
+            initiator_pk_attest: pk_attest.to_vec(),
+            initiator_signature: sig,
+        };
+        req.encode_to_vec()
     }
 
     /// Build a sorted-ascending participant set that includes the given
@@ -588,7 +740,7 @@ mod tests {
     async fn offer_accepted_returns_own_commit() {
         let state = test_state_for_node("offer-accepted").await;
         let participants = participants_including(&state, 3);
-        let body = make_session_proto(&[7u8; 32], 1_000, &participants);
+        let (body, _pk, _sk) = make_signed_session_proto(&[7u8; 32], &participants);
 
         let app = create_router(state.clone());
         let resp = app
@@ -644,10 +796,8 @@ mod tests {
                 id
             })
             .collect();
-        assert!(!participants
-            .iter()
-            .any(|p| p == state.node_id.as_bytes()));
-        let body = make_session_proto(&[8u8; 32], 1_000, &participants);
+        assert!(!participants.iter().any(|p| p == state.node_id.as_bytes()));
+        let (body, _pk, _sk) = make_signed_session_proto(&[8u8; 32], &participants);
 
         let app = create_router(state);
         let resp = app
@@ -668,7 +818,7 @@ mod tests {
         let state = test_state_for_node("offer-dup").await;
         let participants = participants_including(&state, 3);
         let session_id = [42u8; 32];
-        let body = make_session_proto(&session_id, 1_000, &participants);
+        let (body, _pk, _sk) = make_signed_session_proto(&session_id, &participants);
 
         let app = create_router(state.clone());
 
@@ -702,7 +852,7 @@ mod tests {
     async fn offer_rejected_below_minimum_participants() {
         let state = test_state_for_node("offer-too-few").await;
         let participants = participants_including(&state, 2);
-        let body = make_session_proto(&[9u8; 32], 1_000, &participants);
+        let (body, _pk, _sk) = make_signed_session_proto(&[9u8; 32], &participants);
 
         let app = create_router(state);
         let resp = app
@@ -723,7 +873,7 @@ mod tests {
         let state = test_state_for_node("peer-commit").await;
         let participants = participants_including(&state, 3);
         let session_id = [21u8; 32];
-        let body = make_session_proto(&session_id, 1_000, &participants);
+        let (body, _pk, _sk) = make_signed_session_proto(&session_id, &participants);
 
         let app = create_router(state.clone());
         let resp = app
@@ -800,7 +950,7 @@ mod tests {
         let state = test_state_for_node("reveal-gated").await;
         let participants = participants_including(&state, 3);
         let session_id = [55u8; 32];
-        let body = make_session_proto(&session_id, 1_000, &participants);
+        let (body, pk_attest, sk_attest) = make_signed_session_proto(&session_id, &participants);
 
         let app = create_router(state);
         let resp = app
@@ -821,12 +971,13 @@ mod tests {
             "/api/v2/genesis/mpc/reveal/{}",
             dsm_sdk::util::text_id::encode_base32_crockford(&session_id)
         );
+        let reveal_body = make_signed_reveal_body(&session_id, &pk_attest, &sk_attest);
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(&url)
-                    .body(Body::empty())
+                    .body(Body::from(reveal_body))
                     .expect("req"),
             )
             .await
@@ -839,7 +990,7 @@ mod tests {
         let state = test_state_for_node("reveal-ok").await;
         let participants = participants_including(&state, 3);
         let session_id = [66u8; 32];
-        let body = make_session_proto(&session_id, 1_000, &participants);
+        let (body, pk_attest, sk_attest) = make_signed_session_proto(&session_id, &participants);
 
         let app = create_router(state.clone());
         let resp = app
@@ -885,13 +1036,14 @@ mod tests {
             "/api/v2/genesis/mpc/reveal/{}",
             dsm_sdk::util::text_id::encode_base32_crockford(&session_id)
         );
+        let reveal_body = make_signed_reveal_body(&session_id, &pk_attest, &sk_attest);
         let first = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(&url)
-                    .body(Body::empty())
+                    .body(Body::from(reveal_body.clone()))
                     .expect("req"),
             )
             .await
@@ -918,7 +1070,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(&url)
-                    .body(Body::empty())
+                    .body(Body::from(reveal_body))
                     .expect("req"),
             )
             .await
@@ -932,11 +1084,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purge_removes_expired_session_and_contributions() {
+    async fn purge_removes_session_and_contributions_by_created_at() {
         let state = test_state_for_node("purge").await;
         let participants = participants_including(&state, 3);
         let session_id = [99u8; 32];
-        let body = make_session_proto(&session_id, 50, &participants);
+        let (body, _pk, _sk) = make_signed_session_proto(&session_id, &participants);
 
         let app = create_router(state.clone());
         let resp = app
@@ -952,8 +1104,11 @@ mod tests {
             .expect("offer");
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Purge with cutoff_cycle > deadline.
-        let purged = db::genesis_mpc_session_purge_expired(&state.db_pool, 1_000)
+        // Admin-driven purge against created_at_cycle (operator policy,
+        // not a protocol deadline). Cutoff larger than the row's
+        // created_at_cycle (which is the node's current_tick at
+        // offer time — 0 for a fresh in-memory test state).
+        let purged = db::genesis_mpc_session_purge_expired(&state.db_pool, i64::MAX)
             .await
             .expect("purge");
         assert!(purged >= 1);
@@ -986,7 +1141,7 @@ mod tests {
         let state = test_state_for_node("kat-commit").await;
         let participants = participants_including(&state, 3);
         let session_id = [0xC1u8; 32];
-        let body = make_session_proto(&session_id, 1_000, &participants);
+        let (body, _pk, _sk) = make_signed_session_proto(&session_id, &participants);
 
         let app = create_router(state.clone());
         let resp = app
@@ -1004,14 +1159,11 @@ mod tests {
         // Pull our own contribution row back out and recompute the
         // commit_digest from the secret entropy + session_id, using
         // the same domain tag the canonical core uses.
-        let own = db::genesis_mpc_contribution_get(
-            &state.db_pool,
-            &session_id,
-            state.node_id.as_bytes(),
-        )
-        .await
-        .expect("get own")
-        .expect("own row");
+        let own =
+            db::genesis_mpc_contribution_get(&state.db_pool, &session_id, state.node_id.as_bytes())
+                .await
+                .expect("get own")
+                .expect("own row");
         let entropy = own.own_entropy.expect("own_entropy stored at /offer");
         assert_eq!(entropy.len(), 32);
 

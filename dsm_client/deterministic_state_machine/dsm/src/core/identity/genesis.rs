@@ -364,29 +364,53 @@ pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
     Ok(true)
 }
 
-// -------------------- MPC-only entrypoint --------------------
+// -------------------- MPC-only entrypoint (real network) --------------------
 
-pub async fn create_genesis_via_blind_mpc(
+/// Drive a real N-of-N commit-reveal genesis MPC against `transport`
+/// and return a caller-facing `GenesisState`.
+///
+/// This is a thin convenience wrapper around `create_root_genesis_mpc`
+/// — see that function for the full spec-grounded algorithm
+/// (whitepaper §2.5 + storagenodes-spec §5).
+///
+/// `session_id` is supplied by the caller. Production SDKs derive it
+/// as `H("DSM/genesis-mpc-session\0" || R_reg || device_id)` so the
+/// orchestrator cannot grind a participant set; tests construct it
+/// freely.
+///
+/// `pk_attest` / `sk_attest` are the device's SPHINCS+ platform-
+/// attestation keypair (recoverable from secure element on production
+/// hardware) used to sign the offer envelope under
+/// `DSM/genesis-mpc-offer\0` domain. Storage nodes verify the
+/// signature before accepting the offer.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_genesis_via_blind_mpc<T>(
+    session_id: [u8; 32],
     device_id: [u8; 32],
-    storage_nodes: Vec<NodeId>,
+    device_cdbrw: [u8; 32],
+    participants: Vec<[u8; 32]>,
     k_dbrw: [u8; 32],
     metadata: Option<Vec<u8>>,
-) -> Result<GenesisState, DsmError> {
-    let session = crate::core::identity::genesis_mpc::create_mpc_genesis(
+    pk_attest: Vec<u8>,
+    sk_attest: &[u8],
+    transport: &T,
+) -> Result<GenesisState, DsmError>
+where
+    T: crate::core::identity::genesis_mpc::GenesisMpcCommitRevealTransport + Sync,
+{
+    let outcome = crate::core::identity::genesis_mpc::create_root_genesis_mpc(
+        session_id,
         device_id,
-        storage_nodes,
+        device_cdbrw,
+        participants,
         k_dbrw,
         metadata,
+        pk_attest,
+        sk_attest,
+        transport,
     )
     .await?;
-
-    let gs = convert_session_to_genesis_state_compat(&session)?;
-    if !verify_genesis_state(&gs)? {
-        return Err(DsmError::invalid_operation(
-            "MPC genesis verification failed",
-        ));
-    }
-    Ok(gs)
+    convert_session_to_genesis_state_compat(&outcome.session)
 }
 
 pub fn create_genesis_via_blind_mpc_with_contributors(
@@ -561,19 +585,30 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn test_genesis_state_creation_mpc_only() {
+    #[test]
+    fn test_genesis_state_creation_with_provided_contributors() {
+        // The transport-driven `create_genesis_via_blind_mpc` requires
+        // a real or in-process commit-reveal cluster to drive the MPC
+        // rounds — covered by the orchestrator unit tests in
+        // `genesis_mpc::tests` and the integration test in
+        // `dsm_sdk/tests/genesis_mpc_e2e.rs`. Here we exercise the
+        // session-builder path that takes pre-collected contributions
+        // (used by core_sdk.rs for re-imported sessions).
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
+        let device_entropy = [0xCD; 32];
+        let mpc_entropies = vec![[0xE1; 32], [0xE2; 32], [0xE3; 32]];
         let k_dbrw = [0xDB; 32];
 
-        let res =
-            create_genesis_via_blind_mpc(device_id, nodes, k_dbrw, Some(b"test".to_vec())).await;
-
-        let genesis = match res {
-            Ok(g) => g,
-            Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
-        };
+        let genesis = create_genesis_via_blind_mpc_with_contributors(
+            device_id,
+            nodes,
+            k_dbrw,
+            device_entropy,
+            mpc_entropies,
+            Some(b"test".to_vec()),
+        )
+        .expect("session-builder path should succeed");
 
         assert_eq!(genesis.participants.len(), 3);
         assert_eq!(genesis.hash.len(), 32);
@@ -613,16 +648,23 @@ mod tests {
         assert_eq!(device.initial_entropy.len(), 32);
     }
 
-    #[tokio::test]
-    async fn test_verification_mpc() {
+    #[test]
+    fn test_verification_with_provided_contributors() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [7u8; 32];
+        let device_entropy = [0x52; 32];
+        let mpc_entropies = vec![[0x61; 32], [0x62; 32], [0x63; 32]];
         let k_dbrw = [0xDB; 32];
 
-        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, k_dbrw, None).await {
-            Ok(g) => g,
-            Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
-        };
+        let genesis = create_genesis_via_blind_mpc_with_contributors(
+            device_id,
+            nodes,
+            k_dbrw,
+            device_entropy,
+            mpc_entropies,
+            None,
+        )
+        .expect("session-builder path should succeed");
 
         let ok = match verify_genesis_state(&genesis) {
             Ok(v) => v,
@@ -662,15 +704,24 @@ mod tests {
         assert_eq!(genesis.contributions[4].data, metadata);
     }
 
-    #[tokio::test]
-    async fn test_quantum_resistant_keys() {
+    #[test]
+    fn test_quantum_resistant_keys() {
         use crate::crypto::sphincs::SphincsVariant;
 
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0x11; 32];
+        let device_entropy = [0x22; 32];
+        let mpc_entropies = vec![[0x33; 32], [0x44; 32], [0x55; 32]];
         let k_dbrw = [0xDB; 32];
 
-        let g = match create_genesis_via_blind_mpc(device_id, nodes, k_dbrw, None).await {
+        let g = match create_genesis_via_blind_mpc_with_contributors(
+            device_id,
+            nodes,
+            k_dbrw,
+            device_entropy,
+            mpc_entropies,
+            None,
+        ) {
             Ok(x) => x,
             Err(_) => return,
         };

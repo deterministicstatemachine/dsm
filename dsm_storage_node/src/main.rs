@@ -242,8 +242,8 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     let discovery_router =
         api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
     // Genesis MPC commit-reveal endpoints (spec §5; strict N-of-N).
-    let genesis_mpc_router = api::identity::genesis_mpc::create_router(state.clone())
-        .layer(public_rate_layer.clone());
+    let genesis_mpc_router =
+        api::identity::genesis_mpc::create_router(state.clone()).layer(public_rate_layer.clone());
 
     // Admin endpoints (cleanup, etc.)
     let admin_router = api::infra::admin::router(state.clone());

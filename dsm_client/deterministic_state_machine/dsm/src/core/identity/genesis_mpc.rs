@@ -55,18 +55,65 @@ pub trait GenesisStorage {
     async fn get(&self, genesis_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError>;
 }
 
-/// Optional network transport for real MPC collection.
+/// Production transport for genesis MPC. Implementations move bytes
+/// across the network to real storage nodes — no in-process shortcuts
+/// in production paths (whitepaper §2.5: contributions must be
+/// independent across distinct hosts).
 ///
-/// This is NOT required by the core convenience entrypoint (`create_mpc_genesis`),
-/// but is provided for SDK integration.
+/// The three rounds match the storage-node-side handler shape:
+///
+/// - `offer`: orchestrator hands a fully-signed `GenesisMpcSessionV1`
+///   to one participant; participant returns its own
+///   `GenesisMpcCommitV1` (commit_digest of a freshly-generated
+///   secret entropy `e_self`).
+/// - `observe_peer_commit`: orchestrator fans every peer's commit out
+///   to every other participant so each node satisfies its
+///   bias-resistance gate (spec §5 N-of-N — release `e_self` only
+///   after observing every other participant's commit).
+/// - `request_reveal`: orchestrator asks each participant to release
+///   its `e_self`. The participant verifies it has observed all N-1
+///   peer commits before responding.
 #[async_trait]
-pub trait GenesisMpcTransport {
-    async fn collect_node_entropy(
+pub trait GenesisMpcCommitRevealTransport {
+    async fn offer(
         &self,
-        node: &NodeId,
-        session_id: &[u8; 32],
-        device_commitment: &[u8; 32],
-    ) -> Result<[u8; 32], DsmError>;
+        node_id: &[u8; 32],
+        session: &crate::types::proto::GenesisMpcSessionV1,
+    ) -> Result<crate::types::proto::GenesisMpcCommitV1, DsmError>;
+
+    async fn observe_peer_commit(
+        &self,
+        target_node_id: &[u8; 32],
+        peer_commit: &crate::types::proto::GenesisMpcCommitV1,
+    ) -> Result<(), DsmError>;
+
+    async fn request_reveal(
+        &self,
+        node_id: &[u8; 32],
+        request: &crate::types::proto::GenesisMpcRevealRequestV1,
+    ) -> Result<crate::types::proto::GenesisMpcRevealV1, DsmError>;
+}
+
+/// Full outcome of one genesis MPC session — every artifact the
+/// caller may need to publish, audit, or feed into key derivation.
+#[derive(Debug, Clone)]
+pub struct GenesisMpcOutcome {
+    /// Built and validated `GenesisSession`, including `genesis_id == G`,
+    /// commitments, reveals, and DBRW binding.
+    pub session: GenesisSession,
+    /// `D_commit = H("DSM/anchor/d-commit\0" || sorted_commits)` per
+    /// spec §5.
+    pub d_commit: [u8; 32],
+    /// `D_reveal = H("DSM/anchor/d-reveal\0" || sorted_reveals)` per
+    /// spec §5.
+    pub d_reveal: [u8; 32],
+    /// `η₀ = H("DSM/anchor/eta\0" || D_commit || D_reveal)` per
+    /// spec §5.
+    pub eta_0: [u8; 32],
+    /// SPHINCS+ public attestation key (`pk_attest`) the device used
+    /// to sign the offer envelope. Carried out so the SDK can encode
+    /// the published `PublishableGenesisV1` without re-deriving it.
+    pub pk_attest: Vec<u8>,
 }
 
 // -------------------- Keys (PQ primitives) --------------------
@@ -595,137 +642,346 @@ pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-// -------------------- High-level MPC creation (no I/O) --------------------
+// -------------------- High-level MPC orchestrator (real network) --------------------
 
-/// Production DSM MPC Creation (bytes-only).
+/// Domain tag for the offer-envelope signature preimage.
+pub(crate) const OFFER_SIG_DOMAIN: &str = "DSM/genesis-mpc-offer";
+
+/// Domain tag for the reveal-request signature preimage.
+pub(crate) const REVEAL_SIG_DOMAIN: &str = "DSM/genesis-mpc-reveal";
+
+/// Canonical preimage for the offer-envelope SPHINCS+ signature.
 ///
-/// This entrypoint is the core, no-I/O version: it models the MPC entropies
-/// without performing network collection. SDK integrations should use
-/// `create_mpc_genesis_with_transport`.
-pub async fn create_mpc_genesis(
+/// Hashed under the `DSM/genesis-mpc-offer` domain so the storage-node
+/// side can recompute byte-for-byte. We sign the hash, not the raw
+/// concatenation, so the proto-decoded fields can't be exploited for
+/// length-extension or domain confusion.
+///
+/// Layout (length-prefixed to defeat ambiguous boundaries):
+/// ```text
+///   session_id           (32B)
+///   initiator_device_id  (32B)
+///   initiator_cdbrw      (32B)
+///   participant_count    (u32 LE)
+///   participants concatenated 32B each
+///   pk_attest_len        (u32 LE)
+///   pk_attest            bytes
+/// ```
+/// `initiator_signature` is intentionally NOT in the preimage (it is
+/// what we are computing).
+pub fn compute_offer_sig_preimage(
+    session_id: &[u8; 32],
+    initiator_device_id: &[u8; 32],
+    initiator_cdbrw: &[u8; 32],
+    participants: &[[u8; 32]],
+    pk_attest: &[u8],
+) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(OFFER_SIG_DOMAIN);
+    h.update(session_id);
+    h.update(initiator_device_id);
+    h.update(initiator_cdbrw);
+    h.update(&(participants.len() as u32).to_le_bytes());
+    for p in participants {
+        h.update(p);
+    }
+    h.update(&(pk_attest.len() as u32).to_le_bytes());
+    h.update(pk_attest);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// Canonical preimage for the reveal-request signature.
+/// Bound to `(session_id, "reveal")` so a captured /offer signature
+/// cannot be replayed on /reveal.
+pub fn compute_reveal_sig_preimage(session_id: &[u8; 32]) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(REVEAL_SIG_DOMAIN);
+    h.update(session_id);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// Drive the full N-of-N commit-reveal protocol against `transport`.
+///
+/// On any error from any participant — offer, fan-out, reveal, or
+/// commit-vs-reveal binding — the whole session aborts with `Err`.
+/// Per spec §5, withholding a reveal cannot bias post-commit ordering
+/// but also cannot complete the protocol; there is no retry inside
+/// this function, no partial-set continuation. The caller restarts
+/// with a different participant set if desired (in production, that
+/// requires `R_reg` to advance, since `session_id` is publicly
+/// derived from `(R_reg, device_id)` upstream).
+///
+/// `participants` must be the 32-byte node IDs of ≥3 distinct
+/// storage nodes. The list is canonicalised internally (sorted
+/// ascending lex by `canonical_a`); duplicate entries are rejected.
+///
+/// `pk_attest` / `sk_attest` are the device's SPHINCS+ platform-
+/// attestation keypair (whitepaper §12; recoverable from secure
+/// element on production hardware). The offer envelope is signed
+/// under `sk_attest`; the resulting signature shape-checks the
+/// orchestrator's identity on the storage-node side.
+///
+/// `session_id` is supplied by the caller — production SDK derives
+/// it as `H("DSM/genesis-mpc-session\0" || R_reg || device_id)` so
+/// it cannot be ground; in-process tests construct it freely.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_root_genesis_mpc<T>(
+    session_id: [u8; 32],
     device_id: [u8; 32],
-    storage_nodes: Vec<NodeId>,
+    device_cdbrw: [u8; 32],
+    mut participants: Vec<[u8; 32]>,
     k_dbrw: [u8; 32],
     metadata: Option<Vec<u8>>,
-) -> Result<GenesisSession, DsmError> {
-    if storage_nodes.len() < 3 {
-        return Err(DsmError::InvalidParameter(format!(
-            "MPC requires ≥3 nodes, got {}",
-            storage_nodes.len()
+    pk_attest: Vec<u8>,
+    sk_attest: &[u8],
+    transport: &T,
+) -> Result<GenesisMpcOutcome, DsmError>
+where
+    T: GenesisMpcCommitRevealTransport + Sync,
+{
+    // 1. Validate inputs.
+    if participants.len() < 3 {
+        return Err(DsmError::invalid_parameter(format!(
+            "Genesis MPC requires ≥3 participants (whitepaper §2.5); got {}",
+            participants.len()
         )));
     }
     if k_dbrw == [0u8; 32] {
-        return Err(DsmError::InvalidParameter(
-            "K_DBRW must be a non-zero binding (whitepaper §12)".into(),
+        return Err(DsmError::invalid_parameter(
+            "K_DBRW must be a non-zero binding (whitepaper §12)",
         ));
+    }
+    if pk_attest.is_empty() || sk_attest.is_empty() {
+        return Err(DsmError::invalid_parameter(
+            "pk_attest / sk_attest required for offer-envelope signing",
+        ));
+    }
+    // Canonicalise: sort ascending lex (matches storage-node decoder
+    // and canonical_a), then reject duplicates.
+    participants.sort();
+    for w in participants.windows(2) {
+        if w[0] == w[1] {
+            return Err(DsmError::invalid_parameter(
+                "Genesis MPC: duplicate participant in set",
+            ));
+        }
     }
 
     let meta = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
 
-    // Device entropy (32B)
-    let device_entropy = {
-        let mut e = [0u8; 32];
-        crate::crypto::rng::random_bytes(32)
-            .as_slice()
-            .read_exact(&mut e)
-            .map_err(|e| {
-                DsmError::crypto("Failed to generate device entropy".to_string(), Some(e))
-            })?;
-        e
+    // 2. Device entropy `b_0` (whitepaper §2.5).
+    let mut device_entropy = [0u8; 32];
+    crate::crypto::rng::random_bytes(32)
+        .as_slice()
+        .read_exact(&mut device_entropy)
+        .map_err(|e| DsmError::crypto("Failed to generate device entropy", Some(e)))?;
+
+    // 3. Build the signed offer envelope.
+    let sig_preimage = compute_offer_sig_preimage(
+        &session_id,
+        &device_id,
+        &device_cdbrw,
+        &participants,
+        &pk_attest,
+    );
+    let initiator_signature = sphincs::sphincs_sign(sk_attest, &sig_preimage)?;
+
+    let session_proto = crate::types::proto::GenesisMpcSessionV1 {
+        session_id: session_id.to_vec(),
+        initiator_device_id: device_id.to_vec(),
+        initiator_pk_attest: pk_attest.clone(),
+        initiator_cdbrw: device_cdbrw.to_vec(),
+        participants: participants.iter().map(|p| p.to_vec()).collect(),
+        initiator_signature,
     };
 
-    // MPC entropies (modeled; SDK provides real collection in integration)
-    let mut mpc_entropies: Vec<[u8; 32]> = Vec::with_capacity(storage_nodes.len());
-    for _ in 0..storage_nodes.len() {
-        let mut e = [0u8; 32];
-        crate::crypto::rng::random_bytes(32)
-            .as_slice()
-            .read_exact(&mut e)
-            .map_err(|e| DsmError::crypto("Failed to generate MPC entropy".to_string(), Some(e)))?;
-        mpc_entropies.push(e);
+    // 4. Parallel offer to every participant. Any failure aborts the
+    //    whole session — N-of-N (spec §5).
+    let offer_futures = participants.iter().map(|node_id| {
+        let proto_ref = &session_proto;
+        async move { transport.offer(node_id, proto_ref).await }
+    });
+    let commits: Vec<crate::types::proto::GenesisMpcCommitV1> =
+        futures::future::try_join_all(offer_futures).await?;
+
+    // 5. Validate each commit's shape and id binding.
+    if commits.len() != participants.len() {
+        return Err(DsmError::invalid_operation(
+            "Genesis MPC: offer round returned a different commit count than participants",
+        ));
     }
+    let mut commit_by_id: std::collections::BTreeMap<[u8; 32], [u8; 32]> =
+        std::collections::BTreeMap::new();
+    for (i, c) in commits.iter().enumerate() {
+        if c.session_id != session_id {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: commit returned a wrong session_id",
+            ));
+        }
+        if c.contributor_id.len() != 32 || c.commit_digest.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: commit field shape mismatch (expected 32-byte id and digest)",
+            ));
+        }
+        let contributor_id: [u8; 32] = c
+            .contributor_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("Genesis MPC: bad contributor_id"))?;
+        if contributor_id != participants[i] {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: contributor_id does not match the offered participant",
+            ));
+        }
+        let digest: [u8; 32] = c
+            .commit_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("Genesis MPC: bad commit_digest"))?;
+        if commit_by_id.insert(contributor_id, digest).is_some() {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: duplicate contributor_id in commit round",
+            ));
+        }
+    }
+
+    // 6. Parallel commit fan-out: N·(N-1) pushes (commit_i → node_j
+    //    for every i ≠ j). Each node satisfies its bias-resistance
+    //    gate (spec §5) only after observing all peers' commits.
+    let mut fanout_calls: Vec<_> =
+        Vec::with_capacity(participants.len() * (participants.len() - 1));
+    for target in &participants {
+        for c in &commits {
+            let contributor_id: [u8; 32] =
+                c.contributor_id.as_slice().try_into().unwrap_or([0u8; 32]);
+            if &contributor_id == target {
+                continue;
+            }
+            fanout_calls.push(transport.observe_peer_commit(target, c));
+        }
+    }
+    futures::future::try_join_all(fanout_calls).await?;
+
+    // 7. Build & sign the reveal request envelopes (per node).
+    let reveal_preimage = compute_reveal_sig_preimage(&session_id);
+    let reveal_sig = sphincs::sphincs_sign(sk_attest, &reveal_preimage)?;
+    let reveal_request = crate::types::proto::GenesisMpcRevealRequestV1 {
+        session_id: session_id.to_vec(),
+        initiator_pk_attest: pk_attest.clone(),
+        initiator_signature: reveal_sig,
+    };
+
+    // 8. Parallel reveal request to every participant.
+    let reveal_futures = participants.iter().map(|node_id| {
+        let req_ref = &reveal_request;
+        async move { transport.request_reveal(node_id, req_ref).await }
+    });
+    let reveals: Vec<crate::types::proto::GenesisMpcRevealV1> =
+        futures::future::try_join_all(reveal_futures).await?;
+
+    // 9. Verify each reveal binds to its prior commit:
+    //    H("DSM/genesis-commit\0" || session_id || entropy) == commit_digest
+    //    (matches the storage-node /offer formula at
+    //     `dsm_storage_node/src/api/identity/genesis_mpc.rs::offer`.)
+    let mut reveal_by_id: std::collections::BTreeMap<[u8; 32], [u8; 32]> =
+        std::collections::BTreeMap::new();
+    if reveals.len() != participants.len() {
+        return Err(DsmError::invalid_operation(
+            "Genesis MPC: reveal round returned wrong number of envelopes",
+        ));
+    }
+    for (i, r) in reveals.iter().enumerate() {
+        if r.session_id != session_id {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: reveal returned a wrong session_id",
+            ));
+        }
+        if r.contributor_id.len() != 32 || r.entropy.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: reveal field shape mismatch",
+            ));
+        }
+        let contributor_id: [u8; 32] =
+            r.contributor_id.as_slice().try_into().map_err(|_| {
+                DsmError::invalid_operation("Genesis MPC: bad reveal contributor_id")
+            })?;
+        if contributor_id != participants[i] {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: reveal contributor_id mismatched its participant slot",
+            ));
+        }
+        let entropy: [u8; 32] = r
+            .entropy
+            .as_slice()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("Genesis MPC: bad reveal entropy"))?;
+        // Recompute the commit_digest from the revealed entropy and
+        // reject on mismatch.
+        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-commit");
+        h.update(&session_id);
+        h.update(&entropy);
+        let mut recomputed = [0u8; 32];
+        recomputed.copy_from_slice(h.finalize().as_bytes());
+        let prior = commit_by_id.get(&contributor_id).ok_or_else(|| {
+            DsmError::invalid_operation(
+                "Genesis MPC: reveal contributor_id was not in the commit round",
+            )
+        })?;
+        if recomputed != *prior {
+            return Err(DsmError::invalid_operation(format!(
+                "Genesis MPC: reveal from contributor_id slot {i} does not bind to prior commit"
+            )));
+        }
+        if reveal_by_id.insert(contributor_id, entropy).is_some() {
+            return Err(DsmError::invalid_operation(
+                "Genesis MPC: duplicate contributor_id in reveal round",
+            ));
+        }
+    }
+
+    // 10. Aggregate via spec §5 formulas.
+    let commit_pairs: Vec<([u8; 32], [u8; 32])> =
+        commit_by_id.iter().map(|(k, v)| (*k, *v)).collect();
+    let reveal_pairs: Vec<([u8; 32], [u8; 32])> =
+        reveal_by_id.iter().map(|(k, v)| (*k, *v)).collect();
+    let d_commit = compute_d_commit(&commit_pairs);
+    let d_reveal = compute_d_reveal(&reveal_pairs);
+    let eta_0 = compute_eta_0(&d_commit, &d_reveal);
+
+    // 11. Build `GenesisSession` with entropies in canonical
+    //     participant order (the same order used in `canonical_a`).
+    let entropies_in_order: Vec<[u8; 32]> = participants
+        .iter()
+        .map(|p| {
+            reveal_by_id
+                .get(p)
+                .copied()
+                .expect("reveal_by_id populated for every participant")
+        })
+        .collect();
+    let storage_nodes: Vec<NodeId> = participants
+        .iter()
+        .map(|p| NodeId::from_bytes(p.to_vec()))
+        .collect();
 
     let mut session = GenesisSession::new(meta)?;
     session.initialize_mpc(device_id, storage_nodes)?;
-    session.set_entropies(device_entropy, mpc_entropies)?;
+    session.set_entropies(device_entropy, entropies_in_order)?;
     session.set_dbrw_binding(k_dbrw);
-
     session.compute_commitments();
     session.compute_genesis_id();
     session.validate_session()?;
 
-    Ok(session)
-}
-
-/// SDK-integrated MPC Creation using a transport for node entropy collection.
-///
-/// `K_DBRW` is mandatory (whitepaper §11.1 eq.13: required IKM for the
-/// master-seed derivation that produces the SPHINCS+/Kyber keypair).
-/// Callers obtain it from `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`
-/// against real hardware/environment fingerprints.
-pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
-    device_id: [u8; 32],
-    storage_nodes: Vec<NodeId>,
-    k_dbrw: [u8; 32],
-    metadata: Option<Vec<u8>>,
-    transport: &T,
-) -> Result<GenesisSession, DsmError> {
-    if storage_nodes.len() < 3 {
-        return Err(DsmError::InvalidParameter(format!(
-            "MPC requires ≥3 nodes, got {}",
-            storage_nodes.len()
-        )));
-    }
-    if k_dbrw == [0u8; 32] {
-        return Err(DsmError::InvalidParameter(
-            "K_DBRW must be a non-zero binding (whitepaper §12)".into(),
-        ));
-    }
-
-    let meta = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
-
-    // Device entropy (32B)
-    let device_entropy = {
-        let mut e = [0u8; 32];
-        crate::crypto::rng::random_bytes(32)
-            .as_slice()
-            .read_exact(&mut e)
-            .map_err(|e| {
-                DsmError::crypto("Failed to generate device entropy".to_string(), Some(e))
-            })?;
-        e
-    };
-
-    let mut session = GenesisSession::new(meta)?;
-    session.initialize_mpc(device_id, storage_nodes.clone())?;
-    session.device_entropy = device_entropy;
-    session.set_dbrw_binding(k_dbrw);
-
-    // Device commitment material for transport calls: H(session_id || device_entropy)
-    let device_commitment = {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-device-commit");
-        h.update(&session.session_id);
-        h.update(&session.device_entropy);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(h.finalize().as_bytes());
-        out
-    };
-
-    // Collect node entropies from SDK transport
-    let mut mpc_entropies: Vec<[u8; 32]> = Vec::with_capacity(storage_nodes.len());
-    for n in &storage_nodes {
-        let e = transport
-            .collect_node_entropy(n, &session.session_id, &device_commitment)
-            .await?;
-        mpc_entropies.push(e);
-    }
-    session.mpc_entropies = mpc_entropies;
-
-    session.compute_commitments();
-    session.compute_genesis_id();
-    session.validate_session()?;
-
-    Ok(session)
+    // 12. Done.
+    Ok(GenesisMpcOutcome {
+        session,
+        d_commit,
+        d_reveal,
+        eta_0,
+        pk_attest,
+    })
 }
 
 // -------------------- JNI/result bridge (bytes-only) --------------------
@@ -987,22 +1243,6 @@ mod tests {
         s.validate_session().unwrap();
     }
 
-    #[tokio::test]
-    async fn test_create_mpc_genesis_path() {
-        let dev = id32(0xAA);
-        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let k_dbrw = id32(0xDB);
-        let s = create_mpc_genesis(dev, nodes, k_dbrw, Some(b"DSMv2|test".to_vec())).await;
-
-        let sess = match s {
-            Ok(sess) => sess,
-            Err(e) => panic!("create_mpc_genesis should succeed: {e:?}"),
-        };
-        assert_ne!(sess.genesis_id, [0u8; 32]);
-        assert!(sess.verify_commitments());
-        assert_eq!(sess.mpc_entropies.len(), sess.storage_nodes.len());
-    }
-
     /// Whitepaper §2.5 conformance: an external verifier with the same
     /// public inputs (device_id, participants, metadata, contributions)
     /// must independently recompute the genesis hash byte-for-byte.
@@ -1053,28 +1293,6 @@ mod tests {
         s2.mpc_entropies = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
         s2.compute_genesis_id();
         assert_eq!(s.genesis_id, s2.genesis_id);
-    }
-
-    /// Issue #252 sub-bug 3: session.genesis_id MUST match the value the
-    /// caller-facing converter publishes.  No second recomputation under
-    /// a different formula.
-    #[tokio::test]
-    async fn session_genesis_id_matches_caller_facing_state_hash() {
-        use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
-        let dev = id32(0x77);
-        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let k_dbrw = id32(0xDB);
-        let session = create_mpc_genesis(dev, nodes, k_dbrw, Some(b"meta".to_vec()))
-            .await
-            .expect("create_mpc_genesis succeeds");
-
-        let gs = convert_session_to_genesis_state_compat(&session).expect("convert succeeds");
-
-        assert_eq!(
-            session.genesis_id, gs.hash,
-            "Issue #252 sub-bug 3: session-level genesis_id must match \
-             the GenesisState.hash returned to callers"
-        );
     }
 
     /// Domain separation: the participant commitment domain
@@ -1256,186 +1474,6 @@ mod tests {
         );
     }
 
-    /// Mock GenesisMpcTransport for Issue #252 regression tests:
-    /// returns a pre-set entropy byte-pattern per node and records
-    /// every call so tests can assert no node was skipped (sub-bug 2:
-    /// prefix-bias from `threshold_count` truncation).
-    struct FixedEntropyTransport {
-        table: std::collections::HashMap<Vec<u8>, [u8; 32]>,
-        calls: std::sync::Mutex<Vec<Vec<u8>>>,
-    }
-
-    impl FixedEntropyTransport {
-        fn new(map: &[(NodeId, [u8; 32])]) -> Self {
-            let table = map
-                .iter()
-                .map(|(n, e)| (n.as_bytes().to_vec(), *e))
-                .collect();
-            Self {
-                table,
-                calls: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-        fn called_nodes(&self) -> Vec<Vec<u8>> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl GenesisMpcTransport for FixedEntropyTransport {
-        async fn collect_node_entropy(
-            &self,
-            node: &NodeId,
-            _session_id: &[u8; 32],
-            _device_commitment: &[u8; 32],
-        ) -> Result<[u8; 32], DsmError> {
-            self.calls.lock().unwrap().push(node.as_bytes().to_vec());
-            self.table
-                .get(node.as_bytes())
-                .copied()
-                .ok_or_else(|| DsmError::invalid_operation("unknown node in mock transport"))
-        }
-    }
-
-    /// Issue #252 sub-bug 1: entropy fetched from storage nodes MUST
-    /// be preserved byte-for-byte through the genesis derivation, with
-    /// no drops or mangling on the call path.  Pinned by recomputing
-    /// `G` independently from the transport-supplied bytes.
-    #[tokio::test]
-    async fn issue_252_entropy_from_transport_is_preserved_in_genesis_hash() {
-        let device_id = id32(0xCC);
-        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let map = [
-            (nodes[0].clone(), id32(0xA1)),
-            (nodes[1].clone(), id32(0xA2)),
-            (nodes[2].clone(), id32(0xA3)),
-        ];
-        let transport = FixedEntropyTransport::new(&map);
-        let k_dbrw = id32(0xDB);
-        let session = create_mpc_genesis_with_transport(
-            device_id,
-            nodes.clone(),
-            k_dbrw,
-            Some(b"DSMv2|sub1".to_vec()),
-            &transport,
-        )
-        .await
-        .expect("transport-driven genesis should succeed");
-
-        // Transport-supplied entropy must land in mpc_entropies in
-        // call order (i.e. iteration order over storage_nodes).
-        assert_eq!(session.mpc_entropies.len(), 3);
-        assert_eq!(session.mpc_entropies[0], id32(0xA1));
-        assert_eq!(session.mpc_entropies[1], id32(0xA2));
-        assert_eq!(session.mpc_entropies[2], id32(0xA3));
-
-        // Independent recomputation of G per whitepaper §2.5.  The
-        // device_entropy is sampled locally inside
-        // `create_mpc_genesis_with_transport`, so we read it back.
-        let mut h = dsm_domain_hasher("DSM/genesis");
-        h.update(&session.device_entropy);
-        for m in &session.mpc_entropies {
-            h.update(m);
-        }
-        h.update(&canonical_a(
-            &session.device_id,
-            &session.storage_nodes,
-            &session.metadata,
-        ));
-        let mut expected = [0u8; 32];
-        expected.copy_from_slice(h.finalize().as_bytes());
-        assert_eq!(
-            session.genesis_id, expected,
-            "transport-supplied entropy bytes did not survive the call path"
-        );
-    }
-
-    /// Issue #252 sub-bug 2: with 5 storage nodes configured, entropy
-    /// collection MUST contact all 5 — not the first `threshold_count`
-    /// (the prefix-bias bug).  After Step 2 dropped the threshold
-    /// concept, this is a regression guard.
-    #[tokio::test]
-    async fn issue_252_all_n_storage_nodes_contribute_no_prefix_bias() {
-        let device_id = id32(0x55);
-        let nodes = vec![
-            NodeId::new("n1"),
-            NodeId::new("n2"),
-            NodeId::new("n3"),
-            NodeId::new("n4"),
-            NodeId::new("n5"),
-        ];
-        let map = [
-            (nodes[0].clone(), id32(0xB1)),
-            (nodes[1].clone(), id32(0xB2)),
-            (nodes[2].clone(), id32(0xB3)),
-            (nodes[3].clone(), id32(0xB4)),
-            (nodes[4].clone(), id32(0xB5)),
-        ];
-        let transport = FixedEntropyTransport::new(&map);
-        let k_dbrw = id32(0xDB);
-        let session =
-            create_mpc_genesis_with_transport(device_id, nodes.clone(), k_dbrw, None, &transport)
-                .await
-                .expect("5-node genesis should succeed");
-
-        // All 5 nodes were contacted exactly once each.
-        let called = transport.called_nodes();
-        assert_eq!(
-            called.len(),
-            5,
-            "all n nodes must be contacted (no prefix-bias)"
-        );
-        let mut called_sorted = called;
-        called_sorted.sort();
-        let mut expected_called: Vec<Vec<u8>> =
-            nodes.iter().map(|n| n.as_bytes().to_vec()).collect();
-        expected_called.sort();
-        assert_eq!(called_sorted, expected_called);
-
-        // All 5 node entropies are bound into the session.
-        assert_eq!(session.mpc_entropies.len(), 5);
-        let mut got: Vec<[u8; 32]> = session.mpc_entropies.clone();
-        got.sort();
-        let mut want = vec![id32(0xB1), id32(0xB2), id32(0xB3), id32(0xB4), id32(0xB5)];
-        want.sort();
-        assert_eq!(got, want);
-    }
-
-    /// Issue #252 sub-bug 3 (transport variant): the hash returned to
-    /// callers via `convert_session_to_genesis_state_compat` must equal
-    /// the session's own `genesis_id` even when the entropy came over
-    /// a transport (the path most exposed to mangling).  Complements
-    /// `session_genesis_id_matches_caller_facing_state_hash` above.
-    #[tokio::test]
-    async fn issue_252_transport_session_hash_matches_caller_hash() {
-        use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
-        let device_id = id32(0x77);
-        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let map = [
-            (nodes[0].clone(), id32(0xC1)),
-            (nodes[1].clone(), id32(0xC2)),
-            (nodes[2].clone(), id32(0xC3)),
-        ];
-        let transport = FixedEntropyTransport::new(&map);
-        let k_dbrw = id32(0xDB);
-        let session = create_mpc_genesis_with_transport(
-            device_id,
-            nodes,
-            k_dbrw,
-            Some(b"DSMv2|sub3-transport".to_vec()),
-            &transport,
-        )
-        .await
-        .expect("transport-driven genesis should succeed");
-
-        let gs = convert_session_to_genesis_state_compat(&session).expect("convert succeeds");
-        assert_eq!(
-            session.genesis_id, gs.hash,
-            "Issue #252 sub-bug 3 (transport): session genesis_id must \
-             match GenesisState.hash returned to callers"
-        );
-    }
-
     /// Independent recomputation of S_master from public inputs +
     /// K_DBRW must match the value the session derives, end-to-end.
     /// This pins the §11.1 IKM ordering.
@@ -1463,5 +1501,479 @@ mod tests {
         let s_master_independent = crate::crypto::hkdf::extract(b"DSM/dev\0", &ikm);
 
         assert_eq!(s_master_session, s_master_independent);
+    }
+
+    // -------------------- Orchestrator tests (Task A.4) --------------------
+    //
+    // These tests exercise `create_root_genesis_mpc` end-to-end against
+    // `InMemoryCommitRevealCluster`, an in-process mock of the storage-
+    // node-side state machine. They cover the happy path, every abort
+    // edge, and the load-bearing recomputability properties.
+
+    use std::sync::Mutex as StdMutex;
+
+    /// In-process mock of the 3-round commit-reveal storage node.
+    /// Mirrors the real handler at
+    /// `dsm_storage_node/src/api/identity/genesis_mpc.rs` byte-for-byte
+    /// for the commit_digest formula. The integration test
+    /// (`dsm_sdk/tests/genesis_mpc_e2e.rs`) exercises the real HTTP
+    /// path with the real handler; this mock is for fast unit tests
+    /// of the orchestrator alone.
+    struct InMemoryCommitRevealCluster {
+        // Per-node state, keyed by node_id.
+        nodes: StdMutex<std::collections::HashMap<[u8; 32], NodeState>>,
+        // Set of node_ids whose /offer must fail (test injection).
+        fail_offer_for: std::collections::HashSet<[u8; 32]>,
+        // Set of node_ids whose /commit fan-in must fail.
+        fail_fanout_for: std::collections::HashSet<[u8; 32]>,
+        // Set of node_ids whose /reveal must fail.
+        fail_reveal_for: std::collections::HashSet<[u8; 32]>,
+        // Set of node_ids that should return tampered reveals
+        // (entropy that does not match the prior commit_digest).
+        tamper_reveal_for: std::collections::HashSet<[u8; 32]>,
+    }
+
+    #[derive(Default)]
+    struct NodeState {
+        // Sessions this node has accepted, keyed by session_id → row.
+        sessions: std::collections::HashMap<[u8; 32], NodeSessionRow>,
+    }
+
+    struct NodeSessionRow {
+        participants: Vec<[u8; 32]>,
+        own_entropy: [u8; 32],
+        peer_commits: std::collections::HashMap<[u8; 32], [u8; 32]>,
+    }
+
+    impl InMemoryCommitRevealCluster {
+        fn new(node_ids: &[[u8; 32]]) -> Self {
+            let mut nodes = std::collections::HashMap::new();
+            for id in node_ids {
+                nodes.insert(*id, NodeState::default());
+            }
+            Self {
+                nodes: StdMutex::new(nodes),
+                fail_offer_for: std::collections::HashSet::new(),
+                fail_fanout_for: std::collections::HashSet::new(),
+                fail_reveal_for: std::collections::HashSet::new(),
+                tamper_reveal_for: std::collections::HashSet::new(),
+            }
+        }
+
+        fn with_offer_failure(mut self, node_id: [u8; 32]) -> Self {
+            self.fail_offer_for.insert(node_id);
+            self
+        }
+        fn with_fanout_failure(mut self, node_id: [u8; 32]) -> Self {
+            self.fail_fanout_for.insert(node_id);
+            self
+        }
+        fn with_reveal_failure(mut self, node_id: [u8; 32]) -> Self {
+            self.fail_reveal_for.insert(node_id);
+            self
+        }
+        fn with_tampered_reveal(mut self, node_id: [u8; 32]) -> Self {
+            self.tamper_reveal_for.insert(node_id);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GenesisMpcCommitRevealTransport for InMemoryCommitRevealCluster {
+        async fn offer(
+            &self,
+            node_id: &[u8; 32],
+            session: &crate::types::proto::GenesisMpcSessionV1,
+        ) -> Result<crate::types::proto::GenesisMpcCommitV1, DsmError> {
+            if self.fail_offer_for.contains(node_id) {
+                return Err(DsmError::invalid_operation("test: offer injected failure"));
+            }
+            let session_id: [u8; 32] = session
+                .session_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| DsmError::invalid_operation("bad session_id len"))?;
+            // Generate fresh entropy for this node's contribution.
+            let mut e_self = [0u8; 32];
+            crate::crypto::rng::random_bytes(32)
+                .as_slice()
+                .read_exact(&mut e_self)
+                .map_err(|e| DsmError::crypto("mock: rng failed", Some(e)))?;
+            // commit_digest = H("DSM/genesis-commit\0" || session_id || e_self)
+            let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-commit");
+            h.update(&session_id);
+            h.update(&e_self);
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(h.finalize().as_bytes());
+
+            let mut nodes = self.nodes.lock().unwrap();
+            let node = nodes
+                .get_mut(node_id)
+                .ok_or_else(|| DsmError::invalid_operation("mock: unknown node"))?;
+            let participants: Vec<[u8; 32]> = session
+                .participants
+                .iter()
+                .map(|p| p.as_slice().try_into().unwrap_or([0u8; 32]))
+                .collect();
+            node.sessions.insert(
+                session_id,
+                NodeSessionRow {
+                    participants,
+                    own_entropy: e_self,
+                    peer_commits: std::collections::HashMap::new(),
+                },
+            );
+
+            Ok(crate::types::proto::GenesisMpcCommitV1 {
+                session_id: session_id.to_vec(),
+                contributor_id: node_id.to_vec(),
+                commit_digest: digest.to_vec(),
+            })
+        }
+
+        async fn observe_peer_commit(
+            &self,
+            target_node_id: &[u8; 32],
+            peer_commit: &crate::types::proto::GenesisMpcCommitV1,
+        ) -> Result<(), DsmError> {
+            if self.fail_fanout_for.contains(target_node_id) {
+                return Err(DsmError::invalid_operation("test: fanout injected failure"));
+            }
+            let session_id: [u8; 32] = peer_commit
+                .session_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| DsmError::invalid_operation("bad session_id"))?;
+            let contributor_id: [u8; 32] = peer_commit
+                .contributor_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| DsmError::invalid_operation("bad contributor_id"))?;
+            let digest: [u8; 32] = peer_commit
+                .commit_digest
+                .as_slice()
+                .try_into()
+                .map_err(|_| DsmError::invalid_operation("bad commit_digest"))?;
+            let mut nodes = self.nodes.lock().unwrap();
+            let node = nodes
+                .get_mut(target_node_id)
+                .ok_or_else(|| DsmError::invalid_operation("mock: unknown target"))?;
+            let row = node
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(|| DsmError::invalid_operation("mock: session missing"))?;
+            row.peer_commits.insert(contributor_id, digest);
+            Ok(())
+        }
+
+        async fn request_reveal(
+            &self,
+            node_id: &[u8; 32],
+            request: &crate::types::proto::GenesisMpcRevealRequestV1,
+        ) -> Result<crate::types::proto::GenesisMpcRevealV1, DsmError> {
+            if self.fail_reveal_for.contains(node_id) {
+                return Err(DsmError::invalid_operation("test: reveal injected failure"));
+            }
+            let session_id: [u8; 32] = request
+                .session_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| DsmError::invalid_operation("bad session_id"))?;
+            let nodes = self.nodes.lock().unwrap();
+            let node = nodes
+                .get(node_id)
+                .ok_or_else(|| DsmError::invalid_operation("mock: unknown node"))?;
+            let row = node
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| DsmError::invalid_operation("mock: no session"))?;
+            // Spec §5 bias-resistance gate: each node releases its
+            // entropy only after seeing every peer's commit.
+            let expected_peers = row.participants.len() - 1;
+            if row.peer_commits.len() < expected_peers {
+                return Err(DsmError::invalid_operation(
+                    "mock: bias-resistance gate not satisfied (missing peer commits)",
+                ));
+            }
+            let entropy = if self.tamper_reveal_for.contains(node_id) {
+                // Return entropy that does not match the prior commit.
+                let mut tampered = row.own_entropy;
+                tampered[0] ^= 0xFF;
+                tampered
+            } else {
+                row.own_entropy
+            };
+            Ok(crate::types::proto::GenesisMpcRevealV1 {
+                session_id: session_id.to_vec(),
+                contributor_id: node_id.to_vec(),
+                entropy: entropy.to_vec(),
+            })
+        }
+    }
+
+    /// Build deterministic-ish keypair material for the orchestrator
+    /// tests. The keypair must SPHINCS+-verify under our own preimage,
+    /// so we use `sphincs::generate_sphincs_keypair` per call rather
+    /// than fabricating bytes.
+    #[allow(clippy::type_complexity)]
+    fn orchestrator_test_inputs(
+        participants: Vec<[u8; 32]>,
+    ) -> (
+        [u8; 32],
+        [u8; 32],
+        [u8; 32],
+        [u8; 32],
+        Vec<u8>,
+        Vec<u8>,
+        Vec<[u8; 32]>,
+    ) {
+        let session_id = id32(0x01);
+        let device_id = id32(0x02);
+        let device_cdbrw = id32(0x03);
+        let k_dbrw = id32(0xDB);
+        let (pk, sk) = sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        (
+            session_id,
+            device_id,
+            device_cdbrw,
+            k_dbrw,
+            pk,
+            sk,
+            participants,
+        )
+    }
+
+    fn three_participants() -> Vec<[u8; 32]> {
+        let mut a = id32(0x10);
+        let mut b = id32(0x20);
+        let mut c = id32(0x30);
+        // Force ascending lex.
+        a[0] = 0x10;
+        b[0] = 0x20;
+        c[0] = 0x30;
+        vec![a, b, c]
+    }
+
+    #[tokio::test]
+    async fn orchestrator_happy_path_3_node() {
+        let parts = three_participants();
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let out = create_root_genesis_mpc(
+            sid,
+            did,
+            dcd,
+            ps.clone(),
+            k,
+            Some(b"meta".to_vec()),
+            pk,
+            &sk,
+            &cluster,
+        )
+        .await
+        .expect("3-node happy path should succeed");
+        assert_ne!(out.session.genesis_id, [0u8; 32]);
+        assert_eq!(out.session.mpc_entropies.len(), 3);
+        assert!(out.session.verify_commitments());
+        assert_ne!(out.eta_0, [0u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_aborts_when_any_offer_fails() {
+        let parts = three_participants();
+        let bad = parts[1];
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps).with_offer_failure(bad);
+        let r = create_root_genesis_mpc(sid, did, dcd, ps, k, None, pk, &sk, &cluster).await;
+        assert!(
+            r.is_err(),
+            "must abort if any participant's offer fails (spec §5 N-of-N)"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_aborts_when_any_fanout_fails() {
+        let parts = three_participants();
+        let bad = parts[2];
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps).with_fanout_failure(bad);
+        let r = create_root_genesis_mpc(sid, did, dcd, ps, k, None, pk, &sk, &cluster).await;
+        assert!(
+            r.is_err(),
+            "must abort if any fan-out push fails (a node can't satisfy bias-resistance gate)"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_aborts_when_any_reveal_fails() {
+        let parts = three_participants();
+        let bad = parts[0];
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps).with_reveal_failure(bad);
+        let r = create_root_genesis_mpc(sid, did, dcd, ps, k, None, pk, &sk, &cluster).await;
+        assert!(
+            r.is_err(),
+            "must abort if any reveal call fails (withholding cannot complete per spec §5)"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_rejects_reveal_that_doesnt_bind_to_prior_commit() {
+        let parts = three_participants();
+        let tampered = parts[1];
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps).with_tampered_reveal(tampered);
+        let r = create_root_genesis_mpc(sid, did, dcd, ps, k, None, pk, &sk, &cluster).await;
+        assert!(
+            r.is_err(),
+            "must abort when a reveal does not bind to its prior commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn g_recomputable_from_outcome_using_whitepaper_25_formula() {
+        let parts = three_participants();
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let out = create_root_genesis_mpc(
+            sid,
+            did,
+            dcd,
+            ps.clone(),
+            k,
+            Some(b"recompute".to_vec()),
+            pk,
+            &sk,
+            &cluster,
+        )
+        .await
+        .expect("happy path");
+
+        // Independent recomputation per whitepaper §2.5:
+        // G = H("DSM/genesis\0" || device_entropy || mpc_1..n || A)
+        let mut h = dsm_domain_hasher("DSM/genesis");
+        h.update(&out.session.device_entropy);
+        for m in &out.session.mpc_entropies {
+            h.update(m);
+        }
+        h.update(&canonical_a(
+            &out.session.device_id,
+            &out.session.storage_nodes,
+            &out.session.metadata,
+        ));
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(h.finalize().as_bytes());
+        assert_eq!(out.session.genesis_id, expected);
+    }
+
+    #[tokio::test]
+    async fn every_participant_is_contacted_no_prefix_bias() {
+        // 5-node cluster — every node must be contacted in offer + reveal.
+        let mut parts: Vec<[u8; 32]> = Vec::new();
+        for i in 1u8..=5 {
+            let mut id = [0u8; 32];
+            id[0] = i * 0x10;
+            parts.push(id);
+        }
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let out = create_root_genesis_mpc(sid, did, dcd, ps.clone(), k, None, pk, &sk, &cluster)
+            .await
+            .expect("5-node MPC");
+        assert_eq!(out.session.mpc_entropies.len(), 5);
+        // Every node has a session row after the run — i.e. every
+        // participant was contacted.
+        let nodes = cluster.nodes.lock().unwrap();
+        for p in &ps {
+            assert!(
+                nodes.get(p).unwrap().sessions.contains_key(&sid),
+                "participant {p:?} was not contacted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn g_equals_session_genesis_id_returned_to_callers() {
+        use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
+        let parts = three_participants();
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let out = create_root_genesis_mpc(
+            sid,
+            did,
+            dcd,
+            ps,
+            k,
+            Some(b"caller-hash".to_vec()),
+            pk,
+            &sk,
+            &cluster,
+        )
+        .await
+        .expect("happy path");
+
+        let gs = convert_session_to_genesis_state_compat(&out.session).expect("convert");
+        assert_eq!(
+            out.session.genesis_id, gs.hash,
+            "session-level genesis_id must equal the caller-facing GenesisState.hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn d_commit_d_reveal_eta_0_match_pinned_formulas() {
+        let parts = three_participants();
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let out = create_root_genesis_mpc(sid, did, dcd, ps.clone(), k, None, pk, &sk, &cluster)
+            .await
+            .expect("happy path");
+
+        // Recompute D_commit / D_reveal / η₀ from the public outcome
+        // and confirm they match the pinned formulas at
+        // dsm/src/core/identity/genesis_mpc.rs:500-540.
+        let commits: Vec<([u8; 32], [u8; 32])> = ps
+            .iter()
+            .zip(out.session.mpc_entropies.iter())
+            .map(|(id, e)| {
+                let mut h = dsm_domain_hasher("DSM/genesis-commit");
+                h.update(&sid);
+                h.update(e);
+                let mut d = [0u8; 32];
+                d.copy_from_slice(h.finalize().as_bytes());
+                (*id, d)
+            })
+            .collect();
+        let reveals: Vec<([u8; 32], [u8; 32])> = ps
+            .iter()
+            .zip(out.session.mpc_entropies.iter())
+            .map(|(id, e)| (*id, *e))
+            .collect();
+        let d_c = compute_d_commit(&commits);
+        let d_r = compute_d_reveal(&reveals);
+        let eta = compute_eta_0(&d_c, &d_r);
+        assert_eq!(out.d_commit, d_c);
+        assert_eq!(out.d_reveal, d_r);
+        assert_eq!(out.eta_0, eta);
+    }
+
+    #[tokio::test]
+    async fn n_less_than_3_rejected() {
+        let parts: Vec<[u8; 32]> = vec![id32(0x10), id32(0x20)];
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let r = create_root_genesis_mpc(sid, did, dcd, ps, k, None, pk, &sk, &cluster).await;
+        assert!(r.is_err(), "n<3 must be rejected (whitepaper §2.5 floor)");
+    }
+
+    #[tokio::test]
+    async fn duplicate_participant_rejected() {
+        let parts: Vec<[u8; 32]> = vec![id32(0x10), id32(0x10), id32(0x20)];
+        let (sid, did, dcd, k, pk, sk, ps) = orchestrator_test_inputs(parts);
+        let cluster = InMemoryCommitRevealCluster::new(&ps);
+        let r = create_root_genesis_mpc(sid, did, dcd, ps, k, None, pk, &sk, &cluster).await;
+        assert!(
+            r.is_err(),
+            "duplicate participant_id must be rejected (set semantics)"
+        );
     }
 }

@@ -99,10 +99,7 @@ pub mod utils;
 pub mod vault;
 pub mod verification;
 
-use crate::core::identity;
 use crate::types::error::DsmError;
-
-pub use crate::core::identity::TrustlessGenesisArtifacts;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUST_VERSION: &str = env!("DSM_RUSTC_VERSION");
@@ -156,25 +153,11 @@ fn get_enabled_features() -> Vec<String> {
     features
 }
 
-/// Expose core trustless genesis creation to SDK consumers.
-///
-/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
-/// `k_dbrw` is the device's DBRW binding per whitepaper §12 def.3 —
-/// callers obtain it from
-/// `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
-pub async fn create_trustless_genesis<
-    S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
->(
-    device_id: String,
-    storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    k_dbrw: [u8; 32],
-    metadata: Option<String>,
-    storage: Option<&S>,
-) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, k_dbrw, metadata, storage)
-        .await
-        .map_err(DsmError::from)
-}
+// `create_trustless_genesis` deleted alongside its mod.rs implementation
+// (zero external callers). The canonical production entry point for
+// genesis creation is `dsm::core::identity::genesis_mpc::create_root_genesis_mpc`,
+// invoked from `dsm_sdk::sdk::identity_sdk::IdentitySDK::create_genesis`
+// with a real `HttpGenesisMpcTransport`.
 
 // verify_trustless_identity wrapper deleted: zero external callers, and
 // the underlying impl was deleted (it relied on state_number reads

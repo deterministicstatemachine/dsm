@@ -154,11 +154,10 @@ impl GenesisPublisher for SdkGenesisPublisher {
             payload.public_key.len(),
             payload.participants.len()
         );
-        // Serialize payload to bytes (using deterministic protobuf if possible, or just raw bytes for now)
-        // For now, we'll just serialize the genesis hash and device id as a simple check
-        // In a real implementation, we would use a proper protobuf serialization
-
-        // Serialize the full payload using our binary format
+        // Serialize the payload via the local deterministic binary
+        // encoder. Task A.4 follow-up: migrate to `PublishableGenesisV1`
+        // proto + content-addressed `addr = H("DSM/genesis-mirror\0" || G)`
+        // per spec §6; tracked as a separate publication-path commit.
         let body = Self::serialize_payload(payload);
 
         // Use the path as the key for StorageNodeSDK

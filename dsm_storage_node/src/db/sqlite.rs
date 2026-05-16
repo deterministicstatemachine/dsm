@@ -297,8 +297,10 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                 -- Genesis MPC sessions (spec §5 / plan Task A.3).
                 -- A row exists only while a session is live (offer
                 -- accepted; awaiting reveal or already revealed).
-                -- Rows are deleted when the deadline+grace window
-                -- expires (purge_expired_genesis_mpc_sessions).
+                -- Rows are purged via admin tooling (operator-supplied
+                -- cutoff against `created_at_cycle`). Per spec §1
+                -- ("clockless"), there is no protocol-level deadline —
+                -- session liveness is operator policy, not consensus.
                 --
                 -- N-of-N protocol: there is NO threshold column. The
                 -- `participants_blob` is the concatenation of all N
@@ -306,18 +308,24 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                 -- `participants_blob.len() / 32` recovers N. All N
                 -- participants are required to commit AND reveal —
                 -- spec §5 says withholding cannot bias, only DoS.
+                --
+                -- `initiator_signature` is the SPHINCS+ signature over
+                -- the canonical-encoded session fields under domain
+                -- "DSM/genesis-mpc-offer\0". The storage node verifies
+                -- on /offer; stored for audit. Storage nodes never
+                -- sign (spec §1) — they verify device sigs (spec §2).
                 CREATE TABLE IF NOT EXISTS genesis_mpc_sessions (
                     session_id           BLOB PRIMARY KEY,   -- 32 bytes
                     initiator_device_id  BLOB NOT NULL,      -- 32 bytes
-                    initiator_pk         BLOB NOT NULL,      -- SPHINCS+ pk
+                    initiator_pk_attest  BLOB NOT NULL,      -- SPHINCS+ pk_attest
                     initiator_cdbrw      BLOB NOT NULL,      -- 32 bytes
                     participants_blob    BLOB NOT NULL,      -- N × 32 bytes, sorted
-                    deadline_cycle       INTEGER NOT NULL,
+                    initiator_signature  BLOB NOT NULL,      -- SPHINCS+ sig over canonical bytes
                     state                TEXT NOT NULL,      -- "offered" | "revealed" | "expired"
                     created_at_cycle     INTEGER NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_deadline
-                    ON genesis_mpc_sessions(deadline_cycle);
+                CREATE INDEX IF NOT EXISTS idx_genesis_mpc_sessions_created_at
+                    ON genesis_mpc_sessions(created_at_cycle);
 
                 -- Genesis MPC contributions known to this node for a
                 -- given session. Each row is one contributor (this node
@@ -1467,10 +1475,17 @@ pub async fn verify_bytecommit_chain_empty(
 pub struct GenesisMpcSessionRow {
     pub session_id: Vec<u8>,
     pub initiator_device_id: Vec<u8>,
-    pub initiator_pk: Vec<u8>,
+    /// SPHINCS+ platform-attestation public key (`pk_attest`) carried
+    /// on the offer envelope. Used to derive `initiator_device_id`
+    /// and to verify `initiator_signature`. Storage nodes do NOT
+    /// sign — they verify device sigs (spec §1 + §2).
+    pub initiator_pk_attest: Vec<u8>,
     pub initiator_cdbrw: Vec<u8>,
     pub participants_blob: Vec<u8>,
-    pub deadline_cycle: i64,
+    /// SPHINCS+ signature over canonical-encoded session fields
+    /// under "DSM/genesis-mpc-offer\0" domain. Verified on /offer
+    /// and stored for audit.
+    pub initiator_signature: Vec<u8>,
     pub state: String,
     pub created_at_cycle: i64,
 }
@@ -1502,16 +1517,16 @@ pub async fn genesis_mpc_session_insert(
     with_conn(pool, move |conn| {
         match conn.execute(
             "INSERT INTO genesis_mpc_sessions
-             (session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
-              participants_blob, deadline_cycle, state, created_at_cycle)
+             (session_id, initiator_device_id, initiator_pk_attest, initiator_cdbrw,
+              participants_blob, initiator_signature, state, created_at_cycle)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session.session_id,
                 session.initiator_device_id,
-                session.initiator_pk,
+                session.initiator_pk_attest,
                 session.initiator_cdbrw,
                 session.participants_blob,
-                session.deadline_cycle,
+                session.initiator_signature,
                 session.state,
                 session.created_at_cycle,
             ],
@@ -1541,18 +1556,18 @@ pub async fn genesis_mpc_session_get(
     with_conn(pool, move |conn| {
         let row = conn
             .query_row(
-                "SELECT session_id, initiator_device_id, initiator_pk, initiator_cdbrw,
-                        participants_blob, deadline_cycle, state, created_at_cycle
+                "SELECT session_id, initiator_device_id, initiator_pk_attest, initiator_cdbrw,
+                        participants_blob, initiator_signature, state, created_at_cycle
                  FROM genesis_mpc_sessions WHERE session_id = ?1",
                 params![session_id],
                 |row| {
                     Ok(GenesisMpcSessionRow {
                         session_id: row.get(0)?,
                         initiator_device_id: row.get(1)?,
-                        initiator_pk: row.get(2)?,
+                        initiator_pk_attest: row.get(2)?,
                         initiator_cdbrw: row.get(3)?,
                         participants_blob: row.get(4)?,
-                        deadline_cycle: row.get(5)?,
+                        initiator_signature: row.get(5)?,
                         state: row.get(6)?,
                         created_at_cycle: row.get(7)?,
                     })
@@ -1582,25 +1597,26 @@ pub async fn genesis_mpc_session_set_state(
     .await
 }
 
-/// Purge sessions whose deadline + grace < cutoff_cycle. Returns the
+/// Purge sessions whose `created_at_cycle < cutoff_cycle`. Returns the
 /// number of session rows removed (cascading contribution rows are
 /// removed explicitly via the same call).
-pub async fn genesis_mpc_session_purge_expired(
-    pool: &DBPool,
-    cutoff_cycle: i64,
-) -> Result<usize> {
+///
+/// Per spec §1 (clockless), this is operator policy invoked via the
+/// admin router — NOT a protocol-level deadline. The handler layer
+/// never references this purge directly.
+pub async fn genesis_mpc_session_purge_expired(pool: &DBPool, cutoff_cycle: i64) -> Result<usize> {
     with_conn(pool, move |conn| {
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM genesis_mpc_contributions
              WHERE session_id IN (
                  SELECT session_id FROM genesis_mpc_sessions
-                 WHERE deadline_cycle < ?1
+                 WHERE created_at_cycle < ?1
              )",
             params![cutoff_cycle],
         )?;
         let n = tx.execute(
-            "DELETE FROM genesis_mpc_sessions WHERE deadline_cycle < ?1",
+            "DELETE FROM genesis_mpc_sessions WHERE created_at_cycle < ?1",
             params![cutoff_cycle],
         )?;
         tx.commit()?;
@@ -1703,10 +1719,7 @@ pub async fn genesis_mpc_contribution_list(
 /// Count distinct contributors for a session — used for the
 /// bias-resistance gate (must observe ≥ threshold-1 OTHER commits
 /// before revealing).
-pub async fn genesis_mpc_contribution_count(
-    pool: &DBPool,
-    session_id: &[u8],
-) -> Result<i64> {
+pub async fn genesis_mpc_contribution_count(pool: &DBPool, session_id: &[u8]) -> Result<i64> {
     let session_id = session_id.to_vec();
     with_conn(pool, move |conn| {
         let n: i64 = conn.query_row(

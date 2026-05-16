@@ -1039,44 +1039,12 @@ impl StorageNodeSDK {
         Ok(result)
     }
 
-    /// Initialize MPC Genesis identity for quantum-resistant operations
-    pub async fn initialize_mpc_genesis(&self, config: MpcGenesisConfig) -> Result<(), DsmError> {
-        if !self.config.advanced_features.enable_mpc_genesis {
-            return Err(DsmError::crypto(
-                "MPC Genesis not enabled in configuration".to_string(),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Store MPC Genesis configuration - scope the lock
-        {
-            let mut mpc_config = self.mpc_genesis_config.write().await;
-            *mpc_config = Some(config.clone());
-        } // Lock is released here
-
-        // Initialize identity with the storage node using the create_genesis_with_mpc method.
-        // No threshold parameter — n-of-n MPC per whitepaper §2.5.
-        match self.create_genesis_with_mpc(None).await {
-            Ok(response) => {
-                if !response.session_id.is_empty() {
-                    info!(
-                        "MPC Genesis initialized successfully for {} with session {}",
-                        config.identity_id, response.session_id
-                    );
-                    Ok(())
-                } else {
-                    Err(DsmError::crypto(
-                        "MPC Genesis failed: empty session ID".to_string(),
-                        None::<std::io::Error>,
-                    ))
-                }
-            }
-            Err(e) => Err(DsmError::crypto(
-                format!("MPC Genesis initialization failed: {e}"),
-                None::<std::io::Error>,
-            )),
-        }
-    }
+    // `initialize_mpc_genesis` deleted (Task A.4). Zero production
+    // callers; the wrapper combined a config-store with
+    // `create_genesis_with_mpc` and added nothing real. Production
+    // wallet creation goes through
+    // `IdentitySDK::create_genesis` (which uses the new
+    // `HttpGenesisMpcTransport` against real storage nodes).
 
     /// Perform bilateral sync with remote nodes
     pub async fn bilateral_sync(&self) -> Result<(), DsmError> {
@@ -2129,6 +2097,7 @@ impl StorageNodeSDK {
             discovered_nodes: self.config.node_urls.clone(),
             discovery_method: "configuration".to_string(),
             event_counter: dt::tick(),
+            discovered_node_infos: vec![],
         };
         Ok(resp)
     }

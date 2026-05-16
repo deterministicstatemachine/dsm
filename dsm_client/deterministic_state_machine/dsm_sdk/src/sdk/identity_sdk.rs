@@ -68,7 +68,10 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::types::state_types::{State, DeviceInfo};
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
+// `create_genesis_via_blind_mpc` was a thin wrapper around the
+// orchestrator; this SDK now invokes the orchestrator
+// (`create_root_genesis_mpc`) directly with a real
+// `HttpGenesisMpcTransport`.
 
 // ExtendedRelationshipContext struct deleted: only used by
 // IdentitySDK::create_relationship_context + get_relationship_context, both
@@ -476,13 +479,26 @@ impl IdentitySDK {
     ///     Some(vec![9, 10, 11, 12])
     /// ).map_err(|_e| DsmError::internal(e.to_string(), None))?;
     /// ```
+    #[cfg(not(feature = "storage"))]
+    pub fn create_genesis(
+        &self,
+        _device_info: DeviceInfo,
+        _participant_inputs: Vec<Vec<u8>>,
+        _metadata: Option<Vec<u8>>,
+    ) -> Result<State, DsmError> {
+        Err(DsmError::invalid_operation(
+            "IdentitySDK::create_genesis requires the `storage` feature; \
+             production genesis MPC contacts real storage-node URLs.",
+        ))
+    }
+
+    #[cfg(feature = "storage")]
     pub fn create_genesis(
         &self,
         device_info: DeviceInfo,
         participant_inputs: Vec<Vec<u8>>,
         metadata: Option<Vec<u8>>,
     ) -> Result<State, DsmError> {
-        #[cfg(feature = "storage")]
         log::info!(
             "IdentitySDK::create_genesis(start): identity_id='{}' device_label='{}' participant_inputs={} storage_sdk_set={}",
             self.identity_id,
@@ -499,8 +515,8 @@ impl IdentitySDK {
 
         // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
 
-        // Call core backend genesis creation via MPC to get proper cryptographic genesis
-        // Derive a deterministic device id for MPC path from identity id + device id to keep tests stable
+        // Derive a deterministic 32-byte device id for MPC path from
+        // identity id + device id to keep tests stable.
         let mut id_hasher = dsm_domain_hasher("DSM/identity-mpc-id");
         id_hasher.update(self.identity_id.as_bytes());
         id_hasher.update(&device_info.device_id);
@@ -508,27 +524,129 @@ impl IdentitySDK {
         let mut device_id_arr = [0u8; 32];
         device_id_arr.copy_from_slice(id_hash.as_bytes());
 
-        // Use a fixed set of test node IDs (≥3 per whitepaper §2.5).
-        let test_nodes = vec![
-            dsm::types::identifiers::NodeId::new("n1"),
-            dsm::types::identifiers::NodeId::new("n2"),
-            dsm::types::identifiers::NodeId::new("n3"),
-        ];
-
-        #[cfg(feature = "storage")]
-        log::info!(
-            "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
-            test_nodes.len()
-        );
         let k_dbrw =
             crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key("identity_sdk")
                 .map_err(dsm::types::error::DsmError::invalid_operation)?;
-        let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
-            device_id_arr,
-            test_nodes.clone(),
-            k_dbrw,
-            None,
-        ))?;
+
+        // ---- Genesis MPC against real storage nodes (Task A.4) ----
+        //
+        // No more `test_nodes = [n1, n2, n3]` placeholder. The SDK
+        // contacts every URL in `storage_sdk.get_node_urls()`,
+        // resolves each to its self-reported 32-byte node_id via
+        // `/api/v2/node/identity`, and runs the strict N-of-N
+        // commit-reveal protocol against the first ≥3 reachable
+        // participants.
+        //
+        // Followups (not in this commit): deterministic session_id
+        // from `H("DSM/genesis-mpc-session\0" || R_reg || device_id)`
+        // and `Permute(session_id, registry)` participant selection.
+        // Both are economic-security improvements; the immediate
+        // atomic outcome (zero placeholders, real network MPC) is
+        // achieved here without them.
+
+        let storage_sdk = self
+            .storage_sdk
+            .read()
+            .map_err(|_| DsmError::LockError)?
+            .clone()
+            .ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "IdentitySDK::create_genesis: storage_sdk not configured; \
+                     production genesis MPC requires storage-node URLs.",
+                )
+            })?;
+        let urls = storage_sdk.get_node_urls();
+        if urls.len() < 3 {
+            return Err(DsmError::invalid_operation(format!(
+                "IdentitySDK::create_genesis: need ≥3 storage-node URLs \
+                 (whitepaper §2.5); have {}",
+                urls.len()
+            )));
+        }
+
+        // Resolve URL → real node_id via /api/v2/node/identity. Pick
+        // the first ≥3 reachable nodes. Defer adversarial-stage-6
+        // discovery cross-verify (would require registry-driven
+        // selection — out of scope for this commit per plan
+        // "out-of-scope" note).
+        let mut node_urls_pairs: Vec<([u8; 32], String)> = Vec::with_capacity(urls.len());
+        for url in &urls {
+            match futures::executor::block_on(
+                crate::sdk::genesis_mpc_transport::fetch_node_identity(url),
+            ) {
+                Ok(id) => node_urls_pairs.push((id, url.to_string())),
+                Err(e) => {
+                    log::warn!("IdentitySDK::create_genesis: skipping unreachable node {url}: {e}");
+                }
+            }
+            if node_urls_pairs.len() >= 3 {
+                break;
+            }
+        }
+        if node_urls_pairs.len() < 3 {
+            return Err(DsmError::invalid_operation(format!(
+                "IdentitySDK::create_genesis: only {} of {} storage-node URLs \
+                 reachable; need ≥3 for N-of-N MPC.",
+                node_urls_pairs.len(),
+                urls.len()
+            )));
+        }
+
+        // Device's platform-attestation SPHINCS+ keypair. In a
+        // production silicon-binding integration this would come
+        // from the secure element; for this pass we generate a
+        // fresh keypair per session — still defeats offer
+        // front-running (sk_attest never leaves this process).
+        let (pk_attest, sk_attest) = dsm::crypto::sphincs::generate_sphincs_keypair()?;
+
+        // Random session_id (defer deterministic
+        // H("DSM/genesis-mpc-session\0" || R_reg || device_id)).
+        let mut session_id_arr = [0u8; 32];
+        use std::io::Read;
+        dsm::crypto::rng::random_bytes(32)
+            .as_slice()
+            .read_exact(&mut session_id_arr)
+            .map_err(|e| DsmError::crypto("failed to sample session_id", Some(e)))?;
+
+        // Build participants list, canonicalised by the orchestrator.
+        let participants: Vec<[u8; 32]> = node_urls_pairs.iter().map(|(id, _)| *id).collect();
+
+        // Compute device_cdbrw binding for the offer envelope.
+        let device_cdbrw = {
+            let mut h = dsm_domain_hasher("DSM/genesis-mpc-cdbrw");
+            h.update(&device_id_arr);
+            h.update(&k_dbrw);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.finalize().as_bytes());
+            out
+        };
+
+        let transport =
+            crate::sdk::genesis_mpc_transport::HttpGenesisMpcTransport::new(node_urls_pairs);
+
+        #[cfg(feature = "storage")]
+        log::info!(
+            "IdentitySDK::create_genesis: launching N-of-N MPC against {} participants",
+            participants.len()
+        );
+
+        let outcome = futures::executor::block_on(
+            dsm::core::identity::genesis_mpc::create_root_genesis_mpc(
+                session_id_arr,
+                device_id_arr,
+                device_cdbrw,
+                participants,
+                k_dbrw,
+                None,
+                pk_attest,
+                &sk_attest,
+                &transport,
+            ),
+        )?;
+
+        let genesis_state = dsm::core::identity::genesis::convert_session_to_genesis_state_compat(
+            &outcome.session,
+        )?;
 
         #[cfg(feature = "storage")]
         log::info!(
@@ -558,11 +676,13 @@ impl IdentitySDK {
                 )));
             }
 
+            let participants_for_payload: Vec<dsm::types::identifiers::NodeId> =
+                outcome.session.storage_nodes.clone();
             let payload = SanitizedGenesisPayload {
                 genesis_hash: genesis_hash_arr,
                 device_id: device_id_arr,
                 public_key: genesis_state.signing_key.public_key.clone(),
-                participants: test_nodes,
+                participants: participants_for_payload,
                 created_at_ticks: dsm::utils::deterministic_time::tick_index(),
             };
 
