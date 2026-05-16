@@ -1474,44 +1474,60 @@ message GenesisCreated {
 // spec §5: "withholding a reveal cannot bias ordering post-commit").
 // There is no t-of-n DKG, no Shamir share recovery.
 //
+// SIGNATURE-FREE. Storage nodes are dumb mirrors. Per spec §1 and §2:
+// "Dumb storage nodes: store, mirror, and enforce arithmetic; never
+// sign." The commit binds the entropy via BLAKE3 alone; no SPHINCS+
+// sig appears anywhere in this commit-reveal protocol. The device
+// (orchestrator) does sign the resulting RootBindingRecord with its
+// own pk_1 — but that is a separate later step, not part of these
+// envelopes.
+//
 // All hashes are BLAKE3-256 with explicit domain separation per the
 // "DSM/<tag>\0" convention (tag bytes followed by a single NUL).
 //
-// Session flow (root device perspective):
+// Session flow (root device = orchestrator perspective):
 //   1. Offer: build GenesisMpcSessionV1 with the declared N-of-N
 //      participant set (n ≥ 3 distinct storage node IDs, sorted
 //      ascending lex). POST to every participant.
 //   2. Accept: each participant verifies its own node_id is in the
-//      participant set, persists the session, returns its own signed
-//      commit (commit_digest_i) — generated locally from a fresh
-//      32-byte e_i it does NOT yet release.
+//      participant set, persists the session, returns its own
+//      GenesisMpcCommitV1 — generated locally from a fresh 32-byte
+//      e_i it does NOT yet release. The commit_digest is
+//        H("DSM/genesis-commit\0" || session_id || e_i)
+//      matching dsm/src/core/identity/genesis_mpc.rs exactly.
 //   3. Commit fan-out: the orchestrator collects all n commits and
 //      pushes each peer commit to every other participant via the
 //      /commit endpoint. Each node stores peer commits idempotently
-//      (commit_digest as-received; no cross-verification here —
-//      orchestrator is trusted to forward genuine commits, and any
-//      forgery is caught at combine when D_commit derivation diverges).
+//      (commit_digest as-received; no cross-verification — there is
+//      no signature to verify, and the binding is enforced at
+//      combine when the device recomputes the digest from the reveal).
 //   4. Bias-resistance gate: a node MUST observe stored commits from
 //      ALL OTHER n-1 declared participants before releasing its e_i.
 //   5. Reveal phase: orchestrator POSTs /reveal to each node; each
-//      node returns its signed GenesisMpcRevealV1.
-//   6. Combine (root device only):
-//        D_commit = H_concat( commit_digest_i for i sorted by contributor_id )
-//        D_reveal = H_concat( e_i for i sorted by contributor_id )
+//      node returns its GenesisMpcRevealV1 (entropy in the clear).
+//   6. Combine (root device only). The device recomputes each
+//      participant's commit_digest from the revealed entropy and
+//      rejects any mismatch. Then computes:
 //        eta_0    = H("DSM/anchor/eta\0" || D_commit || D_reveal)
-//        A_0      = ProtoDet( contributor_id || initiator_pk
-//                             || initiator_cdbrw || D_reveal )
-//        G        = H("DSM/genesis\0" || A_0)
+//        G        = H("DSM/genesis\0" || device_entropy
+//                                     || mpc_1 || ... || mpc_n
+//                                     || A)
+//      where A = canonical_a(device_id, sorted_participants, metadata)
+//      per `compute_genesis_id` in
+//      dsm/src/core/identity/genesis_mpc.rs.
 //
-// `H_concat` is byte concatenation of the sorted hashes (no separator,
-// no length prefix — each element is fixed 32 bytes). Sort is ascending
-// lexicographic over contributor_id bytes, matching the existing core
-// MPC orchestration in dsm/src/core/identity/genesis_mpc.rs.
+// D_commit / D_reveal are implementation-defined byte aggregates of
+// the sorted (by contributor_id) commits and reveals respectively.
+// They are NOT yet pinned in the core code — they live alongside the
+// future combine implementation. Down-stream code that lands first
+// MUST pin them in core, then update this comment to match.
 
 message GenesisMpcSessionV1 {
-  // 32 bytes. Derivation:
-  //   H("DSM/genesis-mpc-session\0" || initiator_device_id
-  //     || initiator_nonce || initiator_cdbrw)
+  // Opaque 32-byte session id chosen by the orchestrator (the device).
+  // The existing core MPC at dsm/src/core/identity/genesis_mpc.rs uses
+  // 32 random bytes; storage nodes treat this field as opaque and
+  // never recompute it. Uniqueness is the only invariant the storage
+  // node enforces (write-once on insert; duplicates return 409).
   bytes session_id = 1 [(dsm_fixed_len)=32];
   // Root device's DevID.
   bytes initiator_device_id = 2 [(dsm_fixed_len)=32];
@@ -1536,10 +1552,15 @@ message GenesisMpcSessionV1 {
 // commits by recomputing the hash, not by checking a signature).
 message GenesisMpcCommitV1 {
   bytes session_id = 1 [(dsm_fixed_len)=32];
-  // Storage node ID (the storage_node_id, 32 bytes).
+  // Storage node ID (the 32-byte storage_node_id). Used only as a
+  // wire label so the orchestrator can associate this commit with a
+  // specific participant — it does NOT enter the commit_digest hash.
   bytes contributor_id = 2 [(dsm_fixed_len)=32];
-  // commit_digest = H("DSM/genesis-commit\0"
-  //                    || session_id || contributor_id || entropy_i)
+  // commit_digest = H("DSM/genesis-commit\0" || session_id || entropy_i)
+  //
+  // Matches dsm/src/core/identity/genesis_mpc.rs::compute_commitments
+  // exactly. contributor_id is intentionally NOT in the hash input
+  // (the existing core verifier won't include it either).
   bytes commit_digest = 3 [(dsm_fixed_len)=32];
 }
 
@@ -1547,8 +1568,9 @@ message GenesisMpcRevealV1 {
   bytes session_id = 1 [(dsm_fixed_len)=32];
   bytes contributor_id = 2 [(dsm_fixed_len)=32];
   // 32-byte entropy that hashes to the prior commit_digest. Recipient
-  // re-derives commit_digest and rejects on mismatch — no signature
-  // path exists.
+  // (the orchestrating device) re-derives
+  //   H("DSM/genesis-commit\0" || session_id || entropy)
+  // and rejects on mismatch. There is no signature path.
   bytes entropy = 3 [(dsm_fixed_len)=32];
 }
 
@@ -1562,9 +1584,14 @@ message GenesisMpcCombinedV1 {
   repeated GenesisMpcRevealV1 reveals = 2;
   // H("DSM/device-commit\0" || initiator_pk || initiator_cdbrw)
   bytes initiator_device_commitment = 3 [(dsm_fixed_len)=32];
-  // G = H("DSM/genesis\0" || ProtoDet(A_0))
+  // G = H("DSM/genesis\0" || device_entropy || mpc_1 || … || mpc_n || A)
+  // where A = canonical_a(device_id, sorted_participants, metadata)
+  // per dsm/src/core/identity/genesis_mpc.rs::compute_genesis_id.
   bytes computed_g = 4 [(dsm_fixed_len)=32];
-  // eta_0 = H("DSM/anchor/eta\0" || D_commit || D_reveal)
+  // eta_0 = H("DSM/anchor/eta\0" || D_commit || D_reveal). The exact
+  // byte aggregation rule for D_commit / D_reveal is not yet pinned
+  // in core code; the orchestrator's combine implementation MUST
+  // define it before this field is populated by any production path.
   bytes computed_eta_0 = 5 [(dsm_fixed_len)=32];
 }
 

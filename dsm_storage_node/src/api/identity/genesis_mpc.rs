@@ -172,10 +172,15 @@ async fn offer(
         .try_fill_bytes(&mut e_self)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // commit_digest = H("DSM/genesis-commit\0" || session_id || self_id || e_self)
-    let mut input = Vec::with_capacity(32 + 32 + 32);
+    // commit_digest = H("DSM/genesis-commit\0" || session_id || entropy)
+    //
+    // Matches the canonical formula in
+    // `dsm/src/core/identity/genesis_mpc.rs::compute_commitments` —
+    // contributor_id is NOT in the hash input. The wire envelope
+    // carries contributor_id separately so the orchestrator can label
+    // and order commits during combine, but it never enters the hash.
+    let mut input = Vec::with_capacity(32 + 32);
     input.extend_from_slice(&session.session_id);
-    input.extend_from_slice(&self_id);
     input.extend_from_slice(&e_self);
     let commit_digest = domain_hash_bytes(COMMIT_DOMAIN, &input);
 
@@ -962,6 +967,64 @@ mod tests {
         assert!(
             contribs.is_empty(),
             "contributions should cascade-purge with the session"
+        );
+    }
+
+    /// Cross-check: the commit_digest this handler produces and stores
+    /// MUST match what `dsm::crypto::blake3::domain_hash` produces for
+    /// `domain="DSM/genesis-commit"`, body=`session_id || entropy`.
+    ///
+    /// This is the same formula
+    /// `dsm/src/core/identity/genesis_mpc.rs::compute_commitments`
+    /// uses to compute commitments — if the orchestrator's
+    /// `verify_commitments` doesn't see the same input bytes, every
+    /// MPC session will fail at combine time.
+    #[tokio::test]
+    async fn commit_digest_matches_core_genesis_commit_formula() {
+        use dsm::crypto::blake3::domain_hash_bytes;
+
+        let state = test_state_for_node("kat-commit").await;
+        let participants = participants_including(&state, 3);
+        let session_id = [0xC1u8; 32];
+        let body = make_session_proto(&session_id, 1_000, &participants);
+
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/genesis/mpc/offer")
+                    .body(Body::from(body))
+                    .expect("req"),
+            )
+            .await
+            .expect("offer");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Pull our own contribution row back out and recompute the
+        // commit_digest from the secret entropy + session_id, using
+        // the same domain tag the canonical core uses.
+        let own = db::genesis_mpc_contribution_get(
+            &state.db_pool,
+            &session_id,
+            state.node_id.as_bytes(),
+        )
+        .await
+        .expect("get own")
+        .expect("own row");
+        let entropy = own.own_entropy.expect("own_entropy stored at /offer");
+        assert_eq!(entropy.len(), 32);
+
+        let mut input = Vec::with_capacity(64);
+        input.extend_from_slice(&session_id);
+        input.extend_from_slice(&entropy);
+        let expected = domain_hash_bytes("DSM/genesis-commit", &input);
+        assert_eq!(
+            own.commit_digest.as_slice(),
+            &expected,
+            "handler's commit_digest must match \
+             H(\"DSM/genesis-commit\\0\" || session_id || entropy) \
+             — same as dsm/src/core/identity/genesis_mpc.rs"
         );
     }
 

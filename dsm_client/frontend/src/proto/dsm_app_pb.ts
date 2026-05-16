@@ -11335,9 +11335,11 @@ export class GenesisCreated extends Message<GenesisCreated> {
  */
 export class GenesisMpcSessionV1 extends Message<GenesisMpcSessionV1> {
   /**
-   * 32 bytes. Derivation:
-   *   H("DSM/genesis-mpc-session\0" || initiator_device_id
-   *     || initiator_nonce || initiator_cdbrw)
+   * Opaque 32-byte session id chosen by the orchestrator (the device).
+   * The existing core MPC at dsm/src/core/identity/genesis_mpc.rs uses
+   * 32 random bytes; storage nodes treat this field as opaque and
+   * never recompute it. Uniqueness is the only invariant the storage
+   * node enforces (write-once on insert; duplicates return 409).
    *
    * @generated from field: bytes session_id = 1;
    */
@@ -11431,15 +11433,20 @@ export class GenesisMpcCommitV1 extends Message<GenesisMpcCommitV1> {
   sessionId = new Uint8Array(0);
 
   /**
-   * Storage node ID (the storage_node_id, 32 bytes).
+   * Storage node ID (the 32-byte storage_node_id). Used only as a
+   * wire label so the orchestrator can associate this commit with a
+   * specific participant — it does NOT enter the commit_digest hash.
    *
    * @generated from field: bytes contributor_id = 2;
    */
   contributorId = new Uint8Array(0);
 
   /**
-   * commit_digest = H("DSM/genesis-commit\0"
-   *                    || session_id || contributor_id || entropy_i)
+   * commit_digest = H("DSM/genesis-commit\0" || session_id || entropy_i)
+   *
+   * Matches dsm/src/core/identity/genesis_mpc.rs::compute_commitments
+   * exactly. contributor_id is intentionally NOT in the hash input
+   * (the existing core verifier won't include it either).
    *
    * @generated from field: bytes commit_digest = 3;
    */
@@ -11491,8 +11498,9 @@ export class GenesisMpcRevealV1 extends Message<GenesisMpcRevealV1> {
 
   /**
    * 32-byte entropy that hashes to the prior commit_digest. Recipient
-   * re-derives commit_digest and rejects on mismatch — no signature
-   * path exists.
+   * (the orchestrating device) re-derives
+   *   H("DSM/genesis-commit\0" || session_id || entropy)
+   * and rejects on mismatch. There is no signature path.
    *
    * @generated from field: bytes entropy = 3;
    */
@@ -11556,14 +11564,19 @@ export class GenesisMpcCombinedV1 extends Message<GenesisMpcCombinedV1> {
   initiatorDeviceCommitment = new Uint8Array(0);
 
   /**
-   * G = H("DSM/genesis\0" || ProtoDet(A_0))
+   * G = H("DSM/genesis\0" || device_entropy || mpc_1 || … || mpc_n || A)
+   * where A = canonical_a(device_id, sorted_participants, metadata)
+   * per dsm/src/core/identity/genesis_mpc.rs::compute_genesis_id.
    *
    * @generated from field: bytes computed_g = 4;
    */
   computedG = new Uint8Array(0);
 
   /**
-   * eta_0 = H("DSM/anchor/eta\0" || D_commit || D_reveal)
+   * eta_0 = H("DSM/anchor/eta\0" || D_commit || D_reveal). The exact
+   * byte aggregation rule for D_commit / D_reveal is not yet pinned
+   * in core code; the orchestrator's combine implementation MUST
+   * define it before this field is populated by any production path.
    *
    * @generated from field: bytes computed_eta_0 = 5;
    */
