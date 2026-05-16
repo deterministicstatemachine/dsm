@@ -10,9 +10,11 @@ pub mod auth;
 pub mod db;
 #[cfg(feature = "dev-replication")]
 pub mod dev_replication;
+pub mod identity;
 pub mod replication;
 pub mod timing;
 
+use identity::StorageNodeMpcKey;
 use replication::StorageNodeId;
 
 #[derive(Clone)]
@@ -22,6 +24,11 @@ pub struct AppState {
     pub db_pool: Arc<db::DBPool>,
     pub replication_manager: Arc<replication::ReplicationManager>,
     pub current_tick: Arc<AtomicI64>,
+    /// Per-node SPHINCS+ keypair used to sign Genesis-MPC
+    /// commit/reveal contributions (spec §5). Optional because
+    /// in-memory test harnesses can omit it; production paths must
+    /// load the key on startup before mounting MPC endpoints.
+    pub mpc_key: Option<Arc<StorageNodeMpcKey>>,
 }
 
 impl AppState {
@@ -46,7 +53,15 @@ impl AppState {
             db_pool,
             replication_manager,
             current_tick: Arc::new(AtomicI64::new(0)),
+            mpc_key: None,
         }
+    }
+
+    /// Attach the storage node's genesis-MPC participation keypair.
+    /// Returns a new AppState with the key set; consumes `self`.
+    pub fn with_mpc_key(mut self, mpc_key: Arc<StorageNodeMpcKey>) -> Self {
+        self.mpc_key = Some(mpc_key);
+        self
     }
 }
 

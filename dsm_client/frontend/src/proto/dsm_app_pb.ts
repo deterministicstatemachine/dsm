@@ -8666,6 +8666,78 @@ export class StorageNodeInfoV1 extends Message<StorageNodeInfoV1> {
 }
 
 /**
+ * Response for GET /api/v2/node/info. Used by SDK clients to discover
+ * MPC genesis participants — the `mpc_public_key` here is what the
+ * SDK installs into the local GenesisMpcTransport when offering a
+ * session. See docs/plans/2026-04-24-genesis-mpc-and-device-tree.md
+ * Task A.2.
+ *
+ * @generated from message dsm.NodeMpcInfoV1
+ */
+export class NodeMpcInfoV1 extends Message<NodeMpcInfoV1> {
+  /**
+   * Canonical Base32-Crockford node id (matches the gossip
+   * StorageNodeInfoV1.node_id encoding).
+   *
+   * @generated from field: string node_id = 1;
+   */
+  nodeId = "";
+
+  /**
+   * SPHINCS+ public key (SPX256f variant). Used by clients to verify
+   * this node's commit/reveal signatures in MPC sessions.
+   *
+   * @generated from field: bytes mpc_public_key = 2;
+   */
+  mpcPublicKey = new Uint8Array(0);
+
+  /**
+   * Advertised free capacity in bytes. -1 if not exposed.
+   *
+   * @generated from field: int64 capacity_bytes = 3;
+   */
+  capacityBytes = protoInt64.zero;
+
+  /**
+   * Schema fingerprint of the MPC protocol this node speaks. Bumps
+   * on hard fork. Current: 1.
+   *
+   * @generated from field: uint32 mpc_protocol_version = 4;
+   */
+  mpcProtocolVersion = 0;
+
+  constructor(data?: PartialMessage<NodeMpcInfoV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NodeMpcInfoV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "node_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "mpc_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "capacity_bytes", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
+    { no: 4, name: "mpc_protocol_version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NodeMpcInfoV1 {
+    return new NodeMpcInfoV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NodeMpcInfoV1 {
+    return new NodeMpcInfoV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NodeMpcInfoV1 {
+    return new NodeMpcInfoV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NodeMpcInfoV1 | PlainMessage<NodeMpcInfoV1> | undefined, b: NodeMpcInfoV1 | PlainMessage<NodeMpcInfoV1> | undefined): boolean {
+    return proto3.util.equals(NodeMpcInfoV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.GossipMessageV1
  */
 export class GossipMessageV1 extends Message<GossipMessageV1> {

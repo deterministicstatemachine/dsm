@@ -4,4 +4,5 @@
 pub mod core;
 pub mod discovery;
 pub mod drain;
+pub mod node_info;
 pub mod scaling;

@@ -1174,6 +1174,25 @@ message StorageNodeInfoV1 {
   StorageNodeStatus status = 4;
 }
 
+// Response for GET /api/v2/node/info. Used by SDK clients to discover
+// MPC genesis participants — the `mpc_public_key` here is what the
+// SDK installs into the local GenesisMpcTransport when offering a
+// session. See docs/plans/2026-04-24-genesis-mpc-and-device-tree.md
+// Task A.2.
+message NodeMpcInfoV1 {
+  // Canonical Base32-Crockford node id (matches the gossip
+  // StorageNodeInfoV1.node_id encoding).
+  string node_id = 1;
+  // SPHINCS+ public key (SPX256f variant). Used by clients to verify
+  // this node's commit/reveal signatures in MPC sessions.
+  bytes mpc_public_key = 2 [(dsm_max_len)=65535];
+  // Advertised free capacity in bytes. -1 if not exposed.
+  int64 capacity_bytes = 3;
+  // Schema fingerprint of the MPC protocol this node speaks. Bumps
+  // on hard fork. Current: 1.
+  uint32 mpc_protocol_version = 4;
+}
+
 message GossipMessageV1 {
   string sender_node_id = 1;
   int64  sender_tick    = 2; // deterministic counter (transport/admin only)
