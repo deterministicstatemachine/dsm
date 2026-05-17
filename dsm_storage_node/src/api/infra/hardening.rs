@@ -91,47 +91,15 @@ pub fn enforce_release_safety(config_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Deterministic, unbiased Fisher–Yates permutation using a BLAKE3 stream and rejection sampling.
+/// Deterministic, unbiased Fisher–Yates permutation. Delegates to
+/// the canonical implementation in
+/// `dsm::core::identity::genesis_mpc::permute_unbiased` — single
+/// authoritative algorithm shared between the SDK's Genesis MPC
+/// participant selection and the storage-node's mirror-set
+/// permutation, so a change to the byte layout can't drift
+/// between layers.
 pub fn permute_unbiased<T: Clone>(seed: [u8; 32], items: &[T]) -> Vec<T> {
-    let mut a: Vec<T> = items.to_vec();
-    let mut i: isize = a.len() as isize - 1;
-    if i <= 0 {
-        return a;
-    }
-
-    // PRF stream state
-    let mut ctr: u64 = 0;
-    let mut buf: [u8; 32] = blake3_tagged_stream(seed, ctr);
-    ctr += 1;
-    let mut k: usize = 0;
-
-    while i > 0 {
-        let range = (i as u64) + 1;
-        let j = sample_u64(&mut buf, &mut k, &mut ctr, seed) % range;
-        let j = j as usize;
-        a.swap(i as usize, j);
-        i -= 1;
-    }
-    a
-}
-
-fn blake3_tagged_stream(seed: [u8; 32], ctr: u64) -> [u8; 32] {
-    let mut inbuf = Vec::with_capacity(40);
-    inbuf.extend_from_slice(&seed);
-    inbuf.extend_from_slice(&ctr.to_le_bytes());
-    blake3_tagged("DSM/perm\0", &inbuf)
-}
-
-fn sample_u64(buf: &mut [u8; 32], k: &mut usize, ctr: &mut u64, seed: [u8; 32]) -> u64 {
-    if *k + 8 > buf.len() {
-        *buf = blake3_tagged_stream(seed, *ctr);
-        *ctr += 1;
-        *k = 0;
-    }
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&buf[*k..*k + 8]);
-    *k += 8;
-    u64::from_le_bytes(bytes)
+    dsm::core::identity::genesis_mpc::permute_unbiased(seed, items)
 }
 
 /// Mirror set for a given window seed `sw`: first MMIRROR entries of permute(H("DSM/mirror\0"||nodeID||sw), ActivePositions\exclude)

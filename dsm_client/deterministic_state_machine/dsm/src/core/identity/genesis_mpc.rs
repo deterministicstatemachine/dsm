@@ -601,6 +601,98 @@ pub fn compute_eta_0(d_commit: &[u8; 32], d_reveal: &[u8; 32]) -> [u8; 32] {
     out
 }
 
+/// Registry root: `R_reg = H("DSM/registry\0" || ProtoDet(RegistryV3))`
+/// per spec §9. Publicly recomputable from the bytes the storage
+/// node returns at `GET /api/v2/registry/current`.
+///
+/// `R_reg` advances on operator events (joins / leaves / capacity
+/// signals); it is the canonical anchor for any computation that
+/// must bind to the current view of the participant set — including
+/// the deterministic Genesis MPC `session_id` derivation below.
+pub fn compute_registry_root(registry_bytes: &[u8]) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/registry");
+    h.update(registry_bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// Deterministic Genesis MPC `session_id`:
+///
+/// ```text
+/// session_id = H("DSM/genesis-mpc-session\0" || R_reg || device_id)
+/// ```
+///
+/// Closes the orchestrator-side grinding lever on participant
+/// selection (adversarial-stage-6 fix per the A.4 plan). Because
+/// `session_id` is now a function of public state (`R_reg`) plus
+/// the silicon-bound `device_id`, an attacker cannot grind a
+/// favorable participant set: one shot per `(R_reg, device_id)` pair.
+/// Retry on failure requires `R_reg` to advance (operator events)
+/// OR a different physical device.
+pub fn compute_genesis_mpc_session_id(r_reg: &[u8; 32], device_id: &[u8; 32]) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-mpc-session");
+    h.update(r_reg);
+    h.update(device_id);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// Deterministic, unbiased Fisher–Yates permutation seeded by
+/// `seed` (typically the Genesis MPC `session_id`). Used to pick
+/// N participants from the full registry — both sides recompute
+/// the same permutation byte-for-byte, so the orchestrator cannot
+/// grind a favorable subset.
+///
+/// Pinned here as the canonical home so both `dsm_sdk` (the
+/// orchestrator) and `dsm_storage_node` (already-existing mirror-set
+/// permutation under domain `DSM/mirror\0`) agree on the algorithm.
+pub fn permute_unbiased<T: Clone>(seed: [u8; 32], items: &[T]) -> Vec<T> {
+    let mut a: Vec<T> = items.to_vec();
+    let mut i: isize = a.len() as isize - 1;
+    if i <= 0 {
+        return a;
+    }
+    let mut ctr: u64 = 0;
+    let mut buf: [u8; 32] = permute_stream(seed, ctr);
+    ctr += 1;
+    let mut k: usize = 0;
+
+    while i > 0 {
+        let range = (i as u64) + 1;
+        let j = permute_sample_u64(&mut buf, &mut k, &mut ctr, seed) % range;
+        a.swap(i as usize, j as usize);
+        i -= 1;
+    }
+    a
+}
+
+#[inline]
+fn permute_stream(seed: [u8; 32], ctr: u64) -> [u8; 32] {
+    let mut input = Vec::with_capacity(40);
+    input.extend_from_slice(&seed);
+    input.extend_from_slice(&ctr.to_le_bytes());
+    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/perm");
+    h.update(&input);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+#[inline]
+fn permute_sample_u64(buf: &mut [u8; 32], k: &mut usize, ctr: &mut u64, seed: [u8; 32]) -> u64 {
+    if *k + 8 > buf.len() {
+        *buf = permute_stream(seed, *ctr);
+        *ctr += 1;
+        *k = 0;
+    }
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&buf[*k..*k + 8]);
+    *k += 8;
+    u64::from_le_bytes(bytes)
+}
+
 /// Content-addressed publication address for a published genesis
 /// state:
 ///
@@ -2025,6 +2117,128 @@ mod tests {
         assert!(
             r.is_err(),
             "duplicate participant_id must be rejected (set semantics)"
+        );
+    }
+
+    // -------------------- R_reg + session_id + permute KATs --------------------
+
+    #[test]
+    fn registry_root_matches_pinned_formula() {
+        // Independent recomputation of `H("DSM/registry\0" || body)`
+        // against the public helper. Any drift in domain tag or hash
+        // input ordering trips this.
+        let body = b"hello-registry-bytes";
+        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/registry");
+        h.update(body);
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(h.finalize().as_bytes());
+        assert_eq!(compute_registry_root(body), expected);
+    }
+
+    #[test]
+    fn session_id_changes_with_r_reg_and_device_id() {
+        let r1 = [0x11u8; 32];
+        let r2 = [0x22u8; 32];
+        let d1 = [0xAAu8; 32];
+        let d2 = [0xBBu8; 32];
+        let s11 = compute_genesis_mpc_session_id(&r1, &d1);
+        let s21 = compute_genesis_mpc_session_id(&r2, &d1);
+        let s12 = compute_genesis_mpc_session_id(&r1, &d2);
+        let s11_again = compute_genesis_mpc_session_id(&r1, &d1);
+        assert_eq!(s11, s11_again, "same inputs must produce same session_id");
+        assert_ne!(
+            s11, s21,
+            "different R_reg must produce different session_id"
+        );
+        assert_ne!(
+            s11, s12,
+            "different device_id must produce different session_id"
+        );
+        assert_ne!(s21, s12, "all distinct inputs must distinguish");
+    }
+
+    #[test]
+    fn session_id_domain_is_distinct_from_registry_root() {
+        // Even when fed bytes that overlap, the two derivations must
+        // not collide because of their distinct domain tags.
+        let payload = [0x77u8; 64];
+        let reg = compute_registry_root(&payload);
+        let mut r_reg = [0u8; 32];
+        let mut device_id = [0u8; 32];
+        r_reg.copy_from_slice(&payload[..32]);
+        device_id.copy_from_slice(&payload[32..]);
+        let sid = compute_genesis_mpc_session_id(&r_reg, &device_id);
+        assert_ne!(
+            reg, sid,
+            "DSM/registry and DSM/genesis-mpc-session domains must not collide"
+        );
+    }
+
+    #[test]
+    fn permute_is_deterministic_and_uses_every_element() {
+        let seed = [0x42u8; 32];
+        let v: Vec<u32> = (0..16).collect();
+        let p1 = permute_unbiased(seed, &v);
+        let p2 = permute_unbiased(seed, &v);
+        assert_eq!(p1, p2, "permute_unbiased must be deterministic in seed");
+        let mut sorted = p1.clone();
+        sorted.sort();
+        assert_eq!(sorted, v, "permute must yield every input exactly once");
+    }
+
+    #[test]
+    fn permute_changes_with_seed() {
+        let v: Vec<u32> = (0..32).collect();
+        let p_a = permute_unbiased([0x01u8; 32], &v);
+        let p_b = permute_unbiased([0x02u8; 32], &v);
+        // With 32 elements, the probability two random permutations
+        // are identical is 1/32! — effectively zero.
+        assert_ne!(
+            p_a, p_b,
+            "different seeds must produce different permutations"
+        );
+    }
+
+    #[test]
+    fn permute_empty_and_singleton_are_no_ops() {
+        let empty: Vec<u32> = vec![];
+        let single = vec![42u32];
+        assert_eq!(permute_unbiased([0u8; 32], &empty), empty);
+        assert_eq!(permute_unbiased([0u8; 32], &single), single);
+    }
+
+    /// End-to-end deterministic-selection scenario: given the same
+    /// `R_reg` and `device_id`, two devices independently compute
+    /// the same `session_id` and pick the same N participants from
+    /// the same registry. The selection is fully reproducible from
+    /// public state.
+    #[test]
+    fn deterministic_selection_matches_across_independent_runs() {
+        let registry_bytes = (0u8..200).map(|i| 0x10 ^ i).collect::<Vec<_>>();
+        let r_reg = compute_registry_root(&registry_bytes);
+        let device_id = [0xDEu8; 32];
+        let sid_a = compute_genesis_mpc_session_id(&r_reg, &device_id);
+        let sid_b = compute_genesis_mpc_session_id(&r_reg, &device_id);
+        assert_eq!(sid_a, sid_b);
+
+        let registry: Vec<[u8; 32]> = (0u8..16)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[0] = i;
+                id
+            })
+            .collect();
+        let pick_a: Vec<[u8; 32]> = permute_unbiased(sid_a, &registry)
+            .into_iter()
+            .take(3)
+            .collect();
+        let pick_b: Vec<[u8; 32]> = permute_unbiased(sid_b, &registry)
+            .into_iter()
+            .take(3)
+            .collect();
+        assert_eq!(
+            pick_a, pick_b,
+            "independent picks under the same (R_reg, device_id) must agree"
         );
     }
 }

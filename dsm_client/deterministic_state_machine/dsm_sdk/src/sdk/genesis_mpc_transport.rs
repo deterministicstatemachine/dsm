@@ -183,6 +183,62 @@ impl GenesisMpcCommitRevealTransport for HttpGenesisMpcTransport {
     }
 }
 
+/// Active-registry snapshot fetched from one storage node:
+/// `R_reg` + the parsed list of 32-byte node IDs sorted as
+/// returned (the storage node returns them already sorted per
+/// spec §9).
+#[derive(Debug, Clone)]
+pub struct RegistrySnapshot {
+    /// `R_reg = H("DSM/registry\0" || ProtoDet(RegistryV3))` per
+    /// `dsm::core::identity::genesis_mpc::compute_registry_root`.
+    pub r_reg: [u8; 32],
+    /// Active registry node IDs (32 bytes each).
+    pub node_ids: Vec<[u8; 32]>,
+}
+
+/// Fetch the active registry from a storage node and compute
+/// `R_reg` from the returned bytes. Used by the device-side
+/// Genesis MPC orchestrator to derive a deterministic `session_id`
+/// and pick participants via `permute_unbiased`.
+///
+/// `r_reg` is the hash OF THE WIRE BYTES the storage node sent —
+/// recomputed locally so a tampered transit can't substitute a
+/// different anchor. Two storage nodes serving the same registry
+/// will both yield the same `r_reg`; if they diverge the caller
+/// selects an authoritative one or refuses to proceed.
+pub async fn fetch_registry(base_url: &str) -> Result<RegistrySnapshot, DsmError> {
+    let client = build_ca_aware_client();
+    let url = format!("{}/api/v2/registry/current", base_url.trim_end_matches('/'));
+    let resp = client.get(&url).send().await.map_err(|e| {
+        DsmError::network(format!("registry/current GET {url} failed: {e}"), Some(e))
+    })?;
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| DsmError::network(format!("registry/current read failed: {e}"), Some(e)))?;
+    if !status.is_success() {
+        return Err(DsmError::invalid_operation(format!(
+            "registry/current {url} returned {status}"
+        )));
+    }
+
+    let r_reg = dsm::core::identity::genesis_mpc::compute_registry_root(&bytes);
+
+    let registry = pb::RegistryV3::decode(bytes.as_ref())
+        .map_err(|e| DsmError::invalid_operation(format!("RegistryV3 proto decode: {e}")))?;
+    let mut node_ids: Vec<[u8; 32]> = Vec::with_capacity(registry.node_ids.len());
+    for nid in registry.node_ids {
+        let arr: [u8; 32] = nid
+            .as_slice()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("RegistryV3.node_ids entry not 32 bytes"))?;
+        node_ids.push(arr);
+    }
+
+    Ok(RegistrySnapshot { r_reg, node_ids })
+}
+
 /// Fetch a node's self-reported 32-byte id via
 /// `GET /api/v2/node/identity`. Used by the orchestrator to learn
 /// the real participant id for a configured URL when discovery

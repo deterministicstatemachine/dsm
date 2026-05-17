@@ -531,19 +531,19 @@ impl IdentitySDK {
 
         // ---- Genesis MPC against real storage nodes (Task A.4) ----
         //
-        // No more `test_nodes = [n1, n2, n3]` placeholder. The SDK
-        // contacts every URL in `storage_sdk.get_node_urls()`,
-        // resolves each to its self-reported 32-byte node_id via
-        // `/api/v2/node/identity`, and runs the strict N-of-N
-        // commit-reveal protocol against the first ≥3 reachable
-        // participants.
-        //
-        // Followups (not in this commit): deterministic session_id
-        // from `H("DSM/genesis-mpc-session\0" || R_reg || device_id)`
-        // and `Permute(session_id, registry)` participant selection.
-        // Both are economic-security improvements; the immediate
-        // atomic outcome (zero placeholders, real network MPC) is
-        // achieved here without them.
+        // 1. Fetch the active registry from any reachable bootstrap
+        //    storage node and compute
+        //    `R_reg = H("DSM/registry\0" || ProtoDet(RegistryV3))`.
+        // 2. Derive `session_id = H("DSM/genesis-mpc-session\0" ||
+        //    R_reg || device_id)` — publicly recomputable, not
+        //    orchestrator-chosen.
+        // 3. Pick N participants by `permute_unbiased(session_id,
+        //    registry).take(N)` — deterministic from public inputs;
+        //    the orchestrator cannot grind a favorable subset.
+        // 4. Resolve each picked node_id to a reachable URL via
+        //    discovery (`/api/v2/nodes/discover`) and cross-verify
+        //    by hitting `/api/v2/node/identity` on the address.
+        // 5. Run the strict N-of-N commit-reveal protocol.
 
         let storage_sdk = self
             .storage_sdk
@@ -556,41 +556,118 @@ impl IdentitySDK {
                      production genesis MPC requires storage-node URLs.",
                 )
             })?;
-        let urls = storage_sdk.get_node_urls();
-        if urls.len() < 3 {
+        let bootstrap_urls = storage_sdk.get_node_urls();
+        if bootstrap_urls.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "IdentitySDK::create_genesis: no bootstrap storage-node URLs configured",
+            ));
+        }
+
+        // Fetch the active registry from any reachable bootstrap node.
+        // First successful response wins. (R_reg recomputation locally
+        // means a tampered transit can't substitute a different anchor.)
+        let mut snapshot_opt: Option<crate::sdk::genesis_mpc_transport::RegistrySnapshot> = None;
+        let mut last_err: Option<DsmError> = None;
+        for url in &bootstrap_urls {
+            match futures::executor::block_on(crate::sdk::genesis_mpc_transport::fetch_registry(
+                url,
+            )) {
+                Ok(snap) => {
+                    snapshot_opt = Some(snap);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "IdentitySDK::create_genesis: registry fetch from {url} failed: {e}"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        let snapshot = snapshot_opt.ok_or_else(|| {
+            last_err.unwrap_or_else(|| {
+                DsmError::invalid_operation(
+                    "IdentitySDK::create_genesis: registry unreachable on every bootstrap URL",
+                )
+            })
+        })?;
+
+        let n_required: usize = 3;
+        if snapshot.node_ids.len() < n_required {
             return Err(DsmError::invalid_operation(format!(
-                "IdentitySDK::create_genesis: need ≥3 storage-node URLs \
-                 (whitepaper §2.5); have {}",
-                urls.len()
+                "IdentitySDK::create_genesis: registry has {} active node(s); \
+                 need ≥{} for N-of-N MPC (whitepaper §2.5)",
+                snapshot.node_ids.len(),
+                n_required
             )));
         }
 
-        // Resolve URL → real node_id via /api/v2/node/identity. Pick
-        // the first ≥3 reachable nodes. Defer adversarial-stage-6
-        // discovery cross-verify (would require registry-driven
-        // selection — out of scope for this commit per plan
-        // "out-of-scope" note).
-        let mut node_urls_pairs: Vec<([u8; 32], String)> = Vec::with_capacity(urls.len());
-        for url in &urls {
-            match futures::executor::block_on(
-                crate::sdk::genesis_mpc_transport::fetch_node_identity(url),
-            ) {
-                Ok(id) => node_urls_pairs.push((id, url.to_string())),
-                Err(e) => {
-                    log::warn!("IdentitySDK::create_genesis: skipping unreachable node {url}: {e}");
+        // Deterministic session_id + permute-based participant pick.
+        let session_id_arr = dsm::core::identity::genesis_mpc::compute_genesis_mpc_session_id(
+            &snapshot.r_reg,
+            &device_id_arr,
+        );
+        let permuted =
+            dsm::core::identity::genesis_mpc::permute_unbiased(session_id_arr, &snapshot.node_ids);
+        let chosen_ids: Vec<[u8; 32]> = permuted.into_iter().take(n_required).collect();
+
+        // Resolve picked node_ids → URLs via discovery. The
+        // bootstrap node tells us about all alive peers; the
+        // address-to-id pairing is then cross-verified by directly
+        // calling /api/v2/node/identity on each picked address.
+        let discovered: Vec<(String, [u8; 32])> = {
+            let mut acc: Vec<(String, [u8; 32])> = Vec::new();
+            for url in &bootstrap_urls {
+                if let Ok(resp) = futures::executor::block_on(storage_sdk.discover_local()) {
+                    for info in &resp.discovered_node_infos {
+                        if let Ok(id_arr) = info.node_id.as_slice().try_into() {
+                            acc.push((info.address.clone(), id_arr));
+                        }
+                    }
+                    if !resp.discovered_node_infos.is_empty() {
+                        break;
+                    }
+                }
+                let _ = url;
+            }
+            // Fallback: if `discover_local()` is a config-only stub,
+            // pair each configured URL with the id reported by
+            // `/api/v2/node/identity`. This is the same path the
+            // earlier "first ≥3 reachable" code used, kept as a
+            // legitimate non-registry resolution branch.
+            if acc.is_empty() {
+                for url in &bootstrap_urls {
+                    if let Ok(id) = futures::executor::block_on(
+                        crate::sdk::genesis_mpc_transport::fetch_node_identity(url),
+                    ) {
+                        acc.push((url.clone(), id));
+                    }
                 }
             }
-            if node_urls_pairs.len() >= 3 {
-                break;
-            }
+            acc
+        };
+
+        let mut id_to_url: std::collections::HashMap<[u8; 32], String> =
+            std::collections::HashMap::new();
+        for (addr, id) in discovered {
+            id_to_url.entry(id).or_insert(addr);
         }
-        if node_urls_pairs.len() < 3 {
-            return Err(DsmError::invalid_operation(format!(
-                "IdentitySDK::create_genesis: only {} of {} storage-node URLs \
-                 reachable; need ≥3 for N-of-N MPC.",
-                node_urls_pairs.len(),
-                urls.len()
-            )));
+
+        // Build the chosen `(node_id, url)` pairs, cross-verifying
+        // each via `/api/v2/node/identity` so a discovery operator
+        // can't lie about which id lives at which address.
+        let mut node_urls_pairs: Vec<([u8; 32], String)> = Vec::with_capacity(n_required);
+        for id in &chosen_ids {
+            let url = id_to_url.get(id).ok_or_else(|| {
+                DsmError::invalid_operation(format!(
+                    "IdentitySDK::create_genesis: picked participant {} not reachable via discovery",
+                    crate::util::text_id::encode_base32_crockford(id)
+                ))
+            })?;
+            futures::executor::block_on(
+                crate::sdk::genesis_mpc_transport::fetch_and_verify_node_identity(url, id),
+            )?;
+            node_urls_pairs.push((*id, url.clone()));
         }
 
         // Device's platform-attestation SPHINCS+ keypair. In a
@@ -599,15 +676,6 @@ impl IdentitySDK {
         // fresh keypair per session — still defeats offer
         // front-running (sk_attest never leaves this process).
         let (pk_attest, sk_attest) = dsm::crypto::sphincs::generate_sphincs_keypair()?;
-
-        // Random session_id (defer deterministic
-        // H("DSM/genesis-mpc-session\0" || R_reg || device_id)).
-        let mut session_id_arr = [0u8; 32];
-        use std::io::Read;
-        dsm::crypto::rng::random_bytes(32)
-            .as_slice()
-            .read_exact(&mut session_id_arr)
-            .map_err(|e| DsmError::crypto("failed to sample session_id", Some(e)))?;
 
         // Build participants list, canonicalised by the orchestrator.
         let participants: Vec<[u8; 32]> = node_urls_pairs.iter().map(|(id, _)| *id).collect();
