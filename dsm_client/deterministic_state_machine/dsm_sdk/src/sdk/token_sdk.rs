@@ -11,7 +11,7 @@ use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use dsm::{
     commitments::SmartCommitment as DsmSmartCommitment,
-    core::identity::{verify_genesis_state, GenesisState},
+    core::identity::GenesisState,
     types::{
         error::DsmError,
         operations::{Operation, TransactionMode, VerificationType},
@@ -21,14 +21,17 @@ use dsm::{
         },
     },
 };
+#[cfg(feature = "storage")]
+use dsm::core::identity::verify_genesis_state;
 use parking_lot::RwLock;
 use prost::Message;
 
 use super::{
     core_sdk::{CoreSDK, Operation as CoreOperation, TokenManagerTrait},
-    counterparty_genesis_helpers::fetch_genesis_state,
     identity_sdk::IdentitySDK,
 };
+#[cfg(feature = "storage")]
+use super::counterparty_genesis_helpers::fetch_genesis_state;
 
 use crate::generated::{MetadataField, TokenMetadataProto};
 
@@ -2726,31 +2729,61 @@ impl GenesisStateCache {
         }
     }
 
+    /// Fetch by alias is gone (it depended on the deleted placeholder
+    /// that fabricated a counterparty genesis from a name string).
+    /// Callers MUST migrate to `fetch_and_cache_genesis_by_hash` with
+    /// the counterparty's published `G` and a configured
+    /// `StorageNodeSDK`. The bilateral-transfer paths that called
+    /// this method need an alias→G addressing layer (e.g. a contact
+    /// book) before they can resolve a counterparty in production.
     pub async fn fetch_and_cache_genesis(&self, device_id: &str) -> Result<GenesisState, DsmError> {
+        let _ = device_id;
+        Err(DsmError::invalid_operation(
+            "GenesisStateCache::fetch_and_cache_genesis(alias) removed \
+             (Task A.4 publisher rewrite). The publisher resolves \
+             counterparty genesis by `G = H(\"DSM/genesis\\0\" || ...)`, \
+             not by alias. Wire an alias→G addressing layer and call \
+             `fetch_and_cache_genesis_by_hash(storage_sdk, &G)` instead.",
+        ))
+    }
+
+    /// Fetch and cache a counterparty genesis by its hash `G`. The
+    /// returned `GenesisState` has its public inputs verified to
+    /// recompute `G` per whitepaper §2.5 (rejecting forged-input
+    /// publications) plus its structural invariants checked via
+    /// `verify_genesis_state`.
+    ///
+    /// Cache key is the base32-Crockford rendering of `G` — the
+    /// canonical content address — so two callers asking for the
+    /// same counterparty share a single fetched copy.
+    #[cfg(feature = "storage")]
+    pub async fn fetch_and_cache_genesis_by_hash(
+        &self,
+        storage_sdk: &crate::sdk::storage_node_sdk::StorageNodeSDK,
+        g: &[u8; 32],
+    ) -> Result<GenesisState, DsmError> {
+        let key = crate::util::text_id::encode_base32_crockford(g);
         {
             let states = self.genesis_states.read();
-            if let Some(genesis) = states.get(device_id) {
+            if let Some(genesis) = states.get(&key) {
                 return Ok(genesis.clone());
             }
         }
 
-        log::info!("Fetching Genesis state for {device_id} from storage nodes");
-        let genesis = fetch_genesis_state(device_id, "").await?;
+        log::info!("Fetching Genesis state for G_b32={key} from storage nodes");
+        let genesis = fetch_genesis_state(storage_sdk, g).await?;
 
-        let verification_result = verify_genesis_state(&genesis)?;
-
-        if !verification_result {
+        if !verify_genesis_state(&genesis)? {
             return Err(DsmError::invalid_operation(
-                "Genesis state verification failed",
+                "Counterparty GenesisState verification failed",
             ));
         }
 
         {
             let mut states = self.genesis_states.write();
             let mut verified = self.verified_states.write();
-
-            states.insert(device_id.to_string(), genesis.clone());
-            verified.insert(device_id.to_string(), true);
+            states.insert(key.clone(), genesis.clone());
+            verified.insert(key, true);
         }
 
         Ok(genesis)

@@ -33,27 +33,14 @@ fn now_tick() -> u64 {
 
 // -------------------- Traits (SDK implements real I/O) --------------------
 
-/// Payload safe for external publication (bytes-only)
-#[derive(Debug, Clone)]
-pub struct SanitizedGenesisPayload {
-    pub genesis_hash: [u8; 32],
-    pub device_id: [u8; 32],
-    pub public_key: Vec<u8>, // SPHINCS+ public key
-    pub participants: Vec<NodeId>,
-    pub created_at_ticks: u64,
-}
-
-#[async_trait]
-pub trait GenesisPublisher {
-    async fn publish(&self, payload: &SanitizedGenesisPayload) -> Result<(), DsmError>;
-    async fn retrieve(&self, genesis_hash: &[u8; 32]) -> Result<SanitizedGenesisPayload, DsmError>;
-}
-
-#[async_trait]
-pub trait GenesisStorage {
-    async fn put(&self, genesis_hash: &[u8; 32], payload: &[u8]) -> Result<(), DsmError>;
-    async fn get(&self, genesis_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError>;
-}
+// `SanitizedGenesisPayload`, `GenesisPublisher`, and `GenesisStorage`
+// removed (Task A.4 follow-up). The canonical externally-publishable
+// artifact is now `proto::PublishableGenesisV1`, content-addressed
+// at `compute_genesis_mirror_addr(&G)`. The publisher trait is
+// replaced by the inherent methods on
+// `dsm_sdk::sdk::genesis_publisher::SdkGenesisPublisher` which take
+// the proto type directly — no trait indirection, no parallel
+// bytes-only payload schema.
 
 /// Production transport for genesis MPC. Implementations move bytes
 /// across the network to real storage nodes — no in-process shortcuts
@@ -114,6 +101,44 @@ pub struct GenesisMpcOutcome {
     /// to sign the offer envelope. Carried out so the SDK can encode
     /// the published `PublishableGenesisV1` without re-deriving it.
     pub pk_attest: Vec<u8>,
+}
+
+impl GenesisMpcOutcome {
+    /// Build the canonical externally-publishable artifact for this
+    /// outcome — a `PublishableGenesisV1` containing every input
+    /// needed for an independent verifier to recompute `G` per
+    /// whitepaper §2.5. `K_DBRW` is intentionally NOT included
+    /// (silicon binding stays device-local per §11.1 / §12).
+    ///
+    /// Derives the post-G silicon-bound SPHINCS+ + Kyber public keys
+    /// (whitepaper §11.1 eq.13) so counterparties can verify
+    /// device-side signatures without re-running the MPC.
+    ///
+    /// Stored content-addressed at
+    /// `compute_genesis_mirror_addr(&G)`.
+    pub fn to_publishable(&self) -> Result<crate::types::proto::PublishableGenesisV1, DsmError> {
+        let mk = self.session.derive_silicon_bound_keypair()?;
+        Ok(crate::types::proto::PublishableGenesisV1 {
+            genesis_hash: self.session.genesis_id.to_vec(),
+            device_id: self.session.device_id.to_vec(),
+            device_entropy: self.session.device_entropy.to_vec(),
+            mpc_entropies: self
+                .session
+                .mpc_entropies
+                .iter()
+                .map(|m| m.to_vec())
+                .collect(),
+            participants: self
+                .session
+                .storage_nodes
+                .iter()
+                .map(|n| n.as_bytes().to_vec())
+                .collect(),
+            metadata: self.session.metadata.clone(),
+            initiator_pk_post_genesis: mk.sphincs_public.clone(),
+            initiator_kyber_pk: mk.kyber_public.clone(),
+        })
+    }
 }
 
 // -------------------- Keys (PQ primitives) --------------------
@@ -571,6 +596,31 @@ pub fn compute_eta_0(d_commit: &[u8; 32], d_reveal: &[u8; 32]) -> [u8; 32] {
     let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/anchor/eta");
     h.update(d_commit);
     h.update(d_reveal);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// Content-addressed publication address for a published genesis
+/// state:
+///
+/// ```text
+/// addr = H("DSM/genesis-mirror\0" || G)
+/// ```
+///
+/// This is the address the device PUTs `PublishableGenesisV1` bytes
+/// under, and the address counterparties GET them from. Per
+/// storagenodes-spec §6 the address scheme is `H(DSM/object\0 ||
+/// DLV_node || path || H(content))`; the genesis-mirror form uses a
+/// dedicated domain tag (`DSM/genesis-mirror\0`) so it does NOT
+/// collide with the per-DLV object address space.
+///
+/// MUST stay in lock-step with every consumer that resolves a
+/// published genesis by `G` — the SDK publisher and the storage-node
+/// genesis-mirror endpoint both call this function.
+pub fn compute_genesis_mirror_addr(g: &[u8; 32]) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-mirror");
+    h.update(g);
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
     out
@@ -1412,18 +1462,24 @@ mod tests {
     }
 
     /// Whitepaper §11.1 + §12 normative rule: `K_DBRW` MUST NEVER
-    /// appear in any externally-publishable bytes.  Concretely, no
-    /// 32-byte window of the SanitizedGenesisPayload encoding may
-    /// equal the `K_DBRW` value.
+    /// appear in any externally-publishable bytes. Concretely, no
+    /// 32-byte window of the canonical `PublishableGenesisV1` encoding
+    /// (the canonical publication artifact per Task A.4) may equal
+    /// the `K_DBRW` value. This also covers the post-G keypair the
+    /// device derives via §11.1 eq.13 — the IKM mixes `K_DBRW` in,
+    /// but the resulting `sphincs_public` / `kyber_public` must not
+    /// leak the byte pattern.
     #[test]
-    fn k_dbrw_never_appears_in_sanitized_payload_bytes() {
+    fn k_dbrw_never_appears_in_publishable_genesis_bytes() {
+        use prost::Message;
+
         let device_id = id32(0x42);
         let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
         let dev_e = id32(0xD0);
         let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
         let meta = b"DSMv2|nonleak".to_vec();
         // Use a high-entropy K_DBRW so accidental match probability is
-        // negligible.  (id32(b) only varies by tag byte; we want full
+        // negligible. (id32(b) only varies by tag byte; we want full
         // byte-pattern uniqueness.)
         let k_dbrw: [u8; 32] = [
             0x9a, 0x73, 0x21, 0xf0, 0x4c, 0x88, 0xb1, 0x5d, 0xee, 0x06, 0x97, 0x42, 0xa8, 0x33,
@@ -1431,31 +1487,26 @@ mod tests {
             0x05, 0xfd, 0x68, 0x4e,
         ];
 
-        let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, k_dbrw);
+        let s = deterministic_session(device_id, nodes, dev_e, mpc_e.clone(), meta.clone(), k_dbrw);
         let mk = s.derive_silicon_bound_keypair().unwrap();
 
-        // Construct the externally-publishable payload (the only thing
-        // that is allowed to leave the device).
-        let payload = SanitizedGenesisPayload {
-            genesis_hash: s.genesis_id,
-            device_id: s.device_id,
-            public_key: mk.sphincs_public.clone(),
-            participants: s.storage_nodes.clone(),
-            created_at_ticks: s.created_at_ticks,
+        // Build the canonical publishable artifact — exactly what
+        // the SDK encodes and PUTs to storage nodes.
+        let publishable = crate::types::proto::PublishableGenesisV1 {
+            genesis_hash: s.genesis_id.to_vec(),
+            device_id: s.device_id.to_vec(),
+            device_entropy: s.device_entropy.to_vec(),
+            mpc_entropies: s.mpc_entropies.iter().map(|m| m.to_vec()).collect(),
+            participants: s
+                .storage_nodes
+                .iter()
+                .map(|n| n.as_bytes().to_vec())
+                .collect(),
+            metadata: s.metadata.clone(),
+            initiator_pk_post_genesis: mk.sphincs_public.clone(),
+            initiator_kyber_pk: mk.kyber_public.clone(),
         };
-
-        // Flatten the payload into a single byte stream (every field
-        // that could possibly be transmitted).
-        let mut flat: Vec<u8> = Vec::new();
-        flat.extend_from_slice(&payload.genesis_hash);
-        flat.extend_from_slice(&payload.device_id);
-        flat.extend_from_slice(&payload.public_key);
-        for n in &payload.participants {
-            flat.extend_from_slice(n.as_bytes());
-        }
-        flat.extend_from_slice(&payload.created_at_ticks.to_le_bytes());
-        // And include the public Kyber key, which would also ship.
-        flat.extend_from_slice(&mk.kyber_public);
+        let flat = publishable.encode_to_vec();
 
         // Sanity: there's enough material to hold a 32-byte pattern.
         assert!(flat.len() >= k_dbrw.len());
@@ -1470,7 +1521,7 @@ mod tests {
         }
         assert!(
             !leaked,
-            "K_DBRW byte-pattern leaked into externally-publishable payload"
+            "K_DBRW byte-pattern leaked into PublishableGenesisV1"
         );
     }
 

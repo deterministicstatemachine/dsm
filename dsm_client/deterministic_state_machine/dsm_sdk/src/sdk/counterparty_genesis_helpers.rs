@@ -217,32 +217,103 @@ pub fn create_genesis_binding(
 // state-history tree is superseded by DeviceState's per-relationship SMT.
 // Zero external callers for either function.
 
-/// Fetch a counterparty's published Genesis state. After Task A.4
-/// the canonical publication path is `SdkGenesisPublisher` with a
-/// content-addressed `PublishableGenesisV1` artifact at
-/// `addr = H("DSM/genesis-mirror\0" || G)`. This helper used to
-/// synthesise a fake MPC-style genesis locally; that placeholder is
-/// gone. Callers must now wire a real `SdkGenesisPublisher` and
-/// resolve by `(G, storage_sdk)` — see the publisher's `retrieve`
-/// method.
+/// Fetch a counterparty's published Genesis state via the canonical
+/// content-addressed retrieval path (Task A.4 publisher rewrite).
 ///
-/// Returning an error here (rather than synthesising) is the
-/// load-bearing change: counterparty acceptance can no longer be
-/// satisfied by locally-fabricated genesis bytes (whitepaper §2.5
-/// "publicly recomputable" — a synthesised counterparty genesis
-/// fails that property by construction).
+/// Looks up `addr = H("DSM/genesis-mirror\0" || G)` on the supplied
+/// `storage_sdk`, decodes the returned `PublishableGenesisV1`, and
+/// independently recomputes `G` from the public inputs per
+/// whitepaper §2.5. Rejects on any mismatch — a malicious mirror
+/// cannot serve a payload whose stated `G` doesn't recompute.
+///
+/// The returned `GenesisState` carries only the bytes a counterparty
+/// is allowed to see: `hash` (G), `device_id`, `participants` (as
+/// canonical 32-byte ids re-rendered as strings for the existing
+/// HashSet field), the post-G `sphincs_public` / `kyber_public` keys,
+/// and the `device_entropy + mpc_entropies + metadata` as
+/// `Contribution` records (so `verify_genesis_state` can sanity-check
+/// initial-entropy derivation). Secret keys are NOT recoverable
+/// from the published payload (whitepaper §11.1 silicon binding).
+#[cfg(feature = "storage")]
 pub async fn fetch_genesis_state(
-    device_id: &str,
-    _storage_endpoint: &str,
+    storage_sdk: &crate::sdk::storage_node_sdk::StorageNodeSDK,
+    genesis_hash: &[u8; 32],
 ) -> Result<GenesisState, DsmError> {
-    let _ = device_id;
-    Err(DsmError::invalid_operation(
-        "counterparty_genesis_helpers::fetch_genesis_state: \
-         placeholder synthesis removed (Task A.4). Use \
-         dsm_sdk::sdk::genesis_publisher::SdkGenesisPublisher::retrieve \
-         with the counterparty's `G` and a configured storage_sdk \
-         instead.",
-    ))
+    let publisher = crate::sdk::genesis_publisher::SdkGenesisPublisher::new(storage_sdk.clone());
+    let payload = publisher.retrieve(genesis_hash).await?;
+
+    let mut device_id_arr = [0u8; 32];
+    device_id_arr.copy_from_slice(&payload.device_id);
+
+    // Re-render participants as the existing `HashSet<String>` field.
+    // The canonical bytes already live on the payload; the string
+    // representation here is display-only for the legacy GenesisState
+    // shape and never re-enters logic.
+    let participants: std::collections::HashSet<String> = payload
+        .participants
+        .iter()
+        .map(|p| crate::util::text_id::encode_base32_crockford(p))
+        .collect();
+
+    // Public-only keys reconstructed from the payload. Secret keys
+    // are NOT publishable (silicon binding §11.1), so the GenesisState
+    // here is signing-disabled — callers MUST only use it for
+    // signature *verification* and ordering, never to sign on behalf
+    // of the counterparty.
+    let signing_key = dsm::core::identity::genesis::SigningKey {
+        public_key: payload.initiator_pk_post_genesis.clone(),
+        secret_key: Vec::new(),
+    };
+    let kyber_keypair = dsm::core::identity::genesis::KyberKey {
+        public_key: payload.initiator_kyber_pk.clone(),
+        secret_key: Vec::new(),
+    };
+
+    // Re-derive initial_entropy from the recovered contributions so
+    // the resulting GenesisState passes `verify_genesis_state`'s
+    // structural check (which recomputes `DSM/genesis-initial-entropy`).
+    let mut contribs_for_init: Vec<Vec<u8>> = Vec::new();
+    // The legacy `convert_session_to_genesis_state_compat` layout uses
+    // a `(device_id || device_entropy)` first contribution, then each
+    // mpc entropy, then the metadata.
+    let mut dev_contrib = Vec::with_capacity(64);
+    dev_contrib.extend_from_slice(&payload.device_id);
+    dev_contrib.extend_from_slice(&payload.device_entropy);
+    contribs_for_init.push(dev_contrib);
+    for m in &payload.mpc_entropies {
+        contribs_for_init.push(m.clone());
+    }
+    contribs_for_init.push(payload.metadata.clone());
+
+    let initial_entropy = {
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/genesis-initial-entropy");
+        hasher.update(genesis_hash);
+        for c in &contribs_for_init {
+            hasher.update(c);
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(hasher.finalize().as_bytes());
+        out
+    };
+
+    let contributions: Vec<dsm::core::identity::genesis::Contribution> = contribs_for_init
+        .into_iter()
+        .map(|data| dsm::core::identity::genesis::Contribution {
+            data,
+            verified: true,
+        })
+        .collect();
+
+    Ok(GenesisState {
+        hash: *genesis_hash,
+        initial_entropy,
+        participants,
+        merkle_root: None,
+        device_id: Some(device_id_arr),
+        signing_key,
+        kyber_keypair,
+        contributions,
+    })
 }
 
 /// Verify a published Genesis state by recomputing `G` from its

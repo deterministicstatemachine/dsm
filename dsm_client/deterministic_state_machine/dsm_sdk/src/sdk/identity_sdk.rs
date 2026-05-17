@@ -37,8 +37,9 @@ use dsm::crypto::blake3::dsm_domain_hasher;
 use crate::sdk::storage_node_sdk::StorageNodeSDK;
 #[cfg(feature = "storage")]
 use crate::sdk::genesis_publisher::SdkGenesisPublisher;
-#[cfg(feature = "storage")]
-use dsm::core::identity::genesis_mpc::{GenesisPublisher, SanitizedGenesisPayload};
+// `GenesisPublisher` + `SanitizedGenesisPayload` removed; publish
+// now takes `pb::PublishableGenesisV1` directly via
+// `SdkGenesisPublisher::publish`.
 use crate::util::text_id;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -656,7 +657,9 @@ impl IdentitySDK {
             genesis_state.initial_entropy.len()
         );
 
-        // Publish genesis if storage SDK is available
+        // Publish genesis content-addressed at
+        // `addr = H("DSM/genesis-mirror\0" || G)` per spec §6 — the
+        // counterparty fetch path resolves the same address.
         #[cfg(feature = "storage")]
         if let Some(storage_sdk) = self
             .storage_sdk
@@ -665,37 +668,17 @@ impl IdentitySDK {
             .as_ref()
         {
             let publisher = SdkGenesisPublisher::new(storage_sdk.clone());
-
-            let mut genesis_hash_arr = [0u8; 32];
-            if genesis_state.hash.len() == 32 {
-                genesis_hash_arr.copy_from_slice(&genesis_state.hash);
-            } else {
-                return Err(DsmError::invalid_parameter(format!(
-                    "Invalid genesis hash length: expected 32, got {}",
-                    genesis_state.hash.len()
-                )));
-            }
-
-            let participants_for_payload: Vec<dsm::types::identifiers::NodeId> =
-                outcome.session.storage_nodes.clone();
-            let payload = SanitizedGenesisPayload {
-                genesis_hash: genesis_hash_arr,
-                device_id: device_id_arr,
-                public_key: genesis_state.signing_key.public_key.clone(),
-                participants: participants_for_payload,
-                created_at_ticks: dsm::utils::deterministic_time::tick_index(),
-            };
+            let publishable = outcome.to_publishable()?;
 
             log::info!(
-                "IdentitySDK::create_genesis: publishing genesis payload (genesis_hash_b32={}, device_id_b32={}, pk_len={})",
-                crate::util::text_id::encode_base32_crockford(&payload.genesis_hash),
-                crate::util::text_id::encode_base32_crockford(&payload.device_id),
-                payload.public_key.len()
+                "IdentitySDK::create_genesis: publishing genesis (genesis_hash_b32={}, participants={})",
+                crate::util::text_id::encode_base32_crockford(&publishable.genesis_hash),
+                publishable.participants.len(),
             );
 
-            // NOTE: This blocks on an async HTTP call while we're in a sync function.
-            // If this hangs, it's a network/IO stall, not an MPC stall.
-            futures::executor::block_on(publisher.publish(&payload))?;
+            // NOTE: This blocks on an async HTTP call while we're in a
+            // sync function — if it hangs, it's a network/IO stall.
+            futures::executor::block_on(publisher.publish(&publishable))?;
 
             log::info!("IdentitySDK::create_genesis: publish done");
         }
