@@ -24,7 +24,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
@@ -66,7 +66,7 @@ pub fn encrypt_chain_sk(plain_sk: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| anyhow!("XChaCha20Poly1305 init: {e}"))?;
     let mut nonce_bytes = [0u8; 24];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut nonce_bytes).expect("OsRng entropy failure");
     let ct = cipher
         .encrypt(
             XNonce::from_slice(&nonce_bytes),

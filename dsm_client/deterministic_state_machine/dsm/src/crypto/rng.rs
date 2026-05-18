@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::sync::Mutex;
 
 use crate::types::error::DsmError;
-use rand::{rngs::OsRng, RngCore, SeedableRng};
+use rand::{rngs::OsRng, RngCore, SeedableRng, TryRngCore};
 use rand_chacha::ChaCha20Rng;
 use rand::CryptoRng;
 
@@ -42,11 +42,6 @@ impl RngCore for SecureRng {
     fn fill_bytes(&mut self, dest: &mut [u8]) {
         let bytes = random_bytes(dest.len());
         dest.copy_from_slice(&bytes);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
-        Ok(())
     }
 }
 
@@ -118,7 +113,9 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
     }
 
     // Fall back to strong OS entropy
-    OsRng.fill_bytes(&mut bytes);
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut bytes)
+        .expect("OsRng failed to provide entropy");
     bytes
 }
 
@@ -128,7 +125,13 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 /// handling, wire this to `getrandom`/`try_fill_bytes` in your rand version.
 pub fn generate_secure_random(len: usize) -> Result<Vec<u8>, DsmError> {
     let mut bytes = vec![0u8; len];
-    OsRng.fill_bytes(&mut bytes);
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut bytes).map_err(|e| {
+        DsmError::crypto(
+            format!("OsRng entropy failure: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
     Ok(bytes)
 }
 

@@ -16,7 +16,7 @@ use dsm_sdk::bluetooth::bilateral_transport_adapter::{
 use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::storage_utils;
 use dsm_sdk::util::text_id;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -279,7 +279,8 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     // Create Alice genesis via MPC
     let mut os_rng = OsRng;
     let mut alice_entropy = vec![0u8; 32];
-    os_rng.fill_bytes(&mut alice_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut alice_entropy)
+        .expect("OsRng entropy failure");
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(alice_entropy))
         .await
@@ -293,7 +294,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
     // Create Bob genesis via MPC
     let mut bob_entropy = vec![1u8; 32];
-    os_rng.fill_bytes(&mut bob_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut bob_entropy).expect("OsRng entropy failure");
     let bob_genesis = storage_sdk
         .create_genesis_with_mpc(Some(bob_entropy))
         .await
@@ -581,9 +582,11 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     let mut alice_entropy = vec![0u8; 32];
     let mut bob_entropy = vec![1u8; 32];
     let mut carol_entropy = vec![2u8; 32];
-    os_rng.fill_bytes(&mut alice_entropy);
-    os_rng.fill_bytes(&mut bob_entropy);
-    os_rng.fill_bytes(&mut carol_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut alice_entropy)
+        .expect("OsRng entropy failure");
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut bob_entropy).expect("OsRng entropy failure");
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut carol_entropy)
+        .expect("OsRng entropy failure");
 
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(alice_entropy))

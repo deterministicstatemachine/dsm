@@ -24,7 +24,7 @@ use crate::types::error::DsmError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{rand_core as aead_rand_core, Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
 use blake3::Hasher;
@@ -33,11 +33,72 @@ use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
     B32, EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
 };
-use rand::rngs::OsRng;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use tracing::{debug, error, info, trace};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+struct DeterministicRng {
+    seed: [u8; 32],
+    counter: u64,
+    block: [u8; 32],
+    block_pos: usize,
+}
+
+impl DeterministicRng {
+    fn from_seed(seed: [u8; 32]) -> Self {
+        Self {
+            seed,
+            counter: 0,
+            block: [0u8; 32],
+            block_pos: 32,
+        }
+    }
+
+    fn refill_block(&mut self) {
+        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        h.update(&self.seed);
+        h.update(&self.counter.to_le_bytes());
+        self.block.copy_from_slice(h.finalize().as_bytes());
+        self.counter = self.counter.wrapping_add(1);
+        self.block_pos = 0;
+    }
+}
+
+impl aead_rand_core::RngCore for DeterministicRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut buf = [0u8; 4];
+        self.fill_bytes(&mut buf);
+        u32::from_le_bytes(buf)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut buf = [0u8; 8];
+        self.fill_bytes(&mut buf);
+        u64::from_le_bytes(buf)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let mut written = 0usize;
+        while written < dest.len() {
+            if self.block_pos >= self.block.len() {
+                self.refill_block();
+            }
+            let remaining_block = self.block.len() - self.block_pos;
+            let remaining_dest = dest.len() - written;
+            let to_copy = remaining_block.min(remaining_dest);
+            dest[written..written + to_copy]
+                .copy_from_slice(&self.block[self.block_pos..self.block_pos + to_copy]);
+            self.block_pos += to_copy;
+            written += to_copy;
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), aead_rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+impl aead_rand_core::CryptoRng for DeterministicRng {}
 
 // ------------------ Deterministic op-gated health checking (no wall clock) ------------------
 
@@ -424,7 +485,7 @@ pub fn generate_kyber_keypair_from_entropy(
     let mut seed = [0u8; 32];
     seed.copy_from_slice(digest.as_bytes());
 
-    let mut rng = ChaCha20Rng::from_seed(seed);
+    let mut rng = DeterministicRng::from_seed(seed);
     let (decapsulation_key, encapsulation_key) = MlKem768::generate(&mut rng);
 
     let pk_bytes = encapsulation_key.as_bytes().as_slice().to_vec();

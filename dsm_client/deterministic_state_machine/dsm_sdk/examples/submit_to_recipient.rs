@@ -5,7 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 use reqwest::Client;
 
 fn base32_encode(bytes: &[u8]) -> String {
@@ -49,12 +49,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register a fresh test device (sender)
     let mut device_id_raw = [0u8; 32];
-    os_rng.fill_bytes(&mut device_id_raw);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut device_id_raw)
+        .expect("OsRng entropy failure");
     let device_id_b32 = base32_encode(&device_id_raw);
     let mut pubkey_raw = [0u8; 32];
-    os_rng.fill_bytes(&mut pubkey_raw);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut pubkey_raw).expect("OsRng entropy failure");
     let mut genesis_raw = [0u8; 32];
-    os_rng.fill_bytes(&mut genesis_raw);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut genesis_raw).expect("OsRng entropy failure");
 
     let reg_req = dsm_sdk::generated::RegisterDeviceRequest {
         device_id: device_id_raw.to_vec(),
@@ -86,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build a minimal Envelope v3 (payload-free) for spool routing; the app should accept/ack only if valid
     let mut msg_id = [0u8; 16];
-    os_rng.fill_bytes(&mut msg_id);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut msg_id).expect("OsRng entropy failure");
     let env = dsm_sdk::generated::Envelope {
         version: 3,
         headers: Some(dsm_sdk::generated::Headers {

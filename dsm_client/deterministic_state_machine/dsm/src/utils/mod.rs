@@ -50,10 +50,12 @@ pub use deterministic_time::*;
 /// ```
 #[allow(unused)]
 pub fn random_bytes(length: usize) -> Vec<u8> {
-    use rand::{rngs::OsRng, RngCore};
+    use rand::{rngs::OsRng, TryRngCore};
 
     let mut bytes = vec![0u8; length];
-    OsRng.fill_bytes(&mut bytes);
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut bytes)
+        .expect("OsRng failed to provide entropy");
     bytes
 }
 

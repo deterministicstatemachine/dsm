@@ -14,7 +14,6 @@
 use dsm::types::proto as generated;
 use dsm::bitcoin::BitcoinSettlementObservation;
 use prost::Message;
-use rand::RngCore;
 use std::sync::Arc;
 
 use crate::bridge::{AppInvoke, AppResult};
@@ -1386,7 +1385,9 @@ impl AppRouterImpl {
                 // 16 bytes → 12 words if word_count == 12.
                 let entropy_len: usize = if req.word_count == 12 { 16 } else { 32 };
                 let mut entropy = vec![0u8; entropy_len];
-                rand::rngs::OsRng.fill_bytes(&mut entropy);
+                let mut rng = rand::rngs::OsRng;
+                rand::TryRngCore::try_fill_bytes(&mut rng, &mut entropy)
+                    .expect("OsRng entropy failure");
                 // Ensure entropy is non-zero (astronomically unlikely, but guard anyway).
                 if entropy.iter().all(|&b| b == 0) {
                     return err(
