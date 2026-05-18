@@ -609,13 +609,24 @@ class SinglePathWebViewBridge(private val context: Context) {
                 "captureCdbrwOrbitTimings" -> {
                     try {
                         val envBytes = com.dsm.wallet.security.AntiCloneGate.buildEnvironmentBytes()
+                        // Per Alg 1 step 1, the orbit seed needs a CSPRNG
+                        // challenge. The frontend never holds business state,
+                        // so we mint the challenge here on every probe.
+                        val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                        // Thermal HAL snapshot — Android-sanctioned path
+                        // because direct sysfs reads are SELinux-blocked on
+                        // most OEMs. Kotlin layer is doing transport only;
+                        // PowerManager reads are not business logic.
+                        val thermalBytes = com.dsm.wallet.security.AntiCloneGate.sampleThermalBytesForBridge(inst.context)
                         val timings = com.dsm.wallet.security.SiliconFingerprintNative.captureOrbitDensity(
                             envBytes,
+                            challenge,
+                            thermalBytes,
                             1024 * 1024, // 1MB arena
-                            9, // 9 probes
-                            1000, // 1000 steps per probe
-                            1, // 1 warmup round
-                            7 // rotation bits
+                            8,           // probes (must be divisible by 8)
+                            1000,        // 1000 steps per probe
+                            1,           // 1 warmup round
+                            7            // rotation bits
                         )
                         if (timings == null) {
                             Log.w(TAG, "captureCdbrwOrbitTimings: silicon PUF returned null")

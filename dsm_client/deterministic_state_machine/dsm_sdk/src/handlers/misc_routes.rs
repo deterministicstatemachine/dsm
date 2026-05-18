@@ -558,13 +558,19 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 Err(e) => return err(format!("decode CdbrwEnrollRequest failed: {e}")),
             };
 
-            // Convert trials from repeated CdbrwOrbitTrial to Vec<Vec<i64>>.
-            // Empty trials get caught by the writer's validation.
-            let trials: Vec<Vec<i64>> = req.trials.into_iter().map(|t| t.timings).collect();
+            // Split trials into parallel timings + challenges. Empty trials
+            // and missing/short challenges get caught by the writer's
+            // validation (MissingTrialChallenge / EmptyTrial).
+            let (trials, trial_challenges): (Vec<Vec<i64>>, Vec<Vec<u8>>) = req
+                .trials
+                .into_iter()
+                .map(|t| (t.timings, t.challenge))
+                .unzip();
 
             let inputs = EnrollInputs {
                 env_bytes: &req.env_bytes,
                 trials: &trials,
+                trial_challenges: &trial_challenges,
                 arena_bytes: req.arena_bytes,
                 probes: req.probes,
                 steps_per_probe: req.steps_per_probe,
@@ -597,6 +603,9 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 }
                 Err(EnrollError::InvalidHistogramBins { bins }) => err(format!(
                     "cdbrw.enroll: invalid histogram_bins={bins} (expected 256/512/1024)"
+                )),
+                Err(EnrollError::MissingTrialChallenge { index, reason }) => err(format!(
+                    "cdbrw.enroll: trial {index} challenge invalid: {reason}"
                 )),
                 Err(EnrollError::Io(msg)) => err(format!("cdbrw.enroll: io error: {msg}")),
             }

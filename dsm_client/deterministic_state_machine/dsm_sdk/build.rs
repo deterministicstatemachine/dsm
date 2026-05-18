@@ -132,6 +132,14 @@ fn main() {
         }
     }
 
+    // Emit DT_SONAME on the Android cdylib so consumers (e.g. libsiliconfp.so)
+    // record `libdsm_sdk.so` as DT_NEEDED instead of the absolute build-time path.
+    // Without this, the NDK linker bakes the host filesystem path into the
+    // dependent .so and dlopen fails on-device with "library ... not found".
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libdsm_sdk.so");
+    }
+
     // Preserve deterministic schema hash emission used by the SDK
     write_min_schema_hash_module();
 

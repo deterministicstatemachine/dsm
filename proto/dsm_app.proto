@@ -2765,6 +2765,12 @@ enum CdbrwResonantStatus {
 // One PUF orbit trial (ARX interrogation walk timings).
 message CdbrwOrbitTrial {
   repeated int64 timings = 1 [(dsm_max_len)=16384]; // per-step ARX timing samples
+  // Per-trial CSPRNG challenge that seeded x_0 = H("DSM/cdbrw-seed\0" || challenge || K_DBRW) mod 2^32
+  // per Alg 1 step 1. For enrollment trials before K_DBRW is bound, callers pass the random 32-byte
+  // challenge alone and the Rust writer treats it as authoritative (Alg 2 line 1491).
+  // Empty bytes are treated as "this trial was not challenge-seeded" — Rust rejects such enrollments
+  // so a regression that strips per-trial challenges fails closed instead of silently downgrading.
+  bytes challenge = 2 [(dsm_max_len)=32];
 }
 
 // cdbrw.measure_trust args — compute resonant health and current access verdict

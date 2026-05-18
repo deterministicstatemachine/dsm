@@ -43,6 +43,7 @@ target_compile_options(siliconfp PRIVATE
 target_link_libraries(
     siliconfp
     ${log-lib}
+    dsm_sdk  # for dsm_blake3_keyed, dsm_seed_orbit, dsm_get_cdbrw_binding_key
 )
 
 # ------------------------------------------------------------------

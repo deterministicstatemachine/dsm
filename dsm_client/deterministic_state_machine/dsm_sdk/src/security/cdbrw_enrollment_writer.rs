@@ -77,6 +77,14 @@ pub struct EnrollInputs<'a> {
     /// `K` orbit timing vectors. Each entry is the raw output of the NDK
     /// silicon-PUF probe. Length must be `>= MIN_ENROLL_TRIALS`.
     pub trials: &'a [Vec<i64>],
+    /// Per-trial CSPRNG challenges (Alg 2 line 1491). Parallel to `trials`
+    /// — `trial_challenges[i]` is the 32-byte challenge that seeded the
+    /// orbit producing `trials[i]`. Each entry must be 32 bytes and at
+    /// least one byte non-zero; the writer rejects enrollments where any
+    /// trial is missing or all-zero so a regression that strips
+    /// per-trial challenges fails closed instead of silently downgrading
+    /// to a challenge-independent orbit.
+    pub trial_challenges: &'a [Vec<u8>],
     /// Enrollment config — mirrored from Kotlin `SiliconFingerprint.Config`.
     /// Stored on-disk and checked by the verifier at runtime to detect
     /// downgrade attempts.
@@ -121,6 +129,11 @@ pub enum EnrollError {
     /// Kotlin-approved set (256 / 512 / 1024). Keeping the same constraints
     /// as the Kotlin enrollment so anchors stay comparable.
     InvalidHistogramBins { bins: u32 },
+    /// Per-trial challenge missing, wrong length, or all-zero (Alg 2 line
+    /// 1491). A zero or absent challenge means the orbit wasn't actually
+    /// challenge-seeded at the C++ layer — a spec violation we refuse to
+    /// silently downgrade past.
+    MissingTrialChallenge { index: usize, reason: &'static str },
     /// I/O error while writing `dsm_silicon_fp_v4.bin`.
     Io(String),
 }
@@ -137,6 +150,9 @@ impl std::fmt::Display for EnrollError {
             }
             EnrollError::InvalidHistogramBins { bins } => {
                 write!(f, "invalid histogram bin count {bins}")
+            }
+            EnrollError::MissingTrialChallenge { index, reason } => {
+                write!(f, "enrollment trial {index} challenge invalid: {reason}")
             }
             EnrollError::Io(msg) => write!(f, "enrollment I/O error: {msg}"),
         }
@@ -186,6 +202,26 @@ pub fn enroll_device(
     for (i, trial) in inputs.trials.iter().enumerate() {
         if trial.is_empty() {
             return Err(EnrollError::EmptyTrial { index: i });
+        }
+    }
+    if inputs.trial_challenges.len() != inputs.trials.len() {
+        return Err(EnrollError::MissingTrialChallenge {
+            index: inputs.trial_challenges.len().min(inputs.trials.len()),
+            reason: "challenge count must equal trial count",
+        });
+    }
+    for (i, challenge) in inputs.trial_challenges.iter().enumerate() {
+        if challenge.len() != 32 {
+            return Err(EnrollError::MissingTrialChallenge {
+                index: i,
+                reason: "challenge must be exactly 32 bytes",
+            });
+        }
+        if challenge.iter().all(|&b| b == 0) {
+            return Err(EnrollError::MissingTrialChallenge {
+                index: i,
+                reason: "challenge is all zero — orbit was not CSPRNG-seeded",
+            });
         }
     }
 
@@ -495,15 +531,34 @@ mod tests {
             .collect()
     }
 
+    /// One distinct 32-byte non-zero challenge per trial. Mirrors what the
+    /// Android side does with `SecureRandom().nextBytes(challenge)`.
+    fn synthetic_challenges(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|i| {
+                let mut c = vec![0u8; 32];
+                for (j, b) in c.iter_mut().enumerate() {
+                    *b = ((i + 1) as u8).wrapping_add(j as u8).wrapping_mul(13);
+                }
+                // Force the first byte non-zero so the all-zero guard never
+                // trips for the synthetic fixture.
+                c[0] |= 0x01;
+                c
+            })
+            .collect()
+    }
+
     #[test]
     fn enroll_rejects_too_few_trials() {
         let dir = TempDir::new().expect("tempdir");
         let trials: Vec<Vec<i64>> = (0..(MIN_ENROLL_TRIALS - 1))
             .map(|i| synthetic_timings(i as u64, 1024))
             .collect();
+        let challenges = synthetic_challenges(trials.len());
         let inputs = EnrollInputs {
             env_bytes: b"test-env",
             trials: &trials,
+            trial_challenges: &challenges,
             arena_bytes: 8 * 1024 * 1024,
             probes: 4096,
             steps_per_probe: 4096,
@@ -520,9 +575,11 @@ mod tests {
         let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
             .map(|i| synthetic_timings(i as u64, 1024))
             .collect();
+        let challenges = synthetic_challenges(trials.len());
         let inputs = EnrollInputs {
             env_bytes: b"test-env",
             trials: &trials,
+            trial_challenges: &challenges,
             arena_bytes: 8 * 1024 * 1024,
             probes: 4096,
             steps_per_probe: 4096,
@@ -534,15 +591,89 @@ mod tests {
     }
 
     #[test]
+    fn enroll_rejects_missing_challenge() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        // One fewer challenge than trial — count mismatch.
+        let challenges = synthetic_challenges(trials.len() - 1);
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(err, EnrollError::MissingTrialChallenge { .. }));
+    }
+
+    #[test]
+    fn enroll_rejects_all_zero_challenge() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        let mut challenges = synthetic_challenges(trials.len());
+        challenges[3] = vec![0u8; 32];
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(
+            err,
+            EnrollError::MissingTrialChallenge { index: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn enroll_rejects_wrong_length_challenge() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        let mut challenges = synthetic_challenges(trials.len());
+        challenges[0] = vec![0xFFu8; 16]; // half-length
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(
+            err,
+            EnrollError::MissingTrialChallenge { index: 0, .. }
+        ));
+    }
+
+    #[test]
     fn enroll_rejects_empty_trial() {
         let dir = TempDir::new().expect("tempdir");
         let mut trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
             .map(|i| synthetic_timings(i as u64, 1024))
             .collect();
         trials[5] = Vec::new();
+        let challenges = synthetic_challenges(trials.len());
         let inputs = EnrollInputs {
             env_bytes: b"test-env",
             trials: &trials,
+            trial_challenges: &challenges,
             arena_bytes: 8 * 1024 * 1024,
             probes: 4096,
             steps_per_probe: 4096,
@@ -560,9 +691,11 @@ mod tests {
             let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
                 .map(|i| synthetic_timings(i as u64 + 1, 2048))
                 .collect();
+            let challenges = synthetic_challenges(trials.len());
             let inputs = EnrollInputs {
                 env_bytes: b"DSM/silicon_env/v2\0BOARD|BRAND|DEVICE|HW|MFG|MODEL|SOC|com.test",
                 trials: &trials,
+                trial_challenges: &challenges,
                 arena_bytes: 8 * 1024 * 1024,
                 probes: 4096,
                 steps_per_probe: 4096,
@@ -621,9 +754,11 @@ mod tests {
             let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
                 .map(|i| synthetic_timings(i as u64 + 1000, 4096))
                 .collect();
+            let challenges = synthetic_challenges(trials.len());
             let inputs = EnrollInputs {
                 env_bytes: b"DSM/silicon_env/v2\0snapshot-test",
                 trials: &trials,
+                trial_challenges: &challenges,
                 arena_bytes: 8 * 1024 * 1024,
                 probes: 4096,
                 steps_per_probe: 4096,
@@ -656,9 +791,11 @@ mod tests {
             let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
                 .map(|i| synthetic_timings(seed_base + i as u64, 2048))
                 .collect();
+            let challenges = synthetic_challenges(trials.len());
             let inputs = EnrollInputs {
                 env_bytes: b"DSM/silicon_env/v2\0rename-test",
                 trials: &trials,
+                trial_challenges: &challenges,
                 arena_bytes: 8 * 1024 * 1024,
                 probes: 4096,
                 steps_per_probe: 4096,
