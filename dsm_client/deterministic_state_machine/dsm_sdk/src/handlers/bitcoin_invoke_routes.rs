@@ -1386,8 +1386,9 @@ impl AppRouterImpl {
                 let entropy_len: usize = if req.word_count == 12 { 16 } else { 32 };
                 let mut entropy = vec![0u8; entropy_len];
                 let mut rng = rand::rngs::OsRng;
-                rand::TryRngCore::try_fill_bytes(&mut rng, &mut entropy)
-                    .expect("OsRng entropy failure");
+                if let Err(e) = rand::TryRngCore::try_fill_bytes(&mut rng, &mut entropy) {
+                    return err(format!("bitcoin.wallet.create: OsRng entropy failure: {e}"));
+                }
                 // Ensure entropy is non-zero (astronomically unlikely, but guard anyway).
                 if entropy.iter().all(|&b| b == 0) {
                     return err(

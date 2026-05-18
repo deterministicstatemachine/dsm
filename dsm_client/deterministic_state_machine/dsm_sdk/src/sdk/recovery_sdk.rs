@@ -259,7 +259,12 @@ impl RecoverySDK {
     pub fn generate_mnemonic() -> Result<String, DsmError> {
         let mut entropy = [0u8; 32]; // 256 bits → 24 words
         let mut rng = rand::rngs::OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut rng, &mut entropy).expect("OsRng entropy failure");
+        rand::TryRngCore::try_fill_bytes(&mut rng, &mut entropy).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         let mnemonic = bip39::Mnemonic::from_entropy(&entropy).map_err(|e| {
             DsmError::crypto(
                 format!("BIP-39 generation failed: {e}"),

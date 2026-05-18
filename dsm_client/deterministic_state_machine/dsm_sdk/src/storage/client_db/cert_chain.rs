@@ -66,7 +66,8 @@ pub fn encrypt_chain_sk(plain_sk: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| anyhow!("XChaCha20Poly1305 init: {e}"))?;
     let mut nonce_bytes = [0u8; 24];
-    rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut nonce_bytes).expect("OsRng entropy failure");
+    rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut nonce_bytes)
+        .map_err(|e| anyhow!("OsRng entropy failure: {e}"))?;
     let ct = cipher
         .encrypt(
             XNonce::from_slice(&nonce_bytes),

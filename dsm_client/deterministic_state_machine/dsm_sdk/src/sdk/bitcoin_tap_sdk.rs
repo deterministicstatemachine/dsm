@@ -1393,8 +1393,12 @@ impl BitcoinTapSdk {
             })?;
         let mut deposit_nonce = [0u8; 32];
         let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut deposit_nonce)
-            .expect("OsRng entropy failure");
+        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut deposit_nonce).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         let eta = Self::derive_bearer_eta(&manifold_seed, &deposit_nonce);
         let preimage = Self::derive_preimage_from_eta(&eta);
         let hash_lock = sha256_hash_lock(&preimage);
@@ -1640,8 +1644,14 @@ impl BitcoinTapSdk {
         })?;
         let mut successor_deposit_nonce = [0u8; 32];
         let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut successor_deposit_nonce)
-            .expect("OsRng entropy failure");
+        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut successor_deposit_nonce).map_err(
+            |e| {
+                DsmError::crypto(
+                    format!("OsRng entropy failure: {e}"),
+                    None::<std::io::Error>,
+                )
+            },
+        )?;
         let successor_eta = Self::derive_bearer_eta(&manifold_seed, &successor_deposit_nonce);
         let successor_preimage = Self::derive_preimage_from_eta(&successor_eta);
         let successor_hash_lock = sha256_hash_lock(&successor_preimage);

@@ -308,7 +308,12 @@ impl WalTransactionQueue {
 
         let mut nonce = [0u8; 12];
         let mut rng = rand::rngs::OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut rng, &mut nonce).expect("OsRng entropy failure");
+        rand::TryRngCore::try_fill_bytes(&mut rng, &mut nonce).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
 
         let encrypted_data = cipher
             .encrypt(&nonce.into(), transaction)
