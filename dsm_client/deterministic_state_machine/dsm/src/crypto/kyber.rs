@@ -27,7 +27,6 @@ use aes_gcm::{
     aead::{rand_core as aead_rand_core, Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
-use blake3::Hasher;
 use crate::crypto::blake3::dsm_domain_hasher;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
@@ -465,7 +464,7 @@ pub fn generate_kyber_keypair() -> Result<KyberKeyPair, DsmError> {
     })
 }
 
-/// Deterministic key generation: Blake3(context||entropy) → 32B seed → ChaCha20Rng(seed) → ml-kem
+/// Deterministic key generation: Blake3(context||entropy) -> 32B seed -> DeterministicRng(seed) -> ml-kem
 pub fn generate_kyber_keypair_from_entropy(
     entropy: &[u8],
     context: &str,
@@ -526,8 +525,6 @@ pub fn generate_deterministic_kyber_keypair(
 pub struct EntropyContext {
     context: String,
     entropy: Vec<u8>,
-    #[allow(dead_code)]
-    hasher: Hasher,
 }
 impl Drop for EntropyContext {
     fn drop(&mut self) {
@@ -536,12 +533,9 @@ impl Drop for EntropyContext {
 }
 
 pub fn new_entropy_context(context: &str, entropy: &[u8]) -> EntropyContext {
-    let mut hasher = dsm_domain_hasher("DSM/ml-kem-ctx");
-    hasher.update(context.as_bytes());
     EntropyContext {
         context: context.to_string(),
         entropy: entropy.to_vec(),
-        hasher,
     }
 }
 
