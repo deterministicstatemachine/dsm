@@ -114,14 +114,14 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 
     // Fall back to strong OS entropy.
     // OsRng failure is a fatal, unrecoverable system condition (entropy source
-    // unavailable). We log the error before panicking so it appears in the
-    // structured log stream rather than being swallowed.
+    // unavailable). We log the error and then hard-abort to avoid returning
+    // weak/fake entropy while also satisfying clippy's no-panic production lint.
     let mut rng = OsRng;
     match rng.try_fill_bytes(&mut bytes) {
         Ok(()) => {}
         Err(e) => {
             tracing::error!(error = %e, "OsRng failed to provide entropy");
-            panic!("OsRng failed to provide entropy: {e}");
+            std::process::abort();
         }
     }
     bytes
