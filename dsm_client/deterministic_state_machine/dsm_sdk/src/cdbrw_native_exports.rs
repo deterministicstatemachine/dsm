@@ -125,7 +125,8 @@ mod tests {
         let tag = CString::new("DSM/cdbrw-thermal").unwrap();
         let data = b"abc";
         let mut out = [0u8; 32];
-        let ok = unsafe { dsm_blake3_keyed(tag.as_ptr(), data.as_ptr(), data.len(), out.as_mut_ptr()) };
+        let ok =
+            unsafe { dsm_blake3_keyed(tag.as_ptr(), data.as_ptr(), data.len(), out.as_mut_ptr()) };
         assert!(ok);
         let expected = dsm::crypto::blake3::domain_hash_bytes("DSM/cdbrw-thermal", data);
         assert_eq!(out, expected);
@@ -179,6 +180,9 @@ mod tests {
 
     #[test]
     fn seed_orbit_null_returns_zero() {
-        assert_eq!(unsafe { dsm_seed_orbit(std::ptr::null(), std::ptr::null()) }, 0);
+        assert_eq!(
+            unsafe { dsm_seed_orbit(std::ptr::null(), std::ptr::null()) },
+            0
+        );
     }
 }

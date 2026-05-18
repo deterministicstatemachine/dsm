@@ -114,8 +114,8 @@ pub mod prelude;
 pub mod jni;
 
 mod binding_key;
-mod cdbrw_native_exports;
 pub mod bridge;
+mod cdbrw_native_exports;
 // crypto_performance module deleted: orphan benchmark helpers that only
 // referenced HashChainSDK + IdentitySDK, with no consumers outside the
 // orphaned performance_demo.rs file (also deleted).
