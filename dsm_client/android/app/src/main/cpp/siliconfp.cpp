@@ -408,18 +408,41 @@ Java_com_dsm_wallet_security_SiliconFingerprintNative_captureOrbitDensity(
 
     std::vector<uint64_t> deltas((size_t)probes, 0ull);
 
+    // Hybrid substrate-refresh cadence (Phase 2.1 fix for the falsifying
+    // delta test failure). Spec Def 3.4 demands per-step substrate
+    // sampling; PR #351 hoisted to per-probe to dodge syscall storm; the
+    // falsifying test then confirmed thermal contribution was below the
+    // noise floor. The middle ground: pre-sample N_SUBSTRATE_PER_PROBE
+    // substrate digests UPFRONT (each is its own fresh BLAKE3 over real
+    // thermal/cpufreq/perf/cntvct reads, spaced by syscall-latency
+    // microseconds), then the timed inner loop indexes through them
+    // sequentially. This gives N_SUBSTRATE_PER_PROBE distinct
+    // thermal-influenced digests per probe (was 1) without putting any
+    // syscalls inside the timed region.
+    constexpr int N_SUBSTRATE_PER_PROBE = 16;
+    uint8_t substrates[N_SUBSTRATE_PER_PROBE][32];
+    const int steps_per_substrate =
+        (stepsPerProbe + N_SUBSTRATE_PER_PROBE - 1) / N_SUBSTRATE_PER_PROBE;
+
     for (int p = 0; p < probes; p++) {
-        // Per-probe substrate digest — matches spec Def 9.1(c) "microsecond
-        // intervals" for thermal reads. Within the inner loop µ_n derives
-        // from this digest + per-step CNTVCT, so the substrate state still
-        // drives every iteration but we only pay syscall cost per probe.
-        uint8_t substrate[32];
-        sample_substrate_digest((uint64_t)p, thermal_buf, thermal_len, substrate);
+        // Pre-sample substrate digests for this probe — outside the timed
+        // region so syscall latency does not pollute orbit timings.
+        for (int k = 0; k < N_SUBSTRATE_PER_PROBE; k++) {
+            const uint64_t substrate_idx =
+                (uint64_t)p * (uint64_t)N_SUBSTRATE_PER_PROBE + (uint64_t)k;
+            sample_substrate_digest(substrate_idx, thermal_buf, thermal_len,
+                                    substrates[k]);
+        }
 
         serializing_barrier();
         const uint64_t t0 = read_cycle_counter();
 
         for (int s = 0; s < stepsPerProbe; s++) {
+            // Pick the substrate that covers this step. Index switches every
+            // steps_per_substrate iterations so thermal/cpufreq/perf contribute
+            // to µ_n N_SUBSTRATE_PER_PROBE times per probe instead of once.
+            const uint8_t* substrate = substrates[s / steps_per_substrate];
+
             // Arena access for cache topology pressure — NOT used as µ_n.
             volatile uint8_t _arena_touch = arena[idx];
             (void)_arena_touch;
