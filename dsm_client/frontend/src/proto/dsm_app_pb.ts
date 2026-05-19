@@ -7582,6 +7582,37 @@ export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
    */
   nonce = new Uint8Array(0);
 
+  /**
+   * Tier 2 envelope binding. When `max_paths > 1` the binder runs
+   * N-best path enumeration and stamps the primary path's hops into
+   * `RouteCommitV1.hops` and the runner-up paths into
+   * `RouteCommitV1.fallbacks[].hops`. All paths share one signature
+   * and one external commitment X. 0 → server default (1, primary-only,
+   * preserves legacy behavior).
+   *
+   * @generated from field: uint32 max_paths = 6;
+   */
+  maxPaths = 0;
+
+  /**
+   * Trader's per-hop slippage tolerance in basis points (e.g. 50 =
+   * 0.5%). Each hop's `min_output_amount_u128` is stamped to
+   * `expected_output * (10000 - slippage_bps) / 10000`. 0 → no
+   * per-hop floor (legacy / unbounded).
+   *
+   * @generated from field: uint32 slippage_bps = 7;
+   */
+  slippageBps = 0;
+
+  /**
+   * Trader's envelope-level slippage tolerance for the final output
+   * (often equal to `slippage_bps` but allowed to differ). 0 → no
+   * envelope floor (legacy / unbounded).
+   *
+   * @generated from field: uint32 floor_bps = 8;
+   */
+  floorBps = 0;
+
   constructor(data?: PartialMessage<FindAndBindRouteRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7595,6 +7626,9 @@ export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
     { no: 3, name: "input_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "max_hops", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 5, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "max_paths", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "slippage_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 8, name: "floor_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FindAndBindRouteRequest {
@@ -7878,6 +7912,18 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
    */
   vaultStateAnchorDigest = new Uint8Array(0);
 
+  /**
+   * Tier 2 intent-bound: minimum acceptable output for THIS hop. If
+   * the unlock-time simulation yields less than this, the gate
+   * rejects and the wallet retries against the next fallback hop
+   * group (RouteCommitV1.fallbacks). Empty (zero-length) bytes mean
+   * "no per-hop floor" and the only check is the envelope-level
+   * floor on RouteCommitV1.floor_final_output_amount_u128.
+   *
+   * @generated from field: bytes min_output_amount_u128 = 14;
+   */
+  minOutputAmountU128 = new Uint8Array(0);
+
   constructor(data?: PartialMessage<RouteCommitHopV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7899,6 +7945,7 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
     { no: 11, name: "vault_state_anchor_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "vault_state_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "vault_state_anchor_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 14, name: "min_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitHopV1 {
@@ -7915,6 +7962,48 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
 
   static equals(a: RouteCommitHopV1 | PlainMessage<RouteCommitHopV1> | undefined, b: RouteCommitHopV1 | PlainMessage<RouteCommitHopV1> | undefined): boolean {
     return proto3.util.equals(RouteCommitHopV1, a, b);
+  }
+}
+
+/**
+ * Tier 2: one fallback hop group. When the primary hops are blocked
+ * (state-move, intent-bound violation), the wallet attempts each
+ * fallback group in order under the SAME signed RouteCommitV1
+ * envelope.
+ *
+ * @generated from message dsm.RouteCommitFallbackV1
+ */
+export class RouteCommitFallbackV1 extends Message<RouteCommitFallbackV1> {
+  /**
+   * @generated from field: repeated dsm.RouteCommitHopV1 hops = 1;
+   */
+  hops: RouteCommitHopV1[] = [];
+
+  constructor(data?: PartialMessage<RouteCommitFallbackV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RouteCommitFallbackV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "hops", kind: "message", T: RouteCommitHopV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitFallbackV1 {
+    return new RouteCommitFallbackV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouteCommitFallbackV1 {
+    return new RouteCommitFallbackV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouteCommitFallbackV1 {
+    return new RouteCommitFallbackV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RouteCommitFallbackV1 | PlainMessage<RouteCommitFallbackV1> | undefined, b: RouteCommitFallbackV1 | PlainMessage<RouteCommitFallbackV1> | undefined): boolean {
+    return proto3.util.equals(RouteCommitFallbackV1, a, b);
   }
 }
 
@@ -7990,6 +8079,24 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
    */
   initiatorSignature = new Uint8Array(0);
 
+  /**
+   * Tier 2 envelope-level intent-bound floor for the final output.
+   * Empty (zero-length) bytes mean "no envelope floor". When set, the
+   * unlock-routed gate rejects any candidate path whose simulated final
+   * output falls below this.
+   *
+   * @generated from field: bytes floor_final_output_amount_u128 = 11;
+   */
+  floorFinalOutputAmountU128 = new Uint8Array(0);
+
+  /**
+   * Tier 2 fallback hop groups. Empty for legacy primary-only routes.
+   * Each group is an alternate path under the same signed X commitment.
+   *
+   * @generated from field: repeated dsm.RouteCommitFallbackV1 fallbacks = 12;
+   */
+  fallbacks: RouteCommitFallbackV1[] = [];
+
   constructor(data?: PartialMessage<RouteCommitV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8008,6 +8115,8 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
     { no: 8, name: "hops", kind: "message", T: RouteCommitHopV1, repeated: true },
     { no: 9, name: "initiator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "initiator_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "floor_final_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "fallbacks", kind: "message", T: RouteCommitFallbackV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitV1 {

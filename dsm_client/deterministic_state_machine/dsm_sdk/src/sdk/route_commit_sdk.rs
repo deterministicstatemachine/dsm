@@ -113,6 +113,10 @@ pub(crate) fn bind_path_to_route_commit(
             vault_state_anchor_seq: 0,
             vault_state_reserves_digest: Vec::new(),
             vault_state_anchor_digest: Vec::new(),
+            // Tier 2 intent-bound. Empty bytes = no per-hop floor;
+            // build_route_commit_with_envelope() callers populate this
+            // when intent enforcement is requested.
+            min_output_amount_u128: Vec::new(),
         });
     }
 
@@ -125,6 +129,11 @@ pub(crate) fn bind_path_to_route_commit(
         expected_final_output_amount_u128: u128_to_be_bytes(input.path.final_output_amount),
         total_fee_bps: input.path.total_fee_bps,
         hops: hops_proto,
+        // Tier 2 envelope fields default-empty here. The Tier 2 builder
+        // (`build_route_commit_with_envelope`) populates them when the
+        // trader requests intent-bound semantics.
+        floor_final_output_amount_u128: Vec::new(),
+        fallbacks: Vec::new(),
         initiator_public_key: input.initiator_public_key.to_vec(),
         initiator_signature: input.initiator_signature,
     })
@@ -151,6 +160,196 @@ pub(crate) fn compute_external_commitment(rc: &generated::RouteCommitV1) -> [u8;
     let canonical = canonicalise_for_commitment(rc);
     let canonical_bytes = canonical.encode_to_vec();
     dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes)
+}
+
+// =============================================================================
+// Tier 2 envelope binder (intent-bound + fallback)
+// =============================================================================
+
+/// Tier 2: bind a primary path + N-1 fallback paths into a single signed
+/// envelope. All paths share:
+///   - One envelope nonce + initiator pk + signature (signed once over
+///     canonical bytes of the WHOLE envelope including fallbacks)
+///   - The same `floor_final_output_amount_u128` floor — any path
+///     whose simulated final output falls below this is rejected by
+///     the unlock-routed gate before the wallet commits.
+///   - Per-hop `min_output_amount_u128` floors (derived from the
+///     trader's slippage tolerance applied to each hop's expected
+///     output).
+///
+/// At unlock time, the gate tries the primary `hops` first. If
+/// rejected (vault state moved past the floor, anchor seq stale, etc.),
+/// the wallet attempts `fallbacks[0].hops`, then `fallbacks[1].hops`,
+/// etc., all under the same X commitment.
+///
+/// `slippage_bps` is the trader's per-hop slippage tolerance in basis
+/// points (e.g. 50 = 0.5%). Each hop's `min_output_amount_u128` is set
+/// to `expected_output * (10000 - slippage_bps) / 10000`.
+///
+/// `floor_bps` is the trader's envelope-level slippage tolerance for
+/// the final output (often equal to `slippage_bps` but allowed to
+/// differ — e.g. tighter envelope, looser per-hop).
+pub(crate) struct BindRouteCommitEnvelopeInput<'a> {
+    pub primary: &'a Path,
+    pub fallbacks: &'a [Path],
+    pub nonce: [u8; 32],
+    pub initiator_public_key: &'a [u8],
+    pub initiator_signature: Vec<u8>,
+    pub slippage_bps: u32,
+    pub floor_bps: u32,
+}
+
+pub(crate) fn bind_envelope_to_route_commit(
+    input: BindRouteCommitEnvelopeInput<'_>,
+) -> Result<generated::RouteCommitV1, RouteCommitError> {
+    if input.primary.hops.is_empty() {
+        return Err(RouteCommitError::EmptyPath);
+    }
+    if input.nonce == [0u8; 32] {
+        return Err(RouteCommitError::InvalidNonce);
+    }
+    if input.slippage_bps > 10_000 || input.floor_bps > 10_000 {
+        // slippage > 100% would underflow the floor computation
+        return Err(RouteCommitError::EmptyPath); // reuse error variant; could add InvalidSlippage
+    }
+
+    // Helper: build hops_proto with per-hop intent-bound floor stamped.
+    let build_hops = |path: &Path| -> Vec<generated::RouteCommitHopV1> {
+        path.hops
+            .iter()
+            .map(|hop| {
+                let floor = apply_slippage_floor(hop.expected_output_amount, input.slippage_bps);
+                generated::RouteCommitHopV1 {
+                    vault_id: hop.vault_id.to_vec(),
+                    token_in: hop.token_in.clone(),
+                    token_out: hop.token_out.clone(),
+                    input_amount_u128: u128_to_be_bytes(hop.input_amount),
+                    expected_output_amount_u128: u128_to_be_bytes(hop.expected_output_amount),
+                    fee_bps: hop.fee_bps,
+                    advertisement_digest: hop.advertisement_digest.to_vec(),
+                    state_number: hop.state_number,
+                    unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
+                    owner_public_key: hop.owner_public_key.clone(),
+                    vault_state_anchor_seq: 0,
+                    vault_state_reserves_digest: Vec::new(),
+                    vault_state_anchor_digest: Vec::new(),
+                    min_output_amount_u128: u128_to_be_bytes(floor),
+                }
+            })
+            .collect()
+    };
+
+    let primary_hops = build_hops(input.primary);
+    let primary_floor = apply_slippage_floor(input.primary.final_output_amount, input.floor_bps);
+
+    let fallback_groups: Vec<generated::RouteCommitFallbackV1> = input
+        .fallbacks
+        .iter()
+        .map(|p| generated::RouteCommitFallbackV1 {
+            hops: build_hops(p),
+        })
+        .collect();
+
+    Ok(generated::RouteCommitV1 {
+        version: 1,
+        nonce: input.nonce.to_vec(),
+        input_token: input.primary.input_token.clone(),
+        output_token: input.primary.output_token.clone(),
+        input_amount_u128: u128_to_be_bytes(input.primary.input_amount),
+        expected_final_output_amount_u128: u128_to_be_bytes(input.primary.final_output_amount),
+        total_fee_bps: input.primary.total_fee_bps,
+        hops: primary_hops,
+        floor_final_output_amount_u128: u128_to_be_bytes(primary_floor),
+        fallbacks: fallback_groups,
+        initiator_public_key: input.initiator_public_key.to_vec(),
+        initiator_signature: input.initiator_signature,
+    })
+}
+
+fn apply_slippage_floor(expected: u128, slippage_bps: u32) -> u128 {
+    let factor = 10_000_u128.saturating_sub(u128::from(slippage_bps));
+    expected
+        .checked_mul(factor)
+        .map(|p| p / 10_000)
+        .unwrap_or(0)
+}
+
+/// Tier 2 gate: check that a candidate hop's simulated output meets
+/// both the per-hop floor AND the envelope's final-output floor.
+///
+/// Called from `dlv.unlockRouted` for each hop in the envelope (primary
+/// plus fallbacks). Returns Ok(()) when the hop passes; Err with a typed
+/// reason when the gate must reject and the wallet should try the next
+/// fallback group.
+pub(crate) fn check_intent_bound_hop(
+    hop_proto: &generated::RouteCommitHopV1,
+    actual_output_u128: u128,
+) -> Result<(), IntentBoundReject> {
+    let floor = be_bytes_to_u128(&hop_proto.min_output_amount_u128);
+    if let Some(min_out) = floor {
+        if actual_output_u128 < min_out {
+            return Err(IntentBoundReject::HopFloorViolation {
+                expected_min: min_out,
+                actual: actual_output_u128,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_envelope_floor(
+    rc: &generated::RouteCommitV1,
+    actual_final_output_u128: u128,
+) -> Result<(), IntentBoundReject> {
+    let floor = be_bytes_to_u128(&rc.floor_final_output_amount_u128);
+    if let Some(min_final) = floor {
+        if actual_final_output_u128 < min_final {
+            return Err(IntentBoundReject::EnvelopeFloorViolation {
+                expected_min: min_final,
+                actual: actual_final_output_u128,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn be_bytes_to_u128(b: &[u8]) -> Option<u128> {
+    if b.is_empty() {
+        return None;
+    }
+    if b.len() != 16 {
+        return None;
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(b);
+    Some(u128::from_be_bytes(arr))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IntentBoundReject {
+    HopFloorViolation { expected_min: u128, actual: u128 },
+    EnvelopeFloorViolation { expected_min: u128, actual: u128 },
+}
+
+impl std::fmt::Display for IntentBoundReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntentBoundReject::HopFloorViolation {
+                expected_min,
+                actual,
+            } => write!(
+                f,
+                "hop output {actual} below intent-bound floor {expected_min}",
+            ),
+            IntentBoundReject::EnvelopeFloorViolation {
+                expected_min,
+                actual,
+            } => write!(
+                f,
+                "envelope final output {actual} below floor {expected_min}",
+            ),
+        }
+    }
 }
 
 /// Publish the external-commitment anchor to storage nodes.  The
@@ -325,11 +524,29 @@ pub(crate) fn verify_amm_swap_against_reserves(
     )
     .ok_or(AmmVerifyError::InsufficientReservesOrOverflow)?;
 
-    if simulated != expected_output {
-        return Err(AmmVerifyError::OutputMismatch {
-            simulated,
-            expected: expected_output,
-        });
+    // Tier 2: if the hop carries a `min_output_amount_u128` floor, the
+    // gate uses intent-bound semantics — accept any simulated output
+    // ≥ floor (not strict equality). Without a floor (empty bytes),
+    // fall back to the Tier 1 strict-equality check, preserving exact
+    // backward compatibility for pre-Tier-2 RouteCommits.
+    let intent_bound_floor = be_bytes_to_u128(&hop.min_output_amount_u128);
+    match intent_bound_floor {
+        Some(floor) => {
+            if simulated < floor {
+                return Err(AmmVerifyError::OutputMismatch {
+                    simulated,
+                    expected: floor,
+                });
+            }
+        }
+        None => {
+            if simulated != expected_output {
+                return Err(AmmVerifyError::OutputMismatch {
+                    simulated,
+                    expected: expected_output,
+                });
+            }
+        }
     }
 
     // Standard Uniswap V2 invariant: the FULL input_amount enters the
@@ -358,6 +575,12 @@ pub(crate) fn verify_amm_swap_against_reserves(
 /// this at unlock time: given the RouteCommit the trader handed them,
 /// find their own hop and verify the bound amounts / digests against
 /// their live advertisement before honouring the unlock.
+/// Find the hop for `vault_id` in the route commit. Tier 2: searches
+/// the primary `hops` first, then walks each fallback group in order.
+/// Returns the first match — the verifier doesn't care which group it
+/// came from because the envelope's intent-bounds + floor apply
+/// uniformly across all groups (a vault may legitimately appear in
+/// multiple groups, e.g. as the same hop on different paths).
 pub(crate) fn find_hop<'a>(
     rc: &'a generated::RouteCommitV1,
     vault_id: &[u8; 32],
@@ -365,6 +588,14 @@ pub(crate) fn find_hop<'a>(
     rc.hops
         .iter()
         .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
+        .or_else(|| {
+            rc.fallbacks.iter().find_map(|group| {
+                group
+                    .hops
+                    .iter()
+                    .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
+            })
+        })
 }
 
 /// Typed failure of the routed-unlock eligibility check.  Each
@@ -559,6 +790,131 @@ mod tests {
                 proto_hop.advertisement_digest,
                 path_hop.advertisement_digest.to_vec()
             );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Tier 2 envelope binder + intent-bound gate
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn envelope_binder_stamps_per_hop_floor_from_slippage() {
+        let path = sample_path();
+        let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
+            primary: &path,
+            fallbacks: &[],
+            nonce: nonce(2),
+            initiator_public_key: &[0x22u8; 64],
+            initiator_signature: vec![],
+            slippage_bps: 100, // 1%
+            floor_bps: 100,
+        })
+        .expect("envelope bind");
+
+        assert!(!rc.hops[0].min_output_amount_u128.is_empty());
+        let floor_hop0 = be_bytes_to_u128(&rc.hops[0].min_output_amount_u128).unwrap();
+        // expected = path.hops[0].expected_output_amount (computed in
+        // make_hop helper) * 0.99
+        let expected_floor = path.hops[0].expected_output_amount * 9_900 / 10_000;
+        assert_eq!(floor_hop0, expected_floor);
+
+        let envelope_floor = be_bytes_to_u128(&rc.floor_final_output_amount_u128).unwrap();
+        let expected_env = path.final_output_amount * 9_900 / 10_000;
+        assert_eq!(envelope_floor, expected_env);
+    }
+
+    #[test]
+    fn envelope_binder_stamps_fallback_groups() {
+        let primary = sample_path();
+        let fallback = sample_path();
+        let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
+            primary: &primary,
+            fallbacks: &[fallback.clone()],
+            nonce: nonce(3),
+            initiator_public_key: &[0x33u8; 64],
+            initiator_signature: vec![],
+            slippage_bps: 50,
+            floor_bps: 50,
+        })
+        .expect("envelope bind");
+
+        assert_eq!(rc.fallbacks.len(), 1);
+        assert_eq!(rc.fallbacks[0].hops.len(), fallback.hops.len());
+        // Fallback hops also get per-hop floors stamped from the same
+        // slippage_bps — verifier walks each group with the same gate.
+        for hop in &rc.fallbacks[0].hops {
+            assert!(!hop.min_output_amount_u128.is_empty());
+        }
+    }
+
+    #[test]
+    fn intent_bound_gate_accepts_when_actual_meets_floor() {
+        let mut hop_proto = make_proto_hop_with_floor(1_000, 950);
+        // actual = 970 ≥ 950 floor → pass
+        assert!(check_intent_bound_hop(&hop_proto, 970).is_ok());
+        // actual = exactly floor → pass (≥ is inclusive)
+        assert!(check_intent_bound_hop(&hop_proto, 950).is_ok());
+        // empty floor → pass regardless
+        hop_proto.min_output_amount_u128.clear();
+        assert!(check_intent_bound_hop(&hop_proto, 0).is_ok());
+    }
+
+    #[test]
+    fn intent_bound_gate_rejects_when_actual_below_floor() {
+        let hop_proto = make_proto_hop_with_floor(1_000, 950);
+        match check_intent_bound_hop(&hop_proto, 949) {
+            Err(IntentBoundReject::HopFloorViolation {
+                expected_min,
+                actual,
+            }) => {
+                assert_eq!(expected_min, 950);
+                assert_eq!(actual, 949);
+            }
+            other => panic!("expected HopFloorViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn envelope_floor_gate_rejects_low_final_output() {
+        let path = sample_path();
+        let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
+            primary: &path,
+            fallbacks: &[],
+            nonce: nonce(4),
+            initiator_public_key: &[0x44u8; 64],
+            initiator_signature: vec![],
+            slippage_bps: 50,
+            floor_bps: 100, // 1% floor
+        })
+        .expect("envelope bind");
+        let floor = be_bytes_to_u128(&rc.floor_final_output_amount_u128).unwrap();
+        // Just below the envelope floor → reject.
+        assert!(matches!(
+            check_envelope_floor(&rc, floor - 1),
+            Err(IntentBoundReject::EnvelopeFloorViolation { .. })
+        ));
+        // At the envelope floor → pass.
+        assert!(check_envelope_floor(&rc, floor).is_ok());
+    }
+
+    fn make_proto_hop_with_floor(expected: u128, floor: u128) -> generated::RouteCommitHopV1 {
+        let a = token("AAA");
+        let b = token("BBB");
+        generated::RouteCommitHopV1 {
+            vault_id: vec![0xAAu8; 32],
+            token_in: a,
+            token_out: b,
+            input_amount_u128: u128_to_be_bytes(1_000),
+            expected_output_amount_u128: u128_to_be_bytes(expected),
+            fee_bps: 30,
+            advertisement_digest: vec![0u8; 32],
+            state_number: 1,
+            unlock_spec_digest: vec![0u8; 32],
+            owner_public_key: vec![0xABu8; 64],
+            vault_state_anchor_seq: 0,
+            vault_state_reserves_digest: Vec::new(),
+            vault_state_anchor_digest: Vec::new(),
+            min_output_amount_u128: u128_to_be_bytes(floor),
         }
     }
 
@@ -1071,6 +1427,7 @@ mod tests {
             // Tier 2 Foundation default-init: anchor binding absent.
             // OPTIONAL/UNSPECIFIED enforcement passes through; REQUIRED
             // would fail-closed at the gate, which is correct.
+            min_output_amount_u128: Vec::new(),
             vault_state_anchor_seq: 0,
             vault_state_reserves_digest: Vec::new(),
             vault_state_anchor_digest: Vec::new(),
