@@ -1,6 +1,7 @@
 package com.dsm.wallet.security
 
 import android.content.Context
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
@@ -220,6 +221,62 @@ class SiliconFingerprintRealHwTest {
                 "(perTrialEntropy=$perTrialEntropy)",
             sigmaDevice >= 0.04f,
         )
+    }
+
+    /**
+     * Cross-device capture test (Phase 2.2).
+     *
+     * Spec's anti-cloning guarantee reduces to: two physically distinct
+     * devices produce histograms with W1 ≥ ε_inter. This test runs an
+     * aggregated enrollment-class capture on the current device and dumps
+     * the mean histogram to logcat with a parseable marker:
+     *
+     *   [CROSS_DEVICE_HISTOGRAM]<device_id>|<bin0>,<bin1>,...,<binN>
+     *
+     * The driving Bash script runs this test on each connected device,
+     * greps the marker from each device's logcat, parses the floats, and
+     * computes W1 host-side. This is the ONLY way to verify the spec's
+     * load-bearing property across physical devices from a single host.
+     */
+    @Test
+    fun cross_device_histogram_capture() {
+        val env = envBytes()
+        val deviceId = "${android.os.Build.MODEL}-${android.os.Build.HARDWARE}"
+        val nTrials = 5
+        val bins = 32
+        // Reduced probes for the cross-device capture so that slower
+        // devices (lower clock, fewer thermal zones, no perf access) can
+        // complete within the AndroidJUnitRunner timeout. The histogram
+        // shape is preserved with fewer probes; only sample size shrinks.
+        val captureProbes = 8192
+
+        val sum = FloatArray(bins)
+        repeat(nTrials) {
+            val timings = SiliconFingerprintNative.captureOrbitDensity(
+                envBytes = env,
+                challenge = newChallenge(),
+                thermalBytes = thermalBytes(),
+                arenaBytes = ARENA_BYTES,
+                probes = captureProbes,
+                stepsPerProbe = STEPS_PER_PROBE,
+                warmupRounds = WARMUP_ROUNDS,
+                rotationBits = ROTATION_BITS,
+            )
+            assertNotNull("trial returned null", timings)
+            val h = coarseHistogram(timings!!)
+            for (i in 0 until bins) sum[i] += h[i]
+        }
+        val inv = 1f / nTrials
+        for (i in 0 until bins) sum[i] *= inv
+
+        val csv = sum.joinToString(",") { "%.8f".format(it) }
+        Log.i("CROSS_DEVICE_HISTOGRAM", "$deviceId|$csv")
+        // Also assert the histogram is normalized and non-degenerate so
+        // the test itself fails fast if the capture is broken.
+        val total = sum.sum()
+        assertTrue("histogram should sum to ~1.0, got $total", kotlin.math.abs(total - 1.0f) < 0.01f)
+        val nonZeroBins = sum.count { it > 0f }
+        assertTrue("expected >3 non-zero bins, got $nonZeroBins", nonZeroBins > 3)
     }
 
     /**
