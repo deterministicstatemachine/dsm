@@ -95,7 +95,7 @@ mod kyber_pbt_tests;
 // Kyber (KEM + AES-GCM helpers)
 pub use kyber::{
     aes_decrypt, aes_encrypt, generate_kyber_keypair, init_kyber, kyber_decapsulate,
-    kyber_encapsulate, EncapsulationResult, KyberKeyPair,
+    kyber_encapsulate, KyberKeyPair,
 };
 
 // Classical commitment re-exports REMOVED — see module-level removal note above.

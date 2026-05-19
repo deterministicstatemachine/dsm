@@ -27,7 +27,6 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use blake3::Hasher;
 use crate::crypto::blake3::dsm_domain_hasher;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
@@ -37,7 +36,7 @@ use rand::rngs::OsRng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use tracing::{debug, error, info, trace};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 // ------------------ Deterministic op-gated health checking (no wall clock) ------------------
 
@@ -124,128 +123,6 @@ impl KyberKeyPair {
 
     pub fn generate() -> Result<Self, DsmError> {
         generate_kyber_keypair()
-    }
-
-    pub fn generate_from_entropy(entropy: &[u8], context: Option<&str>) -> Result<Self, DsmError> {
-        let ctx = context.unwrap_or("DSM_KYBER_KEY");
-        let (public_key, secret_key) = generate_kyber_keypair_from_entropy(entropy, ctx)?;
-        Ok(Self {
-            public_key,
-            secret_key,
-        })
-    }
-
-    pub fn encapsulate(&self) -> Result<EncapsulationResult, DsmError> {
-        let (shared_secret, ciphertext) = kyber_encapsulate(&self.public_key)?;
-        Ok(EncapsulationResult {
-            shared_secret,
-            ciphertext,
-        })
-    }
-
-    pub fn encapsulate_for_recipient(
-        &self,
-        recipient_public_key: &[u8],
-    ) -> Result<EncapsulationResult, DsmError> {
-        let (shared_secret, ciphertext) = kyber_encapsulate(recipient_public_key)?;
-        Ok(EncapsulationResult {
-            shared_secret,
-            ciphertext,
-        })
-    }
-
-    pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DsmError> {
-        kyber_decapsulate(&self.secret_key, ciphertext)
-    }
-
-    /// Domain-separated Blake3 KDF (XOF-style expansion via BLAKE3 finalize_xof)
-    pub fn derive_symmetric_key(
-        shared_secret: &[u8],
-        key_size: usize,
-        context: Option<&str>,
-    ) -> Vec<u8> {
-        let ctx = context.unwrap_or("DSM_SYMMETRIC_KEY");
-        let mut hasher = dsm_domain_hasher("DSM/ml-kem-derive");
-        hasher.update(ctx.as_bytes());
-        hasher.update(shared_secret);
-        let mut out = vec![0u8; key_size];
-        hasher.finalize_xof().fill(&mut out);
-        out
-    }
-}
-
-/// Encapsulation result (bytes-only)
-#[derive(Debug, Clone, ZeroizeOnDrop)]
-pub struct EncapsulationResult {
-    pub shared_secret: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-}
-
-impl EncapsulationResult {
-    /// Canonical, versioned bytes
-    ///   magic: b"DSM.KYBER.ENCRES\0"
-    ///   ver  : u8 (=1)
-    ///   ctlen: u32 (BE) | ct
-    ///   sslen: u32 (BE) | ss
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(CT_LEN + SS_LEN + 32);
-        out.extend_from_slice(b"DSM.KYBER.ENCRES\0");
-        out.push(1u8);
-        encode_bytes(&mut out, &self.ciphertext);
-        encode_bytes(&mut out, &self.shared_secret);
-        out
-    }
-
-    pub fn from_bytes(mut bytes: &[u8]) -> Result<Self, DsmError> {
-        const MAGIC: &[u8] = b"DSM.KYBER.ENCRES\0";
-        if bytes.len() < MAGIC.len() + 1 {
-            return Err(DsmError::serialization_error(
-                "EncapsulationResult too short",
-                "encres_bytes",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        if &bytes[..MAGIC.len()] != MAGIC {
-            return Err(DsmError::serialization_error(
-                "Bad EncapsulationResult magic",
-                "encres_bytes",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        bytes = &bytes[MAGIC.len()..];
-
-        let version = bytes[0];
-        bytes = &bytes[1..];
-        if version != 1 {
-            return Err(DsmError::serialization_error(
-                "Unsupported EncapsulationResult version",
-                "encres_bytes",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-
-        let (ciphertext, rest) = decode_bytes(bytes)?;
-        bytes = rest;
-        let (shared_secret, _rest) = decode_bytes(bytes)?;
-
-        if ciphertext.len() != CT_LEN || shared_secret.len() != SS_LEN {
-            return Err(DsmError::crypto(
-                format!(
-                    "Invalid encapsulation sizes: ct={}, ss={}",
-                    ciphertext.len(),
-                    shared_secret.len()
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        Ok(Self {
-            shared_secret,
-            ciphertext,
-        })
     }
 }
 
@@ -364,14 +241,6 @@ pub fn public_key_bytes() -> usize {
 pub fn secret_key_bytes() -> usize {
     SK_LEN
 }
-#[inline]
-pub fn shared_secret_bytes() -> usize {
-    SS_LEN
-}
-#[inline]
-pub fn ciphertext_bytes() -> usize {
-    CT_LEN
-}
 
 // ------------------ Key generation ------------------
 
@@ -444,58 +313,6 @@ pub fn generate_kyber_keypair_from_entropy(
     maybe_periodic_verify()?;
 
     Ok((pk_bytes, sk_bytes))
-}
-
-pub fn generate_deterministic_kyber_keypair(
-    entropy: &[u8],
-    context: &str,
-) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    if entropy.len() < 32 {
-        return Err(DsmError::crypto(
-            "Minimum 32 bytes of entropy required for deterministic key generation",
-            None::<std::io::Error>,
-        ));
-    }
-    generate_kyber_keypair_from_entropy(entropy, context)
-}
-
-// ------------------ Entropy context helpers ------------------
-
-#[derive(Debug)]
-pub struct EntropyContext {
-    context: String,
-    entropy: Vec<u8>,
-    #[allow(dead_code)]
-    hasher: Hasher,
-}
-impl Drop for EntropyContext {
-    fn drop(&mut self) {
-        self.entropy.zeroize();
-    }
-}
-
-pub fn new_entropy_context(context: &str, entropy: &[u8]) -> EntropyContext {
-    let mut hasher = dsm_domain_hasher("DSM/ml-kem-ctx");
-    hasher.update(context.as_bytes());
-    EntropyContext {
-        context: context.to_string(),
-        entropy: entropy.to_vec(),
-        hasher,
-    }
-}
-
-pub fn derive_bytes_from_context(
-    context: &mut EntropyContext,
-    purpose: &str,
-    length: usize,
-) -> Vec<u8> {
-    let mut hasher = dsm_domain_hasher("DSM/ml-kem-ctx-derive");
-    hasher.update(context.context.as_bytes());
-    hasher.update(purpose.as_bytes());
-    hasher.update(&context.entropy);
-    let mut out = vec![0u8; length];
-    hasher.finalize_xof().fill(&mut out);
-    out
 }
 
 // ------------------ KEM ops ------------------
@@ -948,16 +765,8 @@ mod tests {
             SK_LEN,
             "Secret key size constant should match"
         );
-        assert_eq!(
-            shared_secret_bytes(),
-            SS_LEN,
-            "Shared secret size constant should match"
-        );
-        assert_eq!(
-            ciphertext_bytes(),
-            CT_LEN,
-            "Ciphertext size constant should match"
-        );
+        assert_eq!(SS_LEN, 32, "Shared secret size constant should match");
+        assert_eq!(CT_LEN, 1088, "Ciphertext size constant should match");
     }
 
     #[test]
@@ -977,11 +786,10 @@ mod tests {
         let seed3 = vec![2u8; 32];
 
         let (pk1, sk1) =
-            generate_deterministic_kyber_keypair(&seed1, "test").expect("Should succeed");
+            generate_kyber_keypair_from_entropy(&seed1, "test").expect("Should succeed");
         let (pk2, sk2) =
-            generate_deterministic_kyber_keypair(&seed2, "test").expect("Should succeed");
-        let (pk3, _) =
-            generate_deterministic_kyber_keypair(&seed3, "test").expect("Should succeed");
+            generate_kyber_keypair_from_entropy(&seed2, "test").expect("Should succeed");
+        let (pk3, _) = generate_kyber_keypair_from_entropy(&seed3, "test").expect("Should succeed");
 
         // Same seed and context should produce same keypair
         assert_eq!(pk1, pk2, "Same seed should produce same public key");
@@ -1055,27 +863,6 @@ mod tests {
         assert_eq!(shared_secret1, shared_secret2);
         assert_eq!(ciphertext1, ciphertext2);
         assert_eq!(decapsulated, shared_secret1);
-    }
-
-    #[test]
-    fn test_entropy_context_derivation() {
-        let mut ctx = new_entropy_context("test_context", b"entropy_data");
-
-        let derived1 = derive_bytes_from_context(&mut ctx, "key1", 32);
-        assert_eq!(derived1.len(), 32, "Should derive 32 bytes");
-
-        let derived2 = derive_bytes_from_context(&mut ctx, "key2", 32);
-        assert_eq!(derived2.len(), 32, "Should derive 32 bytes");
-
-        // Different keys should produce different output
-        assert_ne!(
-            derived1, derived2,
-            "Different keys should produce different derived bytes"
-        );
-
-        // Same key should produce same output (deterministic)
-        let derived1_again = derive_bytes_from_context(&mut ctx, "key1", 32);
-        assert_eq!(derived1, derived1_again, "Same key should be deterministic");
     }
 
     #[test]
