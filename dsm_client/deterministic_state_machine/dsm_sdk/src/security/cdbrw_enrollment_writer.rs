@@ -288,10 +288,8 @@ pub fn enroll_device(
     // ball from the per-trial spread. Baseline is the moments of the
     // mean histogram — that's the value the verifier checks against.
     let baseline_moments = compute_moments(&mean_hist);
-    let per_trial_moments: Vec<MomentVector> = histograms
-        .iter()
-        .map(|h| compute_moments(h))
-        .collect();
+    let per_trial_moments: Vec<MomentVector> =
+        histograms.iter().map(|h| compute_moments(h)).collect();
     let tolerance = tolerance_ball(&per_trial_moments);
     // Fold baseline_moments + tolerance into the anchor preimage so the
     // anchor binds the envelope. Verifier loads baseline + tolerance

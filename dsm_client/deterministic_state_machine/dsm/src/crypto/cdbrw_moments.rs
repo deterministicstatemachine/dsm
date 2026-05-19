@@ -91,7 +91,11 @@ pub fn compute_moments(hist: &[f32]) -> MomentVector {
     // Population skewness and kurtosis (NOT sample-corrected — the
     // histogram is the entire population by construction).
     let stddev = m2.sqrt();
-    let skewness = if stddev > 0.0 { m3 / (stddev * stddev * stddev) } else { 0.0 };
+    let skewness = if stddev > 0.0 {
+        m3 / (stddev * stddev * stddev)
+    } else {
+        0.0
+    };
     let kurtosis = if m2 > 0.0 { m4 / (m2 * m2) } else { 0.0 };
 
     // Quantiles via the CDF over bin indices. With normalized hist[i]
@@ -164,7 +168,10 @@ pub fn moment_commitment(moment: f64, index: u32, challenge: &[u8]) -> [u8; 32] 
 ///
 /// Returns the Merkle root and the m leaf hashes (so the responder can
 /// build the per-leaf Merkle paths without recomputing).
-pub fn build_moment_tree(moments: &MomentVector, challenge: &[u8]) -> ([u8; 32], [[u8; 32]; ENVELOPE_MOMENT_COUNT]) {
+pub fn build_moment_tree(
+    moments: &MomentVector,
+    challenge: &[u8],
+) -> ([u8; 32], [[u8; 32]; ENVELOPE_MOMENT_COUNT]) {
     // Leaves.
     let mut leaves: [[u8; 32]; ENVELOPE_MOMENT_COUNT] = [[0u8; 32]; ENVELOPE_MOMENT_COUNT];
     for i in 0..ENVELOPE_MOMENT_COUNT {
@@ -201,7 +208,7 @@ pub fn verify_moment_path(
     let mut node = *leaf_hash;
     let mut idx = index;
     for sibling in path.iter() {
-        node = if idx % 2 == 0 {
+        node = if idx.is_multiple_of(2) {
             merkle_node(&node, sibling)
         } else {
             merkle_node(sibling, &node)
@@ -313,7 +320,11 @@ mod tests {
         let h = make_hist(&[(0, 1.0)], 32);
         let m = compute_moments(&h);
         assert!((m[0] - 0.0).abs() < 1e-9, "mean should be 0, got {}", m[0]);
-        assert!((m[1] - 0.0).abs() < 1e-9, "variance should be 0, got {}", m[1]);
+        assert!(
+            (m[1] - 0.0).abs() < 1e-9,
+            "variance should be 0, got {}",
+            m[1]
+        );
         assert_eq!(m[5], 0.0, "median should be bin 0");
     }
 
@@ -350,7 +361,11 @@ mod tests {
         let differing = (0..ENVELOPE_MOMENT_COUNT)
             .filter(|&i| (m_a[i] - m_b[i]).abs() > 1e-6)
             .count();
-        assert!(differing >= 4, "expected >=4 moments to differ, got {}", differing);
+        assert!(
+            differing >= 4,
+            "expected >=4 moments to differ, got {}",
+            differing
+        );
     }
 
     #[test]
@@ -481,6 +496,9 @@ mod tests {
         let trials = vec![base, base, shifted, base, base];
         let t = tolerance_ball(&trials);
         assert!(t[0] > 0.0, "tolerance for moment 0 should be > 0");
-        assert!(t[1].abs() < 1e-12, "tolerance for moment 1 should be 0 (no spread)");
+        assert!(
+            t[1].abs() < 1e-12,
+            "tolerance for moment 1 should be 0 (no spread)"
+        );
     }
 }

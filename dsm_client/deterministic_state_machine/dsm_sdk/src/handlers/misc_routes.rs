@@ -437,7 +437,11 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
         "cdbrw.reprove" => {
             let req = match generated::CdbrwMeasureTrustRequest::decode(&*q.params) {
                 Ok(v) => v,
-                Err(e) => return err(format!("decode CdbrwMeasureTrustRequest (reprove) failed: {e}")),
+                Err(e) => {
+                    return err(format!(
+                        "decode CdbrwMeasureTrustRequest (reprove) failed: {e}"
+                    ))
+                }
             };
             let orbit = match req.orbit.as_ref() {
                 Some(v) => v,

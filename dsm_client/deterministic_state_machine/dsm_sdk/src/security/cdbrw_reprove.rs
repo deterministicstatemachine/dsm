@@ -29,9 +29,7 @@
 use crate::security::cdbrw_access_gate::{
     next_iter, store_trust, AccessLevel, ResonantStatus, TrustSnapshot,
 };
-use crate::security::cdbrw_responder::{
-    build_histogram, wasserstein1, DEFAULT_HISTOGRAM_BINS,
-};
+use crate::security::cdbrw_responder::{build_histogram, wasserstein1, DEFAULT_HISTOGRAM_BINS};
 
 /// Clone-detection W1 threshold.
 ///
@@ -264,7 +262,8 @@ mod concurrent_tests {
             }));
         }
         for h in handles {
-            h.join().expect("thread panicked — concurrent slot access corrupted");
+            h.join()
+                .expect("thread panicked — concurrent slot access corrupted");
         }
         assert_eq!(installs.load(Ordering::Relaxed), 8 * ITERS_PER_THREAD);
         assert_eq!(reads.load(Ordering::Relaxed), 8 * ITERS_PER_THREAD);
@@ -327,8 +326,7 @@ mod tests {
         with_clean_state(|| {
             // "Enrolled" — 80% low values, 20% high values.
             let baseline = bimodal_timings(100, 1000, 0.80, 4096);
-            let enrolled =
-                crate::security::cdbrw_responder::build_histogram(&baseline, 32);
+            let enrolled = crate::security::cdbrw_responder::build_histogram(&baseline, 32);
 
             // Live — same shape, tiny ratio drift (80% → 81% low).
             // Resulting W1 should be ~0.01, well below the 0.025 threshold.
@@ -354,8 +352,7 @@ mod tests {
         with_clean_state(|| {
             // "Enrolled" — heavily skewed to the low end (90/10 split).
             let baseline = bimodal_timings(100, 1000, 0.90, 4096);
-            let enrolled =
-                crate::security::cdbrw_responder::build_histogram(&baseline, 32);
+            let enrolled = crate::security::cdbrw_responder::build_histogram(&baseline, 32);
 
             // "Live" from a different device — much flatter ratio (50/50).
             // W1 between [0.9, 0..., 0.1] and [0.5, 0..., 0.5] is roughly
