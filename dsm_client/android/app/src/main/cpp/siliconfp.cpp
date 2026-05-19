@@ -359,11 +359,20 @@ Java_com_dsm_wallet_security_SiliconFingerprintNative_captureOrbitDensity(
 
     sensors_init();
 
-    // Spec gate: every substrate channel degenerate → refuse to run rather
-    // than fall back to a software PRNG. cpufreq has been verified readable
-    // on stock Android, so this is mostly a defense-in-depth check.
-    if (g_sensors.n_cpufreq == 0 && !g_sensors.perf_available && thermal_len == 0) {
-        ALOGE("captureOrbitDensity: no physical substrate channel available — refusing PRNG fallback");
+    // Spec gate (strict, post Phase 2): thermal HAL bytes from Kotlin are
+    // MANDATORY. If the caller does not supply a thermal payload, refuse to
+    // run rather than silently fall back to cpufreq+perf alone (which would
+    // re-introduce a hidden divergence from Def 9.1(b)). This makes the
+    // Kotlin-side PowerManager sample load-bearing for every orbit, and
+    // gives Phase 2's `orbit_refuses_without_thermal_bytes` test a hard
+    // failure to assert.
+    if (thermal_len == 0) {
+        ALOGE("captureOrbitDensity: thermal bytes required — refusing to run without PowerManager HAL sample");
+        return nullptr;
+    }
+    // Defense in depth: every other substrate channel also degenerate.
+    if (g_sensors.n_cpufreq == 0 && !g_sensors.perf_available) {
+        ALOGE("captureOrbitDensity: no cpufreq or perf substrate channel available");
         return nullptr;
     }
 
