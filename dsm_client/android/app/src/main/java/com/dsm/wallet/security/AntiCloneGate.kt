@@ -95,13 +95,19 @@ object AntiCloneGate {
      * just behind a managed interface — it is NOT a software PRNG, it
      * returns real substrate state.
      *
-     * Layout (16 bytes, little-endian):
-     *   [0..4]   IEEE 754 bits of getThermalHeadroom(0) (NaN if API < 30
-     *            or HAL returned no estimate)
+     * We deliberately use getThermalHeadroom(0) (current headroom) TWICE
+     * rather than once-now + once-forecast. The forecast variant is a
+     * HAL-modeled forward projection of throttle ETA, not a substrate
+     * reading — including it would conflate modeled output with raw
+     * sensor data (Phase 2 adversarial follow-up). Two (0) samples a few
+     * microseconds apart fold in scheduler-jitter-driven variance between
+     * successive HAL reads, which IS substrate-influenced.
+     *
+     * Layout (16 bytes, little-endian) — preserved for JNI ABI stability:
+     *   [0..4]   IEEE 754 bits of getThermalHeadroom(0) (first read)
      *   [4..8]   getCurrentThermalStatus() as i32 (or -1 if API < 29)
-     *   [8..12]  IEEE 754 bits of getThermalHeadroom(60) (60s forecast)
-     *   [12..16] reserved (zero) — leaves room for future thermal channels
-     *            without re-cutting the JNI signature.
+     *   [8..12]  IEEE 754 bits of getThermalHeadroom(0) (second read)
+     *   [12..16] reserved (zero) for forward compatibility
      */
     /**
      * Public alias for [sampleThermalBytes] so other Kotlin transport shims
@@ -112,22 +118,25 @@ object AntiCloneGate {
 
     private fun sampleThermalBytes(context: Context): ByteArray {
         val buf = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
-        var nowHeadroom = Float.NaN
-        var soonHeadroom = Float.NaN
+        var headroom1 = Float.NaN
+        var headroom2 = Float.NaN
         var status = -1
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
             if (pm != null) {
-                runCatching { nowHeadroom = pm.getThermalHeadroom(0) }
-                runCatching { soonHeadroom = pm.getThermalHeadroom(60) }
+                // Two getThermalHeadroom(0) reads bracket currentThermalStatus
+                // so the two HAL samples are separated by ~microseconds of
+                // scheduler-induced delay — substrate-influenced jitter.
+                runCatching { headroom1 = pm.getThermalHeadroom(0) }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     runCatching { status = pm.currentThermalStatus }
                 }
+                runCatching { headroom2 = pm.getThermalHeadroom(0) }
             }
         }
-        buf.putFloat(nowHeadroom)
+        buf.putFloat(headroom1)
         buf.putInt(status)
-        buf.putFloat(soonHeadroom)
+        buf.putFloat(headroom2)
         buf.putInt(0)
         return buf.array()
     }
