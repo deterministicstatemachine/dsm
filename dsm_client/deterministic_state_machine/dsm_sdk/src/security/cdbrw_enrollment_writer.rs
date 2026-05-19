@@ -42,6 +42,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use dsm::crypto::blake3::domain_hash_bytes;
+use dsm::crypto::cdbrw_moments::{compute_moments, tolerance_ball, MomentVector};
 
 use crate::security::cdbrw_access_gate::TrustSnapshot;
 use crate::security::cdbrw_ffi::{self, HealthResult, MfgGateResult};
@@ -50,10 +51,11 @@ use crate::security::cdbrw_responder::{
     DEFAULT_DISTANCE_MARGIN, DEFAULT_HISTOGRAM_BINS,
 };
 
-/// Wire revision written to `dsm_silicon_fp_v4.bin`. Must match the Kotlin
-/// `EnrollmentStore.write` revision (=4) and the `load_cdbrw_enrollment`
-/// reader in `misc_routes.rs`.
-pub const ENROLLMENT_REVISION: u32 = 4;
+/// Wire revision written to `dsm_silicon_fp_v4.bin`. Bumped to 5 in
+/// Phase 3 deliverable 3 (attractor envelope test) — readers handle
+/// both revisions (4 = no envelope fields, 5 = envelope fields
+/// appended at the tail after `reference_anchor_len`/anchor blob).
+pub const ENROLLMENT_REVISION: u32 = 5;
 
 /// Filename consumed by [`handlers::misc_routes::load_cdbrw_enrollment`] via
 /// `CDBRW_ENROLLMENT_FILE`. Hard-coding here keeps the writer and reader in
@@ -112,6 +114,15 @@ pub struct EnrollOutputs {
     /// [`PlatformContext::bootstrap`] — this keeps K_DBRW derivation
     /// consistent between the freshly-enrolled device and subsequent boots.
     pub reference_anchor: [u8; 32],
+    /// Phase 3 deliverable 3 (attractor envelope test) — eight statistical
+    /// moments of the enrolled mean histogram, committed at enrollment and
+    /// re-checked at every verification. See `dsm::crypto::cdbrw_moments`.
+    pub baseline_moments: MomentVector,
+    /// Per-moment acceptance radius derived from per-trial moment spread.
+    /// At verification time the verifier asserts
+    /// `|live_moments[i] - baseline_moments[i]| ≤ tolerance_ball[i]`
+    /// for every i in 0..ENVELOPE_MOMENT_COUNT.
+    pub tolerance_ball: MomentVector,
     pub trust: TrustSnapshot,
     pub note: String,
 }
@@ -272,9 +283,30 @@ pub fn enroll_device(
     anchor_input.extend_from_slice(&epsilon_bytes_be);
     anchor_input.extend_from_slice(&metadata_bytes);
 
+    // Phase 3 deliverable 3 (envelope test): compute per-trial moment
+    // vectors, take their median per moment, and derive the tolerance
+    // ball from the per-trial spread. Baseline is the moments of the
+    // mean histogram — that's the value the verifier checks against.
+    let baseline_moments = compute_moments(&mean_hist);
+    let per_trial_moments: Vec<MomentVector> = histograms
+        .iter()
+        .map(|h| compute_moments(h))
+        .collect();
+    let tolerance = tolerance_ball(&per_trial_moments);
+    // Fold baseline_moments + tolerance into the anchor preimage so the
+    // anchor binds the envelope. Verifier loads baseline + tolerance
+    // from disk and asserts the recomputed anchor matches.
+    for &v in baseline_moments.iter() {
+        anchor_input.extend_from_slice(&v.to_le_bytes());
+    }
+    for &v in tolerance.iter() {
+        anchor_input.extend_from_slice(&v.to_le_bytes());
+    }
+
     // `domain_hash_bytes` prepends the domain tag with a trailing NUL,
     // matching Kotlin `CdbrwBlake3Native.nativeBlake3DomainHash` convention.
-    // Keyed BLAKE3 over `env ‖ anchor_input` — same layout as Kotlin.
+    // Keyed BLAKE3 over `env ‖ anchor_input` — same layout as Kotlin, with
+    // the v5 envelope bytes appended to anchor_input.
     let mut preimage = Vec::with_capacity(inputs.env_bytes.len() + anchor_input.len());
     preimage.extend_from_slice(inputs.env_bytes);
     preimage.extend_from_slice(&anchor_input);
@@ -293,6 +325,8 @@ pub fn enroll_device(
         epsilon_intra,
         &mean_hist,
         &anchor32,
+        &baseline_moments,
+        &tolerance,
     )
     .map_err(|e| {
         // On I/O failure, publish a Blocked snapshot so the gate knows
@@ -341,6 +375,8 @@ pub fn enroll_device(
         mean_histogram_len: mean_hist.len() as u32,
         reference_anchor_prefix: anchor32[..10.min(anchor32.len())].to_vec(),
         reference_anchor: anchor32,
+        baseline_moments,
+        tolerance_ball: tolerance,
         trust,
         note,
     })
@@ -393,11 +429,12 @@ fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResul
     )
 }
 
-/// Serialize the enrollment snapshot to `path` using the big-endian layout
-/// consumed by `handlers::misc_routes::load_cdbrw_enrollment`:
+/// Serialize the enrollment snapshot to `path`.
+///
+/// Layout (big-endian, revision 5):
 ///
 /// ```text
-/// u32 BE  revision
+/// u32 BE  revision (4 or 5)
 /// u32 BE  arena_bytes
 /// u32 BE  probes
 /// u32 BE  steps_per_probe
@@ -408,6 +445,9 @@ fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResul
 /// [mean_histogram_len × f32 BE]
 /// u32 BE  reference_anchor_len
 /// [reference_anchor_len × u8]
+/// ---- v5 envelope extension ----
+/// [ENVELOPE_MOMENT_COUNT × f64 BE]   baseline_moments
+/// [ENVELOPE_MOMENT_COUNT × f64 BE]   tolerance_ball
 /// ```
 ///
 /// Writes via a buffered writer so the file is not partially flushed on
@@ -425,6 +465,8 @@ fn write_enrollment_file(
     epsilon_intra: f32,
     mean_histogram: &[f32],
     reference_anchor: &[u8],
+    baseline_moments: &MomentVector,
+    tolerance_ball: &MomentVector,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {parent:?}: {e}"))?;
@@ -472,6 +514,21 @@ fn write_enrollment_file(
     writer
         .write_all(reference_anchor)
         .map_err(|e| format!("write reference_anchor: {e}"))?;
+
+    // v5 envelope extension — 8 × f64 BE baseline moments followed by
+    // 8 × f64 BE tolerance ball. Readers gated on revision ≥ 5.
+    if revision >= 5 {
+        for v in baseline_moments.iter() {
+            writer
+                .write_all(&v.to_bits().to_be_bytes())
+                .map_err(|e| format!("write baseline_moments: {e}"))?;
+        }
+        for v in tolerance_ball.iter() {
+            writer
+                .write_all(&v.to_bits().to_be_bytes())
+                .map_err(|e| format!("write tolerance_ball: {e}"))?;
+        }
+    }
 
     writer.flush().map_err(|e| format!("flush: {e}"))?;
     // Rename the tmp file over the final path so readers never see a

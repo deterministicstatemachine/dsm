@@ -24,6 +24,7 @@ use std::path::Path;
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use crate::security::cdbrw_access_gate::{latest_trust, TrustSnapshot};
 use crate::security::cdbrw_enrollment_writer::{enroll_device, EnrollError, EnrollInputs};
+use crate::security::cdbrw_reprove::{reprove, ReproveInputs, ReproveVerdict};
 use crate::security::cdbrw_responder::{
     measure_trust, respond_to_challenge, RespondError, RespondInputs,
 };
@@ -47,6 +48,10 @@ struct DbrwEnrollmentSnapshot {
     epsilon_intra: f32,
     mean_histogram: Vec<f32>,
     reference_anchor: Vec<u8>,
+    /// Phase 3 deliverable 3 (envelope test) — present only when
+    /// `revision >= 5`. None for v4 snapshots.
+    envelope_baseline_moments: Option<[f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT]>,
+    envelope_tolerance_ball: Option<[f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT]>,
 }
 
 impl DbrwEnrollmentSnapshot {
@@ -154,6 +159,31 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         .read_exact(&mut reference_anchor)
         .map_err(|e| format!("read reference_anchor: {e}"))?;
 
+    // v5 envelope extension — present only when revision ≥ 5. Older
+    // enrollments (revision 4) round-trip as None and the envelope test
+    // is skipped for them.
+    let (envelope_baseline_moments, envelope_tolerance_ball) = if revision >= 5 {
+        let mut baseline = [0.0_f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT];
+        for slot in baseline.iter_mut() {
+            let mut buf = [0u8; 8];
+            cursor
+                .read_exact(&mut buf)
+                .map_err(|e| format!("read baseline_moments: {e}"))?;
+            *slot = f64::from_bits(u64::from_be_bytes(buf));
+        }
+        let mut tolerance = [0.0_f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT];
+        for slot in tolerance.iter_mut() {
+            let mut buf = [0u8; 8];
+            cursor
+                .read_exact(&mut buf)
+                .map_err(|e| format!("read tolerance_ball: {e}"))?;
+            *slot = f64::from_bits(u64::from_be_bytes(buf));
+        }
+        (Some(baseline), Some(tolerance))
+    } else {
+        (None, None)
+    };
+
     Ok(Some(DbrwEnrollmentSnapshot {
         revision,
         arena_bytes,
@@ -164,6 +194,8 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         epsilon_intra,
         mean_histogram,
         reference_anchor,
+        envelope_baseline_moments,
+        envelope_tolerance_ball,
     }))
 }
 
@@ -392,6 +424,50 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
 
             pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
                 snapshot.to_proto("cdbrw.measure_trust"),
+            ))
+        }
+
+        // -------- cdbrw.reprove (Phase 3 deliverable 2 Layer B) --------
+        // Opportunistic ACD re-prove called at boot resume. Reuses the
+        // CdbrwMeasureTrustRequest proto shape (same orbit + bins inputs)
+        // but applies the stronger clone-detection threshold from
+        // CLONE_DETECTION_W1_THRESHOLD. On CloneDetected verdict, zeroes
+        // the in-memory K_DBRW slot AND publishes a Blocked snapshot so
+        // every gated route fails closed.
+        "cdbrw.reprove" => {
+            let req = match generated::CdbrwMeasureTrustRequest::decode(&*q.params) {
+                Ok(v) => v,
+                Err(e) => return err(format!("decode CdbrwMeasureTrustRequest (reprove) failed: {e}")),
+            };
+            let orbit = match req.orbit.as_ref() {
+                Some(v) => v,
+                None => return err("cdbrw.reprove: missing orbit".into()),
+            };
+
+            let enrolled_mean_owned = crate::storage_utils::get_storage_base_dir()
+                .as_ref()
+                .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                .map(|snapshot| snapshot.mean_histogram);
+
+            let out = reprove(&ReproveInputs {
+                orbit_timings: &orbit.timings,
+                enrolled_mean: enrolled_mean_owned.as_deref(),
+                histogram_bins: req.histogram_bins as usize,
+            });
+
+            // Fail-closed wipe: if reprove says clone, zero K_DBRW so no
+            // downstream signer can use it. This is the second half of the
+            // anti-cloning guarantee — stolen salt becomes useless because
+            // the live PUF couldn't match the stored ACD here.
+            if out.verdict == ReproveVerdict::CloneDetected {
+                crate::binding_key::clear_binding_key();
+                log::warn!(
+                    "[cdbrw.reprove] CLONE DETECTED — K_DBRW slot zeroed, full re-enrollment required"
+                );
+            }
+
+            pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
+                out.trust.to_proto("cdbrw.reprove"),
             ))
         }
 

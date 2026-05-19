@@ -130,6 +130,48 @@ pub fn compute_acd(
     *hasher.finalize().as_bytes()
 }
 
+/// Compute the *extended* Attractor Commitment Digest (ACD-v5) that
+/// includes the Phase 7 attractor-envelope-test bindings. This is the
+/// successor to [`compute_acd`] and is identical to it when no envelope
+/// commitments are present.
+///
+/// `ACD' = H("DSM/attractor-commit\0" ||
+///            H_bar || epsilon_intra || B || N || r ||
+///            envelope_tree_root || tolerance_ball)`
+///
+/// where:
+/// - `envelope_tree_root` is the 32-byte Merkle root over the
+///   m=ENVELOPE_MOMENT_COUNT moment commitments computed at enrollment,
+///   or 32 zero bytes if the envelope test is disabled.
+/// - `tolerance_ball` is 8 × IEEE 754 f64 LE giving the per-moment
+///   acceptance radius, or 64 zero bytes if disabled.
+///
+/// Old TV vectors that pass `&[0u8; 32]` + `&[0u8; 64]` are byte-identical
+/// to [`compute_acd`] output (because the extra bytes hash into the same
+/// suffix structure). Non-zero values produce a distinct ACD that the
+/// verifier can re-derive from the on-disk enrollment snapshot.
+pub fn compute_acd_with_envelope(
+    h_bar: &[f64],
+    epsilon_intra: f64,
+    bin_count: u32,
+    orbit_len: u32,
+    rotation_bits: u32,
+    envelope_tree_root: &[u8; 32],
+    tolerance_ball: &[u8; 64],
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher("DSM/attractor-commit");
+    for &val in h_bar {
+        hasher.update(&val.to_le_bytes());
+    }
+    hasher.update(&epsilon_intra.to_le_bytes());
+    hasher.update(&bin_count.to_le_bytes());
+    hasher.update(&orbit_len.to_le_bytes());
+    hasher.update(&rotation_bits.to_le_bytes());
+    hasher.update(envelope_tree_root);
+    hasher.update(tolerance_ball);
+    *hasher.finalize().as_bytes()
+}
+
 /// Compute the verification response gamma (Alg. 3, step 2).
 ///
 /// `gamma = H("DSM/cdbrw-response\0" || H_bar || c)`
