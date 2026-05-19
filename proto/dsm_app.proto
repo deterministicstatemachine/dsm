@@ -1080,6 +1080,56 @@ message ExternalCommitmentV1 {
   string label                  = 4;
 }
 
+// Request wrapper for `route.publishExternalCommitment`. The handler
+// accepts either this wrapper OR a bare ExternalCommitmentV1 (legacy
+// callers). When `signed_route_commit_bytes` is non-empty, the handler
+// additionally derives and publishes one VaultPendingPointerV1 per hop
+// (composition discovery aid; see VaultPendingPointerV1 docs).
+//
+// Decode discriminator: try this wrapper first; if it fails to decode
+// or `anchor` is unset, fall back to decoding the body as bare
+// ExternalCommitmentV1. This keeps the old wire shape working for any
+// non-SoFi external-commitment users.
+message PublishExternalCommitmentRequest {
+  ExternalCommitmentV1 anchor                  = 1;
+  // Optional. Pass the signed RouteCommitV1 bytes returned by
+  // `route.signRouteCommit` so the handler can derive + publish vault-
+  // keyed pending pointers. Empty bytes → handler publishes the anchor
+  // only, identical to the legacy path.
+  bytes                signed_route_commit_bytes = 2 [(dsm_max_len)=131072];
+}
+
+// Vault-keyed pointer to a pending state advance, published alongside
+// each ExternalCommitmentV1 (one pointer per hop's vault). Lets the
+// NEXT trader discover pending trades on a specific vault in O(pending)
+// rather than scanning the global defi/extcommit/* prefix.
+//
+// Storage key: defi/vault-pending/{vault_id_b32}/{new_sequence_be_pad16}/{x_b32}
+//
+// The signature payload is BLAKE3("DSM/vault-pending\0" || vault_id ||
+// parent_sequence_be || new_sequence_be || x || new_reserves_digest).
+//
+// Anyone can verify. Composition flow (vault_state_composition.rs):
+// trader 2 lists the vault's defi/vault-pending/ prefix, verifies each
+// pointer's signature, confirms each referenced X anchor is published,
+// chains them by new_sequence onto the owner-signed baseline anchor,
+// and uses the resulting composed state for quote-time reserves
+// (rather than the potentially stale owner-published anchor alone).
+//
+// SoFi spec §2.3, §4.1: "Once a valid σ is constructed (by anyone), the
+// unlock becomes computable and settlement executes deterministically."
+// This proto turns that property into discoverable behaviour for the
+// next-trader quote path.
+message VaultPendingPointerV1 {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  uint64 parent_sequence       = 2;
+  uint64 new_sequence          = 3;
+  bytes  x                     = 4 [(dsm_fixed_len)=32];
+  bytes  new_reserves_digest   = 5 [(dsm_fixed_len)=32];
+  bytes  publisher_public_key  = 6 [(dsm_max_len)=65535];
+  bytes  publisher_signature   = 7 [(dsm_max_len)=65535];
+}
+
 // Storage-node-mirrored advertisement for a SoFi routing vault.
 //
 // Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —

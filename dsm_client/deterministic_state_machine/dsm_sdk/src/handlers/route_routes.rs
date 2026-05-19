@@ -253,14 +253,37 @@ impl AppRouterImpl {
                 "route.publishExternalCommitment: empty ExternalCommitmentV1 payload".into(),
             );
         }
-        let mut req = match generated::ExternalCommitmentV1::decode(&*bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                return err(format!(
-                    "route.publishExternalCommitment: decode ExternalCommitmentV1 failed: {e}"
-                ));
-            }
-        };
+
+        // Phase 6: the request may be either a bare `ExternalCommitmentV1`
+        // (legacy callers) or a `PublishExternalCommitmentRequest` wrapper
+        // (Phase 6+ trader UI that wants vault-keyed pending pointers
+        // published alongside the anchor).  Try the wrapper first; on
+        // decode failure or missing inner anchor, fall back to bare.
+        let (mut req, signed_rc_bytes_opt): (generated::ExternalCommitmentV1, Option<Vec<u8>>) =
+            match generated::PublishExternalCommitmentRequest::decode(&*bytes) {
+                Ok(wrapper) if wrapper.anchor.is_some() => {
+                    let inner = wrapper.anchor.unwrap();
+                    let rc_opt = if wrapper.signed_route_commit_bytes.is_empty() {
+                        None
+                    } else {
+                        Some(wrapper.signed_route_commit_bytes)
+                    };
+                    (inner, rc_opt)
+                }
+                _ => {
+                    // Fall back to bare ExternalCommitmentV1.
+                    let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return err(format!(
+                            "route.publishExternalCommitment: decode failed (tried PublishExternalCommitmentRequest then ExternalCommitmentV1): {e}"
+                        ));
+                        }
+                    };
+                    (bare, None)
+                }
+            };
+
         if req.x.len() != 32 {
             return err(format!(
                 "route.publishExternalCommitment: x must be 32 bytes, got {}",
@@ -289,16 +312,77 @@ impl AppRouterImpl {
         let mut x = [0u8; 32];
         x.copy_from_slice(&req.x);
 
-        if let Err(e) = crate::sdk::route_commit_sdk::publish_external_commitment(
-            &x,
-            &req.publisher_public_key,
-            &req.label,
-        )
-        .await
-        {
-            return err(format!(
-                "route.publishExternalCommitment: storage put failed: {e}"
-            ));
+        // If the caller supplied the signed RouteCommit bytes, use the
+        // Phase-6 helper to publish X + vault-keyed pending pointers
+        // atomically.  Otherwise publish X only (legacy behaviour).
+        match signed_rc_bytes_opt {
+            None => {
+                if let Err(e) = crate::sdk::route_commit_sdk::publish_external_commitment(
+                    &x,
+                    &req.publisher_public_key,
+                    &req.label,
+                )
+                .await
+                {
+                    return err(format!(
+                        "route.publishExternalCommitment: storage put failed: {e}"
+                    ));
+                }
+            }
+            Some(rc_bytes) => {
+                let rc = match generated::RouteCommitV1::decode(&*rc_bytes) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishExternalCommitment: decode signed_route_commit_bytes failed: {e}"
+                        ));
+                    }
+                };
+                // Verify X derived from this RC matches the caller's X.
+                let derived_x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+                if derived_x != x {
+                    return err(
+                        "route.publishExternalCommitment: signed_route_commit_bytes does not derive the supplied x"
+                            .into(),
+                    );
+                }
+                let sk = match crate::sdk::signing_authority::current_secret_key() {
+                    Ok(s) if !s.is_empty() => s,
+                    Ok(_) => {
+                        return err(
+                            "route.publishExternalCommitment: wallet signing secret key is empty"
+                                .into(),
+                        );
+                    }
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishExternalCommitment: get_current_secret_key failed: {e}"
+                        ));
+                    }
+                };
+                match crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    &req.publisher_public_key,
+                    &sk,
+                    &req.label,
+                )
+                .await
+                {
+                    Ok(pointer_errors) => {
+                        for pe in &pointer_errors {
+                            log::warn!(
+                                "[route.publishExternalCommitment] pointer publish (best-effort) failed: {pe}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishExternalCommitment: anchor publish failed: {e}"
+                        ));
+                    }
+                }
+            }
         }
 
         let resp = generated::AppStateResponse {
@@ -599,6 +683,98 @@ impl AppRouterImpl {
                 return err(format!("route.findAndBindBestPath: load ads failed: {e}"));
             }
         };
+
+        // Phase 6: vault-state composition pass.  For each candidate
+        // advertisement, fetch the owner-signed VaultStateAnchorV1 and
+        // fold any published VaultPendingPointerV1 records into a
+        // composed (sequence, reserves) view.
+        //
+        // Phase 6.0 behaviour: pending pointers serve as a discovery
+        // aid + saturation signal; they do NOT modify the reserves used
+        // for AMM math here (see vault_state_composition module docs).
+        // Vaults whose pending chain is "saturated" (very deep or
+        // missing X anchors) are dropped from the candidate set —
+        // serializing trader 2 against them would be wasted work.
+        let mut ads_after_composition: Vec<generated::RoutingVaultAdvertisementV1> =
+            Vec::with_capacity(ads.len());
+        for ad in ads.into_iter() {
+            // Decode the ad's reserves (the values the owner signed).
+            if ad.vault_id.len() != 32
+                || ad.reserve_a_u128.len() != 16
+                || ad.reserve_b_u128.len() != 16
+            {
+                ads_after_composition.push(ad);
+                continue;
+            }
+            let mut vid = [0u8; 32];
+            vid.copy_from_slice(&ad.vault_id);
+            let mut a_buf = [0u8; 16];
+            a_buf.copy_from_slice(&ad.reserve_a_u128);
+            let mut b_buf = [0u8; 16];
+            b_buf.copy_from_slice(&ad.reserve_b_u128);
+            let reserve_a = u128::from_be_bytes(a_buf);
+            let reserve_b = u128::from_be_bytes(b_buf);
+
+            // Fetch the latest vault state anchor.  If absent, the ad
+            // pre-dates the anchor flow — fall through and use the ad
+            // as-is.  Composition is best-effort.
+            let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
+                &vid,
+            )
+            .await
+            {
+                Ok(Some(a)) => a,
+                _ => {
+                    ads_after_composition.push(ad);
+                    continue;
+                }
+            };
+            match crate::sdk::vault_state_composition::compose_vault_state(
+                &vid,
+                &anchor,
+                (reserve_a, reserve_b),
+                &ad.token_a,
+                &ad.token_b,
+                ad.fee_bps,
+            )
+            .await
+            {
+                Ok(composed) => {
+                    if composed.pending_chain_len > 0 || composed.pending_chain_skipped > 0 {
+                        log::info!(
+                            "[route.findAndBindBestPath] vault {} pending chain len={} skipped={}",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                            composed.pending_chain_len,
+                            composed.pending_chain_skipped,
+                        );
+                    }
+                    if composed.pending_chain_len
+                        >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
+                    {
+                        // Saturated chain: too deep for this trader to
+                        // serialize against.  Drop from candidate set.
+                        log::warn!(
+                            "[route.findAndBindBestPath] vault {} dropped from candidates: pending chain saturated",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                        );
+                        continue;
+                    }
+                    ads_after_composition.push(ad);
+                }
+                Err(e) => {
+                    // Composition failed — most commonly because the
+                    // anchor's signed reserves don't match the ad's
+                    // reserves (ad republished without matching anchor
+                    // re-sign).  Drop from candidates fail-closed.
+                    log::warn!(
+                        "[route.findAndBindBestPath] vault {} dropped from candidates: composition error {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid),
+                    );
+                    continue;
+                }
+            }
+        }
+        let ads = ads_after_composition;
 
         // Tier 2 envelope: when caller asks for N-best (max_paths > 1),
         // run the verified N-best enumerator and bind primary +

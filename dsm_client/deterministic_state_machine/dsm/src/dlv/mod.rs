@@ -5,4 +5,5 @@
 //! flow.  This module deliberately holds no proto / I/O / runtime
 //! state; each submodule is a self-contained crypto primitive.
 
+pub mod vault_pending_pointer;
 pub mod vault_state_anchor;
