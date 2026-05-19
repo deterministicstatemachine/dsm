@@ -280,6 +280,239 @@ class SiliconFingerprintRealHwTest {
     }
 
     /**
+     * Same-device stability (FRR) — Phase 3 deliverable 1.
+     *
+     * Cross-device test (Phase 2.2) proved devices are distinguishable
+     * (W1 = 40–75× noise floor). This test proves the COMPLEMENTARY
+     * property: a device can re-identify itself across a thermal cycle.
+     * If false-rejection is too high, wallets ship broken in production.
+     *
+     * Captures two aggregated mean histograms back-to-back with a heavy
+     * compute workload between them to perturb the SoC's thermal state,
+     * then asserts the same-device W1 stays well below the cross-device
+     * minimum we measured (0.0395 for the closest pair). If it doesn't,
+     * the protocol can't tell self-from-other and that's a problem.
+     */
+    @Test
+    fun same_device_stability_after_thermal_cycle() {
+        val env = envBytes()
+        val nTrials = 5
+        val bins = 32
+        val captureProbes = 8192
+
+        fun aggregate(label: String): FloatArray {
+            val sum = FloatArray(bins)
+            repeat(nTrials) {
+                val timings = SiliconFingerprintNative.captureOrbitDensity(
+                    envBytes = env,
+                    challenge = newChallenge(),
+                    thermalBytes = thermalBytes(),
+                    arenaBytes = ARENA_BYTES,
+                    probes = captureProbes,
+                    stepsPerProbe = STEPS_PER_PROBE,
+                    warmupRounds = WARMUP_ROUNDS,
+                    rotationBits = ROTATION_BITS,
+                )
+                assertNotNull("$label: trial returned null", timings)
+                val h = coarseHistogram(timings!!)
+                for (i in 0 until bins) sum[i] += h[i]
+            }
+            val inv = 1f / nTrials
+            for (i in 0 until bins) sum[i] *= inv
+            return sum
+        }
+
+        val hBaseline = aggregate("baseline")
+
+        // Thermal-cycle the SoC: ~10 seconds of FP burner on this thread
+        // to nudge the die temperature. Fixed iteration count (clockless).
+        var acc = 0.0
+        var burn = 0
+        while (burn < 800_000) {
+            var i = 1
+            while (i < 1000) {
+                acc += kotlin.math.sqrt(i.toDouble())
+                i++
+            }
+            burn++
+        }
+        if (acc.isNaN()) Log.w("FRR", "burn unreachable")
+
+        val hAfter = aggregate("after-burn")
+
+        val sameDeviceW1 = wasserstein1(hBaseline, hAfter)
+
+        // Threshold: comfortably below the cross-device minimum we measured
+        // (A16 ↔ G9T was 0.0395 — the closest pair). Same-device must be
+        // dramatically tighter than that to be useful. We assert ≤ 0.02
+        // (half the closest cross-device pair). If FRR exceeds 0.02 the
+        // device can't reliably identify itself and the spec deviations
+        // doc must be updated to record the FRR floor.
+        val deviceId = "${android.os.Build.MODEL}-${android.os.Build.HARDWARE}"
+        Log.i("SAME_DEVICE_W1", "$deviceId|baseline_vs_after_burn|$sameDeviceW1")
+        assertTrue(
+            "FRR exceeded threshold: W1(baseline, after_burn) = $sameDeviceW1 > 0.02 " +
+                "(closest cross-device pair was 0.0395). Device can't reliably " +
+                "identify itself across a thermal cycle.",
+            sameDeviceW1 <= 0.02f,
+        )
+    }
+
+    /**
+     * Phase 3 deliverable 4 — entropy-health-degrades-under-load (proxy).
+     *
+     * The Rust health gate (cdbrw_ffi::health_test) checks Shannon
+     * entropy, lag-1 autocorrelation, and LZ78 compressibility against
+     * thresholds. Under heavy CPU load, scheduler preemption injects
+     * correlated noise into the orbit timings — exactly what
+     * autocorrelation is supposed to catch. This test runs two captures
+     * back-to-back, one quiescent and one with a CPU burner spinning on
+     * a separate thread, and asserts the under-load capture has
+     * measurably higher inter-probe variance.
+     *
+     * It's a proxy for the full gate verdict: we can't easily route
+     * through the production cdbrw.measure_trust path without
+     * bootstrapping the SDK, so we measure the underlying signal the
+     * gate would gate on (variance / autocorrelation) and assert the
+     * load condition perturbs it. If perturbation is invisible at the
+     * timing-array level, the Rust gate also can't see it.
+     */
+    @Test
+    fun health_signal_degrades_under_cpu_load() {
+        val env = envBytes()
+        // Smaller capture for the test budget — we just need enough
+        // probes to compute robust variance, not a full orbit.
+        val captureProbes = 4096
+
+        fun captureNanoVariance(label: String): Double {
+            val timings = SiliconFingerprintNative.captureOrbitDensity(
+                envBytes = env,
+                challenge = newChallenge(),
+                thermalBytes = thermalBytes(),
+                arenaBytes = ARENA_BYTES,
+                probes = captureProbes,
+                stepsPerProbe = STEPS_PER_PROBE,
+                warmupRounds = WARMUP_ROUNDS,
+                rotationBits = ROTATION_BITS,
+            )
+            assertNotNull("$label: capture returned null", timings)
+            val arr = timings!!
+            val n = arr.size.toDouble()
+            val mean = arr.sumOf { it.toDouble() } / n
+            val variance = arr.sumOf { val d = it.toDouble() - mean; d * d } / n
+            return variance
+        }
+
+        val baselineVariance = captureNanoVariance("baseline")
+
+        // Spawn a CPU burner on a background thread. Fixed iteration
+        // count to satisfy the clockless rule.
+        val burnRunning = java.util.concurrent.atomic.AtomicBoolean(true)
+        val burner = Thread {
+            var acc = 0.0
+            var i = 1L
+            while (burnRunning.get()) {
+                acc += kotlin.math.sqrt(i.toDouble())
+                i++
+                if (acc.isNaN()) break
+            }
+        }
+        burner.priority = Thread.NORM_PRIORITY
+        burner.start()
+
+        val underLoadVariance = try {
+            captureNanoVariance("under-load")
+        } finally {
+            burnRunning.set(false)
+            burner.join(5000)
+        }
+
+        Log.i(
+            "HEALTH_UNDER_LOAD",
+            "baseline_var=$baselineVariance under_load_var=$underLoadVariance " +
+                "ratio=${underLoadVariance / baselineVariance.coerceAtLeast(1.0)}"
+        )
+
+        // Under-load variance should exceed baseline. We use a loose 1.5x
+        // factor — preemption-induced timing noise is highly variable
+        // run-to-run, and we just want to confirm the load condition
+        // measurably perturbs the orbit. If this fails it means scheduler
+        // pressure isn't reaching the capture thread, which means the
+        // health gate also can't observe it.
+        assertTrue(
+            "health signal not degraded under load: baseline_var=$baselineVariance " +
+                "under_load_var=$underLoadVariance — scheduler pressure invisible to capture",
+            underLoadVariance > baselineVariance * 1.5,
+        )
+    }
+
+    /**
+     * Phase 3 deliverable 5 — concurrent capture does not crash.
+     *
+     * Spawns two threads both running `captureOrbitDensity` in parallel
+     * (each its own orbit, K_DBRW slot reads on both, native pinning
+     * race). Assert both return non-null, the process survives, and no
+     * native crashes (the test runner would terminate on SIGSEGV).
+     */
+    @Test
+    fun concurrent_capture_does_not_crash() {
+        val env = envBytes()
+        val captureProbes = 2048
+        val errors = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val resultA = java.util.concurrent.atomic.AtomicReference<LongArray?>(null)
+        val resultB = java.util.concurrent.atomic.AtomicReference<LongArray?>(null)
+
+        val tA = Thread {
+            try {
+                resultA.set(
+                    SiliconFingerprintNative.captureOrbitDensity(
+                        envBytes = env,
+                        challenge = newChallenge(),
+                        thermalBytes = thermalBytes(),
+                        arenaBytes = ARENA_BYTES,
+                        probes = captureProbes,
+                        stepsPerProbe = STEPS_PER_PROBE,
+                        warmupRounds = WARMUP_ROUNDS,
+                        rotationBits = ROTATION_BITS,
+                    )
+                )
+            } catch (t: Throwable) {
+                errors.add("threadA: $t")
+            }
+        }
+        val tB = Thread {
+            try {
+                resultB.set(
+                    SiliconFingerprintNative.captureOrbitDensity(
+                        envBytes = env,
+                        challenge = newChallenge(),
+                        thermalBytes = thermalBytes(),
+                        arenaBytes = ARENA_BYTES,
+                        probes = captureProbes,
+                        stepsPerProbe = STEPS_PER_PROBE,
+                        warmupRounds = WARMUP_ROUNDS,
+                        rotationBits = ROTATION_BITS,
+                    )
+                )
+            } catch (t: Throwable) {
+                errors.add("threadB: $t")
+            }
+        }
+        tA.start()
+        tB.start()
+        tA.join()
+        tB.join()
+
+        assertTrue("concurrent capture errors: $errors", errors.isEmpty())
+        assertNotNull("threadA returned null", resultA.get())
+        assertNotNull("threadB returned null", resultB.get())
+        // Both captures must produce non-degenerate timing arrays —
+        // proves both orbits actually executed, neither was starved.
+        assertTrue("threadA timings empty", resultA.get()!!.isNotEmpty())
+        assertTrue("threadB timings empty", resultB.get()!!.isNotEmpty())
+    }
+
+    /**
      * Negative test (Phase 2 falsifiability gate). The C++ guard added in
      * Phase 2 refuses to run when no thermal HAL bytes are supplied — this
      * proves the Kotlin-side PowerManager sample is load-bearing for the
