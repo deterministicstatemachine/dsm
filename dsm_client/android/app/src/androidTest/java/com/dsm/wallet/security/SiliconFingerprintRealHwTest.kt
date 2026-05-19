@@ -7,6 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -194,6 +195,115 @@ class SiliconFingerprintRealHwTest {
                 "(perTrialEntropy=$perTrialEntropy)",
             sigmaDevice >= 0.04f,
         )
+    }
+
+    /**
+     * Negative test (Phase 2 falsifiability gate). The C++ guard added in
+     * Phase 2 refuses to run when no thermal HAL bytes are supplied — this
+     * proves the Kotlin-side PowerManager sample is load-bearing for the
+     * orbit and catches future regressions that stop sampling.
+     */
+    @Test
+    fun orbit_refuses_without_thermal_bytes() {
+        val timings = SiliconFingerprintNative.captureOrbitDensity(
+            envBytes = envBytes(),
+            challenge = newChallenge(),
+            thermalBytes = ByteArray(0),
+            arenaBytes = ARENA_BYTES,
+            probes = PROBES,
+            stepsPerProbe = STEPS_PER_PROBE,
+            warmupRounds = WARMUP_ROUNDS,
+            rotationBits = ROTATION_BITS,
+        )
+        assertNull(
+            "captureOrbitDensity must refuse to run with zero-length thermal bytes " +
+                "(Phase 2 spec-strict guard)",
+            timings,
+        )
+    }
+
+    /**
+     * Falsifying delta test (Phase 2). Asserts that the thermal channel is
+     * actually load-bearing in the orbit: runs N orbits with real
+     * PowerManager bytes and N with all-zero thermal bytes (but length 16
+     * so the strict guard does not fire), aggregates each set into a mean
+     * histogram, and asserts the Wasserstein-1 distance between the two
+     * means is above a calibrated threshold.
+     *
+     * If this test fails even at the loosest threshold (W1 > 0.001), the
+     * truthful conclusion is that PowerManager thermal HAL data is NOT
+     * materially affecting the ARX orbit timings — at which point the
+     * spec-deviations doc must be updated to demote any "thermal-driven"
+     * language and we either find a stronger thermal channel or accept
+     * the limitation honestly.
+     */
+    @Test
+    fun thermal_channel_is_load_bearing() {
+        val env = envBytes()
+        // Fix challenge across both sets so the only varying input is
+        // thermal_bytes. CNTVCT_EL0 still varies per step inside the
+        // probe; that variation is constant across the two sets too
+        // (same iteration count, same arena pattern), so any mean
+        // histogram divergence is attributable to thermal_bytes.
+        val fixedChallenge = newChallenge()
+        val nTrials = 5
+        val bins = 32
+
+        fun aggregate(thermal: ByteArray): FloatArray {
+            val sum = FloatArray(bins)
+            repeat(nTrials) {
+                val timings = SiliconFingerprintNative.captureOrbitDensity(
+                    envBytes = env,
+                    challenge = fixedChallenge,
+                    thermalBytes = thermal,
+                    arenaBytes = ARENA_BYTES,
+                    probes = PROBES,
+                    stepsPerProbe = STEPS_PER_PROBE,
+                    warmupRounds = WARMUP_ROUNDS,
+                    rotationBits = ROTATION_BITS,
+                )
+                assertNotNull("trial returned null", timings)
+                val h = coarseHistogram(timings!!)
+                for (i in 0 until bins) sum[i] += h[i]
+            }
+            val inv = 1f / nTrials
+            for (i in 0 until bins) sum[i] *= inv
+            return sum
+        }
+
+        val hReal = aggregate(thermalBytes())
+        val hZero = aggregate(ByteArray(16))
+        val w1 = wasserstein1(hReal, hZero)
+
+        // Threshold calibration: starts loose. If even this doesn't hold,
+        // the thermal channel is observation-only — see Phase 2 plan
+        // "Two outcomes" guidance.
+        assertTrue(
+            "thermal channel does NOT measurably influence orbit timings " +
+                "(W1(H_real, H_zero) = $w1 ≤ 0.001) — PowerManager thermal HAL " +
+                "is not load-bearing; CDBRW_SPEC_DEVIATIONS.md must reflect this",
+            w1 > 0.001f,
+        )
+    }
+
+    /**
+     * Wasserstein-1 distance between two normalized histograms.
+     * Mirrors dsm_sdk::security::cdbrw_responder::wasserstein1 exactly so
+     * the Kotlin test computes W1 the same way the Rust pipeline does.
+     */
+    private fun wasserstein1(a: FloatArray, b: FloatArray): Float {
+        val n = minOf(a.size, b.size)
+        if (n == 0) return 0f
+        val step = 1f / n
+        var cdfA = 0f
+        var cdfB = 0f
+        var dist = 0f
+        for (i in 0 until n) {
+            cdfA += a[i]
+            cdfB += b[i]
+            dist += kotlin.math.abs(cdfA - cdfB) * step
+        }
+        return dist
     }
 
     /** 32-bin normalized histogram of nonneg longs. */
