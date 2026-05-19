@@ -241,7 +241,7 @@ time cost: ~70 seconds for the full 6-test instrumentation suite (was
 | Def 9.1(b) `/sys/class/thermal` | `orbit_refuses_without_thermal_bytes` | Phase 2 |
 | Def 9.1(b) thermal load-bearing | `thermal_channel_is_load_bearing` | Passing on Galaxy A54 with Phase 2.1 16×-per-probe hybrid refresh; original per-probe-only design failed this test (W1 ≈ 0.0009 at noise floor) |
 | Def 3.2 per-step sampling vs derivation | (no direct formal test) | Hybrid 16× refresh approximates per-step cadence; full formal analysis pending |
-| **Cross-device anti-cloning (spec's load-bearing property)** | `cross_device_histogram_capture` + host-side W1 | **VERIFIED** on Galaxy A54 (Exynos 1380) vs Galaxy A16 (MediaTek Helio G99): W1 = 0.0747, ≈ 75× same-device noise floor. L1 = 1.07 (out of max 2.0). Per-bin: device A concentrated in bin 0 (95%), device B has secondary mode at bins 5–7. Different SoCs → different cache/DRAM topology → different attractor shapes, exactly as spec Theorem 4.24 predicts. |
+| **Cross-device anti-cloning (spec's load-bearing property)** | `cross_device_histogram_capture` + host-side W1 | **VERIFIED on 3 devices** with pairwise W1 ranging 40–75× same-device noise floor: Galaxy A54 (Samsung Exynos 1380) ↔ Galaxy A16 (MediaTek Helio G99) W1=0.0747. A54 ↔ UMIDIGI G9T (Unisoc UMS9230) W1=0.0749. A16 ↔ G9T W1=0.0395. Three OEMs, three SoC families (Samsung 5nm / TSMC 6nm / SMIC 12nm), three structurally distinct attractor shapes — Exynos concentrated in bin 0 (95%), Helio bimodal (bin 0 + bin 5-7), Unisoc spread across bins 1-4. Spec Theorem 4.24 holds on real silicon. |
 
 The full instrumentation test suite (`SiliconFingerprintRealHwTest`) runs
 in approximately 30 seconds on a Galaxy A54 and is the canonical
