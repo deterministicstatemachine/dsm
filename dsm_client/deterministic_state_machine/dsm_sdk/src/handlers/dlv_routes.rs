@@ -1289,35 +1289,61 @@ impl AppRouterImpl {
                     crate::sdk::signing_authority::current_secret_key(),
                 ) {
                     if !pk.is_empty() && !sk.is_empty() {
-                        match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
-                            &vault_id,
-                            new_seq,
-                            &new_digest,
-                            &pk,
-                            &sk,
-                        ) {
-                            Ok(signed) => {
-                                let proto_bytes =
-                                    crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
-                                        &signed,
-                                    );
-                                if let Err(e) =
-                                    publish_vault_state_anchor(&vault_id, &proto_bytes).await
-                                {
+                        // Phase 6 fix: only republish the anchor when the
+                        // LOCAL wallet is the vault owner.  Trader-side
+                        // routed unlocks (cross-device) MUST NOT sign a new
+                        // anchor with the trader's key — verifiers expect
+                        // the owner's key, and a trader-signed anchor
+                        // would fail `verify_vault_state_anchor`.  The
+                        // vault-keyed pending pointer (published as part
+                        // of `route.publishExternalCommitment` when the
+                        // signed RouteCommit bytes are supplied) is the
+                        // cross-device-safe discovery aid; anchor refresh
+                        // remains the owner's responsibility.
+                        let local_is_owner = match dlv_manager.get_vault(&vault_id).await {
+                            Ok(vault_lock) => {
+                                let vault = vault_lock.lock().await;
+                                vault.creator_public_key.as_slice() == pk.as_slice()
+                            }
+                            Err(_) => false,
+                        };
+                        if local_is_owner {
+                            match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
+                                &vault_id,
+                                new_seq,
+                                &new_digest,
+                                &pk,
+                                &sk,
+                            ) {
+                                Ok(signed) => {
+                                    let proto_bytes =
+                                        crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
+                                            &signed,
+                                        );
+                                    if let Err(e) =
+                                        publish_vault_state_anchor(&vault_id, &proto_bytes).await
+                                    {
+                                        log::warn!(
+                                            "[dlv.unlockRouted] anchor republish (seq={}) failed for {}: {e}",
+                                            new_seq,
+                                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
                                     log::warn!(
-                                        "[dlv.unlockRouted] anchor republish (seq={}) failed for {}: {e}",
+                                        "[dlv.unlockRouted] anchor sign failed for seq={} vault={}: {e:?}",
                                         new_seq,
                                         crate::util::text_id::encode_base32_crockford(&vault_id),
                                     );
                                 }
                             }
-                            Err(e) => {
-                                log::warn!(
-                                    "[dlv.unlockRouted] anchor sign failed for seq={} vault={}: {e:?}",
-                                    new_seq,
-                                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                                );
-                            }
+                        } else {
+                            log::info!(
+                                "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: local wallet is not the vault owner — composition path will reflect this trade via VaultPendingPointerV1 instead",
+                                new_seq,
+                                crate::util::text_id::encode_base32_crockford(&vault_id),
+                            );
                         }
                     } else {
                         log::warn!(
