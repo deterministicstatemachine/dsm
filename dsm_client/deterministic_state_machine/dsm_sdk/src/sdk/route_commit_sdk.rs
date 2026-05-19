@@ -77,6 +77,19 @@ pub(crate) fn vault_pending_prefix(vault_id: &[u8; 32]) -> String {
     )
 }
 
+/// Storage-node prefix for the canonical signed RouteCommit bytes paired
+/// with each X anchor (Phase 6).  Published alongside the
+/// `ExternalCommitmentV1` so the composer can fetch the full RC, find
+/// the hop touching a given vault, and re-simulate the AMM swap to fold
+/// reserves forward — without inflating the on-storage record at
+/// `defi/extcommit/{X_b32}` (which other systems may already parse).
+pub(crate) const EXT_COMMIT_RC_ROOT: &str = "defi/extcommit-rc/";
+
+/// Storage key for the signed RouteCommit bytes paired with `X`.
+pub(crate) fn external_commitment_rc_key(x: &[u8; 32]) -> String {
+    format!("{}{}", EXT_COMMIT_RC_ROOT, encode_base32_crockford(x))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RouteCommitError {
     EmptyPath,
@@ -480,6 +493,17 @@ pub(crate) async fn publish_route_anchor_with_pointers(
 ) -> Result<Vec<PublishPointerError>, dsm::types::error::DsmError> {
     // 1) Publish the X anchor.  Identical behaviour to the legacy path.
     publish_external_commitment(x, publisher_pk, label).await?;
+
+    // 1b) Publish the full signed RouteCommit bytes at
+    //     defi/extcommit-rc/{X_b32}.  This is the load-bearing storage
+    //     write for Phase-6 composition: the composer fetches this RC,
+    //     locates the hop touching each vault, and re-simulates the AMM
+    //     swap to advance reserves forward (not just the sequence).
+    //     Without this, the chain validates but reserves can't move
+    //     past the owner-signed baseline.
+    let rc_bytes_for_storage = rc.encode_to_vec();
+    let rc_key = external_commitment_rc_key(x);
+    BitcoinTapSdk::storage_put_bytes(&rc_key, &rc_bytes_for_storage).await?;
 
     // 2) For each hop, derive the pointer fields by re-simulating the
     //    AMM swap against the hop's bound (input, output, fee) — the

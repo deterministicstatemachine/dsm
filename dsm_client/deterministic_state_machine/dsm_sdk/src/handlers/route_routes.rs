@@ -687,18 +687,21 @@ impl AppRouterImpl {
         // Phase 6: vault-state composition pass.  For each candidate
         // advertisement, fetch the owner-signed VaultStateAnchorV1 and
         // fold any published VaultPendingPointerV1 records into a
-        // composed (sequence, reserves) view.
+        // composed (sequence, reserves) view.  The composed reserves
+        // REPLACE the advertisement's owner-signed reserves so the
+        // downstream path search quotes against the canonical current
+        // state — including any pending trades published since the
+        // owner's last anchor refresh.
         //
-        // Phase 6.0 behaviour: pending pointers serve as a discovery
-        // aid + saturation signal; they do NOT modify the reserves used
-        // for AMM math here (see vault_state_composition module docs).
-        // Vaults whose pending chain is "saturated" (very deep or
-        // missing X anchors) are dropped from the candidate set —
-        // serializing trader 2 against them would be wasted work.
+        // This is the SoFi spec §2.3 / §4.1 "math speaks for itself"
+        // property: concurrent traders quoting against the same vault
+        // while the owner is offline see each other's pending state
+        // advances and serialize on top of them, rather than all
+        // colliding against the stale anchor + having Tripwire prune
+        // everyone but the first.
         let mut ads_after_composition: Vec<generated::RoutingVaultAdvertisementV1> =
             Vec::with_capacity(ads.len());
-        for ad in ads.into_iter() {
-            // Decode the ad's reserves (the values the owner signed).
+        for mut ad in ads.into_iter() {
             if ad.vault_id.len() != 32
                 || ad.reserve_a_u128.len() != 16
                 || ad.reserve_b_u128.len() != 16
@@ -712,12 +715,12 @@ impl AppRouterImpl {
             a_buf.copy_from_slice(&ad.reserve_a_u128);
             let mut b_buf = [0u8; 16];
             b_buf.copy_from_slice(&ad.reserve_b_u128);
-            let reserve_a = u128::from_be_bytes(a_buf);
-            let reserve_b = u128::from_be_bytes(b_buf);
+            let baseline_reserve_a = u128::from_be_bytes(a_buf);
+            let baseline_reserve_b = u128::from_be_bytes(b_buf);
 
             // Fetch the latest vault state anchor.  If absent, the ad
             // pre-dates the anchor flow — fall through and use the ad
-            // as-is.  Composition is best-effort.
+            // as-is (no composition possible without a signed baseline).
             let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
                 &vid,
             )
@@ -732,7 +735,7 @@ impl AppRouterImpl {
             match crate::sdk::vault_state_composition::compose_vault_state(
                 &vid,
                 &anchor,
-                (reserve_a, reserve_b),
+                (baseline_reserve_a, baseline_reserve_b),
                 &ad.token_a,
                 &ad.token_b,
                 ad.fee_bps,
@@ -742,30 +745,35 @@ impl AppRouterImpl {
                 Ok(composed) => {
                     if composed.pending_chain_len > 0 || composed.pending_chain_skipped > 0 {
                         log::info!(
-                            "[route.findAndBindBestPath] vault {} pending chain len={} skipped={}",
+                            "[route.findAndBindBestPath] vault {} composed: baseline=({},{}) composed=({},{}) chain_len={} skipped={} seq={}",
                             crate::util::text_id::encode_base32_crockford(&vid),
+                            baseline_reserve_a,
+                            baseline_reserve_b,
+                            composed.reserves_a,
+                            composed.reserves_b,
                             composed.pending_chain_len,
                             composed.pending_chain_skipped,
+                            composed.sequence,
                         );
                     }
                     if composed.pending_chain_len
                         >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
                     {
-                        // Saturated chain: too deep for this trader to
-                        // serialize against.  Drop from candidate set.
                         log::warn!(
                             "[route.findAndBindBestPath] vault {} dropped from candidates: pending chain saturated",
                             crate::util::text_id::encode_base32_crockford(&vid),
                         );
                         continue;
                     }
+                    // Replace the ad's reserves with the composed values
+                    // so the downstream path search builds AMM edges
+                    // against the canonical current state.
+                    ad.reserve_a_u128 = composed.reserves_a.to_be_bytes().to_vec();
+                    ad.reserve_b_u128 = composed.reserves_b.to_be_bytes().to_vec();
+                    ad.updated_state_number = composed.sequence;
                     ads_after_composition.push(ad);
                 }
                 Err(e) => {
-                    // Composition failed — most commonly because the
-                    // anchor's signed reserves don't match the ad's
-                    // reserves (ad republished without matching anchor
-                    // re-sign).  Drop from candidates fail-closed.
                     log::warn!(
                         "[route.findAndBindBestPath] vault {} dropped from candidates: composition error {e}",
                         crate::util::text_id::encode_base32_crockford(&vid),
