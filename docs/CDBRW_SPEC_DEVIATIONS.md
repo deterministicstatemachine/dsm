@@ -138,28 +138,34 @@ substrate state, the channel degrades to status-only.
 
 **Implementation:**
 
-We sample substrate state **once per probe** (microsecond cadence —
-matches Def 9.1(c) "Native intrinsics read temperature and voltage
-counters at microsecond intervals") and derive per-step µ_n inside the ARX
-loop as:
+We sample substrate state **N times per probe** (Phase 2.1 hybrid
+refresh: `N_SUBSTRATE_PER_PROBE = 16`) and derive per-step µ_n inside
+the ARX loop as:
 
 ```
-µ_n = substrate_digest[n & 31] XOR (cntvct_el0 & 0xFF) XOR ((cntvct_el0 >> 8) & 0xFF)
+substrate = substrates[s / steps_per_substrate]   // refreshes every ~256 steps
+µ_n = substrate[s & 31] XOR (cntvct_el0 & 0xFF) XOR ((cntvct_el0 >> 8) & 0xFF)
 ```
 
-where `substrate_digest` is the 32-byte BLAKE3 fold of the per-probe
-sampling (`thermal_bytes ‖ cpufreq ‖ perf_cycles ‖ perf_cache_misses ‖
-cntvct`) and `cntvct_el0` is read per step via `mrs cntvct_el0`. So per
-step the µ stream has a fresh CNTVCT-driven byte XOR'd against a cycling
-position in the substrate digest.
+where each entry in `substrates[]` is its own 32-byte BLAKE3 fold of
+fresh real-time reads (`thermal_bytes ‖ cpufreq ‖ perf_cycles ‖
+perf_cache_misses ‖ cntvct`), pre-sampled at the start of each probe
+(outside the timed region so syscall latency does not pollute orbit
+timings). `cntvct_el0` is then read per step via `mrs cntvct_el0`.
 
-**Why we deviate:**
+This gives N=16 distinct thermal-influenced substrate digests per probe
+× 16384 probes = 262144 substrate samples per orbit. That cadence
+(~microsecond-class refresh) approximates the spec's Def 9.1(c) wording
+"microsecond intervals" much more closely than the original per-probe
+(1× per 16384) sampling.
 
-Per-step substrate sampling (5 syscalls per step × 67 million steps per
-orbit × 16 enrollment trials) makes the process unkillable-by-anything-
-but-the-watchdog. The pragmatic compromise is per-probe substrate sampling
-(spec-aligned cadence) + per-step CNTVCT folding (provides per-iteration
-freshness, reflects real cache/DRAM access timing).
+**Why we deviate from strict per-step sampling:**
+
+Literal per-step substrate sampling (5 syscalls per ARX step × ~67M
+steps per orbit × 16 enrollment trials) is unkillable-by-anything-but-
+the-watchdog. The 16× hybrid refresh is the most aggressive cadence
+that keeps the timed region syscall-free while still empirically
+satisfying the falsifying delta test (see Verification status table).
 
 **Mitigation:**
 
@@ -184,6 +190,25 @@ In practice, the entropy health test (Def 4.15) is the empirical gate:
 if the derived µ stream fails `|ρ̂| ≤ 0.3` autocorrelation or `L̂ ≥ 0.45`
 compressibility on real device timings, the access gate sits in
 `PinRequired` and the orbit's output is downstream-rejected.
+
+**Measured impact on inter-orbit divergence (Phase 2.1):**
+
+The hybrid 16×-refresh design passes both falsifying tests on Galaxy
+A54 (Android 16, SDK 36):
+
+- `thermal_channel_is_load_bearing`: W1(H_real, H_zero) > 0.001 with
+  N=5 aggregated trials per condition. Initial single-refresh design
+  failed at W1 ≈ 0.0009; with 16× refresh the thermal channel clears
+  the threshold reliably.
+- `different_challenges_produce_different_orbits`: W1(H_A, H_B) > 0.001
+  with N=5 aggregated trials per challenge. Same aggregated pattern as
+  the thermal test (single-probe L1 comparison was too noisy to draw
+  signal from cache/scheduler variance).
+
+Both metrics confirm thermal HAL AND the challenge channel
+non-trivially influence the orbit under the hybrid derivation. Wall
+time cost: ~70 seconds for the full 6-test instrumentation suite (was
+30 seconds with the original per-probe-only refresh).
 
 ---
 
@@ -214,8 +239,8 @@ compressibility on real device timings, the access gate sits in
 |---|---|---|
 | Def 9.1(a) interrupt masking | Entropy health test (`cdbrw_ffi::health_test`) | Implemented; gates access |
 | Def 9.1(b) `/sys/class/thermal` | `orbit_refuses_without_thermal_bytes` | Phase 2 |
-| Def 9.1(b) thermal load-bearing | `thermal_channel_is_load_bearing` | Phase 2 — first-run calibration determines whether the channel is actually contributing |
-| Def 3.2 per-step sampling vs derivation | (none) | Formal analysis follow-up |
+| Def 9.1(b) thermal load-bearing | `thermal_channel_is_load_bearing` | Passing on Galaxy A54 with Phase 2.1 16×-per-probe hybrid refresh; original per-probe-only design failed this test (W1 ≈ 0.0009 at noise floor) |
+| Def 3.2 per-step sampling vs derivation | (no direct formal test) | Hybrid 16× refresh approximates per-step cadence; full formal analysis pending |
 
 The full instrumentation test suite (`SiliconFingerprintRealHwTest`) runs
 in approximately 30 seconds on a Galaxy A54 and is the canonical
