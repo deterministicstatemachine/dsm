@@ -471,7 +471,7 @@ impl StorageNodeClient {
     fn generate_message_id(_key: &str) -> String {
         use rand::RngCore;
         let mut nonce = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
         crate::util::text_id::encode_base32_crockford(&nonce)
     }
 

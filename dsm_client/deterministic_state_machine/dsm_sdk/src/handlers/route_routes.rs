@@ -261,16 +261,28 @@ impl AppRouterImpl {
         // decode failure or missing inner anchor, fall back to bare.
         let (mut req, signed_rc_bytes_opt): (generated::ExternalCommitmentV1, Option<Vec<u8>>) =
             match generated::PublishExternalCommitmentRequest::decode(&*bytes) {
-                Ok(wrapper) if wrapper.anchor.is_some() => {
-                    let inner = wrapper.anchor.unwrap();
-                    let rc_opt = if wrapper.signed_route_commit_bytes.is_empty() {
-                        None
+                Ok(wrapper) => {
+                    if let Some(inner) = wrapper.anchor {
+                        let rc_opt = if wrapper.signed_route_commit_bytes.is_empty() {
+                            None
+                        } else {
+                            Some(wrapper.signed_route_commit_bytes)
+                        };
+                        (inner, rc_opt)
                     } else {
-                        Some(wrapper.signed_route_commit_bytes)
-                    };
-                    (inner, rc_opt)
+                        // Fall back to bare ExternalCommitmentV1.
+                        let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return err(format!(
+                                "route.publishExternalCommitment: decode failed (tried PublishExternalCommitmentRequest then ExternalCommitmentV1): {e}"
+                            ));
+                            }
+                        };
+                        (bare, None)
+                    }
                 }
-                _ => {
+                Err(_) => {
                     // Fall back to bare ExternalCommitmentV1.
                     let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
                         Ok(r) => r,
