@@ -15,7 +15,7 @@ use dsm_sdk::storage::client_db::{
 };
 use std::process::Command;
 use std::collections::HashMap;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 use tokio::time::{timeout, Duration};
 
 fn seed_era_projection(device_txt: &str, available: u64) {
@@ -119,7 +119,8 @@ async fn e2e_online_transfer_era_and_custom_token() {
 
     let mut os_rng = OsRng;
     let mut alice_entropy = vec![0u8; 32];
-    os_rng.fill_bytes(&mut alice_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut alice_entropy)
+        .expect("OsRng entropy failure");
 
     println!("Creating Alice genesis via MPC...");
     let alice_genesis = timeout(
@@ -218,7 +219,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
         .await
         .unwrap_or_else(|e| panic!("Failed to init Bob StorageNodeSDK: {e}"));
     let mut bob_entropy = vec![0u8; 32];
-    os_rng.fill_bytes(&mut bob_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut bob_entropy).expect("OsRng entropy failure");
 
     println!("Creating Bob genesis via MPC...");
     let bob_genesis = timeout(
@@ -507,7 +508,8 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
     let mut os_rng = OsRng;
     let (receiver_device_id, receiver_genesis) = {
         let mut receiver_entropy = vec![0u8; 32];
-        os_rng.fill_bytes(&mut receiver_entropy);
+        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut receiver_entropy)
+            .expect("OsRng entropy failure");
         let receiver_genesis = storage_sdk
             .create_genesis_with_mpc(Some(receiver_entropy.clone()))
             .await
@@ -558,7 +560,8 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
 
     let (sender_device_id, sender_genesis, relationship_tip, expected_route) = {
         let mut sender_entropy = vec![0u8; 32];
-        os_rng.fill_bytes(&mut sender_entropy);
+        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut sender_entropy)
+            .expect("OsRng entropy failure");
         let sender_genesis_record = storage_sdk
             .create_genesis_with_mpc(Some(sender_entropy.clone()))
             .await
