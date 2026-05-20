@@ -17,7 +17,7 @@ use blake3;
 use dsm::types::error::DsmError;
 use dsm::types::proto::SensitiveAppDataProto;
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -56,7 +56,12 @@ impl DeviceMasterKey {
 
         #[cfg(not(target_os = "android"))]
         {
-            OsRng.fill_bytes(&mut entropy);
+            rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut entropy).map_err(|e| {
+                DsmError::crypto(
+                    format!("OsRng entropy failure: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
         }
 
         Ok(DeviceMasterKey(entropy))
@@ -146,7 +151,12 @@ impl EncryptedAppState {
             .map_err(|e| DsmError::crypto("Failed to serialize sensitive data", Some(e)))?;
 
         let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut nonce).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         let encrypted_data = cipher
             .encrypt(&Nonce::from(nonce), plaintext.as_ref())
             .map_err(|e| DsmError::crypto("Failed to encrypt app state", Some(e)))?;
@@ -384,7 +394,12 @@ impl OfflineTransactionQueue {
             .map_err(|e| DsmError::crypto("Invalid AES key", Some(e)))?;
 
         let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut nonce).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
 
         let encrypted_data = cipher
             .encrypt(&Nonce::from(nonce), transaction)
