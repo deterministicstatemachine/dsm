@@ -1660,7 +1660,13 @@ impl WalletSDK {
 
         let core_sdk = Arc::new(CoreSDK::new()?);
         let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-        Self::new(core_sdk, &device_id_b32, None)
+        let test_config = WalletConfig {
+            name: format!("{device_id_b32}'s Wallet"),
+            // Keep tests deterministic under concurrent tick activity in other suites.
+            auto_lock_timeout: 0,
+            ..WalletConfig::default()
+        };
+        Self::new(core_sdk, &device_id_b32, Some(test_config))
     }
 }
 #[cfg(test)]
