@@ -20,10 +20,7 @@
 use crate::types::error::DsmError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, Nonce,
-};
+use aes_gcm::aead::OsRng;
 use crate::crypto::blake3::dsm_domain_hasher;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
