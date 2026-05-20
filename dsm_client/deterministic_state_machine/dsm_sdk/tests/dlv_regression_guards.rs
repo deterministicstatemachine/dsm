@@ -949,12 +949,20 @@ fn route_publish_routes_stamp_wallet_pk_on_empty() {
 /// `route.signRouteCommit`; without it the AMM owner UI couldn't
 /// create vaults without exposing wallet keys to TS.
 ///
-/// Two regressions this guard catches:
+/// The signature is over `LimboVaultDraft::parameters_hash` (the
+/// same value `LimboVault::verify()` re-derives at finalize_vault
+/// time) — NOT over the DlvInstantiateV1 envelope canonical form.
+/// An earlier implementation signed over the envelope, which the
+/// chunks-#7 verifier rejected on every accept-or-sign path; that
+/// bug was caught only when the first end-to-end real-hardware
+/// SoFi trade test ran.
+///
+/// Three regressions this guard catches:
 ///   * Empty-pk handling removed → frontend gets a hard error
 ///     "creator_public_key is required" and the UI breaks.
 ///   * Empty-sig handling removed → same.
-///   * Self-sign domain tag changed → all previously self-signed
-///     vaults fail re-verification.
+///   * Signing message changed away from `draft.parameters_hash` →
+///     finalize_vault would reject all newly-signed vaults.
 #[test]
 fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
     let src = read(sdk_path("src/handlers/dlv_routes.rs"));
@@ -969,9 +977,9 @@ fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
          signing_authority for the wallet pk"
     );
     assert!(
-        src.contains("if req.signature.is_empty() {"),
-        "regression: dlv.create no longer checks for empty signature \
-         (Track C.4 accept-or-sign surface broken)"
+        src.contains("needs_wallet_sign = req.signature.is_empty()"),
+        "regression: dlv.create no longer flags empty signature for wallet-side \
+         signing (Track C.4 accept-or-sign surface broken)"
     );
     assert!(
         src.contains("crate::sdk::signing_authority::current_secret_key()"),
@@ -979,9 +987,9 @@ fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
          signing_authority for the wallet sk"
     );
     assert!(
-        src.contains("\"DSM/dlv-create-self-sign\""),
-        "regression: dlv.create self-sign domain tag changed — \
-         previously-self-signed vaults will fail re-verification"
+        src.contains("&draft.parameters_hash"),
+        "regression: dlv.create no longer signs over draft.parameters_hash — \
+         finalize_vault's vault.verify() would reject every newly-signed vault"
     );
 }
 

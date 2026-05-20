@@ -298,53 +298,14 @@ impl AppRouterImpl {
         if req.locked_amount_u128.len() != 16 {
             return err("dlv.create: locked_amount_u128 must be 16 bytes (big-endian u128)".into());
         }
-        // Accept-or-sign: empty `signature` triggers wallet-side
-        // signing.  Must run AFTER `creator_public_key` is finalised
-        // so the signature covers the same canonical bytes the Rust
-        // verifier will recompute.  The signing pre-image is a
-        // domain-separated BLAKE3 over the encoded
-        // `DlvInstantiateV1` bytes (with `signature` zero) +
-        // `creator_public_key`, mirroring the chunk #6
-        // `route_commit_sdk::canonicalise_for_commitment` pattern.
-        if req.signature.is_empty() {
-            let mut canonical_for_sign = req.clone();
-            canonical_for_sign.signature = Vec::new();
-            let canonical_bytes = canonical_for_sign.encode_to_vec();
-            let signing_input: Vec<u8> = {
-                let mut buf =
-                    Vec::with_capacity(canonical_bytes.len() + req.creator_public_key.len());
-                buf.extend_from_slice(&canonical_bytes);
-                buf.extend_from_slice(&req.creator_public_key);
-                buf
-            };
-            let canonical_digest: [u8; 32] =
-                dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-create-self-sign", &signing_input);
-            let sk = match crate::sdk::signing_authority::current_secret_key() {
-                Ok(s) if !s.is_empty() => s,
-                Ok(_) => {
-                    return err("dlv.create: empty signature requested wallet signing \
-                         but the wallet signing sk is empty"
-                        .into());
-                }
-                Err(e) => {
-                    return err(format!(
-                        "dlv.create: empty signature requested wallet signing \
-                         but get_current_secret_key failed: {e}"
-                    ));
-                }
-            };
-            let sig = match dsm::crypto::sphincs::sign(
-                dsm::crypto::sphincs::SphincsVariant::SPX256f,
-                &sk,
-                canonical_digest.as_ref(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return err(format!("dlv.create: SPHINCS+ sign failed: {e}"));
-                }
-            };
-            req.signature = sig;
-        }
+        // Accept-or-sign: the actual SPHINCS+ signature must cover the
+        // LimboVault's `parameters_hash` (the same value `vault.verify()`
+        // re-derives in `finalize_vault`). We don't know that hash until
+        // `prepare_vault` runs, so the empty-signature wallet-sign
+        // happens BELOW after the draft is built. Don't pre-compute a
+        // wrong-domain signature here — it would mismatch the
+        // canonical params digest and `finalize_vault` would reject.
+        let needs_wallet_sign = req.signature.is_empty();
 
         // Decode FulfillmentMechanism from the canonical proto bytes.
         let fm_proto = match generated::FulfillmentMechanism::decode(&*spec.fulfillment_bytes) {
@@ -376,10 +337,24 @@ impl AppRouterImpl {
         } else {
             Some(spec.intended_recipient.clone())
         };
-        // Encryption target: intended recipient's Kyber pk, or creator's own pk.
-        let encryption_pk = intended_recipient_opt
-            .clone()
-            .unwrap_or_else(|| req.creator_public_key.clone());
+        // Encryption target: intended recipient's Kyber pk if supplied,
+        // otherwise the WALLET's Kyber pk (NOT creator_public_key, which
+        // is the SPHINCS+ key and the wrong shape for kyber_encapsulate).
+        // The wallet's Kyber keypair was generated at genesis and lives
+        // in the keystore under `{device_id}_device_kyber_pk` — the same
+        // accessor `posted_dlv_routes` uses for posted-DLV recipients.
+        let encryption_pk = match intended_recipient_opt.clone() {
+            Some(pk) => pk,
+            None => match self.wallet.get_kyber_public_key() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: empty intended_recipient defaults to self-encryption \
+                         but wallet kyber pk is unavailable: {e}"
+                    ));
+                }
+            },
+        };
 
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         let draft = match dlv_manager.prepare_vault(
@@ -398,6 +373,46 @@ impl AppRouterImpl {
         // Remember the vault_id bytes for the response + finalize step.  The
         // draft is consumed by finalize_vault below so we snapshot here.
         let vault_id: [u8; 32] = draft.id;
+
+        // Accept-or-sign (Track C.4) — when the trader-supplied signature
+        // was empty, sign the draft's `parameters_hash` with the wallet's
+        // SPHINCS+ secret key.  `parameters_hash` is the same value
+        // `vault.verify()` re-derives inside `finalize_vault` (see
+        // limbo_vault.rs:1217-1226), so this is the only signature
+        // shape that round-trips.
+        if needs_wallet_sign {
+            if draft.parameters_hash.len() != 32 {
+                return err(format!(
+                    "dlv.create: draft.parameters_hash unexpected length {} (expected 32)",
+                    draft.parameters_hash.len()
+                ));
+            }
+            let sk = match crate::sdk::signing_authority::current_secret_key() {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => {
+                    return err("dlv.create: empty signature requested wallet signing \
+                         but the wallet signing sk is empty"
+                        .into());
+                }
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: empty signature requested wallet signing \
+                         but get_current_secret_key failed: {e}"
+                    ));
+                }
+            };
+            let sig = match dsm::crypto::sphincs::sign(
+                dsm::crypto::sphincs::SphincsVariant::SPX256f,
+                &sk,
+                &draft.parameters_hash,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return err(format!("dlv.create: SPHINCS+ sign failed: {e}"));
+                }
+            };
+            req.signature = sig;
+        }
 
         // Locked amount + token (both optional — empty token_id = content-only vault).
         let token_id_str_opt: Option<String> = if req.token_id.is_empty() {
