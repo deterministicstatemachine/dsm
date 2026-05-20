@@ -274,7 +274,7 @@ fn kat_sphincs() -> Vec<CryptoKatResult> {
 
 fn kat_kyber() -> Vec<CryptoKatResult> {
     use dsm::crypto::kyber::{
-        generate_deterministic_kyber_keypair, generate_kyber_keypair, kyber_decapsulate,
+        generate_kyber_keypair, generate_kyber_keypair_from_entropy, kyber_decapsulate,
         kyber_encapsulate,
     };
 
@@ -348,8 +348,8 @@ fn kat_kyber() -> Vec<CryptoKatResult> {
     {
         let entropy = b"deterministic_kyber_test_entropy_32bytes!!";
         let ctx = "kat-test";
-        let kp1 = generate_deterministic_kyber_keypair(entropy, ctx);
-        let kp2 = generate_deterministic_kyber_keypair(entropy, ctx);
+        let kp1 = generate_kyber_keypair_from_entropy(entropy, ctx);
+        let kp2 = generate_kyber_keypair_from_entropy(entropy, ctx);
         let pass = match (&kp1, &kp2) {
             (Ok((pk1, sk1)), Ok((pk2, sk2))) => pk1 == pk2 && sk1 == sk2,
             _ => false,
