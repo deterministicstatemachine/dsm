@@ -696,6 +696,41 @@ impl CoreSDK {
         self.state_machine.lock().device_head().map(|ds| ds.root())
     }
 
+    /// Commit a vault state leaf into the Per-Device SMT (SoFi spec
+    /// §4.1.2 / §8.4 step 2).
+    ///
+    /// Mirrors `execute_on_relationship`'s prepare/write/commit
+    /// pattern:
+    ///   1. PREPARE — clone the head, write the leaf, capture root +
+    ///      siblings (pure; no head mutation).
+    ///   2. WRITE   — persist the new head into `bcr_device_heads`.
+    ///      If this fails, the in-memory head is unchanged.
+    ///   3. COMMIT  — install the new head on the StateMachine.
+    ///
+    /// Returns `(new_root, siblings)` ready for the caller to embed in
+    /// a `VaultStateInclusionProofV1`.  The lock is held across all
+    /// three steps so the prepare/write/commit sequence is atomic
+    /// with respect to other writers.
+    pub fn install_vault_state_leaf(
+        &self,
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserves_digest: &[u8; 32],
+    ) -> Result<([u8; 32], Vec<[u8; 32]>), DsmError> {
+        use crate::storage::client_db::update_bcr_device_head;
+
+        let mut sm = self.state_machine.lock();
+        let outcome = sm.prepare_vault_state_leaf(vault_id, sequence, reserves_digest)?;
+        update_bcr_device_head(&outcome.new_device_state).map_err(|e| {
+            DsmError::storage(
+                format!("install_vault_state_leaf: device-head write failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        sm.commit_vault_state_leaf(&outcome);
+        Ok((outcome.new_root, outcome.siblings))
+    }
+
     pub fn register_token_manager(
         &self,
         _manager: Box<dyn TokenManagerTrait>,

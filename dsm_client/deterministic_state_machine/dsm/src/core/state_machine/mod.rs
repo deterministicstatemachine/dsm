@@ -216,6 +216,57 @@ impl StateMachine {
         self.legacy_state = None;
     }
 
+    /// Prepare a vault state SMT leaf update without committing it to
+    /// the device head.  Mirrors `prepare_advance_relationship` —
+    /// returns the candidate new device state + root + siblings; caller
+    /// persists, then installs via `commit_vault_state_leaf`.
+    ///
+    /// SoFi spec §4.1.2 wiring: every DlvCreate / DlvUnlock that
+    /// advances a vault's reserves writes a leaf at
+    /// `compute_vault_smt_key(vault_id)` carrying
+    /// `compute_vault_smt_value(sequence, reserves_digest)`.  See
+    /// [`crate::dlv::vault_smt_leaf`].
+    pub fn prepare_vault_state_leaf(
+        &self,
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserves_digest: &[u8; 32],
+    ) -> Result<crate::types::device_state::VaultLeafOutcome, DsmError> {
+        let head = self.device_state.as_ref().ok_or_else(|| {
+            DsmError::state_machine(
+                "prepare_vault_state_leaf: device head not initialised (genesis required)",
+            )
+        })?;
+        head.with_vault_state_leaf(vault_id, sequence, reserves_digest)
+    }
+
+    /// Install a previously prepared vault-state-leaf outcome as the
+    /// new device head.  Pairs with `prepare_vault_state_leaf`; the
+    /// SDK calls dual-write persistence between the two so a write
+    /// failure leaves the head unchanged (observable as never-happened).
+    pub fn commit_vault_state_leaf(
+        &mut self,
+        outcome: &crate::types::device_state::VaultLeafOutcome,
+    ) {
+        self.device_state = Some(outcome.new_device_state.clone());
+        self.legacy_state = None;
+    }
+
+    /// Convenience wrapper: prepare + commit a vault state leaf update
+    /// with no persistence step in between.  Callers that need
+    /// fail-closed persistence should use the prepare/commit primitives
+    /// directly so they can persist between the two phases.
+    pub fn install_vault_state_leaf(
+        &mut self,
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserves_digest: &[u8; 32],
+    ) -> Result<crate::types::device_state::VaultLeafOutcome, DsmError> {
+        let outcome = self.prepare_vault_state_leaf(vault_id, sequence, reserves_digest)?;
+        self.commit_vault_state_leaf(&outcome);
+        Ok(outcome)
+    }
+
     /// Advance a specific relationship chain on the device.
     ///
     /// Convenience wrapper that runs `prepare_advance_relationship` followed
