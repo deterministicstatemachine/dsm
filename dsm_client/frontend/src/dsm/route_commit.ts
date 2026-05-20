@@ -13,7 +13,7 @@
 //     computes X via the SAME canonicalisation the SDK uses for
 //     SPHINCS+ verification.  Trader gets X back as Base32 Crockford.
 //   * Trader calls `publishExternalCommitment(rcBytes)` to write the
-//     anchor at `defi/extcommit/{X_b32}`.
+//     anchor at `sofi/extcommit/{X_b32}`.
 //   * Vault owners call `isExternalCommitmentVisible(xBytes)` to
 //     check the anchor before invoking `unlockVaultRouted`.
 //   * Vault owners call `unlockVaultRouted(vaultId, deviceId,

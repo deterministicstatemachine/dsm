@@ -151,7 +151,7 @@ impl AppRouterImpl {
 
     /// `dlv.getVaultStateAnchor` (query) — fetch the latest signed
     /// `VaultStateAnchorV1` proto blob published at
-    /// `defi/vault-state/{vault_id_b32}/latest`.  Vault internal
+    /// `sofi/vault-state/{vault_id_b32}/latest`.  Vault internal
     /// state is authoritative; this route serves the
     /// off-device-trader discovery path only.  Returns the Base32
     /// Crockford encoding of the proto bytes in
@@ -186,7 +186,7 @@ impl AppRouterImpl {
                 vault_id_bytes.len()
             ));
         }
-        let key = format!("defi/vault-state/{}/latest", vault_id_b32);
+        let key = format!("sofi/vault-state/{}/latest", vault_id_b32);
         let value = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key).await
         {
             Ok(proto_bytes) => crate::util::text_id::encode_base32_crockford(&proto_bytes),
@@ -1372,12 +1372,12 @@ impl AppRouterImpl {
 
 /// Publish a `VaultStateAnchorV1` proto blob to storage at the
 /// canonical Tier 2 Foundation key
-/// `defi/vault-state/{vault_id_b32}/latest`.  Best-effort —
+/// `sofi/vault-state/{vault_id_b32}/latest`.  Best-effort —
 /// vault internal state is authoritative; this storage write is
 /// advertisement-and-discovery only.
 async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> Result<(), String> {
     let key = format!(
-        "defi/vault-state/{}/latest",
+        "sofi/vault-state/{}/latest",
         crate::util::text_id::encode_base32_crockford(vault_id),
     );
     crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(&key, proto_bytes)

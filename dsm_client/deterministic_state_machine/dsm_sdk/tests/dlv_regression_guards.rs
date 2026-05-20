@@ -308,7 +308,7 @@ fn routing_advertisement_keys_canonicalise_token_pair() {
         "regression: canonical_token_pair must sort lex-lower-first"
     );
     assert!(
-        src.contains("pub(crate) const ROUTING_VAULT_AD_ROOT: &str = \"defi/vault/\";"),
+        src.contains("pub(crate) const ROUTING_VAULT_AD_ROOT: &str = \"sofi/vault/\";"),
         "regression: ROUTING_VAULT_AD_ROOT prefix changed — this breaks every \
          previously-published routing advertisement"
     );
@@ -402,7 +402,7 @@ fn external_commitment_uses_stable_domain_tag() {
          previously-published external commitment X"
     );
     assert!(
-        src.contains("pub(crate) const EXT_COMMIT_ROOT: &str = \"defi/extcommit/\";"),
+        src.contains("pub(crate) const EXT_COMMIT_ROOT: &str = \"sofi/extcommit/\";"),
         "regression: EXT_COMMIT_ROOT prefix changed — every previously-\
          published anchor would become unfindable"
     );

@@ -10,7 +10,7 @@
 //!     defi/vault-pending/{vault_id_b32}/{new_sequence_be_pad16}/{x_b32}
 //!
 //! so that the *next* trader can list pending advances on a vault in
-//! O(pending) — instead of scanning the global `defi/extcommit/*`
+//! O(pending) — instead of scanning the global `sofi/extcommit/*`
 //! prefix — and compose them into the canonical current state before
 //! quoting.
 //!

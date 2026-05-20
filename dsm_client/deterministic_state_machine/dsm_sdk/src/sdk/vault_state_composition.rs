@@ -23,10 +23,10 @@
 //! `compose_vault_state` takes a vault id + owner-signed baseline anchor
 //! + the canonical (token_a, token_b, fee_bps) tuple. It:
 //!
-//! - Lists `defi/vault-pending/{vault_id_b32}/` (lex-ordered by `new_sequence`)
+//! - Lists `sofi/vault-pending/{vault_id_b32}/` (lex-ordered by `new_sequence`)
 //! - For each pointer: verifies the SPHINCS+ signature; fetches
-//!   `defi/extcommit/{x_b32}` to confirm the X anchor is published;
-//!   fetches `defi/extcommit-rc/{x_b32}` to obtain the signed RouteCommit;
+//!   `sofi/extcommit/{x_b32}` to confirm the X anchor is published;
+//!   fetches `sofi/extcommit-rc/{x_b32}` to obtain the signed RouteCommit;
 //!   locates the hop touching this vault, verifies the hop's bound
 //!   reserves digest matches the cursor, and re-simulates the AMM swap
 //!   to advance both the sequence AND the reserves
@@ -38,7 +38,7 @@
 //! ---------------
 //! The composer walks each pointer in sequence order and applies the
 //! AMM swap embedded in the corresponding signed RouteCommit (fetched
-//! from `defi/extcommit-rc/{X_b32}`).  Concretely, for each pointer:
+//! from `sofi/extcommit-rc/{X_b32}`).  Concretely, for each pointer:
 //!
 //! - Look up the hop in the RouteCommit whose `vault_id` matches.
 //! - Verify the hop's `vault_state_reserves_digest` equals the cursor's
@@ -459,7 +459,7 @@ mod tests {
         v
     }
 
-    /// Publish the minimal ExtCommit anchor at `defi/extcommit/{X_b32}`.
+    /// Publish the minimal ExtCommit anchor at `sofi/extcommit/{X_b32}`.
     async fn publish_extcommit(x: &[u8; 32], publisher_pk: &[u8]) {
         let anchor = generated::ExternalCommitmentV1 {
             version: 1,
@@ -474,7 +474,7 @@ mod tests {
     }
 
     /// Publish a `RouteCommitV1` with a single AMM hop touching
-    /// `vault_id` at `defi/extcommit-rc/{X_b32}`.  Returns the swap's
+    /// `vault_id` at `sofi/extcommit-rc/{X_b32}`.  Returns the swap's
     /// post-trade reserves so callers can assert on what the composer
     /// will derive.  The hop's `vault_state_reserves_digest` is bound
     /// to the supplied parent reserves so the composer's

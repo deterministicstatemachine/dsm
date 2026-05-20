@@ -756,8 +756,8 @@ mod tests {
             reserve_b_u128: u128_be_arr(rb).to_vec(),
             fee_bps,
             unlock_spec_digest: vec![0u8; 32],
-            unlock_spec_key: "defi/spec/test".into(),
-            vault_proto_key: format!("defi/vault-proto/test/{:x?}", &vault_id[..4]).into_bytes(),
+            unlock_spec_key: "sofi/spec/test".into(),
+            vault_proto_key: format!("sofi/vault-proto/test/{:x?}", &vault_id[..4]).into_bytes(),
             vault_proto_digest: digest.to_vec(),
             owner_public_key: vec![0xABu8; 64],
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
@@ -893,7 +893,7 @@ mod tests {
             reserve_b_u128: u128_be_arr(1_000_000),
             fee_bps: 30,
             unlock_spec_digest: [0u8; 32],
-            unlock_spec_key: "defi/spec/good".into(),
+            unlock_spec_key: "sofi/spec/good".into(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &good_proto,
         })
@@ -907,7 +907,7 @@ mod tests {
             reserve_b_u128: u128_be_arr(1_000_000),
             fee_bps: 5, // would otherwise win on fee
             unlock_spec_digest: [0u8; 32],
-            unlock_spec_key: "defi/spec/bad".into(),
+            unlock_spec_key: "sofi/spec/bad".into(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &bad_proto,
         })

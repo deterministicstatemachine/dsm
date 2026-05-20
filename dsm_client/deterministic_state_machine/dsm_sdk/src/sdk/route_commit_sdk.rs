@@ -9,7 +9,7 @@
 //!   * the deterministic external commitment `X = BLAKE3("DSM/ext\0" ||
 //!     canonical(RouteCommit{signature=[]}))` referenced by every
 //!     vault on the route;
-//!   * a storage-node anchor at `defi/extcommit/{X_b32}` carrying a
+//!   * a storage-node anchor at `sofi/extcommit/{X_b32}` carrying a
 //!     minimal `ExternalCommitmentV1` proof-of-existence record.
 //!
 //! When the anchor is published, every vault on the route may
@@ -34,9 +34,9 @@ use crate::util::text_id::encode_base32_crockford;
 pub(crate) const EXT_COMMIT_DOMAIN: &str = "DSM/ext";
 
 /// Storage-node prefix for external-commitment anchors.  Each anchor
-/// is stored at `defi/extcommit/{X_b32}` — the suffix doubles as the
+/// is stored at `sofi/extcommit/{X_b32}` — the suffix doubles as the
 /// existence-proof identifier.
-pub(crate) const EXT_COMMIT_ROOT: &str = "defi/extcommit/";
+pub(crate) const EXT_COMMIT_ROOT: &str = "sofi/extcommit/";
 
 /// Anchor key for a given `X`.
 pub(crate) fn external_commitment_key(x: &[u8; 32]) -> String {
@@ -45,10 +45,10 @@ pub(crate) fn external_commitment_key(x: &[u8; 32]) -> String {
 
 /// Storage-node prefix for vault-keyed pending pointers (Phase 6).
 /// Each pointer is stored at
-///   `defi/vault-pending/{vault_id_b32}/{new_sequence_be_pad16}/{x_b32}`
+///   `sofi/vault-pending/{vault_id_b32}/{new_sequence_be_pad16}/{x_b32}`
 /// so that the next trader can list pending advances on a specific
 /// vault in O(pending) rather than scanning the global extcommit prefix.
-pub(crate) const VAULT_PENDING_ROOT: &str = "defi/vault-pending/";
+pub(crate) const VAULT_PENDING_ROOT: &str = "sofi/vault-pending/";
 
 /// Build the storage key for a single pending pointer.  The
 /// new_sequence is encoded as zero-padded big-endian decimal (16 chars)
@@ -82,8 +82,8 @@ pub(crate) fn vault_pending_prefix(vault_id: &[u8; 32]) -> String {
 /// `ExternalCommitmentV1` so the composer can fetch the full RC, find
 /// the hop touching a given vault, and re-simulate the AMM swap to fold
 /// reserves forward — without inflating the on-storage record at
-/// `defi/extcommit/{X_b32}` (which other systems may already parse).
-pub(crate) const EXT_COMMIT_RC_ROOT: &str = "defi/extcommit-rc/";
+/// `sofi/extcommit/{X_b32}` (which other systems may already parse).
+pub(crate) const EXT_COMMIT_RC_ROOT: &str = "sofi/extcommit-rc/";
 
 /// Storage key for the signed RouteCommit bytes paired with `X`.
 pub(crate) fn external_commitment_rc_key(x: &[u8; 32]) -> String {
@@ -894,7 +894,7 @@ pub(crate) enum RouteCommitVerifyError {
 ///   4. Compute X from the canonical (signature-zeroed) RouteCommit
 ///      bytes.
 ///   5. Confirm the `ExternalCommitmentV1` anchor for X is visible at
-///      `defi/extcommit/{X_b32}` on storage nodes — else the trader
+///      `sofi/extcommit/{X_b32}` on storage nodes — else the trader
 ///      has not yet published the atomic-visibility trigger.
 ///
 /// On success, returns the bound hop so the handler has the
@@ -1941,7 +1941,7 @@ mod tests {
                 reserve_b_u128: initial_reserve_b.to_be_bytes(),
                 fee_bps,
                 unlock_spec_digest: [0u8; 32],
-                unlock_spec_key: "defi/spec/demo".to_string(),
+                unlock_spec_key: "sofi/spec/demo".to_string(),
                 owner_public_key: &bob.public_key,
                 vault_proto_bytes: &vault_proto_bytes,
             },
@@ -2130,7 +2130,7 @@ mod tests {
                 reserve_b_u128: outcome.new_reserve_b.to_be_bytes(),
                 fee_bps,
                 unlock_spec_digest: [0u8; 32],
-                unlock_spec_key: "defi/spec/demo".to_string(),
+                unlock_spec_key: "sofi/spec/demo".to_string(),
                 owner_public_key: &bob.public_key,
                 vault_proto_bytes: &vault_proto_bytes,
             },

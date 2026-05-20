@@ -126,7 +126,7 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
         reserve_b_u128: initial_reserve_b.to_be_bytes(),
         fee_bps,
         unlock_spec_digest: [0u8; 32],
-        unlock_spec_key: "defi/spec/demo".to_string(),
+        unlock_spec_key: "sofi/spec/demo".to_string(),
         owner_public_key: &bob.public_key,
         vault_proto_bytes: &vault_proto_bytes,
     })
@@ -338,7 +338,7 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
         reserve_b_u128: trade_1_post_b.to_be_bytes(),
         fee_bps,
         unlock_spec_digest: [0u8; 32],
-        unlock_spec_key: "defi/spec/demo".to_string(),
+        unlock_spec_key: "sofi/spec/demo".to_string(),
         owner_public_key: &bob.public_key,
         vault_proto_bytes: &vault_proto_bytes,
     })

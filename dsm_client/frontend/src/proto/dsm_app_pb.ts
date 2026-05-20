@@ -7757,7 +7757,7 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
 /**
  * Per-vault signed state anchor.  Owner publishes one at vault
  * creation (sequence=0) and one after every accepted routed unlock
- * (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+ * (sequence=N+1).  Stored at `sofi/vault-state/{vault_id_b32}/latest`
  * for off-device traders to read at quote time.  The chunks #7 gate
  * does NOT read this — it verifies against the local DLVManager.
  *
@@ -7893,7 +7893,7 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
 
   /**
    * Tier 2 Foundation state-anchor binding.  Trader stamps these
-   * from the vault's `defi/vault-state/{vault_id}/latest` at quote
+   * from the vault's `sofi/vault-state/{vault_id}/latest` at quote
    * time.  Gate verifies against local DLVManager state (NOT storage).
    * For vaults with `anchor_enforcement = REQUIRED` these fields are
    * mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
@@ -8139,7 +8139,7 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
 /**
  * Storage-node anchor proving an external commitment X has been
  * published.  Each unlock-time verifier fetches this record at key
- * `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
+ * `sofi/extcommit/{x_b32}`; existence implies "all vaults bound by X
  * may now unlock" (atomic visibility, SoFi spec §3.2).
  *
  * The record is INTENTIONALLY minimal — storage nodes are dumb
@@ -8213,7 +8213,7 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
 /**
  * Storage-node-mirrored advertisement for a SoFi routing vault.
  *
- * Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
+ * Keyed under `sofi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
  * PUBLIC discovery by ordered token pair, no recipient scoping.  The
  * router enumerates all vaults matching `(tokenA, tokenB)` (or its
  * reverse, in which case reserves swap roles) and feeds the result
@@ -8222,7 +8222,7 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
  *
  * Storage nodes are dumb mirrors.  Authenticity for routing purposes
  * is rooted in `vault_proto_digest` binding the ad to a full vault
- * proto under `defi/vault-proto/{..}/{..}` — exactly the same pattern
+ * proto under `sofi/vault-proto/{..}/{..}` — exactly the same pattern
  * as DbtcVaultAdvertisementV1 and PostedDlvAdvertisementV1, mounted
  * in a different keyspace.
  *

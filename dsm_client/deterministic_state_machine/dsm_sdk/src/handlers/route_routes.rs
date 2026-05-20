@@ -11,7 +11,7 @@
 //!     Takes raw `RouteCommitV1` bytes, returns Base32-Crockford X.
 //!     No I/O.
 //!   * `route.publishExternalCommitment` (invoke) — writes the
-//!     storage-node anchor at `defi/extcommit/{X_b32}`.
+//!     storage-node anchor at `sofi/extcommit/{X_b32}`.
 //!   * `route.isExternalCommitmentVisible` (query) — fetches the
 //!     anchor; returns `"true"` / `"false"` in
 //!     `AppStateResponse.value`.
@@ -101,7 +101,7 @@ impl AppRouterImpl {
     }
 
     /// `route.isExternalCommitmentVisible` — fetches the anchor at
-    /// `defi/extcommit/{X_b32}` on storage nodes.  Returns
+    /// `sofi/extcommit/{X_b32}` on storage nodes.  Returns
     /// `AppStateResponse.value = "true"` if the anchor exists with a
     /// matching `x` field, `"false"` otherwise.
     ///
