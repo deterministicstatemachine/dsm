@@ -1130,6 +1130,53 @@ message VaultPendingPointerV1 {
   bytes  publisher_signature   = 7 [(dsm_max_len)=65535];
 }
 
+// SoFi spec §4.1.2 / §8.4 step 2: vault state committed in Per-Device
+// SMT.  Published by the vault owner at
+//
+//     sofi/vault-state-inclusion/{vault_id_b32}/seq-{sequence_be_pad16}
+//
+// after each DlvCreate / DlvUnlock that advances the vault's state,
+// with a mirror at
+//
+//     sofi/vault-state-inclusion/{vault_id_b32}/latest
+//
+// for fast lookup at quote time.  Off-device traders verify the
+// inclusion proof BEFORE binding the route commit; the chunks-#7
+// unlock gate re-verifies before emitting Operation::DlvUnlock.
+//
+// Strictly stronger than VaultStateAnchorV1: the anchor only signs
+// (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
+// forge a signed anchor.  The inclusion proof additionally commits the
+// device's PD-SMT root + a 256-sibling Merkle path that
+// dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
+// against the device's actual SMT — forgery requires also fabricating
+// SMT consistency, which a stateless attacker cannot.
+message VaultStateInclusionProofV1 {
+  // The vault whose state is being committed.
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  // Monotonic state sequence (0 at creation, +1 per accepted unlock).
+  uint64 sequence              = 2;
+  // BLAKE3 reserves-digest per dsm::dlv::vault_state_anchor::compute_reserves_digest.
+  bytes  reserves_digest       = 3 [(dsm_fixed_len)=32];
+  // The owner's PD-SMT root AT the moment this leaf was written.
+  // Inclusion proof verifies against this root.
+  bytes  smt_root              = 4 [(dsm_fixed_len)=32];
+  // The 256 sibling hashes in leaf-to-root order produced by
+  // SparseMerkleTree::get_inclusion_proof for the vault-state SMT
+  // leaf key (DSM/vault-smt-key\0 || vault_id).  The verifier
+  // recomputes the proof's `key` from vault_id and `value` from
+  // (sequence, reserves_digest); the wire format only carries the
+  // siblings to keep records compact.
+  repeated bytes smt_siblings  = 5;
+  // SPHINCS+ public key of the vault owner.
+  bytes  owner_public_key      = 6 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
+  // vault_id || sequence_be || reserves_digest || smt_root).  Binds
+  // the SMT root into the signature so a compromised K_DBRW cannot
+  // forge a proof against a different root.
+  bytes  owner_signature       = 7 [(dsm_max_len)=65535];
+}
+
 // Storage-node-mirrored advertisement for a SoFi routing vault.
 //
 // Keyed under `sofi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —

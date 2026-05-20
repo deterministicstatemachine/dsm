@@ -104,6 +104,20 @@ pub(crate) enum CompositionError {
     /// Baseline anchor's SPHINCS+ signature failed verification.  Fail
     /// closed — without a valid baseline the entire composition is moot.
     InvalidBaselineAnchor,
+    /// SoFi spec §4.1.2 / §8.4 step 2: a vault state inclusion proof
+    /// was published for this vault BUT the proof's signature, SMT
+    /// inclusion path, OR (vault_id, sequence, reserves_digest) tuple
+    /// disagrees with the baseline anchor.  Fail closed — either the
+    /// owner equivocated or someone tampered with one of the two
+    /// records; both possibilities make the vault unsafe to quote.
+    InvalidInclusionProof,
+    /// SoFi spec §4.1.2 strict mode: NO inclusion proof was published
+    /// for this vault.  The vault may pre-date the Phase-7 SMT flow
+    /// (legacy advertisement) OR the owner has not yet republished
+    /// after the upgrade.  Either way, strict-mode composition refuses
+    /// to fold it — the trader cannot prove the vault state is in the
+    /// owner's PD-SMT, which is what the spec demands.
+    MissingInclusionProof,
     /// Storage listing the pending prefix failed.
     StorageListFailed(String),
     /// Decoding a pointer proto failed in a non-recoverable way.  The
@@ -117,6 +131,15 @@ impl std::fmt::Display for CompositionError {
         match self {
             CompositionError::InvalidBaselineAnchor => {
                 write!(f, "baseline anchor signature invalid")
+            }
+            CompositionError::InvalidInclusionProof => {
+                write!(f, "vault state inclusion proof failed verification")
+            }
+            CompositionError::MissingInclusionProof => {
+                write!(
+                    f,
+                    "vault has no published VaultStateInclusionProofV1 — strict mode requires one (SoFi §4.1.2)"
+                )
             }
             CompositionError::StorageListFailed(msg) => {
                 write!(f, "storage list failed: {msg}")
@@ -171,6 +194,40 @@ pub(crate) async fn compose_vault_state(
         // baseline cannot be trusted for composition.
         return Err(CompositionError::InvalidBaselineAnchor);
     }
+
+    // SoFi spec §4.1.2 / §8.4 step 2 — STRICT MODE.  Verify the
+    // owner's PD-SMT inclusion proof for the baseline vault state.
+    // The anchor signature above is *necessary* but not *sufficient*:
+    // an attacker who recovered K_DBRW could forge a signed anchor.
+    // The inclusion proof additionally commits the SMT root + a
+    // 256-sibling Merkle path that
+    // dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
+    // against the device's actual SMT — forgery requires also
+    // fabricating SMT consistency, which a stateless attacker cannot.
+    //
+    // Strict mode: a vault with no published inclusion proof is
+    // dropped from the candidate set.  This is the documented Phase-7
+    // migration behaviour — legacy ads pre-dating this code do not
+    // pass.
+    let inclusion = crate::sdk::vault_smt_inclusion_codec::fetch_latest_inclusion_proof(vault_id)
+        .await
+        .map_err(|e| CompositionError::StorageListFailed(format!("inclusion fetch: {e}")))?;
+    let inclusion = match inclusion {
+        Some(p) => p,
+        None => return Err(CompositionError::MissingInclusionProof),
+    };
+    // Cross-bind the inclusion proof to the baseline: same
+    // (vault_id, sequence, reserves_digest) tuple.  If they disagree,
+    // the owner equivocated and the vault is unsafe.
+    if inclusion.vault_id != baseline.vault_id
+        || inclusion.sequence != baseline.sequence
+        || inclusion.reserves_digest != baseline.reserves_digest
+    {
+        return Err(CompositionError::InvalidInclusionProof);
+    }
+    // Verify the inclusion proof end-to-end (signature + SMT path).
+    dsm::dlv::vault_smt_leaf::verify_vault_state_inclusion_proof(&inclusion)
+        .map_err(|_| CompositionError::InvalidInclusionProof)?;
 
     let prefix = vault_pending_prefix(vault_id);
     let mut cursor: Option<String> = None;
@@ -420,8 +477,11 @@ mod tests {
     use dsm::dlv::vault_pending_pointer::sign_vault_pending_pointer;
     use dsm::dlv::vault_state_anchor::sign_vault_state_anchor;
 
+    /// Sign-only baseline anchor.  Used by negative tests that want
+    /// to deliberately skip the inclusion-proof publish (so strict
+    /// mode rejects the vault).
     #[allow(clippy::too_many_arguments)]
-    fn make_baseline(
+    fn make_baseline_anchor_only(
         vault_id: &[u8; 32],
         seq: u64,
         token_a: &[u8],
@@ -434,6 +494,88 @@ mod tests {
     ) -> SignedVaultStateAnchor {
         let digest = compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
         sign_vault_state_anchor(vault_id, seq, &digest, owner_pk, owner_sk).expect("sign anchor")
+    }
+
+    /// Phase-7 strict-mode-compatible baseline: sign the anchor AND
+    /// publish a matching `VaultStateInclusionProofV1` so
+    /// `compose_vault_state` sees a verifiable PD-SMT witness.  Most
+    /// composition tests use this — it's the production-equivalent
+    /// path.
+    #[allow(clippy::too_many_arguments)]
+    async fn make_baseline(
+        vault_id: &[u8; 32],
+        seq: u64,
+        token_a: &[u8],
+        token_b: &[u8],
+        reserve_a: u128,
+        reserve_b: u128,
+        fee_bps: u32,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) -> SignedVaultStateAnchor {
+        let anchor = make_baseline_anchor_only(
+            vault_id, seq, token_a, token_b, reserve_a, reserve_b, fee_bps, owner_pk, owner_sk,
+        );
+        publish_baseline_inclusion_proof(
+            vault_id, seq, token_a, token_b, reserve_a, reserve_b, fee_bps, owner_pk, owner_sk,
+        )
+        .await;
+        anchor
+    }
+
+    /// Phase 7 test helper: publish a real
+    /// `VaultStateInclusionProofV1` for the baseline `(vault_id,
+    /// sequence, reserves_digest)` so strict-mode composition accepts
+    /// it.  Mirrors what `publish_vault_state_inclusion_proof` does on
+    /// the live `dlv.create` path, but driven from test code by
+    /// building a fresh SMT and signing with the supplied owner key.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_baseline_inclusion_proof(
+        vault_id: &[u8; 32],
+        sequence: u64,
+        token_a: &[u8],
+        token_b: &[u8],
+        reserve_a: u128,
+        reserve_b: u128,
+        fee_bps: u32,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) {
+        use dsm::dlv::vault_smt_leaf::{
+            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
+        };
+        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let reserves_digest =
+            compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
+        let mut tree = SparseMerkleTree::new(64);
+        let leaf_key = compute_vault_smt_key(vault_id);
+        let leaf_value = compute_vault_smt_value(sequence, &reserves_digest);
+        tree.update_leaf(&leaf_key, &leaf_value)
+            .expect("update_leaf");
+        let smt_root = *tree.root();
+        let proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
+
+        let signed = sign_vault_state_inclusion_proof(
+            vault_id,
+            sequence,
+            &reserves_digest,
+            &smt_root,
+            proof.siblings,
+            owner_pk,
+            owner_sk,
+        )
+        .expect("sign inclusion proof");
+
+        let proto_bytes =
+            crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
+        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(
+            vault_id,
+            sequence,
+            &proto_bytes,
+        )
+        .await
+        .expect("publish inclusion proof");
     }
 
     fn marker_digest(x: &[u8; 32], hop_index: u32) -> [u8; 32] {
@@ -663,7 +805,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         let composed = compose_vault_state(
             &vault_id,
             &baseline,
@@ -696,7 +839,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         let x = x_seed(0x21);
         let (expected_a, expected_b) = publish_trade(
             &vault_id,
@@ -754,7 +898,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         // Three sequential trades.  Each picks up where the previous
         // left off so the composer sees a coherent chain.
         let mut cur_a: u128 = 1_000_000;
@@ -821,7 +966,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         let x = x_seed(0x41);
         // Intentionally do NOT publish the X anchor (or the RC).
         publish_pointer(
@@ -870,7 +1016,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         let x = x_seed(0x61);
         publish_extcommit(&x, &trader.public_key).await;
         // Skip the RC publish.
@@ -916,7 +1063,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         // Publish seq=1 (chainable) and seq=3 (gap; parent=2 missing).
         // After folding, the cursor advances to seq=1 with reserves
         // reflecting that one trade and stops.
@@ -989,7 +1137,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         let x = x_seed(0x71);
         // Build the RC with WRONG parent reserves (777, 888 instead of
         // the real 1_000_000, 500_000).
@@ -1053,7 +1202,8 @@ mod tests {
             30,
             &alice.public_key,
             &alice.secret_key,
-        );
+        )
+        .await;
 
         // Bob trades.  His RouteCommit settles; X + RC + pointer are
         // published.  CRUCIALLY: Alice is offline — she does NOT publish
@@ -1115,7 +1265,8 @@ mod tests {
             30,
             &owner.public_key,
             &owner.secret_key,
-        );
+        )
+        .await;
         // Supply DIFFERENT reserves than the baseline was signed over.
         let err = compose_vault_state(&vault_id, &baseline, (777_777, 888_888), b"AAA", b"BBB", 30)
             .await

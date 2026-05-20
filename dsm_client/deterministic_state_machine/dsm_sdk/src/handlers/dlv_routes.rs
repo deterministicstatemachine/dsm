@@ -632,6 +632,26 @@ impl AppRouterImpl {
                                             );
                                         }
                                     }
+
+                                    // Phase 7 — SoFi spec §4.1.2: also
+                                    // commit the genesis vault state into
+                                    // the PD-SMT and publish a
+                                    // VaultStateInclusionProofV1.  The
+                                    // anchor above is the legacy fast
+                                    // path (works for composition without
+                                    // SMT verification); the inclusion
+                                    // proof is the spec-strict
+                                    // strengthening that closes the
+                                    // K_DBRW-forgery hole.
+                                    publish_vault_state_inclusion_proof(
+                                        self.core_sdk.as_ref(),
+                                        &vault_id,
+                                        0,
+                                        &reserves_digest,
+                                        &pk,
+                                        &sk,
+                                    )
+                                    .await;
                                 }
                                 _ => {
                                     log::warn!(
@@ -1353,6 +1373,24 @@ impl AppRouterImpl {
                                     );
                                 }
                             }
+
+                            // Phase 7 — SoFi spec §4.1.2: also commit
+                            // the post-trade vault state into the
+                            // PD-SMT and publish a
+                            // VaultStateInclusionProofV1.  This is the
+                            // spec-strict strengthening that closes
+                            // the K_DBRW-forgery hole on the unlock
+                            // path.  Same owner-key gate as the anchor
+                            // republish above.
+                            publish_vault_state_inclusion_proof(
+                                self.core_sdk.as_ref(),
+                                &vault_id,
+                                new_seq,
+                                &new_digest,
+                                &pk,
+                                &sk,
+                            )
+                            .await;
                         } else {
                             log::info!(
                                 "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: local wallet is not the vault owner — composition path will reflect this trade via VaultPendingPointerV1 instead",
@@ -1399,4 +1437,84 @@ async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> 
         .await
         .map(|_| ())
         .map_err(|e| format!("storage put failed: {e:?}"))
+}
+
+/// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2.
+///
+/// 1. Commit a vault-state leaf into the device's PD-SMT at the
+///    (sequence, reserves_digest) tuple — produces the canonical
+///    smt_root + 256-sibling inclusion path.
+/// 2. Sign the inclusion proof with the owner's SPHINCS+ secret key.
+/// 3. Publish to BOTH the seq-pinned key (historical traceability)
+///    AND the `latest` mirror (trader fast-path).
+///
+/// Caller has already confirmed `local_is_owner` (we are the vault
+/// owner).  Failure logs a warning and returns — the on-chain operation
+/// has already succeeded; the inclusion proof is an advertisement and
+/// can be republished later.
+async fn publish_vault_state_inclusion_proof(
+    core_sdk: &crate::sdk::core_sdk::CoreSDK,
+    vault_id: &[u8; 32],
+    sequence: u64,
+    reserves_digest: &[u8; 32],
+    owner_pk: &[u8],
+    owner_sk: &[u8],
+) {
+    // (1) Mutate the device's PD-SMT to commit the new vault state.
+    let (smt_root, siblings) =
+        match core_sdk.install_vault_state_leaf(vault_id, sequence, reserves_digest) {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::warn!(
+                    "[dlv] install_vault_state_leaf (seq={}) failed for {}: {e}",
+                    sequence,
+                    crate::util::text_id::encode_base32_crockford(vault_id),
+                );
+                return;
+            }
+        };
+
+    // (2) Sign over (vault_id, sequence, reserves_digest, smt_root).
+    let signed = match dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof(
+        vault_id,
+        sequence,
+        reserves_digest,
+        &smt_root,
+        siblings,
+        owner_pk,
+        owner_sk,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[dlv] sign_vault_state_inclusion_proof (seq={}) failed for {}: {e}",
+                sequence,
+                crate::util::text_id::encode_base32_crockford(vault_id),
+            );
+            return;
+        }
+    };
+
+    // (3) Encode + publish to storage.
+    let proto_bytes =
+        crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
+    if let Err(e) = crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(
+        vault_id,
+        sequence,
+        &proto_bytes,
+    )
+    .await
+    {
+        log::warn!(
+            "[dlv] inclusion proof publish (seq={}) failed for {}: {e}; vault is locally consistent but may not be quotable off-device until republish",
+            sequence,
+            crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+    } else {
+        log::info!(
+            "[dlv] inclusion proof published seq={} vault={}",
+            sequence,
+            crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+    }
 }
