@@ -54,7 +54,7 @@
 
 use crate::types::error::DsmError;
 use rand::rngs::OsRng;
-use rand::{RngCore, SeedableRng};
+use rand::{RngCore, SeedableRng, TryRngCore};
 use rand_chacha::ChaCha20Rng;
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info};
@@ -763,7 +763,12 @@ pub fn generate_keypair(v: SphincsVariant) -> Result<SphincsKeyPair, DsmError> {
     let mut rng = OsRng;
 
     // sk_seed | sk_prf | pub_seed | root
-    rng.fill_bytes(&mut sk[..3 * p.n]);
+    rng.try_fill_bytes(&mut sk[..3 * p.n]).map_err(|e| {
+        DsmError::crypto(
+            format!("OsRng entropy failure: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
     let (sk_seed, _sk_prf, pub_seed) = (&sk[..p.n], &sk[p.n..2 * p.n], &sk[2 * p.n..3 * p.n]);
 
     // Build top layer Merkle root (layer d-1), across 2^(h/d) leaves

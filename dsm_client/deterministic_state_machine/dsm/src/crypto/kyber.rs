@@ -20,14 +20,15 @@
 use crate::types::error::DsmError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Nonce,
+};
 use crate::crypto::blake3::dsm_domain_hasher;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
     B32, EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
 };
-use rand::rngs::OsRng;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use tracing::{debug, error, info, trace};
 use zeroize::ZeroizeOnDrop;
 
@@ -275,7 +276,7 @@ pub fn generate_kyber_keypair() -> Result<KyberKeyPair, DsmError> {
     })
 }
 
-/// Deterministic key generation: Blake3(context||entropy) → 32B seed → ChaCha20Rng(seed) → ml-kem
+/// Deterministic key generation: Blake3(context||entropy) -> 32B seed -> ml-kem generate_deterministic(d, z)
 pub fn generate_kyber_keypair_from_entropy(
     entropy: &[u8],
     context: &str,
@@ -295,8 +296,19 @@ pub fn generate_kyber_keypair_from_entropy(
     let mut seed = [0u8; 32];
     seed.copy_from_slice(digest.as_bytes());
 
-    let mut rng = ChaCha20Rng::from_seed(seed);
-    let (decapsulation_key, encapsulation_key) = MlKem768::generate(&mut rng);
+    let d: B32 = {
+        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        h.update(&seed);
+        h.update(&0u64.to_le_bytes());
+        (*h.finalize().as_bytes()).into()
+    };
+    let z: B32 = {
+        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        h.update(&seed);
+        h.update(&1u64.to_le_bytes());
+        (*h.finalize().as_bytes()).into()
+    };
+    let (decapsulation_key, encapsulation_key) = MlKem768::generate_deterministic(&d, &z);
 
     let pk_bytes = encapsulation_key.as_bytes().as_slice().to_vec();
     let sk_bytes = decapsulation_key.as_bytes().as_slice().to_vec();

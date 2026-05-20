@@ -48,7 +48,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use dsm::crypto::blake3::dsm_domain_hasher;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 
 use crate::generated as pb;
 use dsm::types::error::DsmError;
@@ -233,7 +233,12 @@ impl BleSecurityContext {
 
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[0..8].copy_from_slice(&seq.to_le_bytes());
-        OsRng.fill_bytes(&mut nonce_bytes[8..12]); // Add randomness for uniqueness
+        rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut nonce_bytes[8..12]).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
 
         let nonce = Nonce::from(nonce_bytes);
 
