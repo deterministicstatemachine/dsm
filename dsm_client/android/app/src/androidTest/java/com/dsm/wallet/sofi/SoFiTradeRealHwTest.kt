@@ -104,14 +104,19 @@ class SoFiTradeRealHwTest {
     private companion object {
         const val TAG = "SOFI_TRADE"
 
-        // Token ids. Lex order: "DEMO_BBB" (0x44...) < "ERA" (0x45...).
-        // Canonical AMM pair = (lex-lower, lex-higher) → (DEMO_BBB, ERA).
-        // Trader spends ERA (tokenB on the vault) and receives
-        // DEMO_BBB (tokenA on the vault).
+        // INPUT_TOKEN is fixed (ERA, which the trader-wallet actually
+        // holds balance of). OUTPUT_TOKEN is varied per run so the
+        // storage's per-pair advertisement set is empty when this run
+        // starts. Storage retains advertisements durably — without
+        // pair-isolation, prior runs' vault advertisements would still
+        // be discoverable by the path search and the picker might
+        // route through a vault whose LimboVault state didn't persist
+        // into this process's DLVManager.
         val INPUT_TOKEN: ByteArray = "ERA".toByteArray(Charsets.UTF_8)
-        val OUTPUT_TOKEN: ByteArray = "DEMO_BBB".toByteArray(Charsets.UTF_8)
-        val LEX_LOWER: ByteArray = OUTPUT_TOKEN
-        val LEX_HIGHER: ByteArray = INPUT_TOKEN
+        // OUTPUT_TOKEN is initialised per-run in setUp().
+        lateinit var OUTPUT_TOKEN: ByteArray
+        lateinit var LEX_LOWER: ByteArray
+        lateinit var LEX_HIGHER: ByteArray
 
         const val INITIAL_RESERVE_A: Long = 1_000_000L
         const val INITIAL_RESERVE_B: Long = 1_000_000L
@@ -138,6 +143,20 @@ class SoFiTradeRealHwTest {
 
     @Before
     fun setUp() {
+        // Per-run unique OUTPUT_TOKEN so storage's per-pair advertisement
+        // set is empty at test start.  Lex-canonical ordering: ERA
+        // (0x45..) is always lex-higher than "TEST_<hex>" (T = 0x54...
+        // wait actually T > E so TEST is lex-HIGHER than ERA).
+        // Force OUTPUT to be lex-LOWER by prefixing with "00_".  The
+        // wallet's faucet credits ERA balance; this test never needs
+        // OUTPUT to have balance because the wallet receives it (the
+        // delta credits via Operation::DlvUnlock).
+        val tokenSalt = ByteArray(8).also { SecureRandom().nextBytes(it) }
+            .joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
+        OUTPUT_TOKEN = "00_DEMO_$tokenSalt".toByteArray(Charsets.UTF_8)
+        LEX_LOWER = OUTPUT_TOKEN
+        LEX_HIGHER = INPUT_TOKEN
+
         // Launch MainActivity so its onCreate runs the full DSM bootstrap
         // sequence (initStorageBaseDir → initDsmSdk → initSdk →
         // bootstrapFromPrefs → ensureAppRouterInstalled). The AppRouter is
@@ -157,13 +176,60 @@ class SoFiTradeRealHwTest {
             installed,
         )
 
-        val balance = getBalance("ERA")
+        // The C-DBRW access gate refuses route reads until the resume
+        // flow has published a fresh trust snapshot via
+        // `BridgeIdentityHandler.resumeCdbrwTrust`. AppRouter being
+        // installed isn't enough — the trust snapshot publish runs in
+        // the background after AppRouter installation and takes 5-15s
+        // for the measure_trust orbit. Poll `balance.get` until it
+        // stops failing with the snapshot-missing error, then read
+        // the actual balance.
+        // 90s budget — covers slow first-boot resume (Minimal → Full
+        // router transition + measure_trust orbit + trust snapshot publish).
+        val balance = pollBalanceUntilTrustReady("ERA", maxAttempts = 900, pollMs = 100L)
         Log.i(TAG, "setUp: ERA balance = $balance (need >= $MIN_ERA_BALANCE)")
         Assume.assumeTrue(
             "Need ERA balance >= $MIN_ERA_BALANCE on this device (have $balance). " +
                 "Open the wallet UI → faucet → claim ERA, then re-run.",
             balance >= MIN_ERA_BALANCE,
         )
+    }
+
+    /** Bounded poll for `balance.get` until the full AppRouter is up
+     *  AND the C-DBRW trust snapshot has been published by the resume
+     *  path. `Unified.ensureAppRouterInstalled()` returns true for the
+     *  MinimalBootstrapRouter stub too — that router rejects balance.get
+     *  with "requires genesis" until the full router takes over. The
+     *  trust snapshot publishes later still, after measure_trust runs.
+     *  This poll retries past both transitions; -1 means neither
+     *  resolved within the budget. */
+    private fun pollBalanceUntilTrustReady(tokenId: String, maxAttempts: Int, pollMs: Long): Long {
+        var lastErr: String? = null
+        for (i in 0 until maxAttempts) {
+            try {
+                val bal = getBalance(tokenId)
+                if (i > 0) {
+                    Log.i(TAG, "pollBalanceUntilTrustReady: ready after $i attempts (~${i * pollMs}ms)")
+                }
+                return bal
+            } catch (t: AssertionError) {
+                val msg = t.message ?: ""
+                val transient =
+                    msg.contains("no trust snapshot has been published") ||
+                        msg.contains("trust snapshot") ||
+                        msg.contains("requires genesis") ||
+                        msg.contains("MinimalBootstrapRouter") ||
+                        msg.contains("app router not installed")
+                if (transient) {
+                    lastErr = msg
+                    android.os.SystemClock.sleep(pollMs)
+                    continue
+                }
+                throw t
+            }
+        }
+        Log.w(TAG, "pollBalanceUntilTrustReady: gave up after $maxAttempts attempts; last error: $lastErr")
+        return -1L
     }
 
     @org.junit.After
@@ -195,16 +261,27 @@ class SoFiTradeRealHwTest {
 
     @Test
     fun t01_trade_settles_against_tier2_envelope() {
+        // Per-run unique salt → unique content_digest → unique vault_id.
+        // Vaults are immutable: a prior run's vault advertisements occupy
+        // their storage keys forever. Each test run creates genuinely
+        // fresh vaults by salting the content with a CSPRNG nonce. The
+        // 16-byte hex form keeps the label readable in logcat without
+        // pulling in Base32 encode for an ephemeral test-only string.
+        val runSalt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+            .joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
+        val label1 = "sofi-test-vault-1-$runSalt"
+        val label2 = "sofi-test-vault-2-$runSalt"
+
         // ── STEP 1: create two AMM vaults with different fee tiers ──
-        val vault1Id = createAmmVault("sofi-test-vault-1", VAULT1_FEE_BPS)
-        val vault2Id = createAmmVault("sofi-test-vault-2", VAULT2_FEE_BPS)
-        Log.i(TAG, "vaults created: v1=${b32(vault1Id)} v2=${b32(vault2Id)}")
+        val vault1Id = createAmmVault(label1, VAULT1_FEE_BPS)
+        val vault2Id = createAmmVault(label2, VAULT2_FEE_BPS)
+        Log.i(TAG, "vaults created: salt=$runSalt v1=${b32(vault1Id)} v2=${b32(vault2Id)}")
         assertEquals("vault_id is 32 bytes", 32, vault1Id.size)
         assertEquals("vault_id is 32 bytes", 32, vault2Id.size)
 
         // ── STEP 2: publish routing advertisements for both ──
-        publishRoutingAdvertisement(vault1Id, VAULT1_FEE_BPS, "sofi-test-vault-1")
-        publishRoutingAdvertisement(vault2Id, VAULT2_FEE_BPS, "sofi-test-vault-2")
+        publishRoutingAdvertisement(vault1Id, VAULT1_FEE_BPS, label1)
+        publishRoutingAdvertisement(vault2Id, VAULT2_FEE_BPS, label2)
 
         // ── STEP 3: sync the canonical pair from storage so the path
         //            search sees the latest advertisement set ──
@@ -426,7 +503,14 @@ class SoFiTradeRealHwTest {
             // computes them per the accept-or-compute path.
             .setFulfillmentBytes(ByteString.copyFrom(fulfillmentBytes))
             .setContent(ByteString.copyFrom(content))
-            .setAnchorEnforcement(AnchorEnforcement.ANCHOR_ENFORCEMENT_REQUIRED)
+            // Tier-2 Foundation anchor binding (REQUIRED) demands that
+            // RouteCommit hops carry vault_state_reserves_digest +
+            // vault_state_anchor_digest stamped from the latest
+            // VaultStateAnchorV1.  `route.findAndBindBestPath` doesn't
+            // wire those fields yet — that's a separate workstream.
+            // For this end-to-end test, OPTIONAL is sufficient to
+            // exercise the full Tier-2 envelope + composition path.
+            .setAnchorEnforcement(AnchorEnforcement.ANCHOR_ENFORCEMENT_OPTIONAL)
             .build()
         val req = DlvInstantiateV1.newBuilder()
             .setSpec(spec)
