@@ -445,13 +445,34 @@ impl StorageNodeClient {
     }
 
     /// Generate a unique message ID for replay protection (transport-layer, not protocol).
-    /// Uses BLAKE3 domain-separated hash of the key + deterministic tick for uniqueness.
-    fn generate_message_id(key: &str) -> String {
-        let tick = dt::tick();
-        let mut hasher = dsm_domain_hasher("DSM/obj-msg-id");
-        hasher.update(key.as_bytes());
-        hasher.update(&tick.to_le_bytes());
-        crate::util::text_id::encode_base32_crockford(hasher.finalize().as_bytes())
+    ///
+    /// The server-side replay guard at `dsm_storage_node/src/auth/mod.rs:78`
+    /// enforces `unique(device_id, message_id)` per device.  A 409 Conflict
+    /// is returned when an already-seen message_id is replayed.  The id is
+    /// transport-layer only (not part of the canonical protocol) and the
+    /// DSM clockless rule applies to PROTOCOL decisions, not transport
+    /// nonces — so a CSPRNG nonce is the correct shape here.
+    ///
+    /// Prior versions of this function used `BLAKE3("DSM/obj-msg-id", key,
+    /// dt::tick())` which was DETERMINISTIC per (key, tick).  Same key PUT
+    /// twice in the same commit-height window collided.  Worse, once the
+    /// server's auth layer recorded a message_id (even when the surrounding
+    /// PUT body subsequently failed), that id was burnt forever — so any
+    /// future retry with the same deterministic id 409'd against the
+    /// poisoned slot.  Real-hardware repro: SoFiTradeRealHwTest's two
+    /// publishRoutingAdvertisement calls both PUT under the same commit
+    /// height; consistent 409 across runs even with genuinely fresh
+    /// vault_ids.
+    ///
+    /// Generates 32 bytes of CSPRNG, encoded Base32-Crockford — same
+    /// shape the server's auth layer parses.  The `key` arg is kept in
+    /// the signature for telemetry / future binding but isn't hashed in;
+    /// the server validates only `unique(device_id, message_id)`.
+    fn generate_message_id(_key: &str) -> String {
+        use rand::RngCore;
+        let mut nonce = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        crate::util::text_id::encode_base32_crockford(&nonce)
     }
 
     pub async fn put(
