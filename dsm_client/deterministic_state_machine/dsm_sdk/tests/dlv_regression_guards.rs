@@ -1133,3 +1133,91 @@ fn dlv_unlock_routed_advances_sequence_and_republishes_anchor_on_settle() {
         "publish_vault_state_anchor must be called from both dlv_create and dlv_unlock_routed (found {count})"
     );
 }
+
+/// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 invariant.
+///
+/// Every `dlv.create` and `dlv.unlockRouted` settle path on a
+/// vault the local wallet owns MUST also publish a
+/// `VaultStateInclusionProofV1`, not just the legacy anchor.  The
+/// inclusion proof is what makes vault state forgery-resistant
+/// against K_DBRW compromise — without it, an attacker with the
+/// owner's key can fabricate a signed anchor against arbitrary
+/// (sequence, reserves_digest).  This guard fails if either of the
+/// two call sites is removed or stops calling the inclusion-proof
+/// publisher.
+#[test]
+fn dlv_create_and_unlock_routed_publish_vault_state_inclusion_proof() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+
+    // The shared helper that wires CoreSDK::install_vault_state_leaf +
+    // sign_vault_state_inclusion_proof + publish_inclusion_proof
+    // together MUST exist.
+    assert!(
+        src.contains("fn publish_vault_state_inclusion_proof"),
+        "dlv_routes.rs must define publish_vault_state_inclusion_proof helper"
+    );
+    // And it must consult the canonical SDK install + sign +
+    // publish primitives — not roll its own.
+    assert!(
+        src.contains("install_vault_state_leaf"),
+        "publish helper must mutate the PD-SMT via CoreSDK::install_vault_state_leaf"
+    );
+    assert!(
+        src.contains("sign_vault_state_inclusion_proof"),
+        "publish helper must sign via dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof"
+    );
+    assert!(
+        src.contains("publish_inclusion_proof"),
+        "publish helper must publish via vault_smt_inclusion_codec::publish_inclusion_proof"
+    );
+
+    // Both dlv.create and dlv.unlockRouted MUST call the helper.
+    // We expect at least 3 occurrences: the function definition + at
+    // least one call from dlv_create + at least one call from
+    // dlv_unlock_routed.
+    let count = src.matches("publish_vault_state_inclusion_proof").count();
+    assert!(
+        count >= 3,
+        "publish_vault_state_inclusion_proof must be called from BOTH dlv_create and dlv_unlock_routed (found {count} total occurrences including the definition)"
+    );
+}
+
+/// Phase 7 — composition strict-mode invariant.
+///
+/// `vault_state_composition::compose_vault_state` MUST fetch and
+/// verify a `VaultStateInclusionProofV1` for the baseline before
+/// folding pending pointers.  If this check is removed, off-device
+/// quote-time verification reverts to anchor-only — the K_DBRW
+/// forgery hole reopens.  This guard fails if the strict-mode
+/// fetch, the cross-bind to baseline, or the inclusion-proof
+/// verification is removed.
+#[test]
+fn compose_vault_state_runs_strict_mode_inclusion_proof_check() {
+    let src = read(sdk_path("src/sdk/vault_state_composition.rs"));
+
+    // Strict-mode fetch from sofi/vault-state-inclusion/.
+    assert!(
+        src.contains("fetch_latest_inclusion_proof"),
+        "compose_vault_state must fetch the inclusion proof"
+    );
+    // Missing-proof variant — strict mode refuses to fold legacy ads.
+    assert!(
+        src.contains("MissingInclusionProof"),
+        "compose_vault_state must surface a MissingInclusionProof error variant"
+    );
+    // Cross-bind to the baseline anchor — equivocation defence.
+    assert!(
+        src.contains("inclusion.vault_id") && src.contains("inclusion.sequence"),
+        "compose_vault_state must cross-bind the inclusion proof to the baseline"
+    );
+    // End-to-end signature + SMT verification.
+    assert!(
+        src.contains("verify_vault_state_inclusion_proof"),
+        "compose_vault_state must call verify_vault_state_inclusion_proof"
+    );
+    // InvalidInclusionProof variant for fail-closed semantics.
+    assert!(
+        src.contains("InvalidInclusionProof"),
+        "compose_vault_state must surface an InvalidInclusionProof error variant"
+    );
+}

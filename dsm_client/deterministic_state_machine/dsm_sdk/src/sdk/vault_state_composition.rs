@@ -1273,4 +1273,179 @@ mod tests {
             .expect_err("composition rejects mismatched baseline_reserves");
         assert!(matches!(err, CompositionError::InvalidBaselineAnchor));
     }
+
+    // ───────────────────────────────────────────────────────────
+    // Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 strict-mode tests
+    // ───────────────────────────────────────────────────────────
+
+    /// Strict mode refuses to fold a vault whose owner never published
+    /// a `VaultStateInclusionProofV1` — the legacy anchor alone is
+    /// insufficient.  This is the K_DBRW-forgery hole closure: an
+    /// attacker with the owner's key can forge a signed anchor but
+    /// cannot fabricate SMT consistency.
+    #[tokio::test]
+    async fn strict_mode_rejects_vault_without_inclusion_proof() {
+        let vault_id = vid_seed(0x80);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        // Only sign the anchor — DO NOT publish an inclusion proof.
+        // make_baseline_anchor_only is the escape hatch for exactly
+        // this negative-test scenario.
+        let baseline = make_baseline_anchor_only(
+            &vault_id,
+            0,
+            b"AAA",
+            b"BBB",
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        );
+        let err = compose_vault_state(
+            &vault_id,
+            &baseline,
+            (1_000_000, 500_000),
+            b"AAA",
+            b"BBB",
+            30,
+        )
+        .await
+        .expect_err("strict mode must refuse vault without inclusion proof");
+        assert!(matches!(err, CompositionError::MissingInclusionProof));
+    }
+
+    /// Strict mode catches owner equivocation: the inclusion proof
+    /// references a different (sequence, reserves_digest) than the
+    /// baseline anchor.  This would happen if a compromised owner
+    /// signed two records with the same key but disagreeing payloads.
+    #[tokio::test]
+    async fn strict_mode_rejects_inclusion_proof_disagreeing_with_baseline() {
+        use dsm::dlv::vault_smt_leaf::{
+            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
+        };
+        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let vault_id = vid_seed(0x81);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        // Anchor is at sequence=0 with the canonical reserves.
+        let baseline = make_baseline_anchor_only(
+            &vault_id,
+            0,
+            b"AAA",
+            b"BBB",
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        );
+
+        // Publish an inclusion proof at sequence=5 — disagreeing with
+        // the baseline's sequence=0.
+        let bogus_reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000_000, 500_000, 30);
+        let mut tree = SparseMerkleTree::new(64);
+        let leaf_key = compute_vault_smt_key(&vault_id);
+        let leaf_value = compute_vault_smt_value(5, &bogus_reserves_digest);
+        tree.update_leaf(&leaf_key, &leaf_value)
+            .expect("update_leaf");
+        let smt_root = *tree.root();
+        let proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
+        let signed = sign_vault_state_inclusion_proof(
+            &vault_id,
+            5, // <-- disagrees with baseline's seq=0
+            &bogus_reserves_digest,
+            &smt_root,
+            proof.siblings,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .expect("sign inclusion proof");
+        let proto_bytes =
+            crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
+        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(&vault_id, 5, &proto_bytes)
+            .await
+            .expect("publish");
+
+        let err = compose_vault_state(
+            &vault_id,
+            &baseline,
+            (1_000_000, 500_000),
+            b"AAA",
+            b"BBB",
+            30,
+        )
+        .await
+        .expect_err("strict mode must reject disagreeing inclusion proof");
+        assert!(matches!(err, CompositionError::InvalidInclusionProof));
+    }
+
+    /// Strict mode catches a tampered SMT path: the inclusion proof's
+    /// (vault_id, sequence, reserves_digest) match the baseline, the
+    /// signature is valid (because it doesn't sign over the siblings —
+    /// only over the root), but the supplied siblings DON'T hash up to
+    /// the claimed root.  Verifier rejects via the SMT inclusion
+    /// check.
+    #[tokio::test]
+    async fn strict_mode_rejects_inclusion_proof_with_tampered_siblings() {
+        use dsm::dlv::vault_smt_leaf::{
+            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
+        };
+        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let vault_id = vid_seed(0x82);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let baseline = make_baseline_anchor_only(
+            &vault_id,
+            0,
+            b"AAA",
+            b"BBB",
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        );
+
+        // Build a real SMT, then corrupt one sibling before signing —
+        // the signed payload (which excludes siblings, by design)
+        // still verifies, but the inclusion check rejects.
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000_000, 500_000, 30);
+        let mut tree = SparseMerkleTree::new(64);
+        let leaf_key = compute_vault_smt_key(&vault_id);
+        let leaf_value = compute_vault_smt_value(0, &reserves_digest);
+        tree.update_leaf(&leaf_key, &leaf_value)
+            .expect("update_leaf");
+        let smt_root = *tree.root();
+        let mut proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
+        // Corrupt one sibling.
+        proof.siblings[0][0] ^= 0xff;
+
+        let signed = sign_vault_state_inclusion_proof(
+            &vault_id,
+            0,
+            &reserves_digest,
+            &smt_root,
+            proof.siblings,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .expect("sign inclusion proof");
+        let proto_bytes =
+            crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
+        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(&vault_id, 0, &proto_bytes)
+            .await
+            .expect("publish");
+
+        let err = compose_vault_state(
+            &vault_id,
+            &baseline,
+            (1_000_000, 500_000),
+            b"AAA",
+            b"BBB",
+            30,
+        )
+        .await
+        .expect_err("strict mode must reject tampered SMT path");
+        assert!(matches!(err, CompositionError::InvalidInclusionProof));
+    }
 }
