@@ -294,13 +294,13 @@ pub fn generate_kyber_keypair_from_entropy(
     seed.copy_from_slice(digest.as_bytes());
 
     let d: B32 = {
-        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        let mut h = dsm_domain_hasher("DSM/ml-kem-keygen-d");
         h.update(&seed);
         h.update(&0u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
     };
     let z: B32 = {
-        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        let mut h = dsm_domain_hasher("DSM/ml-kem-keygen-z");
         h.update(&seed);
         h.update(&1u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
