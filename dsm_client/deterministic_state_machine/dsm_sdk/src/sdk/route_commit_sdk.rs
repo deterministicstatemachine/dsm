@@ -1070,7 +1070,7 @@ mod tests {
         let fallback = sample_path();
         let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
             primary: &primary,
-            fallbacks: &[fallback.clone()],
+            fallbacks: std::slice::from_ref(&fallback),
             nonce: nonce(3),
             initiator_public_key: &[0x33u8; 64],
             initiator_signature: vec![],

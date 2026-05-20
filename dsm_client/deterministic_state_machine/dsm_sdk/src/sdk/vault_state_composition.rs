@@ -420,6 +420,7 @@ mod tests {
     use dsm::dlv::vault_pending_pointer::sign_vault_pending_pointer;
     use dsm::dlv::vault_state_anchor::sign_vault_state_anchor;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_baseline(
         vault_id: &[u8; 32],
         seq: u64,
@@ -479,6 +480,7 @@ mod tests {
     /// will derive.  The hop's `vault_state_reserves_digest` is bound
     /// to the supplied parent reserves so the composer's
     /// cursor-vs-hop digest check passes.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_rc_for_swap(
         x: &[u8; 32],
         vault_id: &[u8; 32],
@@ -605,6 +607,7 @@ mod tests {
     /// Combined helper that publishes the three storage records needed
     /// for one fold-able pending trade: X anchor, full RC, and the
     /// vault-keyed pointer.  Returns the swap's post-trade reserves.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_trade(
         vault_id: &[u8; 32],
         x: &[u8; 32],
@@ -1116,8 +1119,7 @@ mod tests {
         // Supply DIFFERENT reserves than the baseline was signed over.
         let err = compose_vault_state(&vault_id, &baseline, (777_777, 888_888), b"AAA", b"BBB", 30)
             .await
-            .err()
-            .expect("composition rejects mismatched baseline_reserves");
+            .expect_err("composition rejects mismatched baseline_reserves");
         assert!(matches!(err, CompositionError::InvalidBaselineAnchor));
     }
 }

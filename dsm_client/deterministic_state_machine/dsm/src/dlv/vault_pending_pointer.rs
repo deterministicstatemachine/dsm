@@ -255,8 +255,7 @@ mod tests {
             &kp.public_key,
             &kp.secret_key,
         )
-        .err()
-        .expect("non-unit step is rejected");
+        .expect_err("non-unit step is rejected");
         assert!(matches!(err, PointerError::NonUnitStep { .. }));
     }
 
@@ -280,9 +279,7 @@ mod tests {
         .expect("sign succeeds");
         signed.parent_sequence = 5;
         signed.new_sequence = 7;
-        let err = verify_vault_pending_pointer(&signed)
-            .err()
-            .expect("non-unit step rejected");
+        let err = verify_vault_pending_pointer(&signed).expect_err("non-unit step rejected");
         assert!(matches!(err, PointerError::NonUnitStep { .. }));
     }
 

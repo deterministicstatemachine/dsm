@@ -371,8 +371,9 @@ mod tests {
     #[test]
     fn moment_commitment_distinct_per_index() {
         let c = [0xABu8; 32];
-        let h1 = moment_commitment(3.14, 0, &c);
-        let h2 = moment_commitment(3.14, 1, &c);
+        let pi = std::f64::consts::PI;
+        let h1 = moment_commitment(pi, 0, &c);
+        let h2 = moment_commitment(pi, 1, &c);
         assert_ne!(h1, h2);
     }
 
@@ -380,8 +381,9 @@ mod tests {
     fn moment_commitment_distinct_per_challenge() {
         let c1 = [0x01u8; 32];
         let c2 = [0x02u8; 32];
-        let h1 = moment_commitment(3.14, 0, &c1);
-        let h2 = moment_commitment(3.14, 0, &c2);
+        let pi = std::f64::consts::PI;
+        let h1 = moment_commitment(pi, 0, &c1);
+        let h2 = moment_commitment(pi, 0, &c2);
         assert_ne!(h1, h2);
     }
 
