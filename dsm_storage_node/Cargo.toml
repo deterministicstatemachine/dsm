@@ -33,7 +33,7 @@ subtle = "2"
 
 # Configuration
 clap = { version = "4.6.1", features = ["derive"] }
-config = "0.15.22"
+config = "0.15.23"
 toml = "1.1.2"
 
 # Logging
