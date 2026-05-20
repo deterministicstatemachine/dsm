@@ -86,8 +86,31 @@ internal object BridgeIdentityHandler {
     private fun sendBootstrapMeasurementReport(
         report: BootstrapMeasurementReport,
     ): ByteArray {
+        // Envelope.headers is required by Rust-side envelope validation
+        // (dsm::envelope::validate_headers_wire).  device_id + chain_tip
+        // are both 32-byte length-checked fields; chain_tip is reserved
+        // for SDK use and MUST be all-zeros from the frontend.  When the
+        // report itself carries a device_id (FINALIZE path), reuse it
+        // for the header; otherwise the early-signal path passes zeros
+        // (the validator only enforces length, not value).
+        val headerDeviceId: ByteString = if (report.deviceId.size() == 32) {
+            report.deviceId
+        } else {
+            ByteString.copyFrom(ByteArray(32))
+        }
+        val headerGenesisHash: ByteString = if (report.genesisHash.size() == 32) {
+            report.genesisHash
+        } else {
+            ByteString.copyFrom(ByteArray(32))
+        }
+        val headers = dsm.types.proto.Headers.newBuilder()
+            .setDeviceId(headerDeviceId)
+            .setChainTip(ByteString.copyFrom(ByteArray(32)))
+            .setGenesisHash(headerGenesisHash)
+            .build()
         val envelope = Envelope.newBuilder()
             .setVersion(3)
+            .setHeaders(headers)
             .setMessageId(ByteString.copyFrom(ByteArray(16)))
             .setBootstrapMeasurementReport(report)
             .build()
@@ -710,6 +733,26 @@ internal object BridgeIdentityHandler {
 
         genesisLifecycleInFlight.set(true)
         genesisLifecycleInvalidated.set(false)
+
+        // Flip Rust's BOOTSTRAP_SECURING=true BEFORE the slow enrollment
+        // kicks off.  Without this signal the session manager keeps
+        // returning `needs_genesis`, the React UI stays on the
+        // Initialize-button screen, and the user sees nothing happening
+        // for the ~7-minute C-DBRW K-trial enrollment.  Device id /
+        // genesis hash aren't known yet at this point; the Rust handler
+        // accepts empty bytes for BOOTSTRAP_PHASE_STARTED and just
+        // toggles the securing flag + pushes lifecycle events.  The
+        // resume path (`bootstrapFromPrefs`) already sends this signal
+        // before its own derivation work; the first-time path missed it.
+        try {
+            sendBootstrapMeasurementReport(
+                BootstrapMeasurementReport.newBuilder()
+                    .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_STARTED)
+                    .build()
+            )
+        } catch (t: Throwable) {
+            Log.w(logTag, "createGenesis: early BOOTSTRAP_PHASE_STARTED signal failed (continuing)", t)
+        }
 
         val result = try {
             val cachedDevId = prefs.getString(keyDeviceId, null)
