@@ -580,13 +580,11 @@ internal object BridgeIdentityHandler {
 
         Log.i(logTag, "installGenesisEnvelope: identity persisted (deviceId/genesisHash/envelope stored as b32)")
 
-        sendBootstrapMeasurementReport(
-            BootstrapMeasurementReport.newBuilder()
-                .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_STARTED)
-                .setDeviceId(ByteString.copyFrom(deviceIdBytes))
-                .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
-                .build()
-        )
+        // The BOOTSTRAP_PHASE_STARTED signal already fired at the top of
+        // createGenesis (so the UI flipped to the securing-progress
+        // screen BEFORE collectBootstrapMeasurements ran the slow
+        // enrollment). Sending it again here would push a duplicate
+        // lifecycle event for a phase the session manager is already in.
 
         ensureGenesisNotInvalidated(
             context = context,
