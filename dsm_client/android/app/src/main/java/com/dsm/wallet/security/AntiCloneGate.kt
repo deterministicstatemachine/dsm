@@ -76,7 +76,20 @@ object AntiCloneGate {
     private const val WARMUP_ROUNDS: Int = 2
     private const val PROBES: Int = 16384
     private const val STEPS_PER_PROBE: Int = 4096
+    /** K — trials per admission sample (§6.1). */
     private const val ENROLL_TRIALS: Int = 21
+    /**
+     * Phase 9 median-of-M admission rule.  Capture M independent
+     * K-trial samples back-to-back and ship them to Rust as a single
+     * batched request.  Rust partitions by `trialsPerSample` and runs
+     * `classify_resonant_m_sample` on the per-sample health metrics.
+     *
+     * Must equal `dsm_sdk::security::cdbrw_responder::ADMISSION_M`
+     * — Rust rejects a mismatch as `AdmissionShapeMismatch`.
+     */
+    private const val ADMISSION_SAMPLES: Int = 3
+    /** Total trials shipped per enroll = M * K (default 3 * 21 = 63). */
+    private const val TOTAL_ENROLL_TRIALS: Int = ADMISSION_SAMPLES * ENROLL_TRIALS
     private const val HISTOGRAM_BINS: Int = 256
     private const val ROTATION_BITS: Int = 7
 
@@ -190,7 +203,17 @@ object AntiCloneGate {
         onProgress: ((completed: Int, total: Int) -> Unit)? = null,
     ): HardwareAnchorResult {
         val envBytes = buildEnvironmentBytes()
-        val trials = captureTrials(context, envBytes, ENROLL_TRIALS, PROBES, onProgress)
+        // Phase 9: capture M*K=63 trials in one shot so Rust does the
+        // admission protocol composition transactionally.  Progress
+        // callback fires over the full M*K span so the UI reflects the
+        // real enrollment cost (~15min on a mid-range SoC).
+        val trials = captureTrials(
+            context,
+            envBytes,
+            TOTAL_ENROLL_TRIALS,
+            PROBES,
+            onProgress,
+        )
 
         val request = CdbrwEnrollRequest.newBuilder()
             .setEnvBytes(ByteString.copyFrom(envBytes))
@@ -209,6 +232,8 @@ object AntiCloneGate {
             .setStepsPerProbe(STEPS_PER_PROBE)
             .setHistogramBins(HISTOGRAM_BINS)
             .setRotationBits(ROTATION_BITS)
+            .setAdmissionSamples(ADMISSION_SAMPLES)
+            .setTrialsPerSample(ENROLL_TRIALS)
             .build()
 
         val ingressResponseBytes = NativeBoundaryBridge.routerQuery(
