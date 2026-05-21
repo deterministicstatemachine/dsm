@@ -99,6 +99,13 @@ pub struct RespondInputs<'a> {
     /// Histogram bin count. Must equal the enrollment bin count when
     /// `enrolled_mean` is present; asserted in the code path.
     pub histogram_bins: usize,
+    /// Robust binning range committed at enrollment (revision 6+).
+    /// `None` for legacy v4/v5 enrollments — the responder falls back
+    /// to the legacy [min, max] binning derived from live orbit
+    /// timings.  Revision-5 callers that pass `None` will see the
+    /// h_hat-collapse failure mode on outlier-prone devices and
+    /// should invalidate + re-enroll under the new code path.
+    pub bin_range: Option<BinRange>,
 }
 
 /// Outputs of a successful Algorithm 3 response.
@@ -156,14 +163,32 @@ impl From<DsmError> for RespondError {
     }
 }
 
-/// Build a normalized histogram of `samples` in `bins` slots. Exact parity
-/// with `CdbrwMath.buildHistogram` on the Kotlin side.
+/// Fixed lower-tail percentile clipped from the raw timing distribution
+/// when computing the robust binning range. 0.5% trims the bottom-end
+/// outliers without losing the body of the distribution.
+pub const ROBUST_BIN_LOW_PCT: f64 = 0.005;
+/// Fixed upper-tail percentile. 99.5% trims the rare scheduler-interrupt /
+/// GC-pause outliers that pollute the binning normalization without
+/// contributing real silicon-substrate entropy.
+pub const ROBUST_BIN_HIGH_PCT: f64 = 0.995;
+
+// Re-export `BinRange` for callers that read it from
+// `cdbrw_responder`. Source of truth lives in `cdbrw_ffi` because the
+// health test (h_hat / rho_hat / l_hat) is where the binning matters
+// most.
+pub use crate::security::cdbrw_ffi::BinRange;
+
+/// Build a normalized histogram of `samples` in `bins` slots using a
+/// caller-supplied [`BinRange`]. Samples outside `[range.low,
+/// range.high]` clamp to the edge bins.  This is the robust form:
+/// outliers don't compress the bin space, and ranges committed at
+/// enrollment guarantee per-trial histogram alignment for mean-
+/// histogram and W1 math.
 ///
-/// - min/max span over the samples
-/// - `idx = floor(((v - min) / span) * (bins - 1))` clamped to `[0, bins-1]`
+/// - `idx = floor(((v - range.low) / span) * (bins - 1))` clamped to `[0, bins-1]`
 /// - divide each bucket by the sample count
 /// - degenerate span → first bin = 1.0
-pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
+pub fn build_histogram_in_range(samples: &[i64], bins: usize, range: BinRange) -> Vec<f32> {
     if bins == 0 {
         return Vec::new();
     }
@@ -172,16 +197,14 @@ pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
         hist[0] = 1.0;
         return hist;
     }
-    let min_v = samples.iter().copied().min().unwrap_or(0);
-    let max_v = samples.iter().copied().max().unwrap_or(0);
-    if max_v <= min_v {
+    if range.high <= range.low {
         hist[0] = 1.0;
         return hist;
     }
-    let span = (max_v - min_v) as f64;
+    let span = (range.high - range.low) as f64;
     let bins_minus_one = (bins - 1) as f64;
     for v in samples {
-        let diff = (*v - min_v) as f64;
+        let diff = (*v - range.low) as f64;
         let normalized = (diff / span).clamp(0.0, 1.0);
         let idx = ((normalized * bins_minus_one) as isize).clamp(0, bins as isize - 1);
         hist[idx as usize] += 1.0;
@@ -191,6 +214,20 @@ pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
         *v /= total;
     }
     hist
+}
+
+/// Backwards-compatible histogram builder using the legacy [min, max]
+/// span over `samples`.  New callers should prefer
+/// [`build_histogram_in_range`] with a robust [`BinRange`] derived from
+/// enrollment-time aggregate samples — see [`BinRange::from_samples_robust`].
+///
+/// Mirrors `CdbrwMath.buildHistogram` on the Kotlin side. The Layer-1
+/// fix (Phase 2 of the C-DBRW entropy-collapse remediation) shifted the
+/// enrollment + measure paths to the in-range variant; this function
+/// is retained for moment-tree internals and tests that don't need
+/// cross-trial alignment.
+pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
+    build_histogram_in_range(samples, bins, BinRange::full_span(samples))
 }
 
 /// Element-wise mean of a slice of equal-length histograms.
@@ -372,11 +409,20 @@ pub fn publish_trust_snapshot(
 /// Compute a measure-trust result without running the full Algorithm 3
 /// response. Returned snapshot has the same structure as a `respond` result
 /// so the UI can drive the gate from polls without requiring a verifier.
+///
+/// `bin_range` carries the robust [P0.5, P99.5] binning range committed
+/// at enrollment (revision 6+).  Pre-Phase-2 enrollments (revisions 4/5)
+/// supply `None`, in which case this function falls back to the legacy
+/// [min, max] binning derived from the live orbit timings — note that
+/// this fallback re-introduces the h_hat-collapse failure mode for
+/// devices with a single outlier sample, so revision-5 callers should
+/// invalidate + re-enroll.
 pub fn measure_trust(
     orbit_timings: &[i64],
     enrolled_mean: Option<&[f32]>,
     epsilon_intra: f32,
     histogram_bins: usize,
+    bin_range: Option<BinRange>,
 ) -> TrustSnapshot {
     let bins = if histogram_bins == 0 {
         DEFAULT_HISTOGRAM_BINS
@@ -384,8 +430,16 @@ pub fn measure_trust(
         histogram_bins
     };
 
-    let histogram = build_histogram(orbit_timings, bins);
-    let health = cdbrw_ffi::health_test(orbit_timings, bins);
+    let (histogram, health) = match bin_range {
+        Some(range) => (
+            build_histogram_in_range(orbit_timings, bins, range),
+            cdbrw_ffi::health_test_in_range(orbit_timings, bins, range),
+        ),
+        None => (
+            build_histogram(orbit_timings, bins),
+            cdbrw_ffi::health_test(orbit_timings, bins),
+        ),
+    };
 
     let (w1_distance, w1_threshold) = match enrolled_mean {
         Some(ref_hist) if ref_hist.len() == bins => {
@@ -428,9 +482,19 @@ pub fn respond_to_challenge(inputs: &RespondInputs<'_>) -> Result<RespondOutputs
         }
     }
 
-    // Step 1-2: histogram + health test
-    let histogram = build_histogram(inputs.orbit_timings, bins);
-    let health = cdbrw_ffi::health_test(inputs.orbit_timings, bins);
+    // Step 1-2: histogram + health test.  Use the committed robust
+    // bin_range when available (revision 6+); fall back to legacy
+    // min/max binning for v4/v5 enrollments.
+    let (histogram, health) = match inputs.bin_range {
+        Some(range) => (
+            build_histogram_in_range(inputs.orbit_timings, bins, range),
+            cdbrw_ffi::health_test_in_range(inputs.orbit_timings, bins, range),
+        ),
+        None => (
+            build_histogram(inputs.orbit_timings, bins),
+            cdbrw_ffi::health_test(inputs.orbit_timings, bins),
+        ),
+    };
 
     // Step 3: drift check (updates gate even on failure)
     let (w1_distance, w1_threshold) = match inputs.enrolled_mean {
@@ -690,6 +754,7 @@ mod tests {
             device_id: &dev,
             binding_key: &bk,
             histogram_bins: 256,
+            bin_range: None,
         };
         let result = respond_to_challenge(&inputs);
         assert!(matches!(result, Err(RespondError::InvalidVerifierKey)));

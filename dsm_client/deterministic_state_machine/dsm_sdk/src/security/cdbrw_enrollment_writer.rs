@@ -45,17 +45,26 @@ use dsm::crypto::blake3::domain_hash_bytes;
 use dsm::crypto::cdbrw_moments::{compute_moments, tolerance_ball, MomentVector};
 
 use crate::security::cdbrw_access_gate::TrustSnapshot;
-use crate::security::cdbrw_ffi::{self, HealthResult, MfgGateResult};
+use crate::security::cdbrw_ffi::{self, BinRange, HealthResult, MfgGateResult};
 use crate::security::cdbrw_responder::{
-    build_histogram, histogram_to_bytes, mean_histogram, publish_trust_snapshot, wasserstein1,
-    DEFAULT_DISTANCE_MARGIN, DEFAULT_HISTOGRAM_BINS,
+    build_histogram_in_range, histogram_to_bytes, mean_histogram, publish_trust_snapshot,
+    wasserstein1, DEFAULT_DISTANCE_MARGIN, DEFAULT_HISTOGRAM_BINS,
 };
 
-/// Wire revision written to `dsm_silicon_fp_v4.bin`. Bumped to 5 in
-/// Phase 3 deliverable 3 (attractor envelope test) — readers handle
-/// both revisions (4 = no envelope fields, 5 = envelope fields
-/// appended at the tail after `reference_anchor_len`/anchor blob).
-pub const ENROLLMENT_REVISION: u32 = 5;
+/// Wire revision written to `dsm_silicon_fp_v4.bin`. Bumped to 6 in
+/// the C-DBRW h_hat-collapse fix (Phase-2 follow-up) — the file now
+/// carries the committed robust [`BinRange`] (16 bytes appended after
+/// the v5 envelope fields) so every subsequent `measure_trust`
+/// rebuilds histograms in the same bin space the enrollment used,
+/// keeping mean-histogram + W1 alignment intact while discarding
+/// scheduler-interrupt outliers.
+///
+/// Readers handle all three revisions (4 = no envelope fields, 5 =
+/// envelope fields appended, 6 = bin_range appended after envelope).
+/// Revision-5 enrollments invalidate and must be re-enrolled — the
+/// new robust binning changes the histogram bin boundaries so the
+/// committed reference anchor would no longer verify.
+pub const ENROLLMENT_REVISION: u32 = 6;
 
 /// Filename consumed by [`handlers::misc_routes::load_cdbrw_enrollment`] via
 /// `CDBRW_ENROLLMENT_FILE`. Hard-coding here keeps the writer and reader in
@@ -236,13 +245,36 @@ pub fn enroll_device(
         }
     }
 
-    // ---- step 2: per-trial health + histograms ----
+    // ---- step 2a: compute the robust binning range across the
+    //               full K-trial sample set.  Phase-2 fix for the
+    //               h_hat collapse on Galaxy A16: a single
+    //               scheduler-interrupt outlier (max=71044 vs
+    //               p99=4024) would otherwise compress 99% of
+    //               samples into ~9 of the 256 bins, tanking h_hat
+    //               below the 0.45 gate.  Robust [P0.5, P99.5]
+    //               trimming preserves the actual silicon-substrate
+    //               variance while discarding interrupt pollution.
+    let total_samples: usize = inputs.trials.iter().map(|t| t.len()).sum();
+    let mut all_samples = Vec::with_capacity(total_samples);
+    for trial in inputs.trials {
+        all_samples.extend_from_slice(trial);
+    }
+    let bin_range = BinRange::from_samples_robust(
+        &all_samples,
+        crate::security::cdbrw_responder::ROBUST_BIN_LOW_PCT,
+        crate::security::cdbrw_responder::ROBUST_BIN_HIGH_PCT,
+    );
+
+    // ---- step 2b: per-trial health + histograms using the committed
+    //               robust bin_range so every trial's histogram lives
+    //               in the same bin space (required for mean_histogram
+    //               + W1 alignment to be meaningful).
     let mut histograms: Vec<Vec<f32>> = Vec::with_capacity(inputs.trials.len());
     let mut health_results: Vec<HealthResult> = Vec::with_capacity(inputs.trials.len());
     let mut h_bars: Vec<f32> = Vec::with_capacity(inputs.trials.len());
     for trial in inputs.trials {
-        let hist = build_histogram(trial, bins);
-        let health = cdbrw_ffi::health_test(trial, bins);
+        let hist = build_histogram_in_range(trial, bins, bin_range);
+        let health = cdbrw_ffi::health_test_in_range(trial, bins, bin_range);
         h_bars.push(health.h_hat);
         histograms.push(hist);
         health_results.push(health);
@@ -325,6 +357,7 @@ pub fn enroll_device(
         &anchor32,
         &baseline_moments,
         &tolerance,
+        bin_range,
     )
     .map_err(|e| {
         // On I/O failure, publish a Blocked snapshot so the gate knows
@@ -429,10 +462,10 @@ fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResul
 
 /// Serialize the enrollment snapshot to `path`.
 ///
-/// Layout (big-endian, revision 5):
+/// Layout (big-endian, revision 6):
 ///
 /// ```text
-/// u32 BE  revision (4 or 5)
+/// u32 BE  revision (4, 5, or 6)
 /// u32 BE  arena_bytes
 /// u32 BE  probes
 /// u32 BE  steps_per_probe
@@ -446,6 +479,9 @@ fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResul
 /// ---- v5 envelope extension ----
 /// [ENVELOPE_MOMENT_COUNT × f64 BE]   baseline_moments
 /// [ENVELOPE_MOMENT_COUNT × f64 BE]   tolerance_ball
+/// ---- v6 bin_range extension ----
+/// i64 BE  bin_range_low
+/// i64 BE  bin_range_high
 /// ```
 ///
 /// Writes via a buffered writer so the file is not partially flushed on
@@ -465,6 +501,7 @@ fn write_enrollment_file(
     reference_anchor: &[u8],
     baseline_moments: &MomentVector,
     tolerance_ball: &MomentVector,
+    bin_range: BinRange,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {parent:?}: {e}"))?;
@@ -526,6 +563,20 @@ fn write_enrollment_file(
                 .write_all(&v.to_bits().to_be_bytes())
                 .map_err(|e| format!("write tolerance_ball: {e}"))?;
         }
+    }
+
+    // v6 bin_range extension — two i64 BE describing the robust
+    // [P0.5, P99.5] binning range used to build the per-trial
+    // histograms.  Readers gated on revision ≥ 6.  Without this the
+    // measure_trust path can't reproduce the same bin space the
+    // enrollment used, breaking mean-histogram + W1 alignment.
+    if revision >= 6 {
+        writer
+            .write_all(&bin_range.low.to_be_bytes())
+            .map_err(|e| format!("write bin_range.low: {e}"))?;
+        writer
+            .write_all(&bin_range.high.to_be_bytes())
+            .map_err(|e| format!("write bin_range.high: {e}"))?;
     }
 
     writer.flush().map_err(|e| format!("flush: {e}"))?;

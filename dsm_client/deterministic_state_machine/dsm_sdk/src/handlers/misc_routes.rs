@@ -52,6 +52,13 @@ struct DbrwEnrollmentSnapshot {
     /// `revision >= 5`. None for v4 snapshots.
     envelope_baseline_moments: Option<[f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT]>,
     envelope_tolerance_ball: Option<[f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT]>,
+    /// C-DBRW h_hat-collapse fix — present only when `revision >= 6`.
+    /// The robust [P0.5, P99.5] timing range committed at enrollment;
+    /// measure_trust + respond must rebuild histograms in the same
+    /// bin space.  None for v4/v5 snapshots (which invalidate on the
+    /// new code path because their reference anchor was derived under
+    /// the legacy [min, max] binning).
+    bin_range: Option<crate::security::cdbrw_ffi::BinRange>,
 }
 
 impl DbrwEnrollmentSnapshot {
@@ -184,6 +191,28 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         (None, None)
     };
 
+    // v6 bin_range extension — present only when revision ≥ 6.  The
+    // robust [P0.5, P99.5] timing range committed at enrollment.
+    // Revisions 4/5 round-trip as None; downstream consumers fall back
+    // to the legacy [min, max] binning OR invalidate the enrollment
+    // depending on context.
+    let bin_range = if revision >= 6 {
+        let mut low_buf = [0u8; 8];
+        cursor
+            .read_exact(&mut low_buf)
+            .map_err(|e| format!("read bin_range.low: {e}"))?;
+        let mut high_buf = [0u8; 8];
+        cursor
+            .read_exact(&mut high_buf)
+            .map_err(|e| format!("read bin_range.high: {e}"))?;
+        Some(crate::security::cdbrw_ffi::BinRange {
+            low: i64::from_be_bytes(low_buf),
+            high: i64::from_be_bytes(high_buf),
+        })
+    } else {
+        None
+    };
+
     Ok(Some(DbrwEnrollmentSnapshot {
         revision,
         arena_bytes,
@@ -196,6 +225,7 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         reference_anchor,
         envelope_baseline_moments,
         envelope_tolerance_ball,
+        bin_range,
     }))
 }
 
@@ -403,7 +433,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 None => return err("cdbrw.measure_trust: missing orbit".into()),
             };
 
-            let (enrolled_mean_owned, epsilon_intra) =
+            let (enrolled_mean_owned, epsilon_intra, bin_range) =
                 match crate::storage_utils::get_storage_base_dir()
                     .as_ref()
                     .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
@@ -411,8 +441,9 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     Some(snapshot) => (
                         Some(snapshot.mean_histogram.clone()),
                         snapshot.epsilon_intra,
+                        snapshot.bin_range,
                     ),
-                    None => (None, 0.0f32),
+                    None => (None, 0.0f32, None),
                 };
 
             let snapshot = measure_trust(
@@ -420,6 +451,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 enrolled_mean_owned.as_deref(),
                 epsilon_intra,
                 req.histogram_bins as usize,
+                bin_range,
             );
 
             pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
@@ -448,15 +480,20 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 None => return err("cdbrw.reprove: missing orbit".into()),
             };
 
-            let enrolled_mean_owned = crate::storage_utils::get_storage_base_dir()
-                .as_ref()
-                .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
-                .map(|snapshot| snapshot.mean_histogram);
+            let (enrolled_mean_owned, bin_range) =
+                match crate::storage_utils::get_storage_base_dir()
+                    .as_ref()
+                    .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                {
+                    Some(snapshot) => (Some(snapshot.mean_histogram), snapshot.bin_range),
+                    None => (None, None),
+                };
 
             let out = reprove(&ReproveInputs {
                 orbit_timings: &orbit.timings,
                 enrolled_mean: enrolled_mean_owned.as_deref(),
                 histogram_bins: req.histogram_bins as usize,
+                bin_range,
             });
 
             // Fail-closed wipe: if reprove says clone, zero K_DBRW so no
@@ -516,7 +553,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 Err(e) => return err(e),
             };
 
-            let (enrolled_mean_owned, epsilon_intra) =
+            let (enrolled_mean_owned, epsilon_intra, bin_range) =
                 match crate::storage_utils::get_storage_base_dir()
                     .as_ref()
                     .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
@@ -524,8 +561,9 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     Some(snapshot) => (
                         Some(snapshot.mean_histogram.clone()),
                         snapshot.epsilon_intra,
+                        snapshot.bin_range,
                     ),
-                    None => (None, 0.0f32),
+                    None => (None, 0.0f32, None),
                 };
 
             let inputs = RespondInputs {
@@ -539,6 +577,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 device_id: &device_id,
                 binding_key: &binding_key,
                 histogram_bins: req.histogram_bins as usize,
+                bin_range,
             };
 
             match respond_to_challenge(&inputs) {

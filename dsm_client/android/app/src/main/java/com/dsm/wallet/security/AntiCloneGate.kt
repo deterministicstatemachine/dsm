@@ -117,27 +117,61 @@ object AntiCloneGate {
     fun sampleThermalBytesForBridge(context: Context): ByteArray = sampleThermalBytes(context)
 
     private fun sampleThermalBytes(context: Context): ByteArray {
+        // 16-byte layout (little-endian):
+        //   [0..4]   headroom_f32  — PowerManager.getThermalHeadroom(0)
+        //   [4..8]   status_i32    — PowerManager.currentThermalStatus
+        //   [8..12]  cpufreq_i32   — first readable scaling_cur_freq
+        //   [12..16] elapsed_ns_i32 — low 32 bits of elapsedRealtimeNanos
+        //
+        // Phase-2 follow-up: the previous layout did two getThermalHeadroom
+        // calls bracketing currentThermalStatus, but the second call gets
+        // throttled to NaN by Android's PowerManager (~1 Hz rate limit).
+        // That left 4 of 16 substrate bytes always zero, weakening the
+        // µ-byte derivation on devices that already had marginal silicon
+        // entropy.  We replace headroom2 with a /sys/devices cpufreq read
+        // (real silicon DVFS state) plus the low 32 bits of
+        // SystemClock.elapsedRealtimeNanos (microsecond-scale scheduler
+        // jitter) — both are substrate-influenced and don't trip any
+        // throttling.
         val buf = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
-        var headroom1 = Float.NaN
-        var headroom2 = Float.NaN
+        var headroom = Float.NaN
         var status = -1
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
             if (pm != null) {
-                // Two getThermalHeadroom(0) reads bracket currentThermalStatus
-                // so the two HAL samples are separated by ~microseconds of
-                // scheduler-induced delay — substrate-influenced jitter.
-                runCatching { headroom1 = pm.getThermalHeadroom(0) }
+                runCatching { headroom = pm.getThermalHeadroom(0) }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     runCatching { status = pm.currentThermalStatus }
                 }
-                runCatching { headroom2 = pm.getThermalHeadroom(0) }
             }
         }
-        buf.putFloat(headroom1)
+        // Best-effort cpufreq read.  Most Android builds permit
+        // app-context reads of /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq;
+        // failures yield 0 and the BLAKE3 fold in the C++ orbit treats
+        // a zero byte the same as any other.
+        var cpufreqKhz = 0
+        runCatching {
+            for (cpu in 0..7) {
+                val f = java.io.File("/sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_cur_freq")
+                if (f.canRead()) {
+                    val v = f.readText().trim().toIntOrNull()
+                    if (v != null && v > 0) {
+                        cpufreqKhz = v
+                        break
+                    }
+                }
+            }
+        }
+        // Low 32 bits of elapsedRealtimeNanos — adds microsecond-scale
+        // jitter that bracketing the headroom + status reads produces.
+        // Like SystemClock.sleep this is scheduler-domain, not wall-
+        // clock; the protocol's clockless rule applies to consensus /
+        // hash inputs, not substrate-jitter sampling.
+        val elapsedLow = android.os.SystemClock.elapsedRealtimeNanos().toInt()
+        buf.putFloat(headroom)
         buf.putInt(status)
-        buf.putFloat(headroom2)
-        buf.putInt(0)
+        buf.putInt(cpufreqKhz)
+        buf.putInt(elapsedLow)
         return buf.array()
     }
 

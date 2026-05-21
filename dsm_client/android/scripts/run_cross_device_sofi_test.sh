@@ -120,9 +120,8 @@ trap 'kill $OWNER_LOGCAT_PID 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 echo "── Phase 1/3: launching owner test on $OWNER_SERIAL"
 cd "$ANDROID_DIR"
 (
-    ./gradlew :app:connectedAndroidTest \
+    ANDROID_SERIAL="$OWNER_SERIAL" ./gradlew :app:connectedAndroidTest \
         -Pandroid.testInstrumentationRunnerArguments.class=com.dsm.wallet.sofi.SoFiCrossDeviceOwnerTest \
-        -PdeviceSerial="$OWNER_SERIAL" \
         > "$TMP_DIR/owner.gradle.log" 2>&1
     echo "$?" > "$TMP_DIR/owner.exit"
 ) &
@@ -170,13 +169,12 @@ adb -s "$TRADER_SERIAL" logcat -s SOFI_TRADE SOFI_XDEV > "$TRADER_LOG" &
 TRADER_LOGCAT_PID=$!
 trap 'kill $OWNER_LOGCAT_PID $TRADER_LOGCAT_PID 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 
-./gradlew :app:connectedAndroidTest \
+ANDROID_SERIAL="$TRADER_SERIAL" ./gradlew :app:connectedAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.class=com.dsm.wallet.sofi.SoFiCrossDeviceTraderTest \
     -Pandroid.testInstrumentationRunnerArguments.owner_salt="$SALT" \
     -Pandroid.testInstrumentationRunnerArguments.owner_v1_b32="$V1" \
     -Pandroid.testInstrumentationRunnerArguments.owner_v2_b32="$V2" \
     -Pandroid.testInstrumentationRunnerArguments.output_token_b32="$OUT" \
-    -PdeviceSerial="$TRADER_SERIAL" \
     > "$TMP_DIR/trader.gradle.log" 2>&1 &
 TRADER_GRADLE_PID=$!
 

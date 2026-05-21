@@ -29,7 +29,10 @@
 use crate::security::cdbrw_access_gate::{
     next_iter, store_trust, AccessLevel, ResonantStatus, TrustSnapshot,
 };
-use crate::security::cdbrw_responder::{build_histogram, wasserstein1, DEFAULT_HISTOGRAM_BINS};
+use crate::security::cdbrw_ffi::BinRange;
+use crate::security::cdbrw_responder::{
+    build_histogram, build_histogram_in_range, wasserstein1, DEFAULT_HISTOGRAM_BINS,
+};
 
 /// Clone-detection W1 threshold.
 ///
@@ -66,6 +69,10 @@ pub struct ReproveInputs<'a> {
     pub enrolled_mean: Option<&'a [f32]>,
     /// Histogram bin count from enrollment (must match what was stored).
     pub histogram_bins: usize,
+    /// Robust binning range committed at enrollment (revision 6+).
+    /// `None` for legacy v4/v5 enrollments — falls back to legacy
+    /// [min, max] binning over the live orbit timings.
+    pub bin_range: Option<BinRange>,
 }
 
 /// Outputs of a re-prove call. Always publishes a TrustSnapshot via the
@@ -91,7 +98,10 @@ pub fn reprove(inputs: &ReproveInputs<'_>) -> ReproveOutputs {
         inputs.histogram_bins
     };
 
-    let live_hist = build_histogram(inputs.orbit_timings, bins);
+    let live_hist = match inputs.bin_range {
+        Some(range) => build_histogram_in_range(inputs.orbit_timings, bins, range),
+        None => build_histogram(inputs.orbit_timings, bins),
+    };
 
     let (verdict, w1, note) = match inputs.enrolled_mean {
         None => (
@@ -190,11 +200,13 @@ pub fn reprove_with_inputs(
     timings: &[i64],
     enrolled_mean: Option<&[f32]>,
     histogram_bins: usize,
+    bin_range: Option<BinRange>,
 ) -> (ReproveVerdict, f32) {
     let out = reprove(&ReproveInputs {
         orbit_timings: timings,
         enrolled_mean,
         histogram_bins,
+        bin_range,
     });
     (out.verdict, out.w1_distance)
 }
@@ -315,6 +327,7 @@ mod tests {
                 orbit_timings: &timings,
                 enrolled_mean: None,
                 histogram_bins: 32,
+                bin_range: None,
             });
             assert_eq!(out.verdict, ReproveVerdict::NoEnrollment);
             assert_eq!(out.trust.access_level, AccessLevel::FullAccess);
@@ -335,6 +348,7 @@ mod tests {
                 orbit_timings: &live,
                 enrolled_mean: Some(&enrolled),
                 histogram_bins: 32,
+                bin_range: None,
             });
             assert_eq!(
                 out.verdict,
@@ -362,6 +376,7 @@ mod tests {
                 orbit_timings: &live,
                 enrolled_mean: Some(&enrolled),
                 histogram_bins: 32,
+                bin_range: None,
             });
             assert_eq!(
                 out.verdict,
@@ -387,6 +402,7 @@ mod tests {
                 orbit_timings: &live,
                 enrolled_mean: Some(&enrolled),
                 histogram_bins: 32,
+                bin_range: None,
             });
             assert_eq!(out.verdict, ReproveVerdict::NoEnrollment);
         });
