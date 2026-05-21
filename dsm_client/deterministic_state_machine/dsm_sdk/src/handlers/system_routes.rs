@@ -144,6 +144,60 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             &device_id_b32[..8]
         );
 
+        // Register the new device with each storage node's auth endpoint so
+        // subsequent authenticated PUTs (routing-advertisement publish,
+        // external-commitment publish, etc.) succeed.  Without this every
+        // storage write returns 401 Unauthorized because the per-node auth
+        // token slot is empty.  `register_device_for_auth` is idempotent at
+        // the storage-node level and persists the token via
+        // `store_auth_token`, which `resolve_storage_auth` reads on every
+        // PUT path.  Best-effort: a single-node failure is logged but does
+        // NOT roll back genesis — the genesis record is already durable
+        // and a later retry on the same node will get the token.
+        {
+            let cfg_for_auth =
+                match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        log::warn!(
+                            "system.genesis: auth-registration cfg load failed (genesis still durable): {e}"
+                        );
+                        None
+                    }
+                };
+            if let Some(cfg) = cfg_for_auth {
+                let public_key_b32 =
+                    crate::util::text_id::encode_base32_crockford(&public_key);
+                match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+                    Ok(auth_sdk) => match auth_sdk
+                        .register_device_for_auth(
+                            &device_id_b32,
+                            &public_key_b32,
+                            &crate::util::text_id::encode_base32_crockford(&genesis_hash),
+                        )
+                        .await
+                    {
+                        Ok(_token) => {
+                            log::info!(
+                                "system.genesis: auth-registration completed for device={}",
+                                &device_id_b32[..8]
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "system.genesis: auth-registration failed (subsequent PUTs may 401 until retry): {e}"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!(
+                            "system.genesis: auth-registration SDK init failed: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
         let resp = generated::GenesisCreated {
             device_id: device_id.clone(),
             genesis_hash: Some(generated::Hash32 {
