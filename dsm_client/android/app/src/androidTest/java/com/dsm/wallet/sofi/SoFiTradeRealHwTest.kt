@@ -7,30 +7,10 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
-import com.dsm.wallet.bridge.BridgeEncoding
-import com.dsm.wallet.bridge.NativeBoundaryBridge
-import com.dsm.wallet.bridge.Unified
 import com.dsm.wallet.ui.MainActivity
-import com.google.protobuf.ByteString
-import dsm.types.proto.AmmConstantProduct
 import dsm.types.proto.AmmVaultSummaryV1
-import dsm.types.proto.ArgPack
-import dsm.types.proto.AnchorEnforcement
-import dsm.types.proto.BalanceGetResponse
-import dsm.types.proto.Codec
-import dsm.types.proto.DlvInstantiateV1
-import dsm.types.proto.DlvSpecV1
-import dsm.types.proto.DlvUnlockRoutedV1
-import dsm.types.proto.Envelope
-import dsm.types.proto.ExternalCommitmentV1
-import dsm.types.proto.FindAndBindRouteRequest
-import dsm.types.proto.FulfillmentMechanism
-import dsm.types.proto.IngressResponse
-import dsm.types.proto.PublishRoutingAdvertisementRequest
 import dsm.types.proto.RouteCommitV1
-import dsm.types.proto.RoutingPairRequest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Assume
@@ -39,7 +19,6 @@ import org.junit.FixMethodOrder
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.MethodSorters
-import java.math.BigInteger
 import java.security.SecureRandom
 
 /**
@@ -61,6 +40,13 @@ import java.security.SecureRandom
  * pk on each vault) and the trader (initiator_public_key = wallet pk on
  * the RouteCommit) — the single-device dual-role pattern from
  * `route_commit_sdk::tests::demo_full_amm_trade_e2e`.
+ *
+ * **Phase 8 refactor**: all bridge boilerplate, per-route helpers,
+ * bootstrap-readiness pollers, and encoding helpers now live in
+ * [SoFiTestHelpers].  This file is a thin driver that orchestrates
+ * the 9-step flow; the cross-device tests in [SoFiCrossDeviceOwnerTest]
+ * and [SoFiCrossDeviceTraderTest] share the same helper file so any
+ * bridge-pattern fix lands in one place.
  *
  * Prerequisites (the test self-skips via `Assume.assumeTrue` rather
  * than failing if any of these are missing):
@@ -101,61 +87,23 @@ import java.security.SecureRandom
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class SoFiTradeRealHwTest {
 
-    private companion object {
-        const val TAG = "SOFI_TRADE"
-
-        // INPUT_TOKEN is fixed (ERA, which the trader-wallet actually
-        // holds balance of). OUTPUT_TOKEN is varied per run so the
-        // storage's per-pair advertisement set is empty when this run
-        // starts. Storage retains advertisements durably — without
-        // pair-isolation, prior runs' vault advertisements would still
-        // be discoverable by the path search and the picker might
-        // route through a vault whose LimboVault state didn't persist
-        // into this process's DLVManager.
-        val INPUT_TOKEN: ByteArray = "ERA".toByteArray(Charsets.UTF_8)
-        // OUTPUT_TOKEN is initialised per-run in setUp().
-        lateinit var OUTPUT_TOKEN: ByteArray
-        lateinit var LEX_LOWER: ByteArray
-        lateinit var LEX_HIGHER: ByteArray
-
-        const val INITIAL_RESERVE_A: Long = 1_000_000L
-        const val INITIAL_RESERVE_B: Long = 1_000_000L
-        const val INPUT_AMOUNT: Long = 1_000L
-        const val MIN_ERA_BALANCE: Long = 5_000L
-
-        const val VAULT1_FEE_BPS: Int = 30
-        const val VAULT2_FEE_BPS: Int = 50
-        const val MAX_PATHS: Int = 3
-        const val SLIPPAGE_BPS: Int = 50
-        const val FLOOR_BPS: Int = 50
-
-        // Bounded poll for the post-trade reserve update — the handler
-        // commits the on-chain DlvUnlock then updates vault state in a
-        // second lock acquisition. No wall-clock per the clockless rule.
-        const val RESERVE_POLL_ATTEMPTS: Int = 10
-        const val SPIN_BUDGET_PER_POLL: Int = 200_000
-    }
-
     @Suppress("unused")
     private fun ctx(): Context = InstrumentationRegistry.getInstrumentation().targetContext
 
     private var activity: ActivityScenario<MainActivity>? = null
+    private lateinit var sofi: SoFiTestContext
 
     @Before
     fun setUp() {
         // Per-run unique OUTPUT_TOKEN so storage's per-pair advertisement
         // set is empty at test start.  Lex-canonical ordering: ERA
-        // (0x45..) is always lex-higher than "TEST_<hex>" (T = 0x54...
-        // wait actually T > E so TEST is lex-HIGHER than ERA).
-        // Force OUTPUT to be lex-LOWER by prefixing with "00_".  The
-        // wallet's faucet credits ERA balance; this test never needs
-        // OUTPUT to have balance because the wallet receives it (the
-        // delta credits via Operation::DlvUnlock).
-        val tokenSalt = ByteArray(8).also { SecureRandom().nextBytes(it) }
-            .joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
-        OUTPUT_TOKEN = "00_DEMO_$tokenSalt".toByteArray(Charsets.UTF_8)
-        LEX_LOWER = OUTPUT_TOKEN
-        LEX_HIGHER = INPUT_TOKEN
+        // (0x45..) is always lex-higher than "00_DEMO_*" (0x30...), so
+        // outputToken = lexLower and ERA = lexHigher.  The wallet's
+        // faucet credits ERA balance; this test never needs OUTPUT to
+        // have balance because the wallet receives it (the delta
+        // credits via Operation::DlvUnlock).
+        val (outputToken, lexLower, lexHigher) = freshOutputTokenForRun()
+        sofi = SoFiTestContext(outputToken, lexLower, lexHigher)
 
         // Launch MainActivity so its onCreate runs the full DSM bootstrap
         // sequence (initStorageBaseDir → initDsmSdk → initSdk →
@@ -164,10 +112,6 @@ class SoFiTradeRealHwTest {
         // poll Unified.ensureAppRouterInstalled() with a bounded retry
         // until it returns true. No wall-clock — bounded spin.
         activity = ActivityScenario.launch(MainActivity::class.java)
-        // C-DBRW derivation + bridge install can take ~30s on first run
-        // when the wallet was just installed. Use SystemClock.sleep for
-        // the test-side wait loop (this is test plumbing, not a protocol
-        // decision — the clockless rule applies to protocol code only).
         val installed = waitForAppRouter(maxPollAttempts = 600, pollMs = 100L)
         Assume.assumeTrue(
             "AppRouter never installed — wallet bootstrap did not finish. " +
@@ -195,43 +139,6 @@ class SoFiTradeRealHwTest {
         )
     }
 
-    /** Bounded poll for `balance.get` until the full AppRouter is up
-     *  AND the C-DBRW trust snapshot has been published by the resume
-     *  path. `Unified.ensureAppRouterInstalled()` returns true for the
-     *  MinimalBootstrapRouter stub too — that router rejects balance.get
-     *  with "requires genesis" until the full router takes over. The
-     *  trust snapshot publishes later still, after measure_trust runs.
-     *  This poll retries past both transitions; -1 means neither
-     *  resolved within the budget. */
-    private fun pollBalanceUntilTrustReady(tokenId: String, maxAttempts: Int, pollMs: Long): Long {
-        var lastErr: String? = null
-        for (i in 0 until maxAttempts) {
-            try {
-                val bal = getBalance(tokenId)
-                if (i > 0) {
-                    Log.i(TAG, "pollBalanceUntilTrustReady: ready after $i attempts (~${i * pollMs}ms)")
-                }
-                return bal
-            } catch (t: AssertionError) {
-                val msg = t.message ?: ""
-                val transient =
-                    msg.contains("no trust snapshot has been published") ||
-                        msg.contains("trust snapshot") ||
-                        msg.contains("requires genesis") ||
-                        msg.contains("MinimalBootstrapRouter") ||
-                        msg.contains("app router not installed")
-                if (transient) {
-                    lastErr = msg
-                    android.os.SystemClock.sleep(pollMs)
-                    continue
-                }
-                throw t
-            }
-        }
-        Log.w(TAG, "pollBalanceUntilTrustReady: gave up after $maxAttempts attempts; last error: $lastErr")
-        return -1L
-    }
-
     @org.junit.After
     fun tearDown() {
         try {
@@ -240,23 +147,6 @@ class SoFiTradeRealHwTest {
             // best-effort
         }
         activity = null
-    }
-
-    private fun waitForAppRouter(maxPollAttempts: Int, pollMs: Long): Boolean {
-        for (i in 0 until maxPollAttempts) {
-            val ready = try {
-                Unified.ensureAppRouterInstalled()
-            } catch (_: Throwable) {
-                false
-            }
-            if (ready) {
-                Log.i(TAG, "waitForAppRouter: ready after $i attempts (~${i * pollMs}ms)")
-                return true
-            }
-            android.os.SystemClock.sleep(pollMs)
-        }
-        Log.w(TAG, "waitForAppRouter: gave up after $maxPollAttempts attempts")
-        return false
     }
 
     @Test
@@ -273,22 +163,22 @@ class SoFiTradeRealHwTest {
         val label2 = "sofi-test-vault-2-$runSalt"
 
         // ── STEP 1: create two AMM vaults with different fee tiers ──
-        val vault1Id = createAmmVault(label1, VAULT1_FEE_BPS)
-        val vault2Id = createAmmVault(label2, VAULT2_FEE_BPS)
+        val vault1Id = sofi.createAmmVault(label1, VAULT1_FEE_BPS)
+        val vault2Id = sofi.createAmmVault(label2, VAULT2_FEE_BPS)
         Log.i(TAG, "vaults created: salt=$runSalt v1=${b32(vault1Id)} v2=${b32(vault2Id)}")
         assertEquals("vault_id is 32 bytes", 32, vault1Id.size)
         assertEquals("vault_id is 32 bytes", 32, vault2Id.size)
 
         // ── STEP 2: publish routing advertisements for both ──
-        publishRoutingAdvertisement(vault1Id, VAULT1_FEE_BPS, label1)
-        publishRoutingAdvertisement(vault2Id, VAULT2_FEE_BPS, label2)
+        sofi.publishRoutingAdvertisement(vault1Id, VAULT1_FEE_BPS, label1)
+        sofi.publishRoutingAdvertisement(vault2Id, VAULT2_FEE_BPS, label2)
 
         // ── STEP 3: sync the canonical pair from storage so the path
         //            search sees the latest advertisement set ──
-        syncVaultsForPair()
+        sofi.syncVaultsForPair()
 
         // ── STEP 4: findAndBindBestPath with Tier 2 envelope params ──
-        val unsignedRcBytes = findAndBindBestPath()
+        val unsignedRcBytes = sofi.findAndBindBestPath()
         val rc = RouteCommitV1.parseFrom(unsignedRcBytes)
         assertEquals("single-hop AMM route", 1, rc.hopsCount)
         assertTrue(
@@ -312,19 +202,19 @@ class SoFiTradeRealHwTest {
         )
 
         // ── STEP 5: wallet signs (SPHINCS+ stays in Rust) ──
-        val signedRcBytes = signRouteCommit(unsignedRcBytes)
+        val signedRcBytes = sofi.signRouteCommit(unsignedRcBytes)
 
         // ── STEP 6: compute X (query, takes signed RouteCommit) ──
-        val x = computeExternalCommitment(signedRcBytes)
+        val x = sofi.computeExternalCommitment(signedRcBytes)
         assertEquals("X is 32 bytes", 32, x.size)
         Log.i(TAG, "X = ${b32(x)}")
 
         // ── STEP 7: publish X anchor to storage ──
-        publishExternalCommitment(x)
+        sofi.publishExternalCommitment(x)
 
         // ── STEP 8: unlock against the primary vault ──
         val primaryVaultId = rc.hopsList[0].vaultId.toByteArray()
-        val unlockResultVaultB32 = unlockVaultRouted(primaryVaultId, signedRcBytes)
+        val unlockResultVaultB32 = sofi.unlockVaultRouted(primaryVaultId, signedRcBytes)
         Log.i(TAG, "unlock returned vault=$unlockResultVaultB32")
 
         // ── STEP 9: verify reserves advanced (bounded retry — post-
@@ -333,7 +223,7 @@ class SoFiTradeRealHwTest {
         var reservesMoved = false
         var attempts = 0
         while (attempts < RESERVE_POLL_ATTEMPTS && !reservesMoved) {
-            val owned = listOwnedAmmVaults()
+            val owned = sofi.listOwnedAmmVaults()
             primaryAfter = owned.firstOrNull { it.vaultId.toByteArray().contentEquals(primaryVaultId) }
             if (primaryAfter != null) {
                 val ra = u128beToLong(primaryAfter.reserveAU128.toByteArray())
@@ -384,315 +274,5 @@ class SoFiTradeRealHwTest {
                 "post: reserveA=$raAfter reserveB=$rbAfter " +
                 "fallbacks=${rc.fallbacksCount} attempts=$attempts",
         )
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // Bridge invocation helpers — wrap NativeBoundaryBridge with the
-    // ArgPack envelope + IngressResponse + 0x03-framed Envelope-v3
-    // decoding the AppRouter uses on every route.
-    // ─────────────────────────────────────────────────────────────────
-
-    private fun routerInvoke(method: String, body: ByteArray): Envelope {
-        val packed = packArgs(body)
-        val raw = NativeBoundaryBridge.routerInvoke(method, packed)
-        return decodeIngressEnvelope(raw, method)
-    }
-
-    private fun routerQuery(method: String, body: ByteArray): Envelope {
-        val packed = packArgs(body)
-        val raw = NativeBoundaryBridge.routerQuery(method, packed)
-        return decodeIngressEnvelope(raw, method)
-    }
-
-    private fun packArgs(body: ByteArray): ByteArray {
-        return ArgPack.newBuilder()
-            .setCodec(Codec.CODEC_PROTO)
-            .setBody(ByteString.copyFrom(body))
-            .build()
-            .toByteArray()
-    }
-
-    private fun decodeIngressEnvelope(raw: ByteArray, methodForError: String): Envelope {
-        val ir = try {
-            IngressResponse.parseFrom(raw)
-        } catch (e: Exception) {
-            fail("$methodForError: failed to parse IngressResponse: ${e.message}")
-            return Envelope.getDefaultInstance() // unreachable
-        }
-        when (ir.resultCase) {
-            IngressResponse.ResultCase.OK_BYTES -> {
-                val okBytes = ir.okBytes.toByteArray()
-                if (okBytes.isEmpty()) {
-                    fail("$methodForError: ok envelope was empty")
-                }
-                val envelopeBytes = if (okBytes[0] == 0x03.toByte() && okBytes.size > 1) {
-                    okBytes.copyOfRange(1, okBytes.size)
-                } else {
-                    okBytes
-                }
-                val env = try {
-                    Envelope.parseFrom(envelopeBytes)
-                } catch (e: Exception) {
-                    fail("$methodForError: failed to parse Envelope: ${e.message}")
-                    return Envelope.getDefaultInstance()
-                }
-                if (env.payloadCase == Envelope.PayloadCase.ERROR) {
-                    fail("$methodForError: route returned error: ${env.error.message}")
-                }
-                return env
-            }
-            IngressResponse.ResultCase.ERROR -> {
-                fail("$methodForError: ingress error: ${ir.error.message}")
-            }
-            else -> {
-                fail("$methodForError: ingress returned unexpected result ${ir.resultCase}")
-            }
-        }
-        return Envelope.getDefaultInstance() // unreachable
-    }
-
-    private fun appStateValue(env: Envelope, methodForError: String): String {
-        if (env.payloadCase != Envelope.PayloadCase.APP_STATE_RESPONSE) {
-            fail("$methodForError: expected APP_STATE_RESPONSE, got ${env.payloadCase}")
-        }
-        return env.appStateResponse.value ?: ""
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // Per-route helpers — each builds the proto request, calls the
-    // bridge, decodes the response. No business logic — pure framing.
-    // ─────────────────────────────────────────────────────────────────
-
-    private fun getBalance(tokenId: String): Long {
-        // `balance.get` accepts `ArgPack { codec=PROTO, body=<UTF-8 token id> }`
-        val body = tokenId.toByteArray(Charsets.UTF_8)
-        val env = routerQuery("balance.get", body)
-        if (env.payloadCase != Envelope.PayloadCase.BALANCE_GET_RESPONSE) {
-            fail("balance.get: expected BALANCE_GET_RESPONSE, got ${env.payloadCase}")
-        }
-        val resp: BalanceGetResponse = env.balanceGetResponse
-        return resp.available
-    }
-
-    private fun createAmmVault(label: String, feeBps: Int): ByteArray {
-        // Build the AmmConstantProduct fulfillment with canonical
-        // (tokenA, tokenB) = (DEMO_BBB, ERA) since DEMO_BBB is lex-lower.
-        val amm = AmmConstantProduct.newBuilder()
-            .setTokenA(ByteString.copyFrom(LEX_LOWER))
-            .setTokenB(ByteString.copyFrom(LEX_HIGHER))
-            .setReserveAU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_A)))
-            .setReserveBU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_B)))
-            .setFeeBps(feeBps)
-            .build()
-        val fm = FulfillmentMechanism.newBuilder()
-            .setAmmConstantProduct(amm)
-            .build()
-        val fulfillmentBytes = fm.toByteArray()
-
-        // Distinct content per vault → distinct vault_id (computed
-        // Rust-side from device_id + policy_digest + content_digest).
-        val content = "SoFiTradeRealHwTest:$label:fee=$feeBps".toByteArray(Charsets.UTF_8)
-        // Synthetic but stable 32-byte policy anchor — the dlv.create
-        // handler stores this verbatim without verifying it against
-        // a registered CPTA policy. Sufficient for vault creation.
-        val policyDigest = blake3Like32("DSM/sofi-test-policy:$label")
-
-        val spec = DlvSpecV1.newBuilder()
-            .setPolicyDigest(ByteString.copyFrom(policyDigest))
-            // Leave content_digest + fulfillment_digest empty — Rust
-            // computes them per the accept-or-compute path.
-            .setFulfillmentBytes(ByteString.copyFrom(fulfillmentBytes))
-            .setContent(ByteString.copyFrom(content))
-            // Tier-2 Foundation anchor binding (REQUIRED) demands that
-            // RouteCommit hops carry vault_state_reserves_digest +
-            // vault_state_anchor_digest stamped from the latest
-            // VaultStateAnchorV1.  `route.findAndBindBestPath` doesn't
-            // wire those fields yet — that's a separate workstream.
-            // For this end-to-end test, OPTIONAL is sufficient to
-            // exercise the full Tier-2 envelope + composition path.
-            .setAnchorEnforcement(AnchorEnforcement.ANCHOR_ENFORCEMENT_OPTIONAL)
-            .build()
-        val req = DlvInstantiateV1.newBuilder()
-            .setSpec(spec)
-            // Empty pk + signature → Rust accept-or-stamp uses the
-            // wallet's pk + signs Track C.4 style.
-            .setCreatorPublicKey(ByteString.EMPTY)
-            .setTokenId(ByteString.EMPTY)
-            .setLockedAmountU128(ByteString.copyFrom(ByteArray(16)))
-            .setSignature(ByteString.EMPTY)
-            .build()
-
-        val env = routerInvoke("dlv.create", req.toByteArray())
-        val vaultIdB32 = appStateValue(env, "dlv.create")
-        require(vaultIdB32.isNotEmpty()) { "dlv.create returned empty vault_id" }
-        return BridgeEncoding.base32CrockfordDecode(vaultIdB32)
-    }
-
-    private fun publishRoutingAdvertisement(
-        vaultId: ByteArray,
-        feeBps: Int,
-        label: String,
-    ) {
-        // Rust handler computes the BLAKE3 digest from vault_proto_bytes.
-        // We pass a synthetic but stable proto-bytes blob (matches the
-        // pattern in demo_full_amm_trade_e2e).
-        val vaultProtoBytes = ("demo-vault-proto:$label:" + b32(vaultId)).toByteArray(Charsets.UTF_8)
-        val unlockSpecDigest = blake3Like32("DSM/sofi-test-unlock:$label")
-        val req = PublishRoutingAdvertisementRequest.newBuilder()
-            .setVaultId(ByteString.copyFrom(vaultId))
-            .setTokenA(ByteString.copyFrom(LEX_LOWER))
-            .setTokenB(ByteString.copyFrom(LEX_HIGHER))
-            .setReserveAU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_A)))
-            .setReserveBU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_B)))
-            .setFeeBps(feeBps)
-            .setUnlockSpecDigest(ByteString.copyFrom(unlockSpecDigest))
-            .setUnlockSpecKey("defi/spec/sofi-test/$label")
-            // Empty owner_public_key → Rust stamps wallet pk.
-            .setOwnerPublicKey(ByteString.EMPTY)
-            .setVaultProtoBytes(ByteString.copyFrom(vaultProtoBytes))
-            .build()
-        val env = routerInvoke("route.publishRoutingAdvertisement", req.toByteArray())
-        val returnedVaultB32 = appStateValue(env, "route.publishRoutingAdvertisement")
-        require(returnedVaultB32 == b32(vaultId)) {
-            "route.publishRoutingAdvertisement returned $returnedVaultB32, expected ${b32(vaultId)}"
-        }
-    }
-
-    private fun syncVaultsForPair() {
-        val req = RoutingPairRequest.newBuilder()
-            .setTokenA(ByteString.copyFrom(LEX_LOWER))
-            .setTokenB(ByteString.copyFrom(LEX_HIGHER))
-            .build()
-        routerInvoke("route.syncVaultsForPair", req.toByteArray())
-        // Result envelope is an ack — we don't need its body.
-    }
-
-    private fun findAndBindBestPath(): ByteArray {
-        val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val req = FindAndBindRouteRequest.newBuilder()
-            .setInputToken(ByteString.copyFrom(INPUT_TOKEN))
-            .setOutputToken(ByteString.copyFrom(OUTPUT_TOKEN))
-            .setInputAmountU128(ByteString.copyFrom(u128be(INPUT_AMOUNT)))
-            .setMaxHops(0) // 0 → server default (4)
-            .setNonce(ByteString.copyFrom(nonce))
-            .setMaxPaths(MAX_PATHS)
-            .setSlippageBps(SLIPPAGE_BPS)
-            .setFloorBps(FLOOR_BPS)
-            .build()
-        val env = routerInvoke("route.findAndBindBestPath", req.toByteArray())
-        val unsignedB32 = appStateValue(env, "route.findAndBindBestPath")
-        require(unsignedB32.isNotEmpty()) { "findAndBindBestPath returned empty unsigned RouteCommit" }
-        return BridgeEncoding.base32CrockfordDecode(unsignedB32)
-    }
-
-    private fun signRouteCommit(unsignedBytes: ByteArray): ByteArray {
-        val env = routerInvoke("route.signRouteCommit", unsignedBytes)
-        val signedB32 = appStateValue(env, "route.signRouteCommit")
-        require(signedB32.isNotEmpty()) { "signRouteCommit returned empty signed RouteCommit" }
-        return BridgeEncoding.base32CrockfordDecode(signedB32)
-    }
-
-    private fun computeExternalCommitment(signedRcBytes: ByteArray): ByteArray {
-        val env = routerQuery("route.computeExternalCommitment", signedRcBytes)
-        val xB32 = appStateValue(env, "route.computeExternalCommitment")
-        require(xB32.isNotEmpty()) { "computeExternalCommitment returned empty X" }
-        return BridgeEncoding.base32CrockfordDecode(xB32)
-    }
-
-    private fun publishExternalCommitment(x: ByteArray) {
-        val req = ExternalCommitmentV1.newBuilder()
-            .setVersion(1)
-            .setX(ByteString.copyFrom(x))
-            // Empty publisher_public_key → Rust stamps wallet pk.
-            .setPublisherPublicKey(ByteString.EMPTY)
-            .setLabel("sofi-test")
-            .build()
-        val env = routerInvoke("route.publishExternalCommitment", req.toByteArray())
-        val returnedXB32 = appStateValue(env, "route.publishExternalCommitment")
-        require(returnedXB32 == b32(x)) {
-            "publishExternalCommitment returned $returnedXB32, expected ${b32(x)}"
-        }
-    }
-
-    private fun unlockVaultRouted(vaultId: ByteArray, signedRcBytes: ByteArray): String {
-        // device_id field on DlvUnlockRoutedV1 is the unlocker's
-        // device id; for a same-wallet trade we let Rust derive it
-        // from the wallet's current state — but the proto requires
-        // 32 bytes, so pull the current device id via balance metadata
-        // path. Simpler: send 32 bytes of zeros and let the handler
-        // reject if it cares (it accepts non-empty bytes; the value
-        // is informational, not a verification gate per dlv_routes.rs).
-        // To be safe we mirror the frontend pattern and supply the
-        // actual device id derived from the genesis state — but
-        // without a dedicated route to fetch it from instrumentation
-        // context, the safe path is to read it from an existing
-        // balance query response if exposed. The current handler
-        // strict-checks `device_id.len() == 32`, nothing more.
-        val deviceId = ByteArray(32) // 32 zero bytes — passes the length gate
-        val req = DlvUnlockRoutedV1.newBuilder()
-            .setVaultId(ByteString.copyFrom(vaultId))
-            .setDeviceId(ByteString.copyFrom(deviceId))
-            .setRouteCommitBytes(ByteString.copyFrom(signedRcBytes))
-            // Empty unlocker_public_key → handler falls back to device_id.
-            .setUnlockerPublicKey(ByteString.EMPTY)
-            .setSignature(ByteString.EMPTY)
-            .build()
-        val env = routerInvoke("dlv.unlockRouted", req.toByteArray())
-        return appStateValue(env, "dlv.unlockRouted")
-    }
-
-    private fun listOwnedAmmVaults(): List<AmmVaultSummaryV1> {
-        val env = routerQuery("dlv.listOwnedAmmVaults", ByteArray(0))
-        val joined = appStateValue(env, "dlv.listOwnedAmmVaults")
-        if (joined.isEmpty()) return emptyList()
-        return joined.split("\n").mapNotNull { line ->
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) return@mapNotNull null
-            try {
-                val bytes = BridgeEncoding.base32CrockfordDecode(trimmed)
-                AmmVaultSummaryV1.parseFrom(bytes)
-            } catch (e: Exception) {
-                Log.w(TAG, "listOwnedAmmVaults: failed to decode line: ${e.message}")
-                null
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // Small utility helpers
-    // ─────────────────────────────────────────────────────────────────
-
-    /** Big-endian 16-byte (u128) encoding of a non-negative long. */
-    private fun u128be(n: Long): ByteArray {
-        require(n >= 0) { "u128be requires non-negative input" }
-        val out = ByteArray(16)
-        var v = n
-        for (i in 15 downTo 0) {
-            out[i] = (v and 0xff).toByte()
-            v = v ushr 8
-        }
-        return out
-    }
-
-    /** Decode a 16-byte big-endian u128 to Long. Truncates if > Long.MAX_VALUE
-     *  (test inputs are bounded well below that). */
-    private fun u128beToLong(bytes: ByteArray): Long {
-        if (bytes.isEmpty()) return 0L
-        require(bytes.size == 16) { "u128beToLong expects 16 bytes, got ${bytes.size}" }
-        val bi = BigInteger(1, bytes)
-        // The reserve values used in this test fit in a Long.
-        return bi.toLong()
-    }
-
-    private fun b32(bytes: ByteArray): String = BridgeEncoding.base32CrockfordEncode(bytes)
-
-    /** Deterministic 32-byte digest from a label string. Uses MessageDigest
-     *  SHA-256 (BLAKE3 isn't in the AndroidX stdlib but the digest only
-     *  needs to be 32 bytes + collision-resistant within the test scope —
-     *  the dlv.create handler stores it verbatim without semantic check). */
-    private fun blake3Like32(label: String): ByteArray {
-        val md = java.security.MessageDigest.getInstance("SHA-256")
-        md.update(label.toByteArray(Charsets.UTF_8))
-        return md.digest()
     }
 }
