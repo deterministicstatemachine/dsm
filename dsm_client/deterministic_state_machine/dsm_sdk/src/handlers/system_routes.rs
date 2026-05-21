@@ -166,8 +166,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                     }
                 };
             if let Some(cfg) = cfg_for_auth {
-                let public_key_b32 =
-                    crate::util::text_id::encode_base32_crockford(&public_key);
+                let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
                 match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
                     Ok(auth_sdk) => match auth_sdk
                         .register_device_for_auth(
@@ -190,9 +189,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                         }
                     },
                     Err(e) => {
-                        log::warn!(
-                            "system.genesis: auth-registration SDK init failed: {e}"
-                        );
+                        log::warn!("system.genesis: auth-registration SDK init failed: {e}");
                     }
                 }
             }

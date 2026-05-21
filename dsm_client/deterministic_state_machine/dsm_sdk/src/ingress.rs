@@ -297,10 +297,8 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     // tokens stored via `store_auth_token`, read on every PUT path via
     // `BitcoinTapSdk::resolve_storage_auth`.  Best-effort: failures are
     // logged but never block bootstrap completion.
-    let device_id_b32 =
-        crate::util::text_id::encode_base32_crockford(&context.device_id);
-    let genesis_hash_b32 =
-        crate::util::text_id::encode_base32_crockford(&context.genesis_hash);
+    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&context.device_id);
+    let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&context.genesis_hash);
     let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
     let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
     let rt = tokio::runtime::Handle::try_current();

@@ -2951,18 +2951,32 @@ message CdbrwVerifyRequest {
   float epsilon_inter         = 10;
 }
 
-// cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
-// Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
-// reference histogram, ε_intra, and attractor commitment AC_D, and persists
-// the `dsm_silicon_fp_v4.bin` binary loaded by load_cdbrw_enrollment.
+// cdbrw.enroll args — M-sample, K-trial-per-sample admission (Phase 9).
+//
+// Replaces the single-K-trial enrollment with median-of-M admission.
+// The Kotlin caller batches all M*K trials (default 3*21=63) into a
+// single request; Rust partitions them by `trials_per_sample`, runs
+// the per-sample health flow on each chunk, and applies
+// `classify_resonant_m_sample` to produce a stable admission verdict
+// that absorbs silicon trial-to-trial variance.
 message CdbrwEnrollRequest {
   bytes env_bytes                 = 1 [(dsm_max_len)=1024];
-  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=64]; // K ≥ 16 per §6.1
+  // Flat list of M*trials_per_sample trials (e.g. 3*21=63).
+  // Partitioned by Rust into M contiguous chunks of trials_per_sample
+  // each.  Order matters: chunk i = trials[i*K .. (i+1)*K].
+  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=192];
   uint32 arena_bytes              = 3;
   uint32 probes                   = 4;
   uint32 steps_per_probe          = 5;
   uint32 histogram_bins           = 6;
   uint32 rotation_bits            = 7;
+  // Phase 9: number of independent K-trial admission samples (M).
+  // Must equal the SDK's compiled ADMISSION_M (default 3); version
+  // skew is rejected as AdmissionShapeMismatch.
+  uint32 admission_samples        = 8;
+  // Phase 9: K, the trials per sample.  Must satisfy K >= 16 per §6.1.
+  // Rust rejects if trials.length != admission_samples * trials_per_sample.
+  uint32 trials_per_sample        = 9;
 }
 
 // Shared trust state returned with every C-DBRW op. Frontend/UI reads this

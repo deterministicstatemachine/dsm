@@ -59,6 +59,25 @@ struct DbrwEnrollmentSnapshot {
     /// new code path because their reference anchor was derived under
     /// the legacy [min, max] binning).
     bin_range: Option<crate::security::cdbrw_ffi::BinRange>,
+    /// Phase 9 admission audit — present only when `revision >= 7`.
+    /// Carries the per-sample (h_hat, rho_hat, l_hat, epsilon_intra)
+    /// quartets for each of the M K-trial chunks that cleared
+    /// admission.  Diagnostic only (the gate verdict itself was
+    /// computed at enrollment and is baked into the persisted
+    /// reference anchor).  None for v4/v5/v6 snapshots, which
+    /// invalidate under the v7 admission protocol.
+    admission_samples: Option<AdmissionSamples>,
+}
+
+/// Phase 9 admission audit decoded from `dsm_silicon_fp_v4.bin` rev ≥ 7.
+#[derive(Debug, Clone, PartialEq)]
+struct AdmissionSamples {
+    m: u32,
+    trials_per_sample: u32,
+    per_sample_h_hat: Vec<f32>,
+    per_sample_rho_hat: Vec<f32>,
+    per_sample_l_hat: Vec<f32>,
+    per_sample_epsilon_intra: Vec<f32>,
 }
 
 impl DbrwEnrollmentSnapshot {
@@ -213,6 +232,37 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         None
     };
 
+    // v7 admission extension (Phase 9) — admission_m + trials_per_sample
+    // followed by M per-sample audit quartets.  Diagnostic only; the
+    // admission verdict itself was computed at enrollment.  Older
+    // enrollments (revisions 4/5/6) round-trip as None and the C-DBRW
+    // stack treats them as invalid under Phase 9 (a v7-capable wallet
+    // will refuse to use a pre-v7 reference anchor and force re-enroll).
+    let admission_samples = if revision >= 7 {
+        let m = read_u32_be(&mut cursor, "admission_m")?;
+        let trials_per_sample = read_u32_be(&mut cursor, "admission_trials_per_sample")?;
+        let mut h = Vec::with_capacity(m as usize);
+        let mut r = Vec::with_capacity(m as usize);
+        let mut l = Vec::with_capacity(m as usize);
+        let mut e = Vec::with_capacity(m as usize);
+        for _ in 0..m {
+            h.push(read_f32_be(&mut cursor, "admission h_hat")?);
+            r.push(read_f32_be(&mut cursor, "admission rho_hat")?);
+            l.push(read_f32_be(&mut cursor, "admission l_hat")?);
+            e.push(read_f32_be(&mut cursor, "admission epsilon_intra")?);
+        }
+        Some(AdmissionSamples {
+            m,
+            trials_per_sample,
+            per_sample_h_hat: h,
+            per_sample_rho_hat: r,
+            per_sample_l_hat: l,
+            per_sample_epsilon_intra: e,
+        })
+    } else {
+        None
+    };
+
     Ok(Some(DbrwEnrollmentSnapshot {
         revision,
         arena_bytes,
@@ -226,6 +276,7 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         envelope_baseline_moments,
         envelope_tolerance_ball,
         bin_range,
+        admission_samples,
     }))
 }
 
@@ -695,6 +746,8 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 steps_per_probe: req.steps_per_probe,
                 histogram_bins: req.histogram_bins,
                 rotation_bits: req.rotation_bits,
+                admission_samples: req.admission_samples,
+                trials_per_sample: req.trials_per_sample,
             };
 
             let base_dir = match crate::storage_utils::get_storage_base_dir() {
@@ -715,7 +768,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     pack_envelope_ok(generated::envelope::Payload::CdbrwEnrollResponse(resp))
                 }
                 Err(EnrollError::InsufficientTrials { got }) => err(format!(
-                    "cdbrw.enroll: insufficient trials (got {got}, need >= 16)"
+                    "cdbrw.enroll: insufficient trials_per_sample (got {got}, need >= 16)"
                 )),
                 Err(EnrollError::EmptyTrial { index }) => {
                     err(format!("cdbrw.enroll: trial {index} has no timings"))
@@ -727,6 +780,24 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     "cdbrw.enroll: trial {index} challenge invalid: {reason}"
                 )),
                 Err(EnrollError::Io(msg)) => err(format!("cdbrw.enroll: io error: {msg}")),
+                Err(EnrollError::AdmissionShapeMismatch {
+                    admission_samples,
+                    trials_per_sample,
+                    actual_trials,
+                    expected_admission_m,
+                }) => err(format!(
+                    "cdbrw.enroll: admission shape mismatch — got admission_samples={admission_samples} \
+                     (expected {expected_admission_m}), trials_per_sample={trials_per_sample}, \
+                     trials={actual_trials}",
+                )),
+                Err(EnrollError::AdmissionRejected {
+                    median_h_hat,
+                    median_rho_hat_abs,
+                    median_l_hat,
+                    ..
+                }) => err(format!(
+                    "cdbrw.enroll: admission rejected (median H={median_h_hat:.4} |rho|={median_rho_hat_abs:.4} L={median_l_hat:.4})"
+                )),
             }
         }
 

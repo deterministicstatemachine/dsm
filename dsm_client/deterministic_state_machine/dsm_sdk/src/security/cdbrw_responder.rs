@@ -56,11 +56,44 @@ pub const DEFAULT_HISTOGRAM_BINS: usize = 256;
 pub const DEFAULT_DISTANCE_MARGIN: f32 = 0.02;
 
 /// C-DBRW spec §4.5.7: Ĥ threshold (h_min − ε, ε = 0.05).
+///
+/// Phase 9 reinterpretation: this is the **median** floor used by
+/// [`classify_resonant_m_sample`] across `M=ADMISSION_M` independent
+/// samples, not a single-draw gate.  A single sample dipping below
+/// `H_HAT_MIN` but above [`H_HAT_HARD_REJECT`] no longer fails the
+/// device — the median verdict and per-sample hard floors do.
 pub const H_HAT_MIN: f32 = 0.45;
-/// C-DBRW spec §4.5.7: |ρ̂| ≤ 0.3.
+/// Marginal-band lower edge for the M-sample admission rule (Phase 9).
+/// `median_h_hat ∈ [H_HAT_WARN, H_HAT_MIN)` with all per-sample hard
+/// floors clean classifies as [`ResonantStatus::Resonant`] →
+/// [`AccessLevel::ReadOnly`] (degraded but usable) instead of failing
+/// closed.  Devices whose silicon variance straddles `H_HAT_MIN` across
+/// runs get a stable verdict rather than alternating PASS/FAIL.
+pub const H_HAT_WARN: f32 = 0.40;
+/// Per-sample hard floor for Shannon entropy (Phase 9).  If ANY of the
+/// `M` admission samples reports `h_hat < H_HAT_HARD_REJECT`, the
+/// device is rejected outright regardless of the median verdict — this
+/// catches catastrophically bad silicon that one healthy sample
+/// (e.g. lucky cache-state alignment) would otherwise mask.
+pub const H_HAT_HARD_REJECT: f32 = 0.35;
+/// C-DBRW spec §4.5.7: |ρ̂| ≤ 0.3.  Phase 9: median ceiling.
 pub const RHO_HAT_MAX: f32 = 0.30;
-/// C-DBRW spec §4.5.7: L̂ threshold.
+/// Per-sample hard ceiling for |ρ̂| (Phase 9).  ANY sample exceeding
+/// this fails admission regardless of median.
+pub const RHO_HAT_HARD_REJECT: f32 = 0.40;
+/// C-DBRW spec §4.5.7: L̂ threshold.  Phase 9: median floor.
 pub const L_HAT_MIN: f32 = 0.45;
+/// Per-sample hard floor for LZ78 compressibility (Phase 9).
+pub const L_HAT_HARD_REJECT: f32 = 0.35;
+/// Number of independent K-trial admission samples (Phase 9).  Each
+/// sample is an independent K-trial enrollment chunk; the M chunks are
+/// captured back-to-back in a single Kotlin → JNI batch then composed
+/// in Rust under [`classify_resonant_m_sample`].  `M=3` was chosen for
+/// the variance/cost tradeoff: median of 3 absorbs trial-to-trial
+/// jitter on marginal silicon (real-world observed h_hat spread of
+/// 0.41/0.77/0.92/0.94 on Galaxy A54 across runs) without doubling
+/// first-genesis time vs M=5.
+pub const ADMISSION_M: usize = 3;
 /// Minimum total entropy bits for the Resonant path. Matches the spec's
 /// baseline security level: h_min × N_min = 0.5 × 4096 = 2048 bits
 /// (Proposition 7.1). Devices with high ρ̂ but sufficient total entropy
@@ -326,6 +359,111 @@ pub fn classify_resonant(h_hat: f32, rho_hat: f32, l_hat: f32) -> (ResonantStatu
         (ResonantStatus::Adapted, h0_eff, 16384)
     } else {
         (ResonantStatus::Fail, h0_eff, 16384)
+    }
+}
+
+/// Phase 9 — Median-of-M C-DBRW admission rule.
+///
+/// Replaces single-K=21-draw acceptance for the *enrollment* path with
+/// median + hard-floor verdicts over `M=ADMISSION_M` independent
+/// samples. Each `samples[i]` is the [`HealthResult`] computed over the
+/// `i`-th K-trial chunk by [`cdbrw_ffi::health_test_in_range`] under
+/// the shared robust [`BinRange`] committed at enrollment.
+///
+/// Verdict resolution (in order):
+/// 1. **Hard-floor reject** — if any sample's `h_hat <
+///    H_HAT_HARD_REJECT`, `|rho_hat| > RHO_HAT_HARD_REJECT`, or `l_hat
+///    < L_HAT_HARD_REJECT` → [`ResonantStatus::Fail`]. One
+///    catastrophically bad sample cannot be masked by two healthy
+///    samples in the median.
+/// 2. **Median pass** — if `median_h_hat ≥ H_HAT_MIN ∧
+///    median_rho_hat_abs ≤ RHO_HAT_MAX ∧ median_l_hat ≥ L_HAT_MIN` →
+///    [`ResonantStatus::Pass`] (→ `AccessLevel::FullAccess`).
+/// 3. **Marginal band** — if `median_h_hat ∈ [H_HAT_WARN, H_HAT_MIN)`
+///    AND every sample passes the hard floors →
+///    [`ResonantStatus::Resonant`] (→ `AccessLevel::ReadOnly`). The
+///    device is usable but spends are PIN-gated. This is the band that
+///    fixes the Galaxy A54 brittleness: silicon whose median draw
+///    straddles `H_HAT_MIN` gets a stable READ_ONLY verdict instead of
+///    alternating between FULL_ACCESS and PIN_REQUIRED+drift across
+///    runs.
+/// 4. **Degraded admission** — entropy clean but median below
+///    `H_HAT_WARN` → [`ResonantStatus::Adapted`] (→
+///    `AccessLevel::PinRequired`). Step-up enforced.
+/// 5. **Reject** — anything else → [`ResonantStatus::Fail`].
+///
+/// Returns `(status, median_h0_eff, recommended_n)` so the caller can
+/// thread the median scalars into the persisted trust snapshot.  The
+/// per-sample arrays themselves stay with the caller for the audit
+/// trail (schema v7 stores all `M` of them).
+///
+/// # Panics
+///
+/// Panics if `samples` is empty (the enrollment writer pre-validates
+/// `samples.len() == ADMISSION_M`; callers must as well).
+pub fn classify_resonant_m_sample(samples: &[HealthResult]) -> (ResonantStatus, f32, u32) {
+    assert!(
+        !samples.is_empty(),
+        "classify_resonant_m_sample: at least one sample required"
+    );
+
+    // Hard-floor pass first — any sample failing a hard floor disqualifies
+    // the device regardless of the median.
+    for s in samples {
+        if s.h_hat < H_HAT_HARD_REJECT
+            || s.rho_hat.abs() > RHO_HAT_HARD_REJECT
+            || s.l_hat < L_HAT_HARD_REJECT
+        {
+            // Pick a representative h0_eff for the failing sample so the
+            // caller's snapshot reflects a meaningful number.
+            let h0 = s.h_hat * (1.0 - s.rho_hat.abs());
+            return (ResonantStatus::Fail, h0, 16384);
+        }
+    }
+
+    // Median in each metric (sort-then-pick-middle; `samples.len()` is
+    // small — M=3 in production — so the cost is irrelevant).
+    let mut h: Vec<f32> = samples.iter().map(|s| s.h_hat).collect();
+    let mut r: Vec<f32> = samples.iter().map(|s| s.rho_hat.abs()).collect();
+    let mut l: Vec<f32> = samples.iter().map(|s| s.l_hat).collect();
+    let cmp_f32 = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    h.sort_by(cmp_f32);
+    r.sort_by(cmp_f32);
+    l.sort_by(cmp_f32);
+    let mid = samples.len() / 2;
+    let median_h = h[mid];
+    let median_rho_abs = r[mid];
+    let median_l = l[mid];
+    // Approximate median h0_eff: the metrics are computed independently
+    // per sample but reporting `median_h × (1 − median_|ρ|)` keeps the
+    // h0_eff scalar comparable to the single-sample path's value.
+    let median_h0_eff = median_h * (1.0 - median_rho_abs);
+
+    let base_pass = median_h >= H_HAT_MIN && median_rho_abs <= RHO_HAT_MAX && median_l >= L_HAT_MIN;
+    let entropy_ok_strict = median_h >= H_HAT_MIN && median_l >= L_HAT_MIN;
+    let entropy_ok_marginal =
+        median_h >= H_HAT_WARN && median_l >= H_HAT_WARN && median_rho_abs <= RHO_HAT_MAX;
+
+    if base_pass {
+        (ResonantStatus::Pass, median_h0_eff, 4096)
+    } else if entropy_ok_strict
+        && median_h0_eff * cdbrw_ffi::thresholds::HEALTH_N as f32 >= MIN_TOTAL_ENTROPY_BITS
+    {
+        // Median clears H_HAT_MIN/L_HAT_MIN but ρ̂ exceeds the strict
+        // ceiling — same Resonant path as the single-sample classifier.
+        (ResonantStatus::Resonant, median_h0_eff, 4096)
+    } else if entropy_ok_marginal {
+        // Median falls in [H_HAT_WARN, H_HAT_MIN) with all hard floors
+        // clean. The marginal band: device is real silicon, just sitting
+        // at the noisy edge of its variance envelope. READ_ONLY is the
+        // honest verdict.
+        (ResonantStatus::Resonant, median_h0_eff, 4096)
+    } else if median_h >= H_HAT_WARN && median_l >= H_HAT_WARN {
+        // Median entropy ok but rho/correlation issue puts it in the
+        // step-up band.
+        (ResonantStatus::Adapted, median_h0_eff, 16384)
+    } else {
+        (ResonantStatus::Fail, median_h0_eff, 16384)
     }
 }
 
@@ -728,6 +866,96 @@ mod tests {
             assert_eq!(snap.access_level, AccessLevel::FullAccess);
             assert_eq!(snap.resonant_status, ResonantStatus::Pass);
         });
+    }
+
+    fn health_sample(h_hat: f32, rho_hat: f32, l_hat: f32) -> HealthResult {
+        let passed = h_hat >= H_HAT_MIN && rho_hat.abs() <= RHO_HAT_MAX && l_hat >= L_HAT_MIN;
+        HealthResult {
+            h_hat,
+            rho_hat,
+            l_hat,
+            passed,
+        }
+    }
+
+    #[test]
+    fn classify_m_sample_all_pass_is_pass() {
+        let samples = vec![
+            health_sample(0.55, 0.10, 0.55),
+            health_sample(0.60, 0.05, 0.60),
+            health_sample(0.50, 0.15, 0.50),
+        ];
+        let (status, _, n) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Pass);
+        assert_eq!(n, 4096);
+    }
+
+    #[test]
+    fn classify_m_sample_marginal_median_is_resonant() {
+        // The motivating Galaxy A54 case: median lands in [WARN, MIN)
+        // and all hard floors clean.  Should classify Resonant (→
+        // ReadOnly), not Fail.
+        let samples = vec![
+            health_sample(0.41, 0.10, 0.50), // marginal
+            health_sample(0.42, 0.12, 0.48), // marginal
+            health_sample(0.43, 0.15, 0.49), // marginal but clean floors
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Resonant);
+    }
+
+    #[test]
+    fn classify_m_sample_one_hard_floor_breach_rejects() {
+        // One catastrophic sample: hard floor on h_hat triggers Fail
+        // regardless of the median of the other two.
+        let samples = vec![
+            health_sample(0.55, 0.10, 0.55),
+            health_sample(0.20, 0.10, 0.55), // h_hat below 0.35 hard floor
+            health_sample(0.60, 0.10, 0.55),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Fail);
+    }
+
+    #[test]
+    fn classify_m_sample_one_hard_rho_breach_rejects() {
+        let samples = vec![
+            health_sample(0.55, 0.10, 0.55),
+            health_sample(0.55, 0.45, 0.55), // |rho| above 0.40 hard ceiling
+            health_sample(0.55, 0.10, 0.55),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Fail);
+    }
+
+    #[test]
+    fn classify_m_sample_lucky_draw_does_not_mask_variance() {
+        // The brittleness scenario: one healthy draw (0.92) cannot save a
+        // pair of failing draws.  Median is the second-best sample, so
+        // (0.20, 0.41, 0.92) → median=0.41, but 0.20 trips the hard
+        // floor → Fail.  This is the safety property: lucky cache
+        // alignment cannot promote bad silicon to PASS.
+        let samples = vec![
+            health_sample(0.20, 0.10, 0.55),
+            health_sample(0.41, 0.10, 0.50),
+            health_sample(0.92, 0.10, 0.70),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Fail);
+    }
+
+    #[test]
+    fn classify_m_sample_high_variance_clean_floors_lands_resonant() {
+        // Real-world A54 spread: 0.41 / 0.77 / 0.92.  Median = 0.77 →
+        // PASS.  All hard floors clean.  Result: Pass (FULL_ACCESS) on
+        // the same silicon that single-K=21 acceptance rejected at 0.41.
+        let samples = vec![
+            health_sample(0.41, 0.10, 0.50),
+            health_sample(0.77, 0.10, 0.65),
+            health_sample(0.92, 0.10, 0.70),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Pass);
     }
 
     #[test]
