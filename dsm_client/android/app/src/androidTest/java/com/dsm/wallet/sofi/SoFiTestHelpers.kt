@@ -56,9 +56,13 @@ internal val INPUT_TOKEN: ByteArray = "ERA".toByteArray(Charsets.UTF_8)
 
 internal const val INITIAL_RESERVE_A: Long = 1_000_000L
 internal const val INITIAL_RESERVE_B: Long = 1_000_000L
-internal const val INPUT_AMOUNT: Long = 1_000L
-internal const val MIN_ERA_BALANCE: Long = 5_000L
-internal const val FAUCET_CLAIM_AMOUNT: Long = 100_000L
+// Production faucet (faucet_state.rs default config) credits 100 ERA per
+// claim regardless of the requested amount — the server ignores the
+// FaucetClaimRequest.amount field and uses its config.claim_amount.
+// Test thresholds match what one claim actually grants.
+internal const val INPUT_AMOUNT: Long = 10L
+internal const val MIN_ERA_BALANCE: Long = 50L
+internal const val FAUCET_CLAIM_AMOUNT: Long = 100L
 
 internal const val VAULT1_FEE_BPS: Int = 30
 internal const val VAULT2_FEE_BPS: Int = 50
@@ -384,7 +388,12 @@ internal class SoFiTestContext(
      *  via `route.syncVaultsForPair` on the canonical (lex-lower,
      *  lex-higher) pair. */
     fun publishRoutingAdvertisement(vaultId: ByteArray, feeBps: Int, label: String) {
-        val vaultProtoBytes = ("demo-vault-proto:$label:" + b32(vaultId)).toByteArray(Charsets.UTF_8)
+        // Pass empty vault_proto_bytes so the Rust handler derives the
+        // canonical VaultPostProto from the local DLVManager.  The
+        // previous string-placeholder was decode-failing at the
+        // trader's `route.syncVaultsForPair`, leaving the trader's
+        // DLVManager empty and `dlv.unlockRouted` rejecting with
+        // "vault not in local DLVManager".
         val unlockSpecDigest = blake3Like32("DSM/sofi-test-unlock:$label")
         val req = PublishRoutingAdvertisementRequest.newBuilder()
             .setVaultId(ByteString.copyFrom(vaultId))
@@ -397,7 +406,8 @@ internal class SoFiTestContext(
             .setUnlockSpecKey("defi/spec/sofi-test/$label")
             // Empty owner_public_key → Rust stamps wallet pk.
             .setOwnerPublicKey(ByteString.EMPTY)
-            .setVaultProtoBytes(ByteString.copyFrom(vaultProtoBytes))
+            // Empty vault_proto_bytes → Rust derives from local DLVManager.
+            .setVaultProtoBytes(ByteString.EMPTY)
             .build()
         val env = routerInvoke("route.publishRoutingAdvertisement", req.toByteArray())
         val returnedVaultB32 = appStateValue(env, "route.publishRoutingAdvertisement")

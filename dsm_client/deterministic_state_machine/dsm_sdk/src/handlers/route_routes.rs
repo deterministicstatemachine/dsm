@@ -442,8 +442,33 @@ impl AppRouterImpl {
                 "route.publishRoutingAdvertisement: unlock_spec_digest must be 32 bytes".into(),
             );
         }
+        // Derive vault_proto_bytes from the local DLVManager when the
+        // caller passes empty.  This is the path the SoFi test +
+        // production wallet UIs use: the wallet has the canonical
+        // vault state via `dlv.create`; making the caller serialise
+        // VaultPostProto bytes themselves is redundant + error-prone
+        // (the test was passing a UTF-8 placeholder string which then
+        // failed to decode as VaultPostProto at the trader's
+        // `route.syncVaultsForPair` step, leaving the trader's
+        // DLVManager empty and `dlv.unlockRouted` rejecting with
+        // "vault not in local DLVManager").  When the caller does
+        // pass non-empty bytes (router-service integrations), we
+        // honour them verbatim.
         if req.vault_proto_bytes.is_empty() {
-            return err("route.publishRoutingAdvertisement: vault_proto_bytes is required".into());
+            let dlv_manager = self.bitcoin_tap.dlv_manager();
+            let mut vid_arr = [0u8; 32];
+            vid_arr.copy_from_slice(&req.vault_id);
+            match dlv_manager
+                .create_vault_post(&vid_arr, "route.publishRoutingAdvertisement", None)
+                .await
+            {
+                Ok(bytes) => req.vault_proto_bytes = bytes,
+                Err(e) => {
+                    return err(format!(
+                        "route.publishRoutingAdvertisement: vault_proto_bytes empty + local DLVManager create_vault_post failed: {e}"
+                    ));
+                }
+            }
         }
         // Accept-or-stamp: empty owner pk → wallet pk; non-empty →
         // caller-supplied.  Same pattern as chunk #6 / Track C.4 /
