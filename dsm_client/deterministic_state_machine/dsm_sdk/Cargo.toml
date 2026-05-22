@@ -65,7 +65,7 @@ dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false }
 jni = { version = "0.21", optional = true }
 
 # mDNS service discovery
-mdns-sd = { version = "0.19.1", optional = true }
+mdns-sd = { version = "0.19.2", optional = true }
 
 # Protobuf support
 prost = "0.14"
@@ -127,7 +127,7 @@ crc32fast = "1.3.2"
 # Metrics and instrumentation
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-metrics = "0.24.3"
+metrics = "0.24.6"
 
 # Utilities
 bip39 = "2.0.0"
