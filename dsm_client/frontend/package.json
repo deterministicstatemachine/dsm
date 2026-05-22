@@ -75,7 +75,7 @@
     "eslint-plugin-react": "^7.33.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-security": "^4.0.0",
-    "html-webpack-plugin": "^5.5.3",
+    "html-webpack-plugin": "^5.6.7",
     "jest": "^30.3.0",
     "jest-environment-jsdom": "^30.4.1",
     "long": "^5.3.2",
@@ -87,9 +87,9 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.4.0",
     "webpack": "^5.106.2",
-    "webpack-bundle-analyzer": "^4.9.1",
+    "webpack-bundle-analyzer": "^5.3.0",
     "webpack-cli": "^7.0.2",
-    "webpack-dev-server": "^5.2.3"
+    "webpack-dev-server": "^5.2.4"
   },
   "overrides": {
     "minimatch": ">=10.0.0",
