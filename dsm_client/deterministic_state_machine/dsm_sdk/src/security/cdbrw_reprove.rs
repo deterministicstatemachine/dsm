@@ -224,11 +224,21 @@ pub fn reprove_with_inputs(
 #[cfg(test)]
 mod concurrent_tests {
     use crate::binding_key::{clear_binding_key, get_binding_key, install_binding_key};
+    use serial_test::serial;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
+    // `#[serial]` — the wallet_sdk tests are also `#[serial]` and depend
+    // on the binding-key slot being populated by their own
+    // `WalletSDK::test_wallet()` setup.  Without serialization, this
+    // concurrent test races with those tests through the same global
+    // slot: clearing it mid-flight produces an
+    // `InvalidState("C-DBRW binding key unavailable for canonical
+    // signing authority")` failure in the unsuspecting wallet test.
+    // Both groups of tests must run on the same serial queue.
     #[test]
+    #[serial]
     fn binding_key_slot_concurrent_set_and_get_does_not_corrupt() {
         // Reset to a known empty state.
         clear_binding_key();
