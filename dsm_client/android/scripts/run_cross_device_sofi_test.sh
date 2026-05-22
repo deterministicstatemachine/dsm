@@ -137,17 +137,50 @@ echo "✓ identical dsm_env_config.toml on both devices (md5=$OWNER_CFG_MD5)"
 #    restore re-fires AFTER each gradle install pulses.  Cheaper to
 #    move the backup right before tests and accept the wipe risk
 #    once: see the explicit pre-install backup below.
+HOST_BACKUP_DIR="$HOME/.dsm/sofi_wallet_backups"
+mkdir -p "$HOST_BACKUP_DIR"
+
 backup_wallet() {
     local SERIAL="$1"
     local STAGE="$2"
     local BACKUP_PATH="/sdcard/sofi_wallet_backup_${SERIAL}_${STAGE}.tar.b64"
-    # Run-as into the wallet, tar the private files dir, base64-encode
-    # for pipe-safety, write to /sdcard (world-accessible scratch).
-    if adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'cd /data/data/com.dsm.wallet && tar -cf - files/' | base64 > $BACKUP_PATH" 2>&1; then
-        local SIZE=$(adb -s "$SERIAL" shell "stat -c %s $BACKUP_PATH 2>/dev/null" 2>&1 | tr -d '\r' || echo "0")
-        echo "  ✓ backed up wallet on $SERIAL (size=$SIZE bytes) -> $BACKUP_PATH"
+    local HOST_PATH="$HOST_BACKUP_DIR/sofi_wallet_backup_${SERIAL}_${STAGE}.tar.b64"
+
+    # Skip-and-preserve guard: if com.dsm.wallet isn't installed, the
+    # `run-as` below would emit nothing and the `> $BACKUP_PATH` would
+    # truncate any existing good backup to zero bytes (this is exactly
+    # how a previous orchestrator run obliterated 634245-byte backups
+    # from a successful prior run).  Bail without touching the device
+    # or host file.
+    local PKG_PRESENT
+    PKG_PRESENT=$(adb -s "$SERIAL" shell "pm list packages com.dsm.wallet" 2>&1 | tr -d '\r')
+    if [[ -z "$PKG_PRESENT" || "$PKG_PRESENT" != *"com.dsm.wallet"* ]]; then
+        echo "  ! backup on $SERIAL skipped: com.dsm.wallet not installed — preserving any existing backup at $BACKUP_PATH + $HOST_PATH"
+        return
+    fi
+
+    # Stage to a .new file so we don't truncate an existing good
+    # backup if this attempt produces trivial output (e.g. wallet
+    # files dir empty post-wipe).
+    local TMP_BACKUP="${BACKUP_PATH}.new"
+    adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'cd /data/data/com.dsm.wallet && tar -cf - files/' 2>/dev/null | base64 > $TMP_BACKUP" 2>&1 >/dev/null || true
+    local SIZE
+    SIZE=$(adb -s "$SERIAL" shell "stat -c %s $TMP_BACKUP 2>/dev/null" 2>&1 | tr -d '\r')
+    SIZE=${SIZE:-0}
+    if ! [[ "$SIZE" =~ ^[0-9]+$ ]]; then SIZE=0; fi
+    # An empty wallet's `tar files/` produces ~512 bytes of tar header
+    # + base64 overhead = several hundred bytes minimum.  A real
+    # populated wallet is hundreds of KB.  Use 1024 as the floor.
+    if (( SIZE > 1024 )); then
+        adb -s "$SERIAL" shell "mv $TMP_BACKUP $BACKUP_PATH" >/dev/null 2>&1
+        # Also pull to host so the backup survives a full device
+        # uninstall (Samsung/Smart-Switch sometimes nukes
+        # com.dsm.wallet between runs).
+        adb -s "$SERIAL" pull "$BACKUP_PATH" "$HOST_PATH" >/dev/null 2>&1 || true
+        echo "  ✓ backed up wallet on $SERIAL (size=$SIZE bytes) -> $BACKUP_PATH + $HOST_PATH"
     else
-        echo "  ! backup on $SERIAL failed (wallet may be empty or not installed; OK if fresh)"
+        adb -s "$SERIAL" shell "rm $TMP_BACKUP" >/dev/null 2>&1 || true
+        echo "  ! backup on $SERIAL trivial (size=$SIZE); preserving existing $BACKUP_PATH + $HOST_PATH"
     fi
 }
 
@@ -155,17 +188,32 @@ restore_wallet() {
     local SERIAL="$1"
     local STAGE="$2"
     local BACKUP_PATH="/sdcard/sofi_wallet_backup_${SERIAL}_${STAGE}.tar.b64"
-    # Verify backup exists + non-trivial size; otherwise skip restore.
-    local SIZE=$(adb -s "$SERIAL" shell "stat -c %s $BACKUP_PATH 2>/dev/null" 2>&1 | tr -d '\r' || echo "0")
-    if [[ -z "$SIZE" || "$SIZE" == "0" || "$SIZE" == "stat:" ]]; then
-        echo "  ! restore on $SERIAL skipped: no backup at $BACKUP_PATH"
+    local HOST_PATH="$HOST_BACKUP_DIR/sofi_wallet_backup_${SERIAL}_${STAGE}.tar.b64"
+
+    # If /sdcard backup is missing or trivial but a host backup
+    # exists, push it back to the device first.  This is the
+    # uninstall-survives path.
+    local DEV_SIZE
+    DEV_SIZE=$(adb -s "$SERIAL" shell "stat -c %s $BACKUP_PATH 2>/dev/null" 2>&1 | tr -d '\r')
+    DEV_SIZE=${DEV_SIZE:-0}
+    if ! [[ "$DEV_SIZE" =~ ^[0-9]+$ ]]; then DEV_SIZE=0; fi
+    if (( DEV_SIZE <= 1024 )) && [[ -f "$HOST_PATH" ]]; then
+        local HOST_SIZE=$(stat -f %z "$HOST_PATH" 2>/dev/null || stat -c %s "$HOST_PATH" 2>/dev/null || echo "0")
+        if (( HOST_SIZE > 1024 )); then
+            echo "  · device backup missing/trivial ($DEV_SIZE B); pushing from host ($HOST_SIZE B)"
+            adb -s "$SERIAL" push "$HOST_PATH" "$BACKUP_PATH" >/dev/null 2>&1 || true
+            DEV_SIZE=$HOST_SIZE
+        fi
+    fi
+    if (( DEV_SIZE <= 1024 )); then
+        echo "  ! restore on $SERIAL skipped: no usable backup (device=$DEV_SIZE B, host=$(stat -f %z "$HOST_PATH" 2>/dev/null || echo "absent"))"
         return
     fi
     # Force-stop the app so file operations are safe (no in-flight
     # writes), then untar over the existing dir.
     adb -s "$SERIAL" shell "am force-stop com.dsm.wallet" >/dev/null 2>&1 || true
-    if adb -s "$SERIAL" shell "cat $BACKUP_PATH | base64 -d | run-as com.dsm.wallet tar -xf - -C /data/data/com.dsm.wallet" 2>&1; then
-        echo "  ✓ restored wallet on $SERIAL (size=$SIZE bytes) <- $BACKUP_PATH"
+    if adb -s "$SERIAL" shell "cat $BACKUP_PATH | base64 -d | run-as com.dsm.wallet tar -xf - -C /data/data/com.dsm.wallet" 2>&1 >/dev/null; then
+        echo "  ✓ restored wallet on $SERIAL (size=$DEV_SIZE bytes) <- $BACKUP_PATH"
     else
         echo "  ! restore on $SERIAL failed"
     fi
