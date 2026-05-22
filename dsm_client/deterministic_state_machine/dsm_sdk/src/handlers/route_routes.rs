@@ -606,7 +606,59 @@ impl AppRouterImpl {
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            if dlv_manager.get_vault(&vid).await.is_ok() {
+            // Already-mirrored vaults: refresh their reserves from
+            // the latest advertisement.  The advertisement carries
+            // reserves in canonical (lex-lower, lex-higher) pair
+            // order; map back to the vault's storage order before
+            // applying.  This is how the OWNER observes a remote
+            // trader's `dlv.unlockRouted` settle on a vault the
+            // owner created — without this refresh, the owner's
+            // local DLVManager stays frozen at vault-creation-time
+            // reserves and the cross-device SoFi orchestrator's
+            // "owner observes trader's settle" assertion can never
+            // fire.  Trader's post-settle path already publishes the
+            // updated advertisement via
+            // `republish_active_advertisement_with_reserves`; this
+            // closes the loop on the owner side.
+            if let Ok(vault_lock) = dlv_manager.get_vault(&vid).await {
+                if ad.reserve_a_u128.len() == 16 && ad.reserve_b_u128.len() == 16 {
+                    let mut canon_a = [0u8; 16];
+                    canon_a.copy_from_slice(&ad.reserve_a_u128);
+                    let mut canon_b = [0u8; 16];
+                    canon_b.copy_from_slice(&ad.reserve_b_u128);
+                    let ad_canon_a = u128::from_be_bytes(canon_a);
+                    let ad_canon_b = u128::from_be_bytes(canon_b);
+                    // Match the ad's canonical pair order against the
+                    // vault's storage order.  If vault.token_a equals
+                    // ad.token_a, reserves are already in vault order;
+                    // otherwise swap.
+                    let mut vault = vault_lock.lock().await;
+                    let vault_token_a = vault.amm_token_a().map(|s| s.to_vec());
+                    if let Some(vt_a) = vault_token_a {
+                        let (new_a, new_b) = if vt_a.as_slice() == ad.token_a.as_slice() {
+                            (ad_canon_a, ad_canon_b)
+                        } else {
+                            (ad_canon_b, ad_canon_a)
+                        };
+                        if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                            reserve_a,
+                            reserve_b,
+                            ..
+                        } = &vault.fulfillment_condition
+                        {
+                            if *reserve_a != new_a || *reserve_b != new_b {
+                                let _ = vault.update_amm_reserves(new_a, new_b);
+                                log::info!(
+                                    "[route.syncVaultsForPair] refreshed reserves for vault {} from ad: a={} b={} updated_state_number={}",
+                                    crate::util::text_id::encode_base32_crockford(&vid),
+                                    new_a,
+                                    new_b,
+                                    ad.updated_state_number
+                                );
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad).await
