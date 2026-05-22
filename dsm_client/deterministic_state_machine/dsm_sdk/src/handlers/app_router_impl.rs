@@ -2665,6 +2665,7 @@ impl AppRouter for AppRouterImpl {
             // C-DBRW routes (Protocol 6.2 Algorithm 3 + enrollment + measure + status)
             "dbrw.status"
             | "cdbrw.measure_trust"
+            | "cdbrw.reprove"
             | "cdbrw.respond"
             | "cdbrw.verify"
             | "cdbrw.enroll" => self.handle_dbrw_query(q).await,

@@ -96,7 +96,9 @@ pub mod routing_path_sdk;
 pub mod routing_sdk;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
+pub mod vault_smt_inclusion_codec;
 pub mod vault_state_anchor_codec;
+pub mod vault_state_composition;
 
 // Recovery system SDK
 pub mod recovery_sdk;

@@ -359,7 +359,9 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                     "system.genesis" => handle_system_genesis_query(q),
                     // Bootstrap needs C-DBRW enrollment/trust before the full
                     // identity context exists. Keep this allowlist narrow.
-                    "cdbrw.enroll" | "cdbrw.measure_trust" => dispatch_dbrw_query(q).await,
+                    "cdbrw.enroll" | "cdbrw.measure_trust" | "cdbrw.reprove" => {
+                        dispatch_dbrw_query(q).await
+                    }
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),

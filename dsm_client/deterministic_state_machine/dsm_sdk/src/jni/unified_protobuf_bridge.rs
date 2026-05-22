@@ -42,18 +42,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::generated as pb;
-use crate::bluetooth::bilateral_transport_adapter::BleTransportDelegate;
 use crate::jni::helpers;
-use jni::objects::{JByteArray, JString, JObject, JValue};
+use jni::objects::{JByteArray, JString};
 use jni::JNIEnv;
 use prost::Message;
-use tokio::runtime::Handle;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use dsm::utils::deterministic_time as dt;
-use crate::storage::client_db::{get_contact_by_device_id, get_contact_chain_tip};
+use crate::storage::client_db::get_contact_by_device_id;
 use crate::sdk::session_manager::SDK_READY;
-use crate::jni::state::{DEVICE_ID_TO_ADDR, parse_hex_32, register_ble_address_mapping};
+use crate::jni::state::register_ble_address_mapping;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::jni::state::BILATERAL_INIT_POLL_STARTED;
 
@@ -1260,7 +1258,7 @@ fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
 /// 0x03 envelopes rather than BLE chunks.
 fn process_envelope_v3_impl(
     req: &[u8],
-    device_address: Option<&str>,
+    _device_address: Option<&str>,
 ) -> Result<Vec<u8>, IngressShimError> {
     ensure_bootstrap();
 

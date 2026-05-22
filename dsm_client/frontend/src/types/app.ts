@@ -19,6 +19,7 @@ export type ScreenType =
   | 'dev_sofi_launch'
   | 'sofi'
   | 'liquidity'
+  | 'swap'
   | 'mail'
   | 'bluetooth'
   | 'vault'

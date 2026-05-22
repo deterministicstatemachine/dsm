@@ -289,6 +289,59 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     )?;
     push_genesis_lifecycle_event(pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32, 0)?;
 
+    // Ensure the wallet is registered for authenticated PUTs on every
+    // configured storage node.  Runs on BOTH genesis (BootstrapPhaseFinalize)
+    // and resume (BootstrapPhaseResumeFinalize) so existing wallets that
+    // completed genesis before this code existed get their auth tokens
+    // populated on the next launch.  Idempotent at the storage-node level;
+    // tokens stored via `store_auth_token`, read on every PUT path via
+    // `BitcoinTapSdk::resolve_storage_auth`.  Best-effort: failures are
+    // logged but never block bootstrap completion.
+    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&context.device_id);
+    let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&context.genesis_hash);
+    let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+    let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+    let rt = tokio::runtime::Handle::try_current();
+    let auth_task = async move {
+        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+            Ok(cfg) => match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+                Ok(auth_sdk) => match auth_sdk
+                    .register_device_for_auth(&device_id_b32, &public_key_b32, &genesis_hash_b32)
+                    .await
+                {
+                    Ok(_) => log::info!(
+                        "FINALIZE_BOOTSTRAP: storage-node auth-registration completed"
+                    ),
+                    Err(e) => log::warn!(
+                        "FINALIZE_BOOTSTRAP: auth-registration failed (PUTs may 401 until retry): {e}"
+                    ),
+                },
+                Err(e) => log::warn!(
+                    "FINALIZE_BOOTSTRAP: auth-registration SDK init failed: {e}"
+                ),
+            },
+            Err(e) => log::warn!(
+                "FINALIZE_BOOTSTRAP: auth-registration cfg load failed: {e}"
+            ),
+        }
+    };
+    if let Ok(handle) = rt {
+        // Spawn off the runtime if we're already on one — never block
+        // finalize_bootstrap_core on the network round-trips.
+        handle.spawn(auth_task);
+    } else {
+        // No active runtime (test or unusual init order); fire-and-forget
+        // via a fresh runtime so the storage publishes still happen.
+        std::thread::spawn(|| {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(auth_task);
+            }
+        });
+    }
+
     let ready_message = if report.trust_level
         == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
     {

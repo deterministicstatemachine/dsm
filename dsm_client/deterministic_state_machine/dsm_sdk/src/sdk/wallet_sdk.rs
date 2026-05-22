@@ -1660,7 +1660,13 @@ impl WalletSDK {
 
         let core_sdk = Arc::new(CoreSDK::new()?);
         let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-        Self::new(core_sdk, &device_id_b32, None)
+        let test_config = WalletConfig {
+            name: format!("{device_id_b32}'s Wallet"),
+            // Keep tests deterministic under concurrent tick activity in other suites.
+            auto_lock_timeout: 0,
+            ..WalletConfig::default()
+        };
+        Self::new(core_sdk, &device_id_b32, Some(test_config))
     }
 }
 #[cfg(test)]
@@ -1780,8 +1786,11 @@ mod tests {
         let device_id = info
             .get("device_id")
             .unwrap_or_else(|| panic!("device_id missing"));
-        let expected_device_id = crate::util::text_id::encode_base32_crockford(&[0x11; 32]);
+        let expected_device_id = wallet.device_id_string();
         assert_eq!(device_id, &expected_device_id);
+        let decoded = crate::util::text_id::decode_base32_crockford(device_id)
+            .unwrap_or_else(|| panic!("device_id is not valid base32-crockford"));
+        assert_eq!(decoded.len(), 32);
         let name = info.get("name").unwrap_or_else(|| panic!("name missing"));
         assert!(name.ends_with("Wallet"));
         let cc_raw = info

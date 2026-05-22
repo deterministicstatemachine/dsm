@@ -3,7 +3,7 @@
 //! Vault state anchor primitive (Tier 2 Foundation).
 //!
 //! Owner-signed snapshot of a DLV's state at a specific sequence.
-//! Published to storage at `defi/vault-state/{vault_id_b32}/latest`
+//! Published to storage at `sofi/vault-state/{vault_id_b32}/latest`
 //! for off-device traders to read at quote time.  The local
 //! `DLVManager` is the authoritative truth source for the chunks #7
 //! gate — anchors are an *advertisement*, not a consensus mechanism.

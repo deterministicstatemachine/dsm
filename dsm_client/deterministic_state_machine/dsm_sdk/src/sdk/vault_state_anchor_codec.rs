@@ -12,7 +12,7 @@ use prost::Message;
 
 /// Serialise a `SignedVaultStateAnchor` to its canonical
 /// `VaultStateAnchorV1` proto bytes.  Used by:
-///   * publishers, when posting `defi/vault-state/{vault_id_b32}/latest`;
+///   * publishers, when posting `sofi/vault-state/{vault_id_b32}/latest`;
 ///   * traders, when computing `vault_state_anchor_digest` for
 ///     route-commit binding (see `RouteCommitHopV1`).
 pub fn encode_anchor_to_proto(anchor: &SignedVaultStateAnchor) -> Vec<u8> {
@@ -58,6 +58,38 @@ pub fn decode_anchor_from_proto(bytes: &[u8]) -> Result<SignedVaultStateAnchor, 
 pub fn compute_anchor_digest(anchor: &SignedVaultStateAnchor) -> [u8; 32] {
     let bytes = encode_anchor_to_proto(anchor);
     *blake3::hash(&bytes).as_bytes()
+}
+
+/// Fetch the latest signed `VaultStateAnchorV1` for a vault from
+/// storage at `sofi/vault-state/{vault_id_b32}/latest`.  Returns
+/// `Ok(None)` when no anchor has ever been published (vault pre-dates
+/// the Tier-2 anchor flow OR was just created and hasn't been
+/// republished yet); `Ok(Some(_))` when an anchor was found and
+/// decoded; `Err(_)` on storage / decode failures other than "not
+/// found".
+///
+/// Phase 6 composition uses this to obtain the owner-signed baseline
+/// before folding pending pointers.
+pub async fn fetch_latest_signed_anchor(
+    vault_id: &[u8; 32],
+) -> Result<Option<SignedVaultStateAnchor>, String> {
+    let key = format!(
+        "sofi/vault-state/{}/latest",
+        crate::util::text_id::encode_base32_crockford(vault_id),
+    );
+    let bytes = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key).await {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("not found") {
+                return Ok(None);
+            }
+            return Err(msg);
+        }
+    };
+    decode_anchor_from_proto(&bytes)
+        .map(Some)
+        .map_err(|e| format!("decode anchor failed: {e}"))
 }
 
 #[cfg(test)]

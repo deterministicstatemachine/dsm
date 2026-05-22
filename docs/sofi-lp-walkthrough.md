@@ -106,7 +106,7 @@ Bob holds 10000 DEMO_AAA. He wants DEMO_BBB. Alice has a vault.
    - Bind the best path into an unsigned `RouteCommitV1`.
    - Sign the route commit with Bob's SPHINCS+ key.
    - Compute the external commitment digest.
-   - Publish the anchor at `defi/extcommit/{X}`.
+   - Publish the anchor at `sofi/extcommit/{X}`.
    - Run `dlv.unlockRouted` against Alice's vault. The chunk #7 gate
      re-simulates the constant-product math against current reserves;
      if reserves haven't moved since Bob's quote, the unlock proceeds.

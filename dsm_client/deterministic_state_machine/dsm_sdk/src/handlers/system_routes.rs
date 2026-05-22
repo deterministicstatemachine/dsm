@@ -58,6 +58,24 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
         dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
     );
 
+    // Populate the global PLATFORM_ENTROPY_INPUTS slot so the inner
+    // genesis path (StorageNodeSDK::create_genesis_with_mpc →
+    // core_sdk::create_genesis_with_passive_contributors) can consume
+    // the same C-DBRW inputs via `take_platform_cdbrw_binding_key`.
+    // Without this, the inner path errors out with "core_sdk: C-DBRW
+    // platform entropy inputs are required for genesis" because the
+    // strict-mode refactor (Issue #213) wired the inner path to read
+    // from the slot but no production caller was setting it.
+    if let Err(e) = crate::sdk::app_state::AppState::set_platform_entropy_inputs(
+        req.cdbrw_hw_entropy.clone(),
+        req.cdbrw_env_fingerprint.clone(),
+        req.cdbrw_salt.clone(),
+    ) {
+        return err(format!(
+            "system.genesis: failed to stage platform entropy inputs: {e}"
+        ));
+    }
+
     // Perform MPC-only genesis using storage node SDK.
     let fut = async move {
         let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
@@ -125,6 +143,57 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             "system.genesis: wallet_state ensured for device={}",
             &device_id_b32[..8]
         );
+
+        // Register the new device with each storage node's auth endpoint so
+        // subsequent authenticated PUTs (routing-advertisement publish,
+        // external-commitment publish, etc.) succeed.  Without this every
+        // storage write returns 401 Unauthorized because the per-node auth
+        // token slot is empty.  `register_device_for_auth` is idempotent at
+        // the storage-node level and persists the token via
+        // `store_auth_token`, which `resolve_storage_auth` reads on every
+        // PUT path.  Best-effort: a single-node failure is logged but does
+        // NOT roll back genesis — the genesis record is already durable
+        // and a later retry on the same node will get the token.
+        {
+            let cfg_for_auth =
+                match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        log::warn!(
+                            "system.genesis: auth-registration cfg load failed (genesis still durable): {e}"
+                        );
+                        None
+                    }
+                };
+            if let Some(cfg) = cfg_for_auth {
+                let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+                match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+                    Ok(auth_sdk) => match auth_sdk
+                        .register_device_for_auth(
+                            &device_id_b32,
+                            &public_key_b32,
+                            &crate::util::text_id::encode_base32_crockford(&genesis_hash),
+                        )
+                        .await
+                    {
+                        Ok(_token) => {
+                            log::info!(
+                                "system.genesis: auth-registration completed for device={}",
+                                &device_id_b32[..8]
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "system.genesis: auth-registration failed (subsequent PUTs may 401 until retry): {e}"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("system.genesis: auth-registration SDK init failed: {e}");
+                    }
+                }
+            }
+        }
 
         let resp = generated::GenesisCreated {
             device_id: device_id.clone(),

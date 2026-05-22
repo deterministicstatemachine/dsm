@@ -575,6 +575,85 @@ impl DeviceState {
             child_r_a,
         })
     }
+
+    /// Commit a vault state leaf into the Per-Device SMT (SoFi spec §4.1.2).
+    ///
+    /// Vault-state leaves live in the same SMT as bilateral relationship
+    /// chain tips, but in a disjoint key namespace via
+    /// [`dsm::dlv::vault_smt_leaf::compute_vault_smt_key`] (domain tag
+    /// `DSM/vault-smt-key\0`).  This keeps both leaf types committed
+    /// under a single device root — what the spec calls "vault state
+    /// committed in Per-Device SMT" — without colliding with bilateral
+    /// leaves (which use `DSM/smt-key\0 || min(A,B) || max(A,B)`).
+    ///
+    /// This is a *pure* method (mirroring [`Self::advance`]): it returns a
+    /// new `DeviceState` + the inclusion proof siblings + the post-write
+    /// root.  Caller installs the new head via `StateMachine::set_device_head`
+    /// once persistence succeeds, mirroring the prepare/write/commit
+    /// pattern in `CoreSdk::execute_on_relationship`.
+    ///
+    /// # Parameters
+    /// - `vault_id` — 32-byte deterministic vault identifier.
+    /// - `sequence` — monotonic vault state sequence (0 at create,
+    ///   +1 per accepted unlock).
+    /// - `reserves_digest` — BLAKE3 digest of (token_a, token_b,
+    ///   reserve_a, reserve_b, fee_bps) per
+    ///   [`dsm::dlv::vault_state_anchor::compute_reserves_digest`].
+    pub fn with_vault_state_leaf(
+        &self,
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserves_digest: &[u8; 32],
+    ) -> Result<VaultLeafOutcome, DsmError> {
+        use crate::dlv::vault_smt_leaf::{compute_vault_smt_key, compute_vault_smt_value};
+
+        let leaf_key = compute_vault_smt_key(vault_id);
+        let leaf_value = compute_vault_smt_value(sequence, reserves_digest);
+
+        let mut new_smt = self.smt.clone();
+        new_smt.update_leaf(&leaf_key, &leaf_value).map_err(|e| {
+            DsmError::invalid_operation(format!("with_vault_state_leaf: update_leaf failed: {e}"))
+        })?;
+        let new_root = *new_smt.root();
+        let proof = new_smt.get_inclusion_proof(&leaf_key, 256).map_err(|e| {
+            DsmError::merkle(format!(
+                "with_vault_state_leaf: get_inclusion_proof failed: {e}"
+            ))
+        })?;
+
+        let new_device_state = Self {
+            genesis: self.genesis,
+            devid: self.devid,
+            public_key: self.public_key.clone(),
+            smt: new_smt,
+            balances: self.balances.clone(),
+            tips: self.tips.clone(),
+            legacy_anchor: self.legacy_anchor,
+        };
+
+        Ok(VaultLeafOutcome {
+            new_device_state,
+            new_root,
+            siblings: proof.siblings,
+        })
+    }
+}
+
+/// Outcome of [`DeviceState::with_vault_state_leaf`].  Caller installs
+/// `new_device_state` as the device head once persistence succeeds, and
+/// uses `(new_root, siblings)` to build a
+/// `VaultStateInclusionProofV1` record for the off-device trader path.
+#[derive(Debug, Clone)]
+pub struct VaultLeafOutcome {
+    /// The new device state (post-leaf-write).  Has the same balances,
+    /// tips, genesis, etc. as `self`; only the SMT differs.
+    pub new_device_state: DeviceState,
+    /// Post-write SMT root.  This is the value to embed in the signed
+    /// inclusion proof.
+    pub new_root: [u8; 32],
+    /// 256 sibling hashes in leaf-to-root order, ready to ship inside
+    /// `VaultStateInclusionProofV1.smt_siblings`.
+    pub siblings: Vec<[u8; 32]>,
 }
 
 #[cfg(test)]
@@ -1013,5 +1092,159 @@ mod tests {
             expected,
             "net balance change must equal sum of signed deltas"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase 7 — vault state SMT leaf integration (§4.1.2 / §8.4 step 2)
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn with_vault_state_leaf_returns_verifiable_inclusion_proof() {
+        use crate::dlv::vault_smt_leaf::{
+            compute_vault_smt_key, compute_vault_smt_value, verify_vault_smt_inclusion,
+        };
+        use crate::dlv::vault_state_anchor::compute_reserves_digest;
+
+        let bob = fresh_device(0xC1);
+        let vault_id = [0x12u8; 32];
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30);
+
+        let outcome = bob
+            .with_vault_state_leaf(&vault_id, 0, &reserves_digest)
+            .expect("vault leaf write succeeds");
+
+        // Pure-function contract: self untouched.
+        assert_eq!(bob.root(), bob.root(), "self.root must be stable");
+        assert_ne!(
+            bob.root(),
+            outcome.new_root,
+            "writing a vault leaf must change the SMT root"
+        );
+
+        // Spec-strict verification path: trader rebuilds key+value
+        // from public inputs, walks the siblings up to the proven
+        // root, and accepts.
+        verify_vault_smt_inclusion(
+            &vault_id,
+            0,
+            &reserves_digest,
+            &outcome.new_root,
+            &outcome.siblings,
+        )
+        .expect("verifier accepts the on-device-produced proof");
+
+        // Sanity: the new device state actually carries the leaf.
+        let leaf_key = compute_vault_smt_key(&vault_id);
+        let leaf_value = compute_vault_smt_value(0, &reserves_digest);
+        assert!(outcome.new_device_state.smt.contains_key(&leaf_key));
+        // The proof's value field equals the recomputed leaf value.
+        let live_proof = outcome
+            .new_device_state
+            .smt
+            .get_inclusion_proof(&leaf_key, 256)
+            .expect("live proof");
+        assert_eq!(live_proof.value, Some(leaf_value));
+    }
+
+    #[test]
+    fn vault_state_leaf_does_not_disturb_bilateral_tips() {
+        use crate::dlv::vault_state_anchor::compute_reserves_digest;
+
+        // First seed a bilateral chain (self-loop) so there's a real
+        // relationship leaf in the SMT.
+        let alice = fresh_device(0xA2);
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&alice.devid, &alice.devid);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &alice.devid,
+                &alice.devid,
+            );
+        let after_bilateral = alice
+            .advance(
+                rk_self,
+                alice.devid,
+                op(),
+                entropy(7),
+                None,
+                &[],
+                Some(init_tip),
+                None,
+            )
+            .expect("bilateral advance succeeds")
+            .new_device_state;
+
+        let bilateral_tip_before = after_bilateral
+            .chain_tip(&rk_self)
+            .expect("relationship tip present");
+        let smt_root_before = after_bilateral.root();
+
+        // Now write a vault leaf on top.
+        let vault_id = [0x34u8; 32];
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30);
+        let outcome = after_bilateral
+            .with_vault_state_leaf(&vault_id, 0, &reserves_digest)
+            .expect("vault leaf write succeeds");
+
+        // Bilateral tip cache is unchanged.
+        assert_eq!(
+            outcome
+                .new_device_state
+                .chain_tip(&rk_self)
+                .expect("relationship tip survives"),
+            bilateral_tip_before,
+            "vault leaf write must not perturb relationship tip cache"
+        );
+        // Balances unchanged.
+        assert_eq!(outcome.new_device_state.balances, after_bilateral.balances);
+        // But the SMT root advanced because a new leaf landed in the
+        // (disjoint, domain-separated) vault namespace.
+        assert_ne!(outcome.new_root, smt_root_before);
+    }
+
+    #[test]
+    fn vault_state_leaf_sequence_advance_changes_root_monotonically() {
+        use crate::dlv::vault_state_anchor::compute_reserves_digest;
+
+        let bob = fresh_device(0xC2);
+        let vault_id = [0x56u8; 32];
+        let r0 = compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30);
+        let after_seq0 = bob
+            .with_vault_state_leaf(&vault_id, 0, &r0)
+            .expect("seq=0 write");
+
+        // Simulate a trade: reserves shift, sequence bumps.
+        let r1 = compute_reserves_digest(b"AAA", b"BBB", 1_500, 1_700, 30);
+        let after_seq1 = after_seq0
+            .new_device_state
+            .with_vault_state_leaf(&vault_id, 1, &r1)
+            .expect("seq=1 write");
+
+        assert_ne!(
+            after_seq0.new_root, after_seq1.new_root,
+            "sequence advance must visibly change the SMT root"
+        );
+
+        // The seq=1 proof verifies against the seq=1 root.
+        crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion(
+            &vault_id,
+            1,
+            &r1,
+            &after_seq1.new_root,
+            &after_seq1.siblings,
+        )
+        .expect("seq=1 proof verifies");
+
+        // The seq=0 proof now NO LONGER verifies against the seq=1
+        // root — i.e. an attacker cannot replay the old proof against
+        // the device's current state.
+        crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion(
+            &vault_id,
+            0,
+            &r0,
+            &after_seq1.new_root,
+            &after_seq0.siblings,
+        )
+        .expect_err("stale seq=0 proof must not verify against the seq=1 root");
     }
 }

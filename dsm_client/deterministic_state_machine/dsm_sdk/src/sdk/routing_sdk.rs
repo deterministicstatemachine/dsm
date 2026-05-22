@@ -2,8 +2,8 @@
 //! SoFi routing-vault discovery substrate.
 //!
 //! Public discovery by ordered token pair: vaults are advertised at
-//! `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` and their
-//! full proto mirrored at `defi/vault-proto/{..}/{..}/{..}`.  Routers
+//! `sofi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` and their
+//! full proto mirrored at `sofi/vault-proto/{..}/{..}/{..}`.  Routers
 //! enumerate the prefix for the (canonical) trade pair, fetch + verify
 //! each vault, then feed the surviving set into a fee-weighted
 //! shortest-path search (SoFi spec §3.3, §8.3).  This module owns the
@@ -33,10 +33,10 @@ use crate::util::text_id::encode_base32_crockford;
 pub(crate) const ROUTING_VAULT_AD_DOMAIN: &str = "DSM/routing-vault-ad";
 
 /// Base prefix for routing-vault advertisements.
-pub(crate) const ROUTING_VAULT_AD_ROOT: &str = "defi/vault/";
+pub(crate) const ROUTING_VAULT_AD_ROOT: &str = "sofi/vault/";
 
 /// Base prefix for routing-vault full proto mirrors.
-pub(crate) const ROUTING_VAULT_PROTO_ROOT: &str = "defi/vault-proto/";
+pub(crate) const ROUTING_VAULT_PROTO_ROOT: &str = "sofi/vault-proto/";
 
 pub(crate) const LIFECYCLE_ACTIVE: &str = "active";
 pub(crate) const LIFECYCLE_EXHAUSTED: &str = "exhausted";
@@ -386,7 +386,7 @@ mod tests {
     //! `posted_dlv_sdk` (`DBTC_STORAGE_TEST_STATE`).  The mock is a
     //! flat `HashMap<String, Vec<u8>>` so multiple suites in one binary
     //! coexist as long as their keyspaces stay distinct — the
-    //! `defi/vault/...` prefix used here is unique to this module.
+    //! `sofi/vault/...` prefix used here is unique to this module.
     //!
     //! Each test uses unique token-id / vault-id pairs so suites do
     //! not poison each other.
@@ -439,7 +439,7 @@ mod tests {
             reserve_b_u128: u128_be(reserve_b),
             fee_bps: 30,
             unlock_spec_digest: [0u8; 32],
-            unlock_spec_key: "defi/spec/test".to_string(),
+            unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &proto,
         })
@@ -502,7 +502,7 @@ mod tests {
             reserve_b_u128: u128_be(3_000), // intended for `lower`
             fee_bps: 25,
             unlock_spec_digest: [0u8; 32],
-            unlock_spec_key: "defi/spec/test".to_string(),
+            unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &fake_vault_proto_bytes(0x02),
         })
@@ -639,7 +639,7 @@ mod tests {
             reserve_b_u128: u128_be(200).to_vec(),
             fee_bps: 30,
             unlock_spec_digest: vec![0u8; 32],
-            unlock_spec_key: "defi/spec/test".into(),
+            unlock_spec_key: "sofi/spec/test".into(),
             vault_proto_key: proto_key_str.clone().into_bytes(),
             vault_proto_digest: digest.to_vec(),
             owner_public_key: vec![0xABu8; 64],

@@ -3,11 +3,24 @@
 //
 // Free-form symmetric token inputs: any token id pair is valid as long
 // as some vault advertises liquidity for it.  Slippage tolerance is
-// captured client-side and used to compute a min-out floor that the
-// trader can verify before signing; backend route-fallback within the
-// envelope (alternate paths when primary moves) is Tier 2 work
-// (intent-bounds on RouteCommitHopV1) and is not yet wired through —
-// the UI surface is built so the wiring is additive when that lands.
+// captured as a bps value in the UI and handed verbatim to the Rust
+// `findAndBindBestPath` route, which stamps both the per-hop
+// `min_output_amount_u128` floor and the envelope-level
+// `floor_final_output_amount_u128`. The frontend NEVER re-runs the
+// constant-product AMM math, never computes a slippage floor in JS,
+// and never gates on it — those are all `route_commit_sdk`'s job.
+// The wallet just decodes the returned RouteCommitV1, reads
+// `expected_final_output_amount_u128` and `floor_final_output_amount_u128`
+// for display, and presents the trade for the user to confirm or
+// cancel before triggering `signRouteCommit` / `publishExternalCommitment`
+// / `unlockVaultRouted`.
+//
+// Tier 2 backend route-fallback within the envelope (alternate paths
+// when primary state moves between quote and unlock) is wired through
+// the Rust SDK: when `maxPaths > 1` the binder enumerates N-best
+// candidates and stamps the runner-ups into `RouteCommitV1.fallbacks`
+// under the same signed X commitment so the wallet can retry without
+// re-signing.
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
@@ -17,6 +30,7 @@ import {
   signRouteCommit,
   computeExternalCommitment,
   publishExternalCommitment,
+  isExternalCommitmentVisible,
   unlockVaultRouted,
   type RoutingAdvertisementSummary,
 } from '../../../dsm/route_commit';
@@ -30,6 +44,7 @@ type Phase =
   | 'quoted'
   | 'signing'
   | 'publishing'
+  | 'confirming-propagation'
   | 'settling'
   | 'settled'
   | 'error';
@@ -41,7 +56,15 @@ type QuotedRoute = {
   inputToken: Uint8Array;
   outputToken: Uint8Array;
   primaryVaultId: Uint8Array;
+  /** Rust-computed expected final output (decoded from RouteCommitV1
+   *  proto returned by `route.findAndBindBestPath`). The frontend
+   *  NEVER recomputes this. */
   expectedOut: bigint;
+  /** Rust-stamped envelope-level slippage floor (decoded from
+   *  RouteCommitV1.floor_final_output_amount_u128). */
+  floorOut: bigint;
+  /** Count of fallback hop groups in the envelope (0 = primary-only). */
+  fallbackGroupCount: number;
 };
 
 type Props = {
@@ -65,6 +88,7 @@ function phaseLabel(phase: Phase): string {
     case 'quoted': return 'Route ready';
     case 'signing': return 'Signing route commit…';
     case 'publishing': return 'Publishing anchor…';
+    case 'confirming-propagation': return 'Confirming storage propagation…';
     case 'settling': return 'Settling on vault…';
     case 'settled': return 'Trade settled';
     case 'error': return 'Failed';
@@ -95,14 +119,12 @@ function u128BigEndian(n: bigint): Uint8Array {
   return out;
 }
 
-/** Apply slippage tolerance (percent) to a quoted output, returning
- *  the floor the trader is willing to accept.  Slippage is treated as
- *  basis points internally to stay in integer math. */
-function applySlippageFloor(quoted: bigint, slippagePct: number): bigint {
-  if (slippagePct <= 0) return quoted;
-  if (slippagePct >= 100) return 0n;
-  const bps = Math.round(slippagePct * 100); // 0.5% → 50 bps
-  return (quoted * BigInt(10_000 - bps)) / 10_000n;
+/** Convert the user's percent-tolerance slider value to basis points
+ *  for the Rust binder. Pure unit conversion, no AMM math. */
+function slippagePctToBps(slippagePct: number): number {
+  if (slippagePct <= 0) return 0;
+  if (slippagePct >= 100) return 10_000;
+  return Math.round(slippagePct * 100); // 0.5% → 50 bps
 }
 
 function SwapTabInner({
@@ -145,12 +167,13 @@ function SwapTabInner({
     phase === 'discovering' ||
     phase === 'signing' ||
     phase === 'publishing' ||
+    phase === 'confirming-propagation' ||
     phase === 'settling';
 
-  const minOut = useMemo(() => {
-    if (!quoted) return 0n;
-    return applySlippageFloor(quoted.expectedOut, slippageNum);
-  }, [quoted, slippageNum]);
+  // Rust-stamped floor decoded from the RouteCommitV1 envelope on
+  // quote. The frontend NEVER recomputes this — it just surfaces what
+  // the binder produced so the trader can confirm or cancel.
+  const minOut = useMemo(() => quoted?.floorOut ?? 0n, [quoted]);
 
   const handleQuote = useCallback(async () => {
     setError(null);
@@ -183,31 +206,32 @@ function SwapTabInner({
         throw new Error(`No liquidity advertised for ${inputToken.trim()} ↔ ${outputToken.trim()}`);
       }
 
+      const slippageBps = slippagePctToBps(slippageNum);
       const bindRes = await findAndBindBestPath({
         inputToken: inputTokenBytes,
         outputToken: outputTokenBytes,
         inputAmount: amountBig,
         nonce: generateNonce(),
+        // Tier 2: ask Rust for an envelope-bound RouteCommit. The
+        // binder stamps the per-hop and envelope floors from these
+        // bps values and (if maxPaths > 1) attaches N-best fallback
+        // groups under one signature. Set maxPaths=3 to opt in to
+        // fallback semantics; primary still resolves first.
+        maxPaths: 3,
+        slippageBps,
+        floorBps: slippageBps,
       });
-      if (!bindRes.success || !bindRes.unsignedRouteCommitBytes) {
+      if (
+        !bindRes.success ||
+        !bindRes.unsignedRouteCommitBytes ||
+        !bindRes.quote
+      ) {
         throw new Error(bindRes.error || 'findAndBindBestPath failed');
       }
 
-      // Compute the expected output from the canonical pair ordering
-      // the Rust handler returned in the advertisement.  We compare
-      // both directions because a vault advertised under (B, A) lex
-      // ordering swaps reserveIn / reserveOut in our local view.
-      const v = vaults[0];
-      const ad_token_a = new TextDecoder().decode(v.tokenA);
-      const reserveIn = ad_token_a === inputToken.trim() ? v.reserveA : v.reserveB;
-      const reserveOut = ad_token_a === inputToken.trim() ? v.reserveB : v.reserveA;
-      const fee = BigInt(10_000 - v.feeBps);
-      const inEffective = (amountBig * fee) / 10_000n;
-      const expectedOut =
-        reserveIn + inEffective === 0n
-          ? 0n
-          : (reserveOut * inEffective) / (reserveIn + inEffective);
-
+      // expectedOut + floorOut come straight from the Rust-stamped
+      // RouteCommitV1 proto. No JS AMM math, no JS slippage math —
+      // the wallet is a thin viewer over the binder's output.
       const primaryVaultBytes = decodeBase32Crockford(vaults[0].vaultIdBase32);
       setQuoted({
         unsignedBytes: bindRes.unsignedRouteCommitBytes,
@@ -216,7 +240,9 @@ function SwapTabInner({
         inputToken: inputTokenBytes,
         outputToken: outputTokenBytes,
         primaryVaultId: primaryVaultBytes,
-        expectedOut,
+        expectedOut: bindRes.quote.expectedFinalOutput,
+        floorOut: bindRes.quote.floorFinalOutput,
+        fallbackGroupCount: bindRes.quote.fallbackGroupCount,
       });
       setPhase('quoted');
     } catch (e) {
@@ -225,25 +251,18 @@ function SwapTabInner({
       setPhase('error');
       setPhaseDetail(msg);
     }
-  }, [inputToken, outputToken, amount, setError]);
+  }, [inputToken, outputToken, amount, slippageNum, setError]);
 
   const handleExecute = useCallback(async () => {
     if (!quoted) return;
     setError(null);
     setPhaseDetail('');
 
-    // Slippage check (client-side floor).  Backend intent-bounds gate
-    // is Tier 2 work; until that lands the trader's protection is the
-    // chunks #7 reserves-value gate (rejects on reserve drift) plus
-    // this client refusal to sign if the quote already violates the
-    // slippage envelope.
-    if (quoted.expectedOut < minOut) {
-      const msg = `Quoted output ${quoted.expectedOut} below your slippage floor ${minOut}`;
-      setError(msg);
-      setPhase('error');
-      setPhaseDetail(msg);
-      return;
-    }
+    // No pre-sign slippage gate in JS — the Rust binder stamped the
+    // floors into RouteCommitV1 and the unlock-time
+    // `verify_amm_swap_against_reserves` gate enforces them. If the
+    // returned quote already failed to clear the floor the binder
+    // would have returned an error; we wouldn't have a `quoted` here.
 
     try {
       setPhase('signing');
@@ -259,11 +278,37 @@ function SwapTabInner({
       }
 
       setPhase('publishing');
-      const publish = await publishExternalCommitment({
-        x: decodeBase32Crockford(xRes.xBase32),
-      });
+      const xBytes = decodeBase32Crockford(xRes.xBase32);
+      const publish = await publishExternalCommitment({ x: xBytes });
       if (!publish.success) {
         throw new Error(publish.error || 'publishExternalCommitment failed');
+      }
+
+      // Confirm storage propagation before unlocking.  The PUT
+      // returned success after writing to the local-region GCP node,
+      // but unlock-routed will read from a rotated set of nodes; if
+      // we race ahead of replication the unlock fails with an
+      // `ExternalCommitmentNotVisible` rejection that's less
+      // actionable than a clear "still propagating" UX.  Bounded
+      // poll: 5 × ~1s.  Operational transport behaviour only — no
+      // protocol semantics (see DSM clockless-rule exception for
+      // network retry pacing).
+      setPhase('confirming-propagation');
+      let propagated = false;
+      for (let i = 0; i < 5; i++) {
+        const visRes = await isExternalCommitmentVisible(xBytes);
+        if (visRes.success && visRes.visible) {
+          propagated = true;
+          break;
+        }
+        if (i < 4) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      if (!propagated) {
+        throw new Error(
+          'External commitment did not propagate to storage within 5 attempts. Retry the swap.',
+        );
       }
 
       setPhase('settling');
@@ -289,7 +334,7 @@ function SwapTabInner({
       setPhase('error');
       setPhaseDetail(msg);
     }
-  }, [quoted, minOut, deviceB32, loadWalletData, onSwapComplete, setError]);
+  }, [quoted, deviceB32, loadWalletData, onSwapComplete, setError]);
 
   return (
     <div>
@@ -383,6 +428,11 @@ function SwapTabInner({
             <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>
               fee {quoted.vaults[0]?.feeBps} bps · vault {quoted.vaults[0]?.vaultIdBase32.slice(0, 12)}…
             </div>
+            {quoted.fallbackGroupCount > 0 && (
+              <div style={{ fontSize: 10, opacity: 0.75, marginTop: 2 }}>
+                +{quoted.fallbackGroupCount} fallback route{quoted.fallbackGroupCount === 1 ? '' : 's'} in envelope
+              </div>
+            )}
           </div>
         </div>
       )}

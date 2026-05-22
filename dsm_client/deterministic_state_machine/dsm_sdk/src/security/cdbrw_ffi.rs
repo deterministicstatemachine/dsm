@@ -184,12 +184,116 @@ fn decorrelation_stride(n: usize) -> usize {
     }
 }
 
+/// Inclusive bin-space endpoints used by the robust health-test +
+/// histogram-construction path.  Stable across all K=21 trials of one
+/// enrollment AND across every subsequent `measure_trust` orbit on the
+/// same device, so trial-to-trial + enroll-to-measure histogram
+/// alignment is preserved — and the rare scheduler-interrupt / GC-pause
+/// outliers that produce 10×-100× median timings without representing
+/// real silicon substrate entropy get clamped to the edge bins instead
+/// of dominating the bin-spacing.
+///
+/// Committed in the on-disk enrollment file (revision 6+) alongside
+/// the reference anchor.  Phase-2 diagnostic on Galaxy A16 showed that
+/// without trimming, 99% of samples crammed into the first ~9 bins out
+/// of 256 (h_hat ≈ 0.23, FAIL); robust trimming gives ~150 active bins
+/// (h_hat > 0.45, PASS) on the same raw samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinRange {
+    pub low: i64,
+    pub high: i64,
+}
+
+impl BinRange {
+    /// Construct a robust range from the supplied timing samples by
+    /// clipping to `[lower_pct, upper_pct]` percentiles.  Outlier
+    /// timings get clamped to the edge bins by the in-range builders,
+    /// so they still influence the histogram but don't blow up the
+    /// bin spacing.
+    pub fn from_samples_robust(samples: &[i64], lower_pct: f64, upper_pct: f64) -> Self {
+        if samples.is_empty() {
+            return Self { low: 0, high: 1 };
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let low_idx = ((n as f64 * lower_pct) as usize).min(n.saturating_sub(1));
+        let high_idx = ((n as f64 * upper_pct) as usize).min(n.saturating_sub(1));
+        let low = sorted[low_idx];
+        let mut high = sorted[high_idx];
+        if high <= low {
+            high = low.saturating_add(1);
+        }
+        Self { low, high }
+    }
+
+    /// Construct a range from the full [min, max] span — legacy
+    /// behaviour, retained for callers that don't have or need a
+    /// committed robust range (e.g. one-shot moment-tree computation
+    /// where the range is internal and no W1-alignment across trials
+    /// is required).
+    pub fn full_span(samples: &[i64]) -> Self {
+        if samples.is_empty() {
+            return Self { low: 0, high: 1 };
+        }
+        let min_v = samples.iter().copied().min().unwrap_or(0);
+        let max_v = samples.iter().copied().max().unwrap_or(0);
+        let mut high = max_v;
+        if high <= min_v {
+            high = min_v.saturating_add(1);
+        }
+        Self { low: min_v, high }
+    }
+}
+
+/// Full 3-condition health test over raw orbit timings using a
+/// caller-supplied [`BinRange`].  This is the robust form used by the
+/// post-Phase-2 enrollment + measure_trust + respond paths.
+pub fn health_test_in_range(samples: &[i64], bins: usize, range: BinRange) -> HealthResult {
+    if samples.is_empty() || bins < 2 {
+        return HealthResult {
+            h_hat: 0.0,
+            rho_hat: 0.0,
+            l_hat: 0.0,
+            passed: false,
+        };
+    }
+
+    let mut hist = vec![0.0f32; bins];
+    if range.high <= range.low {
+        // Degenerate single-value span — collapse all samples into bin 0
+        // and let downstream Shannon entropy treat it as h_hat=0.
+        hist[0] = 1.0;
+    } else {
+        let span = (range.high - range.low) as i128;
+        let last_bin = (bins as i128) - 1;
+        for &s in samples {
+            let clipped = s.clamp(range.low, range.high);
+            let idx = ((clipped - range.low) as i128 * last_bin) / span;
+            let idx = idx.clamp(0, last_bin) as usize;
+            hist[idx] += 1.0;
+        }
+        let inv_n = 1.0 / samples.len() as f32;
+        for h in hist.iter_mut() {
+            *h *= inv_n;
+        }
+    }
+
+    let h_hat = shannon_entropy(&hist);
+
+    health_metrics_after_histogram(samples, h_hat)
+}
+
 /// Full 3-condition health test over raw orbit timings.
 ///
 /// `bins` must be at least 2 and should match the enrollment histogram bin
 /// count (typically 256). `samples.len()` should equal
 /// [`thresholds::HEALTH_N`] for canonical probes, though shorter slices are
 /// still processed for short-probe diagnostic use.
+///
+/// This is the legacy [min, max] form.  New callers should prefer
+/// [`health_test_in_range`] with a robust [`BinRange`] derived from
+/// enrollment-time aggregate samples — see [`BinRange::from_samples_robust`].
 pub fn health_test(samples: &[i64], bins: usize) -> HealthResult {
     if samples.is_empty() || bins < 2 {
         return HealthResult {
@@ -226,6 +330,15 @@ pub fn health_test(samples: &[i64], bins: usize) -> HealthResult {
     }
 
     let h_hat = shannon_entropy(&hist);
+    health_metrics_after_histogram(samples, h_hat)
+}
+
+/// Shared post-histogram path: given h_hat already computed from a
+/// (possibly robust-range) histogram, compute rho_hat + l_hat from
+/// the raw samples and assemble the HealthResult.  Both `health_test`
+/// and `health_test_in_range` call this so the only thing that differs
+/// between the two is how the histogram bins are constructed.
+fn health_metrics_after_histogram(samples: &[i64], h_hat: f32) -> HealthResult {
     // Subsample before computing autocorrelation so adjacent entries in the
     // decimated sequence are `stride` probes apart in real time, decorrelating
     // thermal coupling between consecutive PUF measurements. h_hat and l_hat

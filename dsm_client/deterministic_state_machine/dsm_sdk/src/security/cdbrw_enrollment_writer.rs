@@ -42,18 +42,31 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use dsm::crypto::blake3::domain_hash_bytes;
+use dsm::crypto::cdbrw_moments::{compute_moments, tolerance_ball, MomentVector};
 
-use crate::security::cdbrw_access_gate::TrustSnapshot;
-use crate::security::cdbrw_ffi::{self, HealthResult, MfgGateResult};
+use crate::security::cdbrw_access_gate::{ResonantStatus, TrustSnapshot};
+use crate::security::cdbrw_ffi::{self, BinRange, HealthResult, MfgGateResult};
 use crate::security::cdbrw_responder::{
-    build_histogram, histogram_to_bytes, mean_histogram, publish_trust_snapshot, wasserstein1,
-    DEFAULT_DISTANCE_MARGIN, DEFAULT_HISTOGRAM_BINS,
+    build_histogram_in_range, classify_resonant_m_sample, histogram_to_bytes, mean_histogram,
+    publish_trust_snapshot, wasserstein1, ADMISSION_M, DEFAULT_DISTANCE_MARGIN,
+    DEFAULT_HISTOGRAM_BINS,
 };
 
-/// Wire revision written to `dsm_silicon_fp_v4.bin`. Must match the Kotlin
-/// `EnrollmentStore.write` revision (=4) and the `load_cdbrw_enrollment`
-/// reader in `misc_routes.rs`.
-pub const ENROLLMENT_REVISION: u32 = 4;
+/// Wire revision written to `dsm_silicon_fp_v4.bin`.
+///
+/// Phase 9 (median-of-M admission) bumps this to **7**.  The file now
+/// also carries `admission_m`, `trials_per_sample`, and per-sample
+/// `h_hat`/`rho_hat`/`l_hat`/`epsilon_intra` arrays appended after the
+/// v6 bin_range fields.  This makes the audit trail explicit: the
+/// reader sees the full M-sample variance band that the device cleared
+/// admission against, not just the median'd verdict.
+///
+/// Readers handle all four revisions (4 = no envelope, 5 = envelope,
+/// 6 = bin_range, 7 = admission samples).  Revision-4/5/6 enrollments
+/// invalidate under the new code path because the admission verdict
+/// itself is structurally different (median over M vs single K-trial);
+/// affected devices must re-enroll on first boot under v7.
+pub const ENROLLMENT_REVISION: u32 = 7;
 
 /// Filename consumed by [`handlers::misc_routes::load_cdbrw_enrollment`] via
 /// `CDBRW_ENROLLMENT_FILE`. Hard-coding here keeps the writer and reader in
@@ -74,9 +87,21 @@ pub struct EnrollInputs<'a> {
     /// UTF-8 encoded with the `DSM/silicon_env/v2\0` prefix already applied
     /// by Kotlin. Opaque to Rust — never parsed, only hashed.
     pub env_bytes: &'a [u8],
-    /// `K` orbit timing vectors. Each entry is the raw output of the NDK
-    /// silicon-PUF probe. Length must be `>= MIN_ENROLL_TRIALS`.
+    /// `M * trials_per_sample` orbit timing vectors. Each entry is the
+    /// raw output of the NDK silicon-PUF probe.  Length must equal
+    /// `M * trials_per_sample` where M is supplied via
+    /// [`Self::admission_samples`].  Phase 9: callers batch all
+    /// admission samples into one request so partitioning is a Rust-side
+    /// invariant and there is no half-written intermediate file.
     pub trials: &'a [Vec<i64>],
+    /// Per-trial CSPRNG challenges (Alg 2 line 1491). Parallel to `trials`
+    /// — `trial_challenges[i]` is the 32-byte challenge that seeded the
+    /// orbit producing `trials[i]`. Each entry must be 32 bytes and at
+    /// least one byte non-zero; the writer rejects enrollments where any
+    /// trial is missing or all-zero so a regression that strips
+    /// per-trial challenges fails closed instead of silently downgrading
+    /// to a challenge-independent orbit.
+    pub trial_challenges: &'a [Vec<u8>],
     /// Enrollment config — mirrored from Kotlin `SiliconFingerprint.Config`.
     /// Stored on-disk and checked by the verifier at runtime to detect
     /// downgrade attempts.
@@ -85,6 +110,19 @@ pub struct EnrollInputs<'a> {
     pub steps_per_probe: u32,
     pub histogram_bins: u32,
     pub rotation_bits: u32,
+    /// Phase 9 admission protocol: number of independent K-trial
+    /// samples in `trials`. The writer partitions `trials` into M
+    /// contiguous chunks of `trials_per_sample` each and runs the
+    /// median-of-M admission via
+    /// [`classify_resonant_m_sample`]. Caller MUST match the SDK's
+    /// compiled [`ADMISSION_M`] constant — a mismatch rejects the
+    /// enrollment as `AdmissionShapeMismatch` defense-in-depth against
+    /// version skew.
+    pub admission_samples: u32,
+    /// Phase 9: chunk size (K).  Must satisfy
+    /// `trials_per_sample >= MIN_ENROLL_TRIALS`. The writer rejects
+    /// `trials.len() != admission_samples * trials_per_sample`.
+    pub trials_per_sample: u32,
 }
 
 /// Successful output — everything the router needs to build a
@@ -104,8 +142,34 @@ pub struct EnrollOutputs {
     /// [`PlatformContext::bootstrap`] — this keeps K_DBRW derivation
     /// consistent between the freshly-enrolled device and subsequent boots.
     pub reference_anchor: [u8; 32],
+    /// Phase 3 deliverable 3 (attractor envelope test) — eight statistical
+    /// moments of the enrolled mean histogram, committed at enrollment and
+    /// re-checked at every verification. See `dsm::crypto::cdbrw_moments`.
+    pub baseline_moments: MomentVector,
+    /// Per-moment acceptance radius derived from per-trial moment spread.
+    /// At verification time the verifier asserts
+    /// `|live_moments[i] - baseline_moments[i]| ≤ tolerance_ball[i]`
+    /// for every i in 0..ENVELOPE_MOMENT_COUNT.
+    pub tolerance_ball: MomentVector,
     pub trust: TrustSnapshot,
     pub note: String,
+    /// Phase 9 admission audit: per-sample (h_hat, rho_hat, l_hat,
+    /// epsilon_intra) for each of the M chunks. Length == admission_m.
+    /// The Kotlin side logs these so a marginal device's variance band
+    /// is visible without parsing the binary file.
+    pub admission_samples: Vec<SampleAuditRecord>,
+}
+
+/// Phase 9: per-sample audit data captured during the M-sample
+/// admission protocol.  Persisted on-disk in v7 layout and reported back
+/// via [`EnrollOutputs`] so logs surface the full variance envelope of
+/// a marginal device.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleAuditRecord {
+    pub h_hat: f32,
+    pub rho_hat: f32,
+    pub l_hat: f32,
+    pub epsilon_intra: f32,
 }
 
 /// Failure modes for enrollment. Each variant publishes a fail-closed trust
@@ -121,8 +185,31 @@ pub enum EnrollError {
     /// Kotlin-approved set (256 / 512 / 1024). Keeping the same constraints
     /// as the Kotlin enrollment so anchors stay comparable.
     InvalidHistogramBins { bins: u32 },
+    /// Per-trial challenge missing, wrong length, or all-zero (Alg 2 line
+    /// 1491). A zero or absent challenge means the orbit wasn't actually
+    /// challenge-seeded at the C++ layer — a spec violation we refuse to
+    /// silently downgrade past.
+    MissingTrialChallenge { index: usize, reason: &'static str },
     /// I/O error while writing `dsm_silicon_fp_v4.bin`.
     Io(String),
+    /// Phase 9: `trials.len() != admission_samples * trials_per_sample`,
+    /// or the supplied `admission_samples` doesn't equal the SDK's
+    /// compiled `ADMISSION_M`. Defense-in-depth against version skew.
+    AdmissionShapeMismatch {
+        admission_samples: u32,
+        trials_per_sample: u32,
+        actual_trials: usize,
+        expected_admission_m: u32,
+    },
+    /// Phase 9: M-sample admission classifier returned
+    /// [`ResonantStatus::Fail`].  Carries the per-sample audit so the
+    /// Kotlin side can log exactly which floor was hit on which sample.
+    AdmissionRejected {
+        samples: Vec<SampleAuditRecord>,
+        median_h_hat: f32,
+        median_rho_hat_abs: f32,
+        median_l_hat: f32,
+    },
 }
 
 impl std::fmt::Display for EnrollError {
@@ -138,7 +225,33 @@ impl std::fmt::Display for EnrollError {
             EnrollError::InvalidHistogramBins { bins } => {
                 write!(f, "invalid histogram bin count {bins}")
             }
+            EnrollError::MissingTrialChallenge { index, reason } => {
+                write!(f, "enrollment trial {index} challenge invalid: {reason}")
+            }
             EnrollError::Io(msg) => write!(f, "enrollment I/O error: {msg}"),
+            EnrollError::AdmissionShapeMismatch {
+                admission_samples,
+                trials_per_sample,
+                actual_trials,
+                expected_admission_m,
+            } => write!(
+                f,
+                "admission shape mismatch: admission_samples={admission_samples} \
+                 (expected {expected_admission_m}), trials_per_sample={trials_per_sample}, \
+                 trials.len()={actual_trials} (expected admission_samples * trials_per_sample)"
+            ),
+            EnrollError::AdmissionRejected {
+                samples,
+                median_h_hat,
+                median_rho_hat_abs,
+                median_l_hat,
+            } => write!(
+                f,
+                "admission rejected: median H={median_h_hat:.4} |rho|={median_rho_hat_abs:.4} \
+                 L={median_l_hat:.4} over {} samples — at least one sample below hard floor or \
+                 median below H_HAT_WARN",
+                samples.len()
+            ),
         }
     }
 }
@@ -167,9 +280,28 @@ pub fn enroll_device(
     inputs: &EnrollInputs<'_>,
 ) -> Result<EnrollOutputs, EnrollError> {
     // ---- step 1: validate ----
-    if inputs.trials.len() < MIN_ENROLL_TRIALS {
+    // Phase 9: admission shape must match the SDK's compiled constants.
+    if inputs.admission_samples as usize != ADMISSION_M {
+        return Err(EnrollError::AdmissionShapeMismatch {
+            admission_samples: inputs.admission_samples,
+            trials_per_sample: inputs.trials_per_sample,
+            actual_trials: inputs.trials.len(),
+            expected_admission_m: ADMISSION_M as u32,
+        });
+    }
+    if (inputs.trials_per_sample as usize) < MIN_ENROLL_TRIALS {
         return Err(EnrollError::InsufficientTrials {
-            got: inputs.trials.len(),
+            got: inputs.trials_per_sample as usize,
+        });
+    }
+    let expected_total =
+        (inputs.admission_samples as usize).saturating_mul(inputs.trials_per_sample as usize);
+    if inputs.trials.len() != expected_total {
+        return Err(EnrollError::AdmissionShapeMismatch {
+            admission_samples: inputs.admission_samples,
+            trials_per_sample: inputs.trials_per_sample,
+            actual_trials: inputs.trials.len(),
+            expected_admission_m: ADMISSION_M as u32,
         });
     }
     let bins = if inputs.histogram_bins == 0 {
@@ -188,36 +320,195 @@ pub fn enroll_device(
             return Err(EnrollError::EmptyTrial { index: i });
         }
     }
-
-    // ---- step 2: per-trial health + histograms ----
-    let mut histograms: Vec<Vec<f32>> = Vec::with_capacity(inputs.trials.len());
-    let mut health_results: Vec<HealthResult> = Vec::with_capacity(inputs.trials.len());
-    let mut h_bars: Vec<f32> = Vec::with_capacity(inputs.trials.len());
-    for trial in inputs.trials {
-        let hist = build_histogram(trial, bins);
-        let health = cdbrw_ffi::health_test(trial, bins);
-        h_bars.push(health.h_hat);
-        histograms.push(hist);
-        health_results.push(health);
+    if inputs.trial_challenges.len() != inputs.trials.len() {
+        return Err(EnrollError::MissingTrialChallenge {
+            index: inputs.trial_challenges.len().min(inputs.trials.len()),
+            reason: "challenge count must equal trial count",
+        });
+    }
+    for (i, challenge) in inputs.trial_challenges.iter().enumerate() {
+        if challenge.len() != 32 {
+            return Err(EnrollError::MissingTrialChallenge {
+                index: i,
+                reason: "challenge must be exactly 32 bytes",
+            });
+        }
+        if challenge.iter().all(|&b| b == 0) {
+            return Err(EnrollError::MissingTrialChallenge {
+                index: i,
+                reason: "challenge is all zero — orbit was not CSPRNG-seeded",
+            });
+        }
     }
 
-    // ---- step 3: manufacturing gate over per-trial Ĥ (non-fatal) ----
-    let mfg = cdbrw_ffi::manufacturing_gate(&h_bars);
+    // ---- step 2a: compute the robust binning range across the
+    //               FULL M×K-trial sample set.  Same Phase-2 robust
+    //               [P0.5, P99.5] trimming, expanded scope: every
+    //               sample chunk's histograms must live in the same
+    //               bin space so cross-chunk medians of mean
+    //               histograms remain meaningful.
+    let total_samples: usize = inputs.trials.iter().map(|t| t.len()).sum();
+    let mut all_samples = Vec::with_capacity(total_samples);
+    for trial in inputs.trials {
+        all_samples.extend_from_slice(trial);
+    }
+    let bin_range = BinRange::from_samples_robust(
+        &all_samples,
+        crate::security::cdbrw_responder::ROBUST_BIN_LOW_PCT,
+        crate::security::cdbrw_responder::ROBUST_BIN_HIGH_PCT,
+    );
 
-    // ---- step 4: mean histogram + P95 intra-distance ----
-    let hist_refs: Vec<&[f32]> = histograms.iter().map(|h| h.as_slice()).collect();
-    let mean_hist = mean_histogram(&hist_refs);
+    // ---- step 2b: M-sample composition.  Partition `trials` into M
+    //               contiguous chunks of `trials_per_sample` each; for
+    //               each chunk run the existing per-trial health +
+    //               histogram + mean + epsilon_intra + moment flow,
+    //               then take element-wise medians across the M chunks
+    //               to produce the persisted reference.
+    let k = inputs.trials_per_sample as usize;
+    let m = inputs.admission_samples as usize;
 
-    let mut distances: Vec<f32> = histograms
+    let mut sample_mean_hists: Vec<Vec<f32>> = Vec::with_capacity(m);
+    let mut sample_eps_intra: Vec<f32> = Vec::with_capacity(m);
+    let mut sample_baseline_moments: Vec<MomentVector> = Vec::with_capacity(m);
+    let mut sample_tolerance: Vec<MomentVector> = Vec::with_capacity(m);
+    let mut sample_health: Vec<HealthResult> = Vec::with_capacity(m);
+    let mut sample_h_bars: Vec<Vec<f32>> = Vec::with_capacity(m);
+
+    for chunk_idx in 0..m {
+        let start = chunk_idx * k;
+        let end = start + k;
+        let chunk = &inputs.trials[start..end];
+
+        let mut chunk_histograms: Vec<Vec<f32>> = Vec::with_capacity(k);
+        let mut chunk_healths: Vec<HealthResult> = Vec::with_capacity(k);
+        let mut chunk_h_bars: Vec<f32> = Vec::with_capacity(k);
+        let mut chunk_h_sum = 0.0f32;
+        let mut chunk_rho_sum = 0.0f32;
+        let mut chunk_l_sum = 0.0f32;
+        for trial in chunk {
+            let hist = build_histogram_in_range(trial, bins, bin_range);
+            let health = cdbrw_ffi::health_test_in_range(trial, bins, bin_range);
+            chunk_h_bars.push(health.h_hat);
+            chunk_h_sum += health.h_hat;
+            chunk_rho_sum += health.rho_hat;
+            chunk_l_sum += health.l_hat;
+            chunk_histograms.push(hist);
+            chunk_healths.push(health);
+        }
+        let n_inv = 1.0 / k as f32;
+        let chunk_health = HealthResult {
+            h_hat: chunk_h_sum * n_inv,
+            rho_hat: chunk_rho_sum * n_inv,
+            l_hat: chunk_l_sum * n_inv,
+            passed: chunk_healths.iter().all(|h| h.passed),
+        };
+
+        let hist_refs: Vec<&[f32]> = chunk_histograms.iter().map(|h| h.as_slice()).collect();
+        let chunk_mean = mean_histogram(&hist_refs);
+
+        let mut chunk_distances: Vec<f32> = chunk_histograms
+            .iter()
+            .map(|h| wasserstein1(h, &chunk_mean))
+            .collect();
+        chunk_distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p95_index = ((chunk_distances.len().saturating_sub(1)) * 95) / 100;
+        let chunk_eps = chunk_distances.get(p95_index).copied().unwrap_or(0.0);
+
+        let chunk_baseline = compute_moments(&chunk_mean);
+        let per_trial_moments: Vec<MomentVector> = chunk_histograms
+            .iter()
+            .map(|h| compute_moments(h))
+            .collect();
+        let chunk_tol = tolerance_ball(&per_trial_moments);
+
+        sample_mean_hists.push(chunk_mean);
+        sample_eps_intra.push(chunk_eps);
+        sample_baseline_moments.push(chunk_baseline);
+        sample_tolerance.push(chunk_tol);
+        sample_health.push(chunk_health);
+        sample_h_bars.push(chunk_h_bars);
+    }
+
+    // Per-sample audit record (returned to caller + persisted on disk).
+    let audit: Vec<SampleAuditRecord> = sample_health
         .iter()
-        .map(|h| wasserstein1(h, &mean_hist))
+        .zip(sample_eps_intra.iter())
+        .map(|(h, eps)| SampleAuditRecord {
+            h_hat: h.h_hat,
+            rho_hat: h.rho_hat,
+            l_hat: h.l_hat,
+            epsilon_intra: *eps,
+        })
         .collect();
-    // Kotlin: `sortedDistances[((n - 1) * 95) / 100]`. We mirror that index
-    // exactly to keep `epsilon_intra` comparable across the cutover.
-    // Safe partial_cmp — histograms only contain non-negative finite values.
-    distances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p95_index = ((distances.len().saturating_sub(1)) * 95) / 100;
-    let epsilon_intra = distances.get(p95_index).copied().unwrap_or(0.0);
+
+    // ---- step 2c: M-sample admission verdict.  This is the gate
+    //               that decides FULL_ACCESS vs READ_ONLY vs reject.
+    let (admission_status, _admission_h0_eff, _recommended_n) =
+        classify_resonant_m_sample(&sample_health);
+    if admission_status == ResonantStatus::Fail {
+        // Hard reject — compute median scalars for the error report
+        // and publish a fail-closed snapshot before returning.  No
+        // file written.
+        let mut hs: Vec<f32> = sample_health.iter().map(|h| h.h_hat).collect();
+        let mut rs: Vec<f32> = sample_health.iter().map(|h| h.rho_hat.abs()).collect();
+        let mut ls: Vec<f32> = sample_health.iter().map(|h| h.l_hat).collect();
+        let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        hs.sort_by(cmp);
+        rs.sort_by(cmp);
+        ls.sort_by(cmp);
+        let mid = sample_health.len() / 2;
+        let median_h = hs[mid];
+        let median_r = rs[mid];
+        let median_l = ls[mid];
+        publish_trust_snapshot(
+            HealthResult {
+                h_hat: median_h,
+                rho_hat: median_r,
+                l_hat: median_l,
+                passed: false,
+            },
+            0.0,
+            0.0,
+            &format!(
+                "enroll_device: admission rejected over M={m} samples (median H={median_h:.3}, \
+                 |rho|={median_r:.3}, L={median_l:.3})"
+            ),
+        );
+        return Err(EnrollError::AdmissionRejected {
+            samples: audit,
+            median_h_hat: median_h,
+            median_rho_hat_abs: median_r,
+            median_l_hat: median_l,
+        });
+    }
+
+    // ---- step 3: manufacturing gate over per-trial Ĥ aggregated
+    //               across all M*K trials.  This stays a non-fatal
+    //               signal — the admission verdict above is the real
+    //               gate now.
+    let mut all_h_bars: Vec<f32> = Vec::with_capacity(m * k);
+    for chunk in &sample_h_bars {
+        all_h_bars.extend_from_slice(chunk);
+    }
+    let mfg = cdbrw_ffi::manufacturing_gate(&all_h_bars);
+
+    // ---- step 4: derive the persisted reference via element-wise
+    //               median across the M sample mean histograms.  The
+    //               resulting mean_hist is what every future
+    //               measure_trust orbit gets W1-compared against, so
+    //               it must reflect the *typical* device state, not
+    //               an outlier-tail one.
+    let mean_hist = element_wise_median_hist(&sample_mean_hists);
+
+    let mut eps_sorted = sample_eps_intra.clone();
+    eps_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let epsilon_intra = eps_sorted[m / 2];
+
+    // Element-wise median across the M baseline moment vectors and the
+    // M tolerance balls.  Each moment is independent so median per
+    // index is well-defined.
+    let baseline_moments = element_wise_median_moments(&sample_baseline_moments);
+    let tolerance = element_wise_median_moments(&sample_tolerance);
 
     // ---- step 5: anchor input + AC_D ----
     // meanBytes_LE ‖ epsilonBytes_BE ‖ metadataBytes (4)
@@ -236,9 +527,17 @@ pub fn enroll_device(
     anchor_input.extend_from_slice(&epsilon_bytes_be);
     anchor_input.extend_from_slice(&metadata_bytes);
 
+    // Fold the median'd baseline_moments + tolerance into the anchor
+    // preimage so the anchor still commits to the envelope.
+    for &v in baseline_moments.iter() {
+        anchor_input.extend_from_slice(&v.to_le_bytes());
+    }
+    for &v in tolerance.iter() {
+        anchor_input.extend_from_slice(&v.to_le_bytes());
+    }
+
     // `domain_hash_bytes` prepends the domain tag with a trailing NUL,
     // matching Kotlin `CdbrwBlake3Native.nativeBlake3DomainHash` convention.
-    // Keyed BLAKE3 over `env ‖ anchor_input` — same layout as Kotlin.
     let mut preimage = Vec::with_capacity(inputs.env_bytes.len() + anchor_input.len());
     preimage.extend_from_slice(inputs.env_bytes);
     preimage.extend_from_slice(&anchor_input);
@@ -257,6 +556,12 @@ pub fn enroll_device(
         epsilon_intra,
         &mean_hist,
         &anchor32,
+        &baseline_moments,
+        &tolerance,
+        bin_range,
+        inputs.admission_samples,
+        inputs.trials_per_sample,
+        &audit,
     )
     .map_err(|e| {
         // On I/O failure, publish a Blocked snapshot so the gate knows
@@ -275,25 +580,27 @@ pub fn enroll_device(
         EnrollError::Io(e)
     })?;
 
-    // ---- step 7: publish averaged trust snapshot ----
-    let (avg_health, note) = averaged_health(&health_results, mfg);
-
-    // Post-enrollment drift is identically zero (we just defined the mean),
-    // and the threshold becomes the new `epsilon_intra + margin`.
+    // ---- step 7: publish median trust snapshot ----
+    let (median_health, note) = m_sample_health(&sample_health, mfg);
     let trust = publish_trust_snapshot(
-        avg_health,
+        median_health,
         0.0,
         epsilon_intra + DEFAULT_DISTANCE_MARGIN,
         &note,
     );
 
-    // Log the final state at info level. No secret material crosses the log
-    // boundary — anchors are truncated and entropy metrics are scalars.
+    // Log per-sample h_hat so a marginal device's variance band shows
+    // up directly in logcat without parsing the binary file.
+    let per_sample_h: Vec<f32> = audit.iter().map(|s| s.h_hat).collect();
     log::info!(
-        "[cdbrw_enroll] persisted K={} bins={} eps_intra={:.6} anchor_prefix={:02x?} access={} note={}",
-        inputs.trials.len(),
+        "[cdbrw_enroll] persisted M={} K={} bins={} eps_intra={:.6} \
+         per_sample_h={:?} median_h={:.4} anchor_prefix={:02x?} access={} note={}",
+        m,
+        k,
         bins,
         epsilon_intra,
+        per_sample_h,
+        median_health.h_hat,
         &anchor32[..10.min(anchor32.len())],
         trust.access_level.as_str(),
         note
@@ -305,17 +612,75 @@ pub fn enroll_device(
         mean_histogram_len: mean_hist.len() as u32,
         reference_anchor_prefix: anchor32[..10.min(anchor32.len())].to_vec(),
         reference_anchor: anchor32,
+        baseline_moments,
+        tolerance_ball: tolerance,
         trust,
         note,
+        admission_samples: audit,
     })
 }
 
-/// Average `h_hat`/`rho_hat`/`l_hat` across trials. Used for the post-enroll
-/// trust snapshot so a single noisy probe can't swing the result. `passed`
-/// is true iff every per-trial health test passed — same invariant the
-/// Kotlin enrollment enforced.
-fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResult, String) {
-    if results.is_empty() {
+/// Element-wise median of M equal-length histograms.  For each bin
+/// index, sort the M values and pick the middle one.  Re-normalises so
+/// the resulting histogram still sums to 1.0 (medians of a
+/// distribution don't preserve the unit-sum invariant under arbitrary
+/// noise — we explicitly renormalise to keep W1 math meaningful).
+fn element_wise_median_hist(samples: &[Vec<f32>]) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let bins = samples[0].len();
+    if bins == 0 {
+        return Vec::new();
+    }
+    let m = samples.len();
+    let mid = m / 2;
+    let mut out = Vec::with_capacity(bins);
+    let mut col = vec![0.0f32; m];
+    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    for b in 0..bins {
+        for (i, s) in samples.iter().enumerate() {
+            col[i] = if b < s.len() { s[b] } else { 0.0 };
+        }
+        col.sort_by(cmp);
+        out.push(col[mid]);
+    }
+    // Renormalise.
+    let total: f32 = out.iter().sum();
+    if total > 1e-12 {
+        for v in out.iter_mut() {
+            *v /= total;
+        }
+    } else {
+        out.fill(0.0);
+        out[0] = 1.0;
+    }
+    out
+}
+
+/// Element-wise median across M moment vectors.  Each moment slot is
+/// independent so per-index median is well-defined.
+fn element_wise_median_moments(samples: &[MomentVector]) -> MomentVector {
+    let mut out: MomentVector = [0.0; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT];
+    let m = samples.len();
+    if m == 0 {
+        return out;
+    }
+    let mid = m / 2;
+    for i in 0..out.len() {
+        let mut col: Vec<f64> = samples.iter().map(|s| s[i]).collect();
+        col.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        out[i] = col[mid];
+    }
+    out
+}
+
+/// Build a HealthResult carrying the median of M samples for the
+/// published TrustSnapshot.  Mirrors the single-sample `averaged_health`
+/// but uses medians (resistant to the same outliers the admission rule
+/// is designed to absorb).
+fn m_sample_health(samples: &[HealthResult], mfg: MfgGateResult) -> (HealthResult, String) {
+    if samples.is_empty() {
         return (
             HealthResult {
                 h_hat: 0.0,
@@ -323,45 +688,54 @@ fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResul
                 l_hat: 0.0,
                 passed: false,
             },
-            "enroll_device: no health results".to_string(),
+            "enroll_device: no sample health results".to_string(),
         );
     }
-    let n = results.len() as f32;
-    let h_hat = results.iter().map(|r| r.h_hat).sum::<f32>() / n;
-    let rho_hat = results.iter().map(|r| r.rho_hat).sum::<f32>() / n;
-    let l_hat = results.iter().map(|r| r.l_hat).sum::<f32>() / n;
-    let passed = results.iter().all(|r| r.passed);
-
+    let mut hs: Vec<f32> = samples.iter().map(|s| s.h_hat).collect();
+    let mut rs: Vec<f32> = samples.iter().map(|s| s.rho_hat).collect();
+    let mut ls: Vec<f32> = samples.iter().map(|s| s.l_hat).collect();
+    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    hs.sort_by(cmp);
+    rs.sort_by(cmp);
+    ls.sort_by(cmp);
+    let mid = samples.len() / 2;
+    let median_h = hs[mid];
+    let median_r = rs[mid];
+    let median_l = ls[mid];
+    let passed = samples.iter().all(|s| s.passed);
     let note = if mfg.passed {
         format!(
-            "enroll_device: K={} sigma_device={:.4} (gate passed)",
-            results.len(),
+            "enroll_device: M={} K-trial samples, median h_hat={:.4} sigma_device={:.4} (mfg passed)",
+            samples.len(),
+            median_h,
             mfg.sigma_device
         )
     } else {
         format!(
-            "enroll_device: K={} sigma_device={:.4} (gate below target — verifier decides)",
-            results.len(),
+            "enroll_device: M={} K-trial samples, median h_hat={:.4} sigma_device={:.4} (mfg \
+             below target — verifier decides)",
+            samples.len(),
+            median_h,
             mfg.sigma_device
         )
     };
-
     (
         HealthResult {
-            h_hat,
-            rho_hat,
-            l_hat,
+            h_hat: median_h,
+            rho_hat: median_r,
+            l_hat: median_l,
             passed,
         },
         note,
     )
 }
 
-/// Serialize the enrollment snapshot to `path` using the big-endian layout
-/// consumed by `handlers::misc_routes::load_cdbrw_enrollment`:
+/// Serialize the enrollment snapshot to `path`.
+///
+/// Layout (big-endian, revision 7):
 ///
 /// ```text
-/// u32 BE  revision
+/// u32 BE  revision (4 .. 7)
 /// u32 BE  arena_bytes
 /// u32 BE  probes
 /// u32 BE  steps_per_probe
@@ -372,6 +746,16 @@ fn averaged_health(results: &[HealthResult], mfg: MfgGateResult) -> (HealthResul
 /// [mean_histogram_len × f32 BE]
 /// u32 BE  reference_anchor_len
 /// [reference_anchor_len × u8]
+/// ---- v5 envelope extension ----
+/// [ENVELOPE_MOMENT_COUNT × f64 BE]   baseline_moments
+/// [ENVELOPE_MOMENT_COUNT × f64 BE]   tolerance_ball
+/// ---- v6 bin_range extension ----
+/// i64 BE  bin_range_low
+/// i64 BE  bin_range_high
+/// ---- v7 admission extension (Phase 9) ----
+/// u32 BE  admission_m
+/// u32 BE  trials_per_sample
+/// [admission_m × {f32 BE h_hat, f32 BE rho_hat, f32 BE l_hat, f32 BE epsilon_intra}]
 /// ```
 ///
 /// Writes via a buffered writer so the file is not partially flushed on
@@ -389,6 +773,12 @@ fn write_enrollment_file(
     epsilon_intra: f32,
     mean_histogram: &[f32],
     reference_anchor: &[u8],
+    baseline_moments: &MomentVector,
+    tolerance_ball: &MomentVector,
+    bin_range: BinRange,
+    admission_m: u32,
+    trials_per_sample: u32,
+    admission_audit: &[SampleAuditRecord],
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {parent:?}: {e}"))?;
@@ -437,6 +827,62 @@ fn write_enrollment_file(
         .write_all(reference_anchor)
         .map_err(|e| format!("write reference_anchor: {e}"))?;
 
+    // v5 envelope extension — 8 × f64 BE baseline moments followed by
+    // 8 × f64 BE tolerance ball. Readers gated on revision ≥ 5.
+    if revision >= 5 {
+        for v in baseline_moments.iter() {
+            writer
+                .write_all(&v.to_bits().to_be_bytes())
+                .map_err(|e| format!("write baseline_moments: {e}"))?;
+        }
+        for v in tolerance_ball.iter() {
+            writer
+                .write_all(&v.to_bits().to_be_bytes())
+                .map_err(|e| format!("write tolerance_ball: {e}"))?;
+        }
+    }
+
+    // v6 bin_range extension — two i64 BE describing the robust
+    // [P0.5, P99.5] binning range used to build the per-trial
+    // histograms.  Readers gated on revision ≥ 6.  Without this the
+    // measure_trust path can't reproduce the same bin space the
+    // enrollment used, breaking mean-histogram + W1 alignment.
+    if revision >= 6 {
+        writer
+            .write_all(&bin_range.low.to_be_bytes())
+            .map_err(|e| format!("write bin_range.low: {e}"))?;
+        writer
+            .write_all(&bin_range.high.to_be_bytes())
+            .map_err(|e| format!("write bin_range.high: {e}"))?;
+    }
+
+    // v7 admission extension (Phase 9) — admission_m + trials_per_sample
+    // followed by per-sample (h_hat, rho_hat, l_hat, epsilon_intra)
+    // quartets.  Readers gated on revision ≥ 7.  Lets the auditor see
+    // the full M-sample variance band that cleared admission.
+    if revision >= 7 {
+        writer
+            .write_all(&admission_m.to_be_bytes())
+            .map_err(|e| format!("write admission_m: {e}"))?;
+        writer
+            .write_all(&trials_per_sample.to_be_bytes())
+            .map_err(|e| format!("write trials_per_sample: {e}"))?;
+        for s in admission_audit {
+            writer
+                .write_all(&s.h_hat.to_bits().to_be_bytes())
+                .map_err(|e| format!("write admission h_hat: {e}"))?;
+            writer
+                .write_all(&s.rho_hat.to_bits().to_be_bytes())
+                .map_err(|e| format!("write admission rho_hat: {e}"))?;
+            writer
+                .write_all(&s.l_hat.to_bits().to_be_bytes())
+                .map_err(|e| format!("write admission l_hat: {e}"))?;
+            writer
+                .write_all(&s.epsilon_intra.to_bits().to_be_bytes())
+                .map_err(|e| format!("write admission epsilon_intra: {e}"))?;
+        }
+    }
+
     writer.flush().map_err(|e| format!("flush: {e}"))?;
     // Rename the tmp file over the final path so readers never see a
     // half-written file.
@@ -479,95 +925,266 @@ mod tests {
     }
 
     /// Build a synthetic set of orbit timings that look sufficiently
-    /// "random" for the entropy health test to pass. We use a linear ramp
-    /// plus a simple LCG perturbation — same pattern the responder tests
-    /// rely on.
+    /// "random" for the entropy health test to pass under the Phase 9
+    /// per-sample admission gates.  Uses pure LCG output (no linear
+    /// ramp) so consecutive samples are statistically independent — the
+    /// pre-Phase-9 fixture added an `i*100` ramp which produced
+    /// `rho_hat ≈ 0.9`, well above the new `RHO_HAT_HARD_REJECT=0.40`
+    /// floor.
     fn synthetic_timings(seed: u64, n: usize) -> Vec<i64> {
-        let mut state = seed;
+        let mut state = seed.wrapping_add(0x9E3779B97F4A7C15);
         (0..n)
-            .map(|i| {
+            .map(|_| {
                 state = state
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let noise = (state >> 16) as i64 & 0xFFFF;
-                (i as i64) * 100 + noise
+                // Take 24 bits of the LCG state to get a wide spread —
+                // the original 16-bit window was too narrow for the
+                // robust-binning histogram math.
+                ((state >> 16) as i64) & 0x00FF_FFFF
             })
             .collect()
     }
 
+    /// One distinct 32-byte non-zero challenge per trial. Mirrors what the
+    /// Android side does with `SecureRandom().nextBytes(challenge)`.
+    fn synthetic_challenges(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|i| {
+                let mut c = vec![0u8; 32];
+                for (j, b) in c.iter_mut().enumerate() {
+                    *b = ((i + 1) as u8).wrapping_add(j as u8).wrapping_mul(13);
+                }
+                // Force the first byte non-zero so the all-zero guard never
+                // trips for the synthetic fixture.
+                c[0] |= 0x01;
+                c
+            })
+            .collect()
+    }
+
+    /// Total trial count for M-sample admission shape: M*K trials.  Tests
+    /// that use this constant pass the same number of challenges.
+    const TOTAL_TRIALS: usize = ADMISSION_M * MIN_ENROLL_TRIALS;
+
     #[test]
-    fn enroll_rejects_too_few_trials() {
+    fn enroll_rejects_too_few_trials_per_sample() {
         let dir = TempDir::new().expect("tempdir");
-        let trials: Vec<Vec<i64>> = (0..(MIN_ENROLL_TRIALS - 1))
+        // trials_per_sample below MIN_ENROLL_TRIALS, total = M*(K-1).
+        let bad_k = MIN_ENROLL_TRIALS - 1;
+        let total = ADMISSION_M * bad_k;
+        let trials: Vec<Vec<i64>> = (0..total)
             .map(|i| synthetic_timings(i as u64, 1024))
             .collect();
+        let challenges = synthetic_challenges(trials.len());
         let inputs = EnrollInputs {
             env_bytes: b"test-env",
             trials: &trials,
+            trial_challenges: &challenges,
             arena_bytes: 8 * 1024 * 1024,
             probes: 4096,
             steps_per_probe: 4096,
             histogram_bins: 256,
             rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: bad_k as u32,
         };
         let err = enroll_device(dir.path(), &inputs).unwrap_err();
         assert!(matches!(err, EnrollError::InsufficientTrials { .. }));
     }
 
     #[test]
-    fn enroll_rejects_bad_bin_count() {
+    fn enroll_rejects_admission_shape_mismatch() {
         let dir = TempDir::new().expect("tempdir");
-        let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+        // M*K-1 trials with the writer expecting M*K — shape mismatch.
+        let total = ADMISSION_M * MIN_ENROLL_TRIALS - 1;
+        let trials: Vec<Vec<i64>> = (0..total)
             .map(|i| synthetic_timings(i as u64, 1024))
             .collect();
+        let challenges = synthetic_challenges(trials.len());
         let inputs = EnrollInputs {
             env_bytes: b"test-env",
             trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(err, EnrollError::AdmissionShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn enroll_rejects_wrong_admission_m() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        let challenges = synthetic_challenges(trials.len());
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+            admission_samples: (ADMISSION_M as u32) + 1, // wrong M
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(err, EnrollError::AdmissionShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn enroll_rejects_bad_bin_count() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        let challenges = synthetic_challenges(trials.len());
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
             arena_bytes: 8 * 1024 * 1024,
             probes: 4096,
             steps_per_probe: 4096,
             histogram_bins: 77,
             rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
         };
         let err = enroll_device(dir.path(), &inputs).unwrap_err();
         assert!(matches!(err, EnrollError::InvalidHistogramBins { .. }));
     }
 
     #[test]
-    fn enroll_rejects_empty_trial() {
+    fn enroll_rejects_missing_challenge() {
         let dir = TempDir::new().expect("tempdir");
-        let mut trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+        let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
             .map(|i| synthetic_timings(i as u64, 1024))
             .collect();
-        trials[5] = Vec::new();
+        // One fewer challenge than trial — count mismatch.
+        let challenges = synthetic_challenges(trials.len() - 1);
         let inputs = EnrollInputs {
             env_bytes: b"test-env",
             trials: &trials,
+            trial_challenges: &challenges,
             arena_bytes: 8 * 1024 * 1024,
             probes: 4096,
             steps_per_probe: 4096,
             histogram_bins: 256,
             rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(err, EnrollError::MissingTrialChallenge { .. }));
+    }
+
+    #[test]
+    fn enroll_rejects_all_zero_challenge() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        let mut challenges = synthetic_challenges(trials.len());
+        challenges[3] = vec![0u8; 32];
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(
+            err,
+            EnrollError::MissingTrialChallenge { index: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn enroll_rejects_wrong_length_challenge() {
+        let dir = TempDir::new().expect("tempdir");
+        let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        let mut challenges = synthetic_challenges(trials.len());
+        challenges[0] = vec![0xFFu8; 16]; // half-length
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
+        };
+        let err = enroll_device(dir.path(), &inputs).unwrap_err();
+        assert!(matches!(
+            err,
+            EnrollError::MissingTrialChallenge { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn enroll_rejects_empty_trial() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
+            .map(|i| synthetic_timings(i as u64, 1024))
+            .collect();
+        trials[5] = Vec::new();
+        let challenges = synthetic_challenges(trials.len());
+        let inputs = EnrollInputs {
+            env_bytes: b"test-env",
+            trials: &trials,
+            trial_challenges: &challenges,
+            arena_bytes: 8 * 1024 * 1024,
+            probes: 4096,
+            steps_per_probe: 4096,
+            histogram_bins: 256,
+            rotation_bits: 7,
+            admission_samples: ADMISSION_M as u32,
+            trials_per_sample: MIN_ENROLL_TRIALS as u32,
         };
         let err = enroll_device(dir.path(), &inputs).unwrap_err();
         assert!(matches!(err, EnrollError::EmptyTrial { index: 5 }));
     }
 
     #[test]
-    fn enroll_writes_expected_binary_layout() {
+    fn enroll_writes_expected_v7_binary_layout() {
         with_clean_state(|| {
             let dir = TempDir::new().expect("tempdir");
-            let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+            let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
                 .map(|i| synthetic_timings(i as u64 + 1, 2048))
                 .collect();
+            let challenges = synthetic_challenges(trials.len());
             let inputs = EnrollInputs {
                 env_bytes: b"DSM/silicon_env/v2\0BOARD|BRAND|DEVICE|HW|MFG|MODEL|SOC|com.test",
                 trials: &trials,
+                trial_challenges: &challenges,
                 arena_bytes: 8 * 1024 * 1024,
                 probes: 4096,
                 steps_per_probe: 4096,
                 histogram_bins: 256,
                 rotation_bits: 7,
+                admission_samples: ADMISSION_M as u32,
+                trials_per_sample: MIN_ENROLL_TRIALS as u32,
             };
             let out = enroll_device(dir.path(), &inputs).expect("enroll");
 
@@ -575,9 +1192,9 @@ mod tests {
             assert_eq!(out.mean_histogram_len, 256);
             assert!(out.epsilon_intra.is_finite());
             assert_eq!(out.reference_anchor_prefix.len(), 10);
+            assert_eq!(out.admission_samples.len(), ADMISSION_M);
 
-            // Parse the file we just wrote and confirm it round-trips with the
-            // reader layout used by `load_cdbrw_enrollment`.
+            // Parse the file we just wrote and confirm v7 layout.
             let bytes = fs::read(dir.path().join(ENROLLMENT_FILE_NAME)).expect("read bin");
             let mut cursor = Cursor::new(bytes.as_slice());
             assert_eq!(read_u32_be(&mut cursor), ENROLLMENT_REVISION);
@@ -596,7 +1213,6 @@ mod tests {
             for v in mean_hist.iter_mut() {
                 *v = read_f32_be(&mut cursor);
             }
-            // mean histogram should sum ≈ 1.0 (normalized).
             let sum: f32 = mean_hist.iter().sum();
             assert!(
                 (sum - 1.0).abs() < 1e-4,
@@ -607,10 +1223,35 @@ mod tests {
             assert_eq!(anchor_len, 32);
             let mut anchor = vec![0u8; 32];
             cursor.read_exact(&mut anchor).expect("anchor");
-            // First 10 bytes should match the prefix returned in the response.
             assert_eq!(&anchor[..10], out.reference_anchor_prefix.as_slice());
-            // Full anchor must round-trip byte-for-byte with the disk layout.
             assert_eq!(anchor.as_slice(), out.reference_anchor.as_slice());
+
+            // v5 envelope: 8 baseline_moments + 8 tolerance_ball f64 BE.
+            for _ in 0..(dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT * 2) {
+                let mut buf = [0u8; 8];
+                cursor.read_exact(&mut buf).expect("envelope f64");
+            }
+            // v6 bin_range: 2 i64 BE.
+            for _ in 0..2 {
+                let mut buf = [0u8; 8];
+                cursor.read_exact(&mut buf).expect("bin_range i64");
+            }
+            // v7 admission: m u32 + k u32 + M*(4*f32) = M*16 bytes.
+            let m_read = read_u32_be(&mut cursor);
+            let k_read = read_u32_be(&mut cursor);
+            assert_eq!(m_read, ADMISSION_M as u32);
+            assert_eq!(k_read, MIN_ENROLL_TRIALS as u32);
+            for i in 0..(m_read as usize) {
+                let h = read_f32_be(&mut cursor);
+                let r = read_f32_be(&mut cursor);
+                let l = read_f32_be(&mut cursor);
+                let e = read_f32_be(&mut cursor);
+                let audit = &out.admission_samples[i];
+                assert!((h - audit.h_hat).abs() < 1e-6);
+                assert!((r - audit.rho_hat).abs() < 1e-6);
+                assert!((l - audit.l_hat).abs() < 1e-6);
+                assert!((e - audit.epsilon_intra).abs() < 1e-6);
+            }
         });
     }
 
@@ -618,21 +1259,24 @@ mod tests {
     fn enroll_publishes_trust_snapshot() {
         with_clean_state(|| {
             let dir = TempDir::new().expect("tempdir");
-            let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+            let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
                 .map(|i| synthetic_timings(i as u64 + 1000, 4096))
                 .collect();
+            let challenges = synthetic_challenges(trials.len());
             let inputs = EnrollInputs {
                 env_bytes: b"DSM/silicon_env/v2\0snapshot-test",
                 trials: &trials,
+                trial_challenges: &challenges,
                 arena_bytes: 8 * 1024 * 1024,
                 probes: 4096,
                 steps_per_probe: 4096,
                 histogram_bins: 256,
                 rotation_bits: 7,
+                admission_samples: ADMISSION_M as u32,
+                trials_per_sample: MIN_ENROLL_TRIALS as u32,
             };
             let out = enroll_device(dir.path(), &inputs).expect("enroll");
 
-            // Gate should now hold a non-Blocked snapshot whose iter matches.
             let latest = latest_trust().expect("trust published");
             assert_eq!(latest.iter, out.trust.iter);
             assert_ne!(
@@ -641,7 +1285,6 @@ mod tests {
                 "enrollment should leave the gate hot, got {:?}",
                 latest.access_level
             );
-            // Post-enroll drift is zero by construction.
             assert!(latest.w1_distance.abs() < 1e-6);
             assert!(latest.w1_threshold >= out.epsilon_intra);
         });
@@ -649,21 +1292,24 @@ mod tests {
 
     #[test]
     fn enroll_atomic_tmp_rename() {
-        // Enroll twice to confirm the tmp-rename logic overwrites cleanly
-        // rather than leaving both tmp and final file on disk.
+        // Enroll twice to confirm the tmp-rename logic overwrites cleanly.
         let dir = TempDir::new().expect("tempdir");
         for seed_base in [1u64, 9001u64] {
-            let trials: Vec<Vec<i64>> = (0..MIN_ENROLL_TRIALS)
+            let trials: Vec<Vec<i64>> = (0..TOTAL_TRIALS)
                 .map(|i| synthetic_timings(seed_base + i as u64, 2048))
                 .collect();
+            let challenges = synthetic_challenges(trials.len());
             let inputs = EnrollInputs {
                 env_bytes: b"DSM/silicon_env/v2\0rename-test",
                 trials: &trials,
+                trial_challenges: &challenges,
                 arena_bytes: 8 * 1024 * 1024,
                 probes: 4096,
                 steps_per_probe: 4096,
                 histogram_bins: 256,
                 rotation_bits: 7,
+                admission_samples: ADMISSION_M as u32,
+                trials_per_sample: MIN_ENROLL_TRIALS as u32,
             };
             enroll_device(dir.path(), &inputs).expect("enroll");
         }

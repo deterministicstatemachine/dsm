@@ -308,7 +308,7 @@ fn routing_advertisement_keys_canonicalise_token_pair() {
         "regression: canonical_token_pair must sort lex-lower-first"
     );
     assert!(
-        src.contains("pub(crate) const ROUTING_VAULT_AD_ROOT: &str = \"defi/vault/\";"),
+        src.contains("pub(crate) const ROUTING_VAULT_AD_ROOT: &str = \"sofi/vault/\";"),
         "regression: ROUTING_VAULT_AD_ROOT prefix changed — this breaks every \
          previously-published routing advertisement"
     );
@@ -402,7 +402,7 @@ fn external_commitment_uses_stable_domain_tag() {
          previously-published external commitment X"
     );
     assert!(
-        src.contains("pub(crate) const EXT_COMMIT_ROOT: &str = \"defi/extcommit/\";"),
+        src.contains("pub(crate) const EXT_COMMIT_ROOT: &str = \"sofi/extcommit/\";"),
         "regression: EXT_COMMIT_ROOT prefix changed — every previously-\
          published anchor would become unfindable"
     );
@@ -949,12 +949,20 @@ fn route_publish_routes_stamp_wallet_pk_on_empty() {
 /// `route.signRouteCommit`; without it the AMM owner UI couldn't
 /// create vaults without exposing wallet keys to TS.
 ///
-/// Two regressions this guard catches:
+/// The signature is over `LimboVaultDraft::parameters_hash` (the
+/// same value `LimboVault::verify()` re-derives at finalize_vault
+/// time) — NOT over the DlvInstantiateV1 envelope canonical form.
+/// An earlier implementation signed over the envelope, which the
+/// chunks-#7 verifier rejected on every accept-or-sign path; that
+/// bug was caught only when the first end-to-end real-hardware
+/// SoFi trade test ran.
+///
+/// Three regressions this guard catches:
 ///   * Empty-pk handling removed → frontend gets a hard error
 ///     "creator_public_key is required" and the UI breaks.
 ///   * Empty-sig handling removed → same.
-///   * Self-sign domain tag changed → all previously self-signed
-///     vaults fail re-verification.
+///   * Signing message changed away from `draft.parameters_hash` →
+///     finalize_vault would reject all newly-signed vaults.
 #[test]
 fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
     let src = read(sdk_path("src/handlers/dlv_routes.rs"));
@@ -969,9 +977,9 @@ fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
          signing_authority for the wallet pk"
     );
     assert!(
-        src.contains("if req.signature.is_empty() {"),
-        "regression: dlv.create no longer checks for empty signature \
-         (Track C.4 accept-or-sign surface broken)"
+        src.contains("needs_wallet_sign = req.signature.is_empty()"),
+        "regression: dlv.create no longer flags empty signature for wallet-side \
+         signing (Track C.4 accept-or-sign surface broken)"
     );
     assert!(
         src.contains("crate::sdk::signing_authority::current_secret_key()"),
@@ -979,9 +987,9 @@ fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
          signing_authority for the wallet sk"
     );
     assert!(
-        src.contains("\"DSM/dlv-create-self-sign\""),
-        "regression: dlv.create self-sign domain tag changed — \
-         previously-self-signed vaults will fail re-verification"
+        src.contains("&draft.parameters_hash"),
+        "regression: dlv.create no longer signs over draft.parameters_hash — \
+         finalize_vault's vault.verify() would reject every newly-signed vault"
     );
 }
 
@@ -1123,5 +1131,93 @@ fn dlv_unlock_routed_advances_sequence_and_republishes_anchor_on_settle() {
     assert!(
         count >= 2,
         "publish_vault_state_anchor must be called from both dlv_create and dlv_unlock_routed (found {count})"
+    );
+}
+
+/// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 invariant.
+///
+/// Every `dlv.create` and `dlv.unlockRouted` settle path on a
+/// vault the local wallet owns MUST also publish a
+/// `VaultStateInclusionProofV1`, not just the legacy anchor.  The
+/// inclusion proof is what makes vault state forgery-resistant
+/// against K_DBRW compromise — without it, an attacker with the
+/// owner's key can fabricate a signed anchor against arbitrary
+/// (sequence, reserves_digest).  This guard fails if either of the
+/// two call sites is removed or stops calling the inclusion-proof
+/// publisher.
+#[test]
+fn dlv_create_and_unlock_routed_publish_vault_state_inclusion_proof() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+
+    // The shared helper that wires CoreSDK::install_vault_state_leaf +
+    // sign_vault_state_inclusion_proof + publish_inclusion_proof
+    // together MUST exist.
+    assert!(
+        src.contains("fn publish_vault_state_inclusion_proof"),
+        "dlv_routes.rs must define publish_vault_state_inclusion_proof helper"
+    );
+    // And it must consult the canonical SDK install + sign +
+    // publish primitives — not roll its own.
+    assert!(
+        src.contains("install_vault_state_leaf"),
+        "publish helper must mutate the PD-SMT via CoreSDK::install_vault_state_leaf"
+    );
+    assert!(
+        src.contains("sign_vault_state_inclusion_proof"),
+        "publish helper must sign via dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof"
+    );
+    assert!(
+        src.contains("publish_inclusion_proof"),
+        "publish helper must publish via vault_smt_inclusion_codec::publish_inclusion_proof"
+    );
+
+    // Both dlv.create and dlv.unlockRouted MUST call the helper.
+    // We expect at least 3 occurrences: the function definition + at
+    // least one call from dlv_create + at least one call from
+    // dlv_unlock_routed.
+    let count = src.matches("publish_vault_state_inclusion_proof").count();
+    assert!(
+        count >= 3,
+        "publish_vault_state_inclusion_proof must be called from BOTH dlv_create and dlv_unlock_routed (found {count} total occurrences including the definition)"
+    );
+}
+
+/// Phase 7 — composition strict-mode invariant.
+///
+/// `vault_state_composition::compose_vault_state` MUST fetch and
+/// verify a `VaultStateInclusionProofV1` for the baseline before
+/// folding pending pointers.  If this check is removed, off-device
+/// quote-time verification reverts to anchor-only — the K_DBRW
+/// forgery hole reopens.  This guard fails if the strict-mode
+/// fetch, the cross-bind to baseline, or the inclusion-proof
+/// verification is removed.
+#[test]
+fn compose_vault_state_runs_strict_mode_inclusion_proof_check() {
+    let src = read(sdk_path("src/sdk/vault_state_composition.rs"));
+
+    // Strict-mode fetch from sofi/vault-state-inclusion/.
+    assert!(
+        src.contains("fetch_latest_inclusion_proof"),
+        "compose_vault_state must fetch the inclusion proof"
+    );
+    // Missing-proof variant — strict mode refuses to fold legacy ads.
+    assert!(
+        src.contains("MissingInclusionProof"),
+        "compose_vault_state must surface a MissingInclusionProof error variant"
+    );
+    // Cross-bind to the baseline anchor — equivocation defence.
+    assert!(
+        src.contains("inclusion.vault_id") && src.contains("inclusion.sequence"),
+        "compose_vault_state must cross-bind the inclusion proof to the baseline"
+    );
+    // End-to-end signature + SMT verification.
+    assert!(
+        src.contains("verify_vault_state_inclusion_proof"),
+        "compose_vault_state must call verify_vault_state_inclusion_proof"
+    );
+    // InvalidInclusionProof variant for fail-closed semantics.
+    assert!(
+        src.contains("InvalidInclusionProof"),
+        "compose_vault_state must surface an InvalidInclusionProof error variant"
     );
 }

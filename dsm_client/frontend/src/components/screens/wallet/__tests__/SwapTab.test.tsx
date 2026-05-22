@@ -76,9 +76,20 @@ describe('SwapTab', () => {
         },
       ],
     });
+    // expectedFinalOutput and floorFinalOutput are stamped by the Rust
+    // binder; the frontend just displays what came back.  Mock both
+    // values directly here — the underlying AMM math (x=10000, y=1M,
+    // fee=30 → ~9871, with 0.5% floor → 9821) is exercised by
+    // `route_commit_sdk::tests` in Rust.
     mockedFindBind.mockResolvedValue({
       success: true,
       unsignedRouteCommitBytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+      quote: {
+        expectedFinalOutput: 9871n,
+        floorFinalOutput: 9821n,
+        hops: [],
+        fallbackGroupCount: 0,
+      },
     });
 
     render(<SwapTab {...makeProps()} />);
@@ -86,9 +97,7 @@ describe('SwapTab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(screen.getByText(/1 vault discovered/)).toBeInTheDocument());
-    // Expected output for x=10000, y=1_000_000, fee=30: ((10000*9970/10000) * 1_000_000) / (1_000_000 + 9970) ≈ 9871
     expect(screen.getByText(/~9871 DEMO_BBB/)).toBeInTheDocument();
-    // Default 0.5% slippage on 9871 → 9821 (floor of 9871 * 9950 / 10000)
     expect(screen.getByText(/9821/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Swap$/ })).toBeInTheDocument();
   });
