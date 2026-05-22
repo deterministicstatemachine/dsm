@@ -161,9 +161,22 @@ backup_wallet() {
 
     # Stage to a .new file so we don't truncate an existing good
     # backup if this attempt produces trivial output (e.g. wallet
-    # files dir empty post-wipe).
+    # files dir empty post-wipe).  Tar EVERY persistent wallet state
+    # location, not just `files/`:
+    #   - `files/`        → dsm_silicon_fp_v4.bin + dsm_client.db
+    #                       + bilateral_storage/ etc.
+    #   - `shared_prefs/` → Keystore-wrapped DBRW salt
+    #                       (EncryptedSharedPreferences master key
+    #                       lives in Android Keystore — only valid
+    #                       across `adb install -r`, NOT across full
+    #                       uninstall).  Captures dsm_cutover.xml,
+    #                       dsm_system.xml.
+    #   - `databases/`    → any SQLite DBs the wallet writes outside
+    #                       `files/` (Android-managed location).
+    # Tarring all three keeps the bundle self-consistent — any partial
+    # set would resume into a mismatched state.
     local TMP_BACKUP="${BACKUP_PATH}.new"
-    adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'cd /data/data/com.dsm.wallet && tar -cf - files/' 2>/dev/null | base64 > $TMP_BACKUP" 2>&1 >/dev/null || true
+    adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'cd /data/data/com.dsm.wallet && tar -cf - files/ shared_prefs/ databases/ 2>/dev/null' 2>/dev/null | base64 > $TMP_BACKUP" 2>&1 >/dev/null || true
     local SIZE
     SIZE=$(adb -s "$SERIAL" shell "stat -c %s $TMP_BACKUP 2>/dev/null" 2>&1 | tr -d '\r')
     SIZE=${SIZE:-0}
