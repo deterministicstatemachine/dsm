@@ -212,11 +212,31 @@ restore_wallet() {
     # Force-stop the app so file operations are safe (no in-flight
     # writes), then untar over the existing dir.
     adb -s "$SERIAL" shell "am force-stop com.dsm.wallet" >/dev/null 2>&1 || true
-    if adb -s "$SERIAL" shell "cat $BACKUP_PATH | base64 -d | run-as com.dsm.wallet tar -xf - -C /data/data/com.dsm.wallet" 2>&1 >/dev/null; then
-        echo "  ✓ restored wallet on $SERIAL (size=$DEV_SIZE bytes) <- $BACKUP_PATH"
-    else
-        echo "  ! restore on $SERIAL failed"
-    fi
+    # Retry up to 3 times: `run-as` can transiently fail with
+    # "unknown package" right after `adb install -r` if Android's
+    # package manager hasn't finalised the package metadata yet.
+    # Without retry the tar pipeline silently no-ops (the underlying
+    # command exits 0 even when `run-as` fails) and we end up with
+    # the install's empty data dir.  Verify the canonical wallet
+    # files (`dsm_silicon_fp_v4.bin` + `dsm_client.db`) actually
+    # landed before declaring success.
+    local TRIES=3
+    local i
+    for (( i = 0; i < TRIES; i++ )); do
+        adb -s "$SERIAL" shell "cat $BACKUP_PATH | base64 -d | run-as com.dsm.wallet tar -xf - -C /data/data/com.dsm.wallet" >/dev/null 2>&1 || true
+        # Verify expected files present.
+        local CHECK
+        CHECK=$(adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'ls files/dsm_silicon_fp_v4.bin files/dsm_client.db 2>/dev/null | wc -l'" 2>&1 | tr -d '\r')
+        if [[ "$CHECK" == "2" ]]; then
+            echo "  ✓ restored wallet on $SERIAL (size=$DEV_SIZE bytes, $((i+1)) attempt$([ $i -gt 0 ] && echo s)) <- $BACKUP_PATH"
+            return
+        fi
+        if (( i + 1 < TRIES )); then
+            echo "  · restore attempt $((i+1))/$TRIES on $SERIAL verified $CHECK/2 canonical files — retrying"
+            sleep 2
+        fi
+    done
+    echo "  ! restore on $SERIAL FAILED after $TRIES attempts: expected files missing" >&2
 }
 
 echo
