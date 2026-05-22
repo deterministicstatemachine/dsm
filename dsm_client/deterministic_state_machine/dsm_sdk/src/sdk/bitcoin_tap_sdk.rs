@@ -2692,6 +2692,17 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
+            // Fan-out PUT to every configured storage node, each
+            // authenticated with its OWN per-node token resolved from
+            // the local DB.  This is the load-bearing fix for SoFi
+            // cross-device discovery: DSM storage nodes are
+            // independent (no server-side replication for the GCP
+            // production deployment), so the owner's PUT must land on
+            // every node the trader might query.  Combined with
+            // per-node auth — each storage node maintains its own
+            // device-auth table and rejects tokens issued by a
+            // different node with HTTP 401 — this is the only PUT
+            // path that actually works for the cross-device case.
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
                 .map_err(|e| {
@@ -2708,12 +2719,16 @@ impl BitcoinTapSdk {
                         None::<std::io::Error>,
                     )
                 })?;
-            let node_url = config.node_urls.first().cloned().unwrap_or_default();
-            let sdk = match Self::resolve_storage_auth(&node_url) {
-                Some(auth) => sdk.with_auth(auth),
-                None => sdk,
-            };
-            sdk.store_data(key, payload).await
+            // Resolve auth for each configured node so the per-client
+            // auth is the right token for that specific endpoint.
+            let mut auths = std::collections::HashMap::new();
+            for url in &config.node_urls {
+                if let Some(auth) = Self::resolve_storage_auth(url) {
+                    auths.insert(url.clone(), auth);
+                }
+            }
+            let sdk = sdk.with_per_node_auth(&auths);
+            sdk.put_to_all_replicas(key, payload, None).await
         }
     }
 
@@ -2767,6 +2782,11 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
+            // Mirror storage_put_bytes: fan-out the DELETE to every
+            // node with each request authenticated by that node's own
+            // token.  Single-node delete would leave the object
+            // reachable from the other 5 replicas a trader might
+            // query.
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
                 .map_err(|e| {
@@ -2783,12 +2803,14 @@ impl BitcoinTapSdk {
                         None::<std::io::Error>,
                     )
                 })?;
-            let node_url = config.node_urls.first().cloned().unwrap_or_default();
-            let sdk = match Self::resolve_storage_auth(&node_url) {
-                Some(auth) => sdk.with_auth(auth),
-                None => sdk,
-            };
-            sdk.delete(key).await
+            let mut auths = std::collections::HashMap::new();
+            for url in &config.node_urls {
+                if let Some(auth) = Self::resolve_storage_auth(url) {
+                    auths.insert(url.clone(), auth);
+                }
+            }
+            let sdk = sdk.with_per_node_auth(&auths);
+            sdk.delete_at_all_replicas(key).await
         }
     }
 

@@ -931,49 +931,52 @@ impl StorageNodeSDK {
 
     /// Write to ALL configured storage nodes (spec §6: redundant mirrors).
     ///
-    /// Fans out the PUT to every endpoint in the live registry. Returns
-    /// successfully if at least one write succeeds. Failed nodes are
-    /// quarantined via `report_storage_failure`.
+    /// DSM storage nodes are independent endpoints — there is NO server-
+    /// side cross-node replication of object writes in production (the
+    /// `dev_replication.rs` shim is localhost-only and not wired into
+    /// the GCP deployment).  For the trader on device B to discover
+    /// what the owner on device A published, the owner must write to
+    /// every node the trader might query.  Calling `put` (single node)
+    /// instead of this method is the canonical "owner writes get lost"
+    /// failure mode in cross-device tests.
+    ///
+    /// Fans the PUT out to every client in `self.clients`, each of
+    /// which already carries its own per-node auth token via
+    /// [`with_per_node_auth`].  Returns successfully if at least one
+    /// write succeeds, with the primary address from the first
+    /// successful node.  Failed nodes are quarantined via
+    /// `report_storage_failure` so background health monitoring picks
+    /// them up.
     pub async fn put_to_all_replicas(
         &self,
         key: &str,
         data: &[u8],
         ttl_seconds: Option<u64>,
     ) -> Result<String, DsmError> {
-        let endpoints = crate::network::list_storage_endpoints()?;
-        if endpoints.is_empty() {
-            return self.put(key, data, ttl_seconds).await;
+        if self.clients.is_empty() {
+            return Err(DsmError::storage(
+                "put_to_all_replicas: no clients configured",
+                None::<std::io::Error>,
+            ));
         }
 
         let mut primary_addr = String::new();
         let mut success_count = 0u32;
-        let total = endpoints.len();
+        let total = self.clients.len();
 
-        for endpoint in &endpoints {
-            let temp_config = StorageNodeConfig::new(vec![endpoint.clone()]);
-            let temp_client = match StorageNodeClient::new(temp_config).await {
-                Ok(mut c) => {
-                    // Propagate auth from primary client.
-                    c.auth.clone_from(&self.inner.auth);
-                    c
-                }
-                Err(e) => {
-                    log::warn!("replica fanout: failed to create client for {endpoint}: {e}");
-                    let _ = crate::network::report_storage_failure(endpoint);
-                    continue;
-                }
-            };
-            match temp_client.put(key, data, ttl_seconds).await {
+        for client in self.clients.iter() {
+            let endpoint = client.node_info.url.clone();
+            match client.put(key, data, ttl_seconds).await {
                 Ok(addr) => {
                     if primary_addr.is_empty() {
                         primary_addr = addr;
                     }
                     success_count += 1;
-                    let _ = crate::network::report_storage_success(endpoint);
+                    let _ = crate::network::report_storage_success(&endpoint);
                 }
                 Err(e) => {
                     log::warn!("replica fanout: PUT to {endpoint} failed: {e}");
-                    let _ = crate::network::report_storage_failure(endpoint);
+                    let _ = crate::network::report_storage_failure(&endpoint);
                 }
             }
         }
@@ -992,6 +995,52 @@ impl StorageNodeSDK {
             ));
         }
         Ok(primary_addr)
+    }
+
+    /// DELETE the key from ALL configured storage nodes.  Mirrors the
+    /// put_to_all_replicas write-everywhere semantics so deletes also
+    /// fan out — otherwise a deleted advertisement would still be
+    /// reachable by traders hitting a node where the delete didn't
+    /// reach.  Returns successfully if at least one delete succeeds.
+    pub async fn delete_at_all_replicas(&self, key: &str) -> Result<(), DsmError> {
+        if self.clients.is_empty() {
+            return Err(DsmError::storage(
+                "delete_at_all_replicas: no clients configured",
+                None::<std::io::Error>,
+            ));
+        }
+
+        let mut success_count = 0u32;
+        let total = self.clients.len();
+
+        for client in self.clients.iter() {
+            let endpoint = client.node_info.url.clone();
+            match client.delete(key).await {
+                Ok(()) => {
+                    success_count += 1;
+                    let _ = crate::network::report_storage_success(&endpoint);
+                }
+                Err(e) => {
+                    log::warn!("replica fanout: DELETE to {endpoint} failed: {e}");
+                    let _ = crate::network::report_storage_failure(&endpoint);
+                }
+            }
+        }
+
+        log::info!(
+            "delete_at_all_replicas: key={} success={}/{} nodes",
+            &key[..key.len().min(24)],
+            success_count,
+            total
+        );
+
+        if success_count == 0 {
+            return Err(DsmError::storage(
+                "all replica deletes failed",
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(())
     }
 
     /// Retrieve data from storage node with automatic decoding and failover
@@ -2210,10 +2259,52 @@ impl StorageNodeSDK {
 
     /// Return a new SDK instance with device auth credentials set on the inner client.
     /// Required for authenticated PUT/DELETE operations on storage nodes.
+    ///
+    /// Single-node convenience — applies the same auth to `inner` only.
+    /// Callers driving multi-node writes (put_to_all_replicas, rotated
+    /// retries) should use [`with_per_node_auth`] so each client carries
+    /// its own node-specific token instead of one token leaking across
+    /// nodes.
     pub fn with_auth(self, auth: StorageAuthContext) -> Self {
         let client = (*self.inner).clone().with_auth(auth);
         Self {
             inner: Arc::new(client),
+            ..self
+        }
+    }
+
+    /// Return a new SDK with per-node auth tokens applied.
+    ///
+    /// Each `auths[url]` is matched against the corresponding
+    /// `StorageNodeClient.node_info.url` in `self.clients` and applied
+    /// to that specific client.  Clients whose URL is absent from
+    /// `auths` retain whatever auth they had (typically None).
+    ///
+    /// Critical for production multi-node deployments: DSM storage nodes
+    /// each maintain their own device-auth table, and a token issued by
+    /// node A is invalid at node B.  Without per-node auth, rotated PUT
+    /// retries against nodes 1..N return HTTP 401 even though the wallet
+    /// is correctly registered with each of them.
+    pub fn with_per_node_auth(
+        self,
+        auths: &std::collections::HashMap<String, StorageAuthContext>,
+    ) -> Self {
+        let new_clients: Vec<Arc<StorageNodeClient>> = self
+            .clients
+            .iter()
+            .map(|c| {
+                let mut client = (**c).clone();
+                if let Some(auth) = auths.get(&client.node_info.url) {
+                    client.auth = Some(auth.clone());
+                }
+                Arc::new(client)
+            })
+            .collect();
+        // `clients` is non-empty per `StorageNodeSDK::new` invariant.
+        let new_inner = new_clients[0].clone();
+        Self {
+            inner: new_inner,
+            clients: Arc::new(new_clients),
             ..self
         }
     }
@@ -2572,8 +2663,24 @@ impl StorageNodeSDK {
         })?;
 
         let mut last_error = None;
+        let mut first_success_token: Option<String> = None;
+        let mut success_count = 0usize;
 
-        // Try to register with each storage node
+        // Register with EVERY configured storage node.  DSM storage
+        // nodes are independent endpoints: each maintains its own
+        // device-registration table and gates PUT/DELETE by an
+        // auth-token issued by THAT node.  If we register with only
+        // one node (the previous early-return-on-first-success
+        // behaviour), subsequent PUTs that rotate to any of the other
+        // nodes get rejected with HTTP 401 Unauthorized — exactly the
+        // failure mode observed on the cross-device SoFi test after
+        // node-rotation landed.  The fix is to keep walking the full
+        // list so every node knows this device.
+        //
+        // Returned token: the first successful node's token (callers
+        // use the return value only as a sentinel; per-node tokens
+        // are read on demand via `resolve_storage_auth` against the
+        // local DB which is keyed by (node_url, device_id)).
         for node_url in &self.config.node_urls {
             let url = format!("{}/api/v2/device/register", node_url.trim_end_matches('/'));
 
@@ -2613,8 +2720,12 @@ impl StorageNodeSDK {
                                         );
                                     }
 
-                                    // Return the token from first successful registration
-                                    return Ok(token);
+                                    success_count += 1;
+                                    if first_success_token.is_none() {
+                                        first_success_token = Some(token);
+                                    }
+                                    // DON'T return — keep walking the list so EVERY node
+                                    // gets a registration + token entry in the local DB.
                                 }
                                 Err(e) => {
                                     log::warn!("Failed to decode RegisterDeviceResponse: {}", e);
@@ -2653,13 +2764,22 @@ impl StorageNodeSDK {
             }
         }
 
-        Err(DsmError::storage(
-            format!(
-                "Failed to register device with any storage node. Last error: {}",
-                last_error.unwrap_or_else(|| "Unknown".to_string())
-            ),
-            None::<std::io::Error>,
-        ))
+        log::info!(
+            "register_device_for_auth: registered with {}/{} nodes",
+            success_count,
+            self.config.node_urls.len()
+        );
+
+        match first_success_token {
+            Some(token) => Ok(token),
+            None => Err(DsmError::storage(
+                format!(
+                    "Failed to register device with any storage node. Last error: {}",
+                    last_error.unwrap_or_else(|| "Unknown".to_string())
+                ),
+                None::<std::io::Error>,
+            )),
+        }
     }
 
     /// Sync with a storage node (simplified for JNI)
