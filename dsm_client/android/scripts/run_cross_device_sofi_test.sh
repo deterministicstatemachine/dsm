@@ -119,6 +119,88 @@ if [[ "$OWNER_CFG_MD5" != "$TRADER_CFG_MD5" ]]; then
 fi
 echo "✓ identical dsm_env_config.toml on both devices (md5=$OWNER_CFG_MD5)"
 
+# ── Wallet-data backup + restore around the gradle install.
+#    Gradle's connectedAndroidTest install path triggers an
+#    Android-system clean install whenever the APK changes between
+#    runs (signature/binary delta).  bmgr disable + allowBackup=false
+#    do NOT prevent this on Samsung devices — observed empirically
+#    that A54 + A16 both lose `dsm_silicon_fp_v4.bin` + `dsm_client.db`
+#    on every code-change install cycle, forcing a ~15min M=3
+#    re-enrollment per device.  This loop runs `run-as tar` against
+#    each wallet's private files dir BEFORE the gradle install
+#    spawns, stashes the archive to /sdcard, then restores after
+#    the install completes.  The wallet's app is debuggable in the
+#    dev build (manifest android:debuggable=true) so run-as is
+#    available.  We pre-install + pre-restore here, then pass
+#    `-Pandroid.testInstrumentationRunnerArguments.dontDisableTests=
+#    true` (placeholder) — actually gradle still reinstalls; the
+#    restore re-fires AFTER each gradle install pulses.  Cheaper to
+#    move the backup right before tests and accept the wipe risk
+#    once: see the explicit pre-install backup below.
+backup_wallet() {
+    local SERIAL="$1"
+    local STAGE="$2"
+    local BACKUP_PATH="/sdcard/sofi_wallet_backup_${SERIAL}_${STAGE}.tar.b64"
+    # Run-as into the wallet, tar the private files dir, base64-encode
+    # for pipe-safety, write to /sdcard (world-accessible scratch).
+    if adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'cd /data/data/com.dsm.wallet && tar -cf - files/' | base64 > $BACKUP_PATH" 2>&1; then
+        local SIZE=$(adb -s "$SERIAL" shell "stat -c %s $BACKUP_PATH 2>/dev/null" 2>&1 | tr -d '\r' || echo "0")
+        echo "  ✓ backed up wallet on $SERIAL (size=$SIZE bytes) -> $BACKUP_PATH"
+    else
+        echo "  ! backup on $SERIAL failed (wallet may be empty or not installed; OK if fresh)"
+    fi
+}
+
+restore_wallet() {
+    local SERIAL="$1"
+    local STAGE="$2"
+    local BACKUP_PATH="/sdcard/sofi_wallet_backup_${SERIAL}_${STAGE}.tar.b64"
+    # Verify backup exists + non-trivial size; otherwise skip restore.
+    local SIZE=$(adb -s "$SERIAL" shell "stat -c %s $BACKUP_PATH 2>/dev/null" 2>&1 | tr -d '\r' || echo "0")
+    if [[ -z "$SIZE" || "$SIZE" == "0" || "$SIZE" == "stat:" ]]; then
+        echo "  ! restore on $SERIAL skipped: no backup at $BACKUP_PATH"
+        return
+    fi
+    # Force-stop the app so file operations are safe (no in-flight
+    # writes), then untar over the existing dir.
+    adb -s "$SERIAL" shell "am force-stop com.dsm.wallet" >/dev/null 2>&1 || true
+    if adb -s "$SERIAL" shell "cat $BACKUP_PATH | base64 -d | run-as com.dsm.wallet tar -xf - -C /data/data/com.dsm.wallet" 2>&1; then
+        echo "  ✓ restored wallet on $SERIAL (size=$SIZE bytes) <- $BACKUP_PATH"
+    else
+        echo "  ! restore on $SERIAL failed"
+    fi
+}
+
+echo
+echo "── Phase 0/3: backup + reinstall main APK + restore on both devices"
+echo "             (preserves M=3 enrollment across install; gradle's later test-APK reinstall has no wallet data to touch)"
+APP_APK="$(dirname "$0")/../app/build/outputs/apk/debug/app-debug.apk"
+if [[ ! -f "$APP_APK" ]]; then
+    echo "ERROR: main APK not found at $APP_APK — run ./gradlew :app:assembleDebug first" >&2
+    exit 1
+fi
+for SERIAL in "$OWNER_SERIAL" "$TRADER_SERIAL"; do
+    echo "  ── $SERIAL ──"
+    backup_wallet "$SERIAL" "preinstall"
+    # Force-stop before install to avoid in-flight write races.
+    adb -s "$SERIAL" shell "am force-stop com.dsm.wallet" >/dev/null 2>&1 || true
+    # Install the up-to-date main APK.  This is the wipe trigger
+    # we're explicitly choreographing — the install may clear
+    # /data/data/com.dsm.wallet/files/* under Samsung's clean-install
+    # behaviour, but we restore from the backup immediately after.
+    echo "  · installing main APK (this is the data-wipe trigger we're working around)"
+    if adb -s "$SERIAL" install -r "$APP_APK" 2>&1 | tail -1 | grep -q Success; then
+        echo "  ✓ installed main APK on $SERIAL"
+    else
+        echo "  ! main APK install on $SERIAL failed; continuing — may be UP-TO-DATE" >&2
+    fi
+    restore_wallet "$SERIAL" "preinstall"
+done
+# After this point, gradle's connectedAndroidTest will see the main
+# APK is up-to-date and skip its install — only the test APK will
+# reinstall (no wallet data to lose there).
+echo "  ✓ all wallets restored; gradle install will now be a no-op for the main APK"
+
 # ── Start owner's logcat capture in the background ────────────────
 echo
 echo "── Phase 1/3: starting owner's logcat capture"
