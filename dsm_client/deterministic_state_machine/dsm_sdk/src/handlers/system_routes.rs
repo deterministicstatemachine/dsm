@@ -36,16 +36,11 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
     if req.cdbrw_env_fingerprint.is_empty() {
         return err("system.genesis: cdbrw_env_fingerprint is required".into());
     }
-    if req.cdbrw_salt.len() != 32 {
-        return err(format!(
-            "system.genesis: cdbrw_salt must be 32 bytes, got {}",
-            req.cdbrw_salt.len()
-        ));
-    }
+    // Phase 13: salt dropped from K_DBRW preimage.  req.cdbrw_salt
+    // is now `reserved 7;` in the proto and ignored if present.
     let k_dbrw = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
         &req.cdbrw_hw_entropy,
         &req.cdbrw_env_fingerprint,
-        &req.cdbrw_salt,
     ) {
         Ok(k) => k,
         Err(e) => {
@@ -69,7 +64,6 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
     if let Err(e) = crate::sdk::app_state::AppState::set_platform_entropy_inputs(
         req.cdbrw_hw_entropy.clone(),
         req.cdbrw_env_fingerprint.clone(),
-        req.cdbrw_salt.clone(),
     ) {
         return err(format!(
             "system.genesis: failed to stage platform entropy inputs: {e}"

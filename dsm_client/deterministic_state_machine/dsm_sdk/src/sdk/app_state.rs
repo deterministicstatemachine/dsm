@@ -79,11 +79,15 @@ static STORAGE: Mutex<Option<AppStateStorage>> = Mutex::new(None);
 /// Three byte arrays collected by the platform entropy collector
 /// (Android Kotlin: `PlatformEntropyCollector`). Consumed at genesis
 /// time to derive K_DBRW via the canonical
-/// `derive_cdbrw_binding_key(hw, env, salt)` path.
+/// `derive_cdbrw_binding_key(hw, env)` path.
 ///
-/// Drop zeroizes all three vectors. Construct via
+/// Drop zeroizes both vectors. Construct via
 /// `AppState::set_platform_entropy_inputs` and consume via
 /// `AppState::take_platform_entropy_inputs`.
+///
+/// Phase 13: the third input (random salt) was dropped from the K_DBRW
+/// preimage so the wallet is recoverable across Android uninstall +
+/// reinstall on the same physical device.
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PlatformEntropyInputs {
     /// Hardware-bound entropy: BLAKE3 mix of StrongBox / hardware-Keystore
@@ -93,10 +97,6 @@ pub struct PlatformEntropyInputs {
     /// identifiers (manufacturer, model, hardware, board, bootloader, OS
     /// API level). Must be non-empty.
     pub env_fingerprint: Vec<u8>,
-    /// Per-install random salt, generated once on first launch by the
-    /// platform's CSPRNG and persisted in EncryptedSharedPreferences
-    /// (or equivalent platform secure storage). Must be non-empty.
-    pub salt: Vec<u8>,
 }
 
 static PLATFORM_ENTROPY_INPUTS: Mutex<Option<PlatformEntropyInputs>> = Mutex::new(None);
@@ -543,21 +543,24 @@ impl AppState {
 
     // ----------------- Platform entropy inputs (C-DBRW silicon binding) -----------------
 
-    /// Store the three byte arrays the platform entropy collector
-    /// produced (hw_entropy, env_fingerprint, salt) for consumption at
+    /// Store the two byte arrays the platform entropy collector
+    /// produced (hw_entropy, env_fingerprint) for consumption at
     /// the next genesis attempt. Idempotent: a second call overwrites
     /// the prior values (which are zeroized on drop).
     ///
-    /// All three inputs MUST be non-empty. Empty inputs are rejected
+    /// Both inputs MUST be non-empty. Empty inputs are rejected
     /// here so the gate fires at the JNI boundary rather than deep
     /// inside `derive_cdbrw_binding_key`.
+    ///
+    /// Phase 13: the third input (random salt) was dropped from the
+    /// K_DBRW preimage so the wallet is recoverable across Android
+    /// uninstall + reinstall on the same physical device.
     ///
     /// Returns `Ok(())` on success or a structured error if any input
     /// is empty.
     pub fn set_platform_entropy_inputs(
         hw_entropy: Vec<u8>,
         env_fingerprint: Vec<u8>,
-        salt: Vec<u8>,
     ) -> Result<(), String> {
         if hw_entropy.is_empty() {
             return Err("platform entropy: hw_entropy must not be empty".to_string());
@@ -565,14 +568,10 @@ impl AppState {
         if env_fingerprint.is_empty() {
             return Err("platform entropy: env_fingerprint must not be empty".to_string());
         }
-        if salt.is_empty() {
-            return Err("platform entropy: salt must not be empty".to_string());
-        }
 
         let inputs = PlatformEntropyInputs {
             hw_entropy,
             env_fingerprint,
-            salt,
         };
 
         let mut slot = PLATFORM_ENTROPY_INPUTS
@@ -609,7 +608,6 @@ impl AppState {
         dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
             &inputs.hw_entropy,
             &inputs.env_fingerprint,
-            &inputs.salt,
         )
         .map_err(|e| format!("{context}: C-DBRW binding derivation failed: {e}"))
     }
@@ -1168,9 +1166,8 @@ mod tests {
         setup_test_env();
         let hw = vec![0xAAu8; 32];
         let env = vec![0xBBu8; 32];
-        let salt = vec![0xCCu8; 32];
 
-        AppState::set_platform_entropy_inputs(hw.clone(), env.clone(), salt.clone())
+        AppState::set_platform_entropy_inputs(hw.clone(), env.clone())
             .expect("set must succeed for non-empty inputs");
 
         assert!(AppState::has_platform_entropy_inputs());
@@ -1179,7 +1176,6 @@ mod tests {
             .expect("take must return the inputs we just set");
         assert_eq!(taken.hw_entropy, hw);
         assert_eq!(taken.env_fingerprint, env);
-        assert_eq!(taken.salt, salt);
 
         // One-shot semantics: second take returns None.
         assert!(AppState::take_platform_entropy_inputs().is_none());
@@ -1190,7 +1186,7 @@ mod tests {
     #[serial]
     fn platform_entropy_inputs_rejects_empty_hw_entropy() {
         setup_test_env();
-        let err = AppState::set_platform_entropy_inputs(vec![], vec![0xBB; 32], vec![0xCC; 32])
+        let err = AppState::set_platform_entropy_inputs(vec![], vec![0xBB; 32])
             .expect_err("empty hw_entropy must be rejected");
         assert!(
             err.contains("hw_entropy"),
@@ -1203,7 +1199,7 @@ mod tests {
     #[serial]
     fn platform_entropy_inputs_rejects_empty_env_fingerprint() {
         setup_test_env();
-        let err = AppState::set_platform_entropy_inputs(vec![0xAA; 32], vec![], vec![0xCC; 32])
+        let err = AppState::set_platform_entropy_inputs(vec![0xAA; 32], vec![])
             .expect_err("empty env_fingerprint must be rejected");
         assert!(
             err.contains("env_fingerprint"),
@@ -1214,29 +1210,17 @@ mod tests {
 
     #[test]
     #[serial]
-    fn platform_entropy_inputs_rejects_empty_salt() {
-        setup_test_env();
-        let err = AppState::set_platform_entropy_inputs(vec![0xAA; 32], vec![0xBB; 32], vec![])
-            .expect_err("empty salt must be rejected");
-        assert!(err.contains("salt"), "error must name the bad field: {err}");
-        assert!(!AppState::has_platform_entropy_inputs());
-    }
-
-    #[test]
-    #[serial]
     fn platform_entropy_inputs_set_overwrites_prior() {
         setup_test_env();
 
-        AppState::set_platform_entropy_inputs(vec![0x01; 32], vec![0x02; 32], vec![0x03; 32])
-            .expect("first set");
-        AppState::set_platform_entropy_inputs(vec![0x10; 32], vec![0x20; 32], vec![0x30; 32])
+        AppState::set_platform_entropy_inputs(vec![0x01; 32], vec![0x02; 32]).expect("first set");
+        AppState::set_platform_entropy_inputs(vec![0x10; 32], vec![0x20; 32])
             .expect("second set must overwrite, not error");
 
         let taken = AppState::take_platform_entropy_inputs()
             .expect("take should return the second-set values");
         assert_eq!(taken.hw_entropy, vec![0x10; 32]);
         assert_eq!(taken.env_fingerprint, vec![0x20; 32]);
-        assert_eq!(taken.salt, vec![0x30; 32]);
     }
 
     #[test]
@@ -1248,19 +1232,17 @@ mod tests {
         // direct call with the same byte arrays.
         let hw = b"hw_entropy_test_vector_32_bytes_aaaa".to_vec();
         let env = b"env_fingerprint_test_vector_aaaa".to_vec();
-        let salt = b"per_install_salt_test_vector_aaaa".to_vec();
 
-        AppState::set_platform_entropy_inputs(hw.clone(), env.clone(), salt.clone()).expect("set");
+        AppState::set_platform_entropy_inputs(hw.clone(), env.clone()).expect("set");
         let taken = AppState::take_platform_entropy_inputs().expect("take");
 
         let k_via_slot = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
             &taken.hw_entropy,
             &taken.env_fingerprint,
-            &taken.salt,
         )
         .expect("k_dbrw via slot");
-        let k_direct = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt)
-            .expect("k_dbrw direct");
+        let k_direct =
+            dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env).expect("k_dbrw direct");
 
         assert_eq!(
             k_via_slot, k_direct,

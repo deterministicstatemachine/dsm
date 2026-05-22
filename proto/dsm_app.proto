@@ -1589,7 +1589,10 @@ message SystemGenesisRequest {
   bytes device_entropy = 3 [(dsm_fixed_len)=32];
   bytes cdbrw_hw_entropy = 4 [(dsm_max_len)=1024];
   bytes cdbrw_env_fingerprint = 5 [(dsm_max_len)=1024];
-  bytes cdbrw_salt = 6 [(dsm_fixed_len)=32];
+  reserved 6; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
+              // from K_DBRW preimage so wallet survives uninstall +
+              // reinstall on same device.  Layer B (opportunistic
+              // re-prove) still enforces cross-device anti-clone.
 }
 message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
 message GenesisCreated {
@@ -2048,7 +2051,8 @@ message BootstrapMeasurementReport {
   uint32 progress_percent = 4;
   bytes cdbrw_hw_entropy = 5 [(dsm_max_len)=1024];
   bytes cdbrw_env_fingerprint = 6 [(dsm_max_len)=1024];
-  bytes cdbrw_salt = 7 [(dsm_fixed_len)=32];
+  reserved 7; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
+              // from K_DBRW preimage.  See SystemGenesisRequest.
   TrustLevel trust_level = 8;
   string error_message = 9;
 }
@@ -3428,7 +3432,8 @@ message RestoreIdentityContextOp {
   bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
   bytes cdbrw_hw_entropy      = 3 [(dsm_fixed_len)=32];
   bytes cdbrw_env_fingerprint = 4 [(dsm_max_len)=1024];
-  bytes cdbrw_salt            = 5 [(dsm_fixed_len)=32];
+  reserved 5; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
+              // from K_DBRW preimage.  See SystemGenesisRequest.
 }
 
 // Canonical startup/bootstrap request shared by native platforms.

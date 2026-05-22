@@ -403,10 +403,12 @@ dependencies {
     // Keep previous stable versions until AGP/toolchain bump planned.
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.biometric:biometric:1.1.0")
-    // AndroidX Security — Keystore-backed EncryptedSharedPreferences for
-    // C-DBRW salt persistence (Phase 3 deliverable 2). Tink-based, hardware-
-    // backed master key when StrongBox is available.
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // Phase 13: androidx.security:security-crypto dependency removed.
+    // The only consumer was `security/CdbrwKeystoreSalt.kt` which
+    // wrapped the now-defunct random DBRW salt in
+    // EncryptedSharedPreferences.  K_DBRW is now derived
+    // deterministically from (hw_entropy, env_fingerprint) — no
+    // Keystore-bound master key needed.
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.10.0")
     implementation("androidx.webkit:webkit:1.8.0")
