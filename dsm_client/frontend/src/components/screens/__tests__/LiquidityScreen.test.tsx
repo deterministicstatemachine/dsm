@@ -4,11 +4,17 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import LiquidityScreen from '../LiquidityScreen';
 import * as amm from '../../../dsm/amm';
+import * as route_commit from '../../../dsm/route_commit';
 
 jest.mock('../../../dsm/amm');
+jest.mock('../../../dsm/route_commit');
 
 const mockedList = jest.mocked(amm.listOwnedAmmVaults);
 const mockedCreate = jest.mocked(amm.createAmmVault);
+const mockedPublishAd = jest.mocked(route_commit.publishRoutingAdvertisement);
+
+// 32 zero bytes Base32-Crockford-encoded — 52 chars per ceil(256/5).
+const ZERO_VAULT_ID_B32 = '0'.repeat(52);
 
 describe('LiquidityScreen', () => {
   beforeEach(() => {
@@ -70,7 +76,7 @@ describe('LiquidityScreen', () => {
         success: true,
         vaults: [
           {
-            vaultIdBase32: 'ABCDEFGHJKMNPQRSTVWXYZ0123456789',
+            vaultIdBase32: ZERO_VAULT_ID_B32,
             tokenA: new TextEncoder().encode('AAA'),
             tokenB: new TextEncoder().encode('BBB'),
             reserveA: 1000n,
@@ -81,7 +87,8 @@ describe('LiquidityScreen', () => {
           },
         ],
       });
-    mockedCreate.mockResolvedValue({ success: true, vaultIdBase32: 'ABCDEFGHJKMNPQRSTVWXYZ0123456789' });
+    mockedCreate.mockResolvedValue({ success: true, vaultIdBase32: ZERO_VAULT_ID_B32 });
+    mockedPublishAd.mockResolvedValue({ success: true, vaultIdBase32: ZERO_VAULT_ID_B32 });
 
     render(<LiquidityScreen />);
     await waitFor(() => expect(screen.getByText(/My vaults \(0\)/)).toBeInTheDocument());
