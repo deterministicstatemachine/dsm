@@ -87,8 +87,21 @@ for SERIAL in "$OWNER_SERIAL" "$TRADER_SERIAL"; do
 done
 echo "✓ both devices reachable"
 
+# ── Disable Samsung/AOSP BackupManagerService on both devices.
+#    Without this, `restoreAtInstall` fires every time gradle's
+#    connectedAndroidTest reinstalls the APK and wipes the wallet's
+#    locally-persisted genesis state with a stale cloud snapshot
+#    (observed on Galaxy A54 + A16 — the wallet's manifest sets
+#    allowBackup=false but Samsung's variant ignores that for system
+#    restore).  The bmgr disable persists across reboots; subsequent
+#    test runs see no further wipes.
+for SERIAL in "$OWNER_SERIAL" "$TRADER_SERIAL"; do
+    adb -s "$SERIAL" shell "bmgr enable false" >/dev/null 2>&1 || true
+done
+echo "✓ BackupManagerService disabled on both devices (prevents wallet-data wipe on reinstall)"
+
 # ── Sanity check: identical dsm_env_config.toml ───────────────────
-# Storage cluster config MUST match — different clusters = different
+# Storage node set config MUST match — different config = different
 # storage keyspaces = trader can't read owner's writes.
 OWNER_CFG_MD5="$(adb -s "$OWNER_SERIAL" shell md5sum /sdcard/Download/dsm_env_config.toml 2>/dev/null | awk '{print $1}')"
 TRADER_CFG_MD5="$(adb -s "$TRADER_SERIAL" shell md5sum /sdcard/Download/dsm_env_config.toml 2>/dev/null | awk '{print $1}')"
