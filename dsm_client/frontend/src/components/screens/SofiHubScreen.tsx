@@ -18,6 +18,11 @@ type Brick = {
 
 const BRICKS: Brick[] = [
   {
+    label: 'SWAP',
+    target: 'swap',
+    description: 'Trade against published AMM vaults — picks best route, signs envelope, settles atomically.',
+  },
+  {
     label: 'LIQUIDITY',
     target: 'liquidity',
     description: 'AMM vaults you own — reserves, fees, routing ad status, create new.',

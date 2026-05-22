@@ -267,7 +267,17 @@ export async function publishRoutingAdvertisement(input: {
   unlockSpecKey: string;
   /** Optional — empty / omitted lets Rust stamp the wallet pk. */
   ownerPublicKey?: Uint8Array;
-  vaultProtoBytes: Uint8Array;
+  /**
+   * Optional vault proto bytes.  Empty / omitted → Rust derives the
+   * canonical `VaultPostProto` from the local DLVManager (the
+   * authoritative source).  The previous "must be non-empty" check
+   * forced callers to fabricate VaultPostProto bytes themselves,
+   * which the cross-device SoFi test surfaced as a decode failure
+   * at the trader's `route.syncVaultsForPair` step.  Production
+   * wallets always have the vault in their local DLVManager (they
+   * just called `dlv.create`) — let Rust derive.
+   */
+  vaultProtoBytes?: Uint8Array;
 }): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
   try {
     if (!input?.vaultId || input.vaultId.length !== 32) {
@@ -275,9 +285,6 @@ export async function publishRoutingAdvertisement(input: {
     }
     if (!input.unlockSpecDigest || input.unlockSpecDigest.length !== 32) {
       return { success: false, error: 'unlockSpecDigest must be 32 bytes' };
-    }
-    if (!input.vaultProtoBytes || input.vaultProtoBytes.length === 0) {
-      return { success: false, error: 'vaultProtoBytes is required' };
     }
     const req = new pb.PublishRoutingAdvertisementRequest({
       vaultId: input.vaultId as any,
@@ -290,7 +297,9 @@ export async function publishRoutingAdvertisement(input: {
       unlockSpecKey: input.unlockSpecKey,
       // Empty bytes → Rust accept-or-stamp; wallet pk is filled in.
       ownerPublicKey: (input.ownerPublicKey ?? new Uint8Array()) as any,
-      vaultProtoBytes: input.vaultProtoBytes as any,
+      // Empty bytes → Rust derives canonical VaultPostProto from local
+      // DLVManager (see Rust commit deriving vault_proto_bytes).
+      vaultProtoBytes: (input.vaultProtoBytes ?? new Uint8Array()) as any,
     });
     const resBytes = await routerInvokeBin(
       'route.publishRoutingAdvertisement',

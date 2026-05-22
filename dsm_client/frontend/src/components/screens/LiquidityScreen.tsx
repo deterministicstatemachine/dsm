@@ -15,11 +15,12 @@ import {
   listOwnedAmmVaults,
   type AmmVaultSummary,
 } from '../../dsm/amm';
+import { publishRoutingAdvertisement } from '../../dsm/route_commit';
 import { decodeBase32Crockford } from '../../utils/textId';
 import ConfirmModal from '../ConfirmModal';
 import '../../styles/EnhancedWallet.css';
 
-type Phase = 'idle' | 'loading' | 'creating' | 'created' | 'error';
+type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'created' | 'error';
 
 interface Props {
   onNavigate?: (screen: string) => void;
@@ -123,8 +124,47 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       if (!r.success || !r.vaultIdBase32) {
         throw new Error(r.error || 'createAmmVault failed');
       }
+
+      // Chain `publishRoutingAdvertisement` so the vault is
+      // discoverable by traders on OTHER devices via
+      // `route.syncVaultsForPair`.  Without this step the vault
+      // lives only in the local DLVManager and the cross-device
+      // SoFi flow we proved on real hardware can't fire from the UI.
+      //
+      // `vaultProtoBytes` is left empty — Rust derives the canonical
+      // VaultPostProto from the local DLVManager (the authoritative
+      // source).
+      setPhase('publishing');
+      const vaultIdBytes = decodeBase32Crockford(r.vaultIdBase32);
+      if (vaultIdBytes.length !== 32) {
+        throw new Error(`vault_id Base32 must decode to 32 bytes (got ${vaultIdBytes.length})`);
+      }
+      const publishR = await publishRoutingAdvertisement({
+        vaultId: vaultIdBytes,
+        tokenA: aBytes,
+        tokenB: bBytes,
+        reserveA: rA,
+        reserveB: rB,
+        feeBps: fee,
+        // The policy anchor doubles as a stable 32-byte unlock-spec
+        // identifier for the v1 SoFi UI flow.  Traders read the
+        // digest verbatim from the published advertisement; the
+        // protocol doesn't require it to differ from policyDigest.
+        unlockSpecDigest: policyBytes,
+        unlockSpecKey: `defi/spec/amm/${r.vaultIdBase32.slice(0, 16)}`,
+        // No vaultProtoBytes — Rust derives.  No ownerPublicKey —
+        // Rust stamps the wallet pk.
+      });
+      if (!publishR.success) {
+        // Vault was created locally; only the advertisement publish
+        // failed.  Surface the error but don't roll back the vault —
+        // the owner can refresh + retry from the list view in a
+        // future polish step.
+        throw new Error(`Vault created, but advertisement publish failed: ${publishR.error}`);
+      }
+
       setPhase('created');
-      setToast(`Vault created. id=${r.vaultIdBase32.slice(0, 12)}…`);
+      setToast(`Vault created + published. id=${r.vaultIdBase32.slice(0, 12)}…`);
       setShowCreate(false);
       setTokenA('');
       setTokenB('');
@@ -155,7 +195,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           <button
             type="button"
             onClick={() => void refresh()}
-            disabled={phase === 'loading' || phase === 'creating'}
+            disabled={phase === 'loading' || phase === 'creating' || phase === 'publishing'}
             className="refresh-icon"
             aria-label="Refresh"
             title="Refresh"
@@ -212,7 +252,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               type="button"
               onClick={() => setShowCreate(true)}
               className="send-button button-brick"
-              disabled={phase === 'creating'}
+              disabled={phase === 'creating' || phase === 'publishing'}
             >
               + Create vault
             </button>
@@ -247,14 +287,14 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               <textarea id="liq-policy" className="form-input" value={policyAnchor} onChange={(e) => setPolicyAnchor(e.target.value)} placeholder="paste 52-char Base32" rows={2} />
             </div>
             <div className="form-actions">
-              <button type="button" className="cancel-button" onClick={() => setShowCreate(false)} disabled={phase === 'creating'}>Cancel</button>
+              <button type="button" className="cancel-button" onClick={() => setShowCreate(false)} disabled={phase === 'creating' || phase === 'publishing'}>Cancel</button>
               <button
                 type="button"
                 className="send-button button-brick"
                 onClick={() => setShowConfirm(true)}
-                disabled={!formValid || phase === 'creating'}
+                disabled={!formValid || phase === 'creating' || phase === 'publishing'}
               >
-                {phase === 'creating' ? 'Creating…' : 'Create'}
+                {phase === 'creating' ? 'Creating…' : phase === 'publishing' ? 'Publishing…' : 'Create'}
               </button>
             </div>
           </div>

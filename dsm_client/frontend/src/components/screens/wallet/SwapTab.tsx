@@ -30,6 +30,7 @@ import {
   signRouteCommit,
   computeExternalCommitment,
   publishExternalCommitment,
+  isExternalCommitmentVisible,
   unlockVaultRouted,
   type RoutingAdvertisementSummary,
 } from '../../../dsm/route_commit';
@@ -43,6 +44,7 @@ type Phase =
   | 'quoted'
   | 'signing'
   | 'publishing'
+  | 'confirming-propagation'
   | 'settling'
   | 'settled'
   | 'error';
@@ -86,6 +88,7 @@ function phaseLabel(phase: Phase): string {
     case 'quoted': return 'Route ready';
     case 'signing': return 'Signing route commit…';
     case 'publishing': return 'Publishing anchor…';
+    case 'confirming-propagation': return 'Confirming storage propagation…';
     case 'settling': return 'Settling on vault…';
     case 'settled': return 'Trade settled';
     case 'error': return 'Failed';
@@ -164,6 +167,7 @@ function SwapTabInner({
     phase === 'discovering' ||
     phase === 'signing' ||
     phase === 'publishing' ||
+    phase === 'confirming-propagation' ||
     phase === 'settling';
 
   // Rust-stamped floor decoded from the RouteCommitV1 envelope on
@@ -274,11 +278,37 @@ function SwapTabInner({
       }
 
       setPhase('publishing');
-      const publish = await publishExternalCommitment({
-        x: decodeBase32Crockford(xRes.xBase32),
-      });
+      const xBytes = decodeBase32Crockford(xRes.xBase32);
+      const publish = await publishExternalCommitment({ x: xBytes });
       if (!publish.success) {
         throw new Error(publish.error || 'publishExternalCommitment failed');
+      }
+
+      // Confirm storage propagation before unlocking.  The PUT
+      // returned success after writing to the local-region GCP node,
+      // but unlock-routed will read from a rotated set of nodes; if
+      // we race ahead of replication the unlock fails with an
+      // `ExternalCommitmentNotVisible` rejection that's less
+      // actionable than a clear "still propagating" UX.  Bounded
+      // poll: 5 × ~1s.  Operational transport behaviour only — no
+      // protocol semantics (see DSM clockless-rule exception for
+      // network retry pacing).
+      setPhase('confirming-propagation');
+      let propagated = false;
+      for (let i = 0; i < 5; i++) {
+        const visRes = await isExternalCommitmentVisible(xBytes);
+        if (visRes.success && visRes.visible) {
+          propagated = true;
+          break;
+        }
+        if (i < 4) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      if (!propagated) {
+        throw new Error(
+          'External commitment did not propagate to storage within 5 attempts. Retry the swap.',
+        );
       }
 
       setPhase('settling');
