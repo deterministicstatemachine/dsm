@@ -220,11 +220,16 @@ restore_wallet() {
 }
 
 echo
-echo "── Phase 0/3: backup + reinstall main APK + restore on both devices"
-echo "             (preserves M=3 enrollment across install; gradle's later test-APK reinstall has no wallet data to touch)"
+echo "── Phase 0/3: backup + reinstall main APK + test APK + restore on both devices"
+echo "             (preserves M=3 enrollment across install; test runs via `am instrument` directly — bypass gradle's installer)"
 APP_APK="$(dirname "$0")/../app/build/outputs/apk/debug/app-debug.apk"
+TEST_APK="$(dirname "$0")/../app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
 if [[ ! -f "$APP_APK" ]]; then
     echo "ERROR: main APK not found at $APP_APK — run ./gradlew :app:assembleDebug first" >&2
+    exit 1
+fi
+if [[ ! -f "$TEST_APK" ]]; then
+    echo "ERROR: androidTest APK not found at $TEST_APK — run ./gradlew :app:assembleDebugAndroidTest first" >&2
     exit 1
 fi
 for SERIAL in "$OWNER_SERIAL" "$TRADER_SERIAL"; do
@@ -232,22 +237,30 @@ for SERIAL in "$OWNER_SERIAL" "$TRADER_SERIAL"; do
     backup_wallet "$SERIAL" "preinstall"
     # Force-stop before install to avoid in-flight write races.
     adb -s "$SERIAL" shell "am force-stop com.dsm.wallet" >/dev/null 2>&1 || true
-    # Install the up-to-date main APK.  This is the wipe trigger
-    # we're explicitly choreographing — the install may clear
-    # /data/data/com.dsm.wallet/files/* under Samsung's clean-install
-    # behaviour, but we restore from the backup immediately after.
-    echo "  · installing main APK (this is the data-wipe trigger we're working around)"
+    adb -s "$SERIAL" shell "am force-stop com.dsm.wallet.test" >/dev/null 2>&1 || true
+    # Install both APKs.  Samsung's `pm install -r` clears
+    # /data/data/com.dsm.wallet/files/* on every reinstall under
+    # clean-install behaviour, so we install BOTH up front (main +
+    # test) then restore wallet data ONCE.  Tests run via
+    # `am instrument` directly — no further install cycles.
+    echo "  · installing main APK"
     if adb -s "$SERIAL" install -r "$APP_APK" 2>&1 | tail -1 | grep -q Success; then
         echo "  ✓ installed main APK on $SERIAL"
     else
-        echo "  ! main APK install on $SERIAL failed; continuing — may be UP-TO-DATE" >&2
+        echo "  ! main APK install on $SERIAL failed" >&2
     fi
+    echo "  · installing androidTest APK"
+    if adb -s "$SERIAL" install -r "$TEST_APK" 2>&1 | tail -1 | grep -q Success; then
+        echo "  ✓ installed androidTest APK on $SERIAL"
+    else
+        echo "  ! androidTest APK install on $SERIAL failed" >&2
+    fi
+    # Restore AFTER both installs.  This is the load-bearing step —
+    # the install above wiped data, this puts the M=3 enrollment +
+    # SQLite identity back.
     restore_wallet "$SERIAL" "preinstall"
 done
-# After this point, gradle's connectedAndroidTest will see the main
-# APK is up-to-date and skip its install — only the test APK will
-# reinstall (no wallet data to lose there).
-echo "  ✓ all wallets restored; gradle install will now be a no-op for the main APK"
+echo "  ✓ both APKs installed + wallet data restored on both devices"
 
 # ── Start owner's logcat capture in the background ────────────────
 echo
@@ -257,16 +270,24 @@ adb -s "$OWNER_SERIAL" logcat -s SOFI_TRADE SOFI_XDEV > "$OWNER_LOG" &
 OWNER_LOGCAT_PID=$!
 trap 'kill $OWNER_LOGCAT_PID 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 
-# ── Launch owner test in the background.  We need it running BEFORE
-#    the trader so its setUp + publish steps land first; the owner
-#    will block in its settlement-poll loop waiting for the trader. ──
-echo "── Phase 1/3: launching owner test on $OWNER_SERIAL"
-cd "$ANDROID_DIR"
+# ── Launch owner test in the background via `am instrument`
+#    directly — bypassing gradle's installer pipeline so the wallet
+#    data restored by Phase 0 is not wiped by an extra install
+#    cycle.  Both main + test APKs are already on-device from
+#    Phase 0; this just runs the test class. ──
+echo "── Phase 1/3: launching owner test on $OWNER_SERIAL via am instrument"
 (
-    ANDROID_SERIAL="$OWNER_SERIAL" ./gradlew :app:connectedAndroidTest \
-        -Pandroid.testInstrumentationRunnerArguments.class=com.dsm.wallet.sofi.SoFiCrossDeviceOwnerTest \
+    adb -s "$OWNER_SERIAL" shell am instrument -w -r \
+        -e class com.dsm.wallet.sofi.SoFiCrossDeviceOwnerTest \
+        com.dsm.wallet.test/androidx.test.runner.AndroidJUnitRunner \
         > "$TMP_DIR/owner.gradle.log" 2>&1
-    echo "$?" > "$TMP_DIR/owner.exit"
+    # `am instrument` exits 0 even when tests fail; parse the output
+    # for INSTRUMENTATION_CODE: -1 → all passed, anything else → failure.
+    if grep -qE 'INSTRUMENTATION_CODE:\s*-1' "$TMP_DIR/owner.gradle.log"; then
+        echo "0" > "$TMP_DIR/owner.exit"
+    else
+        echo "1" > "$TMP_DIR/owner.exit"
+    fi
 ) &
 OWNER_GRADLE_PID=$!
 
@@ -312,18 +333,28 @@ adb -s "$TRADER_SERIAL" logcat -s SOFI_TRADE SOFI_XDEV > "$TRADER_LOG" &
 TRADER_LOGCAT_PID=$!
 trap 'kill $OWNER_LOGCAT_PID $TRADER_LOGCAT_PID 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 
-ANDROID_SERIAL="$TRADER_SERIAL" ./gradlew :app:connectedAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class=com.dsm.wallet.sofi.SoFiCrossDeviceTraderTest \
-    -Pandroid.testInstrumentationRunnerArguments.owner_salt="$SALT" \
-    -Pandroid.testInstrumentationRunnerArguments.owner_v1_b32="$V1" \
-    -Pandroid.testInstrumentationRunnerArguments.owner_v2_b32="$V2" \
-    -Pandroid.testInstrumentationRunnerArguments.output_token_b32="$OUT" \
+# Run trader test via `am instrument` directly (same bypass-gradle
+# logic as the owner side).  Pass orchestrator args as `-e key val`
+# pairs — AndroidJUnitRunner exposes these via
+# InstrumentationRegistry.getArguments() inside the test.
+adb -s "$TRADER_SERIAL" shell am instrument -w -r \
+    -e class com.dsm.wallet.sofi.SoFiCrossDeviceTraderTest \
+    -e owner_salt "$SALT" \
+    -e owner_v1_b32 "$V1" \
+    -e owner_v2_b32 "$V2" \
+    -e output_token_b32 "$OUT" \
+    com.dsm.wallet.test/androidx.test.runner.AndroidJUnitRunner \
     > "$TMP_DIR/trader.gradle.log" 2>&1 &
 TRADER_GRADLE_PID=$!
 
 # ── Wait for trader test to finish ────────────────────────────────
 wait $TRADER_GRADLE_PID
-TRADER_EXIT=$?
+# am instrument exits 0 even on test failure; check INSTRUMENTATION_CODE.
+if grep -qE 'INSTRUMENTATION_CODE:\s*-1' "$TMP_DIR/trader.gradle.log"; then
+    TRADER_EXIT=0
+else
+    TRADER_EXIT=1
+fi
 echo
 echo "── trader test finished with exit code $TRADER_EXIT"
 if [[ $TRADER_EXIT -ne 0 ]]; then
