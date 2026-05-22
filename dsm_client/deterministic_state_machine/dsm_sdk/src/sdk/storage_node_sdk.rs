@@ -807,7 +807,18 @@ pub struct NodePerformanceMetrics {
 /// Production-grade SDK for interacting with DSM Storage Nodes
 #[derive(Clone)]
 pub struct StorageNodeSDK {
+    /// Primary client — used by non-retry call sites and as `clients[0]`.
     inner: Arc<StorageNodeClient>,
+    /// All configured storage node clients, one per URL in
+    /// `config.node_urls` order.  DSM storage nodes are independent
+    /// (not a cluster) — each is an autonomous endpoint that the SDK
+    /// can hit directly.  Cross-device SoFi test surfaced that
+    /// `execute_with_retry` had been hammering only `inner` (the first
+    /// node) — when GCP-side rate limiting kicked in on that single
+    /// endpoint with HTTP 429, every retry hit the same blacklisted
+    /// URL.  Rotating through this slice lets the rate-limit window
+    /// on one node clear while we hit a different region's node.
+    clients: Arc<Vec<Arc<StorageNodeClient>>>,
     pub config: StorageNodeConfig,
     #[allow(dead_code)]
     connection_pool: Arc<ConnectionPool>,
@@ -820,14 +831,45 @@ pub struct StorageNodeSDK {
 impl StorageNodeSDK {
     /// Initialize the SDK with enhanced configuration and production features
     pub async fn new(config: StorageNodeConfig) -> Result<Self, DsmError> {
-        let client = StorageNodeClient::new(config.clone()).await.map_err(|e| {
-            DsmError::storage(format!("StorageNodeSDK.new: {e}"), None::<std::io::Error>)
-        })?;
+        // Build a client per configured storage node URL.  DSM storage
+        // nodes are independent (not a cluster); each is an autonomous
+        // endpoint and the SDK can hit any of them.  First-built becomes
+        // the primary; the full set is used by `execute_with_retry`
+        // to rotate across nodes on transient failures (e.g. GCP-side
+        // HTTP 429 throttling against any single endpoint).
+        if config.node_urls.is_empty() {
+            return Err(DsmError::storage(
+                "StorageNodeSDK.new: no node URLs configured".to_string(),
+                None::<std::io::Error>,
+            ));
+        }
+        let mut clients: Vec<Arc<StorageNodeClient>> = Vec::with_capacity(config.node_urls.len());
+        for url in &config.node_urls {
+            // Per-URL client config: same as `config` but with this one URL
+            // pinned as `node_urls.first()` so StorageNodeClient::new picks
+            // it as primary.
+            let mut per_url_config = config.clone();
+            per_url_config.node_urls = vec![url.clone()];
+            match StorageNodeClient::new(per_url_config).await {
+                Ok(c) => clients.push(Arc::new(c)),
+                Err(e) => log::warn!(
+                    "StorageNodeSDK.new: skipping node {url}: {e} — other nodes still available"
+                ),
+            }
+        }
+        if clients.is_empty() {
+            return Err(DsmError::storage(
+                "StorageNodeSDK.new: every configured node failed to build a client".to_string(),
+                None::<std::io::Error>,
+            ));
+        }
+        let inner = clients[0].clone();
 
         let connection_pool = Arc::new(ConnectionPool::new(config.pool_config.clone()));
 
         let sdk = StorageNodeSDK {
-            inner: Arc::new(client),
+            inner,
+            clients: Arc::new(clients),
             config: config.clone(),
             connection_pool,
             health_statuses: Arc::new(RwLock::new(HashMap::new())),
@@ -2026,7 +2068,9 @@ impl StorageNodeSDK {
         });
     }
 
-    /// Execute a storage operation with exponential-backoff retry logic.
+    /// Execute a storage operation with exponential-backoff retry +
+    /// node rotation across the configured set of independent storage
+    /// nodes.
     ///
     /// **Transport-only operational behavior** — per the DSM clockless
     /// rule, wall-clock APIs are banned in protocol semantics (schemas,
@@ -2035,21 +2079,22 @@ impl StorageNodeSDK {
     /// affects HOW fast the SDK rehits a 429/503/transient failure.
     /// Mirrors the `b0x_sdk.rs` retry pattern.
     ///
-    /// Backoff schedule (capped at MAX_DELAY_MS):
-    ///   attempt 0 → 200ms
-    ///   attempt 1 → 400ms
-    ///   attempt 2 → 800ms
-    ///   attempt 3 → 1600ms
-    ///   attempt 4 → 3200ms (capped at 5000ms = MAX_DELAY_MS)
-    ///   attempt 5 → 5000ms
+    /// Each attempt rotates to a different storage node from
+    /// `self.clients` (DSM storage nodes are independent endpoints,
+    /// not a cluster).  Cross-device SoFi test surfaced that the
+    /// previous single-node-only path failed every retry against the
+    /// same blacklisted GCP-hosted endpoint when GCP-side rate
+    /// limiting kicked in — rotation lets the limiter on one node
+    /// clear while we hit a different region's healthy node.
     ///
-    /// Total worst-case wait: ~11s spread across 6 attempts.  Previous
-    /// implementation computed `delay` but never actually slept,
-    /// hammering rate-limited storage clusters in a tight loop and
-    /// dying on transient 429s (observed on cross-device SoFi test:
-    /// every LIST returned `HTTP 429 Too Many Requests` because the
-    /// cluster's per-second rate limit triggered on the bursty 4-back-
-    /// to-back requests).
+    /// Backoff schedule (capped at MAX_DELAY_MS):
+    ///   attempt 0 → no sleep (first try); pick clients[0]
+    ///   attempt 1 → 200ms; pick clients[1 % N]
+    ///   attempt 2 → 400ms; pick clients[2 % N]
+    ///   ...
+    ///   attempt 6 → 5000ms (capped); pick clients[6 % N]
+    ///
+    /// Total worst-case wait: ~11s spread across 7 attempts.
     pub async fn execute_with_retry<F, Fut, T>(&self, operation: F) -> Result<T, DsmError>
     where
         F: Fn(Arc<StorageNodeClient>) -> Fut,
@@ -2059,23 +2104,39 @@ impl StorageNodeSDK {
         const BASE_DELAY_MS: u64 = 200;
         const MAX_DELAY_MS: u64 = 5_000;
 
+        // `clients` is non-empty per `StorageNodeSDK::new` invariant;
+        // pre-compute the modulus once to avoid taking the lock per
+        // attempt.
+        let n_clients = self.clients.len();
+
         for attempt in 0..=MAX_RETRIES {
-            match operation(self.inner.clone()).await {
+            // Rotate: attempt N hits clients[N % n_clients].  When
+            // n_clients == 1 (legacy single-node config) the rotation
+            // degrades cleanly to retry-the-same-node behaviour.
+            let client = self.clients[(attempt as usize) % n_clients].clone();
+            match operation(client).await {
                 Ok(result) => return Ok(result),
                 Err(e) if attempt < MAX_RETRIES => {
                     let delay_ms =
-                        (BASE_DELAY_MS.saturating_mul(1u64 << attempt)).min(MAX_DELAY_MS);
+                        (BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(20))).min(MAX_DELAY_MS);
+                    let next_node_idx = ((attempt as usize) + 1) % n_clients;
                     warn!(
-                        "Storage operation failed (attempt {}/{}): {e} — retrying in {}ms",
+                        "Storage operation failed (attempt {}/{} via node {}): {e} — \
+                         retrying via node {} in {}ms",
                         attempt + 1,
                         MAX_RETRIES + 1,
+                        (attempt as usize) % n_clients,
+                        next_node_idx,
                         delay_ms
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
                 Err(e) => {
                     return Err(DsmError::storage(
-                        format!("Storage operation failed after {MAX_RETRIES} retries: {e}"),
+                        format!(
+                            "Storage operation failed after {} retries across {} node(s): {e}",
+                            MAX_RETRIES, n_clients
+                        ),
                         None::<std::io::Error>,
                     ));
                 }
