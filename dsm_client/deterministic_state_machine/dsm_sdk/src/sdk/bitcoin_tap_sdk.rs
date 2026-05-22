@@ -2727,6 +2727,67 @@ impl BitcoinTapSdk {
                     auths.insert(url.clone(), auth);
                 }
             }
+            // Lazy back-fill: if any configured node has no token in the
+            // local DB, run a registration pass so every node knows this
+            // device.  Idempotent — re-registering a known (device,
+            // node) pair returns the existing token.  This catches the
+            // case where finalize_bootstrap_core's auth-registration
+            // task wasn't invoked (genesis happened on an older binary,
+            // resume path doesn't fire bootstrap finalize, etc.) and
+            // the wallet only has node[0]'s token from b0x_sdk's
+            // single-node auth loop.
+            if auths.len() < config.node_urls.len() {
+                let missing = config.node_urls.len() - auths.len();
+                log::info!(
+                    "storage_put_bytes: {missing}/{} nodes lack a local auth token — running register_device_for_auth to back-fill",
+                    config.node_urls.len()
+                );
+                let device_id =
+                    crate::sdk::app_state::AppState::get_device_id().unwrap_or_default();
+                let public_key =
+                    crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+                let genesis_hash =
+                    crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+                if !device_id.is_empty() && !public_key.is_empty() && !genesis_hash.is_empty() {
+                    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+                    let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+                    let genesis_hash_b32 =
+                        crate::util::text_id::encode_base32_crockford(&genesis_hash);
+                    if let Err(e) = sdk
+                        .register_device_for_auth(
+                            &device_id_b32,
+                            &public_key_b32,
+                            &genesis_hash_b32,
+                        )
+                        .await
+                    {
+                        log::warn!(
+                            "storage_put_bytes: back-fill register_device_for_auth failed: {e} \
+                             (continuing — some nodes may still PUT-401)"
+                        );
+                    }
+                    // Re-read the local DB to pick up the freshly-stored tokens.
+                    auths.clear();
+                    for url in &config.node_urls {
+                        if let Some(auth) = Self::resolve_storage_auth(url) {
+                            auths.insert(url.clone(), auth);
+                        }
+                    }
+                    log::info!(
+                        "storage_put_bytes: post-back-fill auths populated for {}/{} nodes",
+                        auths.len(),
+                        config.node_urls.len()
+                    );
+                } else {
+                    log::warn!(
+                        "storage_put_bytes: skipping back-fill — AppState identity not loaded \
+                         (device_id_empty={} pk_empty={} genesis_empty={})",
+                        device_id.is_empty(),
+                        public_key.is_empty(),
+                        genesis_hash.is_empty()
+                    );
+                }
+            }
             let sdk = sdk.with_per_node_auth(&auths);
             sdk.put_to_all_replicas(key, payload, None).await
         }
