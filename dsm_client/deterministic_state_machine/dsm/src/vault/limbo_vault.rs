@@ -1084,7 +1084,7 @@ impl LimboVault {
         )
         .to_vec();
 
-        let encrypted_data = kyber::aes_encrypt(&sym_key, &nonce, content)
+        let encrypted_data = crate::crypto::aead::aes_encrypt(&sym_key, &nonce, content)
             .map_err(|e| DsmError::crypto("aes_encrypt", Some(e)))?;
 
         // §14 DLV content commitment (Issue #184 F2 — the classical
@@ -1973,7 +1973,7 @@ impl LimboVault {
         .to_vec();
 
         // Decrypt
-        let content = kyber::aes_decrypt(
+        let content = crate::crypto::aead::aes_decrypt(
             &final_key,
             &self.encrypted_content.nonce,
             &self.encrypted_content.encrypted_data,

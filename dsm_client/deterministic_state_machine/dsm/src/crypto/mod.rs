@@ -9,9 +9,10 @@
 //! | BLAKE3-256 | [`blake3`] | All hashing, domain-separated via `BLAKE3-256("DSM/<name>\0" \|\| data)` |
 //! | SPHINCS+ (BLAKE3-only) | [`sphincs`], [`signatures`] | Post-quantum EUF-CMA digital signatures |
 //! | ML-KEM-768 (Kyber) | [`kyber`] | Post-quantum key encapsulation mechanism |
+//! | AES-256-GCM | [`aead`] | Symmetric authenticated encryption |
 //! | Salted-BLAKE3 commitments | [`blake3`] (`dsm_domain_hasher`) | Hiding + binding via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` (e.g. `dlv_content_commitment` in `vault::limbo_vault`) |
 //! | C-DBRW | [`cdbrw_binding`] | Challenge-seeded DBRW anti-cloning (post-quantum) |
-//! | ChaCha20-Poly1305 / AES-256-GCM | [`kyber`] (AES helpers) | Authenticated symmetric encryption |
+//! | ChaCha20-Poly1305 / AES-256-GCM | [`aead`] | Authenticated symmetric encryption |
 //!
 //! # Removed: classical group-based commitment module
 //!
@@ -44,7 +45,8 @@
 //!
 //! - **Core hashing**: [`blake3`], [`hash`], [`canonical_lp`]
 //! - **Signatures**: [`sphincs`] (low-level), [`signatures`] (high-level API), [`streaming_signature`]
-//! - **Key exchange**: [`kyber`] (ML-KEM-768 + AES-GCM helpers)
+//! - **Key exchange**: [`kyber`] (ML-KEM-768)
+//! - **Symmetric AEAD**: [`aead`] (AES-256-GCM)
 //! - **Commitments**: salted BLAKE3 (no dedicated module — call `blake3::dsm_domain_hasher` with a per-purpose tag; canonical pattern lives at `vault::limbo_vault::dlv_content_commitment`)
 //! - **Anti-cloning**: [`cdbrw_binding`]
 //! - **RNG**: [`rng`] (OS and deterministic random byte generation)
@@ -56,6 +58,7 @@ use crate::types::error::DsmError;
 
 // Re-export the main crypto modules
 pub mod adb_test_utils;
+pub mod aead;
 pub mod blake3;
 pub mod canonical_lp;
 pub mod cdbrw_binding;
@@ -92,11 +95,13 @@ mod kyber_pbt_tests;
 
 // ===== Re-exports (curated, no duplicates) =====
 
-// Kyber (KEM + AES-GCM helpers)
+// Kyber (KEM)
 pub use kyber::{
-    aes_decrypt, aes_encrypt, generate_kyber_keypair, init_kyber, kyber_decapsulate,
-    kyber_encapsulate, EncapsulationResult, KyberKeyPair,
+    generate_kyber_keypair, init_kyber, kyber_decapsulate, kyber_encapsulate, KyberKeyPair,
 };
+
+// Symmetric AEAD helpers
+pub use aead::{aes_decrypt, aes_encrypt};
 
 // Classical commitment re-exports REMOVED — see module-level removal note above.
 

@@ -121,6 +121,7 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
         Ok(()) => {}
         Err(e) => {
             tracing::error!(error = %e, "OsRng failed to provide entropy");
+            // SAFETY: abort is intentional here to fail-closed on entropy-source failure; continuing would risk weak randomness in production.
             std::process::abort();
         }
     }

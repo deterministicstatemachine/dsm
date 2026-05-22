@@ -7,9 +7,10 @@ mod tests {
     use proptest::prelude::*;
     use proptest::prelude::ProptestConfig;
 
+    use crate::crypto::aead::{aes_decrypt, aes_encrypt};
     use crate::crypto::kyber::{
-        aes_decrypt, aes_encrypt, generate_kyber_keypair, generate_kyber_keypair_from_entropy,
-        kyber_decapsulate, kyber_encapsulate,
+        generate_kyber_keypair, generate_kyber_keypair_from_entropy, kyber_decapsulate,
+        kyber_encapsulate,
     };
 
     proptest! {

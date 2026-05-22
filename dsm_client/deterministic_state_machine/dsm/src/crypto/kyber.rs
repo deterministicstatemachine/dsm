@@ -1,4 +1,4 @@
-//! ML-KEM-768 (Kyber) post-quantum key encapsulation with AES-256-GCM helpers.
+//! ML-KEM-768 (Kyber) post-quantum key encapsulation.
 //!
 //! Provides the DSM protocol's key exchange mechanism using NIST-standardized
 //! ML-KEM-768 (formerly CRYSTALS-Kyber). This module is strictly bytes-only
@@ -10,30 +10,24 @@
 //! - [`generate_kyber_keypair`] -- generate an ML-KEM-768 keypair
 //! - [`kyber_encapsulate`] -- encapsulate a shared secret to a public key
 //! - [`kyber_decapsulate`] -- decapsulate a shared secret using a secret key
-//! - [`aes_encrypt`] / [`aes_decrypt`] -- AES-256-GCM authenticated encryption
-//!   using shared secrets derived from ML-KEM key exchange
 //!
 //! # Dependencies
 //!
 //! - `ml-kem = "0.2"` (ML-KEM-768 implementation)
-//! - `aes-gcm = "0.10"` (AES-256-GCM authenticated encryption)
 //! - `blake3` (domain-separated key derivation)
 //! - `zeroize` (secret key scrubbing)
 
 use crate::types::error::DsmError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, Nonce,
-};
+use aes_gcm::aead::OsRng;
 use crate::crypto::blake3::dsm_domain_hasher;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
     B32, EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
 };
 use tracing::{debug, error, info, trace};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 // ------------------ Deterministic op-gated health checking (no wall clock) ------------------
 
@@ -103,7 +97,16 @@ impl KyberKeyPair {
 
         let (pk, rest) = decode_bytes(bytes)?;
         bytes = rest;
-        let (sk, _rest) = decode_bytes(bytes)?;
+        let (sk, rest) = decode_bytes(bytes)?;
+
+        if !rest.is_empty() {
+            return Err(DsmError::serialization_error(
+                "Trailing bytes in KyberKeyPair encoding",
+                "keypair_bytes",
+                None::<&str>,
+                None::<std::io::Error>,
+            ));
+        }
 
         if pk.len() != PK_LEN || sk.len() != SK_LEN {
             return Err(DsmError::crypto(
@@ -120,128 +123,6 @@ impl KyberKeyPair {
 
     pub fn generate() -> Result<Self, DsmError> {
         generate_kyber_keypair()
-    }
-
-    pub fn generate_from_entropy(entropy: &[u8], context: Option<&str>) -> Result<Self, DsmError> {
-        let ctx = context.unwrap_or("DSM_KYBER_KEY");
-        let (public_key, secret_key) = generate_kyber_keypair_from_entropy(entropy, ctx)?;
-        Ok(Self {
-            public_key,
-            secret_key,
-        })
-    }
-
-    pub fn encapsulate(&self) -> Result<EncapsulationResult, DsmError> {
-        let (shared_secret, ciphertext) = kyber_encapsulate(&self.public_key)?;
-        Ok(EncapsulationResult {
-            shared_secret,
-            ciphertext,
-        })
-    }
-
-    pub fn encapsulate_for_recipient(
-        &self,
-        recipient_public_key: &[u8],
-    ) -> Result<EncapsulationResult, DsmError> {
-        let (shared_secret, ciphertext) = kyber_encapsulate(recipient_public_key)?;
-        Ok(EncapsulationResult {
-            shared_secret,
-            ciphertext,
-        })
-    }
-
-    pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DsmError> {
-        kyber_decapsulate(&self.secret_key, ciphertext)
-    }
-
-    /// Domain-separated Blake3 KDF (XOF-style expansion via BLAKE3 finalize_xof)
-    pub fn derive_symmetric_key(
-        shared_secret: &[u8],
-        key_size: usize,
-        context: Option<&str>,
-    ) -> Vec<u8> {
-        let ctx = context.unwrap_or("DSM_SYMMETRIC_KEY");
-        let mut hasher = dsm_domain_hasher("DSM/ml-kem-derive");
-        hasher.update(ctx.as_bytes());
-        hasher.update(shared_secret);
-        let mut out = vec![0u8; key_size];
-        hasher.finalize_xof().fill(&mut out);
-        out
-    }
-}
-
-/// Encapsulation result (bytes-only)
-#[derive(Debug, Clone, ZeroizeOnDrop)]
-pub struct EncapsulationResult {
-    pub shared_secret: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-}
-
-impl EncapsulationResult {
-    /// Canonical, versioned bytes
-    ///   magic: b"DSM.KYBER.ENCRES\0"
-    ///   ver  : u8 (=1)
-    ///   ctlen: u32 (BE) | ct
-    ///   sslen: u32 (BE) | ss
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(CT_LEN + SS_LEN + 32);
-        out.extend_from_slice(b"DSM.KYBER.ENCRES\0");
-        out.push(1u8);
-        encode_bytes(&mut out, &self.ciphertext);
-        encode_bytes(&mut out, &self.shared_secret);
-        out
-    }
-
-    pub fn from_bytes(mut bytes: &[u8]) -> Result<Self, DsmError> {
-        const MAGIC: &[u8] = b"DSM.KYBER.ENCRES\0";
-        if bytes.len() < MAGIC.len() + 1 {
-            return Err(DsmError::serialization_error(
-                "EncapsulationResult too short",
-                "encres_bytes",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        if &bytes[..MAGIC.len()] != MAGIC {
-            return Err(DsmError::serialization_error(
-                "Bad EncapsulationResult magic",
-                "encres_bytes",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        bytes = &bytes[MAGIC.len()..];
-
-        let version = bytes[0];
-        bytes = &bytes[1..];
-        if version != 1 {
-            return Err(DsmError::serialization_error(
-                "Unsupported EncapsulationResult version",
-                "encres_bytes",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-
-        let (ciphertext, rest) = decode_bytes(bytes)?;
-        bytes = rest;
-        let (shared_secret, _rest) = decode_bytes(bytes)?;
-
-        if ciphertext.len() != CT_LEN || shared_secret.len() != SS_LEN {
-            return Err(DsmError::crypto(
-                format!(
-                    "Invalid encapsulation sizes: ct={}, ss={}",
-                    ciphertext.len(),
-                    shared_secret.len()
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        Ok(Self {
-            shared_secret,
-            ciphertext,
-        })
     }
 }
 
@@ -360,14 +241,6 @@ pub fn public_key_bytes() -> usize {
 pub fn secret_key_bytes() -> usize {
     SK_LEN
 }
-#[inline]
-pub fn shared_secret_bytes() -> usize {
-    SS_LEN
-}
-#[inline]
-pub fn ciphertext_bytes() -> usize {
-    CT_LEN
-}
 
 // ------------------ Key generation ------------------
 
@@ -405,9 +278,9 @@ pub fn generate_kyber_keypair_from_entropy(
     entropy: &[u8],
     context: &str,
 ) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    if entropy.len() < 16 {
+    if entropy.len() < 32 {
         return Err(DsmError::crypto(
-            "Insufficient entropy for secure key generation (minimum 16 bytes required)",
+            "Insufficient entropy for secure key generation (minimum 32 bytes required)",
             None::<std::io::Error>,
         ));
     }
@@ -421,13 +294,13 @@ pub fn generate_kyber_keypair_from_entropy(
     seed.copy_from_slice(digest.as_bytes());
 
     let d: B32 = {
-        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        let mut h = dsm_domain_hasher("DSM/ml-kem-keygen-d");
         h.update(&seed);
         h.update(&0u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
     };
     let z: B32 = {
-        let mut h = dsm_domain_hasher("DSM/ml-kem-deterministic-rng");
+        let mut h = dsm_domain_hasher("DSM/ml-kem-keygen-z");
         h.update(&seed);
         h.update(&1u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
@@ -451,53 +324,6 @@ pub fn generate_kyber_keypair_from_entropy(
     maybe_periodic_verify()?;
 
     Ok((pk_bytes, sk_bytes))
-}
-
-pub fn generate_deterministic_kyber_keypair(
-    entropy: &[u8],
-    context: &str,
-) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    if entropy.len() < 32 {
-        return Err(DsmError::crypto(
-            "Minimum 32 bytes of entropy required for deterministic key generation",
-            None::<std::io::Error>,
-        ));
-    }
-    generate_kyber_keypair_from_entropy(entropy, context)
-}
-
-// ------------------ Entropy context helpers ------------------
-
-#[derive(Debug)]
-pub struct EntropyContext {
-    context: String,
-    entropy: Vec<u8>,
-}
-impl Drop for EntropyContext {
-    fn drop(&mut self) {
-        self.entropy.zeroize();
-    }
-}
-
-pub fn new_entropy_context(context: &str, entropy: &[u8]) -> EntropyContext {
-    EntropyContext {
-        context: context.to_string(),
-        entropy: entropy.to_vec(),
-    }
-}
-
-pub fn derive_bytes_from_context(
-    context: &mut EntropyContext,
-    purpose: &str,
-    length: usize,
-) -> Vec<u8> {
-    let mut hasher = dsm_domain_hasher("DSM/ml-kem-ctx-derive");
-    hasher.update(context.context.as_bytes());
-    hasher.update(purpose.as_bytes());
-    hasher.update(&context.entropy);
-    let mut out = vec![0u8; length];
-    hasher.finalize_xof().fill(&mut out);
-    out
 }
 
 // ------------------ KEM ops ------------------
@@ -637,70 +463,6 @@ pub fn kyber_decapsulate(secret_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>
     maybe_periodic_verify()?;
 
     Ok(shared_secret.as_slice().to_vec())
-}
-
-// ------------------ AES-GCM (no GenericArray::from_slice anywhere) ------------------
-
-pub fn aes_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, DsmError> {
-    if key.len() != 32 {
-        return Err(DsmError::crypto(
-            "Invalid key size for AES-256".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-    if nonce.len() != 12 {
-        return Err(DsmError::crypto(
-            "Invalid nonce size for AES-GCM".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-
-    // Build cipher without touching GenericArray::from_slice
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| {
-        DsmError::crypto(
-            "Invalid AES-256 key length".to_string(),
-            None::<std::io::Error>,
-        )
-    })?;
-
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(nonce);
-    let nonce = Nonce::from(nonce_arr); // From<[u8;12]>, no removed APIs
-
-    cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|_| DsmError::crypto("AES encryption failed".to_string(), None::<std::io::Error>))
-}
-
-pub fn aes_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, DsmError> {
-    if key.len() != 32 {
-        return Err(DsmError::crypto(
-            "Invalid key size for AES-256".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-    if nonce.len() != 12 {
-        return Err(DsmError::crypto(
-            "Invalid nonce size for AES-GCM".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-
-    // Build cipher without touching GenericArray::from_slice
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| {
-        DsmError::crypto(
-            "Invalid AES-256 key length".to_string(),
-            None::<std::io::Error>,
-        )
-    })?;
-
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(nonce);
-    let nonce = Nonce::from(nonce_arr); // From<[u8;12]>, no removed APIs
-
-    cipher
-        .decrypt(&nonce, ciphertext)
-        .map_err(|_| DsmError::crypto("AES decryption failed".to_string(), None::<std::io::Error>))
 }
 
 // ------------------ Encoding helpers ------------------
@@ -856,85 +618,22 @@ mod tests {
     }
 
     #[test]
-    fn test_aes_encryption_decryption() {
-        let msg = b"Test AES-GCM encryption";
-        let key = vec![0xAAu8; 32]; // 256-bit key
-        let nonce = vec![0x55u8; 12]; // 96-bit nonce
+    fn test_kyber_keypair_rejects_trailing_bytes() {
+        let keypair = generate_kyber_keypair().expect("Key generation should succeed");
+        let mut bytes = keypair.to_bytes();
+        bytes.extend_from_slice(&[0xAB, 0xCD]);
 
-        let encrypted = aes_encrypt(&key, &nonce, msg);
-        assert!(encrypted.is_ok(), "AES encryption should succeed");
-
-        let ciphertext = encrypted.unwrap();
-
-        let decrypted = aes_decrypt(&key, &nonce, &ciphertext);
-        assert!(decrypted.is_ok(), "AES decryption should succeed");
-
-        assert_eq!(
-            msg,
-            decrypted.unwrap().as_slice(),
-            "Decrypted should match original"
-        );
+        let result = KyberKeyPair::from_bytes(&bytes);
+        assert!(result.is_err(), "Should reject trailing bytes");
     }
 
     #[test]
-    fn test_aes_wrong_key() {
-        let msg = b"Secret";
-        let key1 = vec![1u8; 32];
-        let key2 = vec![2u8; 32];
-        let nonce = vec![0u8; 12];
-
-        let ciphertext = aes_encrypt(&key1, &nonce, msg).expect("Encryption should succeed");
-
-        let decrypted = aes_decrypt(&key2, &nonce, &ciphertext);
-        assert!(
-            decrypted.is_err(),
-            "AES decryption with wrong key should fail"
-        );
-    }
-
-    #[test]
-    fn test_aes_wrong_nonce() {
-        let msg = b"Secret";
-        let key = vec![1u8; 32];
-        let nonce1 = vec![1u8; 12];
-        let nonce2 = vec![2u8; 12];
-
-        let ciphertext = aes_encrypt(&key, &nonce1, msg).expect("Encryption should succeed");
-
-        let decrypted = aes_decrypt(&key, &nonce2, &ciphertext);
-        assert!(
-            decrypted.is_err(),
-            "AES decryption with wrong nonce should fail"
-        );
-    }
-
-    #[test]
-    fn test_aes_invalid_key_size() {
-        let msg = b"Test";
-        let bad_key = vec![0u8; 16]; // Wrong size (should be 32)
-        let nonce = vec![0u8; 12];
-
-        let result = aes_encrypt(&bad_key, &nonce, msg);
-        assert!(result.is_err(), "Should reject invalid key size");
-    }
-
-    #[test]
-    fn test_aes_corrupted_ciphertext() {
-        let msg = b"Test message";
-        let key = vec![1u8; 32];
-        let nonce = vec![0u8; 12];
-
-        let mut ciphertext = aes_encrypt(&key, &nonce, msg).expect("Encryption should succeed");
-
-        // Corrupt the ciphertext
-        if !ciphertext.is_empty() {
-            ciphertext[0] ^= 0xFF;
-        }
-
-        let result = aes_decrypt(&key, &nonce, &ciphertext);
+    fn test_kyber_entropy_minimum_32_bytes() {
+        let short_entropy = vec![7u8; 31];
+        let result = generate_kyber_keypair_from_entropy(&short_entropy, "test");
         assert!(
             result.is_err(),
-            "Decryption of corrupted ciphertext should fail"
+            "Should reject entropy shorter than 32 bytes"
         );
     }
 
@@ -950,16 +649,8 @@ mod tests {
             SK_LEN,
             "Secret key size constant should match"
         );
-        assert_eq!(
-            shared_secret_bytes(),
-            SS_LEN,
-            "Shared secret size constant should match"
-        );
-        assert_eq!(
-            ciphertext_bytes(),
-            CT_LEN,
-            "Ciphertext size constant should match"
-        );
+        assert_eq!(SS_LEN, 32, "Shared secret size constant should match");
+        assert_eq!(CT_LEN, 1088, "Ciphertext size constant should match");
     }
 
     #[test]
@@ -979,11 +670,10 @@ mod tests {
         let seed3 = vec![2u8; 32];
 
         let (pk1, sk1) =
-            generate_deterministic_kyber_keypair(&seed1, "test").expect("Should succeed");
+            generate_kyber_keypair_from_entropy(&seed1, "test").expect("Should succeed");
         let (pk2, sk2) =
-            generate_deterministic_kyber_keypair(&seed2, "test").expect("Should succeed");
-        let (pk3, _) =
-            generate_deterministic_kyber_keypair(&seed3, "test").expect("Should succeed");
+            generate_kyber_keypair_from_entropy(&seed2, "test").expect("Should succeed");
+        let (pk3, _) = generate_kyber_keypair_from_entropy(&seed3, "test").expect("Should succeed");
 
         // Same seed and context should produce same keypair
         assert_eq!(pk1, pk2, "Same seed should produce same public key");
@@ -1057,50 +747,5 @@ mod tests {
         assert_eq!(shared_secret1, shared_secret2);
         assert_eq!(ciphertext1, ciphertext2);
         assert_eq!(decapsulated, shared_secret1);
-    }
-
-    #[test]
-    fn test_entropy_context_derivation() {
-        let mut ctx = new_entropy_context("test_context", b"entropy_data");
-
-        let derived1 = derive_bytes_from_context(&mut ctx, "key1", 32);
-        assert_eq!(derived1.len(), 32, "Should derive 32 bytes");
-
-        let derived2 = derive_bytes_from_context(&mut ctx, "key2", 32);
-        assert_eq!(derived2.len(), 32, "Should derive 32 bytes");
-
-        // Different keys should produce different output
-        assert_ne!(
-            derived1, derived2,
-            "Different keys should produce different derived bytes"
-        );
-
-        // Same key should produce same output (deterministic)
-        let derived1_again = derive_bytes_from_context(&mut ctx, "key1", 32);
-        assert_eq!(derived1, derived1_again, "Same key should be deterministic");
-    }
-
-    #[test]
-    fn test_aes_empty_message() {
-        let key = vec![1u8; 32];
-        let nonce = vec![0u8; 12];
-        let msg = b"";
-
-        let encrypted = aes_encrypt(&key, &nonce, msg).expect("Should encrypt empty message");
-        let decrypted = aes_decrypt(&key, &nonce, &encrypted).expect("Should decrypt");
-
-        assert_eq!(msg, decrypted.as_slice(), "Empty message should roundtrip");
-    }
-
-    #[test]
-    fn test_aes_large_message() {
-        let key = vec![1u8; 32];
-        let nonce = vec![0u8; 12];
-        let msg = vec![0xAAu8; 10000]; // 10 KB
-
-        let encrypted = aes_encrypt(&key, &nonce, &msg).expect("Should encrypt large message");
-        let decrypted = aes_decrypt(&key, &nonce, &encrypted).expect("Should decrypt");
-
-        assert_eq!(msg, decrypted, "Large message should roundtrip");
     }
 }
