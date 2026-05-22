@@ -2026,36 +2026,64 @@ impl StorageNodeSDK {
         });
     }
 
-    /// Execute a storage operation with retry logic
+    /// Execute a storage operation with exponential-backoff retry logic.
+    ///
+    /// **Transport-only operational behavior** — per the DSM clockless
+    /// rule, wall-clock APIs are banned in protocol semantics (schemas,
+    /// payloads, receipts, ordering).  Network retry backoff is the
+    /// approved exception: it is opaque to the protocol layer and only
+    /// affects HOW fast the SDK rehits a 429/503/transient failure.
+    /// Mirrors the `b0x_sdk.rs` retry pattern.
+    ///
+    /// Backoff schedule (capped at MAX_DELAY_MS):
+    ///   attempt 0 → 200ms
+    ///   attempt 1 → 400ms
+    ///   attempt 2 → 800ms
+    ///   attempt 3 → 1600ms
+    ///   attempt 4 → 3200ms (capped at 5000ms = MAX_DELAY_MS)
+    ///   attempt 5 → 5000ms
+    ///
+    /// Total worst-case wait: ~11s spread across 6 attempts.  Previous
+    /// implementation computed `delay` but never actually slept,
+    /// hammering rate-limited storage clusters in a tight loop and
+    /// dying on transient 429s (observed on cross-device SoFi test:
+    /// every LIST returned `HTTP 429 Too Many Requests` because the
+    /// cluster's per-second rate limit triggered on the bursty 4-back-
+    /// to-back requests).
     pub async fn execute_with_retry<F, Fut, T>(&self, operation: F) -> Result<T, DsmError>
     where
         F: Fn(Arc<StorageNodeClient>) -> Fut,
         Fut: std::future::Future<Output = Result<T, StorageNodeError>>,
     {
-        let max_retries = 3; // Default retry count since field doesn't exist
-        let base_delay = Duration::from_ticks(1000); // Default deterministic delay (ticks)
+        const MAX_RETRIES: u32 = 6;
+        const BASE_DELAY_MS: u64 = 200;
+        const MAX_DELAY_MS: u64 = 5_000;
 
-        for attempt in 0..=max_retries {
+        for attempt in 0..=MAX_RETRIES {
             match operation(self.inner.clone()).await {
                 Ok(result) => return Ok(result),
-                Err(e) if attempt < max_retries => {
-                    let delay = base_delay * (2_u32.pow(attempt as u32)); // Exponential backoff
-                    warn!("Storage operation failed (attempt {})", attempt + 1);
-                    warn!("Retrying in {delay:?}: {e}");
-                    // Deterministic: no wall-clock delays
+                Err(e) if attempt < MAX_RETRIES => {
+                    let delay_ms =
+                        (BASE_DELAY_MS.saturating_mul(1u64 << attempt)).min(MAX_DELAY_MS);
+                    warn!(
+                        "Storage operation failed (attempt {}/{}): {e} — retrying in {}ms",
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        delay_ms
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
                 Err(e) => {
                     return Err(DsmError::storage(
-                        format!("Storage operation failed after {max_retries} retries: {e}"),
+                        format!("Storage operation failed after {MAX_RETRIES} retries: {e}"),
                         None::<std::io::Error>,
                     ));
                 }
             }
         }
 
-        // This part should ideally not be reached if retry logic is exhaustive
-        // and error handling is complete. If it is reached, it indicates an unhandled
-        // error condition or an issue with the retry mechanism.
+        // Unreachable: the loop exits via `return` in both Ok and final-Err
+        // branches; this is here only to satisfy the compiler.
         Err(DsmError::storage(
             "Storage operation failed due to unhandled error after retries".to_string(),
             None::<std::io::Error>,
