@@ -20,7 +20,7 @@ import { decodeBase32Crockford } from '../../utils/textId';
 import ConfirmModal from '../ConfirmModal';
 import '../../styles/EnhancedWallet.css';
 
-type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'created' | 'error';
+type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'created' | 'error';
 
 interface Props {
   onNavigate?: (screen: string) => void;
@@ -61,6 +61,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   const [reserveB, setReserveB] = useState('');
   const [feeBps, setFeeBps] = useState('30');
   const [policyAnchor, setPolicyAnchor] = useState('');
+  const [pendingPublishId, setPendingPublishId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setPhase('loading');
@@ -77,6 +78,49 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  const handleRepublish = useCallback(async (v: AmmVaultSummary) => {
+    setError('');
+    setToast('');
+    setPendingPublishId(v.vaultIdBase32);
+    setPhase('republishing');
+    try {
+      const vaultIdBytes = decodeBase32Crockford(v.vaultIdBase32);
+      if (vaultIdBytes.length !== 32) {
+        throw new Error(`vault_id Base32 must decode to 32 bytes (got ${vaultIdBytes.length})`);
+      }
+      // Re-derive canonical pair ordering (Rust enforces lex-lower-first).
+      // listOwnedAmmVaults returns tokenA/tokenB already canonicalised by
+      // dlv.create, so the bytes here are good to forward verbatim.
+      // unlockSpecDigest: re-use the vault's policyDigest equivalent.
+      // The owner never exposed it through AmmVaultSummary today, so for
+      // the retry path stamp 32 zero bytes — Rust treats this as
+      // "policy already committed at create time, advertisement carries
+      // no new spec".  Verified against route.publishRoutingAdvertisement
+      // handler which accepts zero-bytes as an advertisement-only flag.
+      const publishR = await publishRoutingAdvertisement({
+        vaultId: vaultIdBytes,
+        tokenA: v.tokenA,
+        tokenB: v.tokenB,
+        reserveA: v.reserveA,
+        reserveB: v.reserveB,
+        feeBps: v.feeBps,
+        unlockSpecDigest: new Uint8Array(32),
+        unlockSpecKey: `defi/spec/amm/${v.vaultIdBase32.slice(0, 16)}`,
+      });
+      if (!publishR.success) {
+        throw new Error(publishR.error || 'publishRoutingAdvertisement failed');
+      }
+      setToast(`Advertisement published. id=${v.vaultIdBase32.slice(0, 12)}…`);
+      await refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'publish failed';
+      setError(msg);
+      setPhase('error');
+    } finally {
+      setPendingPublishId(null);
+    }
   }, [refresh]);
 
   const formValid = useMemo(() => {
@@ -195,7 +239,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           <button
             type="button"
             onClick={() => void refresh()}
-            disabled={phase === 'loading' || phase === 'creating' || phase === 'publishing'}
+            disabled={phase === 'loading' || phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
             className="refresh-icon"
             aria-label="Refresh"
             title="Refresh"
@@ -207,7 +251,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       </div>
 
       {error && (
-        <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(255,0,0,0.08)', border: '2px dashed var(--border)', fontSize: 12 }}>
+        <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12 }}>
           {error}
         </div>
       )}
@@ -228,22 +272,40 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           </div>
         )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {vaults.map((v) => (
-            <div key={v.vaultIdBase32} className="balance-card" style={{ padding: '8px 12px' }}>
-              <div className="balance-info">
-                <span className="token-symbol">
-                  {decodeUtf8(v.tokenA)} / {decodeUtf8(v.tokenB)}
-                </span>
-                <span className="balance-amount">fee {v.feeBps} bps</span>
+          {vaults.map((v) => {
+            const isPublishing =
+              phase === 'republishing' && pendingPublishId === v.vaultIdBase32;
+            return (
+              <div key={v.vaultIdBase32} className="balance-card" style={{ padding: '8px 12px' }}>
+                <div className="balance-info">
+                  <span className="token-symbol">
+                    {decodeUtf8(v.tokenA)} / {decodeUtf8(v.tokenB)}
+                  </span>
+                  <span className="balance-amount">fee {v.feeBps} bps</span>
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
+                  reserves: {v.reserveA.toString()} / {v.reserveB.toString()}
+                </div>
+                <div style={{ fontSize: 10, opacity: 0.7, marginTop: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <span>
+                    vault {v.vaultIdBase32.slice(0, 16)}… · {v.routingAdvertised ? `ad: ✓ seq=${v.advertisedStateNumber.toString()}` : 'ad: ✗ not published'}
+                  </span>
+                  {!v.routingAdvertised && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRepublish(v)}
+                      disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
+                      className="cancel-button"
+                      style={{ fontSize: 10, padding: '2px 8px' }}
+                      title="Republish routing advertisement so traders on other devices can discover this vault"
+                    >
+                      {isPublishing ? 'Publishing…' : 'Publish'}
+                    </button>
+                  )}
+                </div>
               </div>
-              <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
-                reserves: {v.reserveA.toString()} / {v.reserveB.toString()}
-              </div>
-              <div style={{ fontSize: 10, opacity: 0.7, marginTop: 2 }}>
-                vault {v.vaultIdBase32.slice(0, 16)}… · {v.routingAdvertised ? `ad: ✓ seq=${v.advertisedStateNumber.toString()}` : 'ad: ✗ not published'}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div style={{ marginTop: 16 }}>
@@ -252,7 +314,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               type="button"
               onClick={() => setShowCreate(true)}
               className="send-button button-brick"
-              disabled={phase === 'creating' || phase === 'publishing'}
+              disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
             >
               + Create vault
             </button>

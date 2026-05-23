@@ -214,7 +214,7 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       {/* Cross-tab send banners — keep send feedback visible after the
        * post-send tab switch so the user always gets confirmation. */}
       {sendError && (
-        <div className="error-banner" style={{ padding: '8px 12px', margin: '0 0 8px', background: 'rgba(255,0,0,0.08)', border: '2px dashed var(--border)', fontSize: 12 }}>
+        <div className="error-banner" style={{ padding: '8px 12px', margin: '0 0 8px', background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12 }}>
           {sendError}
         </div>
       )}
@@ -240,7 +240,7 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
         {tab === 'inbox' && (
           <>
             {inboxError && (
-              <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(255,0,0,0.08)', border: '2px dashed var(--border)', fontSize: 12 }}>
+              <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12 }}>
                 {inboxError}
               </div>
             )}
