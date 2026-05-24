@@ -483,6 +483,16 @@ pub struct LimboVault {
     /// are mandatory, accepted-if-present, or grandfathered.  Domain-only:
     /// not persisted in `LimboVaultProto`.
     pub anchor_enforcement: i32,
+    /// Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
+    /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the
+    /// routing advertisement's `unlock_spec_digest` so the owner-side
+    /// LiquidityScreen republish path can read the canonical digest
+    /// out of the vault on retry instead of stamping 32 zero bytes
+    /// (the bug fixed by the AmmVaultSummaryV1 plumbing).  `None` for
+    /// vaults created before this field was added; their summaries
+    /// surface no `unlock_spec_digest` and the Publish-retry button is
+    /// suppressed.  Persisted in `LimboVaultProto.policy_digest`.
+    pub policy_digest: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -615,6 +625,19 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
             // vaults).  Routed-unlock construction sites override this
             // from `DlvSpecV1.anchor_enforcement`.
             anchor_enforcement: 0,
+            // Phase 13 follow-up: decode the persisted policy_digest if
+            // present.  Length is strict-validated as 32 bytes; any
+            // other length is treated as `None` so a legacy proto with
+            // a malformed/zero blob doesn't poison the republish path.
+            policy_digest: p.policy_digest.and_then(|b| {
+                if b.len() == 32 {
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&b);
+                    Some(out)
+                } else {
+                    None
+                }
+            }),
         })
     }
 }
@@ -645,6 +668,9 @@ impl From<&LimboVault> for crate::types::proto::LimboVaultProto {
                 .collect(),
             reference_state_hash: v.reference_state_hash.to_vec(),
             entry_header: v.entry_header.map(|eh| eh.to_vec()),
+            // Phase 13 follow-up: persisted policy_digest (CPTA anchor).
+            // Re-used as routing advertisement unlock_spec_digest.
+            policy_digest: v.policy_digest.map(|d| d.to_vec()),
         }
     }
 }
@@ -989,6 +1015,10 @@ impl LimboVault {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            // Phase 13 follow-up: no policy digest at construction time;
+            // dlv.create stamps the real value via `dlv_manager.get_vault()`
+            // immediately after `finalize_vault` returns.
+            policy_digest: None,
         }
     }
 
@@ -1173,6 +1203,10 @@ impl LimboVaultDraft {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            // Phase 13 follow-up: no policy digest at finalize time;
+            // dlv.create stamps the real value via `dlv_manager.get_vault()`
+            // after this function returns.
+            policy_digest: None,
         };
 
         if !vault.verify()? {
@@ -2140,6 +2174,10 @@ impl Default for LimboVault {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            // Phase 13 follow-up: no policy digest at construction time;
+            // dlv.create stamps the real value via `dlv_manager.get_vault()`
+            // immediately after `finalize_vault` returns.
+            policy_digest: None,
         }
     }
 }

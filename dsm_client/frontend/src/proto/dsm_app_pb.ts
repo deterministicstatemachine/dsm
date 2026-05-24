@@ -6648,6 +6648,18 @@ export class LimboVaultProto extends Message<LimboVaultProto> {
    */
   entryHeader?: Uint8Array;
 
+  /**
+   * Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
+   * (32 bytes, BLAKE3 anchor of the CPTA spec).  Re-used as the
+   * routing advertisement's `unlock_spec_digest` so the LiquidityScreen
+   * republish path can fetch the real digest instead of stamping zeros.
+   * Optional for backward compatibility with vaults created before this
+   * field was added; legacy vaults render with no Publish-retry button.
+   *
+   * @generated from field: optional bytes policy_digest = 15;
+   */
+  policyDigest?: Uint8Array;
+
   constructor(data?: PartialMessage<LimboVaultProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -6670,6 +6682,7 @@ export class LimboVaultProto extends Message<LimboVaultProto> {
     { no: 12, name: "verification_positions", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 13, name: "reference_state_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 14, name: "entry_header", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 15, name: "policy_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): LimboVaultProto {
@@ -7717,6 +7730,29 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
    */
   anchorEnforcement = AnchorEnforcement.UNSPECIFIED;
 
+  /**
+   * Phase 13 follow-up: real routing-advertisement digest carried over
+   * from the vault's persisted `policy_digest` at create time.  Used by
+   * the owner-side LiquidityScreen `handleRepublish` flow to pass the
+   * canonical digest to `route.publishRoutingAdvertisement` on retry
+   * instead of stamping 32 zero bytes (which silently corrupts the
+   * advertisement).  Empty for legacy vaults that pre-date persistence.
+   *
+   * @generated from field: optional bytes unlock_spec_digest = 11;
+   */
+  unlockSpecDigest?: Uint8Array;
+
+  /**
+   * Phase 13 follow-up: canonical routing-advertisement key string for
+   * this vault, re-derived in Rust to match the original create-flow
+   * construction (`defi/spec/amm/<first-16-chars-of-vault-id-b32>`).
+   * Centralised in Rust so the frontend stays purely a renderer per the
+   * Layer Communication Law.
+   *
+   * @generated from field: optional string unlock_spec_key = 12;
+   */
+  unlockSpecKey?: string;
+
   constructor(data?: PartialMessage<AmmVaultSummaryV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7735,6 +7771,8 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 8, name: "routing_advertised", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 9, name: "anchor_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 10, name: "anchor_enforcement", kind: "enum", T: proto3.getEnumType(AnchorEnforcement) },
+    { no: 11, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 12, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmVaultSummaryV1 {
@@ -7969,7 +8007,8 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
  * Tier 2: one fallback hop group. When the primary hops are blocked
  * (state-move, intent-bound violation), the wallet attempts each
  * fallback group in order under the SAME signed RouteCommitV1
- * envelope.
+ * envelope. Each group MUST satisfy the envelope's
+ * floor_final_output_amount_u128.
  *
  * @generated from message dsm.RouteCommitFallbackV1
  */
@@ -8080,18 +8119,21 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
   initiatorSignature = new Uint8Array(0);
 
   /**
-   * Tier 2 envelope-level intent-bound floor for the final output.
-   * Empty (zero-length) bytes mean "no envelope floor". When set, the
-   * unlock-routed gate rejects any candidate path whose simulated final
-   * output falls below this.
+   * Tier 2 envelope-level floor: minimum total output the trader is
+   * willing to accept across the full path (or any fallback path).
+   * Empty bytes = no floor (trade succeeds at any output the picked
+   * path produces). When set, the unlock-routed gate rejects any
+   * path whose simulated final output < this value.
    *
    * @generated from field: bytes floor_final_output_amount_u128 = 11;
    */
   floorFinalOutputAmountU128 = new Uint8Array(0);
 
   /**
-   * Tier 2 fallback hop groups. Empty for legacy primary-only routes.
-   * Each group is an alternate path under the same signed X commitment.
+   * Tier 2 fallback hop groups. Tried in order when the primary `hops`
+   * fail intent-bound or state-move checks. All groups share the
+   * single envelope (X = BLAKE3 of canonical bytes including these
+   * groups) and one initiator_signature.
    *
    * @generated from field: repeated dsm.RouteCommitFallbackV1 fallbacks = 12;
    */
@@ -8207,6 +8249,278 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
 
   static equals(a: ExternalCommitmentV1 | PlainMessage<ExternalCommitmentV1> | undefined, b: ExternalCommitmentV1 | PlainMessage<ExternalCommitmentV1> | undefined): boolean {
     return proto3.util.equals(ExternalCommitmentV1, a, b);
+  }
+}
+
+/**
+ * Request wrapper for `route.publishExternalCommitment`. The handler
+ * accepts either this wrapper OR a bare ExternalCommitmentV1 (legacy
+ * callers). When `signed_route_commit_bytes` is non-empty, the handler
+ * additionally derives and publishes one VaultPendingPointerV1 per hop
+ * (composition discovery aid; see VaultPendingPointerV1 docs).
+ *
+ * Decode discriminator: try this wrapper first; if it fails to decode
+ * or `anchor` is unset, fall back to decoding the body as bare
+ * ExternalCommitmentV1. This keeps the old wire shape working for any
+ * non-SoFi external-commitment users.
+ *
+ * @generated from message dsm.PublishExternalCommitmentRequest
+ */
+export class PublishExternalCommitmentRequest extends Message<PublishExternalCommitmentRequest> {
+  /**
+   * @generated from field: dsm.ExternalCommitmentV1 anchor = 1;
+   */
+  anchor?: ExternalCommitmentV1;
+
+  /**
+   * Optional. Pass the signed RouteCommitV1 bytes returned by
+   * `route.signRouteCommit` so the handler can derive + publish vault-
+   * keyed pending pointers. Empty bytes → handler publishes the anchor
+   * only, identical to the legacy path.
+   *
+   * @generated from field: bytes signed_route_commit_bytes = 2;
+   */
+  signedRouteCommitBytes = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PublishExternalCommitmentRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PublishExternalCommitmentRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "anchor", kind: "message", T: ExternalCommitmentV1 },
+    { no: 2, name: "signed_route_commit_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PublishExternalCommitmentRequest {
+    return new PublishExternalCommitmentRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PublishExternalCommitmentRequest {
+    return new PublishExternalCommitmentRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PublishExternalCommitmentRequest {
+    return new PublishExternalCommitmentRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PublishExternalCommitmentRequest | PlainMessage<PublishExternalCommitmentRequest> | undefined, b: PublishExternalCommitmentRequest | PlainMessage<PublishExternalCommitmentRequest> | undefined): boolean {
+    return proto3.util.equals(PublishExternalCommitmentRequest, a, b);
+  }
+}
+
+/**
+ * Vault-keyed pointer to a pending state advance, published alongside
+ * each ExternalCommitmentV1 (one pointer per hop's vault). Lets the
+ * NEXT trader discover pending trades on a specific vault in O(pending)
+ * rather than scanning the global defi/extcommit/* prefix.
+ *
+ * Storage key: defi/vault-pending/{vault_id_b32}/{new_sequence_be_pad16}/{x_b32}
+ *
+ * The signature payload is BLAKE3("DSM/vault-pending\0" || vault_id ||
+ * parent_sequence_be || new_sequence_be || x || new_reserves_digest).
+ *
+ * Anyone can verify. Composition flow (vault_state_composition.rs):
+ * trader 2 lists the vault's defi/vault-pending/ prefix, verifies each
+ * pointer's signature, confirms each referenced X anchor is published,
+ * chains them by new_sequence onto the owner-signed baseline anchor,
+ * and uses the resulting composed state for quote-time reserves
+ * (rather than the potentially stale owner-published anchor alone).
+ *
+ * SoFi spec §2.3, §4.1: "Once a valid σ is constructed (by anyone), the
+ * unlock becomes computable and settlement executes deterministically."
+ * This proto turns that property into discoverable behaviour for the
+ * next-trader quote path.
+ *
+ * @generated from message dsm.VaultPendingPointerV1
+ */
+export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 parent_sequence = 2;
+   */
+  parentSequence = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 new_sequence = 3;
+   */
+  newSequence = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes x = 4;
+   */
+  x = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_reserves_digest = 5;
+   */
+  newReservesDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes publisher_public_key = 6;
+   */
+  publisherPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes publisher_signature = 7;
+   */
+  publisherSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<VaultPendingPointerV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultPendingPointerV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "parent_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "new_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "new_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "publisher_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "publisher_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultPendingPointerV1 {
+    return new VaultPendingPointerV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultPendingPointerV1 {
+    return new VaultPendingPointerV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultPendingPointerV1 {
+    return new VaultPendingPointerV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultPendingPointerV1 | PlainMessage<VaultPendingPointerV1> | undefined, b: VaultPendingPointerV1 | PlainMessage<VaultPendingPointerV1> | undefined): boolean {
+    return proto3.util.equals(VaultPendingPointerV1, a, b);
+  }
+}
+
+/**
+ * SoFi spec §4.1.2 / §8.4 step 2: vault state committed in Per-Device
+ * SMT.  Published by the vault owner at
+ *
+ *     sofi/vault-state-inclusion/{vault_id_b32}/seq-{sequence_be_pad16}
+ *
+ * after each DlvCreate / DlvUnlock that advances the vault's state,
+ * with a mirror at
+ *
+ *     sofi/vault-state-inclusion/{vault_id_b32}/latest
+ *
+ * for fast lookup at quote time.  Off-device traders verify the
+ * inclusion proof BEFORE binding the route commit; the chunks-#7
+ * unlock gate re-verifies before emitting Operation::DlvUnlock.
+ *
+ * Strictly stronger than VaultStateAnchorV1: the anchor only signs
+ * (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
+ * forge a signed anchor.  The inclusion proof additionally commits the
+ * device's PD-SMT root + a 256-sibling Merkle path that
+ * dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
+ * against the device's actual SMT — forgery requires also fabricating
+ * SMT consistency, which a stateless attacker cannot.
+ *
+ * @generated from message dsm.VaultStateInclusionProofV1
+ */
+export class VaultStateInclusionProofV1 extends Message<VaultStateInclusionProofV1> {
+  /**
+   * The vault whose state is being committed.
+   *
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * Monotonic state sequence (0 at creation, +1 per accepted unlock).
+   *
+   * @generated from field: uint64 sequence = 2;
+   */
+  sequence = protoInt64.zero;
+
+  /**
+   * BLAKE3 reserves-digest per dsm::dlv::vault_state_anchor::compute_reserves_digest.
+   *
+   * @generated from field: bytes reserves_digest = 3;
+   */
+  reservesDigest = new Uint8Array(0);
+
+  /**
+   * The owner's PD-SMT root AT the moment this leaf was written.
+   * Inclusion proof verifies against this root.
+   *
+   * @generated from field: bytes smt_root = 4;
+   */
+  smtRoot = new Uint8Array(0);
+
+  /**
+   * The 256 sibling hashes in leaf-to-root order produced by
+   * SparseMerkleTree::get_inclusion_proof for the vault-state SMT
+   * leaf key (DSM/vault-smt-key\0 || vault_id).  The verifier
+   * recomputes the proof's `key` from vault_id and `value` from
+   * (sequence, reserves_digest); the wire format only carries the
+   * siblings to keep records compact.
+   *
+   * @generated from field: repeated bytes smt_siblings = 5;
+   */
+  smtSiblings: Uint8Array[] = [];
+
+  /**
+   * SPHINCS+ public key of the vault owner.
+   *
+   * @generated from field: bytes owner_public_key = 6;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
+   * vault_id || sequence_be || reserves_digest || smt_root).  Binds
+   * the SMT root into the signature so a compromised K_DBRW cannot
+   * forge a proof against a different root.
+   *
+   * @generated from field: bytes owner_signature = 7;
+   */
+  ownerSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<VaultStateInclusionProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultStateInclusionProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "smt_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 6, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "owner_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultStateInclusionProofV1 {
+    return new VaultStateInclusionProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultStateInclusionProofV1 {
+    return new VaultStateInclusionProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultStateInclusionProofV1 {
+    return new VaultStateInclusionProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultStateInclusionProofV1 | PlainMessage<VaultStateInclusionProofV1> | undefined, b: VaultStateInclusionProofV1 | PlainMessage<VaultStateInclusionProofV1> | undefined): boolean {
+    return proto3.util.equals(VaultStateInclusionProofV1, a, b);
   }
 }
 
@@ -11267,11 +11581,6 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
    */
   cdbrwEnvFingerprint = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes cdbrw_salt = 6;
-   */
-  cdbrwSalt = new Uint8Array(0);
-
   constructor(data?: PartialMessage<SystemGenesisRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11285,7 +11594,6 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
     { no: 3, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "cdbrw_salt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SystemGenesisRequest {
@@ -14112,11 +14420,8 @@ export class BootstrapMeasurementReport extends Message<BootstrapMeasurementRepo
   cdbrwEnvFingerprint = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes cdbrw_salt = 7;
-   */
-  cdbrwSalt = new Uint8Array(0);
-
-  /**
+   * from K_DBRW preimage.  See SystemGenesisRequest.
+   *
    * @generated from field: dsm.BootstrapMeasurementReport.TrustLevel trust_level = 8;
    */
   trustLevel = BootstrapMeasurementReport_TrustLevel.BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED;
@@ -14140,7 +14445,6 @@ export class BootstrapMeasurementReport extends Message<BootstrapMeasurementRepo
     { no: 4, name: "progress_percent", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 5, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "cdbrw_salt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "trust_level", kind: "enum", T: proto3.getEnumType(BootstrapMeasurementReport_TrustLevel) },
     { no: 9, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
@@ -21127,6 +21431,17 @@ export class CdbrwOrbitTrial extends Message<CdbrwOrbitTrial> {
    */
   timings: bigint[] = [];
 
+  /**
+   * Per-trial CSPRNG challenge that seeded x_0 = H("DSM/cdbrw-seed\0" || challenge || K_DBRW) mod 2^32
+   * per Alg 1 step 1. For enrollment trials before K_DBRW is bound, callers pass the random 32-byte
+   * challenge alone and the Rust writer treats it as authoritative (Alg 2 line 1491).
+   * Empty bytes are treated as "this trial was not challenge-seeded" — Rust rejects such enrollments
+   * so a regression that strips per-trial challenges fails closed instead of silently downgrading.
+   *
+   * @generated from field: bytes challenge = 2;
+   */
+  challenge = new Uint8Array(0);
+
   constructor(data?: PartialMessage<CdbrwOrbitTrial>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21136,6 +21451,7 @@ export class CdbrwOrbitTrial extends Message<CdbrwOrbitTrial> {
   static readonly typeName = "dsm.CdbrwOrbitTrial";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "timings", kind: "scalar", T: 3 /* ScalarType.INT64 */, repeated: true },
+    { no: 2, name: "challenge", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwOrbitTrial {
@@ -21407,10 +21723,14 @@ export class CdbrwVerifyRequest extends Message<CdbrwVerifyRequest> {
 }
 
 /**
- * cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
- * Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
- * reference histogram, ε_intra, and attractor commitment AC_D, and persists
- * the `dsm_silicon_fp_v4.bin` binary loaded by load_cdbrw_enrollment.
+ * cdbrw.enroll args — M-sample, K-trial-per-sample admission (Phase 9).
+ *
+ * Replaces the single-K-trial enrollment with median-of-M admission.
+ * The Kotlin caller batches all M*K trials (default 3*21=63) into a
+ * single request; Rust partitions them by `trials_per_sample`, runs
+ * the per-sample health flow on each chunk, and applies
+ * `classify_resonant_m_sample` to produce a stable admission verdict
+ * that absorbs silicon trial-to-trial variance.
  *
  * @generated from message dsm.CdbrwEnrollRequest
  */
@@ -21421,7 +21741,9 @@ export class CdbrwEnrollRequest extends Message<CdbrwEnrollRequest> {
   envBytes = new Uint8Array(0);
 
   /**
-   * K ≥ 16 per §6.1
+   * Flat list of M*trials_per_sample trials (e.g. 3*21=63).
+   * Partitioned by Rust into M contiguous chunks of trials_per_sample
+   * each.  Order matters: chunk i = trials[i*K .. (i+1)*K].
    *
    * @generated from field: repeated dsm.CdbrwOrbitTrial trials = 2;
    */
@@ -21452,6 +21774,23 @@ export class CdbrwEnrollRequest extends Message<CdbrwEnrollRequest> {
    */
   rotationBits = 0;
 
+  /**
+   * Phase 9: number of independent K-trial admission samples (M).
+   * Must equal the SDK's compiled ADMISSION_M (default 3); version
+   * skew is rejected as AdmissionShapeMismatch.
+   *
+   * @generated from field: uint32 admission_samples = 8;
+   */
+  admissionSamples = 0;
+
+  /**
+   * Phase 9: K, the trials per sample.  Must satisfy K >= 16 per §6.1.
+   * Rust rejects if trials.length != admission_samples * trials_per_sample.
+   *
+   * @generated from field: uint32 trials_per_sample = 9;
+   */
+  trialsPerSample = 0;
+
   constructor(data?: PartialMessage<CdbrwEnrollRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21467,6 +21806,8 @@ export class CdbrwEnrollRequest extends Message<CdbrwEnrollRequest> {
     { no: 5, name: "steps_per_probe", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 6, name: "histogram_bins", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 7, name: "rotation_bits", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 8, name: "admission_samples", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 9, name: "trials_per_sample", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwEnrollRequest {
@@ -24660,11 +25001,6 @@ export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> 
    */
   cdbrwEnvFingerprint = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes cdbrw_salt = 5;
-   */
-  cdbrwSalt = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RestoreIdentityContextOp>) {
     super();
     proto3.util.initPartial(data, this);
@@ -24677,7 +25013,6 @@ export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> 
     { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "cdbrw_salt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RestoreIdentityContextOp {

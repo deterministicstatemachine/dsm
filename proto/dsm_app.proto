@@ -745,6 +745,13 @@ message LimboVaultProto {
   repeated bytes verification_positions = 12;
   bytes reference_state_hash = 13;
   optional bytes entry_header = 14; // 80-byte Bitcoin block header cached at entry (Invariant 19, §12.2.3)
+  // Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
+  // (32 bytes, BLAKE3 anchor of the CPTA spec).  Re-used as the
+  // routing advertisement's `unlock_spec_digest` so the LiquidityScreen
+  // republish path can fetch the real digest instead of stamping zeros.
+  // Optional for backward compatibility with vaults created before this
+  // field was added; legacy vaults render with no Publish-retry button.
+  optional bytes policy_digest = 15;
 }
 
 // Vault post wrapper for storage nodes
@@ -954,6 +961,19 @@ message AmmVaultSummaryV1 {
   // Vault policy for anchor enforcement.  REQUIRED vaults reject
   // routed unlocks lacking the anchor binding fields.
   AnchorEnforcement anchor_enforcement = 10;
+  // Phase 13 follow-up: real routing-advertisement digest carried over
+  // from the vault's persisted `policy_digest` at create time.  Used by
+  // the owner-side LiquidityScreen `handleRepublish` flow to pass the
+  // canonical digest to `route.publishRoutingAdvertisement` on retry
+  // instead of stamping 32 zero bytes (which silently corrupts the
+  // advertisement).  Empty for legacy vaults that pre-date persistence.
+  optional bytes unlock_spec_digest = 11 [(dsm_fixed_len)=32];
+  // Phase 13 follow-up: canonical routing-advertisement key string for
+  // this vault, re-derived in Rust to match the original create-flow
+  // construction (`defi/spec/amm/<first-16-chars-of-vault-id-b32>`).
+  // Centralised in Rust so the frontend stays purely a renderer per the
+  // Layer Communication Law.
+  optional string unlock_spec_key = 12 [(dsm_max_len)=128];
 }
 
 // Per-vault signed state anchor.  Owner publishes one at vault

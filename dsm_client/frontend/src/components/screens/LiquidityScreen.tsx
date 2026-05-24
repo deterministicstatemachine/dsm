@@ -90,15 +90,25 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       if (vaultIdBytes.length !== 32) {
         throw new Error(`vault_id Base32 must decode to 32 bytes (got ${vaultIdBytes.length})`);
       }
+      // Phase 13 follow-up: pass the REAL `unlock_spec_digest` +
+      // `unlock_spec_key` that Rust persisted in DLV state at create
+      // time and exposes on `AmmVaultSummaryV1`.  The pre-fix path
+      // stamped 32 zero bytes here (under a comment claiming Rust
+      // treated zeros as an "advertisement-only" sentinel) — the
+      // claim was false; the route handler stored zeros verbatim and
+      // corrupted the advertisement so traders on other devices
+      // failed unlock-spec verification.  This guard refuses to fire
+      // for legacy vaults (no persisted digest) — the Publish button
+      // is suppressed for those vaults in the row render below.
+      if (!v.unlockSpecDigest || v.unlockSpecDigest.length !== 32 || !v.unlockSpecKey) {
+        throw new Error(
+          'vault has no persisted unlock-spec digest (legacy vault created before Phase 13); ' +
+            're-create the vault to enable Publish-retry',
+        );
+      }
       // Re-derive canonical pair ordering (Rust enforces lex-lower-first).
       // listOwnedAmmVaults returns tokenA/tokenB already canonicalised by
       // dlv.create, so the bytes here are good to forward verbatim.
-      // unlockSpecDigest: re-use the vault's policyDigest equivalent.
-      // The owner never exposed it through AmmVaultSummary today, so for
-      // the retry path stamp 32 zero bytes — Rust treats this as
-      // "policy already committed at create time, advertisement carries
-      // no new spec".  Verified against route.publishRoutingAdvertisement
-      // handler which accepts zero-bytes as an advertisement-only flag.
       const publishR = await publishRoutingAdvertisement({
         vaultId: vaultIdBytes,
         tokenA: v.tokenA,
@@ -106,8 +116,8 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         reserveA: v.reserveA,
         reserveB: v.reserveB,
         feeBps: v.feeBps,
-        unlockSpecDigest: new Uint8Array(32),
-        unlockSpecKey: `defi/spec/amm/${v.vaultIdBase32.slice(0, 16)}`,
+        unlockSpecDigest: v.unlockSpecDigest,
+        unlockSpecKey: v.unlockSpecKey,
       });
       if (!publishR.success) {
         throw new Error(publishR.error || 'publishRoutingAdvertisement failed');
@@ -290,7 +300,13 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
                   <span>
                     vault {v.vaultIdBase32.slice(0, 16)}… · {v.routingAdvertised ? `ad: ✓ seq=${v.advertisedStateNumber.toString()}` : 'ad: ✗ not published'}
                   </span>
-                  {!v.routingAdvertised && (
+                  {!v.routingAdvertised && v.unlockSpecDigest && v.unlockSpecKey && (
+                    // Phase 13 follow-up: hide the button for legacy
+                    // vaults whose persisted policy_digest is absent.
+                    // Republishing them would require stamping a zero
+                    // digest (the pre-fix bug); refuse instead so the
+                    // owner can re-create with a fresh CPTA anchor
+                    // rather than silently corrupting the ad.
                     <button
                       type="button"
                       onClick={() => void handleRepublish(v)}
