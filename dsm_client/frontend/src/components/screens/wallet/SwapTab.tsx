@@ -445,7 +445,8 @@ function SwapTabInner({
             marginBottom: 12,
             fontSize: 11,
             border: '1px solid var(--border)',
-            background: phase === 'error' ? 'rgba(255,0,0,0.08)' : 'rgba(var(--text-rgb),0.08)',
+            background: phase === 'error' ? 'rgba(var(--text-rgb),0.12)' : 'rgba(var(--text-rgb),0.08)',
+            borderStyle: phase === 'error' ? 'dashed' : 'solid',
           }}
           role="status"
           aria-live="polite"

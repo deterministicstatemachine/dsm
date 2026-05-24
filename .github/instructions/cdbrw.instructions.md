@@ -999,18 +999,46 @@ but since ΦD depends on 232 address-dependent thermal couplings, polynomially m
 cannot determine ΦD to the precision required by the verification threshold. Contradiction.
 5.3 Binding Inseparability
 Theorem 5.2 (DBRW Binding Inseparability). Sofine the DBRW binding key as
-KDBRW := HDSM/dbrw-bind(H(d)∥E(e)∥sdevice), (7)
-where H(d) is the C-DBRW attractor fingerprint (the phase-space histogram commitment), E(e)
-is an execution environment fingerprint, and sdevice is a per-device random salt. Under Sofini-
-tion 5.1, it is computationally infeasible to find (h′,e′,s′) ̸= (H(d),E(e),sdevice) such that
-HDSM/dbrw-bind(h′∥e
-′∥s
-′) = KDBRW.
+KDBRW := HDSM/dbrw-bind(LP(H(d)) ∥ LP(E(e))), (7)
+where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding,
+H(d) is the C-DBRW attractor fingerprint (the phase-space histogram commitment), and
+E(e) is an execution environment fingerprint. Under Sofinition 5.1, it is computationally
+infeasible to find (h′,e′) ̸= (H(d),E(e)) such that
+HDSM/dbrw-bind(LP(h′) ∥ LP(e′)) = KDBRW.
 22
-Proof. Finding such (h′,e′,s′) constitutes a second-preimage attack on BLAKE3-256 with do-
-main separation. Under Definition 5.1, this succeeds with probability ≤negl(λ). The per-device
-salt sdevice ensures that even if two devices share similar H(d) or E(e) values, their KDBRW keys
-are independent (each salt is drawn from a CSPRNG with ≥256 bits of entropy).
+Proof. Finding such (h′,e′) constitutes a second-preimage attack on BLAKE3-256 with domain
+separation. Under Definition 5.1, this succeeds with probability ≤negl(λ).
+
+**Phase 13 — salt removed.** Prior revisions of this theorem included a per-device random
+salt sdevice as a third preimage input, ensuring K_DBRW independence across two enrollment
+instances on the same device. The salt was wrapped in Android Keystore EncryptedShared-
+Preferences; Samsung Smart Switch (and other system-level package managers) silently
+uninstall apps on their own schedule, destroying the Keystore aliases bound to the prior
+package UID and rendering the wrapped salt cipher-text unrecoverable — even when the
+silicon fingerprint H(d) was preserved on disk. This corner bricked the wallet on every
+silent uninstall despite the C-DBRW attractor remaining recoverable.
+
+Salt removed: K_DBRW is now deterministic per device, so the wallet survives uninstall +
+reinstall on the same physical hardware. The same-device-two-enrollment differentiation
+the salt provided corresponded to no real threat model. Cross-device anti-cloning is
+enforced operationally by **Layer B** — `cdbrw_responder.rs::publish_trust_snapshot`
+runs a live W1 probe vs. the enrolled H̄_baseline on every boot via `cdbrw.measure_trust`;
+W1 > epsilon_intra + DEFAULT_DISTANCE_MARGIN downgrades access to PinRequired AND zeros
+the in-memory K_DBRW slot (Phase 13 follow-up; previously only the access downgrade was
+wired). A cross-device clone fails the live PUF orbit regardless of preimage shape, so
+removing the salt input does not weaken cross-device anti-cloning.
+
+**Proof — TODO (formal re-derivation, Phase 13 follow-up for spec author).** The pre-Phase-13
+proof rested on the per-device salt sdevice providing unconditional independence between
+two enrollments on the same device. With sdevice removed, the new proof must rest on:
+(a) BLAKE3-256 collision and second-preimage resistance (unchanged from above),
+(b) min-entropy of the silicon-derived H(d) — must be argued formally from the C-DBRW
+Phase 2.2 calibration (the empirically measured 40–75× cross-device noise-floor figure),
+and (c) Layer B's W1 vs H̄_baseline drift detection providing operational (not unconditional)
+cross-device-clone detection with a quantified false-negative rate bounded by the
+admission policy `ADMISSION_M`. This proof has NOT been re-derived in this revision;
+operational code is shipped, the formal proof is deferred. Until that proof is written,
+this theorem statement is treated as conjectural rather than proven.
 5.4 Forward Secrecy of Per-Step Keys
 Theorem 5.3 (Per-Step Key Independence). Let En+1 be the per-step seed derived as
 En+1 = HKDF-BLAKE3 “DSM/ek\0”, hn∥Cpre∥kstep∥KDBRW ,
@@ -1376,10 +1404,13 @@ H(d) := ACD.
 This replaces any static PUF measurement with a chaotic attractor fingerprint that cap-
 tures the full thermodynamic manifold of the device.
 Definition 8.1 (C-DBRW-Enhanced DBRW Binding). The enhanced DBRW binding key is
-KDBRW := HDSM/dbrw-bind ACD∥E(e)∥sdevice , (16)
-where ACD is the C-DBRW attractor commitment (Equation (8)), E(e) is the execution envi-
-ronment fingerprint, and sdevice
-$ ←−{0,1}256 is a per-device salt from CSPRNG.
+KDBRW := HDSM/dbrw-bind(LP(ACD) ∥ LP(E(e))), (16)
+where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding,
+ACD is the C-DBRW attractor commitment (Equation (8)), and E(e) is the execution
+environment fingerprint. **Phase 13: per-device salt removed** — see Theorem 5.2
+commentary above for the operational rationale and the formal-proof TODO. Cross-device
+anti-cloning is enforced by Layer B (live W1 vs H̄_baseline on every boot), not by
+salt entropy.
 Theorem8.1(EnhancedAnti-Cloning). Under Definition 5.1, Definition 4.2, and Theorem 5.1,
 the C-DBRW-enhanced DBRW binding provides strictly stronger anti-cloning guarantees than
 static PUF-based DBRW:

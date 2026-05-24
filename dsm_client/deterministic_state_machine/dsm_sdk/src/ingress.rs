@@ -234,7 +234,6 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         genesis_hash_raw: genesis_hash.clone(),
         cdbrw_hw_entropy: report.cdbrw_hw_entropy.clone(),
         cdbrw_env_fingerprint: report.cdbrw_env_fingerprint.clone(),
-        cdbrw_salt: report.cdbrw_salt.clone(),
     })
     .map_err(|e| {
         ingress_error(
@@ -894,14 +893,12 @@ fn restore_identity_context_core(
     genesis_hash: Vec<u8>,
     cdbrw_hw_entropy: Vec<u8>,
     cdbrw_env_fingerprint: Vec<u8>,
-    cdbrw_salt: Vec<u8>,
 ) -> Result<Vec<u8>, pb::Error> {
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id,
         genesis_hash_raw: genesis_hash,
         cdbrw_hw_entropy,
         cdbrw_env_fingerprint,
-        cdbrw_salt,
     })
     .map_err(|e| {
         ingress_error(
@@ -1014,12 +1011,12 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
             initialize_identity_context_core(op.device_id, op.genesis_hash, op.binding_key)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
+            // Phase 13: op.cdbrw_salt is `reserved 7;` in proto and ignored.
             restore_identity_context_core(
                 op.device_id,
                 op.genesis_hash,
                 op.cdbrw_hw_entropy,
                 op.cdbrw_env_fingerprint,
-                op.cdbrw_salt,
             )
         }
         None => Err(ingress_error(
@@ -1433,7 +1430,6 @@ endpoint = "http://127.0.0.1:8080"
                 device_entropy: vec![0x42; 8],
                 cdbrw_hw_entropy: Vec::new(),
                 cdbrw_env_fingerprint: Vec::new(),
-                cdbrw_salt: Vec::new(),
             }
             .encode_to_vec(),
         }
@@ -1502,10 +1498,8 @@ endpoint = "http://127.0.0.1:8080"
         let _guard = setup_test_env();
         let hw = vec![0x33; 32];
         let env = vec![0x44; 32];
-        let salt = vec![0x55; 32];
-        let expected_binding =
-            dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt)
-                .expect("binding derivation");
+        let expected_binding = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env)
+            .expect("binding derivation");
 
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
@@ -1514,7 +1508,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: hw,
                     cdbrw_env_fingerprint: env,
-                    cdbrw_salt: salt,
                 },
             )),
         });
@@ -1543,7 +1536,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });
@@ -1559,7 +1551,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });
@@ -1581,7 +1572,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });
@@ -1597,7 +1587,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });

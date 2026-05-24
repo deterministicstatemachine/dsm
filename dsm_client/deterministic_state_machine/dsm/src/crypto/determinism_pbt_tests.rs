@@ -43,10 +43,9 @@ mod tests {
         fn pbt_cdbrw_binding_is_deterministic(
             hw in proptest::collection::vec(any::<u8>(), 1..=128),
             env in proptest::collection::vec(any::<u8>(), 1..=128),
-            salt in proptest::collection::vec(any::<u8>(), 1..=128),
         ) {
-            let b1 = cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt).expect("valid inputs");
-            let b2 = cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt).expect("valid inputs");
+            let b1 = cdbrw_binding::derive_cdbrw_binding_key(&hw, &env).expect("valid inputs");
+            let b2 = cdbrw_binding::derive_cdbrw_binding_key(&hw, &env).expect("valid inputs");
             prop_assert_eq!(b1.len(), 32);
             prop_assert_eq!(b2.len(), 32);
             prop_assert_eq!(b1, b2);

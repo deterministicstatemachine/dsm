@@ -188,6 +188,23 @@ export interface AmmVaultSummary {
   routingAdvertised: boolean;
   anchorSequence: bigint;
   anchorEnforcement: 'unspecified' | 'optional' | 'required';
+  /**
+   * Phase 13 follow-up: real CPTA digest (32 bytes) persisted with the
+   * vault at create-time and exposed here for the owner-side republish
+   * retry path on `LiquidityScreen`.  `undefined` for legacy vaults
+   * that pre-date persistence; the screen must hide the Publish-retry
+   * button when this field is absent (republishing with zero bytes
+   * silently corrupts the advertisement — that was the bug this field
+   * exists to fix).
+   */
+  unlockSpecDigest?: Uint8Array;
+  /**
+   * Phase 13 follow-up: canonical routing-advertisement key string,
+   * derived Rust-side so the frontend stays a renderer per the Layer
+   * Communication Law.  Same value the original create-flow publish
+   * used.  `undefined` for legacy vaults (see `unlockSpecDigest`).
+   */
+  unlockSpecKey?: string;
 }
 
 function decodeReserveBigInt(bytes: Uint8Array): bigint {
@@ -253,6 +270,17 @@ export async function listOwnedAmmVaults(): Promise<{
     const vaults: AmmVaultSummary[] = lines.map((line) => {
       const summaryBytes = decodeBase32Crockford(line);
       const summary = pb.AmmVaultSummaryV1.fromBinary(new Uint8Array(summaryBytes));
+      // Phase 13 follow-up: surface the persisted unlock-spec digest +
+      // key when present so `LiquidityScreen` can republish with the
+      // real digest instead of stamping zeros.  Empty/missing on the
+      // wire → `undefined` here → republish button suppressed by the
+      // screen for legacy vaults.
+      const wireDigest = summary.unlockSpecDigest;
+      const wireKey = summary.unlockSpecKey;
+      const unlockSpecDigest =
+        wireDigest && wireDigest.length === 32 ? wireDigest : undefined;
+      const unlockSpecKey =
+        typeof wireKey === 'string' && wireKey.length > 0 ? wireKey : undefined;
       return {
         vaultIdBase32: encodeBase32Crockford(summary.vaultId),
         tokenA: summary.tokenA,
@@ -264,6 +292,8 @@ export async function listOwnedAmmVaults(): Promise<{
         routingAdvertised: summary.routingAdvertised,
         anchorSequence: summary.anchorSequence,
         anchorEnforcement: anchorEnforcementToString(summary.anchorEnforcement),
+        unlockSpecDigest,
+        unlockSpecKey,
       };
     });
     return { success: true, vaults };

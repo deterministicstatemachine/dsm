@@ -103,6 +103,15 @@ impl AppRouterImpl {
                     };
                 let anchor_sequence = vault.current_sequence;
                 let anchor_enforcement = vault.anchor_enforcement;
+                // Phase 13 follow-up: pull the persisted `policy_digest`
+                // so the owner-side LiquidityScreen republish path can
+                // pass the real digest (instead of 32 zero bytes) to
+                // `route.publishRoutingAdvertisement` on retry.  Vaults
+                // created before this field was added (legacy on-disk
+                // state) carry `None`; the summary leaves both fields
+                // empty and the frontend suppresses the Publish-retry
+                // button for those vaults.
+                let policy_digest_opt = vault.policy_digest;
                 drop(vault);
 
                 // Best-effort storage fetch for advertised state_number.
@@ -122,6 +131,19 @@ impl AppRouterImpl {
                         Err(_) => (0, false),
                     };
 
+                // Phase 13 follow-up: derive the canonical routing
+                // advertisement key string entirely in Rust (Layer
+                // Communication Law: protocol decisions belong in Rust,
+                // frontend is a renderer).  Matches the original
+                // create-flow construction
+                // `defi/spec/amm/<first-16-chars-of-vault-id-b32>` so
+                // the republish path stays bit-identical to the
+                // original publish path.
+                let unlock_spec_key_opt: Option<String> = policy_digest_opt.map(|_| {
+                    let vid_b32 = crate::util::text_id::encode_base32_crockford(&vid);
+                    let prefix: String = vid_b32.chars().take(16).collect();
+                    format!("defi/spec/amm/{prefix}")
+                });
                 out.push(generated::AmmVaultSummaryV1 {
                     vault_id: vid.to_vec(),
                     token_a,
@@ -133,6 +155,13 @@ impl AppRouterImpl {
                     routing_advertised: advertised,
                     anchor_sequence,
                     anchor_enforcement,
+                    // Phase 13 follow-up: populate only when the vault
+                    // has a persisted digest (post-fix vaults).  Legacy
+                    // vaults carry `None` → frontend hides the
+                    // Publish-retry button rather than corrupting the
+                    // advertisement with 32 zero bytes.
+                    unlock_spec_digest: policy_digest_opt.map(|d| d.to_vec()),
+                    unlock_spec_key: unlock_spec_key_opt,
                 });
             }
             out
@@ -565,10 +594,28 @@ impl AppRouterImpl {
         // proto value is passed through verbatim — the gate decodes it
         // via `AnchorEnforcement::try_from` and falls back to
         // `Unspecified` for unknown variants.
+        //
+        // Phase 13 follow-up: also stamp the vault's `policy_digest` from
+        // the spec.  This is the canonical 32-byte CPTA anchor that the
+        // owner's first publish stamped into the routing advertisement's
+        // `unlock_spec_digest`.  Persisting it on the vault lets the
+        // owner-side LiquidityScreen republish path read the real digest
+        // from `AmmVaultSummaryV1` instead of stamping 32 zero bytes
+        // (which silently corrupted advertisements pre-fix).
         match dlv_manager.get_vault(&vault_id).await {
             Ok(vault_lock) => {
                 let mut vault = vault_lock.lock().await;
                 vault.anchor_enforcement = spec.anchor_enforcement;
+                // spec.policy_digest length is already validated as 32
+                // bytes at line 227-229; copy into a fixed array.  Skip
+                // stamping if the spec carried no digest (defensive — the
+                // earlier validation rejects empty too, so this is just
+                // belt-and-braces).
+                if spec.policy_digest.len() == 32 {
+                    let mut pd = [0u8; 32];
+                    pd.copy_from_slice(&spec.policy_digest);
+                    vault.policy_digest = Some(pd);
+                }
             }
             Err(e) => {
                 log::warn!(

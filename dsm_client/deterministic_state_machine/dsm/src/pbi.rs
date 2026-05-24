@@ -30,7 +30,11 @@ pub struct PlatformContext {
     /// Canonical Genesis Hash (32 bytes)
     pub genesis_hash: [u8; 32],
     /// Canonical C-DBRW Binding Key K_DBRW (32 bytes)
-    /// Derived from HW entropy + Env fingerprint + Salt via `cdbrw_binding::derive_cdbrw_binding_key`.
+    /// Derived from HW entropy + Env fingerprint via `cdbrw_binding::derive_cdbrw_binding_key`.
+    /// Phase 13: random salt dropped from the preimage.  K_DBRW is now
+    /// deterministic per-device (recoverable across reinstall on the
+    /// same physical device); cross-device anti-clone is enforced by
+    /// Layer B (opportunistic re-prove) instead.
     pub cdbrw_binding: [u8; 32],
 }
 
@@ -41,7 +45,6 @@ pub struct RawPlatformInputs {
     pub genesis_hash_raw: Vec<u8>,
     pub cdbrw_hw_entropy: Vec<u8>,
     pub cdbrw_env_fingerprint: Vec<u8>,
-    pub cdbrw_salt: Vec<u8>,
 }
 
 impl PlatformContext {
@@ -62,7 +65,6 @@ impl PlatformContext {
         let cdbrw_binding = cdbrw_binding::derive_cdbrw_binding_key(
             &inputs.cdbrw_hw_entropy,
             &inputs.cdbrw_env_fingerprint,
-            &inputs.cdbrw_salt,
         )?;
 
         Ok(Self {
@@ -101,7 +103,6 @@ mod tests {
             genesis_hash_raw: vec![0xBB; 32],
             cdbrw_hw_entropy: vec![0xCC; 32],
             cdbrw_env_fingerprint: vec![0xDD; 32],
-            cdbrw_salt: vec![0xEE; 32],
         }
     }
 
@@ -202,27 +203,17 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_empty_salt_fails() {
-        let mut inputs = valid_inputs();
-        inputs.cdbrw_salt = vec![];
-        let result = PlatformContext::bootstrap(inputs);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn raw_platform_inputs_construction() {
         let raw = RawPlatformInputs {
             device_id_raw: vec![1; 32],
             genesis_hash_raw: vec![2; 32],
             cdbrw_hw_entropy: vec![3; 16],
             cdbrw_env_fingerprint: vec![4; 16],
-            cdbrw_salt: vec![5; 8],
         };
         assert_eq!(raw.device_id_raw.len(), 32);
         assert_eq!(raw.genesis_hash_raw.len(), 32);
         assert_eq!(raw.cdbrw_hw_entropy.len(), 16);
         assert_eq!(raw.cdbrw_env_fingerprint.len(), 16);
-        assert_eq!(raw.cdbrw_salt.len(), 8);
     }
 
     #[test]
@@ -235,7 +226,7 @@ mod tests {
 
         // cdbrw_binding should match a direct call to derive_cdbrw_binding_key
         let expected_binding =
-            cdbrw_binding::derive_cdbrw_binding_key(&[0xCC; 32], &[0xDD; 32], &[0xEE; 32]).unwrap();
+            cdbrw_binding::derive_cdbrw_binding_key(&[0xCC; 32], &[0xDD; 32]).unwrap();
         assert_eq!(ctx.cdbrw_binding, expected_binding);
     }
 

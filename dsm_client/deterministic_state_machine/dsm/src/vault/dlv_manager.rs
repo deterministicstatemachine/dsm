@@ -442,6 +442,7 @@ mod tests {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            policy_digest: None,
         }
     }
 
@@ -621,6 +622,7 @@ mod tests {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            policy_digest: None,
         }
     }
 
