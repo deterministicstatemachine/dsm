@@ -29,10 +29,18 @@ pub(crate) fn get_binding_key() -> Option<Vec<u8>> {
         .clone()
 }
 
-/// Zero the in-memory K_DBRW slot. Used by `cdbrw.reprove` when a clone
-/// (or catastrophic substrate drift) is detected — every downstream
-/// signer that would use K_DBRW must fail closed until re-enrollment
-/// re-derives it.
+/// Zero the in-memory K_DBRW slot. Called by `cdbrw.reprove` on
+/// `CloneDetected` AND by `cdbrw_responder::publish_trust_snapshot`
+/// on W1 drift (Phase 13 follow-up: aligns operational behaviour
+/// with the documented Layer B claim that drift zeros K_DBRW).
+/// Every downstream signer that would use K_DBRW must fail closed
+/// (`InvalidState`) until re-enrollment re-derives it.
+///
+/// TOCTOU bound: a signer that already cloned the bytes via
+/// `get_binding_key()` BEFORE this call can still complete; the access
+/// gate downgrade (`AccessLevel::PinRequired` / `ReadOnly`) in the
+/// router is the strong fence. This function bounds the in-memory
+/// residue window — it does not eliminate it.
 pub(crate) fn clear_binding_key() {
     let mut guard = binding_key_slot()
         .lock()

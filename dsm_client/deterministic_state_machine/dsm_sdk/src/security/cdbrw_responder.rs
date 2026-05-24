@@ -491,6 +491,27 @@ pub fn publish_trust_snapshot(
 
     let drifted = w1_threshold > 0.0 && w1_distance > w1_threshold;
 
+    // Phase 13 follow-up: align operational behaviour with the doc
+    // claim ("Layer B zeros K_DBRW + drops access to ReadOnly on
+    // cross-device drift").  The `cdbrw.reprove` path already clears
+    // the binding-key slot on `CloneDetected`; the boot-time
+    // `cdbrw.measure_trust` path runs through here on every boot and
+    // previously only downgraded the access level on W1 drift, leaving
+    // the binding key in memory.  Mirror the reprove behaviour: when
+    // drift fires here, zero K_DBRW too so the binding key cannot be
+    // re-clone-derived by any code path that bypasses the access gate.
+    //
+    // TOCTOU note: a signing op that cloned `get_binding_key()` BEFORE
+    // this check can still complete with the old (now-suspect) bytes;
+    // the access gate downgrade below is the strong fence.  This clear
+    // bounds the in-memory residue window — it does not eliminate it.
+    if drifted {
+        crate::binding_key::clear_binding_key();
+        log::warn!(
+            "[cdbrw_responder] W1 drift detected (distance={w1_distance:.4} > threshold={w1_threshold:.4}) — K_DBRW slot zeroed; access downgraded to PinRequired"
+        );
+    }
+
     // Strict access-level resolution — no feature gate, no test bypass, no
     // default-allow fallback. A Fail verdict from `classify_resonant`
     // (entropy-health below H_HAT_MIN / L_HAT_MIN, or `|rho_hat|` above
@@ -850,6 +871,67 @@ mod tests {
             };
             let snap = publish_trust_snapshot(pass, 0.2, 0.1, "test drift");
             assert_eq!(snap.access_level, AccessLevel::PinRequired);
+        });
+    }
+
+    /// Phase 13 follow-up: on W1 drift `publish_trust_snapshot` must
+    /// also zero the K_DBRW slot, mirroring the `cdbrw.reprove` ->
+    /// CloneDetected behaviour.  Prior to this hook, drift only
+    /// downgraded the access level; the binding key remained in
+    /// memory.  Now the slot is cleared so any downstream signer that
+    /// gets past the access gate (TOCTOU residue aside) fails closed
+    /// with `InvalidState`.
+    #[test]
+    fn publish_trust_drift_zeros_binding_key_slot() {
+        with_clean_state(|| {
+            // Seed the binding key slot with a known 32-byte value.
+            crate::binding_key::install_binding_key(vec![0xABu8; 32])
+                .expect("install_binding_key must accept a 32-byte key");
+            assert!(
+                crate::binding_key::get_binding_key().is_some(),
+                "precondition: binding key must be installed before the test"
+            );
+
+            let pass = HealthResult {
+                h_hat: 0.60,
+                rho_hat: 0.10,
+                l_hat: 0.55,
+                passed: true,
+            };
+            // W1 distance 0.2 > threshold 0.1 → drift; must clear slot.
+            let snap = publish_trust_snapshot(pass, 0.2, 0.1, "test drift clears K_DBRW");
+            assert_eq!(snap.access_level, AccessLevel::PinRequired);
+            assert!(
+                crate::binding_key::get_binding_key().is_none(),
+                "drift detection must zero the K_DBRW slot per Phase 13 doc claim"
+            );
+        });
+    }
+
+    /// Phase 13 follow-up: clean-pass (no drift) must NOT touch the
+    /// binding key slot — only drift triggers the wipe.
+    #[test]
+    fn publish_trust_clean_pass_preserves_binding_key_slot() {
+        with_clean_state(|| {
+            crate::binding_key::install_binding_key(vec![0xCDu8; 32])
+                .expect("install_binding_key must accept a 32-byte key");
+
+            let pass = HealthResult {
+                h_hat: 0.60,
+                rho_hat: 0.10,
+                l_hat: 0.55,
+                passed: true,
+            };
+            // W1 distance 0.01 < threshold 0.10 → no drift; preserve slot.
+            let snap = publish_trust_snapshot(pass, 0.01, 0.10, "test clean preserves K_DBRW");
+            assert_eq!(snap.access_level, AccessLevel::FullAccess);
+            assert!(
+                crate::binding_key::get_binding_key().is_some(),
+                "clean pass must leave the binding key slot untouched"
+            );
+
+            // Test cleanup — wipe so we don't leak state into siblings.
+            crate::binding_key::clear_binding_key();
         });
     }
 

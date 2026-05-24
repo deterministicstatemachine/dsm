@@ -952,14 +952,29 @@ entropy.
 Definition 2 (Environment Fingerprint). E(e) ∈{0,1}m fingerprints the execution environ-
 ment.
 Definition 3 (Dual-Binding).
-KDBRW = BLAKE3-256 "DSM/dbrw-bind\0" ∥H(d) ∥E(e) ∥sdevice ,
-where sdevice is a per-device salt ensuring uniqueness even for similar hardware or environ-
-ments.
-Theorem 5 (Binding Inseparability). Given KDBRW and collision resistance of BLAKE3-256
-under domain separation, it is infeasible to find (h′,e′,s′) ̸= (h,e,s) such that BLAKE3-256("DSM/dbrw-bind
-h′ ∥e′ ∥s′) = BLAKE3-256("DSM/dbrw-bind\0" ∥h ∥e ∥s). The per-device salt sdevice
-prevents correlation attacks by ensuring unique bindings even when hardware entropy or
-environment fingerprints are similar across devices.
+KDBRW = BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(H(d)) ∥ LP(E(e))),
+where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding.
+**Phase 13 — salt removed.** Prior revisions included a per-device random salt sdevice
+as a third preimage input. The salt was wrapped in Android Keystore-backed
+EncryptedSharedPreferences; on Samsung devices, Smart Switch silently uninstalls apps
+on its own schedule, destroying the Keystore aliases bound to the prior package UID and
+rendering the wrapped salt cipher-text unrecoverable — bricking the wallet on every
+silent uninstall despite the silicon fingerprint H(d) remaining recoverable. Removing the
+salt makes K_DBRW deterministic per device so the wallet survives uninstall + reinstall on
+the same physical hardware. Cross-device anti-cloning is enforced operationally by
+**Layer B** (live W1 vs H̄_baseline on every boot, downgrading access and zeroing the in-
+memory K_DBRW slot on drift — see `cdbrw_responder.rs::publish_trust_snapshot`).
+Theorem 5 (Binding Inseparability — restated). Given KDBRW and collision resistance of
+BLAKE3-256 under domain separation, it is infeasible to find (h′,e′) ̸= (h,e) such that
+BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(h′) ∥ LP(e′)) = BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(h) ∥ LP(e)).
+**Proof — TODO (Phase 13 follow-up).** The pre-Phase-13 proof rested on the per-device
+salt sdevice providing unconditional independence between two enrollments on the same
+device. With sdevice removed, the new proof must rest on: (a) BLAKE3-256 second-preimage
+resistance, (b) min-entropy of the silicon-derived H(d) — formally argued from the C-DBRW
+Phase 2.2 calibration (40–75× cross-device noise-floor figure), and (c) Layer B's W1
+drift detection providing operational (not unconditional) cross-device-clone detection.
+This proof has NOT been re-derived in this revision; until written, the theorem statement
+above is treated as conjectural rather than proven.
 DSM: Deterministic State Machines 28
 DBRW advances without clocks. The ρ/C recurrence is the abstract definition
 of forward-only DBRW state evolution:
@@ -1424,7 +1439,7 @@ Sec. 11.1).
 • KEM: Kyber for step secrets; secrets never serialized.
 • SMT: 256-bit key space; inclusion proofs logarithmic; device-local authoritative.
 • Device Tree: Standard Merkle; replicated to storage nodes and user devices.
-• Entropy: s0 andsdevice fromCSPRNG;per-stepseedsviaHKDF-BLAKE3over(hn,Cpre,kstep,KDBRW).
+• Entropy: s0 from CSPRNG (Phase 13: sdevice removed from K_DBRW preimage — K_DBRW is now deterministic per device); per-step seeds via HKDF-BLAKE3 over (hn, Cpre, kstep, KDBRW).
 • Time: No timestamps, epochs, or heights in predicates or encodings.
 • Modal rule: Pending online for (A,B) blocks offline for (A,B) until synchronized; other
 relationships commute.
