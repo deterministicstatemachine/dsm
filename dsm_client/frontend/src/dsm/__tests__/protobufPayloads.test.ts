@@ -73,7 +73,10 @@ describe("protobuf-only bridge payloads", () => {
     expect(decoded.deviceEntropy).toEqual(entropy);
     expect(decoded.cdbrwHwEntropy.length).toBe(0);
     expect(decoded.cdbrwEnvFingerprint.length).toBe(0);
-    expect(decoded.cdbrwSalt.length).toBe(0);
+    // Phase 13: `cdbrwSalt` (tag 6) is `reserved` in proto — accessor no
+    // longer generated.  Pair with cdbrwHwEntropy / cdbrwEnvFingerprint
+    // being empty (legacy createGenesisViaRouter doesn't populate them
+    // either) to lock the createGenesis-with-no-platform-entropy shape.
   });
 
   test("setBleIdentityForAdvertising sends BleIdentityPayload", async () => {
