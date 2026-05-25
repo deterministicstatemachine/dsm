@@ -521,10 +521,13 @@ object AntiCloneGate {
             CdbrwAccessLevel.CDBRW_ACCESS_FULL_ACCESS -> AccessLevel.FULL_ACCESS
             CdbrwAccessLevel.CDBRW_ACCESS_PIN_REQUIRED -> AccessLevel.PIN_REQUIRED
             CdbrwAccessLevel.CDBRW_ACCESS_READ_ONLY -> AccessLevel.READ_ONLY
+            // `proto` is the non-nullable `CdbrwAccessLevel` enum, so the
+            // `null ->` branch the compiler used to warn about is dead.
+            // BLOCKED + UNSPECIFIED + UNRECOGNIZED all map to BLOCKED as
+            // the safe-default access level.
             CdbrwAccessLevel.CDBRW_ACCESS_BLOCKED,
             CdbrwAccessLevel.CDBRW_ACCESS_UNSPECIFIED,
-            CdbrwAccessLevel.UNRECOGNIZED,
-            null -> AccessLevel.BLOCKED
+            CdbrwAccessLevel.UNRECOGNIZED -> AccessLevel.BLOCKED
         }
     }
 }
