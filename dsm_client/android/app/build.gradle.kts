@@ -377,8 +377,66 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
     }
 }
 
+// Hook `refreshDsmJniLibs` only into the AGP tasks that physically consume
+// jniLibs — `merge${Variant}JniLibFolders` — instead of `preBuild`. The
+// preBuild wiring was over-eager: it forced JVM-only unit tests (which never
+// load native code) to require the Rust .so artifacts, breaking CI for any
+// runner that doesn't pre-build the Rust SDK.
+//
+// The merge-task hook still gates APK assembly (debug + release + androidTest
+// variants all run through `merge${Variant}JniLibFolders` before packaging),
+// so a real build with missing libs still fails fast.
+//
+// `afterEvaluate` runs after AGP has registered all variant tasks; the
+// `tasks.matching {}` lazily binds whenever AGP adds a new merge-jni task,
+// AND we explicitly assert at least one task matched so a future AGP rename
+// (e.g., to processNativeLibs) is caught loudly at configuration time
+// instead of silently skipping the JNI copy step.
+afterEvaluate {
+    val mergeJniTasks = tasks.matching {
+        val n = it.name
+        n.startsWith("merge") && n.endsWith("JniLibFolders")
+    }
+    mergeJniTasks.configureEach {
+        dependsOn(refreshDsmJniLibs)
+    }
+    // Bind a sanity check at config time — Gradle resolves matching{}
+    // lazily, so we have to force evaluation to count matches. Reading
+    // .names triggers configuration of the live filter.
+    val matchedNames = mergeJniTasks.names.toList()
+    if (matchedNames.isEmpty()) {
+        throw GradleException(
+            "refreshDsmJniLibs failed to bind: no merge*JniLibFolders tasks " +
+                "found. AGP may have renamed the JNI merge task; update the " +
+                "matcher in app/build.gradle.kts to the new task name."
+        )
+    }
+}
+
+// Dev fail-fast: a soft warning at preBuild keeps developers informed of
+// missing Rust libs WITHOUT hard-blocking JVM unit tests. The merge-jni
+// hook above is the actual gate for APK builds.
 tasks.named("preBuild").configure {
-    dependsOn(refreshDsmJniLibs)
+    doFirst {
+        val cargoTarget = project.file("../../deterministic_state_machine/target")
+        val appJniLibs = project.file("src/main/jniLibs")
+        val repoJniLibs = project.file("../../deterministic_state_machine/jniLibs")
+        val triples = listOf("aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android")
+        val abis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        val anyPresent = triples.zip(abis).any { (triple, abi) ->
+            File(cargoTarget, "$triple/release/libdsm_sdk.so").exists() ||
+                File(cargoTarget, "$triple/debug/libdsm_sdk.so").exists() ||
+                File(File(appJniLibs, abi), "libdsm_sdk.so").exists() ||
+                File(File(repoJniLibs, abi), "libdsm_sdk.so").exists()
+        }
+        if (!anyPresent) {
+            logger.warn(
+                "[DSM JNI] No Rust .so artifacts found in any expected location. " +
+                    "JVM unit tests will still run, but APK assembly will fail " +
+                    "at the merge-jni step. Run `cargo ndk build` first to populate libs."
+            )
+        }
+    }
 }
 
 // Make Robolectric happy on newer JDKs by opening required modules
