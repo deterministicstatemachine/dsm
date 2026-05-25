@@ -824,9 +824,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun bleCoordinator(): BleCoordinator = BleCoordinator.getInstance(applicationContext)
 
 
-    private fun isAllowlistedExternalHost(host: String): Boolean =
-        host == "tile.openstreetmap.org" || host.endsWith(".tile.openstreetmap.org") ||
-        host == "localhost" || host == "127.0.0.1"
+    // The WebView external-host allowlist lives at file scope below so that
+    // `WebViewAllowlistTest` (src/test) can read the set literals and the
+    // `isAllowlistedExternalHost` predicate directly. The lock is the test
+    // — any change to the allowlist requires a matching test diff that is
+    // visible in PR review.
 
     @VisibleForTesting
     internal fun proxyWithCorsForTest(request: WebResourceRequest): WebResourceResponse? {
@@ -2049,4 +2051,39 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             Log.e(tag, "Failed to load WebView URL: $initialUrl", t)
         }
     }
+}
+
+// =============================================================================
+// SECURITY: WebView external-host allowlist (CI-locked).
+//
+// These declarations are deliberately at file scope (not inside MainActivity)
+// so that `dsm_client/android/app/src/test/.../WebViewAllowlistTest.kt` can
+// read the set literals and call `isAllowlistedExternalHost` directly. The
+// lock is the test: any change to either set requires a matching test diff
+// that is visible in PR review.
+//
+// `proxyWithCorsInternal` consults `isAllowlistedExternalHost` BEFORE
+// performing any external fetch or injecting CORS response headers. Adding
+// a new external host therefore requires both:
+//   1. updating the set(s) below, AND
+//   2. updating WebViewAllowlistTest.kt to match.
+// Both edits land in the same PR diff and trigger explicit review.
+// =============================================================================
+
+internal val WEBVIEW_ALLOWED_EXACT_HOSTS: Set<String> = setOf(
+    "tile.openstreetmap.org",
+    "localhost",
+    "127.0.0.1",
+)
+
+internal val WEBVIEW_ALLOWED_HOST_SUFFIXES: Set<String> = setOf(
+    ".tile.openstreetmap.org",
+)
+
+internal fun isAllowlistedExternalHost(host: String): Boolean {
+    if (host in WEBVIEW_ALLOWED_EXACT_HOSTS) return true
+    for (suffix in WEBVIEW_ALLOWED_HOST_SUFFIXES) {
+        if (host.endsWith(suffix)) return true
+    }
+    return false
 }
