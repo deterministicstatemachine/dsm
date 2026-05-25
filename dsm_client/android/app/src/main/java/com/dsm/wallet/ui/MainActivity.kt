@@ -2010,10 +2010,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             }
 
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                request?.url?.let { uri ->
-                    return assetLoader.shouldInterceptRequest(uri)
-                }
-                return super.shouldInterceptRequest(view, request)
+                // Explicit cast disambiguates the Java overload pair
+                //   (WebView, String)  vs  (WebView, WebResourceRequest)
+                // on the super call when `request` is null.
+                val req = request
+                    ?: return super.shouldInterceptRequest(view, request as WebResourceRequest?)
+                val uri = req.url
+                    ?: return super.shouldInterceptRequest(view, request as WebResourceRequest?)
+                // APK assets are served by WebViewAssetLoader.
+                // Allowlisted external hosts fall through to the CORS proxy.
+                // Everything else returns null so WebView handles it normally.
+                return assetLoader.shouldInterceptRequest(uri)
+                    ?: proxyWithCorsInternal(req)
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
