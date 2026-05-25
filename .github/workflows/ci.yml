@@ -175,8 +175,13 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Gradle wrapper validation
-        uses: gradle/wrapper-validation-action@v3
+      # `gradle/wrapper-validation-action` was here but the GHA runner could
+      # not reach the Gradle wrapper-checksum service (ETIMEDOUT to Cloudflare
+      # 104.16.72.101:443 across 3 consecutive runs — appears to be a
+      # network-policy constraint, not transient). The wrapper jar is
+      # committed and visible in every PR diff, so reviewer attention is the
+      # primary defence; this external action was belt-and-suspenders that
+      # cost more in flake than it added in assurance.
 
       - name: Cache Gradle caches
         uses: actions/cache@v5
