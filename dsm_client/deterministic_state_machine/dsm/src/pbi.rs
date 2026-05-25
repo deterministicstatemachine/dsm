@@ -29,12 +29,13 @@ pub struct PlatformContext {
     pub device_id: [u8; 32],
     /// Canonical Genesis Hash (32 bytes)
     pub genesis_hash: [u8; 32],
-    /// Canonical C-DBRW Binding Key K_DBRW (32 bytes)
-    /// Derived from HW entropy + Env fingerprint via `cdbrw_binding::derive_cdbrw_binding_key`.
-    /// Phase 13: random salt dropped from the preimage.  K_DBRW is now
-    /// deterministic per-device (recoverable across reinstall on the
-    /// same physical device); cross-device anti-clone is enforced by
-    /// Layer B (opportunistic re-prove) instead.
+    /// Canonical C-DBRW Binding Key K_DBRW (32 bytes), derived via
+    /// `cdbrw_binding::derive_cdbrw_binding_key` from the canonical
+    /// four-input preimage `(genesis_hash, device_id, hw_entropy,
+    /// env_fingerprint)`. Deterministic per device + per genesis;
+    /// recoverable across reinstall on the same physical device.
+    /// Cross-device anti-clone is enforced operationally by Layer B
+    /// (`cdbrw_responder::publish_trust_snapshot`).
     pub cdbrw_binding: [u8; 32],
 }
 
@@ -62,7 +63,11 @@ impl PlatformContext {
         // 3. Delegate C-DBRW binding derivation to the crypto module.
         // PBI responsibility: strict validation only.
         // Crypto responsibility: canonical serialization + domain-separated hashing.
+        // Canonical preimage binds K_DBRW to (genesis_hash, device_id, hw, env);
+        // see crypto::cdbrw_binding::derive_cdbrw_binding_key.
         let cdbrw_binding = cdbrw_binding::derive_cdbrw_binding_key(
+            &genesis_hash,
+            &device_id,
             &inputs.cdbrw_hw_entropy,
             &inputs.cdbrw_env_fingerprint,
         )?;
@@ -225,8 +230,14 @@ mod tests {
         assert_eq!(ctx.genesis_hash, [0xBB; 32]);
 
         // cdbrw_binding should match a direct call to derive_cdbrw_binding_key
-        let expected_binding =
-            cdbrw_binding::derive_cdbrw_binding_key(&[0xCC; 32], &[0xDD; 32]).unwrap();
+        // with the same canonical four-input preimage.
+        let expected_binding = cdbrw_binding::derive_cdbrw_binding_key(
+            &[0xBB; 32],
+            &[0xAA; 32],
+            &[0xCC; 32],
+            &[0xDD; 32],
+        )
+        .unwrap();
         assert_eq!(ctx.cdbrw_binding, expected_binding);
     }
 

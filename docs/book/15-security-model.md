@@ -61,8 +61,14 @@ Device-Bound Random Walk prevents an adversary from copying device state to anot
 2. **Environment binding** — runtime environment properties that change across devices
 
 ```
-dbrw_hash = BLAKE3("DSM/dbrw-bind\0" || silicon_fingerprint || env_entropy)
+K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
+                 || LP(genesis_hash) || LP(device_id)
+                 || LP(silicon_fingerprint) || LP(env_entropy))
 ```
+
+where `LP(x) = LE32(len(x)) || x`; root-device invariant binds
+`device_id = genesis_hash`. The binding key reflects the device's
+final protocol identity, not just its silicon/environment fingerprints.
 
 ### Health Monitoring
 

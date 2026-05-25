@@ -235,7 +235,7 @@ Phase 8 (test vectors + PBT) runs incrementally
 ## Domain Separation Tags (Appendix A)
 
 ```
-DSM/dbrw-bind\0          K_DBRW derivation
+DSM/cdbrw/bind\0         K_DBRW derivation (canonical 4-input)
 DSM/attractor-commit\0   ACD enrollment commitment
 DSM/cdbrw-seed\0         Challenge orbit seeding
 DSM/cdbrw-response\0     Verification response gamma

@@ -952,42 +952,34 @@ entropy.
 Definition 2 (Environment Fingerprint). E(e) ∈{0,1}m fingerprints the execution environ-
 ment.
 Definition 3 (Dual-Binding).
-KDBRW = BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(H(d)) ∥ LP(E(e))),
-where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding.
-**Phase 13 — salt removed.** Prior revisions included a per-device random salt sdevice
-as a third preimage input. The salt was wrapped in Android Keystore-backed
-EncryptedSharedPreferences; on Samsung devices, Smart Switch silently uninstalls apps
-on its own schedule, destroying the Keystore aliases bound to the prior package UID and
-rendering the wrapped salt cipher-text unrecoverable — bricking the wallet on every
-silent uninstall despite the silicon fingerprint H(d) remaining recoverable. Removing the
-salt makes K_DBRW deterministic per device so the wallet survives uninstall + reinstall on
-the same physical hardware. Cross-device anti-cloning is enforced operationally by
-**Layer B** (live W1 vs H̄_baseline on every boot, downgrading access and zeroing the in-
-memory K_DBRW slot on drift — see `cdbrw_responder.rs::publish_trust_snapshot`).
-Theorem 5 (Binding Inseparability — restated). Given KDBRW and collision resistance of
-BLAKE3-256 under domain separation, it is infeasible to find (h′,e′) ̸= (h,e) such that
-BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(h′) ∥ LP(e′)) = BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(h) ∥ LP(e)).
-**Theorem 5′ (Binding Inseparability, Phase 13 — canonical target form).** Adopt the
-richer preimage K_DBRW(D) := H("DSM/cdbrw/bind\0" ∥ G ∥ DevID_D ∥ Ĥ_D ∥ ctx) where G is
-the DSM genesis commitment, DevID_D the enrolled device identifier, Ĥ_D the silicon-
-derived hardware entropy from Phase 2.2 calibration, and ctx the canonical binding
-context (subsumes E(e)). Under (A1) canonical injective encoding, (A2) BLAKE3 collision
-resistance, (A3) Phase 2.2 conditional min-entropy lower bound H_∞(Ĥ_D | view_A, Ĥ_{D′}) ≥ λ,
-and (A4) Layer B W1 false-accept bound Pr[Accept_W1(D′, D)] ≤ ε_W1(λ), the probability
-that an adversary A produces a distinct device D′ accepted as inseparably bound to the
-same DSM identity as D is
+KDBRW = BLAKE3-256("DSM/cdbrw/bind\0"
+                    ∥ LP(genesis_hash) ∥ LP(device_id)
+                    ∥ LP(H(d))         ∥ LP(E(e))),
+where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding,
+`genesis_hash` is the n-of-n MPC genesis commitment from §2.5, and
+`device_id` is the protocol device identifier (root-device invariant:
+`device_id = genesis_hash`). K_DBRW is derived post-MPC inside the
+genesis session (so genesis_hash exists before K_DBRW); on restore the
+four inputs are persisted across the platform layer and recovered
+deterministically.
+
+Theorem 5 (Binding Inseparability). Let D be an enrolled DSM device
+and D′ any adversarially constructed device that is not physically
+identical to D. Under
+  (A1) canonical injective LP-encoding of the binding tuple,
+  (A2) BLAKE3-256 collision resistance,
+  (A3) conditional min-entropy H_∞(H(d) | view_A, H(d′)) ≥ λ from
+       C-DBRW Phase 2.2 calibration, and
+  (A4) Layer B W1 false-accept bound Pr[Accept_W1(D′, D)] ≤ ε_W1(λ),
+the probability that A produces a distinct device D′ accepted as
+inseparably bound to the same DSM identity as D is
 
   Adv_bind(A) ≤ Adv^H_coll(A) + 2^(-λ) + ε_W1(λ).
 
-Full statement, assumptions, proof by case analysis on equality of the preimage byte
-string, and reconciliation against the deployed 2-input preimage are in
-`.github/instructions/cdbrw.instructions.md` §5.3.1 (Theorem 5.2′). The deployed
-`dsm/src/crypto/cdbrw_binding.rs` preimage is currently the 2-input form (Eq. 16);
-the canonical target form is the Phase 14 evolution target. Phase 13 thus establishes
-a conditional binding theorem against the canonical target form and a strictly weaker
-Restricted Inseparability against the deployed code; the gap is closed when Phase 14
-extends the code preimage to include (G, DevID_D, ctx) under a wallet schema version
-gate to avoid a second forced re-enrollment.
+Full proof (case analysis on equality of the preimage byte string +
+union bound over the three failure modes) and discussion of the
+conditional nature of (A3)/(A4) are in
+`.github/instructions/cdbrw.instructions.md` §5.3 Theorem 5.2.
 DSM: Deterministic State Machines 28
 DBRW advances without clocks. The ρ/C recurrence is the abstract definition
 of forward-only DBRW state evolution:

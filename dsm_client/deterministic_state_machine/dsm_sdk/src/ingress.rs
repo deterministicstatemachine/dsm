@@ -1496,10 +1496,17 @@ endpoint = "http://127.0.0.1:8080"
     #[serial]
     fn startup_restore_identity_context_derives_binding_key_and_router() {
         let _guard = setup_test_env();
+        let device_id = vec![0x11; 32];
+        let genesis_hash = vec![0x22; 32];
         let hw = vec![0x33; 32];
         let env = vec![0x44; 32];
-        let expected_binding = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env)
-            .expect("binding derivation");
+        let expected_binding = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+            &genesis_hash,
+            &device_id,
+            &hw,
+            &env,
+        )
+        .expect("binding derivation");
 
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
