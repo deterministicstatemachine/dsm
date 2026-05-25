@@ -78,8 +78,22 @@ class BleCoordinatorTest {
         assertEquals("new:addr", resolved.second)
     }
 
+    /**
+     * Production `resolveSession` was deliberately hardened to REFUSE the
+     * "fall back to any ready peer when address is unknown" behaviour
+     * (see BleCoordinator.kt:1172-1176, log: "refusing ready-peer fallback").
+     * Routing an unknown peer's traffic to a random ready session is a
+     * privacy/safety hole — the local side would deliver bytes destined
+     * for peer A to peer B without any identity binding.
+     *
+     * This test is the regression guard: an unknown address with no
+     * identity hydration must return null, even when a ready peer exists.
+     * The sibling test below (`_doesNotFallbackWhenMultipleReadyPeersExist`)
+     * covers the multi-peer case; this one covers the single-ready-peer
+     * temptation.
+     */
     @Test
-    fun resolveSession_fallsBackToAnyReadySession() {
+    fun resolveSession_refusesFallbackToReadyPeerForUnknownAddress() {
         val fallbackPeer = PeerSession(address = "fallback").apply {
             gattClientSession = activeGattClientSession("fallback")
             isConnected = true
@@ -88,9 +102,11 @@ class BleCoordinatorTest {
 
         val resolved = coordinator.resolveSession("unknown")
 
-        assertNotNull(resolved)
-        assertSame(fallbackPeer, resolved!!.first)
-        assertEquals("fallback", resolved.second)
+        assertNull(
+            "resolveSession must refuse ready-peer fallback for an unknown " +
+                "address with no identity hydration (privacy guard)",
+            resolved,
+        )
     }
 
     @Test
