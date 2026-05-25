@@ -3586,7 +3586,7 @@ mod unified_protobuf_bridge_tests {
         let mut env =
             crate::envelope::from_canonical_bytes(build_bilateral_confirm_envelope().as_slice())
                 .expect("decode bilateral confirm envelope");
-        env.version = 2;
+        env.version = 4;
         let raw = env.encode_to_vec();
 
         assert_eq!(

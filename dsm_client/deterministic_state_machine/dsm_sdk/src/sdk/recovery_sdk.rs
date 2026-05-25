@@ -596,8 +596,8 @@ impl RecoverySDK {
                     if tip.len() == 32 && contact.device_id.len() == 32 {
                         let counterparty_id =
                             crate::util::text_id::encode_base32_crockford(&contact.device_id);
-                        // The SMT-backed relationship tip is authoritative. Height is a transport
-                        // placeholder until a canonical per-relationship counter is persisted.
+                        // The SMT-backed relationship tip is authoritative. Height is hardcoded
+                        // to 0 as it is not used for conflict resolution in this context.
                         counterparty_tips.insert(counterparty_id, (0, tip.clone()));
                     }
                 }
