@@ -65,11 +65,28 @@ pub const HEALTH_MIN_LZ78_RATIO: f64 = 0.45;
 /// enforced by Layer B (live W1 vs. enrolled H̄_baseline on every boot
 /// via `cdbrw_responder::publish_trust_snapshot` — drift downgrades
 /// access AND zeros the in-memory K_DBRW slot via
-/// `binding_key::clear_binding_key`).  See whitepaper Definition 3 +
-/// Theorem 5 commentary for the formal-model status: salt removal is
-/// operationally sound but the binding-inseparability proof has not
-/// yet been re-derived for the two-input preimage; that proof is a
-/// deferred follow-up.
+/// `binding_key::clear_binding_key`).
+///
+/// Formal-model status (see `.github/instructions/cdbrw.instructions.md`
+/// §5.3.1 Theorem 5.2′ and `.github/instructions/whitepaper.instructions.md`
+/// Theorem 5′): the canonical-target form proven in the spec uses a
+/// RICHER preimage
+///   `K_DBRW = H("DSM/cdbrw/bind\0" || G || DevID_D || Ĥ_D || ctx)`
+/// where G is the genesis commitment, DevID_D the enrolled device id,
+/// Ĥ_D the silicon hardware entropy, and ctx the canonical binding
+/// context (subsumes E(e)).  The two-input deployed preimage below is
+/// a strict subset and satisfies a strictly weaker "Restricted
+/// Inseparability" — second-preimage resistance over (hw, env) only;
+/// K_DBRW does NOT directly bind to (G, DevID, ctx) today.  Binding
+/// to (G, DevID) currently exists only operationally through the
+/// per-step HKDF mix (`derive_ephemeral_seed` and Kyber-coins).
+///
+/// Phase 14 follow-up: extend this function to accept (G, DevID_D, ctx)
+/// as additional preimage components and update the domain tag.  Because
+/// any K_DBRW preimage change forces re-enrollment, Phase 14 should land
+/// BEFORE mainnet deployment OR behind a wallet `enrollment_schema_version`
+/// gate (also not yet implemented) so future K_DBRW evolutions are
+/// additive rather than hard cutovers.
 ///
 /// The salt's prior purpose (differentiating K_DBRW across two
 /// enrollment instances on the same device) corresponded to no real

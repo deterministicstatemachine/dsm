@@ -1028,17 +1028,151 @@ the in-memory K_DBRW slot (Phase 13 follow-up; previously only the access downgr
 wired). A cross-device clone fails the live PUF orbit regardless of preimage shape, so
 removing the salt input does not weaken cross-device anti-cloning.
 
-**Proof — TODO (formal re-derivation, Phase 13 follow-up for spec author).** The pre-Phase-13
-proof rested on the per-device salt sdevice providing unconditional independence between
-two enrollments on the same device. With sdevice removed, the new proof must rest on:
-(a) BLAKE3-256 collision and second-preimage resistance (unchanged from above),
-(b) min-entropy of the silicon-derived H(d) — must be argued formally from the C-DBRW
-Phase 2.2 calibration (the empirically measured 40–75× cross-device noise-floor figure),
-and (c) Layer B's W1 vs H̄_baseline drift detection providing operational (not unconditional)
-cross-device-clone detection with a quantified false-negative rate bounded by the
-admission policy `ADMISSION_M`. This proof has NOT been re-derived in this revision;
-operational code is shipped, the formal proof is deferred. Until that proof is written,
-this theorem statement is treated as conjectural rather than proven.
+### 5.3.1 Phase 13 Re-Derivation (canonical target form)
+
+The 2-input formula (Eq. 7) is what the deployed Phase 13 code derives. The
+formal theorem below adopts a richer preimage as the canonical target: the
+genesis commitment G, the enrolled device identifier DevID_D, the silicon-
+derived hardware entropy Ĥ_D, and a canonical binding context ctx (which
+subsumes E(e) and any future protocol-bound material). The deployed 2-input
+preimage is a subset of this canonical form; future revisions should evolve
+the code preimage to match (see Implementation Reconciliation Note at end of
+this section).
+
+**Theorem 5.2′ (Binding Inseparability, Phase 13 — canonical form).** Let D be
+an enrolled DSM device and let D′ be any adversarially constructed device that
+is not physically identical to D. Define the Phase 13 C-DBRW binding key as
+
+  K_DBRW(D) := H("DSM/cdbrw/bind\0" ∥ G ∥ DevID_D ∥ Ĥ_D ∥ ctx)
+
+where:
+  - H is BLAKE3-256 under DSM domain separation;
+  - G is the DSM genesis commitment;
+  - DevID_D is the enrolled device identifier;
+  - Ĥ_D is the silicon-derived C-DBRW hardware entropy extracted during
+    Phase 2.2 calibration;
+  - ctx is the canonical binding context (subsumes E(e) and any protocol-
+    bound auxiliary material).
+
+Assume:
+
+  (A1) Canonical injective encoding. The binding tuple (G, DevID_D, Ĥ_D, ctx)
+       is serialized canonically and injectively; two different semantic
+       tuples cannot produce the same byte string before hashing.
+
+  (A2) BLAKE3 collision resistance. For every PPT adversary A,
+         Pr[x ≠ x′ ∧ H(x) = H(x′)] ≤ Adv^H_coll(A),
+       where Adv^H_coll(A) is negligible in the security parameter.
+
+  (A3) Phase 2.2 hardware entropy lower bound. For every adversarial device D′
+       not physically identical to D, the enrolled C-DBRW hardware entropy of
+       D has conditional min-entropy at least λ given the adversary's view
+       and the clone substrate:
+         H_∞( Ĥ_D | view_A, Ĥ_{D′} ) ≥ λ.
+
+  (A4) Layer B W1 clone-detection bound. Let Accept_W1(D′, D) denote the
+       event that D′ produces a live C-DBRW response orbit accepted as
+       belonging to D across the Layer B W1 measurement window. Then
+         Pr[ Accept_W1(D′, D) ] ≤ ε_W1(λ),
+       where ε_W1(λ) is the calibrated false-accept bound (Phase 2.2).
+
+Then the probability that A produces a distinct device D′ that is accepted as
+inseparably bound to the same DSM device identity as D is bounded by
+
+  Adv_bind(A) ≤ Adv^H_coll(A) + 2^(-λ) + ε_W1(λ).
+
+If each right-hand term is negligible, Phase 13 binding inseparability holds
+with negligible adversarial advantage.
+
+**Proof.** Let D be the enrolled device and D′ an adversarial device not
+physically identical to D. The adversary succeeds only if D′ is accepted as
+bound to the same DSM identity as D — which requires passing both the
+cryptographic binding check and the Layer B live orbit check.
+
+Write x  := "DSM/cdbrw/bind\0" ∥ G  ∥ DevID_D  ∥ Ĥ_D  ∥ ctx,
+     x′ := "DSM/cdbrw/bind\0" ∥ G′ ∥ DevID_{D′} ∥ Ĥ_{D′} ∥ ctx′.
+
+If the cryptographic binding check accepts, then H(x) = H(x′). Two cases.
+
+  Case 1: x ≠ x′.
+    Distinct byte strings hashing to the same value constitutes a BLAKE3
+    collision under the DSM binding domain. By (A2), this occurs with
+    probability at most Adv^H_coll(A).
+
+  Case 2: x = x′.
+    By (A1) canonical injective encoding, the underlying semantic tuples are
+    equal:
+      G = G′,  DevID_D = DevID_{D′},  ctx = ctx′,  Ĥ_D = Ĥ_{D′}.
+    Since D′ is not physically identical to D, the adversary must reproduce
+    the enrolled silicon-derived entropy Ĥ_D using only its view, its
+    constructed substrate, and any information exposed by the protocol. By
+    (A3), the conditional min-entropy of Ĥ_D is ≥ λ, so the probability of
+    correctly reproducing it is at most 2^(-λ).
+
+Layer B live orbit acceptance. Even if the adversary matches the static
+binding key, DSM does not accept binding solely from the static digest. The
+device must additionally pass the live C-DBRW orbit check across the Layer B
+W1 measurement window (`cdbrw_responder.rs::publish_trust_snapshot`,
+boot-time `cdbrw.measure_trust`). By (A4),
+
+  Pr[ Accept_W1(D′, D) ] ≤ ε_W1(λ).
+
+Applying the union bound over the three failure modes — BLAKE3 collision,
+silicon-entropy reproduction, Layer B false acceptance —
+
+  Adv_bind(A) ≤ Adv^H_coll(A) + 2^(-λ) + ε_W1(λ).
+
+If each term is negligible in λ, the adversary's probability of producing a
+distinct device accepted as inseparably bound to D is negligible. □
+
+**Remark 5.2.1 (Status of the theorem).** Theorem 5.2′ is conditional. It no
+longer relies on the pre-Phase-13 per-device random salt; the old proof does
+not carry forward automatically. The remaining non-cryptographic proof
+obligations are the empirical and statistical validation of the Phase 2.2
+entropy lower bound (A3) and the Layer B W1 false-accept bound (A4):
+
+  H_∞( Ĥ_D | view_A, Ĥ_{D′} ) ≥ λ           (calibration model)
+  Pr[ Accept_W1(D′, D) ] ≤ ε_W1(λ)            (deployment data)
+
+Until those bounds are supplied by the calibration model and validated against
+the deployment device population, DSM may claim a Phase 13 *conditional*
+binding theorem but should not claim an unconditional formal proof of
+physical non-cloneability.
+
+**Implementation Reconciliation Note (Phase 13 → Phase 14).** The deployed
+production preimage in `dsm/src/crypto/cdbrw_binding.rs` is the 2-input
+form (Eq. 7):
+
+  K_DBRW = BLAKE3("DSM/dbrw-bind\0" ∥ LP(hw_entropy) ∥ LP(env_fingerprint)).
+
+Theorem 5.2′ canonical form adopts the richer preimage
+("DSM/cdbrw/bind\0" ∥ G ∥ DevID_D ∥ Ĥ_D ∥ ctx). The 2-input form is a
+strict subset:
+  - hw_entropy corresponds to Ĥ_D;
+  - env_fingerprint is a partial ctx (subset of the canonical binding
+    context — missing G, DevID_D, and the auxiliary protocol-bound material
+    that Theorem 5.2′ requires).
+
+Consequences for security claims:
+  1. Theorem 5.2′ as stated above is the **target**, not the property of the
+     currently-deployed code. As deployed, the 2-input preimage only proves a
+     restricted form: second-preimage resistance over (hw, env), without
+     binding to (G, DevID, ctx) at the K_DBRW layer. K_DBRW binding to
+     (G, DevID) currently exists only operationally through the per-step
+     HKDF mix (Eq. Eph and the Kyber coins derivation, §11.1).
+  2. Phase 14 work item (tracked separately): evolve `derive_cdbrw_binding_key`
+     to accept (G, DevID_D, ctx) as additional preimage components, update
+     the domain tag to `DSM/cdbrw/bind` if a hard cutover is acceptable, and
+     re-derive Theorem 5.2′ against the new code preimage. This is a
+     K_DBRW-touching change so it carries the same forced-re-enrollment cost
+     Phase 13 did, and so it should land BEFORE mainnet deployment — or
+     behind a wallet `enrollment_schema_version` gate that allows future
+     additions to be additive rather than hard cutovers (also not yet
+     implemented; tracked alongside the Phase 14 preimage evolution).
+  3. Until Phase 14 lands, Theorem 5.2′ holds for the *canonical target form*
+     described above; the *deployed code* satisfies a strictly weaker
+     "Restricted Inseparability" (collision resistance over (hw, env) only,
+     no formal binding to G/DevID/ctx at the K_DBRW layer).
 5.4 Forward Secrecy of Per-Step Keys
 Theorem 5.3 (Per-Step Key Independence). Let En+1 be the per-step seed derived as
 En+1 = HKDF-BLAKE3 “DSM/ek\0”, hn∥Cpre∥kstep∥KDBRW ,

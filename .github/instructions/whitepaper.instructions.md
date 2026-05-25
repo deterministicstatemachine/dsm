@@ -967,14 +967,27 @@ memory K_DBRW slot on drift — see `cdbrw_responder.rs::publish_trust_snapshot`
 Theorem 5 (Binding Inseparability — restated). Given KDBRW and collision resistance of
 BLAKE3-256 under domain separation, it is infeasible to find (h′,e′) ̸= (h,e) such that
 BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(h′) ∥ LP(e′)) = BLAKE3-256("DSM/dbrw-bind\0" ∥ LP(h) ∥ LP(e)).
-**Proof — TODO (Phase 13 follow-up).** The pre-Phase-13 proof rested on the per-device
-salt sdevice providing unconditional independence between two enrollments on the same
-device. With sdevice removed, the new proof must rest on: (a) BLAKE3-256 second-preimage
-resistance, (b) min-entropy of the silicon-derived H(d) — formally argued from the C-DBRW
-Phase 2.2 calibration (40–75× cross-device noise-floor figure), and (c) Layer B's W1
-drift detection providing operational (not unconditional) cross-device-clone detection.
-This proof has NOT been re-derived in this revision; until written, the theorem statement
-above is treated as conjectural rather than proven.
+**Theorem 5′ (Binding Inseparability, Phase 13 — canonical target form).** Adopt the
+richer preimage K_DBRW(D) := H("DSM/cdbrw/bind\0" ∥ G ∥ DevID_D ∥ Ĥ_D ∥ ctx) where G is
+the DSM genesis commitment, DevID_D the enrolled device identifier, Ĥ_D the silicon-
+derived hardware entropy from Phase 2.2 calibration, and ctx the canonical binding
+context (subsumes E(e)). Under (A1) canonical injective encoding, (A2) BLAKE3 collision
+resistance, (A3) Phase 2.2 conditional min-entropy lower bound H_∞(Ĥ_D | view_A, Ĥ_{D′}) ≥ λ,
+and (A4) Layer B W1 false-accept bound Pr[Accept_W1(D′, D)] ≤ ε_W1(λ), the probability
+that an adversary A produces a distinct device D′ accepted as inseparably bound to the
+same DSM identity as D is
+
+  Adv_bind(A) ≤ Adv^H_coll(A) + 2^(-λ) + ε_W1(λ).
+
+Full statement, assumptions, proof by case analysis on equality of the preimage byte
+string, and reconciliation against the deployed 2-input preimage are in
+`.github/instructions/cdbrw.instructions.md` §5.3.1 (Theorem 5.2′). The deployed
+`dsm/src/crypto/cdbrw_binding.rs` preimage is currently the 2-input form (Eq. 16);
+the canonical target form is the Phase 14 evolution target. Phase 13 thus establishes
+a conditional binding theorem against the canonical target form and a strictly weaker
+Restricted Inseparability against the deployed code; the gap is closed when Phase 14
+extends the code preimage to include (G, DevID_D, ctx) under a wallet schema version
+gate to avoid a second forced re-enrollment.
 DSM: Deterministic State Machines 28
 DBRW advances without clocks. The ρ/C recurrence is the abstract definition
 of forward-only DBRW state evolution:
