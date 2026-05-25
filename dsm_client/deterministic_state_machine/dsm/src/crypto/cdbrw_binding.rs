@@ -113,6 +113,41 @@ pub fn derive_cdbrw_binding_key(
         });
     }
 
+    // Phase 13 deployed binding preimage.
+    //
+    // Current deployed form:
+    //   K_DBRW = BLAKE3("DSM/dbrw-bind\0" || LP(hw_entropy) || LP(env_fp))
+    //
+    // Spec target:
+    //   The Phase 13 Binding Inseparability theorem now treats the canonical
+    //   target preimage as a richer identity-bound tuple:
+    //
+    //   K_DBRW = H(
+    //       "DSM/cdbrw/bind\0" ||
+    //       G ||
+    //       DevID ||
+    //       hw_entropy ||
+    //       ctx
+    //   )
+    //
+    // This file intentionally still implements the narrower deployed form for
+    // Phase 13 compatibility. Do not treat this implementation as satisfying the
+    // reconstructed Theorem 5 by itself.
+    //
+    // Follow-up required:
+    //   1. migrate the deployed domain tag to "DSM/cdbrw/bind\0";
+    //   2. bind genesis commitment G;
+    //   3. bind DevID;
+    //   4. bind canonical context ctx;
+    //   5. update test vectors and any persisted binding material accordingly.
+    //
+    // Until that migration lands, the spec/code relationship is:
+    //
+    //   deployed code:   hardware/environment binding only
+    //   canonical spec:  identity + hardware + context binding
+    //
+    // Therefore DSM must not claim the deployed Phase 13 code alone provides the
+    // full reconstructed Binding Inseparability theorem.
     let mut hasher = dsm_domain_hasher("DSM/dbrw-bind");
     canonical_lp::write_lp(&mut hasher, hw_entropy);
     canonical_lp::write_lp(&mut hasher, env_fingerprint);
