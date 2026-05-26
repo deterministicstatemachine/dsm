@@ -324,23 +324,47 @@ fn kat_dsm_dev_tree_pad() {
 }
 
 // =============================================================================
-// §12 — DBRW binding (verified aligned)
+// §12 — DBRW binding (canonical four-input form, whitepaper Definition 3)
 // =============================================================================
 
 #[test]
-fn kat_dsm_dbrw_bind() {
-    let h_d = [0x11u8; 32];
-    let e_e = [0x22u8; 32];
-    let s_device = [0x33u8; 32];
+fn kat_dsm_cdbrw_bind() {
+    let genesis_hash = [0x11u8; 32];
+    let device_id = [0x22u8; 32];
+    let hw_entropy = [0x33u8; 32];
+    let env_fingerprint = [0x44u8; 32];
 
+    // Spec-side recomputation under the canonical four-input preimage:
+    //   BLAKE3("DSM/cdbrw/bind\0"
+    //          || LP(genesis_hash) || LP(device_id)
+    //          || LP(hw_entropy)   || LP(env_fingerprint))
     let mut input = Vec::new();
-    input.extend_from_slice(&h_d);
-    input.extend_from_slice(&e_e);
-    input.extend_from_slice(&s_device);
-    let expected = spec_digest("DSM/dbrw-bind", &input);
+    for slot in [&genesis_hash, &device_id, &hw_entropy, &env_fingerprint] {
+        input.extend_from_slice(&(slot.len() as u32).to_le_bytes());
+        input.extend_from_slice(slot);
+    }
+    let spec = spec_digest("DSM/cdbrw/bind", &input);
+
+    // Must match the production derivation byte-for-byte.
+    let prod = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+        &genesis_hash,
+        &device_id,
+        &hw_entropy,
+        &env_fingerprint,
+    ) {
+        Ok(k) => k,
+        Err(e) => panic!("derive_cdbrw_binding_key with valid inputs: {e:?}"),
+    };
+
+    assert_eq!(
+        spec, prod,
+        "production derivation must match the spec-side recomputation"
+    );
+
+    // Pin to lock the byte pattern across builds.
     assert_pin(
-        "DSM/dbrw-bind",
-        expected,
-        "e5f5599dc61b8ace7268c92d9d1052a7c178055221dcd54268595358c2f16980",
+        "DSM/cdbrw/bind",
+        spec,
+        "1468dbc710bd6e305c02ca3b81a358b39bf1a5f5f4e8837a14b5ac8c1187e2ac",
     );
 }

@@ -13,11 +13,11 @@ import java.util.UUID
 class BleConstantsTest {
 
     // ── UUID validity ──────────────────────────────────────────────────────
-
-    @Test
-    fun serviceUuid_isNotNull() {
-        assertTrue(BleConstants.DSM_SERVICE_UUID_V2 is UUID)
-    }
+    //
+    // The `serviceUuid_isNotNull` test was deleted — `DSM_SERVICE_UUID_V2`
+    // is statically typed `UUID` (non-nullable), so `is UUID` was always
+    // true. The structural validation lives in `allUuids_shareBaseSuffix`
+    // below, which asserts both presence AND well-formedness.
 
     @Test
     fun characteristicUuids_areDistinct() {

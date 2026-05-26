@@ -36,31 +36,14 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
     if req.cdbrw_env_fingerprint.is_empty() {
         return err("system.genesis: cdbrw_env_fingerprint is required".into());
     }
-    // Phase 13: salt dropped from K_DBRW preimage.  req.cdbrw_salt
-    // is now `reserved 7;` in the proto and ignored if present.
-    let k_dbrw = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-        &req.cdbrw_hw_entropy,
-        &req.cdbrw_env_fingerprint,
-    ) {
-        Ok(k) => k,
-        Err(e) => {
-            return err(format!(
-                "system.genesis: C-DBRW binding derivation failed: {e}"
-            ))
-        }
-    };
-    let binding_record = crate::util::text_id::encode_base32_crockford(
-        dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
-    );
-
-    // Populate the global PLATFORM_ENTROPY_INPUTS slot so the inner
-    // genesis path (StorageNodeSDK::create_genesis_with_mpc →
-    // core_sdk::create_genesis_with_passive_contributors) can consume
-    // the same C-DBRW inputs via `take_platform_cdbrw_binding_key`.
-    // Without this, the inner path errors out with "core_sdk: C-DBRW
-    // platform entropy inputs are required for genesis" because the
-    // strict-mode refactor (Issue #213) wired the inner path to read
-    // from the slot but no production caller was setting it.
+    // Stage the silicon-binding inputs in the platform-entropy slot so the
+    // inner MPC genesis path (StorageNodeSDK::create_genesis_with_mpc →
+    // core_sdk::create_genesis_with_passive_contributors) can derive the
+    // canonical K_DBRW post-MPC from
+    //   `derive_cdbrw_binding_key(genesis_hash, device_id = genesis_hash, hw, env)`
+    // and stash it via `binding_key::install_binding_key`. We DO NOT pre-derive
+    // K_DBRW here — the canonical preimage requires `genesis_hash` which is an
+    // MPC output, not an input.
     if let Err(e) = crate::sdk::app_state::AppState::set_platform_entropy_inputs(
         req.cdbrw_hw_entropy.clone(),
         req.cdbrw_env_fingerprint.clone(),
@@ -93,10 +76,29 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                 genesis_hash.len()
             ));
         }
-        crate::install_canonical_binding_key(k_dbrw.to_vec())
-            .map_err(|e| format!("system.genesis: install C-DBRW binding failed: {e}"))?;
+        // K_DBRW is installed by `core_sdk::create_genesis_with_passive_contributors`
+        // post-MPC using the canonical
+        //   derive_cdbrw_binding_key(genesis_hash, device_id = genesis_hash,
+        //                            hw, env)
+        // preimage. Pull it back out here for downstream uses (JNI
+        // installation, binding_record digest stamped into the genesis
+        // record).
+        let k_dbrw_vec = crate::binding_key::get_binding_key().ok_or_else(|| {
+            "system.genesis: canonical K_DBRW slot empty after MPC genesis".to_string()
+        })?;
+        if k_dbrw_vec.len() != 32 {
+            return Err(format!(
+                "system.genesis: canonical K_DBRW length must be 32, got {}",
+                k_dbrw_vec.len()
+            ));
+        }
+        let mut k_dbrw_arr = [0u8; 32];
+        k_dbrw_arr.copy_from_slice(&k_dbrw_vec);
+        let binding_record = crate::util::text_id::encode_base32_crockford(
+            dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw_arr).as_bytes(),
+        );
         #[cfg(all(target_os = "android", feature = "jni"))]
-        crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw.to_vec());
+        crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw_vec.clone());
         let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,

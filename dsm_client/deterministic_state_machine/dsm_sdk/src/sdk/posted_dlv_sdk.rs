@@ -122,11 +122,9 @@ pub(crate) async fn publish_active_advertisement(
 /// same key.  The dedup rule (highest state_number wins) ensures the terminal
 /// ad supersedes the active one on any later list.
 ///
-/// `claimant_signature` is currently an empty placeholder — future hardening
-/// commit lands a typed recipient-signed attestation here.  The security model
-/// today: the authoritative truth is the `Operation::DlvClaim` on the recipient's
-/// chain; the ad is a discovery hint.  A forged "claimed" ad only DoSes
-/// discovery, it cannot credit balance.
+/// `claimant_signature` is an empty byte array by default as the authoritative truth
+/// is the `Operation::DlvClaim` on the recipient's chain; the ad is merely a discovery hint.
+/// A forged "claimed" ad only DoSes discovery, it cannot credit balance.
 pub(crate) async fn publish_terminal_state(
     recipient_kyber_pk: &[u8],
     dlv_id: &[u8; 32],

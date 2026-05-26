@@ -96,6 +96,20 @@ fail_if_found "Forbidden Envelope v-2 usage" "${EXCLUDES[@]}" --fixed-strings "$
 # This check targets *assignments/config-style markers* like `version=2` or `version==2` in code/configs.
 fail_if_found "Forbidden version=2 markers" "${EXCLUDES[@]}" -e '\bversion\s*=\s*2\b[^;]' "${SCAN_ROOTS[@]}"
 
+# 1b) Ban envelope-version lenient-acceptance variants (seam (a) structural
+# enforcement). The strict-fail in dsm/src/envelope.rs::require_envelope_v3
+# already rejects version != 3, but a contributor could regress that by
+# adding accept paths under different identifiers. Catch the obvious shapes:
+#   - "envelope" + "version < 3" (or ≤) on the same line   → accept-old paths
+#   - EnvelopeV2 / EnvelopeV1                              → re-introducing
+#     legacy type names
+#   - accept_v2 / accept_legacy / legacy_envelope          → semantic flags
+# Anchored on `envelope` keyword for the numeric inequality so that
+# non-envelope schema bumps (soft_vault, recovery capsule) don't trigger.
+fail_if_found "envelope-version lenient acceptance (seam a)" "${EXCLUDES[@]}" \
+  -e '\bEnvelopeV[12]\b|\benvelope\b.*\bversion\s*[<≤]\s*3\b|\baccept_v2\b|\baccept_legacy\b|\blegacy_envelope\b' \
+  "${SCAN_ROOTS[@]}"
+
 # Forbidden peer field name (schema/field only). Do not flag local variable names.
 FORBIDDEN_PEER_FIELD="peer"
 FORBIDDEN_PEER_FIELD+="_id"
@@ -103,6 +117,28 @@ fail_if_found "forbidden peer field" "${EXCLUDES[@]}" -e "\"${FORBIDDEN_PEER_FIE
 
 # 2) Ban JSON envelopes (stringify/parse on type/data) anywhere
 fail_if_found "JSON envelopes detected" "${EXCLUDES[@]}" -e 'JSON\.(stringify|parse).*\"(type|data)\"' "${SCAN_ROOTS[@]}"
+
+# 2b) Ban serde_json reaching into Core/SDK protocol paths (seam (b)
+# structural enforcement). DSM wire format is protobuf-only; serde_json on
+# the protocol layer would silently widen the accepted-input surface.
+# Legitimate boundary uses: external HTTP API clients (e.g. mempool.space).
+# Each such file MUST be exempted here with a comment naming the rationale.
+fail_if_found "serde_json reaches into Core/SDK protocol path (seam b)" \
+  -g '!**/tests/**' \
+  -g '!**/*_test.rs' \
+  -g '!**/test_*.rs' \
+  -g '!**/mempool_api.rs' `# external mempool.space REST API — see file header` \
+  -e 'serde_json::(Value|from_str|to_string|to_value|from_value|from_slice|to_vec)\b' \
+  dsm_client/deterministic_state_machine/dsm/src \
+  dsm_client/deterministic_state_machine/dsm_sdk/src
+
+# 2c) Lock transfer_hooks.rs to token-only imports (seam (c) structural
+# enforcement). dBTC transfers must NOT carry vault anchors, preimages,
+# or vault-specific execution material. The file currently has zero vault
+# imports; this scan freezes that property.
+fail_if_found "transfer_hooks must stay token-only — no vault/anchor imports (seam c)" \
+  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_routes::|dlv_sdk::|dsm::dlv::' \
+  dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/transfer_hooks.rs
 
 # 3) Ban clocks/time APIs (protocol layer only)
 # DSM determinism invariant applies to the Rust protocol/core layer.
@@ -120,6 +156,19 @@ if [ -d "$CORE_DIR" ]; then
     CLOCK_PATTERN="\\b${CLOCK_INSTANT}\\s*::\\s*now\\b|\\b${CLOCK_SYSTEM}${CLOCK_TIME}\\s*::\\s*now\\b|\\bstd\\s*::\\s*time\\s*::\\s*(${CLOCK_INSTANT}|${CLOCK_SYSTEM}${CLOCK_TIME}|${CLOCK_UNIX}_${CLOCK_EPOCH})\\b|\\b${CLOCK_CHRONO}\\s*::\\s*${CLOCK_UTC}\\b"
     fail_if_found "Time/clock APIs detected in core" "${EXCLUDES[@]}" -e "$CLOCK_PATTERN" "$CORE_DIR"
 fi
+
+# 3b) Ban blocking entropy sources in production code. Android must use the
+# platform-backed nonblocking OS RNG path exposed through rand/getrandom, not
+# direct reads from /dev/random.
+ENTROPY_SCAN_ROOTS=(
+  dsm_client/deterministic_state_machine/dsm/src
+  dsm_client/deterministic_state_machine/dsm_sdk/src
+  dsm_client/android/app/src/main
+)
+fail_if_found "blocking /dev/random entropy source" \
+  "${EXCLUDES[@]}" \
+  --fixed-strings "/dev/random" \
+  "${ENTROPY_SCAN_ROOTS[@]}"
 
 
 

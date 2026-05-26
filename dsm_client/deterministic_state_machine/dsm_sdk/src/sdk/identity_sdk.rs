@@ -520,13 +520,20 @@ impl IdentitySDK {
             "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
-        let k_dbrw =
-            crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key("identity_sdk")
-                .map_err(dsm::types::error::DsmError::invalid_operation)?;
+        // The MPC session derives the canonical K_DBRW internally from
+        // (genesis_id, device_id = genesis_id, hw, env) — we just supply
+        // the silicon inputs from the platform-entropy slot.
+        let silicon =
+            crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
+                dsm::types::error::DsmError::invalid_operation(
+                    "identity_sdk: platform silicon inputs (hw, env) required for genesis",
+                )
+            })?;
         let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
             device_id_arr,
             test_nodes.clone(),
-            k_dbrw,
+            silicon.hw_entropy.clone(),
+            silicon.env_fingerprint.clone(),
             None,
         ))?;
 

@@ -1525,12 +1525,7 @@ impl LimboVault {
             return Ok(false);
         }
 
-        // Hash transition (protobuf) -> Blake3 -> compare via Merkle path
-        let mut hasher = dsm_domain_hasher("DSM/dlv-merkle");
-        hasher.update(state_transition);
-        let mut cur = hasher.finalize().as_bytes().to_vec();
-
-        if merkle_proof.len() < 4 {
+        if merkle_proof.len() < 8 {
             return Ok(false);
         }
         let path_len = u32::from_le_bytes([
@@ -1539,21 +1534,46 @@ impl LimboVault {
             merkle_proof[2],
             merkle_proof[3],
         ]) as usize;
-        if merkle_proof.len() < 4 + 32 * path_len {
+        let leaf_index = u32::from_le_bytes([
+            merkle_proof[4],
+            merkle_proof[5],
+            merkle_proof[6],
+            merkle_proof[7],
+        ]) as usize;
+
+        if merkle_proof.len() < 8 + 32 * path_len {
             return Ok(false);
         }
-        let path = &merkle_proof[4..4 + 32 * path_len];
 
+        let mut path = Vec::with_capacity(path_len);
         for i in 0..path_len {
-            let sib = &path[i * 32..(i + 1) * 32];
-            let mut hasher = dsm_domain_hasher("DSM/dlv-merkle");
-            hasher.update(&cur);
-            hasher.update(sib);
-            cur = hasher.finalize().as_bytes().to_vec();
+            let mut sib = [0u8; 32];
+            sib.copy_from_slice(&merkle_proof[8 + i * 32..8 + (i + 1) * 32]);
+            path.push(sib);
         }
 
-        let expected_root = domain_hash_bytes("DSM/dlv-merkle", verification_state).to_vec();
-        Ok(secure_eq(&cur, &expected_root))
+        let mut expected_root = [0u8; 32];
+        if verification_state.len() >= 32 {
+            expected_root.copy_from_slice(&verification_state[..32]);
+        } else {
+            return Ok(false);
+        }
+
+        let mut leaf_hash = [0u8; 32];
+        if state_transition.len() == 32 {
+            leaf_hash.copy_from_slice(state_transition);
+        } else {
+            let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/merkle-leaf");
+            hasher.update(state_transition);
+            leaf_hash.copy_from_slice(hasher.finalize().as_bytes());
+        }
+
+        Ok(crate::merkle::MerkleTree::verify_proof(
+            &expected_root,
+            &leaf_hash,
+            &path,
+            leaf_index,
+        ))
     }
 
     /// Verify a Bitcoin HTLC proof (dBTC paper §6.4.5 SPV Verification Stack):

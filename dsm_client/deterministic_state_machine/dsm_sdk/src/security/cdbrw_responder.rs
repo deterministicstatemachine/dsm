@@ -733,6 +733,7 @@ pub fn respond_to_challenge(inputs: &RespondInputs<'_>) -> Result<RespondOutputs
 mod tests {
     use super::*;
     use crate::security::cdbrw_access_gate::{clear_trust_for_test, gate_test_mutex, latest_trust};
+    use serial_test::serial;
 
     fn with_clean_state<F: FnOnce()>(f: F) {
         let guard = match gate_test_mutex().lock() {
@@ -882,6 +883,7 @@ mod tests {
     /// gets past the access gate (TOCTOU residue aside) fails closed
     /// with `InvalidState`.
     #[test]
+    #[serial]
     fn publish_trust_drift_zeros_binding_key_slot() {
         with_clean_state(|| {
             // Seed the binding key slot with a known 32-byte value.
@@ -911,6 +913,7 @@ mod tests {
     /// Phase 13 follow-up: clean-pass (no drift) must NOT touch the
     /// binding key slot — only drift triggers the wipe.
     #[test]
+    #[serial]
     fn publish_trust_clean_pass_preserves_binding_key_slot() {
         with_clean_state(|| {
             crate::binding_key::install_binding_key(vec![0xCDu8; 32])

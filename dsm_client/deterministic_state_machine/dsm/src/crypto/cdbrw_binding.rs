@@ -8,7 +8,7 @@
 //!
 //! | Tag | Usage |
 //! |-----|-------|
-//! | `DSM/dbrw-bind\0` | K_DBRW binding key derivation |
+//! | `DSM/cdbrw/bind\0` | K_DBRW binding key derivation (canonical 4-input form) |
 //! | `DSM/cdbrw-seed\0` | Challenge-seeded orbit starting point |
 //! | `DSM/attractor-commit\0` | ACD (Attractor Commitment Digest) |
 //! | `DSM/cdbrw-response\0` | Verification response gamma |
@@ -50,39 +50,67 @@ pub const HEALTH_MAX_AUTOCORR: f64 = 0.3;
 /// Entropy health: minimum LZ78 compression ratio.
 pub const HEALTH_MIN_LZ78_RATIO: f64 = 0.45;
 
-/// Derive the C-DBRW binding key K_DBRW from hardware entropy and
-/// environment fingerprint.
+/// Derive the C-DBRW binding key K_DBRW from the canonical four-input
+/// preimage that binds K_DBRW to the device's protocol identity and the
+/// silicon/environment fingerprints.
 ///
-/// Formula: `K_DBRW = BLAKE3("DSM/dbrw-bind\0" || LP(hw) || LP(env))`
+/// Formula:
+///   `K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
+///                     || LP(genesis_hash) || LP(device_id)
+///                     || LP(hw_entropy)   || LP(env_fingerprint))`
 ///
 /// where `LP(x) = LE32(len(x)) || x` (length-prefixed canonical encoding).
 ///
-/// Phase 13: the random salt was dropped from the preimage.  K_DBRW is
-/// now deterministic per-device — same `(hw_entropy, env_fingerprint)`
-/// always produces the same key.  This is what makes the wallet
-/// recoverable across `adb install -r` AND across full uninstall +
-/// reinstall on the same physical device.  Cross-device anti-clone is
-/// enforced by Layer B (live W1 vs. enrolled H̄_baseline on every boot
-/// via `cdbrw_responder::publish_trust_snapshot` — drift downgrades
-/// access AND zeros the in-memory K_DBRW slot via
-/// `binding_key::clear_binding_key`).  See whitepaper Definition 3 +
-/// Theorem 5 commentary for the formal-model status: salt removal is
-/// operationally sound but the binding-inseparability proof has not
-/// yet been re-derived for the two-input preimage; that proof is a
-/// deferred follow-up.
+/// Inputs:
+/// - `genesis_hash` — 32-byte root commitment produced by the genesis MPC.
+///   For the root device this equals `device_id` (DSM identity invariant).
+/// - `device_id` — 32-byte protocol device identifier.
+/// - `hw_entropy` — silicon-derived hardware entropy (Phase 2.2 calibration).
+/// - `env_fingerprint` — canonical execution-environment fingerprint (the
+///   canonical binding context).
 ///
-/// The salt's prior purpose (differentiating K_DBRW across two
-/// enrollment instances on the same device) corresponded to no real
-/// threat model and broke the wallet's UX whenever Android's Keystore
-/// aliases got destroyed alongside an uninstall (Samsung Smart Switch
-/// pattern).
+/// K_DBRW is **deterministic per device + per genesis**: same four inputs
+/// always produce the same key, so the wallet recovers across
+/// `adb install -r` and full uninstall + reinstall on the same physical
+/// device. Cross-device anti-clone is enforced by Layer B (live W1 vs.
+/// enrolled H̄_baseline on every boot via
+/// `cdbrw_responder::publish_trust_snapshot` — drift downgrades access
+/// AND zeros the in-memory K_DBRW slot via
+/// `binding_key::clear_binding_key`).
+///
+/// Formal-model anchor: this is the preimage the Binding Inseparability
+/// theorem is proven against — see
+/// `.github/instructions/cdbrw.instructions.md` §5.3 Theorem 5.2 and
+/// `.github/instructions/whitepaper.instructions.md` Definition 3 +
+/// Theorem 5.
 ///
 /// This is the **sole** implementation of K_DBRW derivation. PBI must
-/// delegate here after input validation.
+/// delegate here after input validation; no other module reproduces the
+/// preimage construction.
 pub fn derive_cdbrw_binding_key(
+    genesis_hash: &[u8],
+    device_id: &[u8],
     hw_entropy: &[u8],
     env_fingerprint: &[u8],
 ) -> Result<[u8; 32], DsmError> {
+    if genesis_hash.len() != 32 {
+        return Err(DsmError::Validation {
+            context: format!(
+                "C-DBRW: genesis_hash must be 32 bytes, got {}",
+                genesis_hash.len()
+            ),
+            source: None,
+        });
+    }
+    if device_id.len() != 32 {
+        return Err(DsmError::Validation {
+            context: format!(
+                "C-DBRW: device_id must be 32 bytes, got {}",
+                device_id.len()
+            ),
+            source: None,
+        });
+    }
     if hw_entropy.is_empty() {
         return Err(DsmError::Validation {
             context: "C-DBRW: hw_entropy must not be empty".into(),
@@ -96,7 +124,13 @@ pub fn derive_cdbrw_binding_key(
         });
     }
 
-    let mut hasher = dsm_domain_hasher("DSM/dbrw-bind");
+    // Canonical K_DBRW preimage (= spec Theorem 5):
+    //   domain "DSM/cdbrw/bind\0"
+    //   || LP(genesis_hash) || LP(device_id) || LP(hw_entropy) || LP(env_fingerprint)
+    // Four length-prefixed inputs; no salt, no separate G, no schema variants.
+    let mut hasher = dsm_domain_hasher("DSM/cdbrw/bind");
+    canonical_lp::write_lp(&mut hasher, genesis_hash);
+    canonical_lp::write_lp(&mut hasher, device_id);
     canonical_lp::write_lp(&mut hasher, hw_entropy);
     canonical_lp::write_lp(&mut hasher, env_fingerprint);
     Ok(*hasher.finalize().as_bytes())
@@ -250,44 +284,74 @@ mod tests {
 
     #[test]
     fn binding_key_deterministic() {
+        let genesis_hash = [0x11u8; 32];
+        let device_id = [0x22u8; 32];
         let hw = b"hw_entropy_sample";
         let env = b"env_fingerprint_sample";
-        let k1 = derive_cdbrw_binding_key(hw, env).expect("valid");
-        let k2 = derive_cdbrw_binding_key(hw, env).expect("valid");
+        let k1 = derive_cdbrw_binding_key(&genesis_hash, &device_id, hw, env).expect("valid");
+        let k2 = derive_cdbrw_binding_key(&genesis_hash, &device_id, hw, env).expect("valid");
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 32);
     }
 
     #[test]
     fn binding_key_rejects_empty_inputs() {
-        assert!(derive_cdbrw_binding_key(b"", b"env").is_err());
-        assert!(derive_cdbrw_binding_key(b"hw", b"").is_err());
+        let g = [0x11u8; 32];
+        let d = [0x22u8; 32];
+        // Length-strict on the 32-byte identity inputs.
+        assert!(derive_cdbrw_binding_key(&[0u8; 31], &d, b"hw", b"env").is_err());
+        assert!(derive_cdbrw_binding_key(&[0u8; 33], &d, b"hw", b"env").is_err());
+        assert!(derive_cdbrw_binding_key(&g, &[0u8; 31], b"hw", b"env").is_err());
+        assert!(derive_cdbrw_binding_key(&g, &[0u8; 33], b"hw", b"env").is_err());
+        // Non-empty required for hw / env.
+        assert!(derive_cdbrw_binding_key(&g, &d, b"", b"env").is_err());
+        assert!(derive_cdbrw_binding_key(&g, &d, b"hw", b"").is_err());
     }
 
-    /// TV-9 (Phase 13): K_DBRW is deterministic per-device.  Same
-    /// `(hw_entropy, env_fingerprint)` inputs produce byte-identical
-    /// output across calls.  This is the property that makes the
-    /// wallet recoverable across uninstall + reinstall on the same
-    /// physical device — replaces the implicit "salt differentiates
-    /// instances" property the old salt slot encoded.
+    /// TV-9: K_DBRW is deterministic per (genesis_hash, device_id,
+    /// hw_entropy, env_fingerprint) — same four inputs always produce
+    /// byte-identical output; varying any one input changes the output.
+    /// This is the recoverability invariant that lets the wallet survive
+    /// uninstall + reinstall on the same physical device under the same
+    /// genesis identity.
     #[test]
     fn tv9_k_dbrw_deterministic_per_device() {
+        let g = [0x55u8; 32]; // Stable per-device genesis_hash (= device_id for root)
+        let d = [0x55u8; 32]; // device_id = genesis_hash on the root device
         let hw = [0x7Au8; 32]; // Stable per-device silicon-derived ACD
         let env = [0xC1u8; 32]; // Stable per-device Build.* fingerprint
-        let k1 = derive_cdbrw_binding_key(&hw, &env).expect("valid");
-        let k2 = derive_cdbrw_binding_key(&hw, &env).expect("valid");
+        let k1 = derive_cdbrw_binding_key(&g, &d, &hw, &env).expect("valid");
+        let k2 = derive_cdbrw_binding_key(&g, &d, &hw, &env).expect("valid");
         assert_eq!(
             k1, k2,
-            "same device inputs MUST produce identical K_DBRW — \
-             wallet UX depends on this for uninstall recovery"
+            "same four inputs MUST produce identical K_DBRW — wallet UX \
+             depends on this for uninstall recovery"
         );
-        // Different device inputs MUST produce different K_DBRW.
-        let env2 = [0xC2u8; 32];
-        let k3 = derive_cdbrw_binding_key(&hw, &env2).expect("valid");
-        assert_ne!(k1, k3, "different env MUST produce different K_DBRW");
+        // Vary each input independently — each MUST change the output.
+        let g2 = [0x56u8; 32];
+        assert_ne!(
+            k1,
+            derive_cdbrw_binding_key(&g2, &d, &hw, &env).expect("valid"),
+            "different genesis_hash MUST produce different K_DBRW"
+        );
+        let d2 = [0x57u8; 32];
+        assert_ne!(
+            k1,
+            derive_cdbrw_binding_key(&g, &d2, &hw, &env).expect("valid"),
+            "different device_id MUST produce different K_DBRW"
+        );
         let hw2 = [0x7Bu8; 32];
-        let k4 = derive_cdbrw_binding_key(&hw2, &env).expect("valid");
-        assert_ne!(k1, k4, "different hw MUST produce different K_DBRW");
+        assert_ne!(
+            k1,
+            derive_cdbrw_binding_key(&g, &d, &hw2, &env).expect("valid"),
+            "different hw MUST produce different K_DBRW"
+        );
+        let env2 = [0xC2u8; 32];
+        assert_ne!(
+            k1,
+            derive_cdbrw_binding_key(&g, &d, &hw, &env2).expect("valid"),
+            "different env MUST produce different K_DBRW"
+        );
     }
 
     #[test]
@@ -341,17 +405,17 @@ mod tests {
     // These are canonical: C++/Kotlin/Rust must produce bit-identical outputs.
     // =========================================================================
 
-    /// TV-1: BLAKE3 domain hash — empty data.
-    /// H("DSM/dbrw-bind\0" || "")
+    /// TV-1: BLAKE3 domain hash — empty data, canonical K_DBRW domain.
+    /// `H("DSM/cdbrw/bind\0" || "")`
     #[test]
     fn tv1_domain_hash_empty() {
-        let hasher = dsm_domain_hasher("DSM/dbrw-bind");
+        let hasher = dsm_domain_hasher("DSM/cdbrw/bind");
         let digest = hasher.finalize();
         assert_eq!(digest.as_bytes().len(), 32, "BLAKE3-256 must be 32 bytes");
         // Non-zero output (domain tag alone produces a real hash)
         assert_ne!(*digest.as_bytes(), [0u8; 32]);
         // Deterministic: same call always same output
-        let hasher2 = dsm_domain_hasher("DSM/dbrw-bind");
+        let hasher2 = dsm_domain_hasher("DSM/cdbrw/bind");
         assert_eq!(hasher.finalize().as_bytes(), hasher2.finalize().as_bytes());
     }
 
@@ -376,19 +440,25 @@ mod tests {
         );
     }
 
-    /// TV-3: K_DBRW derivation with canonical inputs.
+    /// TV-3: K_DBRW derivation with the canonical 4-input preimage.
     ///
-    /// Phase 13: salt LP segment dropped.  Preimage is now
-    /// `BLAKE3("DSM/dbrw-bind\0" || LP(hw) || LP(env))`.
+    /// `BLAKE3("DSM/cdbrw/bind\0" || LP(genesis_hash) || LP(device_id)
+    ///         || LP(hw) || LP(env))`
     #[test]
     fn tv3_k_dbrw_derivation() {
+        let genesis_hash = [0xAAu8; 32];
+        let device_id = [0xBBu8; 32];
         let hw = [0x01u8; 16];
         let env = [0x02u8; 16];
 
-        let k = derive_cdbrw_binding_key(&hw, &env).expect("valid");
+        let k = derive_cdbrw_binding_key(&genesis_hash, &device_id, &hw, &env).expect("valid");
 
-        // Verify LP encoding: LE32(16) || 0x01*16 || LE32(16) || 0x02*16
-        let mut expected_hasher = dsm_domain_hasher("DSM/dbrw-bind");
+        // Verify LP encoding in canonical order:
+        //   LE32(32)||genesis_hash || LE32(32)||device_id ||
+        //   LE32(16)||hw           || LE32(16)||env
+        let mut expected_hasher = dsm_domain_hasher("DSM/cdbrw/bind");
+        canonical_lp::write_lp(&mut expected_hasher, &genesis_hash);
+        canonical_lp::write_lp(&mut expected_hasher, &device_id);
         canonical_lp::write_lp(&mut expected_hasher, &hw);
         canonical_lp::write_lp(&mut expected_hasher, &env);
         let expected = *expected_hasher.finalize().as_bytes();
@@ -438,42 +508,58 @@ mod tests {
         assert_ne!(x0, x1, "different challenges should yield different seeds");
     }
 
-    /// TV-7: K_DBRW input sensitivity (avalanche).
-    ///
-    /// Phase 13: salt removed.  Avalanche property now verified
-    /// symmetrically across both `hw` and `env` inputs — the
-    /// hw-only variant alone would silently regress if a future
-    /// refactor broke env's contribution to the preimage.
+    /// TV-7: K_DBRW input sensitivity (avalanche). Verifies that a single
+    /// bit flip in any one of the four canonical preimage inputs avalanches
+    /// across the output. Each input is exercised explicitly so a
+    /// regression that silenced any contribution would be caught.
     #[test]
     fn tv7_k_dbrw_avalanche() {
+        let g = [0xA0u8; 32];
+        let d = [0xB0u8; 32];
         let hw = [0x01u8; 16];
         let env = [0x02u8; 16];
-        let k1 = derive_cdbrw_binding_key(&hw, &env).expect("valid");
+        let k1 = derive_cdbrw_binding_key(&g, &d, &hw, &env).expect("valid");
 
-        // Flip one bit in hw — must avalanche through the output.
-        let mut hw2 = hw;
-        hw2[0] ^= 0x01;
-        let k2 = derive_cdbrw_binding_key(&hw2, &env).expect("valid");
-        assert_ne!(k1, k2, "single bit flip in hw must change output");
-        let diff_hw = k1.iter().zip(k2.iter()).filter(|(a, b)| a != b).count();
-        assert!(
-            diff_hw > 8,
-            "avalanche (hw): expected >8 differing bytes, got {diff_hw}"
+        // Helper: one bit flip in input → output must avalanche.
+        fn assert_avalanche(label: &str, k1: [u8; 32], k2: [u8; 32]) {
+            assert_ne!(k1, k2, "single bit flip in {label} must change output");
+            let diff = k1.iter().zip(k2.iter()).filter(|(a, b)| a != b).count();
+            assert!(
+                diff > 8,
+                "avalanche ({label}): expected >8 differing bytes, got {diff}"
+            );
+        }
+
+        let mut g2 = g;
+        g2[0] ^= 0x01;
+        assert_avalanche(
+            "genesis_hash",
+            k1,
+            derive_cdbrw_binding_key(&g2, &d, &hw, &env).expect("valid"),
         );
 
-        // Phase 13 follow-up: restored symmetric avalanche coverage
-        // after the salt input was dropped.  The pre-Phase-13 PBT path
-        // varied salt across all three inputs implicitly; with salt
-        // gone, hw and env must each be exercised explicitly so a
-        // regression that silenced env's contribution would be caught.
+        let mut d2 = d;
+        d2[0] ^= 0x01;
+        assert_avalanche(
+            "device_id",
+            k1,
+            derive_cdbrw_binding_key(&g, &d2, &hw, &env).expect("valid"),
+        );
+
+        let mut hw2 = hw;
+        hw2[0] ^= 0x01;
+        assert_avalanche(
+            "hw",
+            k1,
+            derive_cdbrw_binding_key(&g, &d, &hw2, &env).expect("valid"),
+        );
+
         let mut env2 = env;
         env2[0] ^= 0x01;
-        let k3 = derive_cdbrw_binding_key(&hw, &env2).expect("valid");
-        assert_ne!(k1, k3, "single bit flip in env must change output");
-        let diff_env = k1.iter().zip(k3.iter()).filter(|(a, b)| a != b).count();
-        assert!(
-            diff_env > 8,
-            "avalanche (env): expected >8 differing bytes, got {diff_env}"
+        assert_avalanche(
+            "env",
+            k1,
+            derive_cdbrw_binding_key(&g, &d, &hw, &env2).expect("valid"),
         );
     }
 
@@ -482,7 +568,7 @@ mod tests {
     fn tv8_domain_tag_isolation() {
         let data = [0xAA; 64];
         let tags = [
-            "DSM/dbrw-bind",
+            "DSM/cdbrw/bind",
             "DSM/cdbrw-seed",
             "DSM/attractor-commit",
             "DSM/cdbrw-response",
