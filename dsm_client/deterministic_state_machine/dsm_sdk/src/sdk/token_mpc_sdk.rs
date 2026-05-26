@@ -784,8 +784,10 @@ impl TokenMpcSDK {
             }
 
             // Derive participant ID from node URL using domain-separated BLAKE3
-            let participant_id: [u8; 32] =
-                dsm::crypto::blake3::domain_hash_bytes("DSM/token-mpc/participant", url.as_bytes());
+            let participant_id: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+                dsm::common::domain_tags::TAG_DSM_TOKEN_MPC_PARTICIPANT,
+                url.as_bytes(),
+            );
 
             let mut material = [0u8; 32];
             material.copy_from_slice(&entropy_bytes);

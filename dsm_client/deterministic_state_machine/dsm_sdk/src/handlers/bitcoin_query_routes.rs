@@ -1090,7 +1090,10 @@ mod tests {
     /// Test labels stay descriptive in source while the on-disk + on-wire id is
     /// the strict 32-byte form `LimboVaultProto.id` requires.
     fn vid_from_label(label: &str) -> [u8; 32] {
-        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+        dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_DBTC_TEST_VAULT,
+            label.as_bytes(),
+        )
     }
 
     fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {

@@ -536,12 +536,18 @@ fn op_success(
 #[inline]
 fn envelope_error(code: u32, message: &str) -> gp::Envelope {
     let error_context = format!("error:{}:{}", code, message);
-    let device_hash =
-        crate::crypto::blake3::domain_hash("DSM/error-envelope/device", error_context.as_bytes());
-    let chain_hash =
-        crate::crypto::blake3::domain_hash("DSM/error-envelope/chain", error_context.as_bytes());
-    let genesis_hash =
-        crate::crypto::blake3::domain_hash("DSM/error-envelope/genesis", error_context.as_bytes());
+    let device_hash = crate::crypto::blake3::domain_hash(
+        crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE_DEVICE,
+        error_context.as_bytes(),
+    );
+    let chain_hash = crate::crypto::blake3::domain_hash(
+        crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE_CHAIN,
+        error_context.as_bytes(),
+    );
+    let genesis_hash = crate::crypto::blake3::domain_hash(
+        crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE_GENESIS,
+        error_context.as_bytes(),
+    );
 
     gp::Envelope {
         version: 3,
@@ -1346,14 +1352,20 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
     gp::Envelope {
         version: 3,
         headers: Some(gp::Headers {
-            device_id: crate::crypto::blake3::domain_hash("DSM/error-envelope", &message_id)
-                .as_bytes()
-                .to_vec(), // Hash of message_id for device_id
-            chain_tip: crate::crypto::blake3::domain_hash("DSM/error-envelope", b"ERROR_CHAIN_TIP")
-                .as_bytes()
-                .to_vec(), // Fixed error chain tip
+            device_id: crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE,
+                &message_id,
+            )
+            .as_bytes()
+            .to_vec(), // Hash of message_id for device_id
+            chain_tip: crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE,
+                b"ERROR_CHAIN_TIP",
+            )
+            .as_bytes()
+            .to_vec(), // Fixed error chain tip
             genesis_hash: crate::crypto::blake3::domain_hash(
-                "DSM/error-envelope",
+                crate::common::domain_tags::TAG_DSM_ERROR_ENVELOPE,
                 b"DSM_ERROR_GENESIS",
             )
             .as_bytes()
@@ -1550,7 +1562,7 @@ pub fn handle_bilateral_offline_send(env_bytes: &[u8], ble_address: &str) -> Vec
                     // Finally bind the raw operation_data bytes
                     commit_preimage.extend_from_slice(&prep.operation_data);
                     let commitment = crate::crypto::blake3::domain_hash(
-                        "DSM/bilateral-commit",
+                        crate::common::domain_tags::TAG_DSM_BILATERAL_COMMIT,
                         &commit_preimage,
                     );
                     let response = gp::BilateralPrepareResponse {
@@ -1680,8 +1692,10 @@ mod tests {
                 preimage.extend_from_slice(&[0u8; 32]);
                 preimage.extend_from_slice(&[0u8; 32]);
                 preimage.extend_from_slice(&[1, 2, 3, 4]);
-                let commitment =
-                    crate::crypto::blake3::domain_hash("DSM/bilateral-commit", &preimage);
+                let commitment = crate::crypto::blake3::domain_hash(
+                    crate::common::domain_tags::TAG_DSM_BILATERAL_COMMIT,
+                    &preimage,
+                );
                 assert_eq!(
                     prep_resp.commitment_hash.unwrap().v,
                     commitment.as_bytes().to_vec()

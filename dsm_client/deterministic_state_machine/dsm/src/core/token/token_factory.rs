@@ -52,7 +52,8 @@ fn ds(label: &'static [u8]) -> &'static [u8] {
 }
 
 fn hash32(parts: &[&[u8]]) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/token-factory");
+    let mut h =
+        crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TOKEN_FACTORY);
     for p in parts {
         h.update(p);
     }

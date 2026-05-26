@@ -1492,7 +1492,7 @@ fn bytes32_from_hash(tag: &str, bytes: &[u8]) -> [u8; 32] {
 }
 
 fn activation_shard_index(id: &[u8; 32], depth: u8) -> u64 {
-    let shard_hash = domain_hash_bytes("DJTE.SHARD", id);
+    let shard_hash = domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_SHARD, id);
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&shard_hash[0..8]);
     let value = u64::from_be_bytes(bytes);

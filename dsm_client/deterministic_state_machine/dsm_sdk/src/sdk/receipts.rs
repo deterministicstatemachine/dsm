@@ -18,7 +18,10 @@ pub use dsm::types::receipt_types::{
 /// Derive relationship key from counterparty public key.
 /// Domain-separated to prevent collision with other hash contexts.
 pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes("DSM/relationship-key", counterparty_pk)
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_RELATIONSHIP_KEY,
+        counterparty_pk,
+    )
 }
 
 /// Compute the receipt challenge-response target.
@@ -41,7 +44,10 @@ pub fn compute_receipt_challenge_response_target(
     let mut input = Vec::with_capacity(64);
     input.extend_from_slice(receipt_commitment);
     input.extend_from_slice(session_binding);
-    dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-bind-session", &input)
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_RECEIPT_BIND_SESSION,
+        &input,
+    )
 }
 
 /// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1).
@@ -973,7 +979,10 @@ pub fn encode_protocol_transition_payload(label: &[u8], parts: &[&[u8]]) -> Vec<
 /// This must be used for sovereign protocol actors instead of the bilateral
 /// `DSM/receipt-commit` domain.
 pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", payload_bytes)
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_PROTOCOL_TRANSITION,
+        payload_bytes,
+    )
 }
 
 #[cfg(test)]

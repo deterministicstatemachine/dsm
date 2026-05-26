@@ -84,7 +84,11 @@ impl SignatureKeyPair {
         // Derive a fixed 32-byte seed deterministically.
         let mut seed32 = [0u8; 32];
         seed32.copy_from_slice(
-            crate::crypto::blake3::domain_hash("DSM/sphincs-seed", entropy).as_bytes(),
+            crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_SPHINCS_SEED,
+                entropy,
+            )
+            .as_bytes(),
         );
         let kp = sphincs::generate_keypair_from_seed(params, &seed32)?;
         Ok(Self {

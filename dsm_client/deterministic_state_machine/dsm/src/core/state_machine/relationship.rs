@@ -193,7 +193,7 @@ impl RelationshipStatePair {
             last_bilateral_state_hash: None,
         };
         // Compute relationship hash
-        let mut hasher = dsm_domain_hasher("DSM/relationship");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RELATIONSHIP);
         hasher.update(&pair.entity_state.hash()?);
         hasher.update(&pair.counterparty_state.hash()?);
         pair.relationship_hash = hasher.finalize().as_bytes().to_vec();
@@ -212,7 +212,8 @@ impl RelationshipStatePair {
         let mut pair = Self::new(entity_id, counterparty_id, entity_state, counterparty_state)?;
 
         // Generate bilateral state hash for this relationship
-        let mut bilateral_hasher = dsm_domain_hasher("DSM/bilateral-state");
+        let mut bilateral_hasher =
+            dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_BILATERAL_STATE);
         bilateral_hasher.update(&pair.entity_state.hash()?);
         bilateral_hasher.update(&pair.counterparty_state.hash()?);
         bilateral_hasher.update(chain_tip_id.as_bytes());
@@ -305,7 +306,7 @@ impl RelationshipStatePair {
         self.chain_tip_id = Some(new_chain_tip_id.clone());
         self.last_bilateral_state_hash = Some(new_state_hash.clone());
 
-        let mut hasher = dsm_domain_hasher("DSM/bilateral-state");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_BILATERAL_STATE);
         hasher.update(&self.entity_state.hash()?);
         hasher.update(&self.counterparty_state.hash()?);
         hasher.update(new_chain_tip_id.as_bytes());
@@ -676,7 +677,11 @@ mod tests {
     // Domain-separated hash for test entity IDs — tag unambiguously marks these as test
     // fixture identifiers, never confused with production identity hashes.
     fn test_entity_id(label: &[u8]) -> [u8; 32] {
-        *crate::crypto::blake3::domain_hash("DSM/test-entity-id", label).as_bytes()
+        *crate::crypto::blake3::domain_hash(
+            crate::common::domain_tags::TAG_DSM_TEST_ENTITY_ID,
+            label,
+        )
+        .as_bytes()
     }
 
     /// Helper function to create a test state. `seed` is a distinguishing
@@ -690,7 +695,7 @@ mod tests {
         // Per §11 eq. 14, production entropy comes from (prev_entropy, op, parent_hash);
         // for the test fixture we synthesize a distinguishable seed.
         let entropy = crate::crypto::blake3::domain_hash(
-            "DSM/test-entropy",
+            crate::common::domain_tags::TAG_DSM_TEST_ENTROPY,
             format!("entropy_{seed}").as_bytes(),
         )
         .as_bytes()

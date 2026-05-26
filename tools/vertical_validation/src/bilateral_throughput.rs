@@ -60,7 +60,8 @@ pub struct BilateralThroughputResult {
 // ---------------------------------------------------------------------------
 
 fn make_genesis(seed: &[u8; 32], pk: &[u8]) -> (State, StateMachine) {
-    let device_id: [u8; 32] = *domain_hash("DSM/test-device", seed).as_bytes();
+    let device_id: [u8; 32] =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed).as_bytes();
     let device_info = DeviceInfo::new(device_id, pk.to_vec());
     let mut state = State::new_genesis(*seed, device_info);
     if let Ok(h) = state.hash() {
@@ -122,7 +123,7 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
     let blake3_samples = 10_000u64;
     let blake3_start = Instant::now();
     for i in 0..blake3_samples {
-        let _ = domain_hash("DSM/bench", &i.to_le_bytes());
+        let _ = domain_hash(dsm::common::domain_tags::TAG_DSM_BENCH, &i.to_le_bytes());
     }
     let avg_blake3_cost_us =
         blake3_start.elapsed().as_secs_f64() * 1_000_000.0 / blake3_samples as f64;

@@ -402,7 +402,9 @@ impl Balance {
                 tag
             });
 
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/canonical-balance");
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_CANONICAL_BALANCE,
+        );
         hasher.update(&device_tag);
         let digest = hasher.finalize();
         *digest.as_bytes()
@@ -606,7 +608,10 @@ impl TokenRegistry {
 
         // Initialize ERA token
         let system_owner = {
-            let hash = crate::crypto::blake3::domain_hash("DSM/token-hash", b"system");
+            let hash = crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_TOKEN_HASH,
+                b"system",
+            );
             let mut arr = [0u8; 32];
             arr.copy_from_slice(hash.as_bytes());
             arr
@@ -715,7 +720,10 @@ impl TokenRegistry {
         state_number: u64,
     ) -> Result<(TokenMetadata, TokenSupplyInfo), DsmError> {
         let system_owner = {
-            let hash = crate::crypto::blake3::domain_hash("DSM/token-hash", b"system");
+            let hash = crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_TOKEN_HASH,
+                b"system",
+            );
             let mut arr = [0u8; 32];
             arr.copy_from_slice(hash.as_bytes());
             arr
@@ -901,11 +909,14 @@ impl Token {
         policy_anchor: [u8; 32],
     ) -> Self {
         // Use first 8 bytes of blake3 hash as a numeric suffix for the token id
-        let hash_bytes = crate::crypto::blake3::domain_hash("DSM/token-hash", &token_data);
+        let hash_bytes = crate::crypto::blake3::domain_hash(
+            crate::common::domain_tags::TAG_DSM_TOKEN_HASH,
+            &token_data,
+        );
         let num = u64::from_le_bytes(hash_bytes.as_bytes()[..8].try_into().unwrap_or([0u8; 8]));
         let id = format!("{}-{}", owner_id, num);
         let token_hash = crate::crypto::blake3::domain_hash(
-            "DSM/token-hash",
+            crate::common::domain_tags::TAG_DSM_TOKEN_HASH,
             &[&token_data[..], &metadata[..]].concat(),
         )
         .as_bytes()

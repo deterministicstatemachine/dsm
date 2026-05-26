@@ -308,7 +308,7 @@ pub(crate) fn derive_production_entropy(
     genesis_hash: &[u8],
     cdbrw_binding: &[u8],
 ) -> Vec<u8> {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/sdk-hash");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SDK_HASH);
     h.update(device_id);
     h.update(genesis_hash);
     h.update(cdbrw_binding);

@@ -26,7 +26,11 @@ fn strict_message_id(payload: &pb::envelope::Payload) -> Vec<u8> {
         payload: Some(payload.clone()),
     }
     .encode_to_vec();
-    dsm::crypto::blake3::domain_hash_bytes("DSM/jni-envelope-message-id/v1", &seed)[..16].to_vec()
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_JNI_ENVELOPE_MESSAGE_ID_V1,
+        &seed,
+    )[..16]
+        .to_vec()
 }
 
 pub fn encode_payload_transport(payload: pb::envelope::Payload) -> pb::Envelope {

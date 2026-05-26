@@ -29,7 +29,11 @@ fn policy_bytes(policy: &SmartPolicy) -> Vec<u8> {
 
 /// Helper: Compute BLAKE3 hash of SmartPolicy bytes (policy anchor)
 fn policy_hash_b3(policy: &SmartPolicy) -> [u8; 32] {
-    *blake3::domain_hash("DSM/dlv-policy", &policy_bytes(policy)).as_bytes()
+    *blake3::domain_hash(
+        dsm::common::domain_tags::TAG_DSM_DLV_POLICY,
+        &policy_bytes(policy),
+    )
+    .as_bytes()
 }
 
 fn vault_post_from_proto(proto: VaultPostProto) -> VaultPost {
@@ -603,17 +607,23 @@ impl DlvSdk {
                     })
                 } else {
                     Ok(FulfillmentMechanism::CryptoCondition {
-                        condition_hash: blake3::domain_hash("DSM/dlv-condition", vt.as_bytes())
-                            .as_bytes()
-                            .to_vec(),
+                        condition_hash: blake3::domain_hash(
+                            dsm::common::domain_tags::TAG_DSM_DLV_CONDITION,
+                            vt.as_bytes(),
+                        )
+                        .as_bytes()
+                        .to_vec(),
                         public_params: vt.as_bytes().to_vec(),
                     })
                 }
             }
             VaultCondition::Hash(hs) => Ok(FulfillmentMechanism::CryptoCondition {
-                condition_hash: blake3::domain_hash("DSM/dlv-condition", hs.as_slice())
-                    .as_bytes()
-                    .to_vec(),
+                condition_hash: blake3::domain_hash(
+                    dsm::common::domain_tags::TAG_DSM_DLV_CONDITION,
+                    hs.as_slice(),
+                )
+                .as_bytes()
+                .to_vec(),
                 public_params: hs.clone(),
             }),
             VaultCondition::SmartPolicy(policy_bytes) => {
@@ -638,9 +648,11 @@ impl DlvSdk {
     fn generate_state_proof(&self, reference_state: &State) -> Result<Vec<u8>, DsmError> {
         let sn = (reference_state.hash[0] as u64).to_le_bytes();
         let proof = [&reference_state.hash[..], &sn, &reference_state.entropy[..]].concat();
-        Ok(blake3::domain_hash("DSM/dlv-proof", &proof)
-            .as_bytes()
-            .to_vec())
+        Ok(
+            blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_DLV_PROOF, &proof)
+                .as_bytes()
+                .to_vec(),
+        )
     }
 
     /// Production Merkle proof (binds to reference state)

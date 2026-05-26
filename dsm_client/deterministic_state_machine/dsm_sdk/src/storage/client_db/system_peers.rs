@@ -227,14 +227,18 @@ pub fn advance_system_chain_tip(
         ));
     }
     let transition_digest = {
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/system-peer-transition");
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(
+            dsm::common::domain_tags::TAG_DSM_SYSTEM_PEER_TRANSITION,
+        );
         hasher.update(peer_key.as_bytes());
         hasher.update(&(payload_bytes.len() as u32).to_le_bytes());
         hasher.update(payload_bytes);
         hasher.finalize().as_bytes().to_vec()
     };
     let child_tip = {
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/system-peer-tip");
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(
+            dsm::common::domain_tags::TAG_DSM_SYSTEM_PEER_TIP,
+        );
         hasher.update(peer_key.as_bytes());
         hasher.update(&parent_tip);
         hasher.update(&transition_digest);

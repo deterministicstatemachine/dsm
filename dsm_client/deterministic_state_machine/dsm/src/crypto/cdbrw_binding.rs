@@ -130,7 +130,7 @@ pub fn derive_cdbrw_binding_key(
     //   domain "DSM/cdbrw/bind\0"
     //   || LP(genesis_hash) || LP(device_id) || LP(hw_entropy) || LP(env_fingerprint)
     // Four length-prefixed inputs; no salt, no separate G, no schema variants.
-    let mut hasher = dsm_domain_hasher("DSM/cdbrw/bind");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_BIND);
     canonical_lp::write_lp(&mut hasher, genesis_hash);
     canonical_lp::write_lp(&mut hasher, device_id);
     canonical_lp::write_lp(&mut hasher, hw_entropy);
@@ -143,7 +143,7 @@ pub fn derive_cdbrw_binding_key(
 /// Given a verifier challenge `c` and the binding key `K_DBRW`, produces the
 /// deterministic starting index for the ARX pointer-chasing orbit.
 pub fn seed_orbit(challenge: &[u8], k_dbrw: &[u8; 32]) -> u32 {
-    let mut hasher = dsm_domain_hasher("DSM/cdbrw-seed");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_SEED);
     hasher.update(challenge);
     hasher.update(k_dbrw);
     let digest = hasher.finalize();
@@ -167,7 +167,7 @@ pub fn compute_acd(
     orbit_len: u32,
     rotation_bits: u32,
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/attractor-commit");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ATTRACTOR_COMMIT);
     for &val in h_bar {
         hasher.update(&val.to_le_bytes());
     }
@@ -186,7 +186,7 @@ pub fn compute_acd(
 /// gamma commits the orbit histogram and the challenge. ACD is checked
 /// separately in the attractor envelope test (step V6d).
 pub fn compute_response(h_bar: &[f64], challenge: &[u8]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/cdbrw-response");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_RESPONSE);
     for &val in h_bar {
         hasher.update(&val.to_le_bytes());
     }
@@ -369,13 +369,13 @@ mod tests {
     /// `H("DSM/cdbrw/bind\0" || "")`
     #[test]
     fn tv1_domain_hash_empty() {
-        let hasher = dsm_domain_hasher("DSM/cdbrw/bind");
+        let hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_BIND);
         let digest = hasher.finalize();
         assert_eq!(digest.as_bytes().len(), 32, "BLAKE3-256 must be 32 bytes");
         // Non-zero output (domain tag alone produces a real hash)
         assert_ne!(*digest.as_bytes(), [0u8; 32]);
         // Deterministic: same call always same output
-        let hasher2 = dsm_domain_hasher("DSM/cdbrw/bind");
+        let hasher2 = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_BIND);
         assert_eq!(hasher.finalize().as_bytes(), hasher2.finalize().as_bytes());
     }
 
@@ -386,7 +386,7 @@ mod tests {
         let challenge: Vec<u8> = (0..32).collect();
         let k_dbrw = [0xABu8; 32];
 
-        let mut hasher = dsm_domain_hasher("DSM/cdbrw-seed");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_SEED);
         hasher.update(&challenge);
         hasher.update(&k_dbrw);
         let d1 = *hasher.finalize().as_bytes();
@@ -416,7 +416,7 @@ mod tests {
         // Verify LP encoding in canonical order:
         //   LE32(32)||genesis_hash || LE32(32)||device_id ||
         //   LE32(16)||hw           || LE32(16)||env
-        let mut expected_hasher = dsm_domain_hasher("DSM/cdbrw/bind");
+        let mut expected_hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CDBRW_BIND);
         canonical_lp::write_lp(&mut expected_hasher, &genesis_hash);
         canonical_lp::write_lp(&mut expected_hasher, &device_id);
         canonical_lp::write_lp(&mut expected_hasher, &hw);

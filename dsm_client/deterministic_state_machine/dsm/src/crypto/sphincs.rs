@@ -214,7 +214,8 @@ impl SpxAddress {
 // =============================== Hash/PRF ===================================
 
 fn blake3_kdf(out_len: usize, inputs: &[&[u8]]) -> Vec<u8> {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/sphincs-kdf");
+    let mut h =
+        crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_SPHINCS_KDF);
     for inp in inputs {
         h.update(inp);
     }

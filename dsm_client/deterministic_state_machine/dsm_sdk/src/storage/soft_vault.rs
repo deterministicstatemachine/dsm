@@ -113,7 +113,7 @@ impl DbrwBindingKeyProvider {
 
 impl BindingKeyProvider for DbrwBindingKeyProvider {
     fn device_binding_key(&self) -> Result<[u8; 32], DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/DBRW/BINDING/v2");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DBRW_BINDING_V2);
         hasher.update(self.device_id_hint.as_bytes());
         let digest = hasher.finalize();
         let mut out = [0u8; 32];
@@ -165,7 +165,7 @@ impl<B: BindingKeyProvider> SoftVaultKeyStorage<B> {
         key_type: &KeyType,
     ) -> Result<[u8; 32], DsmError> {
         let binding = self.binder.device_binding_key()?;
-        let mut h = dsm_domain_hasher("DSM/Vault/KEK/v2");
+        let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_VAULT_KEK_V2);
         h.update(&binding);
         h.update(self.device_id.as_bytes());
         h.update(alias.as_bytes());
@@ -187,7 +187,7 @@ impl<B: BindingKeyProvider> SoftVaultKeyStorage<B> {
         key_type: &KeyType,
         write_seqno: u64,
     ) -> [u8; 24] {
-        let mut h = dsm_domain_hasher("DSM/Vault/Nonce/v2");
+        let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_VAULT_NONCE_V2);
         h.update(self.device_id.as_bytes());
         h.update(alias.as_bytes());
         h.update(purpose.as_bytes());
@@ -259,8 +259,10 @@ impl VaultHeader {
         write_seqno: u64,
     ) -> Self {
         let mut kt = [0u8; 16];
-        let t =
-            dsm::crypto::blake3::domain_hash("DSM/vault-key-type", key_type.as_tag().as_bytes());
+        let t = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_VAULT_KEY_TYPE,
+            key_type.as_tag().as_bytes(),
+        );
         kt.copy_from_slice(&t.as_bytes()[..16]);
         Self {
             version: 3,
@@ -363,7 +365,7 @@ struct Envelope {
 impl Envelope {
     fn address(&self) -> [u8; 32] {
         *dsm::crypto::blake3::domain_hash(
-            "DSM/vault-envelope-v2",
+            dsm::common::domain_tags::TAG_DSM_VAULT_ENVELOPE_V2,
             &[&self.header_bytes[..], &self.ciphertext].concat(),
         )
         .as_bytes()
@@ -380,7 +382,7 @@ impl<B: BindingKeyProvider> KeyStorage for SoftVaultKeyStorage<B> {
         let purpose = "private_key";
         let mut kek = self.derive_kek(alias, purpose, &key_type)?;
         let commit_id = {
-            let mut h = dsm_domain_hasher("DSM/vault-commitment-v2");
+            let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_VAULT_COMMITMENT_V2);
             h.update(self.device_id.as_bytes());
             h.update(alias.as_bytes());
             h.update(purpose.as_bytes());
@@ -749,7 +751,7 @@ impl<B: BindingKeyProvider> SoftVaultKeyStorage<B> {
         let ciphertext = &envelope_bytes[off..off + clen];
 
         let addr: [u8; 32] = {
-            let mut h = dsm_domain_hasher("DSM/vault-envelope-v2");
+            let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_VAULT_ENVELOPE_V2);
             h.update(header_bytes);
             h.update(ciphertext);
             *h.finalize().as_bytes()

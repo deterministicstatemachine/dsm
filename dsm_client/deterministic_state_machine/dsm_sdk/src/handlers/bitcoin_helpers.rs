@@ -159,7 +159,10 @@ impl AppRouterImpl {
         data.extend_from_slice(import_kind.as_bytes());
         data.extend_from_slice(&network.to_le_bytes());
         data.extend_from_slice(secret.as_bytes());
-        let hash = dsm::crypto::blake3::domain_hash_bytes("DSM/bitcoin-account-id", &data);
+        let hash = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_BITCOIN_ACCOUNT_ID,
+            &data,
+        );
         let v = &hash[..8];
         format!(
             "btcacct-{}",

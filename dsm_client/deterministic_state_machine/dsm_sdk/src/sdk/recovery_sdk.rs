@@ -697,7 +697,8 @@ impl RecoverySDK {
                 continue;
             };
 
-            let mut receipt_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/receipt");
+            let mut receipt_hasher =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_RECEIPT);
             receipt_hasher.update(&receipt_bytes);
             let receipt_hash = *receipt_hasher.finalize().as_bytes();
             update_rollup(

@@ -2179,7 +2179,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
             }
             .encode_to_vec();
             let message_id =
-                dsm::crypto::blake3::domain_hash_bytes("DSM/jni-core-envelope-message-id/v1", &seed)
+                dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_JNI_CORE_ENVELOPE_MESSAGE_ID_V1, &seed)
                     [..16]
                     .to_vec();
             gp::Envelope {
@@ -2301,8 +2301,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                     }
                                 };
                                 // Deterministic balance anchor — same derivation as wallet.send path
-                                let balance_anchor = dsm::crypto::blake3::domain_hash(
-                                    "DSM/balance-anchor", &[],
+                                let balance_anchor = dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR, &[],
                                 );
                                 let hint_op = dsm::types::operations::Operation::Transfer {
                                     to_device_id: cid_arr.to_vec(),
@@ -5420,7 +5419,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenera
     // Derive refund hash lock for address generation
     let refund_iterations: u64 = deposit_req.refund_iterations.max(1);
     let refund_key = dsm::crypto::blake3::domain_hash_bytes(
-        "DSM/dlv-refund",
+        dsm::common::domain_tags::TAG_DSM_DLV_REFUND,
         &[&hash_lock[..], &refund_iterations.to_le_bytes()].concat(),
     );
     let refund_hash_lock = dsm::bitcoin::script::sha256_hash_lock(&refund_key);

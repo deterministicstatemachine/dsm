@@ -21,7 +21,7 @@ pub type Digest32 = [u8; 32];
 
 /// Sub-domain separators for intra-hash field isolation within `recompute_genesis_hash`.
 /// These are fed as data delimiters inside an already domain-separated hasher
-/// (`dsm_domain_hasher("DSM/genesis")`), preventing cross-field collisions.
+/// (`dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS)`), preventing cross-field collisions.
 const DOMAIN_KEYS: &[u8] = b"DSM/genesis/keys\0";
 const DOMAIN_MPC: &[u8] = b"DSM/genesis/mpc\0";
 const DOMAIN_DBRW: &[u8] = b"DSM/genesis/dbrw\0";
@@ -71,7 +71,7 @@ pub struct DBRWProof {
     /// (`dsm_sdk::security::cdbrw_reprove`), which zeroes the in-memory
     /// K_DBRW slot when a live orbit drifts outside the enrollment envelope.
     pub device_fingerprint: Vec<u8>,
-    /// Environmental state hash (`domain_hash("DSM/genesis/dbrw-env", proof_data)`)
+    /// Environmental state hash (`domain_hash(crate::common::domain_tags::TAG_DSM_GENESIS_DBRW_ENV, proof_data)`)
     pub env_state_hash: Digest32,
     /// Raw random-walk proof bytes (large; not included directly in genesis hash)
     pub proof_data: Vec<u8>,
@@ -137,7 +137,10 @@ impl GenesisState {
         }
 
         // DBRW env hash must be domain-separated BLAKE3(proof_data)
-        let env_calc = domain_hash("DSM/genesis/dbrw-env", &self.dbrw_proof.proof_data);
+        let env_calc = domain_hash(
+            crate::common::domain_tags::TAG_DSM_GENESIS_DBRW_ENV,
+            &self.dbrw_proof.proof_data,
+        );
         if !ct_eq(env_calc.as_bytes(), &self.dbrw_proof.env_state_hash) {
             return Ok(false);
         }
@@ -163,7 +166,7 @@ impl GenesisState {
     /// Recompute the canonical Genesis hash (BLAKE3 -> 32 bytes).
     ///
     /// Canonical inputs (in order):
-    /// - Domain prefix via `dsm_domain_hasher("DSM/genesis")`
+    /// - Domain prefix via `dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS)`
     /// - device_id (UTF-8 bytes)
     /// - MPC contributions (sorted by `contribution_hash`, then contributor_id)
     ///   Each contribution folded as: DOMAIN_MPC || contribution_hash (32 bytes)
@@ -172,7 +175,7 @@ impl GenesisState {
     ///
     /// Excluded: `created_at`, `metadata`, `DBRW.proof_data`, `DBRW.env_state_hash`
     pub fn recompute_genesis_hash(&self) -> Result<Digest32, DsmError> {
-        let mut h = dsm_domain_hasher("DSM/genesis");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS);
         h.update(&self.device_id);
 
         // MPC contributions: deterministic order by (contribution_hash, contributor_id)
@@ -224,7 +227,7 @@ impl MPCContribution {
 }
 
 impl DBRWProof {
-    /// Create a new DBRW proof. `env_state_hash` must equal `domain_hash("DSM/genesis/dbrw-env", proof_data)`.
+    /// Create a new DBRW proof. `env_state_hash` must equal `domain_hash(crate::common::domain_tags::TAG_DSM_GENESIS_DBRW_ENV, proof_data)`.
     pub fn new(
         device_fingerprint: Vec<u8>,
         env_state_hash: Digest32,
@@ -254,7 +257,7 @@ impl GenesisPublicKeys {
     /// Deterministic key bundle hash (BLAKE3 -> 32 bytes).
     #[inline]
     pub fn compute_key_hash(signing_key: &[u8], encapsulation_key: &[u8]) -> Digest32 {
-        let mut h = dsm_domain_hasher("DSM/genesis/keys");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_KEYS);
         h.update(signing_key);
         h.update(encapsulation_key);
         *h.finalize().as_bytes()
@@ -424,7 +427,8 @@ mod tests {
         let h2 = *blake3::hash(b"c2").as_bytes();
         let keys = GenesisPublicKeys::new(b"S".to_vec(), b"K".to_vec());
         let pd = b"pdata".to_vec();
-        let env = *domain_hash("DSM/genesis/dbrw-env", &pd).as_bytes();
+        let env =
+            *domain_hash(crate::common::domain_tags::TAG_DSM_GENESIS_DBRW_ENV, &pd).as_bytes();
         let dbrw = DBRWProof::new(vec![1], env, pd, *blake3::hash(b"v").as_bytes());
         let did: [u8; 32] = *blake3::hash(b"d").as_bytes();
 
@@ -474,7 +478,8 @@ mod tests {
     fn different_device_ids_produce_different_hashes() {
         let keys = GenesisPublicKeys::new(b"S".to_vec(), b"K".to_vec());
         let pd = b"p".to_vec();
-        let env = *domain_hash("DSM/genesis/dbrw-env", &pd).as_bytes();
+        let env =
+            *domain_hash(crate::common::domain_tags::TAG_DSM_GENESIS_DBRW_ENV, &pd).as_bytes();
         let dbrw = DBRWProof::new(vec![1], env, pd, [0u8; 32]);
         let mpc = vec![MPCContribution::new("n".into(), [0u8; 32], vec![], 0)];
 

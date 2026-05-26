@@ -68,7 +68,7 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
     let mut leaves: Vec<[u8; 32]> = contributions
         .iter()
         .map(|c| {
-            let mut h = dsm_domain_hasher("DSM/GENESIS/CONTRIB/v2");
+            let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_CONTRIB_V2);
             h.update(&c.data);
             *h.finalize().as_bytes()
         })
@@ -91,7 +91,7 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
             };
             // Distinct sub-domain — this is the contribution Merkle tree,
             // not the whitepaper's genesis hash (`"DSM/genesis"`).
-            let mut h = dsm_domain_hasher("DSM/genesis-merkle");
+            let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_MERKLE);
             h.update(left);
             h.update(right);
             next.push(*h.finalize().as_bytes());
@@ -674,6 +674,9 @@ impl Identity {
     }
 
     pub fn genesis_hash(&self) -> blake3::Hash {
-        domain_hash("DSM/genesis-hash", &self.master_genesis.hash)
+        domain_hash(
+            crate::common::domain_tags::TAG_DSM_GENESIS_HASH,
+            &self.master_genesis.hash,
+        )
     }
 }

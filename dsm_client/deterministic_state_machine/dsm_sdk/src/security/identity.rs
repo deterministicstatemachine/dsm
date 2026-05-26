@@ -18,7 +18,7 @@ pub const DOMAIN_DEVID: &[u8] = b"DSM/devid\0";
 /// Normative:
 /// $$\mathrm{DevID} = H(\text{"DSM/devid"}\0 \parallel pk \parallel attest)$$
 pub fn derive_device_id(pk: &[u8], attest_digest: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/devid");
+    let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DEVID);
     h.update(pk);
     h.update(attest_digest);
     *h.finalize().as_bytes()

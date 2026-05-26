@@ -33,7 +33,7 @@ pub fn build_envelope(
     let chain_tip_bytes = match chain_tip_override {
         Some(ct) => ct,
         None => {
-            let mut hasher = dsm_domain_hasher("DSM/CHAIN_TIP");
+            let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_CHAIN_TIP);
             hasher.update(genesis_hash);
             hasher.update(&ticks.to_le_bytes());
             let mut ct = [0u8; 32];
@@ -43,7 +43,7 @@ pub fn build_envelope(
     };
 
     // Deterministic message id
-    let mut idh = dsm_domain_hasher("DSM/ENVELOPE_ID");
+    let mut idh = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ENVELOPE_ID);
     idh.update(device_id);
     idh.update(genesis_hash);
     idh.update(&chain_tip_bytes);

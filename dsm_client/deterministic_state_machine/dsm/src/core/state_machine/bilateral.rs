@@ -156,8 +156,11 @@ impl BilateralStateManager {
         entropy.extend_from_slice(&random_bytes);
 
         // Hash the combined entropy for consistency (binary out)
-        let hash =
-            *crate::crypto::blake3::domain_hash("DSM/bilateral-entropy", &entropy).as_bytes();
+        let hash = *crate::crypto::blake3::domain_hash(
+            crate::common::domain_tags::TAG_DSM_BILATERAL_ENTROPY,
+            &entropy,
+        )
+        .as_bytes();
         Ok(hash)
     }
 }

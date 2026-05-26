@@ -569,7 +569,9 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
 
     for counterparty_id in &counterparty_ids {
         let notify_key = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/tombstone-notify");
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::common::domain_tags::TAG_DSM_TOMBSTONE_NOTIFY,
+            );
             h.update(counterparty_id);
             crate::util::text_id::encode_base32_crockford(h.finalize().as_bytes())
         };

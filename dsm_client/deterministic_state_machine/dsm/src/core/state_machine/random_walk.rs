@@ -88,7 +88,7 @@ pub mod algorithms {
         external_data: &[u8],
         additional_params: Option<&[u8]>,
     ) -> Hash {
-        let mut hasher = dsm_domain_hasher("DSM/walk-seed");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_WALK_SEED);
 
         // Add state hash
         hasher.update(state.as_bytes());
@@ -167,7 +167,7 @@ pub mod algorithms {
             positions.push(Position(position));
 
             // Update the hash for the next position
-            let mut hasher = dsm_domain_hasher("DSM/walk-step");
+            let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_WALK_STEP);
             hasher.update(&current_hash);
             current_hash = *hasher.finalize().as_bytes();
         }
@@ -296,7 +296,8 @@ pub mod algorithms {
             fn new(seed: &[u8]) -> Self {
                 // Use domain-separated hash so test CSPRNG is unambiguously distinct from
                 // production random-walk hashing (tag = "DSM/test-csprng-seed").
-                let mut hasher = dsm_domain_hasher("DSM/test-csprng-seed");
+                let mut hasher =
+                    dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TEST_CSPRNG_SEED);
                 hasher.update(seed);
                 TestCsprng {
                     current: *hasher.finalize().as_bytes(),
@@ -304,7 +305,8 @@ pub mod algorithms {
             }
 
             fn next_u32(&mut self) -> u32 {
-                let mut hasher = dsm_domain_hasher("DSM/test-csprng-next");
+                let mut hasher =
+                    dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TEST_CSPRNG_NEXT);
                 hasher.update(&self.current);
                 self.current = *hasher.finalize().as_bytes();
                 match self.current[0..4].try_into() {

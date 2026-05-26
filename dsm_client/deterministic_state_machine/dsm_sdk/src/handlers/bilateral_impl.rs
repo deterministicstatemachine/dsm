@@ -308,7 +308,7 @@ impl BilateralHandler for BiImpl {
                 #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
                 {
                     let commitment = dsm::crypto::blake3::domain_hash(
-                        "DSM/bilateral-op-commit",
+                        dsm::common::domain_tags::TAG_DSM_BILATERAL_OP_COMMIT,
                         &req.operation_data,
                     );
 
@@ -680,7 +680,10 @@ mod tests {
         assert_eq!(commitment.v.len(), 32);
         assert_eq!(resp.expires_iterations, 10);
 
-        let expected = dsm::crypto::blake3::domain_hash("DSM/bilateral-op-commit", &op_data);
+        let expected = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_BILATERAL_OP_COMMIT,
+            &op_data,
+        );
         assert_eq!(commitment.v, expected.as_bytes());
     }
 

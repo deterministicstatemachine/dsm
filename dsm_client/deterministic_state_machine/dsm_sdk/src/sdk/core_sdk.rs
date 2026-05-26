@@ -1308,9 +1308,10 @@ impl CoreSDK {
         // canonical local id = H("did" || device_id)
         let mut id_data = b"did".to_vec();
         id_data.extend_from_slice(&self.device_info.device_id);
-        let local_id = dsm_blake3::domain_hash("DSM/local-id", &id_data)
-            .as_bytes()
-            .to_vec();
+        let local_id =
+            dsm_blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_LOCAL_ID, &id_data)
+                .as_bytes()
+                .to_vec();
 
         let bilateral_anchor =
             blake3_cat(&[b"bilateral_anchor", &contact_genesis, &local_id]).to_vec();

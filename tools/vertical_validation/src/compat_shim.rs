@@ -52,7 +52,7 @@ pub fn machine_execute_transition(
     // §11 eq.14 entropy
     let op_bytes = operation.to_bytes();
     let new_entropy = {
-        let mut h = dsm_domain_hasher("DSM/state-entropy");
+        let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_STATE_ENTROPY);
         h.update(&current.entropy);
         h.update(&op_bytes);
         h.update(&current.hash);

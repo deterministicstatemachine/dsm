@@ -264,10 +264,14 @@ impl AppRouterImpl {
         // sanity check that catches schema drift).  Empty fields are
         // the canonical request shape: caller declines to commit to
         // the digest and lets Rust derive it.
-        let expected_content_digest: [u8; 32] =
-            dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-content", &spec.content);
-        let expected_fm_digest: [u8; 32] =
-            dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-fulfillment", &spec.fulfillment_bytes);
+        let expected_content_digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_DLV_CONTENT,
+            &spec.content,
+        );
+        let expected_fm_digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_DLV_FULFILLMENT,
+            &spec.fulfillment_bytes,
+        );
         match spec.content_digest.len() {
             0 => {} // accept-or-compute path
             32 => {

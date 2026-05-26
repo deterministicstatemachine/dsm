@@ -360,7 +360,7 @@ pub fn compute_transfer_signing_bytes_v3(
     memo: &str,
 ) -> Vec<u8> {
     // Domain separation for transfer signing
-    let mut hasher = dsm_domain_hasher("DSM/transfer/v3");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TRANSFER_V3);
 
     // Include all signing context in deterministic order
     hasher.update(from_device_id);
@@ -391,7 +391,7 @@ pub fn compute_online_message_signing_bytes_v3(
     payload: &[u8],
     memo: &str,
 ) -> Vec<u8> {
-    let mut hasher = dsm_domain_hasher("DSM/online-message/v3");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ONLINE_MESSAGE_V3);
     hasher.update(from_device_id);
     hasher.update(to_device_id);
     hasher.update(chain_tip);
@@ -411,7 +411,7 @@ pub fn compute_online_message_nonce_v3(
     payload: &[u8],
     memo: &str,
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/online-message/nonce/v3");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ONLINE_MESSAGE_NONCE_V3);
     hasher.update(from_device_id);
     hasher.update(to_device_id);
     hasher.update(chain_tip);

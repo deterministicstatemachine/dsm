@@ -302,7 +302,7 @@ impl GenesisSession {
         self.commitments = contributions
             .iter()
             .map(|c| {
-                let mut h = dsm_domain_hasher("DSM/genesis-commit");
+                let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_COMMIT);
                 h.update(&self.session_id);
                 h.update(c);
                 let mut out = [0u8; 32];
@@ -320,7 +320,7 @@ impl GenesisSession {
             return false;
         }
         for (rev, com) in self.reveals.iter().zip(self.commitments.iter()) {
-            let mut h = dsm_domain_hasher("DSM/genesis-commit");
+            let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_COMMIT);
             h.update(&self.session_id);
             h.update(rev);
             let mut out = [0u8; 32];
@@ -348,7 +348,7 @@ impl GenesisSession {
     /// happens one layer down at master-seed derivation (whitepaper
     /// §11.1 eq.13), not at the genesis hash.
     pub fn compute_genesis_id(&mut self) {
-        let mut h = dsm_domain_hasher("DSM/genesis");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS);
         // b_1 = device_entropy
         h.update(&self.device_entropy);
         // b_2..b_n = mpc_entropies (n-of-n contributions)
@@ -542,7 +542,8 @@ fn canonical_a(device_id: &[u8; 32], storage_nodes: &[NodeId], metadata: &[u8]) 
 /// storage-nodes spec §5.  Mixed into the master-seed IKM (whitepaper
 /// §11.1 eq.13) at keypair derivation time.
 pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/step-salt");
+    let mut h =
+        crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STEP_SALT);
     h.update(g);
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
@@ -597,7 +598,9 @@ pub struct GenesisMasterKeypair {
 
 /// Deterministic device entropy (bytes-only), derived from 32-byte device_id
 pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-device-entropy");
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_GENESIS_DEVICE_ENTROPY,
+    );
     h.update(device_id);
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
@@ -708,7 +711,9 @@ pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
 
     // Device commitment material for transport calls: H(session_id || device_entropy)
     let device_commitment = {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-device-commit");
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_GENESIS_DEVICE_COMMIT,
+        );
         h.update(&session.session_id);
         h.update(&session.device_entropy);
         let mut out = [0u8; 32];
@@ -898,7 +903,7 @@ mod tests {
 
         // Independent recomputation following whitepaper §2.5 exactly.
         let expected = {
-            let mut h = dsm_domain_hasher("DSM/genesis");
+            let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS);
             h.update(&s.device_entropy);
             for m in &s.mpc_entropies {
                 h.update(m);
@@ -957,10 +962,10 @@ mod tests {
     #[test]
     fn commit_domain_is_distinct_from_genesis_domain() {
         let input = id32(0xAB).to_vec();
-        let mut h_g = dsm_domain_hasher("DSM/genesis");
+        let mut h_g = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS);
         h_g.update(&input);
         let g_hash = h_g.finalize();
-        let mut h_c = dsm_domain_hasher("DSM/genesis-commit");
+        let mut h_c = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_COMMIT);
         h_c.update(&input);
         let c_hash = h_c.finalize();
         assert_ne!(g_hash.as_bytes(), c_hash.as_bytes());
@@ -1230,7 +1235,7 @@ mod tests {
         // Independent recomputation of G per whitepaper §2.5.  The
         // device_entropy is sampled locally inside
         // `create_mpc_genesis_with_transport`, so we read it back.
-        let mut h = dsm_domain_hasher("DSM/genesis");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS);
         h.update(&session.device_entropy);
         for m in &session.mpc_entropies {
             h.update(m);

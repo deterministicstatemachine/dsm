@@ -11,7 +11,7 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 fn cert_pin(cert_der: &[u8]) -> Vec<u8> {
-    dsm::crypto::blake3::domain_hash("DSM/tls-cert-hash", cert_der)
+    dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_TLS_CERT_HASH, cert_der)
         .as_bytes()
         .to_vec()
 }

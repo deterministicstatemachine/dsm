@@ -32,7 +32,7 @@ pub fn derive_ephemeral_seed(
     k_step: &[u8; 32],
     k_dbrw: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/ek");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_EK);
     hasher.update(h_n);
     hasher.update(c_pre);
     hasher.update(k_step);
@@ -103,7 +103,7 @@ pub fn verify_cdbrw_response_signature(
 ///
 /// `k_step = BLAKE3("DSM/kyber-ss\0" || ss)`
 pub fn derive_kyber_step_key(shared_secret: &[u8]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/kyber-ss");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_KYBER_SS);
     hasher.update(shared_secret);
     *hasher.finalize().as_bytes()
 }
@@ -117,7 +117,7 @@ pub fn derive_kyber_coins(
     dev_id: &[u8; 32],
     k_dbrw: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/kyber-coins");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_KYBER_COINS);
     hasher.update(h_n);
     hasher.update(c_pre);
     hasher.update(dev_id);
@@ -143,7 +143,7 @@ pub fn derive_kyber_coins(
 /// Compute the certification hash:
 /// `BLAKE3-256("DSM/ek-cert\0" || EK_pk_{n+1} || h_n)`.
 pub fn derive_ek_cert_hash(ek_pk_next: &[u8], h_n: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/ek-cert");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_EK_CERT);
     hasher.update(ek_pk_next);
     hasher.update(h_n);
     *hasher.finalize().as_bytes()

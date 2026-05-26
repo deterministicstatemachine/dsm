@@ -75,7 +75,7 @@ fn kat_blake3_domain_separation() -> Vec<CryptoKatResult> {
 
     // 1. NUL terminator: dsm_domain_hasher prepends "DSM/<tag>\0"
     {
-        let h1 = dsm_domain_hasher("DSM/state-hash")
+        let h1 = dsm_domain_hasher(dsm::common::domain_tags::TAG_STATE_HASH)
             .update(b"test-data")
             .finalize();
         let mut manual = blake3::Hasher::new();
@@ -97,8 +97,8 @@ fn kat_blake3_domain_separation() -> Vec<CryptoKatResult> {
 
     // 2. Determinism: same inputs -> identical output
     {
-        let h1 = domain_hash("DSM/test", b"determinism-check");
-        let h2 = domain_hash("DSM/test", b"determinism-check");
+        let h1 = domain_hash(dsm::common::domain_tags::TAG_DSM_TEST, b"determinism-check");
+        let h2 = domain_hash(dsm::common::domain_tags::TAG_DSM_TEST, b"determinism-check");
         let pass = h1 == h2;
         out.push(CryptoKatResult {
             primitive: "BLAKE3".into(),
@@ -114,8 +114,8 @@ fn kat_blake3_domain_separation() -> Vec<CryptoKatResult> {
 
     // 3. Domain collision resistance: different tags -> different hashes
     {
-        let h1 = domain_hash("DSM/tag-a", b"same-data");
-        let h2 = domain_hash("DSM/tag-b", b"same-data");
+        let h1 = domain_hash(dsm::common::domain_tags::TAG_DSM_TAG_A, b"same-data");
+        let h2 = domain_hash(dsm::common::domain_tags::TAG_DSM_TAG_B, b"same-data");
         let pass = h1 != h2;
         out.push(CryptoKatResult {
             primitive: "BLAKE3".into(),
@@ -131,8 +131,8 @@ fn kat_blake3_domain_separation() -> Vec<CryptoKatResult> {
 
     // 4. Data collision resistance: same tag, different data -> different hashes
     {
-        let h1 = domain_hash("DSM/tag", b"data-alpha");
-        let h2 = domain_hash("DSM/tag", b"data-beta");
+        let h1 = domain_hash(dsm::common::domain_tags::TAG_DSM_TAG, b"data-alpha");
+        let h2 = domain_hash(dsm::common::domain_tags::TAG_DSM_TAG, b"data-beta");
         let pass = h1 != h2;
         out.push(CryptoKatResult {
             primitive: "BLAKE3".into(),

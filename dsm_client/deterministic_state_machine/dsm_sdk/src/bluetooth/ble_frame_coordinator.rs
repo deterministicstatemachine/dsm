@@ -537,7 +537,10 @@ impl BleFrameCoordinator {
 
     /// Compute a 32-bit checksum of the payload using BLAKE3
     fn checksum32(payload: &[u8]) -> u32 {
-        let h = dsm::crypto::blake3::domain_hash("DSM/ble-frame-checksum", payload);
+        let h = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_BLE_FRAME_CHECKSUM,
+            payload,
+        );
         let b = h.as_bytes();
         u32::from_le_bytes([b[0], b[1], b[2], b[3]])
     }
@@ -547,7 +550,7 @@ impl BleFrameCoordinator {
     /// Same payload + frame_type always produces the same commitment,
     /// enabling cross-session chunk correlation for durable persistence.
     fn content_addressed_frame_commitment(frame_type: i32, payload: &[u8]) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/ble-frame");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BLE_FRAME);
         hasher.update(payload);
         hasher.update(&[frame_type as u8]);
         *hasher.finalize().as_bytes()

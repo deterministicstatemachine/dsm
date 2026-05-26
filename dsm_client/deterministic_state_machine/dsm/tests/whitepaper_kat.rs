@@ -70,7 +70,9 @@ fn hex32(b: &[u8; 32]) -> String {
 
 #[test]
 fn kat_dsm_hash_data() {
-    let from_code = *dsm::crypto::blake3::domain_hash("DSM/hash-data", b"abc").as_bytes();
+    let from_code =
+        *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_HASH_DATA, b"abc")
+            .as_bytes();
     let expected = spec_digest("DSM/hash-data", b"abc");
     assert_eq!(from_code, expected);
     assert_pin(
@@ -113,7 +115,9 @@ fn kat_dsm_precommit() {
     input.extend_from_slice(payload);
     input.extend_from_slice(&e);
 
-    let from_code = *dsm::crypto::blake3::domain_hash("DSM/precommit", &input).as_bytes();
+    let from_code =
+        *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_PRECOMMIT, &input)
+            .as_bytes();
     let expected = spec_digest("DSM/precommit", &input);
     assert_eq!(from_code, expected);
     assert_pin(

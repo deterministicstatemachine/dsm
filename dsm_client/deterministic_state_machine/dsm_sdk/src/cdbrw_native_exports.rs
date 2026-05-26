@@ -128,7 +128,10 @@ mod tests {
         let ok =
             unsafe { dsm_blake3_keyed(tag.as_ptr(), data.as_ptr(), data.len(), out.as_mut_ptr()) };
         assert!(ok);
-        let expected = dsm::crypto::blake3::domain_hash_bytes("DSM/cdbrw-thermal", data);
+        let expected = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_CDBRW_THERMAL,
+            data,
+        );
         assert_eq!(out, expected);
     }
 
@@ -138,7 +141,10 @@ mod tests {
         let mut out = [0u8; 32];
         let ok = unsafe { dsm_blake3_keyed(tag.as_ptr(), std::ptr::null(), 0, out.as_mut_ptr()) };
         assert!(ok);
-        let expected = dsm::crypto::blake3::domain_hash_bytes("DSM/cdbrw-thermal", &[]);
+        let expected = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_CDBRW_THERMAL,
+            &[],
+        );
         assert_eq!(out, expected);
     }
 

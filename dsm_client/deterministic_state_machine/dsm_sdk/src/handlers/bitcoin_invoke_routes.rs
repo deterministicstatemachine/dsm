@@ -621,7 +621,10 @@ impl AppRouterImpl {
         preimage.extend_from_slice(&amount_sats.to_le_bytes());
         preimage.extend_from_slice(dest.as_bytes());
         preimage.extend_from_slice(&crate::util::deterministic_time::tick().to_le_bytes());
-        let id_hash = dsm::crypto::blake3::domain_hash("DSM/withdrawal", &preimage);
+        let id_hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_WITHDRAWAL,
+            &preimage,
+        );
         format!(
             "wd-{}",
             crate::util::text_id::encode_base32_crockford(&id_hash.as_bytes()[..16])
@@ -728,7 +731,10 @@ impl AppRouterImpl {
             preimage.extend_from_slice(&plan.requested_net_sats.to_le_bytes());
             preimage.extend_from_slice(req.destination_address.as_bytes());
             preimage.extend_from_slice(&crate::util::deterministic_time::tick().to_le_bytes());
-            let id_hash = dsm::crypto::blake3::domain_hash("DSM/withdrawal", &preimage);
+            let id_hash = dsm::crypto::blake3::domain_hash(
+                dsm::common::domain_tags::TAG_DSM_WITHDRAWAL,
+                &preimage,
+            );
             format!(
                 "wd-{}",
                 crate::util::text_id::encode_base32_crockford(&id_hash.as_bytes()[..16])
@@ -2441,7 +2447,11 @@ impl AppRouterImpl {
                 let refund_preimage = {
                     let mut buf = Vec::from(record.hash_lock.as_slice());
                     buf.extend_from_slice(&record.refund_iterations.to_le_bytes());
-                    dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-refund", &buf).to_vec()
+                    dsm::crypto::blake3::domain_hash_bytes(
+                        dsm::common::domain_tags::TAG_DSM_DLV_REFUND,
+                        &buf,
+                    )
+                    .to_vec()
                 };
 
                 let network = match crate::storage::client_db::list_bitcoin_accounts() {
@@ -4958,7 +4968,10 @@ mod tests {
     /// Test labels stay descriptive in source while the on-disk + on-wire id is
     /// the strict 32-byte form `LimboVaultProto.id` requires.
     fn vid_from_label(label: &str) -> [u8; 32] {
-        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+        dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_DBTC_TEST_VAULT,
+            label.as_bytes(),
+        )
     }
 
     fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {

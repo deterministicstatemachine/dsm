@@ -46,7 +46,8 @@ pub fn calculate_next_entropy(
     operation_bytes: &[u8],
     parent_hash: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/next-entropy");
+    let mut hasher =
+        crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_NEXT_ENTROPY);
     hasher.update(current_entropy);
     hasher.update(operation_bytes);
     hasher.update(parent_hash);
@@ -76,7 +77,7 @@ mod tests {
         let data = b"test data";
         let hash = hash_blake3(data);
 
-        // hash_blake3 uses domain_hash("DSM/state-hash", data) internally
+        // hash_blake3 uses the TAG_STATE_HASH domain internally
         let expected = crate::crypto::blake3::domain_hash(TAG_STATE_HASH, data);
         assert_eq!(hash.as_bytes(), expected.as_bytes());
     }

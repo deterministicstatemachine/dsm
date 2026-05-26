@@ -936,7 +936,8 @@ fn compute_initial_chain_tip(
         (genesis_b, device_b, genesis_a, device_a)
     };
 
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/bilateral-session");
+    let mut hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_BILATERAL_SESSION);
     hasher.update(genesis_1);
     hasher.update(device_1);
     hasher.update(genesis_2);

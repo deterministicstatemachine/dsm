@@ -136,7 +136,7 @@ pub fn hash_data(data: &[u8]) -> Vec<u8> {
 ///
 /// A 32-byte BLAKE3 digest as `Vec<u8>`.
 pub fn hash_multiple(parts: &[&[u8]]) -> Vec<u8> {
-    let mut hasher = blake3::dsm_domain_hasher("DSM/hash-multiple");
+    let mut hasher = blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_HASH_MULTIPLE);
     for part in parts {
         hasher.update(part);
     }
@@ -174,7 +174,8 @@ pub fn generate_nonce_32() -> Vec<u8> {
 
 /// Generate a deterministic 12-byte nonce for state-machine operations (domain separated).
 pub fn generate_deterministic_gcm_nonce(context: &[u8], counter: u64) -> Vec<u8> {
-    let mut hasher = blake3::dsm_domain_hasher("DSM/deterministic-nonce-gcm");
+    let mut hasher =
+        blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DETERMINISTIC_NONCE_GCM);
     hasher.update(context);
     hasher.update(&counter.to_le_bytes());
     let hash = hasher.finalize();
@@ -183,7 +184,8 @@ pub fn generate_deterministic_gcm_nonce(context: &[u8], counter: u64) -> Vec<u8>
 
 /// Generate a deterministic 32-byte nonce (only for protocols that require 256-bit nonces).
 pub fn generate_deterministic_nonce_32(context: &[u8], counter: u64) -> Vec<u8> {
-    let mut hasher = blake3::dsm_domain_hasher("DSM/deterministic-nonce-32");
+    let mut hasher =
+        blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DETERMINISTIC_NONCE_32);
     hasher.update(context);
     hasher.update(&counter.to_le_bytes());
     let hash = hasher.finalize();
@@ -205,7 +207,9 @@ pub fn generate_online_transfer_nonce(
     seq: u64,
     payload_digest: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/OnlineTransferRequest/nonce/v1");
+    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_ONLINETRANSFERREQUEST_NONCE_V1,
+    );
     hasher.update(sender_id);
     hasher.update(receiver_id);
     hasher.update(prev_tip);

@@ -240,7 +240,10 @@ impl ExternalCommitmentSdk {
         if let Some(sdk) = &self.storage_sdk {
             let serialized = self.serialize_commitment(&commitment);
             // Calculate CAS key logic
-            let hash = dsm::crypto::blake3::domain_hash("DSM/external-commit-hash", &serialized);
+            let hash = dsm::crypto::blake3::domain_hash(
+                dsm::common::domain_tags::TAG_DSM_EXTERNAL_COMMIT_HASH,
+                &serialized,
+            );
             let key = crate::util::text_id::encode_base32_crockford(hash.as_bytes());
 
             // Store using store_data(key, data)

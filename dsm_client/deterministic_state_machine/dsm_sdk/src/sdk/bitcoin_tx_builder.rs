@@ -743,7 +743,8 @@ pub fn derive_claim_keypair(
     let mut input = Vec::with_capacity(preimage.len() + 32);
     input.extend_from_slice(preimage);
     input.extend_from_slice(hash_lock);
-    let derived = dsm::crypto::blake3::domain_hash("DSM/dbtc-claim", &input);
+    let derived =
+        dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_DBTC_CLAIM, &input);
 
     let secp = Secp256k1::new();
     let secret_key = SecretKey::from_slice(derived.as_bytes())

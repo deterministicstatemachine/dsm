@@ -51,7 +51,9 @@ impl IdentityVerifier {
 
     /// Verify identity claim signature using the claim's anchored SPHINCS+ public key.
     fn verify_claim_signature(claim: &IdentityClaim) -> Result<bool, DsmError> {
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/identity/claim");
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_IDENTITY_CLAIM,
+        );
         hasher.update(claim.identity_id.as_bytes());
         hasher.update(&claim.tick.to_le_bytes());
         hasher.update(&claim.expires_at_tick.to_le_bytes());
@@ -78,7 +80,9 @@ impl IdentityVerifier {
         anchor: &IdentityAnchor,
     ) -> Result<bool, DsmError> {
         // Hash the anchor data to get the expected commitment value
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/identity/anchor");
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_IDENTITY_ANCHOR,
+        );
 
         // Add all anchor fields to hash
         hasher.update(anchor.identity_id.as_bytes());
@@ -128,7 +132,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn compute_claim_hash(identity_id: &str, tick: u64, expires_at_tick: u64) -> Vec<u8> {
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/identity/claim");
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_IDENTITY_CLAIM,
+        );
         hasher.update(identity_id.as_bytes());
         hasher.update(&tick.to_le_bytes());
         hasher.update(&expires_at_tick.to_le_bytes());
@@ -140,7 +146,9 @@ mod tests {
         created_at_tick: u64,
         revoked_at_tick: Option<u64>,
     ) -> Vec<u8> {
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/identity/anchor");
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_IDENTITY_ANCHOR,
+        );
         hasher.update(identity_id.as_bytes());
         hasher.update(&created_at_tick.to_le_bytes());
         hasher.update(&revoked_at_tick.unwrap_or(0).to_le_bytes());

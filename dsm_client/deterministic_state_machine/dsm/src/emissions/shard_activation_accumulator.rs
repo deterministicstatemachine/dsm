@@ -39,7 +39,7 @@ impl ShardActivationAccumulator {
     }
 
     pub fn append(&mut self, id: [u8; 32]) {
-        let leaf = domain_hash_bytes("DJTE.ACTIVE", &id);
+        let leaf = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_ACTIVE, &id);
         self.leaves.push(leaf);
     }
 
@@ -51,7 +51,8 @@ impl ShardActivationAccumulator {
         while current_level.len() > 1 {
             let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
             for chunk in current_level.chunks(2) {
-                let mut hasher = dsm_domain_hasher("DSM/djte-shard-merkle");
+                let mut hasher =
+                    dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DJTE_SHARD_MERKLE);
                 hasher.update(&chunk[0]);
                 if chunk.len() == 2 {
                     hasher.update(&chunk[1]);
@@ -126,7 +127,7 @@ mod tests {
 
         let leaf = acc.get_leaf(0);
         assert!(leaf.is_some());
-        let expected = domain_hash_bytes("DJTE.ACTIVE", &id);
+        let expected = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_ACTIVE, &id);
         assert_eq!(leaf.unwrap(), expected);
 
         assert!(acc.get_leaf(1).is_none());
@@ -202,6 +203,9 @@ mod tests {
 
         let stored = acc.get_leaf(0).unwrap();
         assert_ne!(stored, id, "leaf must be domain-hashed, not raw id");
-        assert_eq!(stored, domain_hash_bytes("DJTE.ACTIVE", &id));
+        assert_eq!(
+            stored,
+            domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_ACTIVE, &id)
+        );
     }
 }

@@ -152,7 +152,7 @@ pub fn compute_moments(hist: &[f32]) -> MomentVector {
 /// position in the vector AND to the specific verifier challenge,
 /// preventing replay across challenges.
 pub fn moment_commitment(moment: f64, index: u32, challenge: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/moment");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_MOMENT);
     h.update(&moment.to_le_bytes());
     h.update(&index.to_le_bytes());
     h.update(challenge);
@@ -249,7 +249,7 @@ fn extract_moment_path(leaves: &[[u8; 32]; ENVELOPE_MOMENT_COUNT], index: usize)
 }
 
 fn merkle_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/moment-node");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_MOMENT_NODE);
     h.update(left);
     h.update(right);
     *h.finalize().as_bytes()

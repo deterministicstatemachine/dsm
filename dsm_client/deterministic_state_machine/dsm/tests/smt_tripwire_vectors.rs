@@ -132,7 +132,7 @@ fn golden_tag_successor_tip() {
 #[test]
 fn golden_tag_initial_chain_tip() {
     // Reproduce initial_relationship_chain_tip logic:
-    // h_0 = dsm_domain_hasher("DSM/bilateral-session") || sorted(G_A, DevID_A, G_B, DevID_B)
+    // h_0 = dsm_domain_hasher(dsm::common::domain_tags::TAG_BILATERAL_SESSION) || sorted(G_A, DevID_A, G_B, DevID_B)
     // With local_device_id=[0x01;32], local_genesis=[0x01;32],
     //      remote_device_id=[0x02;32], remote_genesis=[0x02;32]
     // Since [0x01;32] < [0x02;32], order is: genesis_a=local_genesis, device_a=local_device,
@@ -158,7 +158,7 @@ fn golden_tag_initial_chain_tip() {
         )
     };
 
-    let mut h = dsm_domain_hasher("DSM/bilateral-session");
+    let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_BILATERAL_SESSION);
     h.update(genesis_a);
     h.update(device_a);
     h.update(genesis_b);

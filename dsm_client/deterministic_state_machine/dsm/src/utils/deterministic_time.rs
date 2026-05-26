@@ -27,7 +27,7 @@ impl ProgressContext {
 
     /// Derive deterministic hash from current progress state + context
     pub fn derive_hash(&self, context: &[u8]) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/deterministic-time");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DETERMINISTIC_TIME);
         hasher.update(&self.smt_root);
         hasher.update(&self.commit_height.to_le_bytes());
         hasher.update(context);
@@ -122,7 +122,7 @@ pub fn derive_progress_hash(context: &[u8]) -> [u8; 32] {
     }
 
     // Default path for uninitialized state or lock contention
-    let mut hasher = dsm_domain_hasher("DSM/deterministic-time");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DETERMINISTIC_TIME);
     hasher.update(b"UNINITIALIZED");
     hasher.update(context);
     *hasher.finalize().as_bytes()

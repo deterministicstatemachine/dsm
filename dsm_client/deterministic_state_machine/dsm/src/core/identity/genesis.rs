@@ -33,7 +33,10 @@ fn generate_secure_random(rng: &mut impl RngCore, len: usize) -> Result<Vec<u8>,
 
 #[inline]
 fn blake3_hash(data: &[u8]) -> Result<[u8; 32], DsmError> {
-    Ok(*crate::crypto::blake3::domain_hash("DSM/genesis-hash", data).as_bytes())
+    Ok(
+        *crate::crypto::blake3::domain_hash(crate::common::domain_tags::TAG_DSM_GENESIS_HASH, data)
+            .as_bytes(),
+    )
 }
 
 #[allow(dead_code)]
@@ -188,7 +191,7 @@ impl KyberKey {
 /// whitepaper §2.5 in `genesis_mpc::compute_genesis_id`).
 #[allow(dead_code)]
 fn calculate_genesis_hash(contributions: &[Vec<u8>], anchor: &[u8]) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis-replay");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_REPLAY);
     hasher.update(anchor);
     for contrib in contributions {
         hasher.update(contrib);
@@ -202,7 +205,7 @@ fn calculate_initial_entropy(
     genesis_hash: &[u8],
     contributions: &[Vec<u8>],
 ) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis-initial-entropy");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_INITIAL_ENTROPY);
     hasher.update(genesis_hash);
     for contrib in contributions {
         hasher.update(contrib);
@@ -219,7 +222,8 @@ fn calculate_device_entropy(
     device_id: &str,
     device_specific_entropy: &[u8],
 ) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/sub-genesis-device-entropy");
+    let mut hasher =
+        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_SUB_GENESIS_DEVICE_ENTROPY);
     hasher.update(sub_genesis_hash);
     hasher.update(master_entropy);
     hasher.update(device_id.as_bytes());
@@ -429,7 +433,8 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
 pub fn get_device_entropy(
     device_id: &str,
 ) -> Result<Vec<u8>, crate::core::identity::IdentityError> {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/DEV_ENT/v2");
+    let mut hasher =
+        crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DEV_ENT_V2);
     hasher.update(device_id.as_bytes());
     Ok(hasher.finalize().as_bytes().to_vec())
 }

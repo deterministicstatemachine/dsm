@@ -105,7 +105,7 @@ fn initial_relationship_chain_tip(
     remote_device_id: &[u8; 32],
     remote_genesis_hash: &[u8; 32],
 ) -> [u8; 32] {
-    // h_0 = dsm_domain_hasher("DSM/bilateral-session") || sorted(G_A, DevID_A, G_B, DevID_B)
+    // h_0 = hasher(TAG_BILATERAL_SESSION) || sorted(G_A, DevID_A, G_B, DevID_B)
     // Lexicographic ordering ensures identical output regardless of initiator.
     // compute_initial_chain_tip() in contact_sdk.rs MUST use the same hasher and tag.
     let (genesis_a, device_a, genesis_b, device_b) = if local_device_id < remote_device_id {

@@ -412,7 +412,9 @@ mod tests {
         // (matches the production primitive after the Issue #184 F2
         // classical-commitment removal).
         let commitment = {
-            let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/dlv-content-commit");
+            let mut h = crate::crypto::blake3::dsm_domain_hasher(
+                crate::common::domain_tags::TAG_DSM_DLV_CONTENT_COMMIT,
+            );
             h.update(&[0xDE; 32]); // fixed test blinding
             h.update(b"test_content");
             *h.finalize().as_bytes()
@@ -589,7 +591,9 @@ mod tests {
         fee_bps: u32,
     ) -> LimboVault {
         let commitment = {
-            let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/dlv-content-commit");
+            let mut h = crate::crypto::blake3::dsm_domain_hasher(
+                crate::common::domain_tags::TAG_DSM_DLV_CONTENT_COMMIT,
+            );
             h.update(&[0xDE; 32]); // fixed test blinding
             h.update(b"amm_vault");
             *h.finalize().as_bytes()

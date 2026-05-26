@@ -464,7 +464,10 @@ impl DiscoveryService {
         }
 
         // Derive a numeric suffix from the URL in a deterministic way (no hex/base64)
-        let hash = dsm::crypto::blake3::domain_hash("DSM/discovery-url", url.as_bytes());
+        let hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_DISCOVERY_URL,
+            url.as_bytes(),
+        );
         let mut four = [0u8; 4];
         four.copy_from_slice(&hash.as_bytes()[..4]);
         let n = u32::from_le_bytes(four);

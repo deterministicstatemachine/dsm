@@ -108,9 +108,12 @@ impl EncryptedAppState {
         smt_root: &[u8],
     ) -> Result<Self, DsmError> {
         // Context binds this encryption to this device
-        let key_context = dsm::crypto::blake3::domain_hash("DSM/offline-key-ctx", device_id)
-            .as_bytes()
-            .to_vec();
+        let key_context = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_OFFLINE_KEY_CTX,
+            device_id,
+        )
+        .as_bytes()
+        .to_vec();
         let enc_key = master_key.derive_storage_key("app_state", &key_context);
 
         let cipher = Aes256Gcm::new_from_slice(&enc_key)
@@ -360,9 +363,12 @@ impl OfflineTransactionQueue {
 
     fn encrypt_transaction(&self, transaction: &[u8]) -> Result<EncryptedTransaction, DsmError> {
         // Bind encryption to the content itself
-        let key_context = dsm::crypto::blake3::domain_hash("DSM/offline-tx-ctx", transaction)
-            .as_bytes()
-            .to_vec();
+        let key_context = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_OFFLINE_TX_CTX,
+            transaction,
+        )
+        .as_bytes()
+        .to_vec();
         let enc_key = self
             .master_key
             .derive_storage_key("transaction", &key_context);

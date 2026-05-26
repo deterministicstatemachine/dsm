@@ -515,7 +515,7 @@ impl RuntimeConfig {
         if let Ok(id) = std::env::var("DSM_DEVICE_ID") {
             return id;
         }
-        let mut hasher = dsm_domain_hasher("DSM/device-id-gen");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DEVICE_ID_GEN);
         if let Ok(hostname) = hostname::get() {
             hasher.update(hostname.to_string_lossy().as_bytes());
         }
@@ -534,7 +534,7 @@ impl RuntimeConfig {
     }
 
     fn generate_device_fingerprint() -> Vec<u8> {
-        let mut hasher = dsm_domain_hasher("DSM/device-fingerprint");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DEVICE_FINGERPRINT);
         hasher.update(std::env::consts::OS.as_bytes());
         hasher.update(std::env::consts::ARCH.as_bytes());
         if let Ok(hostname) = hostname::get() {
@@ -550,7 +550,7 @@ impl RuntimeConfig {
     }
 
     pub fn device_entropy() -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/device-entropy");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DEVICE_ENTROPY);
         hasher.update(&Self::generate_device_fingerprint());
         hasher.update(&Self::current_tick().to_le_bytes());
         let random_bytes = (0..32).map(|_| fastrand::u8(..)).collect::<Vec<u8>>();

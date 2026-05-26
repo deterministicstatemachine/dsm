@@ -472,7 +472,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         //
         // The live path concatenates `genesis || device_id || K_DBRW`, then
         // `SignatureKeyPair::generate_from_entropy()` compresses that material with
-        // `domain_hash("DSM/sphincs-seed", ...)` before deterministic SPHINCS keygen.
+        // `domain_hash(dsm::common::domain_tags::TAG_DSM_SPHINCS_SEED, ...)` before deterministic SPHINCS keygen.
         let dbrw_key = crate::fetch_dbrw_binding_key().map_err(|e| {
             format!(
                 "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
