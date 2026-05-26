@@ -44,26 +44,21 @@
 //! # Module Organisation
 //!
 //! - **Core hashing**: [`blake3`], [`hash`], [`canonical_lp`]
-//! - **Signatures**: [`sphincs`] (low-level), [`signatures`] (high-level API), [`streaming_signature`]
+//! - **Signatures**: [`sphincs`] (low-level), [`signatures`] (high-level API)
 //! - **Key exchange**: [`kyber`] (ML-KEM-768)
 //! - **Symmetric AEAD**: [`aead`] (AES-256-GCM)
 //! - **Commitments**: salted BLAKE3 (no dedicated module — call `blake3::dsm_domain_hasher` with a per-purpose tag; canonical pattern lives at `vault::limbo_vault::dlv_content_commitment`)
 //! - **Anti-cloning**: [`cdbrw_binding`]
 //! - **RNG**: [`rng`] (OS and deterministic random byte generation)
-//! - **Privacy**: [`random_walk_privacy`]
-//! - **Device memory**: [`device_memory_manager`]
-//! - **Testing**: [`adb_test_utils`] (ADB-based hardware testing for C-DBRW)
 
 use crate::types::error::DsmError;
 
 // Re-export the main crypto modules
-pub mod adb_test_utils;
 pub mod aead;
 pub mod blake3;
 pub mod canonical_lp;
 pub mod cdbrw_binding;
 pub mod cdbrw_moments;
-pub mod device_memory_manager;
 pub mod ephemeral_key;
 pub mod hash;
 pub mod hkdf;
@@ -71,11 +66,9 @@ pub mod kyber;
 // Classical group-based commitment module REMOVED — Issue #184 F2.
 // See module docs above for rationale; replacement is a salted BLAKE3
 // commitment in `vault::limbo_vault::dlv_content_commitment`.
-pub mod random_walk_privacy;
 pub mod rng;
 pub mod signatures;
 pub mod sphincs;
-pub mod streaming_signature;
 
 // Micro-level determinism property tests.
 // Kept under `crypto` so they can access crypto primitives without exposing new APIs.
