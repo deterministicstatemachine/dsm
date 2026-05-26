@@ -33,36 +33,12 @@ impl DeviceMasterKey {
     /// This key is **never** used for transaction signing.
     pub fn generate_from_hardware() -> Result<Self, DsmError> {
         let mut entropy = [0u8; 32];
-
-        #[cfg(target_os = "android")]
-        {
-            use std::fs::File;
-            use std::io::Read;
-
-            let mut f = File::open("/dev/random")
-                .map_err(|e| DsmError::crypto("Failed to access entropy source", Some(e)))?;
-            f.read_exact(&mut entropy)
-                .map_err(|e| DsmError::crypto("Failed to read entropy", Some(e)))?;
-
-            // Mix with a static domain key to produce a stable-sized key material
-            let mut key = [0u8; 32];
-            let domain = b"DSM/local_storage";
-            key[..domain.len().min(32)].copy_from_slice(&domain[..domain.len().min(32)]);
-            entropy = *blake3::keyed_hash(&key, &entropy).as_bytes();
-
-            // Best-effort extra uniqueness (not required for correctness)
-            let _ = android_device_id();
-        }
-
-        #[cfg(not(target_os = "android"))]
-        {
-            rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut entropy).map_err(|e| {
-                DsmError::crypto(
-                    format!("OsRng entropy failure: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-        }
+        rand::TryRngCore::try_fill_bytes(&mut OsRng, &mut entropy).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
 
         Ok(DeviceMasterKey(entropy))
     }
@@ -723,26 +699,4 @@ mod tests {
         state.clear_synced_transactions(1);
         assert_eq!(state.get_pending_transactions().len(), 1);
     }
-}
-
-#[cfg(target_os = "android")]
-fn android_device_id() -> Result<String, DsmError> {
-    // Android-specific device ID retrieval (best-effort; purely for local key mixing).
-    if let Some(id) = crate::sdk::app_state::AppState::get_device_id() {
-        if id.len() == 32 {
-            return Ok(crate::util::text_id::encode_base32_crockford(&id));
-        }
-    }
-
-    if let Some(k) = crate::jni::cdbrw::get_cdbrw_binding_key() {
-        if !k.is_empty() {
-            let h = dsm::crypto::blake3::domain_hash("DSM/offline-key-derive", &k);
-            return Ok(crate::util::text_id::encode_base32_crockford(h.as_bytes()));
-        }
-    }
-
-    Err(DsmError::crypto(
-        "android_device_id unavailable",
-        None::<std::io::Error>,
-    ))
 }

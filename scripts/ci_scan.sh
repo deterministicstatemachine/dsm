@@ -157,6 +157,19 @@ if [ -d "$CORE_DIR" ]; then
     fail_if_found "Time/clock APIs detected in core" "${EXCLUDES[@]}" -e "$CLOCK_PATTERN" "$CORE_DIR"
 fi
 
+# 3b) Ban blocking entropy sources in production code. Android must use the
+# platform-backed nonblocking OS RNG path exposed through rand/getrandom, not
+# direct reads from /dev/random.
+ENTROPY_SCAN_ROOTS=(
+  dsm_client/deterministic_state_machine/dsm/src
+  dsm_client/deterministic_state_machine/dsm_sdk/src
+  dsm_client/android/app/src/main
+)
+fail_if_found "blocking /dev/random entropy source" \
+  "${EXCLUDES[@]}" \
+  --fixed-strings "/dev/random" \
+  "${ENTROPY_SCAN_ROOTS[@]}"
+
 
 
 # 5) Ban encoding misuse inside Rust core (hex/base64) for canonical commits
