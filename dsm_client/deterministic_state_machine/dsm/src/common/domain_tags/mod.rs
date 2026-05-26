@@ -4,28 +4,14 @@
 //! hash time, so constants in this module are plain tag strings unless
 //! explicitly suffixed with _NUL for compatibility cases.
 //!
-//! This module is intentionally split into scoped submodules so we keep a
-//! single source of truth without one giant flat file.
+//! This module is intentionally split into a hierarchical structure so DSM
+//! and DJTE namespaces remain easy to navigate and maintain.
 
-mod bilateral_transport;
-mod core;
-mod crypto_keys;
 mod djte;
-mod genesis_identity;
-mod misc;
-mod policy_registry;
-mod recovery;
-mod vault_dbtc;
+mod dsm;
 
-pub use core::*;
+pub use dsm::*;
 pub use djte::*;
-pub use bilateral_transport::*;
-pub use crypto_keys::*;
-pub use genesis_identity::*;
-pub use misc::*;
-pub use policy_registry::*;
-pub use recovery::*;
-pub use vault_dbtc::*;
 
 #[cfg(test)]
 mod tests {
@@ -33,15 +19,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn all_tags() -> Vec<&'static str> {
-        let mut tags = Vec::new();
-        tags.extend_from_slice(core::TAGS);
-        tags.extend_from_slice(bilateral_transport::TAGS);
-        tags.extend_from_slice(crypto_keys::TAGS);
-        tags.extend_from_slice(genesis_identity::TAGS);
-        tags.extend_from_slice(misc::TAGS);
-        tags.extend_from_slice(policy_registry::TAGS);
-        tags.extend_from_slice(recovery::TAGS);
-        tags.extend_from_slice(vault_dbtc::TAGS);
+        let mut tags = dsm::all_tags();
         tags.extend_from_slice(djte::TAGS);
         tags
     }
