@@ -199,7 +199,10 @@ pub fn build_moment_tree(
 /// `path` is the 3 sibling hashes from leaf to root, ordered
 /// innermost-first (layer 0 sibling, layer 1 sibling, layer 2 sibling).
 /// Returns `true` iff the reconstructed root matches `expected_root`.
-pub fn verify_moment_path(
+///
+/// Test-only helper: unreachable by production path.
+#[cfg(test)]
+fn verify_moment_path(
     leaf_hash: &[u8; 32],
     index: u32,
     path: &[[u8; 32]; 3],
@@ -219,10 +222,10 @@ pub fn verify_moment_path(
 }
 
 /// Extract the Merkle path for leaf `index` from the full leaf array.
-pub fn extract_moment_path(
-    leaves: &[[u8; 32]; ENVELOPE_MOMENT_COUNT],
-    index: usize,
-) -> [[u8; 32]; 3] {
+///
+/// Test-only helper: unreachable by production path.
+#[cfg(test)]
+fn extract_moment_path(leaves: &[[u8; 32]; ENVELOPE_MOMENT_COUNT], index: usize) -> [[u8; 32]; 3] {
     debug_assert!(index < ENVELOPE_MOMENT_COUNT);
     // Sibling at layer 0
     let layer0_sibling = leaves[index ^ 1];
@@ -258,7 +261,10 @@ fn merkle_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 /// `Ok(())` when every moment passes; `Err(i)` with the failing moment
 /// index on the first violation. The verifier MUST reject the response
 /// if this returns Err.
-pub fn check_envelope(
+///
+/// Test-only helper: unreachable by production path.
+#[cfg(test)]
+fn check_envelope(
     live: &MomentVector,
     baseline: &MomentVector,
     tolerance: &MomentVector,
