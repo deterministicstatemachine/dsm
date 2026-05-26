@@ -10,6 +10,7 @@ use core::fmt;
 use std::collections::{HashMap, HashSet};
 
 use prost::Message;
+use crate::common::domain_tags::TAG_MERKLE_LEAF;
 use crate::crypto::kyber;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
@@ -1565,7 +1566,7 @@ impl LimboVault {
         if state_transition.len() == 32 {
             leaf_hash.copy_from_slice(state_transition);
         } else {
-            let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/merkle-leaf");
+            let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_MERKLE_LEAF);
             hasher.update(state_transition);
             leaf_hash.copy_from_slice(hasher.finalize().as_bytes());
         }

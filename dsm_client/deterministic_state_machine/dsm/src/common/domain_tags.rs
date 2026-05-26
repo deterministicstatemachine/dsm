@@ -28,6 +28,8 @@ pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit";
 pub const TAG_SMT_NODE: &str = "DSM/smt-node";
 pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf";
 pub const TAG_DBRW: &str = "DSM/dbrw";
+pub const TAG_MERKLE_NODE: &str = "DSM/merkle-node";
+pub const TAG_MERKLE_LEAF: &str = "DSM/merkle-leaf";
 // Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
 // open spec ambiguity between §2.2 (`merkle-node`/`merkle-leaf`) and
 // §16.3 (`dev-merkle`/`dev-empty`). Implementation continues to use
@@ -64,6 +66,8 @@ mod tests {
             TAG_SMT_NODE,
             TAG_SMT_LEAF,
             TAG_DBRW,
+            TAG_MERKLE_NODE,
+            TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
             TAG_DEV_LEAF,
             TAG_DEV_EMPTY,
@@ -85,6 +89,8 @@ mod tests {
             TAG_SMT_NODE,
             TAG_SMT_LEAF,
             TAG_DBRW,
+            TAG_MERKLE_NODE,
+            TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
             TAG_DEV_LEAF,
             TAG_DEV_EMPTY,
@@ -101,6 +107,8 @@ mod tests {
             TAG_SMT_NODE,
             TAG_SMT_LEAF,
             TAG_DBRW,
+            TAG_MERKLE_NODE,
+            TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
             TAG_DEV_LEAF,
             TAG_DEV_EMPTY,
