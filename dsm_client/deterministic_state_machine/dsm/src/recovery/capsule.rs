@@ -24,8 +24,8 @@ const RECOVERY_CAPSULE_AAD: &[u8] = b"DSM/recovery-capsule-v3\0";
 const RECOVERY_RING_ARGON2_SALT: &[u8] = b"DSM/recovery-ring\0";
 const RECOVERY_AEAD_CONTEXT: &str = "DSM/recovery-aead\0";
 const RECOVERY_AUTHORITY_CONTEXT: &str = "DSM/recovery-authority\0";
-const RECOVERY_NONCE_DOMAIN: &str = "DSM/recovery-nonce";
-const RECOVERY_CHALLENGE_DOMAIN: &str = "DSM/recovery-challenge";
+const RECOVERY_NONCE_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_NONCE;
+const RECOVERY_CHALLENGE_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_CHALLENGE;
 
 /// Initialize the capsule encryption/decryption subsystem.
 pub fn init_capsule_subsystem() -> Result<(), DsmError> {

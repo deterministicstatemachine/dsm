@@ -16,6 +16,8 @@ pub const TAG_DSM_DBRW_BINDING_V2: &str = "DSM/DBRW/BINDING/v2";
 pub const TAG_DSM_DBRW_COMMIT_COND: &str = "DSM/dbrw-commit-cond";
 pub const TAG_DSM_DBRW_COMMIT_RECUR: &str = "DSM/dbrw-commit-recur";
 pub const TAG_DSM_DBRW_COMMIT_TIMELOCK: &str = "DSM/dbrw-commit-timelock";
+pub const TAG_DSM_DBRW_RHO: &str = "DSM/dbrw-rho";
+pub const TAG_DSM_DBRW_STEP: &str = "DSM/dbrw-step";
 pub const TAG_DSM_DBRW_RWP_SEED: &str = "DSM/dbrw-rwp-seed";
 pub const TAG_DSM_DBRW_RWP_STEP: &str = "DSM/dbrw-rwp-step";
 pub const TAG_DSM_DETERMINISTIC_NONCE_32: &str = "DSM/deterministic-nonce-32";
@@ -29,6 +31,7 @@ pub const TAG_DSM_FLC_HASH_V2: &str = "DSM/flc/hash/v2";
 pub const TAG_DSM_HASH_MULTIPLE: &str = "DSM/hash-multiple";
 pub const TAG_DSM_KYBER_COINS: &str = "DSM/kyber-coins";
 pub const TAG_DSM_KYBER_SS: &str = "DSM/kyber-ss";
+pub const TAG_DSM_KYBER_STATIC: &str = "DSM/kyber-static";
 pub const TAG_DSM_MERKLE_PATH: &str = "DSM/merkle-path";
 pub const TAG_DSM_ML_KEM_KEYGEN_D: &str = "DSM/ml-kem-keygen-d";
 pub const TAG_DSM_ML_KEM_KEYGEN_Z: &str = "DSM/ml-kem-keygen-z";
@@ -82,6 +85,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_DBRW_COMMIT_COND,
     TAG_DSM_DBRW_COMMIT_RECUR,
     TAG_DSM_DBRW_COMMIT_TIMELOCK,
+    TAG_DSM_DBRW_RHO,
+    TAG_DSM_DBRW_STEP,
     TAG_DSM_DBRW_RWP_SEED,
     TAG_DSM_DBRW_RWP_STEP,
     TAG_DSM_DETERMINISTIC_NONCE_32,
@@ -95,6 +100,7 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_HASH_MULTIPLE,
     TAG_DSM_KYBER_COINS,
     TAG_DSM_KYBER_SS,
+    TAG_DSM_KYBER_STATIC,
     TAG_DSM_MERKLE_PATH,
     TAG_DSM_ML_KEM_KEYGEN_D,
     TAG_DSM_ML_KEM_KEYGEN_Z,
