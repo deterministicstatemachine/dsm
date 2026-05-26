@@ -13,6 +13,7 @@
 //! - Inclusion proofs for old/new leaves and device binding
 //! - Per-step C-DBRW receipt response through EK derivation and cert chaining
 
+use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 use crate::types::error::DsmError;
 use std::collections::HashMap;
 
@@ -475,7 +476,7 @@ impl StitchedReceiptV2 {
         let protobuf_bytes = self.to_canonical_protobuf()?;
 
         // Domain-separated BLAKE3-256: BLAKE3("DSM/receipt-commit\0" || canonical_protobuf_bytes)
-        let hash = crate::crypto::blake3::domain_hash("DSM/receipt-commit", &protobuf_bytes);
+        let hash = crate::crypto::blake3::domain_hash(TAG_RECEIPT_COMMIT, &protobuf_bytes);
         Ok(*hash.as_bytes())
     }
 

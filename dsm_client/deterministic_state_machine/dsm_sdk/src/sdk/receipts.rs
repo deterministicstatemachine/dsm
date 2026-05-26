@@ -7,6 +7,7 @@
 //! counter checking on stitched receipts.
 
 use dsm::types::error::DsmError;
+use dsm::common::domain_tags::TAG_RECEIPT_COMMIT;
 
 // Re-export canonical types from dsm core
 pub use dsm::types::receipt_types::{
@@ -944,7 +945,7 @@ pub fn deserialize_inclusion_proof(
 /// Callers should prefer a true `StitchedReceiptV2::compute_commitment()` when
 /// available. This helper mirrors the same domain and deterministic framing.
 pub fn derive_stitched_receipt_sigma(parts: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/receipt-commit");
+    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(TAG_RECEIPT_COMMIT);
     for part in parts {
         hasher.update(&(part.len() as u32).to_le_bytes());
         hasher.update(part);

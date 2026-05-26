@@ -22,6 +22,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
+use crate::common::domain_tags::{TAG_SMT_LEAF, TAG_SMT_NODE};
 use crate::crypto::blake3::dsm_domain_hasher;
 
 // ───────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ pub fn empty_leaf() -> [u8; 32] {
 ///
 /// Per spec §2.2: `Leaf(X) := BLAKE3-256("DSM/smt-leaf\0" || X)`.
 pub fn hash_smt_leaf(value: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/smt-leaf");
+    let mut hasher = dsm_domain_hasher(TAG_SMT_LEAF);
     hasher.update(value);
     *hasher.finalize().as_bytes()
 }
@@ -54,7 +55,7 @@ pub fn hash_smt_leaf(value: &[u8; 32]) -> [u8; 32] {
 ///
 /// Per spec §2.2: `Node(L, R) := BLAKE3-256("DSM/smt-node\0" || L || R)`.
 pub fn hash_smt_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/smt-node");
+    let mut hasher = dsm_domain_hasher(TAG_SMT_NODE);
     hasher.update(left);
     hasher.update(right);
     *hasher.finalize().as_bytes()
