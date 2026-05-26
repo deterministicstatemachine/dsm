@@ -22,6 +22,7 @@ use crate::core::state_machine::relationship::{
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::state_types::{DeviceInfo, State};
+use crate::common::domain_tags::TAG_ENTITY_ID;
 use crate::crypto::blake3::domain_hash;
 
 /// BilateralStateManager handles bilateral state transitions between entities
@@ -75,8 +76,8 @@ impl BilateralStateManager {
         if self
             .relationship_manager
             .verify_relationship_exists(
-                &domain_hash("DSM/entity-id", eid.as_bytes()).into(),
-                &domain_hash("DSM/entity-id", cid.as_bytes()).into(),
+                &domain_hash(TAG_ENTITY_ID, eid.as_bytes()).into(),
+                &domain_hash(TAG_ENTITY_ID, cid.as_bytes()).into(),
             )
             .unwrap_or(false)
         {
@@ -90,21 +91,21 @@ impl BilateralStateManager {
         let entity_state = State::new_genesis(
             entropy_a,
             DeviceInfo::new(
-                domain_hash("DSM/entity-id", eid.as_bytes()).into(),
+                domain_hash(TAG_ENTITY_ID, eid.as_bytes()).into(),
                 entity_public_key,
             ),
         );
         let counterparty_state = State::new_genesis(
             entropy_b,
             DeviceInfo::new(
-                domain_hash("DSM/entity-id", cid.as_bytes()).into(),
+                domain_hash(TAG_ENTITY_ID, cid.as_bytes()).into(),
                 counterparty_public_key,
             ),
         );
 
         self.relationship_manager.store_relationship(
-            &domain_hash("DSM/entity-id", eid.as_bytes()).into(),
-            &domain_hash("DSM/entity-id", cid.as_bytes()).into(),
+            &domain_hash(TAG_ENTITY_ID, eid.as_bytes()).into(),
+            &domain_hash(TAG_ENTITY_ID, cid.as_bytes()).into(),
             entity_state,
             counterparty_state,
         )
@@ -132,8 +133,8 @@ impl BilateralStateManager {
         let eid = Self::id_from_32(entity_id);
         let cid = Self::id_from_32(counterparty_id);
         self.relationship_manager.execute_relationship_transition(
-            &domain_hash("DSM/entity-id", eid.as_bytes()).into(),
-            &domain_hash("DSM/entity-id", cid.as_bytes()).into(),
+            &domain_hash(TAG_ENTITY_ID, eid.as_bytes()).into(),
+            &domain_hash(TAG_ENTITY_ID, cid.as_bytes()).into(),
             operation,
             entropy,
         )

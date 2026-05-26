@@ -12,6 +12,7 @@ use std::{
     sync::Mutex,
 };
 
+use crate::common::domain_tags::TAG_ENTITY_ID;
 use crate::crypto::blake3::dsm_domain_hasher;
 use base32;
 use zerocopy::IntoBytes;
@@ -646,8 +647,8 @@ impl RelationshipManager {
         counterparty_id: &str,
     ) -> Result<State, DsmError> {
         self.get_entity_state(
-            &crate::crypto::blake3::domain_hash("DSM/entity-id", entity_id.as_bytes()).into(),
-            &crate::crypto::blake3::domain_hash("DSM/entity-id", counterparty_id.as_bytes()).into(),
+            &crate::crypto::blake3::domain_hash(TAG_ENTITY_ID, entity_id.as_bytes()).into(),
+            &crate::crypto::blake3::domain_hash(TAG_ENTITY_ID, counterparty_id.as_bytes()).into(),
         )
     }
 }

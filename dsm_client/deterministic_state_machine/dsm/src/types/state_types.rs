@@ -17,6 +17,7 @@
 //! domain separation as mandated by the protocol specification.
 
 use crate::common::canonical_encoding::CanonicalEncode;
+use crate::common::domain_tags::TAG_DEVICE_ID;
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
@@ -248,7 +249,7 @@ impl DeviceInfo {
     /// * `device_id_str` - String identifier (will be hashed)
     /// * `public_key` - Public key associated with the device
     pub fn from_hashed_label(device_label: &str, public_key: Vec<u8>) -> Self {
-        let device_id_bytes = domain_hash("DSM/device-id", device_label.as_bytes());
+        let device_id_bytes = domain_hash(TAG_DEVICE_ID, device_label.as_bytes());
         Self {
             device_id: *device_id_bytes.as_bytes(),
             public_key,
@@ -1927,7 +1928,7 @@ impl PreCommitment {
             fixed_parameters,
             variable_parameters,
             flc.min_state_number,
-            domain_hash("DSM/device-id", flc.counterparty_id.as_bytes()).into(),
+            domain_hash(TAG_DEVICE_ID, flc.counterparty_id.as_bytes()).into(),
         );
 
         // Set additional fields

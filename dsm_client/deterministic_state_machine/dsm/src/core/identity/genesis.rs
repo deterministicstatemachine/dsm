@@ -11,6 +11,7 @@
 //! - Hashing: BLAKE3 everywhere (32-byte outputs).
 
 use crate::core::identity::Identity;
+use crate::common::domain_tags::TAG_DEVICE_ID;
 use crate::crypto::kyber;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
@@ -256,7 +257,7 @@ pub fn derive_device_sub_genesis(
         participants: HashSet::from([device_id.to_string()]),
         merkle_root: Some(master_genesis.hash),
         device_id: Some(
-            *crate::crypto::blake3::domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes(),
+            *crate::crypto::blake3::domain_hash(TAG_DEVICE_ID, device_id.as_bytes()).as_bytes(),
         ),
         signing_key,
         kyber_keypair,
@@ -615,7 +616,7 @@ mod tests {
         assert_eq!(device.merkle_root.unwrap(), master.hash);
         assert_eq!(
             device.device_id.unwrap(),
-            *crate::crypto::blake3::domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes()
+            *crate::crypto::blake3::domain_hash(TAG_DEVICE_ID, device_id.as_bytes()).as_bytes()
         );
         assert_eq!(device.hash.len(), 32);
         assert_eq!(device.initial_entropy.len(), 32);

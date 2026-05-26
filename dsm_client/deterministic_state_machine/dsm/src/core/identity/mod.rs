@@ -40,6 +40,7 @@ use std::sync::{Arc, RwLock};
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
 use crate::prelude::*; // common items incl. Uuid, etc.
+use crate::common::domain_tags::TAG_DEVICE_ID;
 use crate::crypto::blake3::{dsm_domain_hasher, domain_hash};
 use blake3;
 use tracing;
@@ -221,7 +222,7 @@ pub async fn create_trustless_genesis<
     }
 
     // Deterministic 32B device hash label for MPC inputs
-    let device_id_bytes: [u8; 32] = *domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes();
+    let device_id_bytes: [u8; 32] = *domain_hash(TAG_DEVICE_ID, device_id.as_bytes()).as_bytes();
 
     let session = create_mpc_genesis(
         device_id_bytes,
@@ -293,7 +294,7 @@ pub async fn create_trustless_genesis<
         s.put(&hash32, &ser).await?;
     }
 
-    let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
+    let device_id_bytes = domain_hash(TAG_DEVICE_ID, device_id.as_bytes()).into();
     Ok(TrustlessGenesisArtifacts {
         device_id: device_id_bytes,
         genesis_state,
@@ -368,7 +369,7 @@ impl IdentityStore {
                 .get_mut(genesis_id)
                 .ok_or_else(|| IdentityError::IdentityNotFound("Identity not found".into()))?;
             let device_id = format!("device_{:016x}", crate::performance::mono_commit_height());
-            let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
+            let device_id_bytes = domain_hash(TAG_DEVICE_ID, device_id.as_bytes()).into();
             if identity
                 .devices
                 .iter()
@@ -466,7 +467,7 @@ impl IdentityStore {
                 |e| IdentityError::DeviceError(format!("Device genesis derivation failed: {e:?}")),
             )?;
 
-        let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
+        let device_id_bytes = domain_hash(TAG_DEVICE_ID, device_id.as_bytes()).into();
         let identity = Identity {
             name: name.to_string(),
             master_genesis: genesis,
