@@ -17,7 +17,7 @@
 //! domain separation as mandated by the protocol specification.
 
 use crate::common::canonical_encoding::CanonicalEncode;
-use crate::common::domain_tags::TAG_DEVICE_ID;
+use crate::common::domain_tags::{TAG_DEVICE_ID, TAG_STATE_HASH};
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
@@ -518,7 +518,7 @@ impl State {
     /// (§11 eq. 14) makes state identity unique even when field values
     /// round-trip.
     pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/state-hash");
+        let mut hasher = dsm_domain_hasher(TAG_STATE_HASH);
 
         // Core state properties in deterministic order. No counter.
         hasher.update(&self.prev_state_hash);

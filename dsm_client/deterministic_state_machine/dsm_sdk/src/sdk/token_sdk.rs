@@ -12,6 +12,7 @@
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use dsm::{
+    common::domain_tags::TAG_STATE_HASH,
     commitments::SmartCommitment as DsmSmartCommitment,
     core::identity::{verify_genesis_state, GenesisState},
     types::{
@@ -1915,7 +1916,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             memo.as_deref(),
             &next_entropy,
         );
-        let _next_state_hash = dsm::crypto::blake3::domain_hash("DSM/state-hash", &preimage)
+        let _next_state_hash = dsm::crypto::blake3::domain_hash(TAG_STATE_HASH, &preimage)
             .as_bytes()
             .to_vec();
 

@@ -34,6 +34,7 @@ pub const TAG_DEVICE_ID: &str = "DSM/device-id";
 pub const TAG_BILATERAL_SESSION: &str = "DSM/bilateral-session";
 pub const TAG_SMT_KEY: &str = "DSM/smt-key";
 pub const TAG_TIP: &str = "DSM/tip";
+pub const TAG_STATE_HASH: &str = "DSM/state-hash";
 pub const TAG_MERKLE_NODE: &str = "DSM/merkle-node";
 pub const TAG_MERKLE_LEAF: &str = "DSM/merkle-leaf";
 // Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
@@ -78,6 +79,7 @@ mod tests {
             TAG_BILATERAL_SESSION,
             TAG_SMT_KEY,
             TAG_TIP,
+            TAG_STATE_HASH,
             TAG_MERKLE_NODE,
             TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
@@ -107,6 +109,7 @@ mod tests {
             TAG_BILATERAL_SESSION,
             TAG_SMT_KEY,
             TAG_TIP,
+            TAG_STATE_HASH,
             TAG_MERKLE_NODE,
             TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
@@ -131,6 +134,7 @@ mod tests {
             TAG_BILATERAL_SESSION,
             TAG_SMT_KEY,
             TAG_TIP,
+            TAG_STATE_HASH,
             TAG_MERKLE_NODE,
             TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
