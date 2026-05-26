@@ -15,6 +15,7 @@
 //! correct counterless implementation.
 
 pub use blake3::Hash as HashOutput;
+use crate::common::domain_tags::TAG_HASH_DATA;
 
 /// Hash data using Blake3
 ///
@@ -26,7 +27,7 @@ pub use blake3::Hash as HashOutput;
 /// # Returns
 /// * `HashOutput` - Blake3 hash of the data
 pub fn blake3(data: &[u8]) -> HashOutput {
-    crate::crypto::blake3::domain_hash("DSM/hash-data", data)
+    crate::crypto::blake3::domain_hash(TAG_HASH_DATA, data)
 }
 
 #[cfg(test)]

@@ -326,6 +326,7 @@ impl PerformanceManager {
 /// CPU-intensive cryptographic operations (clockless)
 pub mod crypto_ops {
     use super::*;
+    use crate::common::domain_tags::TAG_HASH_DATA;
     use crate::crypto::{blake3, sphincs, kyber};
 
     /// Hash data using Blake3 (CPU-intensive)
@@ -333,7 +334,7 @@ pub mod crypto_ops {
         let data = data.to_vec();
         perf_manager
             .execute_cpu_task("hash_data", move || {
-                Ok(blake3::domain_hash("DSM/hash-data", &data)
+                Ok(blake3::domain_hash(TAG_HASH_DATA, &data)
                     .as_bytes()
                     .to_vec())
             })

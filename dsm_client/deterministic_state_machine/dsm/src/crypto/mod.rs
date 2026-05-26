@@ -54,6 +54,7 @@
 //! - **RNG**: [`rng`] (OS and deterministic random byte generation)
 
 use crate::types::error::DsmError;
+use crate::common::domain_tags::TAG_HASH_DATA;
 
 // Re-export the main crypto modules
 pub mod aead;
@@ -123,9 +124,7 @@ pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>), DsmError> {
 ///
 /// A 32-byte BLAKE3 digest as `Vec<u8>`.
 pub fn hash_data(data: &[u8]) -> Vec<u8> {
-    blake3::domain_hash("DSM/hash-data", data)
-        .as_bytes()
-        .to_vec()
+    blake3::domain_hash(TAG_HASH_DATA, data).as_bytes().to_vec()
 }
 
 /// Hash multiple byte slices into a single 32-byte digest.
