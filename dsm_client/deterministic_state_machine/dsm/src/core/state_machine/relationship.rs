@@ -12,7 +12,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::common::domain_tags::TAG_ENTITY_ID;
+use crate::common::domain_tags::{TAG_COMMITMENT, TAG_ENTITY_ID};
 use crate::crypto::blake3::dsm_domain_hasher;
 use base32;
 use zerocopy::IntoBytes;
@@ -118,7 +118,7 @@ impl ForwardLinkedCommitment {
         };
 
         // Calculate commitment hash
-        let mut hasher = dsm_domain_hasher("DSM/commitment");
+        let mut hasher = dsm_domain_hasher(TAG_COMMITMENT);
         hasher.update(&commitment.next_state_hash);
         hasher.update(commitment.counterparty_id.as_bytes());
 

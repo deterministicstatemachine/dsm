@@ -13,6 +13,7 @@
 
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
+use crate::common::domain_tags::TAG_COMMITMENT_FIELDS;
 
 const OUT_LEN: usize = 32;
 
@@ -225,7 +226,7 @@ fn hash_fields(
     opt_text: Option<&str>,
     opt_extra: Option<&[u8]>,
 ) -> Vec<u8> {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/commitment-fields");
+    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_COMMITMENT_FIELDS);
     hasher.update(domain);
 
     // field 1: state hash (length-prefixed)
