@@ -31,6 +31,7 @@ pub const TAG_DBRW: &str = "DSM/dbrw";
 pub const TAG_HASH_DATA: &str = "DSM/hash-data";
 pub const TAG_ENTITY_ID: &str = "DSM/entity-id";
 pub const TAG_DEVICE_ID: &str = "DSM/device-id";
+pub const TAG_BILATERAL_SESSION: &str = "DSM/bilateral-session";
 pub const TAG_MERKLE_NODE: &str = "DSM/merkle-node";
 pub const TAG_MERKLE_LEAF: &str = "DSM/merkle-leaf";
 // Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
@@ -72,6 +73,7 @@ mod tests {
             TAG_HASH_DATA,
             TAG_ENTITY_ID,
             TAG_DEVICE_ID,
+            TAG_BILATERAL_SESSION,
             TAG_MERKLE_NODE,
             TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
@@ -98,6 +100,7 @@ mod tests {
             TAG_HASH_DATA,
             TAG_ENTITY_ID,
             TAG_DEVICE_ID,
+            TAG_BILATERAL_SESSION,
             TAG_MERKLE_NODE,
             TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,
@@ -119,6 +122,7 @@ mod tests {
             TAG_HASH_DATA,
             TAG_ENTITY_ID,
             TAG_DEVICE_ID,
+            TAG_BILATERAL_SESSION,
             TAG_MERKLE_NODE,
             TAG_MERKLE_LEAF,
             TAG_DEV_MERKLE,

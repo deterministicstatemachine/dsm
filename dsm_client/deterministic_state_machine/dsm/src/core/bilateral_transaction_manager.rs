@@ -27,6 +27,7 @@ use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::types::state_types::{PreCommitment, State};
 use crate::core::utility::labeling;
+use crate::common::domain_tags::TAG_BILATERAL_SESSION;
 
 // -------------------- Cryptographic Progress (strictly increasing, clockless) --------------------
 #[inline]
@@ -84,7 +85,7 @@ impl BilateralRelationshipAnchor {
     /// Order-independent mutual anchor = H("DSM_BILATERAL_ANCHOR" || min(genesis) || max(genesis))
     pub fn generate_mutual_anchor_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        let mut h = dsm_domain_hasher("DSM/bilateral-session");
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
         canonical_lp::write_lp(&mut h, lo);
         canonical_lp::write_lp(&mut h, hi);
         let out = h.finalize();
@@ -123,7 +124,7 @@ fn initial_relationship_chain_tip(
         )
     };
 
-    let mut h = dsm_domain_hasher("DSM/bilateral-session");
+    let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
     h.update(genesis_a);
     h.update(device_a);
     h.update(genesis_b);
@@ -222,7 +223,7 @@ impl BilateralPreCommitment {
         remote: &PreCommitment,
         op: &Operation,
     ) -> Result<[u8; 32], DsmError> {
-        let mut h = dsm_domain_hasher("DSM/bilateral-session");
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
         canonical_lp::write_lp(&mut h, &local.hash);
         canonical_lp::write_lp(&mut h, &remote.hash);
         canonical_lp::write_lp(&mut h, &op.to_bytes());
@@ -1135,7 +1136,7 @@ impl BilateralTransactionManager {
     }
 
     fn tx_hash(&self, local_state: &State, remote_state: &State) -> Result<[u8; 32], DsmError> {
-        let mut h = dsm_domain_hasher("DSM/bilateral-session");
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
         h.update(&local_state.hash()?);
         h.update(&remote_state.hash()?);
         let out = h.finalize();

@@ -18,6 +18,7 @@ use dsm::core::contact_manager::{ContactError, DsmContactManager};
 use dsm::types::error::DsmError;
 use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{Operation, TransactionMode};
+use dsm::common::domain_tags::TAG_BILATERAL_SESSION;
 
 // Use the SAME proto namespace as the rest of the app to avoid type mismatches.
 use dsm::types::proto as pb;
@@ -88,7 +89,7 @@ impl ContactManager {
         // Using dsm_domain_hasher("DSM/bilateral-session") — not a raw blake3 hasher with a
         // manually-injected tag — because dsm_domain_hasher derives a keyed context from the
         // tag string, producing a different output than treating the tag as plain data.
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/bilateral-session");
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(TAG_BILATERAL_SESSION);
         hasher.update(&genesis_a);
         hasher.update(&device_a);
         hasher.update(&genesis_b);
