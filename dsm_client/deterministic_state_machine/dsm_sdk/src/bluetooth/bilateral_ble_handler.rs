@@ -2933,8 +2933,8 @@ impl BilateralBleHandler {
             );
         }
 
-        // Update session with counterparty signature
-        let updated_session = {
+        // Resolve session first (no mutation yet)
+        let counterparty_device_id = {
             let mut sessions = self.sessions.sessions.lock().await;
             info!(
                 "[BLE_HANDLER] handle_prepare_response: looking up session for commitment_hash={}",
@@ -2989,8 +2989,7 @@ impl BilateralBleHandler {
                 }
             }
 
-            if let Some(session) = sessions.get_mut(&commitment_hash) {
-                session.counterparty_signature = Some(prepare_response.local_signature.clone());
+            if let Some(session) = sessions.get(&commitment_hash) {
                 if session.phase == BilateralPhase::Accepted
                     || session.phase == BilateralPhase::Committed
                     || session.phase == BilateralPhase::ConfirmPending
@@ -3001,6 +3000,64 @@ impl BilateralBleHandler {
                     );
                     return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
                 }
+                session.counterparty_device_id
+            } else {
+                error!(
+                    "[BLE_HANDLER] handle_prepare_response: NO SESSION FOUND for commitment={} (origin={})",
+                    bytes_to_base32(&commitment_hash),
+                    bytes_to_base32(&commitment_hash)
+                );
+                return Err(DsmError::invalid_operation(
+                    "no session found for commitment hash",
+                ));
+            }
+        };
+
+        // Verify receiver signature (σ_B) before mutating/persisting sender session.
+        if prepare_response.local_signature.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "missing counterparty signature (σ_B) in prepare response",
+            ));
+        }
+
+        let counterparty_pubkey = {
+            let mgr = self.bilateral_tx_manager.read().await;
+            mgr.get_contact(&counterparty_device_id)
+                .ok_or_else(|| DsmError::invalid_operation("missing counterparty contact"))?
+                .public_key
+                .clone()
+        };
+        let mut signature_msg = Vec::with_capacity(22 + 32);
+        signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
+        signature_msg.extend_from_slice(&commitment_hash);
+
+        if !crate::crypto::signatures::SignatureKeyPair::verify_raw(
+            &signature_msg,
+            &prepare_response.local_signature,
+            &counterparty_pubkey,
+        )
+        .map_err(|e| DsmError::crypto(format!("verify σ_B failed: {e}"), None::<std::io::Error>))?
+        {
+            return Err(DsmError::invalid_operation(
+                "invalid counterparty signature (σ_B)",
+            ));
+        }
+
+        // Update session with counterparty signature after cryptographic verification.
+        let updated_session = {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(&commitment_hash) {
+                if session.phase == BilateralPhase::Accepted
+                    || session.phase == BilateralPhase::Committed
+                    || session.phase == BilateralPhase::ConfirmPending
+                {
+                    log::warn!(
+                        "[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.",
+                        bytes_to_base32(&commitment_hash)
+                    );
+                    return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
+                }
+                session.counterparty_signature = Some(prepare_response.local_signature.clone());
                 session.phase = BilateralPhase::Accepted;
                 info!("Session moved to Accepted phase");
                 session.clone()
@@ -3847,68 +3904,72 @@ impl BilateralBleHandler {
         // The sender transmits π(h_{n+1} ∈ r'_A) in rel_proof_child and r'_A in
         // sender_smt_root.  Recomputing the Merkle path from the proof against the
         // claimed root catches any attempt to lie about the post-update SMT state.
-        if !confirm_request.rel_proof_child.is_empty()
-            && confirm_request.sender_smt_root.len() == 32
-        {
-            let sender_root: [u8; 32] = confirm_request
-                .sender_smt_root
-                .clone()
-                .try_into()
-                .map_err(|_| DsmError::invalid_operation("sender_smt_root not 32 bytes"))?;
-
-            let child_proof = crate::sdk::receipts::deserialize_inclusion_proof(
-                &confirm_request.rel_proof_child,
-            )?;
-
-            if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
-                &child_proof,
-                &sender_root,
-            ) {
-                return Err(DsmError::invalid_operation(
-                    "sender SMT child proof verification failed: \
-                     π(h_{n+1} ∈ r'_A) does not recompute to sender_smt_root",
-                ));
-            }
-
-            // §4.3 acceptance predicate #2: verify π_rel_parent (h_n ∈ r_A).
-            // For first-ever transactions the proof value is ZERO_LEAF with a
-            // real sibling path — verify_proof_against_root handles this by
-            // hashing ZERO_LEAF and walking the Merkle path to recompute r_A.
-            if !confirm_request.rel_proof_parent.is_empty()
-                && confirm_request.sender_smt_root_before.len() == 32
-            {
-                let old_root: [u8; 32] = confirm_request
-                    .sender_smt_root_before
-                    .clone()
-                    .try_into()
-                    .map_err(|_| {
-                        DsmError::invalid_operation("sender_smt_root_before not 32 bytes")
-                    })?;
-                let parent_proof = crate::sdk::receipts::deserialize_inclusion_proof(
-                    &confirm_request.rel_proof_parent,
-                )?;
-                if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
-                    &parent_proof,
-                    &old_root,
-                ) {
-                    return Err(DsmError::invalid_operation(
-                        "sender SMT parent proof verification failed: \
-                         π(h_n ∈ r_A) does not recompute to sender_smt_root_before (§4.3)",
-                    ));
-                }
-                let is_zero_leaf =
-                    parent_proof.value == Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF);
-                info!(
-                    "[BILATERAL] §4.3 parent proof verified: π(h_n ∈ r_A) ✓ (siblings={}, first_tx={})",
-                    parent_proof.siblings.len(),
-                    is_zero_leaf,
-                );
-            } else {
-                info!(
-                    "[BILATERAL] §4.3 parent proof absent — skipping (empty bytes or no pre-root)"
-                );
-            }
+        if confirm_request.rel_proof_child.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "missing rel_proof_child in confirm (required)",
+            ));
         }
+        if confirm_request.sender_smt_root.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "sender_smt_root must be 32 bytes",
+            ));
+        }
+        if confirm_request.rel_proof_parent.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "missing rel_proof_parent in confirm (required)",
+            ));
+        }
+        if confirm_request.sender_smt_root_before.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "sender_smt_root_before must be 32 bytes",
+            ));
+        }
+
+        let sender_root: [u8; 32] = confirm_request
+            .sender_smt_root
+            .clone()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("sender_smt_root not 32 bytes"))?;
+
+        let child_proof =
+            crate::sdk::receipts::deserialize_inclusion_proof(&confirm_request.rel_proof_child)?;
+
+        if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
+            &child_proof,
+            &sender_root,
+        ) {
+            return Err(DsmError::invalid_operation(
+                "sender SMT child proof verification failed: \
+                 π(h_{n+1} ∈ r'_A) does not recompute to sender_smt_root",
+            ));
+        }
+
+        // §4.3 acceptance predicate #2: verify π_rel_parent (h_n ∈ r_A).
+        // For first-ever transactions the proof value is ZERO_LEAF with a
+        // real sibling path — verify_proof_against_root handles this by
+        // hashing ZERO_LEAF and walking the Merkle path to recompute r_A.
+        let old_root: [u8; 32] = confirm_request
+            .sender_smt_root_before
+            .clone()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("sender_smt_root_before not 32 bytes"))?;
+        let parent_proof =
+            crate::sdk::receipts::deserialize_inclusion_proof(&confirm_request.rel_proof_parent)?;
+        if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
+            &parent_proof,
+            &old_root,
+        ) {
+            return Err(DsmError::invalid_operation(
+                "sender SMT parent proof verification failed: \
+                 π(h_n ∈ r_A) does not recompute to sender_smt_root_before (§4.3)",
+            ));
+        }
+        let is_zero_leaf = parent_proof.value == Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF);
+        info!(
+            "[BILATERAL] §4.3 parent proof verified: π(h_n ∈ r_A) ✓ (siblings={}, first_tx={})",
+            parent_proof.siblings.len(),
+            is_zero_leaf,
+        );
 
         // §11.1 per-step EK signing verification: receiver checks the
         // sender's A-side artifacts on the stitched receipt before applying
@@ -4000,46 +4061,34 @@ impl BilateralBleHandler {
         // §C1: Verify h_{n+1} = compute_successor_tip(h_n, op, pre_entropy, σ)
         // using the sender's pre_entropy. A mismatch means the sender forged
         // shared_chain_tip_new without using the agreed entropy (§4.1).
-        let pre_entropy: Option<[u8; 32]> = if confirm_request.pre_entropy.is_empty() {
-            None
-        } else {
-            Some(
-                confirm_request
-                    .pre_entropy
-                    .clone()
-                    .try_into()
-                    .map_err(|_| DsmError::invalid_operation("pre_entropy must be 32 bytes"))?,
-            )
-        };
+        if confirm_request.pre_entropy.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "pre_entropy must be present and 32 bytes in confirm",
+            ));
+        }
+        let pre_entropy: [u8; 32] = confirm_request
+            .pre_entropy
+            .clone()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("pre_entropy must be 32 bytes"))?;
 
-        let (h_n, entropy) = {
+        let h_n = {
             let manager = self.bilateral_tx_manager.read().await;
             let anchor = manager
                 .get_relationship(&session.counterparty_device_id)
                 .ok_or_else(|| {
                     DsmError::relationship("remote device relationship not found".to_string())
                 })?;
-            let h_n = anchor.chain_tip;
-
-            if let Some(pe) = pre_entropy {
-                let op_bytes = session.operation.to_bytes();
-                let expected_sigma = compute_precommit(&h_n, &op_bytes, &pe);
-                let expected_h_next = compute_successor_tip(&h_n, &op_bytes, &pe, &expected_sigma);
-                if expected_h_next != new_chain_tip {
-                    return Err(DsmError::invalid_operation(
-                        "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
-                    ));
-                }
-            }
-
-            // Use the same entropy the sender used to derive h_{n+1}. Fresh
-            // entropy only valid if the confirm omitted pre_entropy entirely.
-            let entropy = match pre_entropy {
-                Some(pe) => pe,
-                None => manager.generate_entropy()?,
-            };
-            (h_n, entropy)
+            anchor.chain_tip
         };
+        let op_bytes = session.operation.to_bytes();
+        let expected_sigma = compute_precommit(&h_n, &op_bytes, &pre_entropy);
+        let expected_h_next = compute_successor_tip(&h_n, &op_bytes, &pre_entropy, &expected_sigma);
+        if expected_h_next != new_chain_tip {
+            return Err(DsmError::invalid_operation(
+                "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
+            ));
+        }
 
         // Derive receiver-side credit deltas from the session operation.
         let receiver_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation
@@ -4140,10 +4189,6 @@ impl BilateralBleHandler {
             let mut manager = self.bilateral_tx_manager.write().await;
             manager.advance_chain_tip(&session.counterparty_device_id, new_chain_tip);
         }
-
-        // Keep entropy variable live for diagnostics — unused here beyond the
-        // advance's internal use via execute_on_relationship_for_bilateral.
-        let _ = entropy;
 
         // h_{n+1} asymmetric (A-side; here "A" is the receiver) — what T_receiver now stores.
         let h_next_asymmetric = outcome.new_chain_state.compute_chain_tip();
