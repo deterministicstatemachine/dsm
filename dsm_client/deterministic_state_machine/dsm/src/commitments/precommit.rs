@@ -146,10 +146,30 @@ pub struct ForkInvalidationProof {
 }
 
 impl ForkInvalidationProof {
+    /// Verify the integrity of this fork-invalidation proof.
+    ///
+    /// Issue #180.A fix: previous implementation only counted entries in
+    /// `self.signatures` against `min_signatures`. It performed no
+    /// cryptographic verification, so any HashMap with the right number of
+    /// entries was accepted. The verifier now requires the caller to supply
+    /// the per-signer SPHINCS+ public keys and cryptographically verifies
+    /// each signature against the canonical, domain-tagged proof digest:
+    ///
+    /// ```text
+    /// digest = hash_lp1(
+    ///     "DSM/precommit/invalidation-proof/v2\0",
+    ///     build_invalidation_proof_bytes(fork_id, fork_hash, selected_hash, tick)
+    /// )
+    /// ```
+    ///
+    /// Only signatures that verify against `digest` under their corresponding
+    /// public key count toward `min_signatures`. Unknown signer_ids and
+    /// malformed signatures are silently dropped — fail-closed by counting.
     pub fn verify_integrity(
         &self,
         expected_fork_hash: &[u8],
         min_signatures: usize,
+        public_keys: &HashMap<String, Vec<u8>>,
     ) -> Result<bool, CommitmentError> {
         if expected_fork_hash != self.fork_hash.as_slice() {
             return Ok(false);
@@ -157,7 +177,25 @@ impl ForkInvalidationProof {
         if self.signatures.len() < min_signatures {
             return Ok(false);
         }
-        Ok(true)
+
+        let canonical_bytes = build_invalidation_proof_bytes(
+            &self.fork_id,
+            &self.fork_hash,
+            &self.selected_fork_hash,
+            self.tick,
+        );
+        let signing_digest = canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &canonical_bytes);
+
+        let mut valid: usize = 0;
+        for (signer_id, sig) in &self.signatures {
+            let Some(pk) = public_keys.get(signer_id) else {
+                continue;
+            };
+            if let Ok(true) = sphincs::sphincs_verify(pk, signing_digest.as_slice(), sig) {
+                valid += 1;
+            }
+        }
+        Ok(valid >= min_signatures)
     }
 }
 
@@ -1435,5 +1473,136 @@ mod tests {
         )
         .expect_err("v2 verifier must reject pi_inv built from legacy-domain hashes");
         assert!(format!("{err}").contains("pi_inv does not match"));
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #180.A regression — ForkInvalidationProof::verify_integrity must
+    // cryptographically verify each signature, not just count entries.
+    // ────────────────────────────────────────────────────────────────────────
+
+    fn signed_invalidation_proof(
+        signer_ids: &[&str],
+        fork_id: &str,
+        fork_hash: [u8; 32],
+        selected_fork_hash: [u8; 32],
+        tick: u64,
+    ) -> (
+        ForkInvalidationProof,
+        HashMap<String, Vec<u8>>,
+        HashMap<String, Vec<u8>>, // signing-key (secret) by id, for forging tests
+    ) {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let canonical_bytes =
+            build_invalidation_proof_bytes(fork_id, &fork_hash, &selected_fork_hash, tick);
+        let digest = canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &canonical_bytes);
+
+        let mut signatures: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut public_keys: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut secret_keys: HashMap<String, Vec<u8>> = HashMap::new();
+
+        for id in signer_ids {
+            let entropy = format!("DSM/test/{id}").into_bytes();
+            let kp = SignatureKeyPair::generate_from_entropy(&entropy)
+                .expect("generate test keypair");
+            let sig = kp.sign(&digest).expect("sign test digest");
+            signatures.insert((*id).to_string(), sig);
+            public_keys.insert((*id).to_string(), kp.public_key().to_vec());
+            secret_keys.insert((*id).to_string(), kp.secret_key().to_vec());
+        }
+
+        (
+            ForkInvalidationProof {
+                fork_id: fork_id.to_string(),
+                fork_hash,
+                selected_fork_hash,
+                signatures,
+                tick,
+            },
+            public_keys,
+            secret_keys,
+        )
+    }
+
+    #[test]
+    fn verify_integrity_accepts_valid_signatures() {
+        let (proof, pks, _sks) = signed_invalidation_proof(
+            &["s1", "s2", "s3"],
+            "forkA",
+            [0x11; 32],
+            [0x22; 32],
+            42,
+        );
+        let ok = proof
+            .verify_integrity(&proof.fork_hash, 3, &pks)
+            .expect("verify must not error on well-formed input");
+        assert!(ok, "valid signatures should meet the threshold");
+    }
+
+    #[test]
+    fn verify_integrity_rejects_when_signatures_dont_verify() {
+        // Tamper with one signature so cryptographic verify fails on it.
+        let (mut proof, pks, _sks) = signed_invalidation_proof(
+            &["s1", "s2", "s3"],
+            "forkA",
+            [0x11; 32],
+            [0x22; 32],
+            42,
+        );
+        if let Some(sig) = proof.signatures.get_mut("s2") {
+            sig[0] ^= 0xFF; // flip a byte so verification fails
+        }
+        // Two of the three signatures are valid → threshold of 3 not met.
+        let ok = proof
+            .verify_integrity(&proof.fork_hash, 3, &pks)
+            .expect("verify must not error");
+        assert!(
+            !ok,
+            "must fail-closed: invalid signature must not count toward threshold"
+        );
+
+        // Lowering the threshold to 2 should succeed (the two untouched sigs).
+        let ok2 = proof
+            .verify_integrity(&proof.fork_hash, 2, &pks)
+            .expect("verify must not error");
+        assert!(ok2, "two valid signatures should meet threshold=2");
+    }
+
+    #[test]
+    fn verify_integrity_rejects_unknown_signer_ids() {
+        // Build a proof with 3 signatures, but only supply 1 public key. The
+        // other two signer_ids are unknown to the verifier and must NOT count.
+        let (proof, mut pks, _sks) = signed_invalidation_proof(
+            &["s1", "s2", "s3"],
+            "forkA",
+            [0x11; 32],
+            [0x22; 32],
+            42,
+        );
+        pks.remove("s2");
+        pks.remove("s3");
+        let ok = proof
+            .verify_integrity(&proof.fork_hash, 2, &pks)
+            .expect("verify must not error");
+        assert!(
+            !ok,
+            "signatures whose pubkeys are unknown must not count toward threshold"
+        );
+    }
+
+    #[test]
+    fn verify_integrity_rejects_fork_hash_mismatch() {
+        let (proof, pks, _sks) = signed_invalidation_proof(
+            &["s1", "s2", "s3"],
+            "forkA",
+            [0x11; 32],
+            [0x22; 32],
+            42,
+        );
+        let wrong = [0x99u8; 32];
+        let ok = proof
+            .verify_integrity(&wrong, 3, &pks)
+            .expect("verify must not error");
+        assert!(!ok, "fork_hash mismatch must fail closed");
     }
 }
