@@ -1,11 +1,36 @@
-//! Envelope transport encoding/decoding functions (prost/protobuf only)
+//! Envelope wire encoding/decoding for DSM (prost/protobuf only).
 //!
-//! This module provides transport byte encoding and decoding for DSM envelopes
-//! using the prost Message trait. These bytes are for network/IPC transport, not
-//! for canonical hashing or signing.
-
-pub mod canonical;
-pub mod transport;
+//! Issue #161 cleanup: this module is the single source of truth for
+//! `Envelope` byte handling. Two thin duplicate submodules (`envelope/canonical.rs`
+//! and `envelope/transport.rs`) were removed — they each redefined
+//! encode/decode helpers that just delegated back to the functions below,
+//! and `encode_universal_rx` had zero callers outside its own self-tests.
+//!
+//! # Naming caveat: "canonical" here means "transport"
+//!
+//! The exported [`to_canonical_bytes`] / [`from_canonical_bytes`] functions
+//! return / consume the **unframed protobuf transport bytes** of an
+//! [`Envelope`]. They are NOT the canonical signing-preimage bytes used for
+//! hashing — those live in the `compute_*_signing_bytes_v3` family below.
+//! The historical name is retained because 100+ external call sites use it;
+//! treat it as a transport-encoding identifier, not a signing-preimage one.
+//! For receipts the analogous distinction is made cleanly by
+//! [`crate::types::receipt_types::ReceiptCommit`]'s separate canonical-vs-wire
+//! byte paths.
+//!
+//! # Three byte layers (in order of layering)
+//!
+//! 1. **Canonical signing-preimage bytes** — built by
+//!    `compute_transfer_signing_bytes_v3` / `compute_online_message_signing_bytes_v3`.
+//!    These are the deterministic preimages fed into BLAKE3/SPHINCS+; they
+//!    bind to specific protocol fields, NOT to the proto wire format.
+//! 2. **Unframed `Envelope` protobuf bytes** — produced by
+//!    [`to_canonical_bytes`], consumed by [`from_canonical_bytes`]. Just
+//!    `Envelope::encode_to_vec` with deterministic-encoding round-trip
+//!    enforcement and a v3 version gate.
+//! 3. **Framed wire bytes** — `[0x03][Envelope protobuf]`. Framing is added
+//!    OUTSIDE this module (see `dsm_sdk::sdk::session_manager` at the
+//!    transport boundary).
 
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
