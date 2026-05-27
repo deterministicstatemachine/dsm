@@ -557,9 +557,27 @@ impl SmartCommitment {
         Ok(())
     }
 
-    /// Evaluate commitment against a context
+    /// Evaluate commitment against a context.
+    ///
+    /// Issue #180.B fix: the `MultiSignature` branch previously counted
+    /// presence in `ctx.signatures` only — the signature bytes were never
+    /// validated. Any context populated with the right HashMap keys would
+    /// satisfy the threshold. The branch now cryptographically verifies each
+    /// signature against a canonical, commitment-bound message:
+    ///
+    /// ```text
+    /// msg = BLAKE3-256("DSM/smart-commit/multisig/v2\0" || commitment_hash)
+    /// ```
+    ///
+    /// Only valid SPHINCS+ verifications under their corresponding required
+    /// public keys count toward `threshold`. This prevents replay of
+    /// signatures captured from unrelated commitments.
     pub fn evaluate(&self, ctx: &CommitmentContext) -> bool {
-        fn eval_condition(cond: &CommitmentCondition, ctx: &CommitmentContext) -> bool {
+        fn eval_condition(
+            cond: &CommitmentCondition,
+            ctx: &CommitmentContext,
+            commitment_hash: &[u8; 32],
+        ) -> bool {
             match cond {
                 CommitmentCondition::ValueThreshold {
                     parameter_name,
@@ -591,19 +609,36 @@ impl SmartCommitment {
                     required_keys,
                     threshold,
                 } => {
+                    // Commitment-bound signing message: prevents replay of
+                    // a signature captured from a different commitment.
+                    let msg = crate::crypto::blake3::domain_hash(
+                        "DSM/smart-commit/multisig/v2",
+                        commitment_hash,
+                    );
                     let mut ok = 0usize;
-                    for k in required_keys {
-                        if ctx.signatures.contains_key(k) {
+                    for required_pk in required_keys {
+                        let Some(sig) = ctx.signatures.get(required_pk) else {
+                            continue;
+                        };
+                        if let Ok(true) = crate::crypto::sphincs::sphincs_verify(
+                            required_pk,
+                            msg.as_bytes(),
+                            sig,
+                        ) {
                             ok += 1;
                         }
                     }
                     ok >= *threshold
                 }
-                CommitmentCondition::And(v) => v.iter().all(|c| eval_condition(c, ctx)),
-                CommitmentCondition::Or(v) => v.iter().any(|c| eval_condition(c, ctx)),
+                CommitmentCondition::And(v) => {
+                    v.iter().all(|c| eval_condition(c, ctx, commitment_hash))
+                }
+                CommitmentCondition::Or(v) => {
+                    v.iter().any(|c| eval_condition(c, ctx, commitment_hash))
+                }
             }
         }
-        eval_condition(&self.conditions, ctx)
+        eval_condition(&self.conditions, ctx, &self.commitment_hash)
     }
 
     /// Verify binding to origin state + content. Per §4.3 the origin is
@@ -649,20 +684,46 @@ impl SmartCommitment {
     }
 
     /// Check if the commitment is currently executable.
+    ///
+    /// Issue #180.C fix: the oracle signature was previously verified against
+    /// `condition.as_bytes()` — just the bare condition string. That made the
+    /// signature replayable across any unrelated commitment that shared the
+    /// same condition text. The signing payload is now bound to the full
+    /// commitment context:
+    ///
+    /// ```text
+    /// msg = BLAKE3-256(
+    ///     "DSM/smart-commit/oracle/v2\0"
+    ///     || commitment_hash
+    ///     || origin_state_hash
+    ///     || recipient
+    ///     || amount.to_le_bytes()
+    ///     || condition.as_bytes()
+    /// )
+    /// ```
+    ///
+    /// Pre-mainnet flag-day: oracle signatures issued against the old
+    /// `condition`-only payload will no longer verify.
     pub fn is_executable(&self, oracle_signature: Option<Vec<u8>>) -> Result<bool, DsmError> {
         match &self.commitment_type {
             CommitmentType::Conditional {
                 condition,
                 oracle_pubkey,
             } => {
-                if let Some(sig) = oracle_signature {
-                    use crate::crypto::signatures::SignatureKeyPair;
-                    SignatureKeyPair::verify_raw(condition.as_bytes(), &sig, oracle_pubkey).map_err(
-                        |e| DsmError::crypto(String::from("oracle verification failed"), Some(e)),
-                    )
-                } else {
-                    Ok(false)
-                }
+                let Some(sig) = oracle_signature else {
+                    return Ok(false);
+                };
+                let mut buf = Vec::with_capacity(32 + 32 + self.recipient.len() + 8 + condition.len());
+                buf.extend_from_slice(&self.commitment_hash);
+                buf.extend_from_slice(&self.origin_state_hash);
+                buf.extend_from_slice(&self.recipient);
+                buf.extend_from_slice(&self.amount.to_le_bytes());
+                buf.extend_from_slice(condition.as_bytes());
+                let msg = crate::crypto::blake3::domain_hash("DSM/smart-commit/oracle/v2", &buf);
+                use crate::crypto::signatures::SignatureKeyPair;
+                SignatureKeyPair::verify_raw(msg.as_bytes(), &sig, oracle_pubkey).map_err(|e| {
+                    DsmError::crypto(String::from("oracle verification failed"), Some(e))
+                })
             }
         }
     }
@@ -1492,5 +1553,211 @@ mod tests {
         }
 
         let _ = op;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #180.B regression — MultiSignature condition must verify each
+    // signature against a commitment-bound message, not just check presence.
+    // ────────────────────────────────────────────────────────────────────────
+
+    fn make_multisig_commitment(
+        required_pks: Vec<Vec<u8>>,
+        threshold: usize,
+    ) -> SmartCommitment {
+        let (origin_hash, origin_entropy) = test_origin();
+        let op = signed_update("ms_op", vec![1, 2, 3], "Multi-sig payment");
+        SmartCommitment::new(
+            "ms_test",
+            &origin_hash,
+            &origin_entropy,
+            CommitmentCondition::MultiSignature {
+                required_keys: required_pks,
+                threshold,
+            },
+            op,
+        )
+        .expect("construct multisig commitment")
+    }
+
+    fn signing_msg_for_multisig(commitment_hash: &[u8; 32]) -> [u8; 32] {
+        *crate::crypto::blake3::domain_hash("DSM/smart-commit/multisig/v2", commitment_hash)
+            .as_bytes()
+    }
+
+    #[test]
+    fn multisig_evaluate_accepts_valid_signatures_above_threshold() {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let kps: Vec<_> = (0..3)
+            .map(|i| {
+                SignatureKeyPair::generate_from_entropy(format!("ms-{i}").as_bytes())
+                    .expect("kp")
+            })
+            .collect();
+        let required: Vec<Vec<u8>> = kps.iter().map(|k| k.public_key().to_vec()).collect();
+        let c = make_multisig_commitment(required.clone(), 2);
+
+        let msg = signing_msg_for_multisig(&c.commitment_hash);
+        let mut ctx = CommitmentContext::with_step_index(0);
+        // Provide 3 valid sigs over the commitment-bound message.
+        for kp in &kps {
+            let sig = kp.sign(&msg).expect("sign");
+            ctx.add_signature(kp.public_key().to_vec(), sig);
+        }
+        assert!(c.evaluate(&ctx), "3 valid sigs must meet threshold=2");
+    }
+
+    #[test]
+    fn multisig_evaluate_rejects_presence_without_valid_signature() {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let kps: Vec<_> = (0..3)
+            .map(|i| {
+                SignatureKeyPair::generate_from_entropy(format!("ms-{i}").as_bytes())
+                    .expect("kp")
+            })
+            .collect();
+        let required: Vec<Vec<u8>> = kps.iter().map(|k| k.public_key().to_vec()).collect();
+        let c = make_multisig_commitment(required, 2);
+
+        // Insert garbage bytes under each required pubkey — old code would
+        // count these as 'present' and pass. New code must reject.
+        let mut ctx = CommitmentContext::with_step_index(0);
+        for kp in &kps {
+            ctx.add_signature(kp.public_key().to_vec(), vec![0u8; 64]);
+        }
+        assert!(
+            !c.evaluate(&ctx),
+            "fail-closed: mere presence with garbage sigs must not meet threshold"
+        );
+    }
+
+    #[test]
+    fn multisig_evaluate_rejects_signature_bound_to_different_commitment() {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let kp = SignatureKeyPair::generate_from_entropy(b"ms-replay").expect("kp");
+        let required = vec![kp.public_key().to_vec()];
+        let c = make_multisig_commitment(required.clone(), 1);
+
+        // Sign over a *different* commitment hash — must not verify against c.
+        let other_commitment_hash = [0x99u8; 32];
+        let replay_msg = signing_msg_for_multisig(&other_commitment_hash);
+        let sig = kp.sign(&replay_msg).expect("sign");
+
+        let mut ctx = CommitmentContext::with_step_index(0);
+        ctx.add_signature(kp.public_key().to_vec(), sig);
+        assert!(
+            !c.evaluate(&ctx),
+            "signature bound to a different commitment must not verify"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #180.C regression — oracle signature must be bound to the
+    // commitment, not the bare condition string.
+    // ────────────────────────────────────────────────────────────────────────
+
+    fn oracle_signing_msg(commitment: &SmartCommitment, condition: &str) -> [u8; 32] {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&commitment.commitment_hash);
+        buf.extend_from_slice(&commitment.origin_state_hash);
+        buf.extend_from_slice(&commitment.recipient);
+        buf.extend_from_slice(&commitment.amount.to_le_bytes());
+        buf.extend_from_slice(condition.as_bytes());
+        *crate::crypto::blake3::domain_hash("DSM/smart-commit/oracle/v2", &buf).as_bytes()
+    }
+
+    #[test]
+    fn is_executable_accepts_oracle_sig_bound_to_commitment() {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let (origin_hash, origin_entropy) = test_origin();
+        let kp = SignatureKeyPair::generate_from_entropy(b"oracle-ok").expect("kp");
+        let condition = "deliverable".to_string();
+        let c = SmartCommitment::new_conditional(
+            &origin_hash,
+            &origin_entropy,
+            vec![1, 2, 3, 4],
+            100,
+            condition.clone(),
+            kp.public_key().to_vec(),
+        )
+        .expect("conditional");
+
+        let msg = oracle_signing_msg(&c, &condition);
+        let sig = kp.sign(&msg).expect("sign");
+        let ok = c
+            .is_executable(Some(sig))
+            .expect("verify must not error");
+        assert!(ok, "valid commitment-bound oracle sig must verify");
+    }
+
+    #[test]
+    fn is_executable_rejects_oracle_sig_over_bare_condition() {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let (origin_hash, origin_entropy) = test_origin();
+        let kp = SignatureKeyPair::generate_from_entropy(b"oracle-replay").expect("kp");
+        let condition = "deliverable".to_string();
+        let c = SmartCommitment::new_conditional(
+            &origin_hash,
+            &origin_entropy,
+            vec![5, 6, 7, 8],
+            200,
+            condition.clone(),
+            kp.public_key().to_vec(),
+        )
+        .expect("conditional");
+
+        // Old format: sign just the bare condition bytes. This must NOT verify
+        // under the new commitment-bound payload.
+        let legacy_sig = kp.sign(condition.as_bytes()).expect("sign");
+        let ok = c
+            .is_executable(Some(legacy_sig))
+            .expect("verify must not error");
+        assert!(
+            !ok,
+            "oracle sig over bare condition must NOT verify under v2 binding"
+        );
+    }
+
+    #[test]
+    fn is_executable_rejects_oracle_sig_for_different_commitment() {
+        use crate::crypto::signatures::SignatureKeyPair;
+
+        let (origin_hash, origin_entropy) = test_origin();
+        let kp = SignatureKeyPair::generate_from_entropy(b"oracle-cross").expect("kp");
+        let condition = "deliverable".to_string();
+        let c1 = SmartCommitment::new_conditional(
+            &origin_hash,
+            &origin_entropy,
+            vec![1; 4],
+            100,
+            condition.clone(),
+            kp.public_key().to_vec(),
+        )
+        .expect("conditional c1");
+        let c2 = SmartCommitment::new_conditional(
+            &origin_hash,
+            &origin_entropy,
+            vec![2; 4], // different recipient → different commitment_hash
+            100,
+            condition.clone(),
+            kp.public_key().to_vec(),
+        )
+        .expect("conditional c2");
+        assert_ne!(c1.commitment_hash, c2.commitment_hash, "test premise");
+
+        // Sign for c2 then try to use against c1 — must reject.
+        let msg_for_c2 = oracle_signing_msg(&c2, &condition);
+        let sig_for_c2 = kp.sign(&msg_for_c2).expect("sign");
+        let ok = c1
+            .is_executable(Some(sig_for_c2))
+            .expect("verify must not error");
+        assert!(
+            !ok,
+            "oracle sig for c2 must not satisfy c1 — replay prevention"
+        );
     }
 }
