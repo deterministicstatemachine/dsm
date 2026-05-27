@@ -61,83 +61,16 @@ impl ProgressContext {
 static PROGRESS_CONTEXT: once_cell::sync::Lazy<std::sync::RwLock<Option<ProgressContext>>> =
     once_cell::sync::Lazy::new(|| std::sync::RwLock::new(None));
 
-/// Drift detection threshold (maximum allowed difference in commit heights)
-const DRIFT_THRESHOLD: u64 = 100;
-
-/// Resync result
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResyncResult {
-    /// No drift detected, heights are synchronized
-    Synchronized,
-    /// Local height is behind, needs catch-up
-    Behind(u64),
-    /// Local height is ahead, peer may need catch-up
-    Ahead(u64),
-    /// Excessive drift detected, manual intervention required
-    ExcessiveDrift,
-}
-
-/// Detect clock drift between local and remote commit heights
-pub fn detect_drift(local_height: u64, remote_height: u64) -> ResyncResult {
-    let diff = local_height.abs_diff(remote_height);
-
-    if diff == 0 {
-        ResyncResult::Synchronized
-    } else if diff > DRIFT_THRESHOLD {
-        ResyncResult::ExcessiveDrift
-    } else if local_height < remote_height {
-        ResyncResult::Behind(remote_height - local_height)
-    } else {
-        ResyncResult::Ahead(local_height - remote_height)
-    }
-}
-
-/// Attempt to resync progress context from a trusted peer
-/// Returns true if resync was successful, false if rejected
-pub fn attempt_resync(peer_smt_root: [u8; 32], peer_commit_height: u64) -> Result<bool, DsmError> {
-    let current = current_progress()?;
-
-    match current {
-        Some(local_ctx) => {
-            match detect_drift(local_ctx.commit_height(), peer_commit_height) {
-                ResyncResult::Synchronized => {
-                    // Heights match, verify SMT root consistency
-                    if local_ctx.smt_root() == &peer_smt_root {
-                        Ok(true) // Already synchronized
-                    } else {
-                        // Height matches but roots differ - potential fork
-                        Ok(false)
-                    }
-                }
-                ResyncResult::Behind(_diff) => {
-                    // Local is behind, accept peer's progress
-                    update_progress_context(peer_smt_root, peer_commit_height)?;
-                    Ok(true)
-                }
-                ResyncResult::Ahead(_) => {
-                    // Local is ahead, reject resync (peer should catch up)
-                    Ok(false)
-                }
-                ResyncResult::ExcessiveDrift => {
-                    // Excessive drift, reject and log
-                    Ok(false)
-                }
-            }
-        }
-        None => {
-            // Not initialized, accept peer's progress
-            update_progress_context(peer_smt_root, peer_commit_height)?;
-            Ok(true)
-        }
-    }
-}
-
-/// Get drift status for monitoring/diagnostics
-pub fn get_drift_status(peer_height: u64) -> Result<ResyncResult, DsmError> {
-    // Get local height using blocking version since we're in sync context
-    let local_height = current_commit_height_blocking();
-    Ok(detect_drift(local_height, peer_height))
-}
+// NOTE (issue #189): The previous `attempt_resync` / `detect_drift` /
+// `ResyncResult` / `get_drift_status` helpers were a trust-bypass: they accepted
+// peer-supplied `(smt_root, commit_height)` and wrote them straight into the
+// global progress context with no receipt-chain, SMT replacement proof, or
+// authenticated transition behind them. DSM derives progress from accepted state
+// transitions, not from peer claims, so the helpers were both dangerous and
+// unused (zero in-tree callers). They have been removed. If a legitimate
+// resync path is ever required, it MUST be proof-carrying — driven by an
+// authenticated SMT replacement witness or receipt-chain — and must not surface
+// as a height-comparison shortcut on the public API.
 
 /// Initialize or update the global progress context
 /// This should ONLY be called when accepting a valid SMT root transition
