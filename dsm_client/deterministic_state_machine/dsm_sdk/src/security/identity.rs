@@ -11,8 +11,6 @@
 use crate::types::error::DsmError;
 use dsm::crypto::blake3::dsm_domain_hasher;
 
-pub const DOMAIN_DEVID: &[u8] = b"DSM/devid\0";
-
 /// Derive a 32-byte device identifier from a public key and an attestation digest.
 ///
 /// Normative:
