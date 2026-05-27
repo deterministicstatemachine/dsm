@@ -31,7 +31,13 @@ pub struct SpvProof {
 
 impl SpvProof {
     /// Deserialize from compact wire format:
-    /// [index: u32 LE][count: u32 LE][sibling_0: 32 bytes]...[sibling_n: 32 bytes]
+    /// `[index: u32 LE][count: u32 LE][sibling_0: 32 bytes]...[sibling_n: 32 bytes]`
+    ///
+    /// Issue #181 Finding 3 fix: rejects trailing garbage. The wire format
+    /// is canonical and byte-exact; any bytes after the last sibling
+    /// produce `Err`. Previously a valid prefix followed by arbitrary
+    /// bytes parsed successfully, so multiple byte representations decoded
+    /// to equivalent proof semantics — a canonical-encoding violation.
     pub fn from_bytes(data: &[u8]) -> Result<Self, DsmError> {
         if data.len() < 8 {
             return Err(DsmError::invalid_operation("SPV proof too short"));
@@ -41,9 +47,10 @@ impl SpvProof {
         let count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
 
         let expected_len = 8 + count * 32;
-        if data.len() < expected_len {
+        if data.len() != expected_len {
             return Err(DsmError::invalid_operation(format!(
-                "SPV proof data too short: expected {expected_len}, got {}",
+                "SPV proof length mismatch: expected exactly {expected_len} bytes, got {} \
+                 (trailing-garbage and short-buffer both rejected)",
                 data.len()
             )));
         }
@@ -301,5 +308,42 @@ mod tests {
         let mut header = [0u8; 80];
         header[36..68].copy_from_slice(&[0x42; 32]);
         assert_eq!(extract_merkle_root(&header), [0x42; 32]);
+    }
+
+    // Issue #181 Finding 3 regression: from_bytes must reject trailing
+    // garbage. Multiple byte representations decoding to equivalent proof
+    // semantics is a canonical-encoding violation.
+    #[test]
+    fn spv_proof_from_bytes_rejects_trailing_garbage() {
+        let proof = SpvProof {
+            siblings: vec![[1u8; 32], [2u8; 32]],
+            index: 5,
+        };
+        let valid_bytes = proof.to_bytes();
+        // Sanity: well-formed input decodes cleanly.
+        let decoded = SpvProof::from_bytes(&valid_bytes).expect("valid proof must decode");
+        assert_eq!(decoded.index, 5);
+        assert_eq!(decoded.siblings, proof.siblings);
+
+        // Appending arbitrary bytes must reject.
+        let mut padded = valid_bytes.clone();
+        padded.push(0xFF);
+        assert!(
+            SpvProof::from_bytes(&padded).is_err(),
+            "1 trailing byte must reject"
+        );
+
+        padded.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(
+            SpvProof::from_bytes(&padded).is_err(),
+            "multiple trailing bytes must reject"
+        );
+
+        // Short-buffer rejection still works.
+        let truncated = &valid_bytes[..valid_bytes.len() - 1];
+        assert!(
+            SpvProof::from_bytes(truncated).is_err(),
+            "truncated input must reject"
+        );
     }
 }

@@ -121,24 +121,36 @@ pub fn verify_header_chain(
 ) -> Result<bool, DsmError> {
     let known_checkpoints = checkpoints(network);
 
-    // If no checkpoints for this network: test networks pass (no PoW enforcement),
-    // mainnet fails closed (cannot verify without anchors).
-    // Matches verify_entry_anchor which also bypasses Testnet/Signet.
-    //
-    // NON_PAPER_MODE: The paper (§17, Definition 13) requires checkpoint-rooted
-    // header-chain enforcement on all networks. This bypass is intentional for
-    // development/testing only. When this branch is taken, runtime acceptance
-    // no longer implies the formal `RustVerifierAccepted` mainnet predicate.
-    // See audit finding §5 and `bitcoin::trust`.
+    // Issue #181 Finding 2 fix: the Testnet/Signet bypass is gated behind
+    // the `bitcoin-testnet-bypass` cargo feature. Production builds (feature
+    // off) fail closed on every network when no checkpoints are configured.
+    // Only dev/test rigs that supply synthetic headers should enable the
+    // feature. The paper (§17, Definition 13) requires checkpoint-rooted
+    // header-chain enforcement on all networks.
     if known_checkpoints.is_empty() {
-        return match network {
-            BitcoinNetwork::Testnet | BitcoinNetwork::Signet => Ok(true),
-            _ => Err(DsmError::Validation {
-                context: "No checkpoints available for network; SPV verification cannot proceed"
-                    .to_string(),
+        #[cfg(feature = "bitcoin-testnet-bypass")]
+        {
+            return match network {
+                BitcoinNetwork::Testnet | BitcoinNetwork::Signet => Ok(true),
+                _ => Err(DsmError::Validation {
+                    context:
+                        "No checkpoints available for network; SPV verification cannot proceed"
+                            .to_string(),
+                    source: None,
+                }),
+            };
+        }
+        #[cfg(not(feature = "bitcoin-testnet-bypass"))]
+        {
+            let _ = network;
+            return Err(DsmError::Validation {
+                context:
+                    "No checkpoints available for network; SPV verification cannot proceed (\
+                     production build — testnet bypass disabled)"
+                        .to_string(),
                 source: None,
-            }),
-        };
+            });
+        }
     }
 
     // Build ordered list of headers to validate: [header_chain..., block_header]
@@ -218,15 +230,17 @@ pub fn verify_entry_anchor(
     connecting_headers: &[[u8; 80]],
     network: BitcoinNetwork,
 ) -> Result<bool, DsmError> {
-    // For testnet/signet: always returns Ok(true) (headers are synthetic)
-    //
-    // NON_PAPER_MODE: The paper (§21.1, §21.3) requires entry-anchor chain
-    // verification on all networks. This bypass is intentional for development
-    // and testing only; it must not be used on mainnet. When bypassed,
-    // `sameChain` in the formal trust model is not established.
-    // See audit finding §5 and `bitcoin::trust`.
-    if matches!(network, BitcoinNetwork::Testnet | BitcoinNetwork::Signet) {
-        return Ok(true);
+    // Issue #181 Finding 2 fix: the testnet/signet pass-through is gated
+    // behind the `bitcoin-testnet-bypass` cargo feature. Production builds
+    // (feature off) require a real entry-anchor chain on every network.
+    // The paper (§21.1, §21.3) requires entry-anchor chain verification on
+    // all networks; bypassing it leaves `sameChain` unestablished in the
+    // formal trust model.
+    #[cfg(feature = "bitcoin-testnet-bypass")]
+    {
+        if matches!(network, BitcoinNetwork::Testnet | BitcoinNetwork::Signet) {
+            return Ok(true);
+        }
     }
 
     // Build the chain: [entry_header, connecting_headers..., exit_header]
@@ -464,12 +478,34 @@ mod tests {
         assert!(difficulty_floor(BitcoinNetwork::Testnet).is_none());
     }
 
+    // Issue #181 Finding 2: this test exercises the testnet/signet bypass,
+    // which is gated behind the `bitcoin-testnet-bypass` cargo feature.
+    // The default-secure build (feature off) rejects unchecked Testnet/Signet
+    // header chains; the bypass behavior is asserted here only when the
+    // feature is enabled.
+    #[cfg(feature = "bitcoin-testnet-bypass")]
     #[test]
     fn test_networks_always_pass() {
         // Testnet and signet have no checkpoint enforcement — any header chain is accepted.
         let header = [0u8; 80];
         assert!(verify_header_chain(&header, &[], BitcoinNetwork::Testnet).unwrap());
         assert!(verify_header_chain(&header, &[], BitcoinNetwork::Signet).unwrap());
+    }
+
+    // Issue #181 Finding 2 regression — without the bypass feature, the
+    // testnet/signet short-circuit is gone: an unchecked header chain on
+    // those networks must fail closed.
+    #[cfg(not(feature = "bitcoin-testnet-bypass"))]
+    #[test]
+    fn default_build_rejects_testnet_signet_without_checkpoints() {
+        let header = [0u8; 80];
+        for net in [BitcoinNetwork::Testnet, BitcoinNetwork::Signet] {
+            let res = verify_header_chain(&header, &[], net);
+            assert!(
+                res.is_err(),
+                "{net:?} must fail closed in default-secure build, got: {res:?}"
+            );
+        }
     }
 
     #[test]

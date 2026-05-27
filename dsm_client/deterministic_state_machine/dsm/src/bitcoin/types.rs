@@ -29,13 +29,38 @@ impl BitcoinNetwork {
         }
     }
 
-    /// Convert from a u32 wire value (proto encoding)
-    pub fn from_u32(n: u32) -> Self {
+    /// Convert from a u32 wire value (proto encoding) — fail-closed.
+    ///
+    /// Issue #181 Finding 1 fix: returns `Err` on unknown values. The
+    /// previous `from_u32` accepted any non-0/1 value as `Signet`, which
+    /// (combined with Finding 2's NON_PAPER_MODE short-circuit) silently
+    /// downgraded the bridge to the `WeakenedDevelopment` trust profile on
+    /// any corrupted or adversarial network selector. Use this at every
+    /// trust boundary (proto decoding, external input).
+    pub fn try_from_u32(n: u32) -> Result<Self, DsmError> {
         match n {
-            0 => BitcoinNetwork::Mainnet,
-            1 => BitcoinNetwork::Testnet,
-            _ => BitcoinNetwork::Signet, // legacy/unknown non-mainnet values collapse to signet
+            0 => Ok(BitcoinNetwork::Mainnet),
+            1 => Ok(BitcoinNetwork::Testnet),
+            2 => Ok(BitcoinNetwork::Signet),
+            other => Err(DsmError::Validation {
+                context: format!(
+                    "BitcoinNetwork: unknown wire value {other}; valid: 0=Mainnet, 1=Testnet, 2=Signet"
+                ),
+                source: None,
+            }),
         }
+    }
+
+    /// Convert from a u32 wire value, with a SAFE fallback to `Mainnet`.
+    ///
+    /// Issue #181 Finding 1 fix: unknown values now fall back to `Mainnet`
+    /// (the STRICTEST trust profile), not `Signet`. Callers that have a
+    /// security-critical decision downstream (e.g. trust-profile selection
+    /// in the SPV bridge) MUST use [`try_from_u32`] and handle the `Err`
+    /// path explicitly. This wrapper exists only for UI/handler paths
+    /// where the `u32` came from a previously-validated internal store.
+    pub fn from_u32(n: u32) -> Self {
+        Self::try_from_u32(n).unwrap_or(BitcoinNetwork::Mainnet)
     }
 
     /// Convert to a u32 wire value (proto encoding)
@@ -115,5 +140,34 @@ mod tests {
             BitcoinNetwork::Testnet
         );
         assert!(BitcoinNetwork::try_from("invalid").is_err());
+    }
+
+    // Issue #181 Finding 1 regression — unknown wire values must NOT
+    // silently downgrade. `try_from_u32` returns Err; `from_u32` falls
+    // back to Mainnet (the STRICTEST profile), never to Signet.
+    #[test]
+    fn try_from_u32_accepts_only_known_values() {
+        assert_eq!(BitcoinNetwork::try_from_u32(0).unwrap(), BitcoinNetwork::Mainnet);
+        assert_eq!(BitcoinNetwork::try_from_u32(1).unwrap(), BitcoinNetwork::Testnet);
+        assert_eq!(BitcoinNetwork::try_from_u32(2).unwrap(), BitcoinNetwork::Signet);
+        for n in [3u32, 4, 5, 99, 1000, u32::MAX] {
+            assert!(
+                BitcoinNetwork::try_from_u32(n).is_err(),
+                "unknown wire value {n} must reject"
+            );
+        }
+    }
+
+    #[test]
+    fn from_u32_unknown_falls_back_to_mainnet_not_signet() {
+        // Unknown values land in the STRICTEST profile so they can't
+        // weaken downstream trust selection (issue #181 Finding 1).
+        for n in [3u32, 4, 99, 1000, u32::MAX] {
+            assert_eq!(
+                BitcoinNetwork::from_u32(n),
+                BitcoinNetwork::Mainnet,
+                "unknown wire value {n} must fall back to Mainnet, not Signet"
+            );
+        }
     }
 }

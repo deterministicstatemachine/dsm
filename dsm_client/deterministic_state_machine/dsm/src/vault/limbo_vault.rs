@@ -1621,15 +1621,27 @@ impl LimboVault {
             ));
         }
 
-        // 1. Deep-anchor depth check (dBTC paper §6.4, Invariants 10-11):
-        //    Derive confirmation depth from the PoW-validated header chain length.
-        //    For test networks (empty header_chain, no checkpoints): depth defaults to 1.
-        //    For mainnet: depth = header_chain.len() + 1 (chain from checkpoint to block, inclusive).
-        let confirmations = (header_chain.len() as u64) + 1;
-        if confirmations < min_confirmations {
+        // 1. Deep-anchor depth check (dBTC paper §6.4, Invariants 10-11).
+        //
+        // KNOWN LIMITATION (issue #181 Finding 4) — `header_chain` is the
+        // ancestor chain from a known checkpoint UP TO `block_header`, not
+        // the descendant headers that come AFTER it. `header_chain.len()+1`
+        // therefore measures "depth from checkpoint to settlement block"
+        // and NOT "Bitcoin confirmations on descendants of the settlement
+        // block" as the variable name (and the field name `min_confirmations`)
+        // suggests. Fixing this requires extending `BitcoinHTLCProof` with
+        // a `descendant_headers` field and cascading the change through
+        // every proof producer (UI, faucet, etc.) — tracked as a separate
+        // follow-on issue. Until that lands, the predicate here serves
+        // only as a "chain proves anchor-to-block continuity" check, not
+        // a true confirmation-depth gate.
+        let chain_depth_from_checkpoint = (header_chain.len() as u64) + 1;
+        if chain_depth_from_checkpoint < min_confirmations {
             return Err(DsmError::invalid_operation(format!(
-                "Insufficient confirmation depth: {} < {} required (provide more header chain headers)",
-                confirmations, min_confirmations
+                "Insufficient anchor-to-block chain depth: {} < {} required \
+                 (NOTE: this gate currently measures checkpoint distance, not \
+                 descendant confirmations — see issue #181 Finding 4)",
+                chain_depth_from_checkpoint, min_confirmations
             )));
         }
 
@@ -1711,8 +1723,12 @@ impl LimboVault {
             return Ok(false);
         }
 
-        // 6. Verify header chain connects block to a known checkpoint
-        let btc_network = BitcoinNetwork::from_u32(network);
+        // 6. Verify header chain connects block to a known checkpoint.
+        //    Issue #181 Finding 1 fix: use the fail-closed `try_from_u32`
+        //    at this trust boundary so an unknown wire byte propagates as
+        //    an error instead of silently selecting a weakened trust
+        //    profile (the legacy `from_u32` fell back to Signet).
+        let btc_network = BitcoinNetwork::try_from_u32(network)?;
         let header_chain_ok = verify_header_chain(block_header, header_chain, btc_network)?;
         if !header_chain_ok {
             log::error!("verify_bitcoin_htlc failed: verify_header_chain failed");
@@ -1739,7 +1755,14 @@ impl LimboVault {
             observation: BitcoinSettlementObservation {
                 network: btc_network,
                 bitcoin_spend_observed: true,
-                confirmation_depth: confirmations,
+                // Issue #181 Finding 4 KNOWN LIMITATION: this is the
+                // chain depth from the latest known checkpoint up to the
+                // settlement block, not Bitcoin confirmations on
+                // descendants of the settlement block. Fed into the
+                // formal-evidence observation under its existing field
+                // name to avoid an API break; see the variable definition
+                // above for the full caveat.
+                confirmation_depth: chain_depth_from_checkpoint,
                 min_confirmations,
             },
             spv_inclusion_valid,

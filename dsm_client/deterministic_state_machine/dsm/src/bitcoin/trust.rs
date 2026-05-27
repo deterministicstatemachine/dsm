@@ -46,10 +46,22 @@ impl BitcoinSettlementObservation {
     }
 
     pub fn trust_profile(&self) -> RustVerifierTrustProfile {
+        // Issue #181 Finding 2 fix: `WeakenedDevelopment` is only reachable
+        // when the `bitcoin-testnet-bypass` feature is enabled at build
+        // time. Production builds (feature off) select `MainnetFormal` for
+        // every network, so a corrupted or downgraded network selector
+        // cannot weaken the trust profile at runtime.
         match self.network {
             BitcoinNetwork::Mainnet => RustVerifierTrustProfile::MainnetFormal,
             BitcoinNetwork::Testnet | BitcoinNetwork::Signet => {
-                RustVerifierTrustProfile::WeakenedDevelopment
+                #[cfg(feature = "bitcoin-testnet-bypass")]
+                {
+                    RustVerifierTrustProfile::WeakenedDevelopment
+                }
+                #[cfg(not(feature = "bitcoin-testnet-bypass"))]
+                {
+                    RustVerifierTrustProfile::MainnetFormal
+                }
             }
         }
     }
@@ -143,6 +155,11 @@ mod tests {
         assert!(evidence.runtime_acceptance_implies_formal_mainnet());
     }
 
+    // Issue #181 Finding 2: this test is only meaningful when the
+    // `bitcoin-testnet-bypass` feature is enabled. Without it, Testnet/Signet
+    // select `MainnetFormal` (default-secure) and weakened acceptance is
+    // unreachable — which is exactly what the new test below pins.
+    #[cfg(feature = "bitcoin-testnet-bypass")]
     #[test]
     fn weakened_network_can_accept_without_formal_mainnet_predicate() {
         let evidence = RustVerifierAcceptedEvidence {
@@ -161,6 +178,38 @@ mod tests {
         assert!(!evidence.rust_verifier_accepted());
         assert!(evidence.runtime_accepts());
         assert!(!evidence.runtime_acceptance_implies_formal_mainnet());
+    }
+
+    // Issue #181 Finding 2 regression — with the bypass feature OFF
+    // (default), Signet and Testnet are treated as MainnetFormal: weak
+    // evidence that previously cleared the WeakenedDevelopment profile is
+    // now rejected.
+    #[cfg(not(feature = "bitcoin-testnet-bypass"))]
+    #[test]
+    fn default_build_treats_signet_testnet_as_mainnet_formal() {
+        for net in [BitcoinNetwork::Signet, BitcoinNetwork::Testnet] {
+            let evidence = RustVerifierAcceptedEvidence {
+                observation: BitcoinSettlementObservation {
+                    network: net,
+                    bitcoin_spend_observed: true,
+                    confirmation_depth: 1,
+                    min_confirmations: 1,
+                },
+                spv_inclusion_valid: true,
+                pow_valid: true,
+                checkpoint_rooted: false,    // would have passed under bypass
+                same_chain_anchored: false,  // would have passed under bypass
+            };
+            assert_eq!(
+                evidence.observation.trust_profile(),
+                RustVerifierTrustProfile::MainnetFormal,
+                "{net:?} must select MainnetFormal when bypass feature is off"
+            );
+            assert!(
+                !evidence.runtime_accepts(),
+                "{net:?} weak evidence must NOT be accepted in default-secure build"
+            );
+        }
     }
 
     #[test]
