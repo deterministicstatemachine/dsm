@@ -179,13 +179,17 @@ fn attack_forged_signature(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> Adversarial
 
     let msg = b"forged signature attack test message";
 
-    // Random bytes as signature
-    let forged_sig = vec![0xDE; 29_792]; // SPHINCS+ SPX256s signature size
+    // Random bytes as signature. Size matches the canonical production
+    // variant (SPHINCS+ SPX256f = 49_856 bytes per FIPS 205 Cat-5 fast
+    // profile, the variant pinned by whitepaper §11.1 line 1572 and used
+    // by `sphincs_sign` / `sphincs_verify` everywhere in dsm/dsm_sdk).
+    let forged_sig = vec![0xDE; 49_856];
     let forged_result = sphincs_verify(pk, msg, &forged_sig);
 
-    // Valid sig but wrong key
+    // Valid sig but wrong key. Use SPX256f to match the canonical
+    // production variant rather than the smaller-signature SPX256s.
     let seed2 = [88u8; 32];
-    let kp2 = generate_keypair_from_seed(SphincsVariant::SPX256s, &seed2).expect("keygen2");
+    let kp2 = generate_keypair_from_seed(SphincsVariant::SPX256f, &seed2).expect("keygen2");
     let sig = sphincs_sign(sk, msg).expect("sign");
     let wrong_key_result = sphincs_verify(&kp2.public_key, msg, &sig);
 

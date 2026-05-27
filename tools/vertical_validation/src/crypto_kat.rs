@@ -158,7 +158,10 @@ fn kat_sphincs() -> Vec<CryptoKatResult> {
     };
 
     let mut out = Vec::new();
-    let variant = SphincsVariant::SPX256s;
+    // Canonical production variant per whitepaper §11.1 line 1572 (Cat-5, fast).
+    // The vertical-validation harness must exercise the same variant the
+    // protocol uses end-to-end — not the smaller-signature SPX256s.
+    let variant = SphincsVariant::SPX256f;
     let seed = [42u8; 32];
 
     // 1. Deterministic keygen from seed

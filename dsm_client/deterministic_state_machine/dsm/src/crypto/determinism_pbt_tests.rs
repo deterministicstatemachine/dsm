@@ -31,8 +31,9 @@ mod tests {
 
         #[test]
         fn pbt_sphincs_seeded_keygen_is_deterministic(seed in any::<[u8;32]>()) {
-            // Use one representative variant; others are covered by unit tests.
-            let v = SphincsVariant::SPX256s;
+            // Use the canonical production variant per whitepaper §11.1
+            // (Cat-5, fast). Other variants are covered by `sphincs::tests`.
+            let v = SphincsVariant::SPX256f;
             let kp1 = generate_keypair_from_seed(v, &seed).expect("seeded keygen must succeed");
             let kp2 = generate_keypair_from_seed(v, &seed).expect("seeded keygen must succeed");
             prop_assert_eq!(&kp1.public_key, &kp2.public_key);
