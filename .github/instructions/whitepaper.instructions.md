@@ -102,6 +102,15 @@ child digest R,
 Node(L,R) := BLAKE3-256 "DSM/merkle-node\0" ∥L∥R ,
 and leaves are hashed with an explicit leaf domain:
 Leaf(X) := BLAKE3-256 "DSM/merkle-leaf\0" ∥X .
+
+Note (Device Tree specialization). The Device Tree (§16.3) uses a distinct, normative
+tag set — "DSM/dev-merkle\0", "DSM/dev-leaf\0", "DSM/dev-empty\0", and
+"DSM/dev-tree-pad\0" — to keep its domain disjoint from the Per-Device SMT and other
+binary Merkle structures defined in this section. The "DSM/merkle-node\0" /
+"DSM/merkle-leaf\0" tags above apply to the generic binary Merkle constructions used
+by SMT mirrors and similar structures; the Device Tree's specialized tag set is
+authoritative wherever a Device Tree node, leaf, empty root, or padding leaf is
+hashed. See §16.3 for the full Device Tree tag definitions.
 SMT Parameters: The zero leaf value is ZERO_LEAF (exactly 32 zero bytes). Leaf keys for
 relationship indexing are derived as
 kA↔B := BLAKE3-256 "DSM/smt-key\0" ∥min(DevIDA,DevIDB) ∥max(DevIDA,DevIDB),
@@ -1303,12 +1312,18 @@ verification.
 Device Tree (standard Merkle, normative). A standard Merkle tree whose root is the
 Device Tree root RG, constructed from the owner’s device identifiers. It binds every device
 of the same owner to RG and is replicated on all user devices and storage nodes.
-Leaves. Leaves are 32-byte DevID values sorted lexicographically (big-endian byte order).
+Leaves. Sorted lexicographically (big-endian byte order) by raw 32-byte DevID, then
+hashed with an explicit leaf-domain tag:
+Hleaf(X) := BLAKE3 "DSM/dev-leaf\0" ∥X .
 Internal nodes. For left child L and right child R,
 Hdev(L,R) := BLAKE3 "DSM/dev-merkle\0" ∥L∥R .
 Empty tree root.
 R∅
 G := BLAKE3 "DSM/dev-empty\0".
+Padding leaf (odd-arity). When a level has an odd number of nodes, the last node is
+paired with a distinguished padding leaf produced under a separate domain tag so that
+the padding can never collide with a legitimate Hleaf(DevID) value:
+Hpad := BLAKE3 "DSM/dev-tree-pad\0".
 Per-Device SMT (sparse). For each device, a Per-Device Sparse Merkle Tree indexes that
 device’s bilateral relationships; leaves store the current relationship chain tip digest hA↔B
 per counterparty key. Other devices do not mirror this SMT; storage nodes may keep concise
