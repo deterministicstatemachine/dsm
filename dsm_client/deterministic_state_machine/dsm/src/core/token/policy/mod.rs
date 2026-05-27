@@ -73,6 +73,23 @@ impl TokenPolicySystem {
         policy_file: PolicyFile,
     ) -> Result<PolicyAnchor, DsmError> {
         let anchor = PolicyAnchor::from_policy(&policy_file)?;
+        self.register_token_policy_with_anchor(token_id, policy_file, anchor.clone())
+            .await?;
+        Ok(anchor)
+    }
+
+    /// Register a token policy while preserving an already-authoritative
+    /// policy anchor.
+    ///
+    /// Use this when the policy bytes are committed externally (for example,
+    /// via storage-layer `DSM/policy` anchoring) and token operations must
+    /// bind to that exact 32-byte commitment.
+    pub async fn register_token_policy_with_anchor(
+        &self,
+        token_id: &str,
+        policy_file: PolicyFile,
+        anchor: PolicyAnchor,
+    ) -> Result<(), DsmError> {
 
         // Validate policy deterministically
         let validation_context = ValidationContext::new(token_id, &policy_file);
@@ -89,7 +106,7 @@ impl TokenPolicySystem {
             ));
         }
 
-        let token_policy = TokenPolicy::new(policy_file)?;
+        let token_policy = TokenPolicy::new_with_anchor(policy_file, anchor.clone());
         self.policy_cache.store_policy(anchor.clone(), token_policy);
 
         // Register mappings
@@ -100,7 +117,7 @@ impl TokenPolicySystem {
             .insert(token_id.to_string(), anchor.clone());
 
         log::info!("Registered policy for token {}", token_id);
-        Ok(anchor)
+        Ok(())
     }
 
     pub async fn get_token_policy(&self, token_id: &str) -> Result<Option<TokenPolicy>, DsmError> {
@@ -123,9 +140,10 @@ impl TokenPolicySystem {
                 .enforce_policy(&policy, operation_type, context)
                 .await
         } else {
-            // No policy registered -> allow by default.
-            // tick is best-effort; use peek (non-advancing) via enforcer default patterns elsewhere.
-            Ok(EnforcementResult::allowed("No policy restrictions", 0))
+            Ok(EnforcementResult::denied(
+                "No policy registered for token",
+                0,
+            ))
         }
     }
 

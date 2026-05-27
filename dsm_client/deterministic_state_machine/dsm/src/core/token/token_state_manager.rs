@@ -541,10 +541,20 @@ impl TokenStateManager {
         };
 
         let mut context = std::collections::HashMap::new();
+        context.insert(
+            "tick".to_string(),
+            crate::utils::deterministic_time::tick_index()
+                .to_le_bytes()
+                .to_vec(),
+        );
         match operation {
             Operation::Transfer {
                 amount, recipient, ..
             } => {
+                context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
                 context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
@@ -557,6 +567,10 @@ impl TokenStateManager {
                 ..
             } => {
                 context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
+                context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
                 );
@@ -564,9 +578,33 @@ impl TokenStateManager {
             }
             Operation::Burn { amount, .. } => {
                 context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
+                context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
                 );
+            }
+            Operation::LockToken { amount, purpose, .. } => {
+                let amount_u64 = u64::try_from(*amount).map_err(|_| {
+                    DsmError::invalid_operation(
+                        "Policy verification rejected: LockToken amount must be non-negative",
+                    )
+                })?;
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
+            }
+            Operation::UnlockToken { amount, purpose, .. } => {
+                let amount_u64 = u64::try_from(*amount).map_err(|_| {
+                    DsmError::invalid_operation(
+                        "Policy verification rejected: UnlockToken amount must be non-negative",
+                    )
+                })?;
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
             }
             Operation::Lock {
                 amount,
@@ -574,6 +612,10 @@ impl TokenStateManager {
                 owner,
                 ..
             } => {
+                context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
                 context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
@@ -587,6 +629,10 @@ impl TokenStateManager {
                 owner,
                 ..
             } => {
+                context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
                 context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
@@ -606,6 +652,8 @@ impl TokenStateManager {
             Operation::Transfer { .. } => "transfer",
             Operation::Mint { .. } => "mint",
             Operation::Burn { .. } => "burn",
+            Operation::LockToken { .. } => "lock",
+            Operation::UnlockToken { .. } => "unlock",
             Operation::Lock { .. } => "lock",
             Operation::Unlock { .. } => "unlock",
             _ => "unknown",
