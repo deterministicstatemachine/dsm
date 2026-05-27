@@ -125,7 +125,8 @@ mod tests {
         let recipient_info = b"recipient";
 
         let deterministic =
-            create_deterministic_commitment(&state_hash, &operation, recipient_info, None);
+            create_deterministic_commitment(&state_hash, &operation, recipient_info, None)
+                .expect("deterministic commitment must construct");
 
         // Verify the deterministic commitment
         assert!(verify_deterministic_commitment(

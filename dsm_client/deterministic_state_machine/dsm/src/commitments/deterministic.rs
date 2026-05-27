@@ -3,7 +3,13 @@
 //! Produces canonical, domain-separated BLAKE3 commitments over operations
 //! and state transition parameters. All commitments are deterministic: the
 //! same inputs always produce the same 32-byte digest.
+//!
+//! Issue #180.D fix: all `create_*_commitment` constructors now return
+//! `Result<Vec<u8>, DsmError>` instead of silently emitting `Vec::new()` on
+//! invalid input. Empty-vector fail-silent behavior hid input-validation
+//! errors and let callers downstream treat a sentinel as a real digest.
 
+use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 
 const OUT_LEN: usize = 32;
@@ -30,28 +36,23 @@ pub fn create_deterministic_commitment(
     operation: &Operation,
     recipient_info: &[u8],
     conditions: Option<&str>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DsmError> {
     let op_bytes = operation.to_bytes();
-    if !inputs_ok(current_state_hash, &op_bytes, recipient_info) {
-        return Vec::new();
-    }
+    validate_inputs(&op_bytes, recipient_info)?;
 
     let cond = match conditions {
-        Some(s) => match canonical_text(s) {
-            Ok(v) => Some(v),
-            Err(_) => return Vec::new(),
-        },
+        Some(s) => Some(canonical_text(s)?),
         None => None,
     };
 
-    hash_fields(
+    Ok(hash_fields(
         DOM_BASE,
         current_state_hash,
         &op_bytes,
         recipient_info,
         cond.as_deref(),
         None,
-    )
+    ))
 }
 
 /// Create a deterministic commitment that unlocks at a deterministic *slot*.
@@ -62,23 +63,21 @@ pub fn create_time_locked_commitment(
     operation: &Operation,
     recipient_info: &[u8],
     unlock_time: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DsmError> {
     let op_bytes = operation.to_bytes();
-    if !inputs_ok(current_state_hash, &op_bytes, recipient_info) {
-        return Vec::new();
-    }
+    validate_inputs(&op_bytes, recipient_info)?;
 
     let mut extra = [0u8; 8];
     extra.copy_from_slice(&unlock_time.to_le_bytes());
 
-    hash_fields(
+    Ok(hash_fields(
         DOM_TIMELOCK,
         current_state_hash,
         &op_bytes,
         recipient_info,
         None,
         Some(&extra),
-    )
+    ))
 }
 
 /// Create a conditional deterministic commitment.
@@ -90,33 +89,25 @@ pub fn create_conditional_commitment(
     recipient_info: &[u8],
     condition: &str,
     oracle_id: &str,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DsmError> {
     let op_bytes = operation.to_bytes();
-    if !inputs_ok(current_state_hash, &op_bytes, recipient_info) {
-        return Vec::new();
-    }
+    validate_inputs(&op_bytes, recipient_info)?;
 
-    let cond = match canonical_text(condition) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let oracle = match canonical_text(oracle_id) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    let cond = canonical_text(condition)?;
+    let oracle = canonical_text(oracle_id)?;
 
     // Encode condition + oracle as a single canonical text payload with explicit separators.
     // This is deterministic and avoids ambiguity.
     let combined = format!("cond={};oracle={}", cond, oracle);
 
-    hash_fields(
+    Ok(hash_fields(
         DOM_CONDITIONAL,
         current_state_hash,
         &op_bytes,
         recipient_info,
         Some(&combined),
         None,
-    )
+    ))
 }
 
 /// Create a recurring payment deterministic commitment.
@@ -130,27 +121,29 @@ pub fn create_recurring_commitment(
     recipient_info: &[u8],
     period_seconds: u64,
     end_date: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DsmError> {
     let op_bytes = operation.to_bytes();
-    if !inputs_ok(current_state_hash, &op_bytes, recipient_info) {
-        return Vec::new();
-    }
+    validate_inputs(&op_bytes, recipient_info)?;
 
     let mut extra = [0u8; 16];
     extra[0..8].copy_from_slice(&period_seconds.to_le_bytes());
     extra[8..16].copy_from_slice(&end_date.to_le_bytes());
 
-    hash_fields(
+    Ok(hash_fields(
         DOM_RECURRING,
         current_state_hash,
         &op_bytes,
         recipient_info,
         None,
         Some(&extra),
-    )
+    ))
 }
 
 /// Verify a deterministic commitment (base variant).
+///
+/// Returns `false` on length mismatch, mismatched digest, or invalid input
+/// to the underlying constructor (the constructor's `DsmError` is consumed
+/// because at the verify boundary any invalid input is just a non-match).
 pub fn verify_deterministic_commitment(
     commitment: &[u8],
     current_state_hash: &[u8; 32],
@@ -161,23 +154,39 @@ pub fn verify_deterministic_commitment(
     if commitment.len() != OUT_LEN {
         return false;
     }
-    let calculated =
-        create_deterministic_commitment(current_state_hash, operation, recipient_info, conditions);
-    calculated.as_slice() == commitment
+    match create_deterministic_commitment(current_state_hash, operation, recipient_info, conditions)
+    {
+        Ok(calculated) => calculated.as_slice() == commitment,
+        Err(_) => false,
+    }
 }
 
 // ---------- Internal helpers (deterministic, canonical) ----------
 
-fn inputs_ok(_current_state_hash: &[u8; 32], op_bytes: &[u8], recipient_info: &[u8]) -> bool {
-    // current_state_hash is fixed size [u8; 32], so no length check needed.
-    // We could check for zero hash if that's invalid, but for now we just check other inputs.
-    if op_bytes.is_empty() || op_bytes.len() > MAX_OP_BYTES_LEN {
-        return false;
+fn validate_inputs(op_bytes: &[u8], recipient_info: &[u8]) -> Result<(), DsmError> {
+    if op_bytes.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "deterministic commitment: operation bytes empty",
+        ));
     }
-    if recipient_info.is_empty() || recipient_info.len() > MAX_RECIPIENT_INFO_LEN {
-        return false;
+    if op_bytes.len() > MAX_OP_BYTES_LEN {
+        return Err(DsmError::invalid_operation(format!(
+            "deterministic commitment: operation bytes {} exceed cap {MAX_OP_BYTES_LEN}",
+            op_bytes.len()
+        )));
     }
-    true
+    if recipient_info.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "deterministic commitment: recipient_info empty",
+        ));
+    }
+    if recipient_info.len() > MAX_RECIPIENT_INFO_LEN {
+        return Err(DsmError::invalid_operation(format!(
+            "deterministic commitment: recipient_info {} exceeds cap {MAX_RECIPIENT_INFO_LEN}",
+            recipient_info.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Canonical text:
@@ -185,13 +194,23 @@ fn inputs_ok(_current_state_hash: &[u8; 32], op_bytes: &[u8], recipient_info: &[
 /// - ASCII only
 /// - lowercase
 /// - bounded length
-fn canonical_text(s: &str) -> Result<String, ()> {
+fn canonical_text(s: &str) -> Result<String, DsmError> {
     let t = s.trim();
-    if t.is_empty() || t.len() > MAX_TEXT_LEN {
-        return Err(());
+    if t.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "deterministic commitment: text field empty after trim",
+        ));
+    }
+    if t.len() > MAX_TEXT_LEN {
+        return Err(DsmError::invalid_operation(format!(
+            "deterministic commitment: text length {} exceeds cap {MAX_TEXT_LEN}",
+            t.len()
+        )));
     }
     if !t.is_ascii() {
-        return Err(());
+        return Err(DsmError::invalid_operation(
+            "deterministic commitment: text contains non-ASCII characters",
+        ));
     }
     Ok(t.to_ascii_lowercase())
 }
@@ -291,7 +310,8 @@ mod tests {
             &operation,
             recipient_info,
             conditions,
-        );
+        )
+        .expect("commitment must construct");
 
         assert_eq!(commitment.len(), 32);
 
@@ -300,7 +320,8 @@ mod tests {
             &operation,
             recipient_info,
             conditions,
-        );
+        )
+        .expect("commitment must construct");
         assert_eq!(commitment, commitment2);
 
         let different_operation = mk_transfer(200);
@@ -310,7 +331,8 @@ mod tests {
             &different_operation,
             recipient_info,
             conditions,
-        );
+        )
+        .expect("commitment must construct");
 
         assert_ne!(commitment, different_commitment);
     }
@@ -327,7 +349,8 @@ mod tests {
             &operation,
             recipient_info,
             conditions,
-        );
+        )
+        .expect("commitment must construct");
 
         assert!(verify_deterministic_commitment(
             &commitment,
@@ -361,14 +384,16 @@ mod tests {
             &operation,
             recipient_info,
             unlock_slot,
-        );
+        )
+        .expect("time-locked commitment must construct");
 
         let commitment2 = create_time_locked_commitment(
             &current_state_hash,
             &operation,
             recipient_info,
             unlock_slot,
-        );
+        )
+        .expect("time-locked commitment must construct");
         assert_eq!(commitment, commitment2);
 
         let different_commitment = create_time_locked_commitment(
@@ -376,7 +401,8 @@ mod tests {
             &operation,
             recipient_info,
             unlock_slot + 1,
-        );
+        )
+        .expect("time-locked commitment must construct");
         assert_ne!(commitment, different_commitment);
     }
 
@@ -395,7 +421,8 @@ mod tests {
             recipient_info,
             condition,
             oracle_id,
-        );
+        )
+        .expect("conditional commitment must construct");
 
         let commitment2 = create_conditional_commitment(
             &current_state_hash,
@@ -403,7 +430,8 @@ mod tests {
             recipient_info,
             condition,
             oracle_id,
-        );
+        )
+        .expect("conditional commitment must construct");
         assert_eq!(commitment, commitment2);
 
         let different_commitment = create_conditional_commitment(
@@ -412,7 +440,8 @@ mod tests {
             recipient_info,
             "btc_price_gt_60000",
             oracle_id,
-        );
+        )
+        .expect("conditional commitment must construct");
         assert_ne!(commitment, different_commitment);
     }
 
@@ -431,7 +460,8 @@ mod tests {
             recipient_info,
             period_slot,
             end_slot,
-        );
+        )
+        .expect("recurring commitment must construct");
 
         let commitment2 = create_recurring_commitment(
             &current_state_hash,
@@ -439,7 +469,8 @@ mod tests {
             recipient_info,
             period_slot,
             end_slot,
-        );
+        )
+        .expect("recurring commitment must construct");
         assert_eq!(commitment, commitment2);
 
         let different_commitment = create_recurring_commitment(
@@ -448,7 +479,54 @@ mod tests {
             recipient_info,
             period_slot + 1,
             end_slot,
-        );
+        )
+        .expect("recurring commitment must construct");
         assert_ne!(commitment, different_commitment);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #180.D regression — invalid inputs must produce a typed error,
+    // never the fail-silent Vec::new() sentinel.
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn constructors_reject_empty_recipient_info() {
+        let h = [1u8; 32];
+        let op = mk_transfer(100);
+        assert!(create_deterministic_commitment(&h, &op, &[], None).is_err());
+        assert!(create_time_locked_commitment(&h, &op, &[], 1).is_err());
+        assert!(create_conditional_commitment(&h, &op, &[], "x", "y").is_err());
+        assert!(create_recurring_commitment(&h, &op, &[], 1, 2).is_err());
+    }
+
+    #[test]
+    fn constructors_reject_oversized_recipient_info() {
+        let h = [1u8; 32];
+        let op = mk_transfer(100);
+        let big = vec![0u8; MAX_RECIPIENT_INFO_LEN + 1];
+        assert!(create_deterministic_commitment(&h, &op, &big, None).is_err());
+        assert!(create_time_locked_commitment(&h, &op, &big, 1).is_err());
+        assert!(create_conditional_commitment(&h, &op, &big, "x", "y").is_err());
+        assert!(create_recurring_commitment(&h, &op, &big, 1, 2).is_err());
+    }
+
+    #[test]
+    fn conditional_rejects_non_ascii_text_fields() {
+        let h = [1u8; 32];
+        let op = mk_transfer(100);
+        let r = b"recipient";
+        // Non-ASCII condition.
+        assert!(create_conditional_commitment(&h, &op, r, "café", "oracle").is_err());
+        // Non-ASCII oracle id.
+        assert!(create_conditional_commitment(&h, &op, r, "ok", "oráculo").is_err());
+    }
+
+    #[test]
+    fn deterministic_rejects_empty_conditions_string() {
+        let h = [1u8; 32];
+        let op = mk_transfer(100);
+        let r = b"recipient";
+        // Empty-after-trim is rejected by canonical_text.
+        assert!(create_deterministic_commitment(&h, &op, r, Some("   ")).is_err());
     }
 }
