@@ -1195,9 +1195,7 @@ impl BilateralTransactionManager {
             &counterparty_pubkey,
         )
         .map_err(|e| {
-            DsmError::InvalidOperation(format!(
-                "receiver acceptance proof verification error: {e}"
-            ))
+            DsmError::InvalidOperation(format!("receiver acceptance proof verification error: {e}"))
         })?;
 
         if !valid {
