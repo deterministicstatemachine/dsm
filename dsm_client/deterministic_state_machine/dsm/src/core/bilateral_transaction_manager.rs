@@ -601,26 +601,25 @@ impl BilateralTransactionManager {
     /// Sign a commitment hash using the local keypair.
     /// This is used by the BLE handler when registering a sender session for bilateral transfers.
     /// The signature is required for the commit phase.
-    pub fn sign_commitment(&self, commitment_hash: &[u8; 32]) -> Vec<u8> {
+    ///
+    /// Fail-closed: signer errors are surfaced as `DsmError`, never silently converted
+    /// to an empty signature blob. See issue #191.
+    pub fn sign_commitment(&self, commitment_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
         // §ISSUE-B4 FIX: canonical "DSM/<domain>\0" domain separator format.
         let mut msg = Vec::with_capacity(22 + 32);
         msg.extend_from_slice(b"DSM/bilateral-sign\0");
         msg.extend_from_slice(commitment_hash);
 
-        match self.signature_keypair.sign(&msg) {
-            Ok(sig) => {
-                info!(
-                    "[BTM] sign_commitment: signed commitment {}... with {} byte signature",
-                    labeling::hash_to_short_id(commitment_hash),
-                    sig.len()
-                );
-                sig
-            }
-            Err(e) => {
-                error!("[BTM] sign_commitment: failed to sign: {}", e);
-                Vec::new()
-            }
-        }
+        let sig = self.signature_keypair.sign(&msg).map_err(|e| {
+            error!("[BTM] sign_commitment: failed to sign: {}", e);
+            e
+        })?;
+        info!(
+            "[BTM] sign_commitment: signed commitment {}... with {} byte signature",
+            labeling::hash_to_short_id(commitment_hash),
+            sig.len()
+        );
+        Ok(sig)
     }
 
     pub fn add_verified_contact(&mut self, c: DsmVerifiedContact) -> Result<(), DsmError> {
@@ -1872,5 +1871,24 @@ mod tests {
             .create_bilateral_precommitment(&remote_id, op, 100)
             .await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
+    }
+
+    // Regression for issue #191: sign_commitment must be fail-closed.
+    // Previous bug: signer errors silently returned `Vec::new()`. The new
+    // signature is `Result<Vec<u8>, DsmError>`, so the only way to obtain
+    // an empty signature is to construct one explicitly — the function
+    // itself cannot emit one. This test pins both the success contract
+    // (non-empty bytes wrapped in Ok) and the return-type shape.
+    #[tokio::test]
+    async fn sign_commitment_returns_non_empty_signature_on_success() {
+        let (manager, _kp) = make_manager();
+        let commitment_hash = [0xABu8; 32];
+        let sig = manager
+            .sign_commitment(&commitment_hash)
+            .expect("sign_commitment must succeed with a valid keypair");
+        assert!(
+            !sig.is_empty(),
+            "sign_commitment must never return an empty signature on the Ok path"
+        );
     }
 }
