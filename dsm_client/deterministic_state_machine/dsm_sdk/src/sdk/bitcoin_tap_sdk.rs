@@ -45,7 +45,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 
 use dsm::{
     bitcoin::{
@@ -1393,7 +1393,12 @@ impl BitcoinTapSdk {
             })?;
         let mut deposit_nonce = [0u8; 32];
         let mut os_rng = OsRng;
-        os_rng.fill_bytes(&mut deposit_nonce);
+        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut deposit_nonce).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         let eta = Self::derive_bearer_eta(&manifold_seed, &deposit_nonce);
         let preimage = Self::derive_preimage_from_eta(&eta);
         let hash_lock = sha256_hash_lock(&preimage);
@@ -1639,7 +1644,14 @@ impl BitcoinTapSdk {
         })?;
         let mut successor_deposit_nonce = [0u8; 32];
         let mut os_rng = OsRng;
-        os_rng.fill_bytes(&mut successor_deposit_nonce);
+        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut successor_deposit_nonce).map_err(
+            |e| {
+                DsmError::crypto(
+                    format!("OsRng entropy failure: {e}"),
+                    None::<std::io::Error>,
+                )
+            },
+        )?;
         let successor_eta = Self::derive_bearer_eta(&manifold_seed, &successor_deposit_nonce);
         let successor_preimage = Self::derive_preimage_from_eta(&successor_eta);
         let successor_hash_lock = sha256_hash_lock(&successor_preimage);
@@ -2680,6 +2692,17 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
+            // Fan-out PUT to every configured storage node, each
+            // authenticated with its OWN per-node token resolved from
+            // the local DB.  This is the load-bearing fix for SoFi
+            // cross-device discovery: DSM storage nodes are
+            // independent (no server-side replication for the GCP
+            // production deployment), so the owner's PUT must land on
+            // every node the trader might query.  Combined with
+            // per-node auth — each storage node maintains its own
+            // device-auth table and rejects tokens issued by a
+            // different node with HTTP 401 — this is the only PUT
+            // path that actually works for the cross-device case.
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
                 .map_err(|e| {
@@ -2696,12 +2719,77 @@ impl BitcoinTapSdk {
                         None::<std::io::Error>,
                     )
                 })?;
-            let node_url = config.node_urls.first().cloned().unwrap_or_default();
-            let sdk = match Self::resolve_storage_auth(&node_url) {
-                Some(auth) => sdk.with_auth(auth),
-                None => sdk,
-            };
-            sdk.store_data(key, payload).await
+            // Resolve auth for each configured node so the per-client
+            // auth is the right token for that specific endpoint.
+            let mut auths = std::collections::HashMap::new();
+            for url in &config.node_urls {
+                if let Some(auth) = Self::resolve_storage_auth(url) {
+                    auths.insert(url.clone(), auth);
+                }
+            }
+            // Lazy back-fill: if any configured node has no token in the
+            // local DB, run a registration pass so every node knows this
+            // device.  Idempotent — re-registering a known (device,
+            // node) pair returns the existing token.  This catches the
+            // case where finalize_bootstrap_core's auth-registration
+            // task wasn't invoked (genesis happened on an older binary,
+            // resume path doesn't fire bootstrap finalize, etc.) and
+            // the wallet only has node[0]'s token from b0x_sdk's
+            // single-node auth loop.
+            if auths.len() < config.node_urls.len() {
+                let missing = config.node_urls.len() - auths.len();
+                log::info!(
+                    "storage_put_bytes: {missing}/{} nodes lack a local auth token — running register_device_for_auth to back-fill",
+                    config.node_urls.len()
+                );
+                let device_id =
+                    crate::sdk::app_state::AppState::get_device_id().unwrap_or_default();
+                let public_key =
+                    crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+                let genesis_hash =
+                    crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+                if !device_id.is_empty() && !public_key.is_empty() && !genesis_hash.is_empty() {
+                    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+                    let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+                    let genesis_hash_b32 =
+                        crate::util::text_id::encode_base32_crockford(&genesis_hash);
+                    if let Err(e) = sdk
+                        .register_device_for_auth(
+                            &device_id_b32,
+                            &public_key_b32,
+                            &genesis_hash_b32,
+                        )
+                        .await
+                    {
+                        log::warn!(
+                            "storage_put_bytes: back-fill register_device_for_auth failed: {e} \
+                             (continuing — some nodes may still PUT-401)"
+                        );
+                    }
+                    // Re-read the local DB to pick up the freshly-stored tokens.
+                    auths.clear();
+                    for url in &config.node_urls {
+                        if let Some(auth) = Self::resolve_storage_auth(url) {
+                            auths.insert(url.clone(), auth);
+                        }
+                    }
+                    log::info!(
+                        "storage_put_bytes: post-back-fill auths populated for {}/{} nodes",
+                        auths.len(),
+                        config.node_urls.len()
+                    );
+                } else {
+                    log::warn!(
+                        "storage_put_bytes: skipping back-fill — AppState identity not loaded \
+                         (device_id_empty={} pk_empty={} genesis_empty={})",
+                        device_id.is_empty(),
+                        public_key.is_empty(),
+                        genesis_hash.is_empty()
+                    );
+                }
+            }
+            let sdk = sdk.with_per_node_auth(&auths);
+            sdk.put_to_all_replicas(key, payload, None).await
         }
     }
 
@@ -2755,6 +2843,11 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
+            // Mirror storage_put_bytes: fan-out the DELETE to every
+            // node with each request authenticated by that node's own
+            // token.  Single-node delete would leave the object
+            // reachable from the other 5 replicas a trader might
+            // query.
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
                 .map_err(|e| {
@@ -2771,12 +2864,14 @@ impl BitcoinTapSdk {
                         None::<std::io::Error>,
                     )
                 })?;
-            let node_url = config.node_urls.first().cloned().unwrap_or_default();
-            let sdk = match Self::resolve_storage_auth(&node_url) {
-                Some(auth) => sdk.with_auth(auth),
-                None => sdk,
-            };
-            sdk.delete(key).await
+            let mut auths = std::collections::HashMap::new();
+            for url in &config.node_urls {
+                if let Some(auth) = Self::resolve_storage_auth(url) {
+                    auths.insert(url.clone(), auth);
+                }
+            }
+            let sdk = sdk.with_per_node_auth(&auths);
+            sdk.delete_at_all_replicas(key).await
         }
     }
 

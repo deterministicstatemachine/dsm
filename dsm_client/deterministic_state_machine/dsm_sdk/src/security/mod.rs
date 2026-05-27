@@ -7,6 +7,7 @@
 pub mod cdbrw_access_gate;
 pub mod cdbrw_enrollment_writer;
 pub mod cdbrw_ffi;
+pub mod cdbrw_reprove;
 pub mod cdbrw_responder;
 pub mod cdbrw_verifier;
 pub mod identity;

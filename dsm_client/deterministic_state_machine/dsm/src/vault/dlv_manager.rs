@@ -346,6 +346,54 @@ impl LimboVault {
             None
         }
     }
+
+    /// Update the AMM constant-product reserves in-place + bump
+    /// `current_sequence`.  Returns the vault's `token_a` so callers
+    /// can match the advertisement's canonical pair order against
+    /// the vault's storage order before writing.  Returns `None` if
+    /// this vault is not an AMM constant-product (other fulfillment
+    /// kinds don't carry reserves).
+    ///
+    /// Used by `route.syncVaultsForPair` to mirror post-trade
+    /// reserves from the latest `RoutingVaultAdvertisementV1` into
+    /// the local DLVManager — this is how the OWNER observes a
+    /// remote trader's `dlv.unlockRouted` settle on a vault the
+    /// owner created.  Without this, the owner's local DLVManager
+    /// stays frozen at the initial reserves the owner created at
+    /// vault-creation time, and the cross-device SoFi test orchestrator's
+    /// "owner observes trader's settle" assertion can never fire.
+    pub fn update_amm_reserves(&mut self, new_a: u128, new_b: u128) -> Option<Vec<u8>> {
+        if let crate::vault::FulfillmentMechanism::AmmConstantProduct {
+            token_a,
+            reserve_a,
+            reserve_b,
+            ..
+        } = &mut self.fulfillment_condition
+        {
+            *reserve_a = new_a;
+            *reserve_b = new_b;
+            self.current_sequence = self.current_sequence.saturating_add(1);
+            Some(token_a.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Read-only accessor for the vault's AMM token_a (the
+    /// caller's-side order of the canonical pair).  Returns `None`
+    /// if not AMM.  Used by `route.syncVaultsForPair` to map the
+    /// advertisement's canonical (lex-lower, lex-higher) ordering
+    /// back to the vault's storage ordering before applying a
+    /// reserve refresh.
+    pub fn amm_token_a(&self) -> Option<&[u8]> {
+        if let crate::vault::FulfillmentMechanism::AmmConstantProduct { token_a, .. } =
+            &self.fulfillment_condition
+        {
+            Some(token_a.as_slice())
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +442,7 @@ mod tests {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            policy_digest: None,
         }
     }
 
@@ -573,6 +622,7 @@ mod tests {
             entry_header: None,
             current_sequence: 0,
             anchor_enforcement: 0,
+            policy_digest: None,
         }
     }
 

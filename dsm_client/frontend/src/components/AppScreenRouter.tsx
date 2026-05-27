@@ -88,6 +88,8 @@ export default function AppScreenRouter({
       return <MemoSofi onNavigate={onNavigate} />;
     case 'liquidity':
       return <MemoLiquidity onNavigate={onNavigate} />;
+    case 'swap':
+      return <MemoWallet initialTab="swap" eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
     case 'mail':
       return <MemoMail onNavigate={onNavigate} />;
     case 'lock_setup':

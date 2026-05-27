@@ -234,7 +234,6 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         genesis_hash_raw: genesis_hash.clone(),
         cdbrw_hw_entropy: report.cdbrw_hw_entropy.clone(),
         cdbrw_env_fingerprint: report.cdbrw_env_fingerprint.clone(),
-        cdbrw_salt: report.cdbrw_salt.clone(),
     })
     .map_err(|e| {
         ingress_error(
@@ -288,6 +287,59 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         0,
     )?;
     push_genesis_lifecycle_event(pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32, 0)?;
+
+    // Ensure the wallet is registered for authenticated PUTs on every
+    // configured storage node.  Runs on BOTH genesis (BootstrapPhaseFinalize)
+    // and resume (BootstrapPhaseResumeFinalize) so existing wallets that
+    // completed genesis before this code existed get their auth tokens
+    // populated on the next launch.  Idempotent at the storage-node level;
+    // tokens stored via `store_auth_token`, read on every PUT path via
+    // `BitcoinTapSdk::resolve_storage_auth`.  Best-effort: failures are
+    // logged but never block bootstrap completion.
+    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&context.device_id);
+    let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&context.genesis_hash);
+    let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+    let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+    let rt = tokio::runtime::Handle::try_current();
+    let auth_task = async move {
+        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+            Ok(cfg) => match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+                Ok(auth_sdk) => match auth_sdk
+                    .register_device_for_auth(&device_id_b32, &public_key_b32, &genesis_hash_b32)
+                    .await
+                {
+                    Ok(_) => log::info!(
+                        "FINALIZE_BOOTSTRAP: storage-node auth-registration completed"
+                    ),
+                    Err(e) => log::warn!(
+                        "FINALIZE_BOOTSTRAP: auth-registration failed (PUTs may 401 until retry): {e}"
+                    ),
+                },
+                Err(e) => log::warn!(
+                    "FINALIZE_BOOTSTRAP: auth-registration SDK init failed: {e}"
+                ),
+            },
+            Err(e) => log::warn!(
+                "FINALIZE_BOOTSTRAP: auth-registration cfg load failed: {e}"
+            ),
+        }
+    };
+    if let Ok(handle) = rt {
+        // Spawn off the runtime if we're already on one — never block
+        // finalize_bootstrap_core on the network round-trips.
+        handle.spawn(auth_task);
+    } else {
+        // No active runtime (test or unusual init order); fire-and-forget
+        // via a fresh runtime so the storage publishes still happen.
+        std::thread::spawn(|| {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(auth_task);
+            }
+        });
+    }
 
     let ready_message = if report.trust_level
         == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
@@ -841,14 +893,12 @@ fn restore_identity_context_core(
     genesis_hash: Vec<u8>,
     cdbrw_hw_entropy: Vec<u8>,
     cdbrw_env_fingerprint: Vec<u8>,
-    cdbrw_salt: Vec<u8>,
 ) -> Result<Vec<u8>, pb::Error> {
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id,
         genesis_hash_raw: genesis_hash,
         cdbrw_hw_entropy,
         cdbrw_env_fingerprint,
-        cdbrw_salt,
     })
     .map_err(|e| {
         ingress_error(
@@ -961,12 +1011,12 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
             initialize_identity_context_core(op.device_id, op.genesis_hash, op.binding_key)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
+            // Phase 13: op.cdbrw_salt is `reserved 7;` in proto and ignored.
             restore_identity_context_core(
                 op.device_id,
                 op.genesis_hash,
                 op.cdbrw_hw_entropy,
                 op.cdbrw_env_fingerprint,
-                op.cdbrw_salt,
             )
         }
         None => Err(ingress_error(
@@ -1380,7 +1430,6 @@ endpoint = "http://127.0.0.1:8080"
                 device_entropy: vec![0x42; 8],
                 cdbrw_hw_entropy: Vec::new(),
                 cdbrw_env_fingerprint: Vec::new(),
-                cdbrw_salt: Vec::new(),
             }
             .encode_to_vec(),
         }
@@ -1447,12 +1496,17 @@ endpoint = "http://127.0.0.1:8080"
     #[serial]
     fn startup_restore_identity_context_derives_binding_key_and_router() {
         let _guard = setup_test_env();
+        let device_id = vec![0x11; 32];
+        let genesis_hash = vec![0x22; 32];
         let hw = vec![0x33; 32];
         let env = vec![0x44; 32];
-        let salt = vec![0x55; 32];
-        let expected_binding =
-            dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt)
-                .expect("binding derivation");
+        let expected_binding = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+            &genesis_hash,
+            &device_id,
+            &hw,
+            &env,
+        )
+        .expect("binding derivation");
 
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
@@ -1461,7 +1515,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: hw,
                     cdbrw_env_fingerprint: env,
-                    cdbrw_salt: salt,
                 },
             )),
         });
@@ -1490,7 +1543,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });
@@ -1506,7 +1558,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });
@@ -1528,7 +1579,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });
@@ -1544,7 +1594,6 @@ endpoint = "http://127.0.0.1:8080"
                     genesis_hash: vec![0x22; 32],
                     cdbrw_hw_entropy: vec![0x33; 32],
                     cdbrw_env_fingerprint: vec![0x44; 32],
-                    cdbrw_salt: vec![0x55; 32],
                 },
             )),
         });

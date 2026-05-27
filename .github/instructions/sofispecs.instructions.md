@@ -5,7 +5,7 @@
 
                                                                                                         Welcome back to the Deep Dive. So you've come to us with, well, it's an overwhelming stack of technical documentation, architectural blueprints, and even source code for something truly radical. It is, yeah.
 
-                                                                                                        We are moving past the theoretical. We're getting past the why of decentralized finance and jumping straight into the deterministic core of what seems to be its successor, sovereign finance or DT5. That's exactly right.
+                                                                                                        We are moving past the theoretical. We're getting past the why of decentralized finance and jumping straight into the deterministic core of what seems to be its successor, sovereign finance or SoFi. That's exactly right.
 
                                                                                                         Today is not about the philosophy, we've talked about that before. It's about fixing the systemic flaws of traditional SoFi. Today is about the how.
 
@@ -17,23 +17,23 @@
 
                                                                                                         Yeah. Before we dive into the code crates and the REST files, let's just quickly set the stage. Let's just reiterate the three major systemic risks that traditional SoFi as we know it has.
 
-                                                                                                        The things that DT5's implementation is designed to eliminate from day one. Okay, so the first one is the big one. It's the one that makes headlines every few months.
+                                                                                                        The things that SoFi's implementation is designed to eliminate from day one. Okay, so the first one is the big one. It's the one that makes headlines every few months.
 
                                                                                                         It's custody centralization. I mean, despite the name decentralized, traditional SoFi forces you to pool all your funds into one huge, often massive, smart contract. It's a honeypot.
 
                                                                                                         It's a giant honeypot. It's a single point of failure that can hold billions. And if that lock gets picked, the funds are just gone.
 
-                                                                                                        DT5 is built to make sure that liquidity stays sovereign. It's always under your direct cryptographic control. And that whole pooled structure, it's only possible because of how the contracts themselves are built, which I guess brings us to risk number two, smart contract vulnerabilities.
+                                                                                                        SoFi is built to make sure that liquidity stays sovereign. It's always under your direct cryptographic control. And that whole pooled structure, it's only possible because of how the contracts themselves are built, which I guess brings us to risk number two, smart contract vulnerabilities.
 
                                                                                                         Exactly. Traditional smart contracts are Turing complete. And, you know, that sounds powerful and it is, but it means they can support incredibly complex logic, loops, recursion, unbounded execution paths.
 
                                                                                                         Complexity is the enemy of security. It absolutely is. That Turing complete environment opens the door for these subtle, non-obvious bugs like re-entrancy attacks or gas limit exploits that just lead to catastrophic losses.
 
-                                                                                                        So the implementation path for DT5 has to eliminate this risk by severely, severely limiting that complexity. And the third risk, it's more of a silent drain. It strips value from users every single day, even when nothing is being hacked, maximal extractable value or MEV.
+                                                                                                        So the implementation path for SoFi has to eliminate this risk by severely, severely limiting that complexity. And the third risk, it's more of a silent drain. It strips value from users every single day, even when nothing is being hacked, maximal extractable value or MEV.
 
                                                                                                         MEV is parasitic. That's the best word for it. It's the ability of the validators or the block proposers, these centralized entities that order transactions to just front run you or sandwich or trade or just reorder everything in the global mem pool for their own private profit.
 
-                                                                                                        We're talking billions a year, right? Billions extracted from retail users. DT5's implementation has to rely on a bilateral non-consensus architecture that just makes this kind of extraction economically impossible. The system is designed so there is no central place to extract that value.
+                                                                                                        We're talking billions a year, right? Billions extracted from retail users. SoFi's implementation has to rely on a bilateral non-consensus architecture that just makes this kind of extraction economically impossible. The system is designed so there is no central place to extract that value.
 
                                                                                                         Okay, let's unpack how it actually does that. Yeah. How does it achieve this paradigm shift? Yeah.
 
@@ -53,7 +53,8 @@
 
                                                                                                         Miners or validators have to agree. Exactly. In those systems, settlement requires this global, slow, expensive consensus.
 
-                                                                                                        The entire network has to agree that your transaction is valid, put it in a block, finalize it. That's what creates all the latency, the high gas fees, and, of course, the MEV opportunity because the ordering is competitive and it's up to the validator. DTFi just replaces that entire process with deterministic, hash-anchored commitments.
+                                                                                                        The entire network has to agree that your transaction is valid, put it in a block, finalize it. That's what creates all the latency, the high gas fees, and, of course, the MEV opportunity because the ordering is competitive and it's up to the validator. SoFi just replaces that entire process with implement 
+                                                                                                        eterministic, hash-anchored commitments.
 
                                                                                                         Yes. The goal here is absolute certainty. The outcome isn't validated by a network consensus.
 
@@ -93,7 +94,7 @@
 
                                                                                                         The trade executes the moment a valid cryptographic proof, we call it sigma-twe, is generated that satisfies the unlock logic. And that proof is then verified by the vault owner's device. This sounds incredibly disciplined as an architecture.
 
-                                                                                                        So let's move down to that foundational layer, because if everything depends on determinism, the environment has to be utterly predictable. It does. I mean, implementing DT5 requires this rigid adherence to specific state machine invariants, which are enforced by the core DSM crate, just called DSM.
+                                                                                                        So let's move down to that foundational layer, because if everything depends on determinism, the environment has to be utterly predictable. It does. I mean, implementing SoFi requires this rigid adherence to specific state machine invariants, which are enforced by the core DSM crate, just called DSM.
 
                                                                                                         If a developer introduces any non-deterministic input here, the entire security model just collapses. So what are these non-negotiable architectural constraints that the DSM core imposes? Well, the most immediate one addresses the chaos of timing in distributed systems. The DSM core enforces a clockless protocol.
 

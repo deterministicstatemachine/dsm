@@ -18,7 +18,7 @@ use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameTyp
 use dsm_sdk::storage_utils;
 use dsm_sdk::generated;
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -114,14 +114,15 @@ async fn verify_frontend_event_guarantees() {
     // Alice & Bob Genesis
     let mut os_rng = OsRng;
     let mut alice_entropy = vec![10u8; 32];
-    os_rng.fill_bytes(&mut alice_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut alice_entropy)
+        .expect("OsRng entropy failure");
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(alice_entropy))
         .await
         .expect("alice MPC genesis");
 
     let mut bob_entropy = vec![11u8; 32];
-    os_rng.fill_bytes(&mut bob_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut bob_entropy).expect("OsRng entropy failure");
     let bob_genesis = storage_sdk
         .create_genesis_with_mpc(Some(bob_entropy))
         .await

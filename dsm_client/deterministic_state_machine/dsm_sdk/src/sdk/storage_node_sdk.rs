@@ -445,13 +445,34 @@ impl StorageNodeClient {
     }
 
     /// Generate a unique message ID for replay protection (transport-layer, not protocol).
-    /// Uses BLAKE3 domain-separated hash of the key + deterministic tick for uniqueness.
-    fn generate_message_id(key: &str) -> String {
-        let tick = dt::tick();
-        let mut hasher = dsm_domain_hasher("DSM/obj-msg-id");
-        hasher.update(key.as_bytes());
-        hasher.update(&tick.to_le_bytes());
-        crate::util::text_id::encode_base32_crockford(hasher.finalize().as_bytes())
+    ///
+    /// The server-side replay guard at `dsm_storage_node/src/auth/mod.rs:78`
+    /// enforces `unique(device_id, message_id)` per device.  A 409 Conflict
+    /// is returned when an already-seen message_id is replayed.  The id is
+    /// transport-layer only (not part of the canonical protocol) and the
+    /// DSM clockless rule applies to PROTOCOL decisions, not transport
+    /// nonces — so a CSPRNG nonce is the correct shape here.
+    ///
+    /// Prior versions of this function used `BLAKE3("DSM/obj-msg-id", key,
+    /// dt::tick())` which was DETERMINISTIC per (key, tick).  Same key PUT
+    /// twice in the same commit-height window collided.  Worse, once the
+    /// server's auth layer recorded a message_id (even when the surrounding
+    /// PUT body subsequently failed), that id was burnt forever — so any
+    /// future retry with the same deterministic id 409'd against the
+    /// poisoned slot.  Real-hardware repro: SoFiTradeRealHwTest's two
+    /// publishRoutingAdvertisement calls both PUT under the same commit
+    /// height; consistent 409 across runs even with genuinely fresh
+    /// vault_ids.
+    ///
+    /// Generates 32 bytes of CSPRNG, encoded Base32-Crockford — same
+    /// shape the server's auth layer parses.  The `key` arg is kept in
+    /// the signature for telemetry / future binding but isn't hashed in;
+    /// the server validates only `unique(device_id, message_id)`.
+    fn generate_message_id(_key: &str) -> String {
+        use rand::RngCore;
+        let mut nonce = [0u8; 32];
+        rand::rng().fill_bytes(&mut nonce);
+        crate::util::text_id::encode_base32_crockford(&nonce)
     }
 
     pub async fn put(
@@ -786,7 +807,18 @@ pub struct NodePerformanceMetrics {
 /// Production-grade SDK for interacting with DSM Storage Nodes
 #[derive(Clone)]
 pub struct StorageNodeSDK {
+    /// Primary client — used by non-retry call sites and as `clients[0]`.
     inner: Arc<StorageNodeClient>,
+    /// All configured storage node clients, one per URL in
+    /// `config.node_urls` order.  DSM storage nodes are independent
+    /// (not a cluster) — each is an autonomous endpoint that the SDK
+    /// can hit directly.  Cross-device SoFi test surfaced that
+    /// `execute_with_retry` had been hammering only `inner` (the first
+    /// node) — when GCP-side rate limiting kicked in on that single
+    /// endpoint with HTTP 429, every retry hit the same blacklisted
+    /// URL.  Rotating through this slice lets the rate-limit window
+    /// on one node clear while we hit a different region's node.
+    clients: Arc<Vec<Arc<StorageNodeClient>>>,
     pub config: StorageNodeConfig,
     #[allow(dead_code)]
     connection_pool: Arc<ConnectionPool>,
@@ -799,14 +831,45 @@ pub struct StorageNodeSDK {
 impl StorageNodeSDK {
     /// Initialize the SDK with enhanced configuration and production features
     pub async fn new(config: StorageNodeConfig) -> Result<Self, DsmError> {
-        let client = StorageNodeClient::new(config.clone()).await.map_err(|e| {
-            DsmError::storage(format!("StorageNodeSDK.new: {e}"), None::<std::io::Error>)
-        })?;
+        // Build a client per configured storage node URL.  DSM storage
+        // nodes are independent (not a cluster); each is an autonomous
+        // endpoint and the SDK can hit any of them.  First-built becomes
+        // the primary; the full set is used by `execute_with_retry`
+        // to rotate across nodes on transient failures (e.g. GCP-side
+        // HTTP 429 throttling against any single endpoint).
+        if config.node_urls.is_empty() {
+            return Err(DsmError::storage(
+                "StorageNodeSDK.new: no node URLs configured".to_string(),
+                None::<std::io::Error>,
+            ));
+        }
+        let mut clients: Vec<Arc<StorageNodeClient>> = Vec::with_capacity(config.node_urls.len());
+        for url in &config.node_urls {
+            // Per-URL client config: same as `config` but with this one URL
+            // pinned as `node_urls.first()` so StorageNodeClient::new picks
+            // it as primary.
+            let mut per_url_config = config.clone();
+            per_url_config.node_urls = vec![url.clone()];
+            match StorageNodeClient::new(per_url_config).await {
+                Ok(c) => clients.push(Arc::new(c)),
+                Err(e) => log::warn!(
+                    "StorageNodeSDK.new: skipping node {url}: {e} — other nodes still available"
+                ),
+            }
+        }
+        if clients.is_empty() {
+            return Err(DsmError::storage(
+                "StorageNodeSDK.new: every configured node failed to build a client".to_string(),
+                None::<std::io::Error>,
+            ));
+        }
+        let inner = clients[0].clone();
 
         let connection_pool = Arc::new(ConnectionPool::new(config.pool_config.clone()));
 
         let sdk = StorageNodeSDK {
-            inner: Arc::new(client),
+            inner,
+            clients: Arc::new(clients),
             config: config.clone(),
             connection_pool,
             health_statuses: Arc::new(RwLock::new(HashMap::new())),
@@ -868,49 +931,52 @@ impl StorageNodeSDK {
 
     /// Write to ALL configured storage nodes (spec §6: redundant mirrors).
     ///
-    /// Fans out the PUT to every endpoint in the live registry. Returns
-    /// successfully if at least one write succeeds. Failed nodes are
-    /// quarantined via `report_storage_failure`.
+    /// DSM storage nodes are independent endpoints — there is NO server-
+    /// side cross-node replication of object writes in production (the
+    /// `dev_replication.rs` shim is localhost-only and not wired into
+    /// the GCP deployment).  For the trader on device B to discover
+    /// what the owner on device A published, the owner must write to
+    /// every node the trader might query.  Calling `put` (single node)
+    /// instead of this method is the canonical "owner writes get lost"
+    /// failure mode in cross-device tests.
+    ///
+    /// Fans the PUT out to every client in `self.clients`, each of
+    /// which already carries its own per-node auth token via
+    /// [`with_per_node_auth`].  Returns successfully if at least one
+    /// write succeeds, with the primary address from the first
+    /// successful node.  Failed nodes are quarantined via
+    /// `report_storage_failure` so background health monitoring picks
+    /// them up.
     pub async fn put_to_all_replicas(
         &self,
         key: &str,
         data: &[u8],
         ttl_seconds: Option<u64>,
     ) -> Result<String, DsmError> {
-        let endpoints = crate::network::list_storage_endpoints()?;
-        if endpoints.is_empty() {
-            return self.put(key, data, ttl_seconds).await;
+        if self.clients.is_empty() {
+            return Err(DsmError::storage(
+                "put_to_all_replicas: no clients configured",
+                None::<std::io::Error>,
+            ));
         }
 
         let mut primary_addr = String::new();
         let mut success_count = 0u32;
-        let total = endpoints.len();
+        let total = self.clients.len();
 
-        for endpoint in &endpoints {
-            let temp_config = StorageNodeConfig::new(vec![endpoint.clone()]);
-            let temp_client = match StorageNodeClient::new(temp_config).await {
-                Ok(mut c) => {
-                    // Propagate auth from primary client.
-                    c.auth.clone_from(&self.inner.auth);
-                    c
-                }
-                Err(e) => {
-                    log::warn!("replica fanout: failed to create client for {endpoint}: {e}");
-                    let _ = crate::network::report_storage_failure(endpoint);
-                    continue;
-                }
-            };
-            match temp_client.put(key, data, ttl_seconds).await {
+        for client in self.clients.iter() {
+            let endpoint = client.node_info.url.clone();
+            match client.put(key, data, ttl_seconds).await {
                 Ok(addr) => {
                     if primary_addr.is_empty() {
                         primary_addr = addr;
                     }
                     success_count += 1;
-                    let _ = crate::network::report_storage_success(endpoint);
+                    let _ = crate::network::report_storage_success(&endpoint);
                 }
                 Err(e) => {
                     log::warn!("replica fanout: PUT to {endpoint} failed: {e}");
-                    let _ = crate::network::report_storage_failure(endpoint);
+                    let _ = crate::network::report_storage_failure(&endpoint);
                 }
             }
         }
@@ -929,6 +995,52 @@ impl StorageNodeSDK {
             ));
         }
         Ok(primary_addr)
+    }
+
+    /// DELETE the key from ALL configured storage nodes.  Mirrors the
+    /// put_to_all_replicas write-everywhere semantics so deletes also
+    /// fan out — otherwise a deleted advertisement would still be
+    /// reachable by traders hitting a node where the delete didn't
+    /// reach.  Returns successfully if at least one delete succeeds.
+    pub async fn delete_at_all_replicas(&self, key: &str) -> Result<(), DsmError> {
+        if self.clients.is_empty() {
+            return Err(DsmError::storage(
+                "delete_at_all_replicas: no clients configured",
+                None::<std::io::Error>,
+            ));
+        }
+
+        let mut success_count = 0u32;
+        let total = self.clients.len();
+
+        for client in self.clients.iter() {
+            let endpoint = client.node_info.url.clone();
+            match client.delete(key).await {
+                Ok(()) => {
+                    success_count += 1;
+                    let _ = crate::network::report_storage_success(&endpoint);
+                }
+                Err(e) => {
+                    log::warn!("replica fanout: DELETE to {endpoint} failed: {e}");
+                    let _ = crate::network::report_storage_failure(&endpoint);
+                }
+            }
+        }
+
+        log::info!(
+            "delete_at_all_replicas: key={} success={}/{} nodes",
+            &key[..key.len().min(24)],
+            success_count,
+            total
+        );
+
+        if success_count == 0 {
+            return Err(DsmError::storage(
+                "all replica deletes failed",
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(())
     }
 
     /// Retrieve data from storage node with automatic decoding and failover
@@ -2005,36 +2117,83 @@ impl StorageNodeSDK {
         });
     }
 
-    /// Execute a storage operation with retry logic
+    /// Execute a storage operation with exponential-backoff retry +
+    /// node rotation across the configured set of independent storage
+    /// nodes.
+    ///
+    /// **Transport-only operational behavior** — per the DSM clockless
+    /// rule, wall-clock APIs are banned in protocol semantics (schemas,
+    /// payloads, receipts, ordering).  Network retry backoff is the
+    /// approved exception: it is opaque to the protocol layer and only
+    /// affects HOW fast the SDK rehits a 429/503/transient failure.
+    /// Mirrors the `b0x_sdk.rs` retry pattern.
+    ///
+    /// Each attempt rotates to a different storage node from
+    /// `self.clients` (DSM storage nodes are independent endpoints,
+    /// not a cluster).  Cross-device SoFi test surfaced that the
+    /// previous single-node-only path failed every retry against the
+    /// same blacklisted GCP-hosted endpoint when GCP-side rate
+    /// limiting kicked in — rotation lets the limiter on one node
+    /// clear while we hit a different region's healthy node.
+    ///
+    /// Backoff schedule (capped at MAX_DELAY_MS):
+    ///   attempt 0 → no sleep (first try); pick clients[0]
+    ///   attempt 1 → 200ms; pick clients[1 % N]
+    ///   attempt 2 → 400ms; pick clients[2 % N]
+    ///   ...
+    ///   attempt 6 → 5000ms (capped); pick clients[6 % N]
+    ///
+    /// Total worst-case wait: ~11s spread across 7 attempts.
     pub async fn execute_with_retry<F, Fut, T>(&self, operation: F) -> Result<T, DsmError>
     where
         F: Fn(Arc<StorageNodeClient>) -> Fut,
         Fut: std::future::Future<Output = Result<T, StorageNodeError>>,
     {
-        let max_retries = 3; // Default retry count since field doesn't exist
-        let base_delay = Duration::from_ticks(1000); // Default deterministic delay (ticks)
+        const MAX_RETRIES: u32 = 6;
+        const BASE_DELAY_MS: u64 = 200;
+        const MAX_DELAY_MS: u64 = 5_000;
 
-        for attempt in 0..=max_retries {
-            match operation(self.inner.clone()).await {
+        // `clients` is non-empty per `StorageNodeSDK::new` invariant;
+        // pre-compute the modulus once to avoid taking the lock per
+        // attempt.
+        let n_clients = self.clients.len();
+
+        for attempt in 0..=MAX_RETRIES {
+            // Rotate: attempt N hits clients[N % n_clients].  When
+            // n_clients == 1 (legacy single-node config) the rotation
+            // degrades cleanly to retry-the-same-node behaviour.
+            let client = self.clients[(attempt as usize) % n_clients].clone();
+            match operation(client).await {
                 Ok(result) => return Ok(result),
-                Err(e) if attempt < max_retries => {
-                    let delay = base_delay * (2_u32.pow(attempt as u32)); // Exponential backoff
-                    warn!("Storage operation failed (attempt {})", attempt + 1);
-                    warn!("Retrying in {delay:?}: {e}");
-                    // Deterministic: no wall-clock delays
+                Err(e) if attempt < MAX_RETRIES => {
+                    let delay_ms =
+                        (BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(20))).min(MAX_DELAY_MS);
+                    let next_node_idx = ((attempt as usize) + 1) % n_clients;
+                    warn!(
+                        "Storage operation failed (attempt {}/{} via node {}): {e} — \
+                         retrying via node {} in {}ms",
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        (attempt as usize) % n_clients,
+                        next_node_idx,
+                        delay_ms
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
                 Err(e) => {
                     return Err(DsmError::storage(
-                        format!("Storage operation failed after {max_retries} retries: {e}"),
+                        format!(
+                            "Storage operation failed after {} retries across {} node(s): {e}",
+                            MAX_RETRIES, n_clients
+                        ),
                         None::<std::io::Error>,
                     ));
                 }
             }
         }
 
-        // This part should ideally not be reached if retry logic is exhaustive
-        // and error handling is complete. If it is reached, it indicates an unhandled
-        // error condition or an issue with the retry mechanism.
+        // Unreachable: the loop exits via `return` in both Ok and final-Err
+        // branches; this is here only to satisfy the compiler.
         Err(DsmError::storage(
             "Storage operation failed due to unhandled error after retries".to_string(),
             None::<std::io::Error>,
@@ -2100,10 +2259,52 @@ impl StorageNodeSDK {
 
     /// Return a new SDK instance with device auth credentials set on the inner client.
     /// Required for authenticated PUT/DELETE operations on storage nodes.
+    ///
+    /// Single-node convenience — applies the same auth to `inner` only.
+    /// Callers driving multi-node writes (put_to_all_replicas, rotated
+    /// retries) should use [`with_per_node_auth`] so each client carries
+    /// its own node-specific token instead of one token leaking across
+    /// nodes.
     pub fn with_auth(self, auth: StorageAuthContext) -> Self {
         let client = (*self.inner).clone().with_auth(auth);
         Self {
             inner: Arc::new(client),
+            ..self
+        }
+    }
+
+    /// Return a new SDK with per-node auth tokens applied.
+    ///
+    /// Each `auths[url]` is matched against the corresponding
+    /// `StorageNodeClient.node_info.url` in `self.clients` and applied
+    /// to that specific client.  Clients whose URL is absent from
+    /// `auths` retain whatever auth they had (typically None).
+    ///
+    /// Critical for production multi-node deployments: DSM storage nodes
+    /// each maintain their own device-auth table, and a token issued by
+    /// node A is invalid at node B.  Without per-node auth, rotated PUT
+    /// retries against nodes 1..N return HTTP 401 even though the wallet
+    /// is correctly registered with each of them.
+    pub fn with_per_node_auth(
+        self,
+        auths: &std::collections::HashMap<String, StorageAuthContext>,
+    ) -> Self {
+        let new_clients: Vec<Arc<StorageNodeClient>> = self
+            .clients
+            .iter()
+            .map(|c| {
+                let mut client = (**c).clone();
+                if let Some(auth) = auths.get(&client.node_info.url) {
+                    client.auth = Some(auth.clone());
+                }
+                Arc::new(client)
+            })
+            .collect();
+        // `clients` is non-empty per `StorageNodeSDK::new` invariant.
+        let new_inner = new_clients[0].clone();
+        Self {
+            inner: new_inner,
+            clients: Arc::new(new_clients),
             ..self
         }
     }
@@ -2462,8 +2663,24 @@ impl StorageNodeSDK {
         })?;
 
         let mut last_error = None;
+        let mut first_success_token: Option<String> = None;
+        let mut success_count = 0usize;
 
-        // Try to register with each storage node
+        // Register with EVERY configured storage node.  DSM storage
+        // nodes are independent endpoints: each maintains its own
+        // device-registration table and gates PUT/DELETE by an
+        // auth-token issued by THAT node.  If we register with only
+        // one node (the previous early-return-on-first-success
+        // behaviour), subsequent PUTs that rotate to any of the other
+        // nodes get rejected with HTTP 401 Unauthorized — exactly the
+        // failure mode observed on the cross-device SoFi test after
+        // node-rotation landed.  The fix is to keep walking the full
+        // list so every node knows this device.
+        //
+        // Returned token: the first successful node's token (callers
+        // use the return value only as a sentinel; per-node tokens
+        // are read on demand via `resolve_storage_auth` against the
+        // local DB which is keyed by (node_url, device_id)).
         for node_url in &self.config.node_urls {
             let url = format!("{}/api/v2/device/register", node_url.trim_end_matches('/'));
 
@@ -2503,8 +2720,12 @@ impl StorageNodeSDK {
                                         );
                                     }
 
-                                    // Return the token from first successful registration
-                                    return Ok(token);
+                                    success_count += 1;
+                                    if first_success_token.is_none() {
+                                        first_success_token = Some(token);
+                                    }
+                                    // DON'T return — keep walking the list so EVERY node
+                                    // gets a registration + token entry in the local DB.
                                 }
                                 Err(e) => {
                                     log::warn!("Failed to decode RegisterDeviceResponse: {}", e);
@@ -2543,13 +2764,22 @@ impl StorageNodeSDK {
             }
         }
 
-        Err(DsmError::storage(
-            format!(
-                "Failed to register device with any storage node. Last error: {}",
-                last_error.unwrap_or_else(|| "Unknown".to_string())
-            ),
-            None::<std::io::Error>,
-        ))
+        log::info!(
+            "register_device_for_auth: registered with {}/{} nodes",
+            success_count,
+            self.config.node_urls.len()
+        );
+
+        match first_success_token {
+            Some(token) => Ok(token),
+            None => Err(DsmError::storage(
+                format!(
+                    "Failed to register device with any storage node. Last error: {}",
+                    last_error.unwrap_or_else(|| "Unknown".to_string())
+                ),
+                None::<std::io::Error>,
+            )),
+        }
     }
 
     /// Sync with a storage node (simplified for JNI)

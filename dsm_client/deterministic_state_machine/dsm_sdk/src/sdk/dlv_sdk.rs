@@ -581,12 +581,17 @@ impl DlvSdk {
         reference_state: &State,
     ) -> Result<FulfillmentMechanism, DsmError> {
         match condition {
-            VaultCondition::MinimumBalance(amount) => Ok(FulfillmentMechanism::Payment {
-                amount: *amount,
-                token_id: "default".to_string(),
-                recipient: "default".to_string(),
-                verification_state: reference_state.hash.to_vec(),
-            }),
+            VaultCondition::MinimumBalance(amount) => {
+                let op_bytes = reference_state.operation.to_bytes();
+                let tree = dsm::merkle::MerkleTree::new(vec![op_bytes]);
+                let root = tree.root_hash().unwrap_or([0u8; 32]);
+                Ok(FulfillmentMechanism::Payment {
+                    amount: *amount,
+                    token_id: "default".to_string(),
+                    recipient: "default".to_string(),
+                    verification_state: root.to_vec(),
+                })
+            }
             VaultCondition::VaultType(vt) => {
                 if vt == "multisig" {
                     let (pk, _) = sphincs::generate_sphincs_keypair()?;
@@ -636,12 +641,21 @@ impl DlvSdk {
             .to_vec())
     }
 
-    /// Simplified Merkle proof placeholder (binds to reference state)
+    /// Production Merkle proof (binds to reference state)
     fn generate_merkle_proof(&self, reference_state: &State) -> Result<Vec<u8>, DsmError> {
-        let merkle_data = [&reference_state.hash[..], b"payment_verification"].concat();
-        Ok(blake3::domain_hash("DSM/dlv-merkle", &merkle_data)
-            .as_bytes()
-            .to_vec())
+        let op_bytes = reference_state.operation.to_bytes();
+        let tree = dsm::merkle::MerkleTree::new(vec![op_bytes]);
+        let proof = tree.generate_proof(0);
+
+        let mut out = Vec::new();
+        // Path len
+        out.extend_from_slice(&(proof.path.len() as u32).to_le_bytes());
+        // Leaf index
+        out.extend_from_slice(&(proof.leaf_index as u32).to_le_bytes());
+        for sibling in proof.path {
+            out.extend_from_slice(&sibling);
+        }
+        Ok(out)
     }
 }
 

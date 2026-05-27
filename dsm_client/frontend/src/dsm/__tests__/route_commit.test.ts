@@ -390,13 +390,33 @@ describe('route_commit.ts', () => {
       expect(result.error).toMatch(/32 bytes/);
     });
 
-    test('rejects empty vaultProtoBytes', async () => {
+    test('empty vaultProtoBytes is forwarded; Rust derives from local DLVManager', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(validInput.vaultId)),
+      );
       const result = await publishRoutingAdvertisement({
         ...validInput,
         vaultProtoBytes: new Uint8Array(0),
       });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/vaultProtoBytes/);
+      expect(result.success).toBe(true);
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const req = pb.PublishRoutingAdvertisementRequest.fromBinary(argPack.body);
+      expect(req.vaultProtoBytes.length).toBe(0);
+    });
+
+    test('omitted vaultProtoBytes is forwarded as empty (Rust derives)', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(validInput.vaultId)),
+      );
+      const { vaultProtoBytes, ...inputWithoutProto } = validInput;
+      const _ = vaultProtoBytes;
+      const result = await publishRoutingAdvertisement(inputWithoutProto);
+      expect(result.success).toBe(true);
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const req = pb.PublishRoutingAdvertisementRequest.fromBinary(argPack.body);
+      expect(req.vaultProtoBytes.length).toBe(0);
     });
   });
 

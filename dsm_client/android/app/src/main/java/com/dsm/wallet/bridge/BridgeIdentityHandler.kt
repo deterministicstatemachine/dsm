@@ -51,11 +51,13 @@ internal object BridgeIdentityHandler {
         val entropyBytes: ByteArray,
     )
 
+    // Phase 13: dbrwSalt removed.  K_DBRW is now deterministic from
+    // (hw_entropy, env_fingerprint) alone — see
+    // dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key in Rust.
     private data class BootstrapMeasurements(
         val trustLevel: BootstrapMeasurementReport.TrustLevel,
         val hwEntropy: ByteArray,
         val envEntropy: ByteArray,
-        val dbrwSalt: ByteArray,
     )
 
     private fun getFramedErrorEnvelopeCode(envelopeBytes: ByteArray): Int {
@@ -86,8 +88,31 @@ internal object BridgeIdentityHandler {
     private fun sendBootstrapMeasurementReport(
         report: BootstrapMeasurementReport,
     ): ByteArray {
+        // Envelope.headers is required by Rust-side envelope validation
+        // (dsm::envelope::validate_headers_wire).  device_id + chain_tip
+        // are both 32-byte length-checked fields; chain_tip is reserved
+        // for SDK use and MUST be all-zeros from the frontend.  When the
+        // report itself carries a device_id (FINALIZE path), reuse it
+        // for the header; otherwise the early-signal path passes zeros
+        // (the validator only enforces length, not value).
+        val headerDeviceId: ByteString = if (report.deviceId.size() == 32) {
+            report.deviceId
+        } else {
+            ByteString.copyFrom(ByteArray(32))
+        }
+        val headerGenesisHash: ByteString = if (report.genesisHash.size() == 32) {
+            report.genesisHash
+        } else {
+            ByteString.copyFrom(ByteArray(32))
+        }
+        val headers = dsm.types.proto.Headers.newBuilder()
+            .setDeviceId(headerDeviceId)
+            .setChainTip(ByteString.copyFrom(ByteArray(32)))
+            .setGenesisHash(headerGenesisHash)
+            .build()
         val envelope = Envelope.newBuilder()
             .setVersion(3)
+            .setHeaders(headers)
             .setMessageId(ByteString.copyFrom(ByteArray(16)))
             .setBootstrapMeasurementReport(report)
             .build()
@@ -144,6 +169,7 @@ internal object BridgeIdentityHandler {
     }
 
     private fun clearGenesisArtifacts(
+        context: Context,
         prefs: SharedPreferences,
         sdkContextInitialized: AtomicBoolean,
         keyDeviceId: String,
@@ -156,18 +182,21 @@ internal object BridgeIdentityHandler {
             .remove(keyDeviceId)
             .remove(keyGenesisHash)
             .remove(keyGenesisEnvelope)
-            .remove(keyDbrwSalt)
+            .remove(keyDbrwSalt) // legacy plaintext slot; cleared for one-time migration safety
             .remove(KEY_CDBRW_ANCHOR)
             .remove(KEY_HAS_IDENTITY)
             .remove(KEY_FRONTEND_DEVICE_ID)
             .remove(KEY_FRONTEND_GENESIS_HASH)
             .remove(KEY_GENESIS_CREATED)
             .apply()
+        // Phase 13: random DBRW salt was dropped from K_DBRW preimage.
+        // No Keystore-wrapped salt store to clear.
         sdkContextInitialized.set(false)
-        Log.w(logTag, "clearGenesisArtifacts: cleared partial genesis + DBRW state")
+        Log.w(logTag, "clearGenesisArtifacts: cleared partial genesis state")
     }
 
     private fun ensureGenesisNotInvalidated(
+        context: Context,
         prefs: SharedPreferences,
         sdkContextInitialized: AtomicBoolean,
         logTag: String,
@@ -180,6 +209,7 @@ internal object BridgeIdentityHandler {
             return
         }
         clearGenesisArtifacts(
+            context = context,
             prefs = prefs,
             sdkContextInitialized = sdkContextInitialized,
             keyDeviceId = keyDeviceId,
@@ -254,22 +284,23 @@ internal object BridgeIdentityHandler {
             "collectBootstrapMeasurements: cdbrw.enroll returned no anchor"
         )
         val envEntropy = AntiCloneGate.buildEnvironmentBytes()
-        val dbrwSalt = ByteArray(32)
-        java.security.SecureRandom().nextBytes(dbrwSalt)
+        // Phase 13: random DBRW salt removed.  K_DBRW is now derived
+        // deterministically from (hwEntropy, envEntropy) in Rust via
+        // dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key.  The
+        // wallet is recoverable across uninstall + reinstall on the
+        // same physical device; cross-device anti-clone is still
+        // enforced by Layer B (opportunistic re-prove).
         prefs.edit()
-            .putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(dbrwSalt))
             .putString(KEY_CDBRW_ANCHOR, BridgeEncoding.base32CrockfordEncode(hwEntropy))
             .apply()
         Log.i(
             logTag,
-            "collectBootstrapMeasurements: persisted DBRW salt and cached reference anchor " +
-                "(access=${hwResult.accessLevel})"
+            "collectBootstrapMeasurements: cached reference anchor (access=${hwResult.accessLevel})"
         )
         return BootstrapMeasurements(
             trustLevel = mapTrustLevel(hwResult.accessLevel),
             hwEntropy = hwEntropy,
             envEntropy = envEntropy,
-            dbrwSalt = dbrwSalt,
         )
     }
 
@@ -350,26 +381,10 @@ internal object BridgeIdentityHandler {
         return result
     }
 
-    private fun loadPersistedDbrwSalt(
-        prefs: SharedPreferences,
-        keyDbrwSalt: String,
-        logTag: String,
-    ): ByteArray? {
-        val existing = prefs.getString(keyDbrwSalt, null)
-        if (!existing.isNullOrEmpty()) {
-            try {
-                val decoded = BridgeEncoding.base32CrockfordDecode(existing)
-                if (decoded.size == 32) {
-                    Log.i(logTag, "loadPersistedDbrwSalt: loaded persisted DBRW salt")
-                    return decoded
-                }
-            } catch (_: Throwable) {
-                Log.w(logTag, "loadPersistedDbrwSalt: invalid persisted DBRW salt")
-            }
-        }
-        Log.w(logTag, "loadPersistedDbrwSalt: persisted DBRW salt missing")
-        return null
-    }
+    // Phase 13: `loadPersistedDbrwSalt` deleted — random DBRW salt was
+    // dropped from the K_DBRW preimage.  K_DBRW is now derived
+    // deterministically from (hw_entropy, env_fingerprint) by the
+    // Rust core; no per-install salt is read on resume.
 
     private fun restoreIdentityContextDirect(
         context: Context,
@@ -377,7 +392,6 @@ internal object BridgeIdentityHandler {
         logTag: String,
         keyDeviceId: String,
         keyGenesisHash: String,
-        keyDbrwSalt: String,
     ): Boolean {
         val deviceIdStr = prefs.getString(keyDeviceId, null)
         val genesisHashStr = prefs.getString(keyGenesisHash, null)
@@ -409,12 +423,7 @@ internal object BridgeIdentityHandler {
             return false
         }
 
-        val dbrwSalt = loadPersistedDbrwSalt(
-            prefs = prefs,
-            keyDbrwSalt = keyDbrwSalt,
-            logTag = logTag,
-        ) ?: return false
-
+        // Phase 13: no salt fetch — K_DBRW derives from (hw, env) only.
         return try {
             dispatchStartupOrThrow(
                 StartupRequest.newBuilder()
@@ -424,7 +433,6 @@ internal object BridgeIdentityHandler {
                             .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
                             .setCdbrwHwEntropy(ByteString.copyFrom(cachedAnchor))
                             .setCdbrwEnvFingerprint(ByteString.copyFrom(AntiCloneGate.buildEnvironmentBytes()))
-                            .setCdbrwSalt(ByteString.copyFrom(dbrwSalt))
                     )
                         .build()
             )
@@ -457,13 +465,13 @@ internal object BridgeIdentityHandler {
             .setCodec(Codec.CODEC_PROTO)
             .setBody(
                 ByteString.copyFrom(
+                    // Phase 13: setCdbrwSalt removed — field is `reserved 7;`.
                     SystemGenesisRequest.newBuilder()
                         .setLocale(locale)
                         .setNetworkId(networkId)
                         .setDeviceEntropy(ByteString.copyFrom(entropyBytes))
                         .setCdbrwHwEntropy(ByteString.copyFrom(measurements.hwEntropy))
                         .setCdbrwEnvFingerprint(ByteString.copyFrom(measurements.envEntropy))
-                        .setCdbrwSalt(ByteString.copyFrom(measurements.dbrwSalt))
                         .build()
                         .toByteArray()
                 )
@@ -488,6 +496,7 @@ internal object BridgeIdentityHandler {
     }
 
     private fun installGenesisEnvelope(
+        context: Context,
         prefs: SharedPreferences,
         sdkContextInitialized: AtomicBoolean,
         logTag: String,
@@ -509,6 +518,7 @@ internal object BridgeIdentityHandler {
         }
 
         ensureGenesisNotInvalidated(
+            context = context,
             prefs = prefs,
             sdkContextInitialized = sdkContextInitialized,
             logTag = logTag,
@@ -538,15 +548,14 @@ internal object BridgeIdentityHandler {
 
         Log.i(logTag, "installGenesisEnvelope: identity persisted (deviceId/genesisHash/envelope stored as b32)")
 
-        sendBootstrapMeasurementReport(
-            BootstrapMeasurementReport.newBuilder()
-                .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_STARTED)
-                .setDeviceId(ByteString.copyFrom(deviceIdBytes))
-                .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
-                .build()
-        )
+        // The BOOTSTRAP_PHASE_STARTED signal already fired at the top of
+        // createGenesis (so the UI flipped to the securing-progress
+        // screen BEFORE collectBootstrapMeasurements ran the slow
+        // enrollment). Sending it again here would push a duplicate
+        // lifecycle event for a phase the session manager is already in.
 
         ensureGenesisNotInvalidated(
+            context = context,
             prefs = prefs,
             sdkContextInitialized = sdkContextInitialized,
             logTag = logTag,
@@ -557,13 +566,13 @@ internal object BridgeIdentityHandler {
         )
 
         val finalizeEnvelope = sendBootstrapMeasurementReport(
+            // Phase 13: setCdbrwSalt removed.
             BootstrapMeasurementReport.newBuilder()
                 .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_FINALIZE)
                 .setDeviceId(ByteString.copyFrom(deviceIdBytes))
                 .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
                 .setCdbrwHwEntropy(ByteString.copyFrom(measurements.hwEntropy))
                 .setCdbrwEnvFingerprint(ByteString.copyFrom(measurements.envEntropy))
-                .setCdbrwSalt(ByteString.copyFrom(measurements.dbrwSalt))
                 .setTrustLevel(measurements.trustLevel)
                 .build()
         )
@@ -595,7 +604,6 @@ internal object BridgeIdentityHandler {
                 logTag = logTag,
                 keyDeviceId = keyDeviceId,
                 keyGenesisHash = keyGenesisHash,
-                keyDbrwSalt = keyDbrwSalt,
             )) {
             sdkContextInitialized.set(true)
             return true
@@ -635,11 +643,7 @@ internal object BridgeIdentityHandler {
                         "bootstrapFromPrefs: cdbrw anchor unavailable after resume"
                     )
                     val envEntropy = AntiCloneGate.buildEnvironmentBytes()
-                    val dbrwSalt = loadPersistedDbrwSalt(
-                        prefs = prefs,
-                        keyDbrwSalt = keyDbrwSalt,
-                        logTag = logTag,
-                    ) ?: return false
+                    // Phase 13: no salt fetch — K_DBRW derives from (hw, env) only.
                     val finalizeEnvelope = sendBootstrapMeasurementReport(
                         BootstrapMeasurementReport.newBuilder()
                             .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_RESUME_FINALIZE)
@@ -647,7 +651,6 @@ internal object BridgeIdentityHandler {
                             .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
                             .setCdbrwHwEntropy(ByteString.copyFrom(hwEntropy))
                             .setCdbrwEnvFingerprint(ByteString.copyFrom(envEntropy))
-                            .setCdbrwSalt(ByteString.copyFrom(dbrwSalt))
                             .setTrustLevel(mapTrustLevel(hwAnchorResult.accessLevel))
                             .build()
                     )
@@ -690,6 +693,26 @@ internal object BridgeIdentityHandler {
         genesisLifecycleInFlight.set(true)
         genesisLifecycleInvalidated.set(false)
 
+        // Flip Rust's BOOTSTRAP_SECURING=true BEFORE the slow enrollment
+        // kicks off.  Without this signal the session manager keeps
+        // returning `needs_genesis`, the React UI stays on the
+        // Initialize-button screen, and the user sees nothing happening
+        // for the ~7-minute C-DBRW K-trial enrollment.  Device id /
+        // genesis hash aren't known yet at this point; the Rust handler
+        // accepts empty bytes for BOOTSTRAP_PHASE_STARTED and just
+        // toggles the securing flag + pushes lifecycle events.  The
+        // resume path (`bootstrapFromPrefs`) already sends this signal
+        // before its own derivation work; the first-time path missed it.
+        try {
+            sendBootstrapMeasurementReport(
+                BootstrapMeasurementReport.newBuilder()
+                    .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_STARTED)
+                    .build()
+            )
+        } catch (t: Throwable) {
+            Log.w(logTag, "createGenesis: early BOOTSTRAP_PHASE_STARTED signal failed (continuing)", t)
+        }
+
         val result = try {
             val cachedDevId = prefs.getString(keyDeviceId, null)
             val cachedGenHash = prefs.getString(keyGenesisHash, null)
@@ -697,6 +720,7 @@ internal object BridgeIdentityHandler {
             if (!cachedDevId.isNullOrEmpty() && !cachedGenHash.isNullOrEmpty()) {
                 Log.i(logTag, "createGenesis: identity already exists, clearing for fresh genesis")
                 clearGenesisArtifacts(
+                    context = context,
                     prefs = prefs,
                     sdkContextInitialized = sdkContextInitialized,
                     keyDeviceId = keyDeviceId,
@@ -715,6 +739,7 @@ internal object BridgeIdentityHandler {
             )
 
             ensureGenesisNotInvalidated(
+                context = context,
                 prefs = prefs,
                 sdkContextInitialized = sdkContextInitialized,
                 logTag = logTag,
@@ -736,6 +761,7 @@ internal object BridgeIdentityHandler {
             }
             val installInput = parseGenesisEnvelopeInstallInput(envelopeBytes)
             val finalizeEnvelope = installGenesisEnvelope(
+                context = context,
                 prefs = prefs,
                 sdkContextInitialized = sdkContextInitialized,
                 logTag = logTag,
@@ -754,6 +780,7 @@ internal object BridgeIdentityHandler {
         } catch (t: Throwable) {
             Log.e(logTag, "createGenesis failed", t)
             clearGenesisArtifacts(
+                context = context,
                 prefs = prefs,
                 sdkContextInitialized = sdkContextInitialized,
                 keyDeviceId = keyDeviceId,

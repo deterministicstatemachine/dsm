@@ -952,14 +952,34 @@ entropy.
 Definition 2 (Environment Fingerprint). E(e) ∈{0,1}m fingerprints the execution environ-
 ment.
 Definition 3 (Dual-Binding).
-KDBRW = BLAKE3-256 "DSM/dbrw-bind\0" ∥H(d) ∥E(e) ∥sdevice ,
-where sdevice is a per-device salt ensuring uniqueness even for similar hardware or environ-
-ments.
-Theorem 5 (Binding Inseparability). Given KDBRW and collision resistance of BLAKE3-256
-under domain separation, it is infeasible to find (h′,e′,s′) ̸= (h,e,s) such that BLAKE3-256("DSM/dbrw-bind
-h′ ∥e′ ∥s′) = BLAKE3-256("DSM/dbrw-bind\0" ∥h ∥e ∥s). The per-device salt sdevice
-prevents correlation attacks by ensuring unique bindings even when hardware entropy or
-environment fingerprints are similar across devices.
+KDBRW = BLAKE3-256("DSM/cdbrw/bind\0"
+                    ∥ LP(genesis_hash) ∥ LP(device_id)
+                    ∥ LP(H(d))         ∥ LP(E(e))),
+where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding,
+`genesis_hash` is the n-of-n MPC genesis commitment from §2.5, and
+`device_id` is the protocol device identifier (root-device invariant:
+`device_id = genesis_hash`). K_DBRW is derived post-MPC inside the
+genesis session (so genesis_hash exists before K_DBRW); on restore the
+four inputs are persisted across the platform layer and recovered
+deterministically.
+
+Theorem 5 (Binding Inseparability). Let D be an enrolled DSM device
+and D′ any adversarially constructed device that is not physically
+identical to D. Under
+  (A1) canonical injective LP-encoding of the binding tuple,
+  (A2) BLAKE3-256 collision resistance,
+  (A3) conditional min-entropy H_∞(H(d) | view_A, H(d′)) ≥ λ from
+       C-DBRW Phase 2.2 calibration, and
+  (A4) Layer B W1 false-accept bound Pr[Accept_W1(D′, D)] ≤ ε_W1(λ),
+the probability that A produces a distinct device D′ accepted as
+inseparably bound to the same DSM identity as D is
+
+  Adv_bind(A) ≤ Adv^H_coll(A) + 2^(-λ) + ε_W1(λ).
+
+Full proof (case analysis on equality of the preimage byte string +
+union bound over the three failure modes) and discussion of the
+conditional nature of (A3)/(A4) are in
+`.github/instructions/cdbrw.instructions.md` §5.3 Theorem 5.2.
 DSM: Deterministic State Machines 28
 DBRW advances without clocks. The ρ/C recurrence is the abstract definition
 of forward-only DBRW state evolution:
@@ -1424,7 +1444,7 @@ Sec. 11.1).
 • KEM: Kyber for step secrets; secrets never serialized.
 • SMT: 256-bit key space; inclusion proofs logarithmic; device-local authoritative.
 • Device Tree: Standard Merkle; replicated to storage nodes and user devices.
-• Entropy: s0 andsdevice fromCSPRNG;per-stepseedsviaHKDF-BLAKE3over(hn,Cpre,kstep,KDBRW).
+• Entropy: s0 from CSPRNG (Phase 13: sdevice removed from K_DBRW preimage — K_DBRW is now deterministic per device); per-step seeds via HKDF-BLAKE3 over (hn, Cpre, kstep, KDBRW).
 • Time: No timestamps, epochs, or heights in predicates or encodings.
 • Modal rule: Pending online for (A,B) blocks offline for (A,B) until synchronized; other
 relationships commute.

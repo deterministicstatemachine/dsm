@@ -56,11 +56,44 @@ pub const DEFAULT_HISTOGRAM_BINS: usize = 256;
 pub const DEFAULT_DISTANCE_MARGIN: f32 = 0.02;
 
 /// C-DBRW spec §4.5.7: Ĥ threshold (h_min − ε, ε = 0.05).
+///
+/// Phase 9 reinterpretation: this is the **median** floor used by
+/// [`classify_resonant_m_sample`] across `M=ADMISSION_M` independent
+/// samples, not a single-draw gate.  A single sample dipping below
+/// `H_HAT_MIN` but above [`H_HAT_HARD_REJECT`] no longer fails the
+/// device — the median verdict and per-sample hard floors do.
 pub const H_HAT_MIN: f32 = 0.45;
-/// C-DBRW spec §4.5.7: |ρ̂| ≤ 0.3.
+/// Marginal-band lower edge for the M-sample admission rule (Phase 9).
+/// `median_h_hat ∈ [H_HAT_WARN, H_HAT_MIN)` with all per-sample hard
+/// floors clean classifies as [`ResonantStatus::Resonant`] →
+/// [`AccessLevel::ReadOnly`] (degraded but usable) instead of failing
+/// closed.  Devices whose silicon variance straddles `H_HAT_MIN` across
+/// runs get a stable verdict rather than alternating PASS/FAIL.
+pub const H_HAT_WARN: f32 = 0.40;
+/// Per-sample hard floor for Shannon entropy (Phase 9).  If ANY of the
+/// `M` admission samples reports `h_hat < H_HAT_HARD_REJECT`, the
+/// device is rejected outright regardless of the median verdict — this
+/// catches catastrophically bad silicon that one healthy sample
+/// (e.g. lucky cache-state alignment) would otherwise mask.
+pub const H_HAT_HARD_REJECT: f32 = 0.35;
+/// C-DBRW spec §4.5.7: |ρ̂| ≤ 0.3.  Phase 9: median ceiling.
 pub const RHO_HAT_MAX: f32 = 0.30;
-/// C-DBRW spec §4.5.7: L̂ threshold.
+/// Per-sample hard ceiling for |ρ̂| (Phase 9).  ANY sample exceeding
+/// this fails admission regardless of median.
+pub const RHO_HAT_HARD_REJECT: f32 = 0.40;
+/// C-DBRW spec §4.5.7: L̂ threshold.  Phase 9: median floor.
 pub const L_HAT_MIN: f32 = 0.45;
+/// Per-sample hard floor for LZ78 compressibility (Phase 9).
+pub const L_HAT_HARD_REJECT: f32 = 0.35;
+/// Number of independent K-trial admission samples (Phase 9).  Each
+/// sample is an independent K-trial enrollment chunk; the M chunks are
+/// captured back-to-back in a single Kotlin → JNI batch then composed
+/// in Rust under [`classify_resonant_m_sample`].  `M=3` was chosen for
+/// the variance/cost tradeoff: median of 3 absorbs trial-to-trial
+/// jitter on marginal silicon (real-world observed h_hat spread of
+/// 0.41/0.77/0.92/0.94 on Galaxy A54 across runs) without doubling
+/// first-genesis time vs M=5.
+pub const ADMISSION_M: usize = 3;
 /// Minimum total entropy bits for the Resonant path. Matches the spec's
 /// baseline security level: h_min × N_min = 0.5 × 4096 = 2048 bits
 /// (Proposition 7.1). Devices with high ρ̂ but sufficient total entropy
@@ -99,6 +132,13 @@ pub struct RespondInputs<'a> {
     /// Histogram bin count. Must equal the enrollment bin count when
     /// `enrolled_mean` is present; asserted in the code path.
     pub histogram_bins: usize,
+    /// Robust binning range committed at enrollment (revision 6+).
+    /// `None` for legacy v4/v5 enrollments — the responder falls back
+    /// to the legacy [min, max] binning derived from live orbit
+    /// timings.  Revision-5 callers that pass `None` will see the
+    /// h_hat-collapse failure mode on outlier-prone devices and
+    /// should invalidate + re-enroll under the new code path.
+    pub bin_range: Option<BinRange>,
 }
 
 /// Outputs of a successful Algorithm 3 response.
@@ -156,14 +196,32 @@ impl From<DsmError> for RespondError {
     }
 }
 
-/// Build a normalized histogram of `samples` in `bins` slots. Exact parity
-/// with `CdbrwMath.buildHistogram` on the Kotlin side.
+/// Fixed lower-tail percentile clipped from the raw timing distribution
+/// when computing the robust binning range. 0.5% trims the bottom-end
+/// outliers without losing the body of the distribution.
+pub const ROBUST_BIN_LOW_PCT: f64 = 0.005;
+/// Fixed upper-tail percentile. 99.5% trims the rare scheduler-interrupt /
+/// GC-pause outliers that pollute the binning normalization without
+/// contributing real silicon-substrate entropy.
+pub const ROBUST_BIN_HIGH_PCT: f64 = 0.995;
+
+// Re-export `BinRange` for callers that read it from
+// `cdbrw_responder`. Source of truth lives in `cdbrw_ffi` because the
+// health test (h_hat / rho_hat / l_hat) is where the binning matters
+// most.
+pub use crate::security::cdbrw_ffi::BinRange;
+
+/// Build a normalized histogram of `samples` in `bins` slots using a
+/// caller-supplied [`BinRange`]. Samples outside `[range.low,
+/// range.high]` clamp to the edge bins.  This is the robust form:
+/// outliers don't compress the bin space, and ranges committed at
+/// enrollment guarantee per-trial histogram alignment for mean-
+/// histogram and W1 math.
 ///
-/// - min/max span over the samples
-/// - `idx = floor(((v - min) / span) * (bins - 1))` clamped to `[0, bins-1]`
+/// - `idx = floor(((v - range.low) / span) * (bins - 1))` clamped to `[0, bins-1]`
 /// - divide each bucket by the sample count
 /// - degenerate span → first bin = 1.0
-pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
+pub fn build_histogram_in_range(samples: &[i64], bins: usize, range: BinRange) -> Vec<f32> {
     if bins == 0 {
         return Vec::new();
     }
@@ -172,16 +230,14 @@ pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
         hist[0] = 1.0;
         return hist;
     }
-    let min_v = samples.iter().copied().min().unwrap_or(0);
-    let max_v = samples.iter().copied().max().unwrap_or(0);
-    if max_v <= min_v {
+    if range.high <= range.low {
         hist[0] = 1.0;
         return hist;
     }
-    let span = (max_v - min_v) as f64;
+    let span = (range.high - range.low) as f64;
     let bins_minus_one = (bins - 1) as f64;
     for v in samples {
-        let diff = (*v - min_v) as f64;
+        let diff = (*v - range.low) as f64;
         let normalized = (diff / span).clamp(0.0, 1.0);
         let idx = ((normalized * bins_minus_one) as isize).clamp(0, bins as isize - 1);
         hist[idx as usize] += 1.0;
@@ -191,6 +247,20 @@ pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
         *v /= total;
     }
     hist
+}
+
+/// Backwards-compatible histogram builder using the legacy [min, max]
+/// span over `samples`.  New callers should prefer
+/// [`build_histogram_in_range`] with a robust [`BinRange`] derived from
+/// enrollment-time aggregate samples — see [`BinRange::from_samples_robust`].
+///
+/// Mirrors `CdbrwMath.buildHistogram` on the Kotlin side. The Layer-1
+/// fix (Phase 2 of the C-DBRW entropy-collapse remediation) shifted the
+/// enrollment + measure paths to the in-range variant; this function
+/// is retained for moment-tree internals and tests that don't need
+/// cross-trial alignment.
+pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
+    build_histogram_in_range(samples, bins, BinRange::full_span(samples))
 }
 
 /// Element-wise mean of a slice of equal-length histograms.
@@ -292,6 +362,111 @@ pub fn classify_resonant(h_hat: f32, rho_hat: f32, l_hat: f32) -> (ResonantStatu
     }
 }
 
+/// Phase 9 — Median-of-M C-DBRW admission rule.
+///
+/// Replaces single-K=21-draw acceptance for the *enrollment* path with
+/// median + hard-floor verdicts over `M=ADMISSION_M` independent
+/// samples. Each `samples[i]` is the [`HealthResult`] computed over the
+/// `i`-th K-trial chunk by [`cdbrw_ffi::health_test_in_range`] under
+/// the shared robust [`BinRange`] committed at enrollment.
+///
+/// Verdict resolution (in order):
+/// 1. **Hard-floor reject** — if any sample's `h_hat <
+///    H_HAT_HARD_REJECT`, `|rho_hat| > RHO_HAT_HARD_REJECT`, or `l_hat
+///    < L_HAT_HARD_REJECT` → [`ResonantStatus::Fail`]. One
+///    catastrophically bad sample cannot be masked by two healthy
+///    samples in the median.
+/// 2. **Median pass** — if `median_h_hat ≥ H_HAT_MIN ∧
+///    median_rho_hat_abs ≤ RHO_HAT_MAX ∧ median_l_hat ≥ L_HAT_MIN` →
+///    [`ResonantStatus::Pass`] (→ `AccessLevel::FullAccess`).
+/// 3. **Marginal band** — if `median_h_hat ∈ [H_HAT_WARN, H_HAT_MIN)`
+///    AND every sample passes the hard floors →
+///    [`ResonantStatus::Resonant`] (→ `AccessLevel::ReadOnly`). The
+///    device is usable but spends are PIN-gated. This is the band that
+///    fixes the Galaxy A54 brittleness: silicon whose median draw
+///    straddles `H_HAT_MIN` gets a stable READ_ONLY verdict instead of
+///    alternating between FULL_ACCESS and PIN_REQUIRED+drift across
+///    runs.
+/// 4. **Degraded admission** — entropy clean but median below
+///    `H_HAT_WARN` → [`ResonantStatus::Adapted`] (→
+///    `AccessLevel::PinRequired`). Step-up enforced.
+/// 5. **Reject** — anything else → [`ResonantStatus::Fail`].
+///
+/// Returns `(status, median_h0_eff, recommended_n)` so the caller can
+/// thread the median scalars into the persisted trust snapshot.  The
+/// per-sample arrays themselves stay with the caller for the audit
+/// trail (schema v7 stores all `M` of them).
+///
+/// # Panics
+///
+/// Panics if `samples` is empty (the enrollment writer pre-validates
+/// `samples.len() == ADMISSION_M`; callers must as well).
+pub fn classify_resonant_m_sample(samples: &[HealthResult]) -> (ResonantStatus, f32, u32) {
+    assert!(
+        !samples.is_empty(),
+        "classify_resonant_m_sample: at least one sample required"
+    );
+
+    // Hard-floor pass first — any sample failing a hard floor disqualifies
+    // the device regardless of the median.
+    for s in samples {
+        if s.h_hat < H_HAT_HARD_REJECT
+            || s.rho_hat.abs() > RHO_HAT_HARD_REJECT
+            || s.l_hat < L_HAT_HARD_REJECT
+        {
+            // Pick a representative h0_eff for the failing sample so the
+            // caller's snapshot reflects a meaningful number.
+            let h0 = s.h_hat * (1.0 - s.rho_hat.abs());
+            return (ResonantStatus::Fail, h0, 16384);
+        }
+    }
+
+    // Median in each metric (sort-then-pick-middle; `samples.len()` is
+    // small — M=3 in production — so the cost is irrelevant).
+    let mut h: Vec<f32> = samples.iter().map(|s| s.h_hat).collect();
+    let mut r: Vec<f32> = samples.iter().map(|s| s.rho_hat.abs()).collect();
+    let mut l: Vec<f32> = samples.iter().map(|s| s.l_hat).collect();
+    let cmp_f32 = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    h.sort_by(cmp_f32);
+    r.sort_by(cmp_f32);
+    l.sort_by(cmp_f32);
+    let mid = samples.len() / 2;
+    let median_h = h[mid];
+    let median_rho_abs = r[mid];
+    let median_l = l[mid];
+    // Approximate median h0_eff: the metrics are computed independently
+    // per sample but reporting `median_h × (1 − median_|ρ|)` keeps the
+    // h0_eff scalar comparable to the single-sample path's value.
+    let median_h0_eff = median_h * (1.0 - median_rho_abs);
+
+    let base_pass = median_h >= H_HAT_MIN && median_rho_abs <= RHO_HAT_MAX && median_l >= L_HAT_MIN;
+    let entropy_ok_strict = median_h >= H_HAT_MIN && median_l >= L_HAT_MIN;
+    let entropy_ok_marginal =
+        median_h >= H_HAT_WARN && median_l >= H_HAT_WARN && median_rho_abs <= RHO_HAT_MAX;
+
+    if base_pass {
+        (ResonantStatus::Pass, median_h0_eff, 4096)
+    } else if entropy_ok_strict
+        && median_h0_eff * cdbrw_ffi::thresholds::HEALTH_N as f32 >= MIN_TOTAL_ENTROPY_BITS
+    {
+        // Median clears H_HAT_MIN/L_HAT_MIN but ρ̂ exceeds the strict
+        // ceiling — same Resonant path as the single-sample classifier.
+        (ResonantStatus::Resonant, median_h0_eff, 4096)
+    } else if entropy_ok_marginal {
+        // Median falls in [H_HAT_WARN, H_HAT_MIN) with all hard floors
+        // clean. The marginal band: device is real silicon, just sitting
+        // at the noisy edge of its variance envelope. READ_ONLY is the
+        // honest verdict.
+        (ResonantStatus::Resonant, median_h0_eff, 4096)
+    } else if median_h >= H_HAT_WARN && median_l >= H_HAT_WARN {
+        // Median entropy ok but rho/correlation issue puts it in the
+        // step-up band.
+        (ResonantStatus::Adapted, median_h0_eff, 16384)
+    } else {
+        (ResonantStatus::Fail, median_h0_eff, 16384)
+    }
+}
+
 /// Build a [`TrustSnapshot`] from raw health metrics + enrollment drift and
 /// publish it through the access gate. Called by the responder, the
 /// measure-trust route, and the enrollment writer.
@@ -315,6 +490,27 @@ pub fn publish_trust_snapshot(
         classify_resonant(health.h_hat, health.rho_hat, health.l_hat);
 
     let drifted = w1_threshold > 0.0 && w1_distance > w1_threshold;
+
+    // Phase 13 follow-up: align operational behaviour with the doc
+    // claim ("Layer B zeros K_DBRW + drops access to ReadOnly on
+    // cross-device drift").  The `cdbrw.reprove` path already clears
+    // the binding-key slot on `CloneDetected`; the boot-time
+    // `cdbrw.measure_trust` path runs through here on every boot and
+    // previously only downgraded the access level on W1 drift, leaving
+    // the binding key in memory.  Mirror the reprove behaviour: when
+    // drift fires here, zero K_DBRW too so the binding key cannot be
+    // re-clone-derived by any code path that bypasses the access gate.
+    //
+    // TOCTOU note: a signing op that cloned `get_binding_key()` BEFORE
+    // this check can still complete with the old (now-suspect) bytes;
+    // the access gate downgrade below is the strong fence.  This clear
+    // bounds the in-memory residue window — it does not eliminate it.
+    if drifted {
+        crate::binding_key::clear_binding_key();
+        log::warn!(
+            "[cdbrw_responder] W1 drift detected (distance={w1_distance:.4} > threshold={w1_threshold:.4}) — K_DBRW slot zeroed; access downgraded to PinRequired"
+        );
+    }
 
     // Strict access-level resolution — no feature gate, no test bypass, no
     // default-allow fallback. A Fail verdict from `classify_resonant`
@@ -372,11 +568,20 @@ pub fn publish_trust_snapshot(
 /// Compute a measure-trust result without running the full Algorithm 3
 /// response. Returned snapshot has the same structure as a `respond` result
 /// so the UI can drive the gate from polls without requiring a verifier.
+///
+/// `bin_range` carries the robust [P0.5, P99.5] binning range committed
+/// at enrollment (revision 6+).  Pre-Phase-2 enrollments (revisions 4/5)
+/// supply `None`, in which case this function falls back to the legacy
+/// [min, max] binning derived from the live orbit timings — note that
+/// this fallback re-introduces the h_hat-collapse failure mode for
+/// devices with a single outlier sample, so revision-5 callers should
+/// invalidate + re-enroll.
 pub fn measure_trust(
     orbit_timings: &[i64],
     enrolled_mean: Option<&[f32]>,
     epsilon_intra: f32,
     histogram_bins: usize,
+    bin_range: Option<BinRange>,
 ) -> TrustSnapshot {
     let bins = if histogram_bins == 0 {
         DEFAULT_HISTOGRAM_BINS
@@ -384,8 +589,16 @@ pub fn measure_trust(
         histogram_bins
     };
 
-    let histogram = build_histogram(orbit_timings, bins);
-    let health = cdbrw_ffi::health_test(orbit_timings, bins);
+    let (histogram, health) = match bin_range {
+        Some(range) => (
+            build_histogram_in_range(orbit_timings, bins, range),
+            cdbrw_ffi::health_test_in_range(orbit_timings, bins, range),
+        ),
+        None => (
+            build_histogram(orbit_timings, bins),
+            cdbrw_ffi::health_test(orbit_timings, bins),
+        ),
+    };
 
     let (w1_distance, w1_threshold) = match enrolled_mean {
         Some(ref_hist) if ref_hist.len() == bins => {
@@ -428,9 +641,19 @@ pub fn respond_to_challenge(inputs: &RespondInputs<'_>) -> Result<RespondOutputs
         }
     }
 
-    // Step 1-2: histogram + health test
-    let histogram = build_histogram(inputs.orbit_timings, bins);
-    let health = cdbrw_ffi::health_test(inputs.orbit_timings, bins);
+    // Step 1-2: histogram + health test.  Use the committed robust
+    // bin_range when available (revision 6+); fall back to legacy
+    // min/max binning for v4/v5 enrollments.
+    let (histogram, health) = match inputs.bin_range {
+        Some(range) => (
+            build_histogram_in_range(inputs.orbit_timings, bins, range),
+            cdbrw_ffi::health_test_in_range(inputs.orbit_timings, bins, range),
+        ),
+        None => (
+            build_histogram(inputs.orbit_timings, bins),
+            cdbrw_ffi::health_test(inputs.orbit_timings, bins),
+        ),
+    };
 
     // Step 3: drift check (updates gate even on failure)
     let (w1_distance, w1_threshold) = match inputs.enrolled_mean {
@@ -510,6 +733,7 @@ pub fn respond_to_challenge(inputs: &RespondInputs<'_>) -> Result<RespondOutputs
 mod tests {
     use super::*;
     use crate::security::cdbrw_access_gate::{clear_trust_for_test, gate_test_mutex, latest_trust};
+    use serial_test::serial;
 
     fn with_clean_state<F: FnOnce()>(f: F) {
         let guard = match gate_test_mutex().lock() {
@@ -651,6 +875,69 @@ mod tests {
         });
     }
 
+    /// Phase 13 follow-up: on W1 drift `publish_trust_snapshot` must
+    /// also zero the K_DBRW slot, mirroring the `cdbrw.reprove` ->
+    /// CloneDetected behaviour.  Prior to this hook, drift only
+    /// downgraded the access level; the binding key remained in
+    /// memory.  Now the slot is cleared so any downstream signer that
+    /// gets past the access gate (TOCTOU residue aside) fails closed
+    /// with `InvalidState`.
+    #[test]
+    #[serial]
+    fn publish_trust_drift_zeros_binding_key_slot() {
+        with_clean_state(|| {
+            // Seed the binding key slot with a known 32-byte value.
+            crate::binding_key::install_binding_key(vec![0xABu8; 32])
+                .expect("install_binding_key must accept a 32-byte key");
+            assert!(
+                crate::binding_key::get_binding_key().is_some(),
+                "precondition: binding key must be installed before the test"
+            );
+
+            let pass = HealthResult {
+                h_hat: 0.60,
+                rho_hat: 0.10,
+                l_hat: 0.55,
+                passed: true,
+            };
+            // W1 distance 0.2 > threshold 0.1 → drift; must clear slot.
+            let snap = publish_trust_snapshot(pass, 0.2, 0.1, "test drift clears K_DBRW");
+            assert_eq!(snap.access_level, AccessLevel::PinRequired);
+            assert!(
+                crate::binding_key::get_binding_key().is_none(),
+                "drift detection must zero the K_DBRW slot per Phase 13 doc claim"
+            );
+        });
+    }
+
+    /// Phase 13 follow-up: clean-pass (no drift) must NOT touch the
+    /// binding key slot — only drift triggers the wipe.
+    #[test]
+    #[serial]
+    fn publish_trust_clean_pass_preserves_binding_key_slot() {
+        with_clean_state(|| {
+            crate::binding_key::install_binding_key(vec![0xCDu8; 32])
+                .expect("install_binding_key must accept a 32-byte key");
+
+            let pass = HealthResult {
+                h_hat: 0.60,
+                rho_hat: 0.10,
+                l_hat: 0.55,
+                passed: true,
+            };
+            // W1 distance 0.01 < threshold 0.10 → no drift; preserve slot.
+            let snap = publish_trust_snapshot(pass, 0.01, 0.10, "test clean preserves K_DBRW");
+            assert_eq!(snap.access_level, AccessLevel::FullAccess);
+            assert!(
+                crate::binding_key::get_binding_key().is_some(),
+                "clean pass must leave the binding key slot untouched"
+            );
+
+            // Test cleanup — wipe so we don't leak state into siblings.
+            crate::binding_key::clear_binding_key();
+        });
+    }
+
     #[test]
     fn publish_trust_pass_clean_is_full_access() {
         with_clean_state(|| {
@@ -664,6 +951,96 @@ mod tests {
             assert_eq!(snap.access_level, AccessLevel::FullAccess);
             assert_eq!(snap.resonant_status, ResonantStatus::Pass);
         });
+    }
+
+    fn health_sample(h_hat: f32, rho_hat: f32, l_hat: f32) -> HealthResult {
+        let passed = h_hat >= H_HAT_MIN && rho_hat.abs() <= RHO_HAT_MAX && l_hat >= L_HAT_MIN;
+        HealthResult {
+            h_hat,
+            rho_hat,
+            l_hat,
+            passed,
+        }
+    }
+
+    #[test]
+    fn classify_m_sample_all_pass_is_pass() {
+        let samples = vec![
+            health_sample(0.55, 0.10, 0.55),
+            health_sample(0.60, 0.05, 0.60),
+            health_sample(0.50, 0.15, 0.50),
+        ];
+        let (status, _, n) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Pass);
+        assert_eq!(n, 4096);
+    }
+
+    #[test]
+    fn classify_m_sample_marginal_median_is_resonant() {
+        // The motivating Galaxy A54 case: median lands in [WARN, MIN)
+        // and all hard floors clean.  Should classify Resonant (→
+        // ReadOnly), not Fail.
+        let samples = vec![
+            health_sample(0.41, 0.10, 0.50), // marginal
+            health_sample(0.42, 0.12, 0.48), // marginal
+            health_sample(0.43, 0.15, 0.49), // marginal but clean floors
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Resonant);
+    }
+
+    #[test]
+    fn classify_m_sample_one_hard_floor_breach_rejects() {
+        // One catastrophic sample: hard floor on h_hat triggers Fail
+        // regardless of the median of the other two.
+        let samples = vec![
+            health_sample(0.55, 0.10, 0.55),
+            health_sample(0.20, 0.10, 0.55), // h_hat below 0.35 hard floor
+            health_sample(0.60, 0.10, 0.55),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Fail);
+    }
+
+    #[test]
+    fn classify_m_sample_one_hard_rho_breach_rejects() {
+        let samples = vec![
+            health_sample(0.55, 0.10, 0.55),
+            health_sample(0.55, 0.45, 0.55), // |rho| above 0.40 hard ceiling
+            health_sample(0.55, 0.10, 0.55),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Fail);
+    }
+
+    #[test]
+    fn classify_m_sample_lucky_draw_does_not_mask_variance() {
+        // The brittleness scenario: one healthy draw (0.92) cannot save a
+        // pair of failing draws.  Median is the second-best sample, so
+        // (0.20, 0.41, 0.92) → median=0.41, but 0.20 trips the hard
+        // floor → Fail.  This is the safety property: lucky cache
+        // alignment cannot promote bad silicon to PASS.
+        let samples = vec![
+            health_sample(0.20, 0.10, 0.55),
+            health_sample(0.41, 0.10, 0.50),
+            health_sample(0.92, 0.10, 0.70),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Fail);
+    }
+
+    #[test]
+    fn classify_m_sample_high_variance_clean_floors_lands_resonant() {
+        // Real-world A54 spread: 0.41 / 0.77 / 0.92.  Median = 0.77 →
+        // PASS.  All hard floors clean.  Result: Pass (FULL_ACCESS) on
+        // the same silicon that single-K=21 acceptance rejected at 0.41.
+        let samples = vec![
+            health_sample(0.41, 0.10, 0.50),
+            health_sample(0.77, 0.10, 0.65),
+            health_sample(0.92, 0.10, 0.70),
+        ];
+        let (status, _, _) = classify_resonant_m_sample(&samples);
+        assert_eq!(status, ResonantStatus::Pass);
     }
 
     #[test]
@@ -690,6 +1067,7 @@ mod tests {
             device_id: &dev,
             binding_key: &bk,
             histogram_bins: 256,
+            bin_range: None,
         };
         let result = respond_to_challenge(&inputs);
         assert!(matches!(result, Err(RespondError::InvalidVerifierKey)));

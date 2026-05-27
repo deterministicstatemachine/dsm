@@ -13,7 +13,7 @@
 //     computes X via the SAME canonicalisation the SDK uses for
 //     SPHINCS+ verification.  Trader gets X back as Base32 Crockford.
 //   * Trader calls `publishExternalCommitment(rcBytes)` to write the
-//     anchor at `defi/extcommit/{X_b32}`.
+//     anchor at `sofi/extcommit/{X_b32}`.
 //   * Vault owners call `isExternalCommitmentVisible(xBytes)` to
 //     check the anchor before invoking `unlockVaultRouted`.
 //   * Vault owners call `unlockVaultRouted(vaultId, deviceId,
@@ -267,7 +267,17 @@ export async function publishRoutingAdvertisement(input: {
   unlockSpecKey: string;
   /** Optional — empty / omitted lets Rust stamp the wallet pk. */
   ownerPublicKey?: Uint8Array;
-  vaultProtoBytes: Uint8Array;
+  /**
+   * Optional vault proto bytes.  Empty / omitted → Rust derives the
+   * canonical `VaultPostProto` from the local DLVManager (the
+   * authoritative source).  The previous "must be non-empty" check
+   * forced callers to fabricate VaultPostProto bytes themselves,
+   * which the cross-device SoFi test surfaced as a decode failure
+   * at the trader's `route.syncVaultsForPair` step.  Production
+   * wallets always have the vault in their local DLVManager (they
+   * just called `dlv.create`) — let Rust derive.
+   */
+  vaultProtoBytes?: Uint8Array;
 }): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
   try {
     if (!input?.vaultId || input.vaultId.length !== 32) {
@@ -275,9 +285,6 @@ export async function publishRoutingAdvertisement(input: {
     }
     if (!input.unlockSpecDigest || input.unlockSpecDigest.length !== 32) {
       return { success: false, error: 'unlockSpecDigest must be 32 bytes' };
-    }
-    if (!input.vaultProtoBytes || input.vaultProtoBytes.length === 0) {
-      return { success: false, error: 'vaultProtoBytes is required' };
     }
     const req = new pb.PublishRoutingAdvertisementRequest({
       vaultId: input.vaultId as any,
@@ -290,7 +297,9 @@ export async function publishRoutingAdvertisement(input: {
       unlockSpecKey: input.unlockSpecKey,
       // Empty bytes → Rust accept-or-stamp; wallet pk is filled in.
       ownerPublicKey: (input.ownerPublicKey ?? new Uint8Array()) as any,
-      vaultProtoBytes: input.vaultProtoBytes as any,
+      // Empty bytes → Rust derives canonical VaultPostProto from local
+      // DLVManager (see Rust commit deriving vault_proto_bytes).
+      vaultProtoBytes: (input.vaultProtoBytes ?? new Uint8Array()) as any,
     });
     const resBytes = await routerInvokeBin(
       'route.publishRoutingAdvertisement',
@@ -433,9 +442,37 @@ export async function findAndBindBestPath(input: {
   nonce: Uint8Array;
   /** 0 → server default (4). */
   maxHops?: number;
+  /** Tier 2 envelope: number of N-best path candidates to bind into
+   *  the envelope.  0/1 → primary only (legacy); >1 → primary +
+   *  fallback groups under one signed X commitment. */
+  maxPaths?: number;
+  /** Tier 2 per-hop slippage tolerance in basis points (e.g. 50 =
+   *  0.5%).  Rust binder stamps each hop's `min_output_amount_u128`
+   *  to `expected_output * (10000 - slippage_bps) / 10000`. */
+  slippageBps?: number;
+  /** Tier 2 envelope-level floor in basis points.  Rust binder
+   *  stamps `floor_final_output_amount_u128` accordingly. */
+  floorBps?: number;
 }): Promise<{
   success: boolean;
+  /** Raw unsigned RouteCommitV1 wire bytes — pass straight to
+   *  `signRouteCommit`.  Decoded into typed mirrors below for the UI. */
   unsignedRouteCommitBytes?: Uint8Array;
+  /** Decoded mirror of the Rust-computed quote so callers don't need
+   *  to re-simulate AMM math in JS.  All business logic stays in
+   *  Rust; this surface is read-only. */
+  quote?: {
+    expectedFinalOutput: bigint;
+    floorFinalOutput: bigint;
+    hops: Array<{
+      vaultId: Uint8Array;
+      tokenIn: Uint8Array;
+      tokenOut: Uint8Array;
+      expectedOutput: bigint;
+      minOutput: bigint;
+    }>;
+    fallbackGroupCount: number;
+  };
   error?: string;
 }> {
   try {
@@ -448,6 +485,9 @@ export async function findAndBindBestPath(input: {
       inputAmountU128: u128BigEndian(input.inputAmount) as any,
       maxHops: input.maxHops ?? 0,
       nonce: input.nonce as any,
+      maxPaths: input.maxPaths ?? 0,
+      slippageBps: input.slippageBps ?? 0,
+      floorBps: input.floorBps ?? 0,
     });
     const resBytes = await routerInvokeBin(
       'route.findAndBindBestPath',
@@ -456,7 +496,43 @@ export async function findAndBindBestPath(input: {
     const env = decodeFramedEnvelopeV3(resBytes);
     const base32 = readAppStateValue(env, 'route.findAndBindBestPath');
     const unsignedRouteCommitBytes = new Uint8Array(decodeBase32Crockford(base32));
-    return { success: true, unsignedRouteCommitBytes };
+    // Decode the Rust-stamped RouteCommitV1 into a read-only quote
+    // mirror.  No business logic here — pure proto decode + numeric
+    // unmarshalling so the UI can render what the binder produced.
+    // If decode fails (test-mode bytes, version skew) we still return
+    // the raw bytes so signing can proceed; the quote view is best-effort.
+    let quote:
+      | {
+          expectedFinalOutput: bigint;
+          floorFinalOutput: bigint;
+          hops: Array<{
+            vaultId: Uint8Array;
+            tokenIn: Uint8Array;
+            tokenOut: Uint8Array;
+            expectedOutput: bigint;
+            minOutput: bigint;
+          }>;
+          fallbackGroupCount: number;
+        }
+      | undefined;
+    try {
+      const rc = pb.RouteCommitV1.fromBinary(unsignedRouteCommitBytes);
+      quote = {
+        expectedFinalOutput: decodeReserveBigInt(rc.expectedFinalOutputAmountU128 as Uint8Array),
+        floorFinalOutput: decodeReserveBigInt(rc.floorFinalOutputAmountU128 as Uint8Array),
+        hops: rc.hops.map((h) => ({
+          vaultId: h.vaultId as Uint8Array,
+          tokenIn: h.tokenIn as Uint8Array,
+          tokenOut: h.tokenOut as Uint8Array,
+          expectedOutput: decodeReserveBigInt(h.expectedOutputAmountU128 as Uint8Array),
+          minOutput: decodeReserveBigInt(h.minOutputAmountU128 as Uint8Array),
+        })),
+        fallbackGroupCount: rc.fallbacks.length,
+      };
+    } catch {
+      quote = undefined;
+    }
+    return { success: true, unsignedRouteCommitBytes, quote };
   } catch (e: any) {
     return { success: false, error: e?.message || 'findAndBindBestPath failed' };
   }

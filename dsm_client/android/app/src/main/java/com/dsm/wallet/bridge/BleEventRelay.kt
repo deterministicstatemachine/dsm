@@ -178,10 +178,20 @@ object BleEventRelay {
                         val id = cursor.getLong(0)
                         val topic = cursor.getString(1)
                         val payload = cursor.getBlob(2)
-                        
+
                         // Bridge should be ready by now, but double-check
                         if (bridgeReady) {
-                            postToBridgeBinary(topic, payload)
+                            // `persistIfUnavailable = false` — we're iterating
+                            // already-persisted events. Re-persisting on bridge
+                            // failure here would self-defeat the flush: the
+                            // old id gets deleted below and a new row gets
+                            // inserted by postToBridgeBinary's catch block,
+                            // so the event count never reaches zero. If
+                            // delivery fails we want it to either drop
+                            // (and rely on the next event to revive the
+                            // bridge) or — once postToBridgeBinary returns a
+                            // success signal — be left in place.
+                            postToBridgeBinary(topic, payload, persistIfUnavailable = false)
                             ids.add(id)
                             flushed++
                         } else {

@@ -274,7 +274,7 @@ fn kat_sphincs() -> Vec<CryptoKatResult> {
 
 fn kat_kyber() -> Vec<CryptoKatResult> {
     use dsm::crypto::kyber::{
-        generate_deterministic_kyber_keypair, generate_kyber_keypair, kyber_decapsulate,
+        generate_kyber_keypair, generate_kyber_keypair_from_entropy, kyber_decapsulate,
         kyber_encapsulate,
     };
 
@@ -348,8 +348,8 @@ fn kat_kyber() -> Vec<CryptoKatResult> {
     {
         let entropy = b"deterministic_kyber_test_entropy_32bytes!!";
         let ctx = "kat-test";
-        let kp1 = generate_deterministic_kyber_keypair(entropy, ctx);
-        let kp2 = generate_deterministic_kyber_keypair(entropy, ctx);
+        let kp1 = generate_kyber_keypair_from_entropy(entropy, ctx);
+        let kp2 = generate_kyber_keypair_from_entropy(entropy, ctx);
         let pass = match (&kp1, &kp2) {
             (Ok((pk1, sk1)), Ok((pk2, sk2))) => pk1 == pk2 && sk1 == sk2,
             _ => false,
@@ -363,6 +363,43 @@ fn kat_kyber() -> Vec<CryptoKatResult> {
             } else {
                 "FAILED: different keypairs from same entropy".into()
             },
+        });
+    }
+
+    // 5. Pinned deterministic vector (entropy, context) -> (pk, sk)
+    {
+        let entropy = b"vertical-validation-kyber-kat-vector-entropy-v1";
+        let ctx = "vv/kat/ml-kem-768/keygen-v1";
+        let kp = generate_kyber_keypair_from_entropy(entropy, ctx);
+
+        // Pin BLAKE3 digests of full keys to keep fixture compact while still
+        // detecting any silent re-keying from domain-label/counter changes or
+        // upstream ml-kem behavioral drift.
+        let expected_pk_hash = "3081606ec41d016abc26e748abfe1d9f4eba33a907a649d28dd3d55730cbd78c";
+        let expected_sk_hash = "f6b3f4eb216024d238535630a059e369e54ba90c3617b52cb86b1354517c0491";
+
+        let (pass, details) = match kp {
+            Ok((pk, sk)) => {
+                let pk_hash = blake3::hash(&pk).to_hex().to_string();
+                let sk_hash = blake3::hash(&sk).to_hex().to_string();
+                let pass = pk_hash == expected_pk_hash && sk_hash == expected_sk_hash;
+                let details = if pass {
+                    format!("pinned vector matched (pk_hash={pk_hash}, sk_hash={sk_hash})")
+                } else {
+                    format!(
+                        "MISMATCH: expected pk={expected_pk_hash} sk={expected_sk_hash}; got pk={pk_hash} sk={sk_hash}"
+                    )
+                };
+                (pass, details)
+            }
+            Err(e) => (false, format!("deterministic keygen failed: {e}")),
+        };
+
+        out.push(CryptoKatResult {
+            primitive: "ML-KEM-768".into(),
+            test_name: "pinned deterministic keygen vector".into(),
+            passed: pass,
+            details,
         });
     }
 

@@ -103,6 +103,15 @@ impl AppRouterImpl {
                     };
                 let anchor_sequence = vault.current_sequence;
                 let anchor_enforcement = vault.anchor_enforcement;
+                // Phase 13 follow-up: pull the persisted `policy_digest`
+                // so the owner-side LiquidityScreen republish path can
+                // pass the real digest (instead of 32 zero bytes) to
+                // `route.publishRoutingAdvertisement` on retry.  Vaults
+                // created before this field was added (legacy on-disk
+                // state) carry `None`; the summary leaves both fields
+                // empty and the frontend suppresses the Publish-retry
+                // button for those vaults.
+                let policy_digest_opt = vault.policy_digest;
                 drop(vault);
 
                 // Best-effort storage fetch for advertised state_number.
@@ -122,6 +131,19 @@ impl AppRouterImpl {
                         Err(_) => (0, false),
                     };
 
+                // Phase 13 follow-up: derive the canonical routing
+                // advertisement key string entirely in Rust (Layer
+                // Communication Law: protocol decisions belong in Rust,
+                // frontend is a renderer).  Matches the original
+                // create-flow construction
+                // `defi/spec/amm/<first-16-chars-of-vault-id-b32>` so
+                // the republish path stays bit-identical to the
+                // original publish path.
+                let unlock_spec_key_opt: Option<String> = policy_digest_opt.map(|_| {
+                    let vid_b32 = crate::util::text_id::encode_base32_crockford(&vid);
+                    let prefix: String = vid_b32.chars().take(16).collect();
+                    format!("defi/spec/amm/{prefix}")
+                });
                 out.push(generated::AmmVaultSummaryV1 {
                     vault_id: vid.to_vec(),
                     token_a,
@@ -133,6 +155,13 @@ impl AppRouterImpl {
                     routing_advertised: advertised,
                     anchor_sequence,
                     anchor_enforcement,
+                    // Phase 13 follow-up: populate only when the vault
+                    // has a persisted digest (post-fix vaults).  Legacy
+                    // vaults carry `None` → frontend hides the
+                    // Publish-retry button rather than corrupting the
+                    // advertisement with 32 zero bytes.
+                    unlock_spec_digest: policy_digest_opt.map(|d| d.to_vec()),
+                    unlock_spec_key: unlock_spec_key_opt,
                 });
             }
             out
@@ -151,7 +180,7 @@ impl AppRouterImpl {
 
     /// `dlv.getVaultStateAnchor` (query) — fetch the latest signed
     /// `VaultStateAnchorV1` proto blob published at
-    /// `defi/vault-state/{vault_id_b32}/latest`.  Vault internal
+    /// `sofi/vault-state/{vault_id_b32}/latest`.  Vault internal
     /// state is authoritative; this route serves the
     /// off-device-trader discovery path only.  Returns the Base32
     /// Crockford encoding of the proto bytes in
@@ -186,7 +215,7 @@ impl AppRouterImpl {
                 vault_id_bytes.len()
             ));
         }
-        let key = format!("defi/vault-state/{}/latest", vault_id_b32);
+        let key = format!("sofi/vault-state/{}/latest", vault_id_b32);
         let value = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key).await
         {
             Ok(proto_bytes) => crate::util::text_id::encode_base32_crockford(&proto_bytes),
@@ -298,53 +327,14 @@ impl AppRouterImpl {
         if req.locked_amount_u128.len() != 16 {
             return err("dlv.create: locked_amount_u128 must be 16 bytes (big-endian u128)".into());
         }
-        // Accept-or-sign: empty `signature` triggers wallet-side
-        // signing.  Must run AFTER `creator_public_key` is finalised
-        // so the signature covers the same canonical bytes the Rust
-        // verifier will recompute.  The signing pre-image is a
-        // domain-separated BLAKE3 over the encoded
-        // `DlvInstantiateV1` bytes (with `signature` zero) +
-        // `creator_public_key`, mirroring the chunk #6
-        // `route_commit_sdk::canonicalise_for_commitment` pattern.
-        if req.signature.is_empty() {
-            let mut canonical_for_sign = req.clone();
-            canonical_for_sign.signature = Vec::new();
-            let canonical_bytes = canonical_for_sign.encode_to_vec();
-            let signing_input: Vec<u8> = {
-                let mut buf =
-                    Vec::with_capacity(canonical_bytes.len() + req.creator_public_key.len());
-                buf.extend_from_slice(&canonical_bytes);
-                buf.extend_from_slice(&req.creator_public_key);
-                buf
-            };
-            let canonical_digest: [u8; 32] =
-                dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-create-self-sign", &signing_input);
-            let sk = match crate::sdk::signing_authority::current_secret_key() {
-                Ok(s) if !s.is_empty() => s,
-                Ok(_) => {
-                    return err("dlv.create: empty signature requested wallet signing \
-                         but the wallet signing sk is empty"
-                        .into());
-                }
-                Err(e) => {
-                    return err(format!(
-                        "dlv.create: empty signature requested wallet signing \
-                         but get_current_secret_key failed: {e}"
-                    ));
-                }
-            };
-            let sig = match dsm::crypto::sphincs::sign(
-                dsm::crypto::sphincs::SphincsVariant::SPX256f,
-                &sk,
-                canonical_digest.as_ref(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return err(format!("dlv.create: SPHINCS+ sign failed: {e}"));
-                }
-            };
-            req.signature = sig;
-        }
+        // Accept-or-sign: the actual SPHINCS+ signature must cover the
+        // LimboVault's `parameters_hash` (the same value `vault.verify()`
+        // re-derives in `finalize_vault`). We don't know that hash until
+        // `prepare_vault` runs, so the empty-signature wallet-sign
+        // happens BELOW after the draft is built. Don't pre-compute a
+        // wrong-domain signature here — it would mismatch the
+        // canonical params digest and `finalize_vault` would reject.
+        let needs_wallet_sign = req.signature.is_empty();
 
         // Decode FulfillmentMechanism from the canonical proto bytes.
         let fm_proto = match generated::FulfillmentMechanism::decode(&*spec.fulfillment_bytes) {
@@ -376,10 +366,24 @@ impl AppRouterImpl {
         } else {
             Some(spec.intended_recipient.clone())
         };
-        // Encryption target: intended recipient's Kyber pk, or creator's own pk.
-        let encryption_pk = intended_recipient_opt
-            .clone()
-            .unwrap_or_else(|| req.creator_public_key.clone());
+        // Encryption target: intended recipient's Kyber pk if supplied,
+        // otherwise the WALLET's Kyber pk (NOT creator_public_key, which
+        // is the SPHINCS+ key and the wrong shape for kyber_encapsulate).
+        // The wallet's Kyber keypair was generated at genesis and lives
+        // in the keystore under `{device_id}_device_kyber_pk` — the same
+        // accessor `posted_dlv_routes` uses for posted-DLV recipients.
+        let encryption_pk = match intended_recipient_opt.clone() {
+            Some(pk) => pk,
+            None => match self.wallet.get_kyber_public_key() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: empty intended_recipient defaults to self-encryption \
+                         but wallet kyber pk is unavailable: {e}"
+                    ));
+                }
+            },
+        };
 
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         let draft = match dlv_manager.prepare_vault(
@@ -398,6 +402,46 @@ impl AppRouterImpl {
         // Remember the vault_id bytes for the response + finalize step.  The
         // draft is consumed by finalize_vault below so we snapshot here.
         let vault_id: [u8; 32] = draft.id;
+
+        // Accept-or-sign (Track C.4) — when the trader-supplied signature
+        // was empty, sign the draft's `parameters_hash` with the wallet's
+        // SPHINCS+ secret key.  `parameters_hash` is the same value
+        // `vault.verify()` re-derives inside `finalize_vault` (see
+        // limbo_vault.rs:1217-1226), so this is the only signature
+        // shape that round-trips.
+        if needs_wallet_sign {
+            if draft.parameters_hash.len() != 32 {
+                return err(format!(
+                    "dlv.create: draft.parameters_hash unexpected length {} (expected 32)",
+                    draft.parameters_hash.len()
+                ));
+            }
+            let sk = match crate::sdk::signing_authority::current_secret_key() {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => {
+                    return err("dlv.create: empty signature requested wallet signing \
+                         but the wallet signing sk is empty"
+                        .into());
+                }
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: empty signature requested wallet signing \
+                         but get_current_secret_key failed: {e}"
+                    ));
+                }
+            };
+            let sig = match dsm::crypto::sphincs::sign(
+                dsm::crypto::sphincs::SphincsVariant::SPX256f,
+                &sk,
+                &draft.parameters_hash,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return err(format!("dlv.create: SPHINCS+ sign failed: {e}"));
+                }
+            };
+            req.signature = sig;
+        }
 
         // Locked amount + token (both optional — empty token_id = content-only vault).
         let token_id_str_opt: Option<String> = if req.token_id.is_empty() {
@@ -550,10 +594,28 @@ impl AppRouterImpl {
         // proto value is passed through verbatim — the gate decodes it
         // via `AnchorEnforcement::try_from` and falls back to
         // `Unspecified` for unknown variants.
+        //
+        // Phase 13 follow-up: also stamp the vault's `policy_digest` from
+        // the spec.  This is the canonical 32-byte CPTA anchor that the
+        // owner's first publish stamped into the routing advertisement's
+        // `unlock_spec_digest`.  Persisting it on the vault lets the
+        // owner-side LiquidityScreen republish path read the real digest
+        // from `AmmVaultSummaryV1` instead of stamping 32 zero bytes
+        // (which silently corrupted advertisements pre-fix).
         match dlv_manager.get_vault(&vault_id).await {
             Ok(vault_lock) => {
                 let mut vault = vault_lock.lock().await;
                 vault.anchor_enforcement = spec.anchor_enforcement;
+                // spec.policy_digest length is already validated as 32
+                // bytes at line 227-229; copy into a fixed array.  Skip
+                // stamping if the spec carried no digest (defensive — the
+                // earlier validation rejects empty too, so this is just
+                // belt-and-braces).
+                if spec.policy_digest.len() == 32 {
+                    let mut pd = [0u8; 32];
+                    pd.copy_from_slice(&spec.policy_digest);
+                    vault.policy_digest = Some(pd);
+                }
             }
             Err(e) => {
                 log::warn!(
@@ -617,6 +679,26 @@ impl AppRouterImpl {
                                             );
                                         }
                                     }
+
+                                    // Phase 7 — SoFi spec §4.1.2: also
+                                    // commit the genesis vault state into
+                                    // the PD-SMT and publish a
+                                    // VaultStateInclusionProofV1.  The
+                                    // anchor above is the legacy fast
+                                    // path (works for composition without
+                                    // SMT verification); the inclusion
+                                    // proof is the spec-strict
+                                    // strengthening that closes the
+                                    // K_DBRW-forgery hole.
+                                    publish_vault_state_inclusion_proof(
+                                        self.core_sdk.as_ref(),
+                                        &vault_id,
+                                        0,
+                                        &reserves_digest,
+                                        &pk,
+                                        &sk,
+                                    )
+                                    .await;
                                 }
                                 _ => {
                                     log::warn!(
@@ -1289,35 +1371,79 @@ impl AppRouterImpl {
                     crate::sdk::signing_authority::current_secret_key(),
                 ) {
                     if !pk.is_empty() && !sk.is_empty() {
-                        match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
-                            &vault_id,
-                            new_seq,
-                            &new_digest,
-                            &pk,
-                            &sk,
-                        ) {
-                            Ok(signed) => {
-                                let proto_bytes =
-                                    crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
-                                        &signed,
-                                    );
-                                if let Err(e) =
-                                    publish_vault_state_anchor(&vault_id, &proto_bytes).await
-                                {
+                        // Phase 6 fix: only republish the anchor when the
+                        // LOCAL wallet is the vault owner.  Trader-side
+                        // routed unlocks (cross-device) MUST NOT sign a new
+                        // anchor with the trader's key — verifiers expect
+                        // the owner's key, and a trader-signed anchor
+                        // would fail `verify_vault_state_anchor`.  The
+                        // vault-keyed pending pointer (published as part
+                        // of `route.publishExternalCommitment` when the
+                        // signed RouteCommit bytes are supplied) is the
+                        // cross-device-safe discovery aid; anchor refresh
+                        // remains the owner's responsibility.
+                        let local_is_owner = match dlv_manager.get_vault(&vault_id).await {
+                            Ok(vault_lock) => {
+                                let vault = vault_lock.lock().await;
+                                vault.creator_public_key.as_slice() == pk.as_slice()
+                            }
+                            Err(_) => false,
+                        };
+                        if local_is_owner {
+                            match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
+                                &vault_id,
+                                new_seq,
+                                &new_digest,
+                                &pk,
+                                &sk,
+                            ) {
+                                Ok(signed) => {
+                                    let proto_bytes =
+                                        crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
+                                            &signed,
+                                        );
+                                    if let Err(e) =
+                                        publish_vault_state_anchor(&vault_id, &proto_bytes).await
+                                    {
+                                        log::warn!(
+                                            "[dlv.unlockRouted] anchor republish (seq={}) failed for {}: {e}",
+                                            new_seq,
+                                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
                                     log::warn!(
-                                        "[dlv.unlockRouted] anchor republish (seq={}) failed for {}: {e}",
+                                        "[dlv.unlockRouted] anchor sign failed for seq={} vault={}: {e:?}",
                                         new_seq,
                                         crate::util::text_id::encode_base32_crockford(&vault_id),
                                     );
                                 }
                             }
-                            Err(e) => {
-                                log::warn!(
-                                    "[dlv.unlockRouted] anchor sign failed for seq={} vault={}: {e:?}",
-                                    new_seq,
-                                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                                );
-                            }
+
+                            // Phase 7 — SoFi spec §4.1.2: also commit
+                            // the post-trade vault state into the
+                            // PD-SMT and publish a
+                            // VaultStateInclusionProofV1.  This is the
+                            // spec-strict strengthening that closes
+                            // the K_DBRW-forgery hole on the unlock
+                            // path.  Same owner-key gate as the anchor
+                            // republish above.
+                            publish_vault_state_inclusion_proof(
+                                self.core_sdk.as_ref(),
+                                &vault_id,
+                                new_seq,
+                                &new_digest,
+                                &pk,
+                                &sk,
+                            )
+                            .await;
+                        } else {
+                            log::info!(
+                                "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: local wallet is not the vault owner — composition path will reflect this trade via VaultPendingPointerV1 instead",
+                                new_seq,
+                                crate::util::text_id::encode_base32_crockford(&vault_id),
+                            );
                         }
                     } else {
                         log::warn!(
@@ -1346,16 +1472,96 @@ impl AppRouterImpl {
 
 /// Publish a `VaultStateAnchorV1` proto blob to storage at the
 /// canonical Tier 2 Foundation key
-/// `defi/vault-state/{vault_id_b32}/latest`.  Best-effort —
+/// `sofi/vault-state/{vault_id_b32}/latest`.  Best-effort —
 /// vault internal state is authoritative; this storage write is
 /// advertisement-and-discovery only.
 async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> Result<(), String> {
     let key = format!(
-        "defi/vault-state/{}/latest",
+        "sofi/vault-state/{}/latest",
         crate::util::text_id::encode_base32_crockford(vault_id),
     );
     crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(&key, proto_bytes)
         .await
         .map(|_| ())
         .map_err(|e| format!("storage put failed: {e:?}"))
+}
+
+/// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2.
+///
+/// 1. Commit a vault-state leaf into the device's PD-SMT at the
+///    (sequence, reserves_digest) tuple — produces the canonical
+///    smt_root + 256-sibling inclusion path.
+/// 2. Sign the inclusion proof with the owner's SPHINCS+ secret key.
+/// 3. Publish to BOTH the seq-pinned key (historical traceability)
+///    AND the `latest` mirror (trader fast-path).
+///
+/// Caller has already confirmed `local_is_owner` (we are the vault
+/// owner).  Failure logs a warning and returns — the on-chain operation
+/// has already succeeded; the inclusion proof is an advertisement and
+/// can be republished later.
+async fn publish_vault_state_inclusion_proof(
+    core_sdk: &crate::sdk::core_sdk::CoreSDK,
+    vault_id: &[u8; 32],
+    sequence: u64,
+    reserves_digest: &[u8; 32],
+    owner_pk: &[u8],
+    owner_sk: &[u8],
+) {
+    // (1) Mutate the device's PD-SMT to commit the new vault state.
+    let (smt_root, siblings) =
+        match core_sdk.install_vault_state_leaf(vault_id, sequence, reserves_digest) {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::warn!(
+                    "[dlv] install_vault_state_leaf (seq={}) failed for {}: {e}",
+                    sequence,
+                    crate::util::text_id::encode_base32_crockford(vault_id),
+                );
+                return;
+            }
+        };
+
+    // (2) Sign over (vault_id, sequence, reserves_digest, smt_root).
+    let signed = match dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof(
+        vault_id,
+        sequence,
+        reserves_digest,
+        &smt_root,
+        siblings,
+        owner_pk,
+        owner_sk,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[dlv] sign_vault_state_inclusion_proof (seq={}) failed for {}: {e}",
+                sequence,
+                crate::util::text_id::encode_base32_crockford(vault_id),
+            );
+            return;
+        }
+    };
+
+    // (3) Encode + publish to storage.
+    let proto_bytes =
+        crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
+    if let Err(e) = crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(
+        vault_id,
+        sequence,
+        &proto_bytes,
+    )
+    .await
+    {
+        log::warn!(
+            "[dlv] inclusion proof publish (seq={}) failed for {}: {e}; vault is locally consistent but may not be quotable off-device until republish",
+            sequence,
+            crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+    } else {
+        log::info!(
+            "[dlv] inclusion proof published seq={} vault={}",
+            sequence,
+            crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+    }
 }

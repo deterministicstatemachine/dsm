@@ -24,9 +24,6 @@ use crate::storage::bilateral::BilateralStorageSDK;
 // Use SDK-local generated protobufs to ensure consistency with tests and app router
 use crate::generated as pb;
 
-#[cfg(all(target_os = "android", feature = "jni"))]
-use dsm::types::error::DsmError;
-
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter;
 

@@ -1,6 +1,8 @@
 package com.dsm.wallet.bridge.ble
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +16,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.UUID
 
+// Tests exercise `CompletableDeferred.getCompleted()` (Experimental) and
+// `Channel.isClosedForSend` (Delicate). Both are deliberate test-only
+// uses of unstable coroutine APIs to inspect coroutine state after
+// PeerSession's lifecycle methods run — opt-in here keeps production
+// code free of the annotations.
+@OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
 class PeerSessionTest {

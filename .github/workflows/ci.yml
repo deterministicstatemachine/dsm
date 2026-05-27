@@ -151,6 +151,52 @@ jobs:
         run: npm run build
 
   # --------------------------------------------------------------------------
+  # Android: Kotlin unit tests (pure JVM — no SDK / no emulator).
+  # Today this guards the WebView external-host allowlist via
+  # WebViewAllowlistTest, which freezes the allowlist set so any expansion
+  # is visible in PR diff.
+  #
+  # SECURITY: run: commands below use only ${{ runner.os }} and
+  # ${{ hashFiles(...) }} which are not derived from untrusted user input.
+  # --------------------------------------------------------------------------
+  android-unit-tests:
+    name: Android Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dsm_client/android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # `gradle/wrapper-validation-action` was here but the GHA runner could
+      # not reach the Gradle wrapper-checksum service (ETIMEDOUT to Cloudflare
+      # 104.16.72.101:443 across 3 consecutive runs — appears to be a
+      # network-policy constraint, not transient). The wrapper jar is
+      # committed and visible in every PR diff, so reviewer attention is the
+      # primary defence; this external action was belt-and-suspenders that
+      # cost more in flake than it added in assurance.
+
+      - name: Cache Gradle caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('dsm_client/android/**/*.gradle*', 'dsm_client/android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Run app unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
+  # --------------------------------------------------------------------------
   # Coverage: Rust + frontend reports, Codecov upload, aggregate summary
   # --------------------------------------------------------------------------
   coverage:
@@ -186,11 +232,21 @@ jobs:
         run: npm ci
 
       - name: Generate Rust coverage artifacts
+        # --test-threads=1: under llvm-cov's instrumentation the test
+        # scheduling differs enough from a plain `cargo test` run that
+        # tests touching shared global state in dsm_sdk (AppState,
+        # binding-key slot, identity-info slot) race. The plain Rust
+        # job passes with default parallelism because its schedule
+        # happens to avoid the bad interleavings; coverage runs flake
+        # on different tests (e.g. test_generate_recovery_mnemonic_and_config,
+        # set_and_get_sdk_initialized) depending on order. Serializing
+        # is the cheap deterministic fix while the wider serial-group
+        # audit lands separately.
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked --workspace --exclude dsm_storage_node --no-report -- --nocapture
-          cargo llvm-cov --locked -p dsm_storage_node --no-default-features --features local-dev,strict --no-report -- --nocapture
+          cargo llvm-cov --locked --workspace --exclude dsm_storage_node --no-report -- --nocapture --test-threads=1
+          cargo llvm-cov --locked -p dsm_storage_node --no-default-features --features local-dev,strict --no-report -- --nocapture --test-threads=1
           cargo llvm-cov report --json --output-path coverage.json
           cargo llvm-cov report --lcov --output-path coverage/rust.lcov
 

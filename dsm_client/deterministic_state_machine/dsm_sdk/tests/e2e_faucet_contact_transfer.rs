@@ -9,7 +9,7 @@ use prost::Message;
 use dsm_sdk::storage_utils;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::sdk::b0x_sdk::B0xSDK;
-use rand::{rngs::OsRng, RngCore};
+use rand::rngs::OsRng;
 use std::process::Command;
 use tokio::time::{timeout, Duration};
 
@@ -69,7 +69,8 @@ async fn e2e_flow_faucet_contact_transfer() {
 
     let mut os_rng = OsRng;
     let mut alice_entropy = vec![0u8; 32];
-    os_rng.fill_bytes(&mut alice_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut alice_entropy)
+        .expect("OsRng entropy failure");
 
     let alice_genesis = timeout(
         Duration::from_secs(20),
@@ -173,7 +174,7 @@ async fn e2e_flow_faucet_contact_transfer() {
         .await
         .unwrap_or_else(|e| panic!("Failed to init StorageNodeSDK: {e}"));
     let mut bob_entropy = vec![0u8; 32];
-    os_rng.fill_bytes(&mut bob_entropy);
+    rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut bob_entropy).expect("OsRng entropy failure");
     println!("Creating Bob genesis via MPC...");
     let bob_genesis = timeout(
         Duration::from_secs(20),

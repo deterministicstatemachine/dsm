@@ -11,7 +11,7 @@
 //!     Takes raw `RouteCommitV1` bytes, returns Base32-Crockford X.
 //!     No I/O.
 //!   * `route.publishExternalCommitment` (invoke) — writes the
-//!     storage-node anchor at `defi/extcommit/{X_b32}`.
+//!     storage-node anchor at `sofi/extcommit/{X_b32}`.
 //!   * `route.isExternalCommitmentVisible` (query) — fetches the
 //!     anchor; returns `"true"` / `"false"` in
 //!     `AppStateResponse.value`.
@@ -101,7 +101,7 @@ impl AppRouterImpl {
     }
 
     /// `route.isExternalCommitmentVisible` — fetches the anchor at
-    /// `defi/extcommit/{X_b32}` on storage nodes.  Returns
+    /// `sofi/extcommit/{X_b32}` on storage nodes.  Returns
     /// `AppStateResponse.value = "true"` if the anchor exists with a
     /// matching `x` field, `"false"` otherwise.
     ///
@@ -253,14 +253,49 @@ impl AppRouterImpl {
                 "route.publishExternalCommitment: empty ExternalCommitmentV1 payload".into(),
             );
         }
-        let mut req = match generated::ExternalCommitmentV1::decode(&*bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                return err(format!(
-                    "route.publishExternalCommitment: decode ExternalCommitmentV1 failed: {e}"
-                ));
-            }
-        };
+
+        // Phase 6: the request may be either a bare `ExternalCommitmentV1`
+        // (legacy callers) or a `PublishExternalCommitmentRequest` wrapper
+        // (Phase 6+ trader UI that wants vault-keyed pending pointers
+        // published alongside the anchor).  Try the wrapper first; on
+        // decode failure or missing inner anchor, fall back to bare.
+        let (mut req, signed_rc_bytes_opt): (generated::ExternalCommitmentV1, Option<Vec<u8>>) =
+            match generated::PublishExternalCommitmentRequest::decode(&*bytes) {
+                Ok(wrapper) => {
+                    if let Some(inner) = wrapper.anchor {
+                        let rc_opt = if wrapper.signed_route_commit_bytes.is_empty() {
+                            None
+                        } else {
+                            Some(wrapper.signed_route_commit_bytes)
+                        };
+                        (inner, rc_opt)
+                    } else {
+                        // Fall back to bare ExternalCommitmentV1.
+                        let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return err(format!(
+                                "route.publishExternalCommitment: decode failed (tried PublishExternalCommitmentRequest then ExternalCommitmentV1): {e}"
+                            ));
+                            }
+                        };
+                        (bare, None)
+                    }
+                }
+                Err(_) => {
+                    // Fall back to bare ExternalCommitmentV1.
+                    let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return err(format!(
+                            "route.publishExternalCommitment: decode failed (tried PublishExternalCommitmentRequest then ExternalCommitmentV1): {e}"
+                        ));
+                        }
+                    };
+                    (bare, None)
+                }
+            };
+
         if req.x.len() != 32 {
             return err(format!(
                 "route.publishExternalCommitment: x must be 32 bytes, got {}",
@@ -289,16 +324,77 @@ impl AppRouterImpl {
         let mut x = [0u8; 32];
         x.copy_from_slice(&req.x);
 
-        if let Err(e) = crate::sdk::route_commit_sdk::publish_external_commitment(
-            &x,
-            &req.publisher_public_key,
-            &req.label,
-        )
-        .await
-        {
-            return err(format!(
-                "route.publishExternalCommitment: storage put failed: {e}"
-            ));
+        // If the caller supplied the signed RouteCommit bytes, use the
+        // Phase-6 helper to publish X + vault-keyed pending pointers
+        // atomically.  Otherwise publish X only (legacy behaviour).
+        match signed_rc_bytes_opt {
+            None => {
+                if let Err(e) = crate::sdk::route_commit_sdk::publish_external_commitment(
+                    &x,
+                    &req.publisher_public_key,
+                    &req.label,
+                )
+                .await
+                {
+                    return err(format!(
+                        "route.publishExternalCommitment: storage put failed: {e}"
+                    ));
+                }
+            }
+            Some(rc_bytes) => {
+                let rc = match generated::RouteCommitV1::decode(&*rc_bytes) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishExternalCommitment: decode signed_route_commit_bytes failed: {e}"
+                        ));
+                    }
+                };
+                // Verify X derived from this RC matches the caller's X.
+                let derived_x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+                if derived_x != x {
+                    return err(
+                        "route.publishExternalCommitment: signed_route_commit_bytes does not derive the supplied x"
+                            .into(),
+                    );
+                }
+                let sk = match crate::sdk::signing_authority::current_secret_key() {
+                    Ok(s) if !s.is_empty() => s,
+                    Ok(_) => {
+                        return err(
+                            "route.publishExternalCommitment: wallet signing secret key is empty"
+                                .into(),
+                        );
+                    }
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishExternalCommitment: get_current_secret_key failed: {e}"
+                        ));
+                    }
+                };
+                match crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    &req.publisher_public_key,
+                    &sk,
+                    &req.label,
+                )
+                .await
+                {
+                    Ok(pointer_errors) => {
+                        for pe in &pointer_errors {
+                            log::warn!(
+                                "[route.publishExternalCommitment] pointer publish (best-effort) failed: {pe}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishExternalCommitment: anchor publish failed: {e}"
+                        ));
+                    }
+                }
+            }
         }
 
         let resp = generated::AppStateResponse {
@@ -346,8 +442,33 @@ impl AppRouterImpl {
                 "route.publishRoutingAdvertisement: unlock_spec_digest must be 32 bytes".into(),
             );
         }
+        // Derive vault_proto_bytes from the local DLVManager when the
+        // caller passes empty.  This is the path the SoFi test +
+        // production wallet UIs use: the wallet has the canonical
+        // vault state via `dlv.create`; making the caller serialise
+        // VaultPostProto bytes themselves is redundant + error-prone
+        // (the test was passing a UTF-8 placeholder string which then
+        // failed to decode as VaultPostProto at the trader's
+        // `route.syncVaultsForPair` step, leaving the trader's
+        // DLVManager empty and `dlv.unlockRouted` rejecting with
+        // "vault not in local DLVManager").  When the caller does
+        // pass non-empty bytes (router-service integrations), we
+        // honour them verbatim.
         if req.vault_proto_bytes.is_empty() {
-            return err("route.publishRoutingAdvertisement: vault_proto_bytes is required".into());
+            let dlv_manager = self.bitcoin_tap.dlv_manager();
+            let mut vid_arr = [0u8; 32];
+            vid_arr.copy_from_slice(&req.vault_id);
+            match dlv_manager
+                .create_vault_post(&vid_arr, "route.publishRoutingAdvertisement", None)
+                .await
+            {
+                Ok(bytes) => req.vault_proto_bytes = bytes,
+                Err(e) => {
+                    return err(format!(
+                        "route.publishRoutingAdvertisement: vault_proto_bytes empty + local DLVManager create_vault_post failed: {e}"
+                    ));
+                }
+            }
         }
         // Accept-or-stamp: empty owner pk → wallet pk; non-empty →
         // caller-supplied.  Same pattern as chunk #6 / Track C.4 /
@@ -485,7 +606,59 @@ impl AppRouterImpl {
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            if dlv_manager.get_vault(&vid).await.is_ok() {
+            // Already-mirrored vaults: refresh their reserves from
+            // the latest advertisement.  The advertisement carries
+            // reserves in canonical (lex-lower, lex-higher) pair
+            // order; map back to the vault's storage order before
+            // applying.  This is how the OWNER observes a remote
+            // trader's `dlv.unlockRouted` settle on a vault the
+            // owner created — without this refresh, the owner's
+            // local DLVManager stays frozen at vault-creation-time
+            // reserves and the cross-device SoFi orchestrator's
+            // "owner observes trader's settle" assertion can never
+            // fire.  Trader's post-settle path already publishes the
+            // updated advertisement via
+            // `republish_active_advertisement_with_reserves`; this
+            // closes the loop on the owner side.
+            if let Ok(vault_lock) = dlv_manager.get_vault(&vid).await {
+                if ad.reserve_a_u128.len() == 16 && ad.reserve_b_u128.len() == 16 {
+                    let mut canon_a = [0u8; 16];
+                    canon_a.copy_from_slice(&ad.reserve_a_u128);
+                    let mut canon_b = [0u8; 16];
+                    canon_b.copy_from_slice(&ad.reserve_b_u128);
+                    let ad_canon_a = u128::from_be_bytes(canon_a);
+                    let ad_canon_b = u128::from_be_bytes(canon_b);
+                    // Match the ad's canonical pair order against the
+                    // vault's storage order.  If vault.token_a equals
+                    // ad.token_a, reserves are already in vault order;
+                    // otherwise swap.
+                    let mut vault = vault_lock.lock().await;
+                    let vault_token_a = vault.amm_token_a().map(|s| s.to_vec());
+                    if let Some(vt_a) = vault_token_a {
+                        let (new_a, new_b) = if vt_a.as_slice() == ad.token_a.as_slice() {
+                            (ad_canon_a, ad_canon_b)
+                        } else {
+                            (ad_canon_b, ad_canon_a)
+                        };
+                        if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                            reserve_a,
+                            reserve_b,
+                            ..
+                        } = &vault.fulfillment_condition
+                        {
+                            if *reserve_a != new_a || *reserve_b != new_b {
+                                let _ = vault.update_amm_reserves(new_a, new_b);
+                                log::info!(
+                                    "[route.syncVaultsForPair] refreshed reserves for vault {} from ad: a={} b={} updated_state_number={}",
+                                    crate::util::text_id::encode_base32_crockford(&vid),
+                                    new_a,
+                                    new_b,
+                                    ad.updated_state_number
+                                );
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad).await
@@ -600,37 +773,194 @@ impl AppRouterImpl {
             }
         };
 
-        let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
-            &ads,
-            &req.input_token,
-            &req.output_token,
-            input_amount,
-            max_hops,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return err(format!(
-                    "route.findAndBindBestPath: path search rejected: {e:?}"
-                ));
+        // Phase 6: vault-state composition pass.  For each candidate
+        // advertisement, fetch the owner-signed VaultStateAnchorV1 and
+        // fold any published VaultPendingPointerV1 records into a
+        // composed (sequence, reserves) view.  The composed reserves
+        // REPLACE the advertisement's owner-signed reserves so the
+        // downstream path search quotes against the canonical current
+        // state — including any pending trades published since the
+        // owner's last anchor refresh.
+        //
+        // This is the SoFi spec §2.3 / §4.1 "math speaks for itself"
+        // property: concurrent traders quoting against the same vault
+        // while the owner is offline see each other's pending state
+        // advances and serialize on top of them, rather than all
+        // colliding against the stale anchor + having Tripwire prune
+        // everyone but the first.
+        let mut ads_after_composition: Vec<generated::RoutingVaultAdvertisementV1> =
+            Vec::with_capacity(ads.len());
+        for mut ad in ads.into_iter() {
+            if ad.vault_id.len() != 32
+                || ad.reserve_a_u128.len() != 16
+                || ad.reserve_b_u128.len() != 16
+            {
+                ads_after_composition.push(ad);
+                continue;
             }
-        };
+            let mut vid = [0u8; 32];
+            vid.copy_from_slice(&ad.vault_id);
+            let mut a_buf = [0u8; 16];
+            a_buf.copy_from_slice(&ad.reserve_a_u128);
+            let mut b_buf = [0u8; 16];
+            b_buf.copy_from_slice(&ad.reserve_b_u128);
+            let baseline_reserve_a = u128::from_be_bytes(a_buf);
+            let baseline_reserve_b = u128::from_be_bytes(b_buf);
 
-        // Chunk #3 binder.  `initiator_public_key` is left empty here;
-        // `route.signRouteCommit` will stamp the wallet's pk during
-        // signing per the chunk #6 invariant.
-        let unsigned = match crate::sdk::route_commit_sdk::bind_path_to_route_commit(
-            crate::sdk::route_commit_sdk::BindRouteCommitInput {
-                path: &path,
-                nonce,
-                initiator_public_key: &[],
-                initiator_signature: vec![],
-            },
-        ) {
-            Ok(rc) => rc,
-            Err(e) => {
-                return err(format!("route.findAndBindBestPath: bind rejected: {e:?}"));
+            // Fetch the latest vault state anchor.  If absent, the ad
+            // pre-dates the anchor flow — fall through and use the ad
+            // as-is (no composition possible without a signed baseline).
+            let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
+                &vid,
+            )
+            .await
+            {
+                Ok(Some(a)) => a,
+                _ => {
+                    ads_after_composition.push(ad);
+                    continue;
+                }
+            };
+            match crate::sdk::vault_state_composition::compose_vault_state(
+                &vid,
+                &anchor,
+                (baseline_reserve_a, baseline_reserve_b),
+                &ad.token_a,
+                &ad.token_b,
+                ad.fee_bps,
+            )
+            .await
+            {
+                Ok(composed) => {
+                    if composed.pending_chain_len > 0 || composed.pending_chain_skipped > 0 {
+                        log::info!(
+                            "[route.findAndBindBestPath] vault {} composed: baseline=({},{}) composed=({},{}) chain_len={} skipped={} seq={}",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                            baseline_reserve_a,
+                            baseline_reserve_b,
+                            composed.reserves_a,
+                            composed.reserves_b,
+                            composed.pending_chain_len,
+                            composed.pending_chain_skipped,
+                            composed.sequence,
+                        );
+                    }
+                    if composed.pending_chain_len
+                        >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
+                    {
+                        log::warn!(
+                            "[route.findAndBindBestPath] vault {} dropped from candidates: pending chain saturated",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                        );
+                        continue;
+                    }
+                    // Replace the ad's reserves with the composed values
+                    // so the downstream path search builds AMM edges
+                    // against the canonical current state.
+                    ad.reserve_a_u128 = composed.reserves_a.to_be_bytes().to_vec();
+                    ad.reserve_b_u128 = composed.reserves_b.to_be_bytes().to_vec();
+                    ad.updated_state_number = composed.sequence;
+                    ads_after_composition.push(ad);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[route.findAndBindBestPath] vault {} dropped from candidates: composition error {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid),
+                    );
+                    continue;
+                }
+            }
+        }
+        let ads = ads_after_composition;
+
+        // Tier 2 envelope: when caller asks for N-best (max_paths > 1),
+        // run the verified N-best enumerator and bind primary +
+        // fallbacks under one envelope. Legacy single-path callers
+        // (max_paths == 0 or 1) keep the chunk #3 single-path binder
+        // path so the wire format remains identical for them.
+        let requested_paths = if req.max_paths == 0 {
+            1
+        } else {
+            req.max_paths as usize
+        };
+        let slippage_bps = req.slippage_bps;
+        let floor_bps = req.floor_bps;
+
+        let unsigned = if requested_paths <= 1 {
+            let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
+                &ads,
+                &req.input_token,
+                &req.output_token,
+                input_amount,
+                max_hops,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return err(format!(
+                        "route.findAndBindBestPath: path search rejected: {e:?}"
+                    ));
+                }
+            };
+            match crate::sdk::route_commit_sdk::bind_path_to_route_commit(
+                crate::sdk::route_commit_sdk::BindRouteCommitInput {
+                    path: &path,
+                    nonce,
+                    initiator_public_key: &[],
+                    initiator_signature: vec![],
+                },
+            ) {
+                Ok(rc) => rc,
+                Err(e) => {
+                    return err(format!("route.findAndBindBestPath: bind rejected: {e:?}"));
+                }
+            }
+        } else {
+            let paths = match crate::sdk::routing_path_sdk::find_and_verify_n_best_paths(
+                &ads,
+                &req.input_token,
+                &req.output_token,
+                input_amount,
+                max_hops,
+                requested_paths,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return err(format!(
+                        "route.findAndBindBestPath: N-best path search rejected: {e:?}"
+                    ));
+                }
+            };
+            // Guaranteed non-empty by the SDK contract; first is primary,
+            // rest are fallbacks.  Split safely without panic.
+            let (primary, fallbacks) = match paths.split_first() {
+                Some((p, rest)) => (p.clone(), rest.to_vec()),
+                None => {
+                    return err(
+                        "route.findAndBindBestPath: N-best search returned empty set".into(),
+                    );
+                }
+            };
+            match crate::sdk::route_commit_sdk::bind_envelope_to_route_commit(
+                crate::sdk::route_commit_sdk::BindRouteCommitEnvelopeInput {
+                    primary: &primary,
+                    fallbacks: &fallbacks,
+                    nonce,
+                    initiator_public_key: &[],
+                    initiator_signature: vec![],
+                    slippage_bps,
+                    floor_bps,
+                },
+            ) {
+                Ok(rc) => rc,
+                Err(e) => {
+                    return err(format!(
+                        "route.findAndBindBestPath: envelope bind rejected: {e:?}"
+                    ));
+                }
             }
         };
         let unsigned_bytes = unsigned.encode_to_vec();

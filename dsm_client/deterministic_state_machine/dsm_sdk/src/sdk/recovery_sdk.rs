@@ -257,9 +257,14 @@ impl RecoverySDK {
     /// Generate a cryptographically secure 24-word BIP-39 mnemonic.
     /// Uses 256 bits of CSPRNG entropy via OsRng. Crypto stays in Rust.
     pub fn generate_mnemonic() -> Result<String, DsmError> {
-        use rand::RngCore;
         let mut entropy = [0u8; 32]; // 256 bits → 24 words
-        rand::rngs::OsRng.fill_bytes(&mut entropy);
+        let mut rng = rand::rngs::OsRng;
+        rand::TryRngCore::try_fill_bytes(&mut rng, &mut entropy).map_err(|e| {
+            DsmError::crypto(
+                format!("OsRng entropy failure: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         let mnemonic = bip39::Mnemonic::from_entropy(&entropy).map_err(|e| {
             DsmError::crypto(
                 format!("BIP-39 generation failed: {e}"),
@@ -591,8 +596,8 @@ impl RecoverySDK {
                     if tip.len() == 32 && contact.device_id.len() == 32 {
                         let counterparty_id =
                             crate::util::text_id::encode_base32_crockford(&contact.device_id);
-                        // The SMT-backed relationship tip is authoritative. Height is a transport
-                        // placeholder until a canonical per-relationship counter is persisted.
+                        // The SMT-backed relationship tip is authoritative. Height is hardcoded
+                        // to 0 as it is not used for conflict resolution in this context.
                         counterparty_tips.insert(counterparty_id, (0, tip.clone()));
                     }
                 }

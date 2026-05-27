@@ -24,6 +24,7 @@ use std::path::Path;
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use crate::security::cdbrw_access_gate::{latest_trust, TrustSnapshot};
 use crate::security::cdbrw_enrollment_writer::{enroll_device, EnrollError, EnrollInputs};
+use crate::security::cdbrw_reprove::{reprove, ReproveInputs, ReproveVerdict};
 use crate::security::cdbrw_responder::{
     measure_trust, respond_to_challenge, RespondError, RespondInputs,
 };
@@ -47,6 +48,36 @@ struct DbrwEnrollmentSnapshot {
     epsilon_intra: f32,
     mean_histogram: Vec<f32>,
     reference_anchor: Vec<u8>,
+    /// Phase 3 deliverable 3 (envelope test) — present only when
+    /// `revision >= 5`. None for v4 snapshots.
+    envelope_baseline_moments: Option<[f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT]>,
+    envelope_tolerance_ball: Option<[f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT]>,
+    /// C-DBRW h_hat-collapse fix — present only when `revision >= 6`.
+    /// The robust [P0.5, P99.5] timing range committed at enrollment;
+    /// measure_trust + respond must rebuild histograms in the same
+    /// bin space.  None for v4/v5 snapshots (which invalidate on the
+    /// new code path because their reference anchor was derived under
+    /// the legacy [min, max] binning).
+    bin_range: Option<crate::security::cdbrw_ffi::BinRange>,
+    /// Phase 9 admission audit — present only when `revision >= 7`.
+    /// Carries the per-sample (h_hat, rho_hat, l_hat, epsilon_intra)
+    /// quartets for each of the M K-trial chunks that cleared
+    /// admission.  Diagnostic only (the gate verdict itself was
+    /// computed at enrollment and is baked into the persisted
+    /// reference anchor).  None for v4/v5/v6 snapshots, which
+    /// invalidate under the v7 admission protocol.
+    admission_samples: Option<AdmissionSamples>,
+}
+
+/// Phase 9 admission audit decoded from `dsm_silicon_fp_v4.bin` rev ≥ 7.
+#[derive(Debug, Clone, PartialEq)]
+struct AdmissionSamples {
+    m: u32,
+    trials_per_sample: u32,
+    per_sample_h_hat: Vec<f32>,
+    per_sample_rho_hat: Vec<f32>,
+    per_sample_l_hat: Vec<f32>,
+    per_sample_epsilon_intra: Vec<f32>,
 }
 
 impl DbrwEnrollmentSnapshot {
@@ -154,6 +185,84 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         .read_exact(&mut reference_anchor)
         .map_err(|e| format!("read reference_anchor: {e}"))?;
 
+    // v5 envelope extension — present only when revision ≥ 5. Older
+    // enrollments (revision 4) round-trip as None and the envelope test
+    // is skipped for them.
+    let (envelope_baseline_moments, envelope_tolerance_ball) = if revision >= 5 {
+        let mut baseline = [0.0_f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT];
+        for slot in baseline.iter_mut() {
+            let mut buf = [0u8; 8];
+            cursor
+                .read_exact(&mut buf)
+                .map_err(|e| format!("read baseline_moments: {e}"))?;
+            *slot = f64::from_bits(u64::from_be_bytes(buf));
+        }
+        let mut tolerance = [0.0_f64; dsm::crypto::cdbrw_moments::ENVELOPE_MOMENT_COUNT];
+        for slot in tolerance.iter_mut() {
+            let mut buf = [0u8; 8];
+            cursor
+                .read_exact(&mut buf)
+                .map_err(|e| format!("read tolerance_ball: {e}"))?;
+            *slot = f64::from_bits(u64::from_be_bytes(buf));
+        }
+        (Some(baseline), Some(tolerance))
+    } else {
+        (None, None)
+    };
+
+    // v6 bin_range extension — present only when revision ≥ 6.  The
+    // robust [P0.5, P99.5] timing range committed at enrollment.
+    // Revisions 4/5 round-trip as None; downstream consumers fall back
+    // to the legacy [min, max] binning OR invalidate the enrollment
+    // depending on context.
+    let bin_range = if revision >= 6 {
+        let mut low_buf = [0u8; 8];
+        cursor
+            .read_exact(&mut low_buf)
+            .map_err(|e| format!("read bin_range.low: {e}"))?;
+        let mut high_buf = [0u8; 8];
+        cursor
+            .read_exact(&mut high_buf)
+            .map_err(|e| format!("read bin_range.high: {e}"))?;
+        Some(crate::security::cdbrw_ffi::BinRange {
+            low: i64::from_be_bytes(low_buf),
+            high: i64::from_be_bytes(high_buf),
+        })
+    } else {
+        None
+    };
+
+    // v7 admission extension (Phase 9) — admission_m + trials_per_sample
+    // followed by M per-sample audit quartets.  Diagnostic only; the
+    // admission verdict itself was computed at enrollment.  Older
+    // enrollments (revisions 4/5/6) round-trip as None and the C-DBRW
+    // stack treats them as invalid under Phase 9 (a v7-capable wallet
+    // will refuse to use a pre-v7 reference anchor and force re-enroll).
+    let admission_samples = if revision >= 7 {
+        let m = read_u32_be(&mut cursor, "admission_m")?;
+        let trials_per_sample = read_u32_be(&mut cursor, "admission_trials_per_sample")?;
+        let mut h = Vec::with_capacity(m as usize);
+        let mut r = Vec::with_capacity(m as usize);
+        let mut l = Vec::with_capacity(m as usize);
+        let mut e = Vec::with_capacity(m as usize);
+        for _ in 0..m {
+            h.push(read_f32_be(&mut cursor, "admission h_hat")?);
+            r.push(read_f32_be(&mut cursor, "admission rho_hat")?);
+            l.push(read_f32_be(&mut cursor, "admission l_hat")?);
+            e.push(read_f32_be(&mut cursor, "admission epsilon_intra")?);
+        }
+        Some(AdmissionSamples {
+            m,
+            trials_per_sample,
+            per_sample_h_hat: h,
+            per_sample_rho_hat: r,
+            per_sample_l_hat: l,
+            per_sample_epsilon_intra: e,
+        })
+    } else {
+        None
+    };
+
     Ok(Some(DbrwEnrollmentSnapshot {
         revision,
         arena_bytes,
@@ -164,6 +273,10 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         epsilon_intra,
         mean_histogram,
         reference_anchor,
+        envelope_baseline_moments,
+        envelope_tolerance_ball,
+        bin_range,
+        admission_samples,
     }))
 }
 
@@ -371,7 +484,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 None => return err("cdbrw.measure_trust: missing orbit".into()),
             };
 
-            let (enrolled_mean_owned, epsilon_intra) =
+            let (enrolled_mean_owned, epsilon_intra, bin_range) =
                 match crate::storage_utils::get_storage_base_dir()
                     .as_ref()
                     .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
@@ -379,8 +492,9 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     Some(snapshot) => (
                         Some(snapshot.mean_histogram.clone()),
                         snapshot.epsilon_intra,
+                        snapshot.bin_range,
                     ),
-                    None => (None, 0.0f32),
+                    None => (None, 0.0f32, None),
                 };
 
             let snapshot = measure_trust(
@@ -388,10 +502,64 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 enrolled_mean_owned.as_deref(),
                 epsilon_intra,
                 req.histogram_bins as usize,
+                bin_range,
             );
 
             pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
                 snapshot.to_proto("cdbrw.measure_trust"),
+            ))
+        }
+
+        // -------- cdbrw.reprove (Phase 3 deliverable 2 Layer B) --------
+        // Opportunistic ACD re-prove called at boot resume. Reuses the
+        // CdbrwMeasureTrustRequest proto shape (same orbit + bins inputs)
+        // but applies the stronger clone-detection threshold from
+        // CLONE_DETECTION_W1_THRESHOLD. On CloneDetected verdict, zeroes
+        // the in-memory K_DBRW slot AND publishes a Blocked snapshot so
+        // every gated route fails closed.
+        "cdbrw.reprove" => {
+            let req = match generated::CdbrwMeasureTrustRequest::decode(&*q.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return err(format!(
+                        "decode CdbrwMeasureTrustRequest (reprove) failed: {e}"
+                    ))
+                }
+            };
+            let orbit = match req.orbit.as_ref() {
+                Some(v) => v,
+                None => return err("cdbrw.reprove: missing orbit".into()),
+            };
+
+            let (enrolled_mean_owned, bin_range) =
+                match crate::storage_utils::get_storage_base_dir()
+                    .as_ref()
+                    .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                {
+                    Some(snapshot) => (Some(snapshot.mean_histogram), snapshot.bin_range),
+                    None => (None, None),
+                };
+
+            let out = reprove(&ReproveInputs {
+                orbit_timings: &orbit.timings,
+                enrolled_mean: enrolled_mean_owned.as_deref(),
+                histogram_bins: req.histogram_bins as usize,
+                bin_range,
+            });
+
+            // Fail-closed wipe: if reprove says clone, zero K_DBRW so no
+            // downstream signer can use it. This is the second half of the
+            // anti-cloning guarantee — stolen salt becomes useless because
+            // the live PUF couldn't match the stored ACD here.
+            if out.verdict == ReproveVerdict::CloneDetected {
+                crate::binding_key::clear_binding_key();
+                log::warn!(
+                    "[cdbrw.reprove] CLONE DETECTED — K_DBRW slot zeroed, full re-enrollment required"
+                );
+            }
+
+            pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
+                out.trust.to_proto("cdbrw.reprove"),
             ))
         }
 
@@ -436,7 +604,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 Err(e) => return err(e),
             };
 
-            let (enrolled_mean_owned, epsilon_intra) =
+            let (enrolled_mean_owned, epsilon_intra, bin_range) =
                 match crate::storage_utils::get_storage_base_dir()
                     .as_ref()
                     .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
@@ -444,8 +612,9 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     Some(snapshot) => (
                         Some(snapshot.mean_histogram.clone()),
                         snapshot.epsilon_intra,
+                        snapshot.bin_range,
                     ),
-                    None => (None, 0.0f32),
+                    None => (None, 0.0f32, None),
                 };
 
             let inputs = RespondInputs {
@@ -459,6 +628,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 device_id: &device_id,
                 binding_key: &binding_key,
                 histogram_bins: req.histogram_bins as usize,
+                bin_range,
             };
 
             match respond_to_challenge(&inputs) {
@@ -558,18 +728,26 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 Err(e) => return err(format!("decode CdbrwEnrollRequest failed: {e}")),
             };
 
-            // Convert trials from repeated CdbrwOrbitTrial to Vec<Vec<i64>>.
-            // Empty trials get caught by the writer's validation.
-            let trials: Vec<Vec<i64>> = req.trials.into_iter().map(|t| t.timings).collect();
+            // Split trials into parallel timings + challenges. Empty trials
+            // and missing/short challenges get caught by the writer's
+            // validation (MissingTrialChallenge / EmptyTrial).
+            let (trials, trial_challenges): (Vec<Vec<i64>>, Vec<Vec<u8>>) = req
+                .trials
+                .into_iter()
+                .map(|t| (t.timings, t.challenge))
+                .unzip();
 
             let inputs = EnrollInputs {
                 env_bytes: &req.env_bytes,
                 trials: &trials,
+                trial_challenges: &trial_challenges,
                 arena_bytes: req.arena_bytes,
                 probes: req.probes,
                 steps_per_probe: req.steps_per_probe,
                 histogram_bins: req.histogram_bins,
                 rotation_bits: req.rotation_bits,
+                admission_samples: req.admission_samples,
+                trials_per_sample: req.trials_per_sample,
             };
 
             let base_dir = match crate::storage_utils::get_storage_base_dir() {
@@ -590,7 +768,7 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                     pack_envelope_ok(generated::envelope::Payload::CdbrwEnrollResponse(resp))
                 }
                 Err(EnrollError::InsufficientTrials { got }) => err(format!(
-                    "cdbrw.enroll: insufficient trials (got {got}, need >= 16)"
+                    "cdbrw.enroll: insufficient trials_per_sample (got {got}, need >= 16)"
                 )),
                 Err(EnrollError::EmptyTrial { index }) => {
                     err(format!("cdbrw.enroll: trial {index} has no timings"))
@@ -598,7 +776,28 @@ pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
                 Err(EnrollError::InvalidHistogramBins { bins }) => err(format!(
                     "cdbrw.enroll: invalid histogram_bins={bins} (expected 256/512/1024)"
                 )),
+                Err(EnrollError::MissingTrialChallenge { index, reason }) => err(format!(
+                    "cdbrw.enroll: trial {index} challenge invalid: {reason}"
+                )),
                 Err(EnrollError::Io(msg)) => err(format!("cdbrw.enroll: io error: {msg}")),
+                Err(EnrollError::AdmissionShapeMismatch {
+                    admission_samples,
+                    trials_per_sample,
+                    actual_trials,
+                    expected_admission_m,
+                }) => err(format!(
+                    "cdbrw.enroll: admission shape mismatch — got admission_samples={admission_samples} \
+                     (expected {expected_admission_m}), trials_per_sample={trials_per_sample}, \
+                     trials={actual_trials}",
+                )),
+                Err(EnrollError::AdmissionRejected {
+                    median_h_hat,
+                    median_rho_hat_abs,
+                    median_l_hat,
+                    ..
+                }) => err(format!(
+                    "cdbrw.enroll: admission rejected (median H={median_h_hat:.4} |rho|={median_rho_hat_abs:.4} L={median_l_hat:.4})"
+                )),
             }
         }
 

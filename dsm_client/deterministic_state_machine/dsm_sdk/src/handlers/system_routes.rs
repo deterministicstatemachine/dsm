@@ -36,27 +36,22 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
     if req.cdbrw_env_fingerprint.is_empty() {
         return err("system.genesis: cdbrw_env_fingerprint is required".into());
     }
-    if req.cdbrw_salt.len() != 32 {
+    // Stage the silicon-binding inputs in the platform-entropy slot so the
+    // inner MPC genesis path (StorageNodeSDK::create_genesis_with_mpc →
+    // core_sdk::create_genesis_with_passive_contributors) can derive the
+    // canonical K_DBRW post-MPC from
+    //   `derive_cdbrw_binding_key(genesis_hash, device_id = genesis_hash, hw, env)`
+    // and stash it via `binding_key::install_binding_key`. We DO NOT pre-derive
+    // K_DBRW here — the canonical preimage requires `genesis_hash` which is an
+    // MPC output, not an input.
+    if let Err(e) = crate::sdk::app_state::AppState::set_platform_entropy_inputs(
+        req.cdbrw_hw_entropy.clone(),
+        req.cdbrw_env_fingerprint.clone(),
+    ) {
         return err(format!(
-            "system.genesis: cdbrw_salt must be 32 bytes, got {}",
-            req.cdbrw_salt.len()
+            "system.genesis: failed to stage platform entropy inputs: {e}"
         ));
     }
-    let k_dbrw = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-        &req.cdbrw_hw_entropy,
-        &req.cdbrw_env_fingerprint,
-        &req.cdbrw_salt,
-    ) {
-        Ok(k) => k,
-        Err(e) => {
-            return err(format!(
-                "system.genesis: C-DBRW binding derivation failed: {e}"
-            ))
-        }
-    };
-    let binding_record = crate::util::text_id::encode_base32_crockford(
-        dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
-    );
 
     // Perform MPC-only genesis using storage node SDK.
     let fut = async move {
@@ -81,10 +76,29 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                 genesis_hash.len()
             ));
         }
-        crate::install_canonical_binding_key(k_dbrw.to_vec())
-            .map_err(|e| format!("system.genesis: install C-DBRW binding failed: {e}"))?;
+        // K_DBRW is installed by `core_sdk::create_genesis_with_passive_contributors`
+        // post-MPC using the canonical
+        //   derive_cdbrw_binding_key(genesis_hash, device_id = genesis_hash,
+        //                            hw, env)
+        // preimage. Pull it back out here for downstream uses (JNI
+        // installation, binding_record digest stamped into the genesis
+        // record).
+        let k_dbrw_vec = crate::binding_key::get_binding_key().ok_or_else(|| {
+            "system.genesis: canonical K_DBRW slot empty after MPC genesis".to_string()
+        })?;
+        if k_dbrw_vec.len() != 32 {
+            return Err(format!(
+                "system.genesis: canonical K_DBRW length must be 32, got {}",
+                k_dbrw_vec.len()
+            ));
+        }
+        let mut k_dbrw_arr = [0u8; 32];
+        k_dbrw_arr.copy_from_slice(&k_dbrw_vec);
+        let binding_record = crate::util::text_id::encode_base32_crockford(
+            dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw_arr).as_bytes(),
+        );
         #[cfg(all(target_os = "android", feature = "jni"))]
-        crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw.to_vec());
+        crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw_vec.clone());
         let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
@@ -125,6 +139,57 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             "system.genesis: wallet_state ensured for device={}",
             &device_id_b32[..8]
         );
+
+        // Register the new device with each storage node's auth endpoint so
+        // subsequent authenticated PUTs (routing-advertisement publish,
+        // external-commitment publish, etc.) succeed.  Without this every
+        // storage write returns 401 Unauthorized because the per-node auth
+        // token slot is empty.  `register_device_for_auth` is idempotent at
+        // the storage-node level and persists the token via
+        // `store_auth_token`, which `resolve_storage_auth` reads on every
+        // PUT path.  Best-effort: a single-node failure is logged but does
+        // NOT roll back genesis — the genesis record is already durable
+        // and a later retry on the same node will get the token.
+        {
+            let cfg_for_auth =
+                match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        log::warn!(
+                            "system.genesis: auth-registration cfg load failed (genesis still durable): {e}"
+                        );
+                        None
+                    }
+                };
+            if let Some(cfg) = cfg_for_auth {
+                let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+                match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+                    Ok(auth_sdk) => match auth_sdk
+                        .register_device_for_auth(
+                            &device_id_b32,
+                            &public_key_b32,
+                            &crate::util::text_id::encode_base32_crockford(&genesis_hash),
+                        )
+                        .await
+                    {
+                        Ok(_token) => {
+                            log::info!(
+                                "system.genesis: auth-registration completed for device={}",
+                                &device_id_b32[..8]
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "system.genesis: auth-registration failed (subsequent PUTs may 401 until retry): {e}"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!("system.genesis: auth-registration SDK init failed: {e}");
+                    }
+                }
+            }
+        }
 
         let resp = generated::GenesisCreated {
             device_id: device_id.clone(),

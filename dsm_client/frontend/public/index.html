@@ -1783,7 +1783,7 @@ html[data-shell-theme] .stateboy::before {
             pending.delete(id);
             console.warn('[Bridge] Timeout for id:', id.toString());
             reject(new Error(`Bridge timeout (id=${id})`));
-          }, 300000); // 5 min — full 16384-probe orbit enrollment takes ~3.5 min
+          }, 1800000); // 30 min — Phase 9 M=3 K=21 admission enrollment is ~10-15 min worst case on mid-range silicon; other calls return fast
 
           // Register pending state (ID-based routing)
           pending.set(id, { resolve, reject, timeout });

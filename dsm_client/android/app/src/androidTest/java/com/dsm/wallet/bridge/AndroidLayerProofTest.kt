@@ -396,7 +396,7 @@ class AndroidLayerProofTest {
             IngressResponse.ResultCase.OK_BYTES,
             ingressResponse.resultCase
         )
-        assertTrue("Router query response payload must be non-empty", ingressResponse.okBytes.isNotEmpty())
+        assertTrue("Router query response payload must be non-empty", !ingressResponse.okBytes.isEmpty)
     }
 
     @Test

@@ -745,6 +745,13 @@ message LimboVaultProto {
   repeated bytes verification_positions = 12;
   bytes reference_state_hash = 13;
   optional bytes entry_header = 14; // 80-byte Bitcoin block header cached at entry (Invariant 19, §12.2.3)
+  // Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
+  // (32 bytes, BLAKE3 anchor of the CPTA spec).  Re-used as the
+  // routing advertisement's `unlock_spec_digest` so the LiquidityScreen
+  // republish path can fetch the real digest instead of stamping zeros.
+  // Optional for backward compatibility with vaults created before this
+  // field was added; legacy vaults render with no Publish-retry button.
+  optional bytes policy_digest = 15;
 }
 
 // Vault post wrapper for storage nodes
@@ -912,6 +919,25 @@ message FindAndBindRouteRequest {
   // initiator_public_key is left empty here on purpose — the
   // subsequent `route.signRouteCommit` invoke stamps the wallet's
   // pk and overwrites whatever the bind step put there.
+
+  // Tier 2 envelope binding. When `max_paths > 1` the binder runs
+  // N-best path enumeration and stamps the primary path's hops into
+  // `RouteCommitV1.hops` and the runner-up paths into
+  // `RouteCommitV1.fallbacks[].hops`. All paths share one signature
+  // and one external commitment X. 0 → server default (1, primary-only,
+  // preserves legacy behavior).
+  uint32 max_paths              = 6;
+
+  // Trader's per-hop slippage tolerance in basis points (e.g. 50 =
+  // 0.5%). Each hop's `min_output_amount_u128` is stamped to
+  // `expected_output * (10000 - slippage_bps) / 10000`. 0 → no
+  // per-hop floor (legacy / unbounded).
+  uint32 slippage_bps           = 7;
+
+  // Trader's envelope-level slippage tolerance for the final output
+  // (often equal to `slippage_bps` but allowed to differ). 0 → no
+  // envelope floor (legacy / unbounded).
+  uint32 floor_bps              = 8;
 }
 
 // Owner-side summary of an AMM vault for the monitor screen.
@@ -935,11 +961,24 @@ message AmmVaultSummaryV1 {
   // Vault policy for anchor enforcement.  REQUIRED vaults reject
   // routed unlocks lacking the anchor binding fields.
   AnchorEnforcement anchor_enforcement = 10;
+  // Phase 13 follow-up: real routing-advertisement digest carried over
+  // from the vault's persisted `policy_digest` at create time.  Used by
+  // the owner-side LiquidityScreen `handleRepublish` flow to pass the
+  // canonical digest to `route.publishRoutingAdvertisement` on retry
+  // instead of stamping 32 zero bytes (which silently corrupts the
+  // advertisement).  Empty for legacy vaults that pre-date persistence.
+  optional bytes unlock_spec_digest = 11 [(dsm_fixed_len)=32];
+  // Phase 13 follow-up: canonical routing-advertisement key string for
+  // this vault, re-derived in Rust to match the original create-flow
+  // construction (`defi/spec/amm/<first-16-chars-of-vault-id-b32>`).
+  // Centralised in Rust so the frontend stays purely a renderer per the
+  // Layer Communication Law.
+  optional string unlock_spec_key = 12 [(dsm_max_len)=128];
 }
 
 // Per-vault signed state anchor.  Owner publishes one at vault
 // creation (sequence=0) and one after every accepted routed unlock
-// (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+// (sequence=N+1).  Stored at `sofi/vault-state/{vault_id_b32}/latest`
 // for off-device traders to read at quote time.  The chunks #7 gate
 // does NOT read this — it verifies against the local DLVManager.
 //
@@ -976,13 +1015,29 @@ message RouteCommitHopV1 {
   bytes  unlock_spec_digest        = 9 [(dsm_fixed_len)=32];
   bytes  owner_public_key          = 10 [(dsm_max_len)=65535];
   // Tier 2 Foundation state-anchor binding.  Trader stamps these
-  // from the vault's `defi/vault-state/{vault_id}/latest` at quote
+  // from the vault's `sofi/vault-state/{vault_id}/latest` at quote
   // time.  Gate verifies against local DLVManager state (NOT storage).
   // For vaults with `anchor_enforcement = REQUIRED` these fields are
   // mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
   uint64 vault_state_anchor_seq      = 11;
   bytes  vault_state_reserves_digest = 12 [(dsm_fixed_len)=32];
   bytes  vault_state_anchor_digest   = 13 [(dsm_fixed_len)=32];
+  // Tier 2 intent-bound: minimum acceptable output for THIS hop. If
+  // the unlock-time simulation yields less than this, the gate
+  // rejects and the wallet retries against the next fallback hop
+  // group (RouteCommitV1.fallbacks). Empty (zero-length) bytes mean
+  // "no per-hop floor" and the only check is the envelope-level
+  // floor on RouteCommitV1.floor_final_output_amount_u128.
+  bytes  min_output_amount_u128     = 14 [(dsm_max_len)=16];
+}
+
+// Tier 2: one fallback hop group. When the primary hops are blocked
+// (state-move, intent-bound violation), the wallet attempts each
+// fallback group in order under the SAME signed RouteCommitV1
+// envelope. Each group MUST satisfy the envelope's
+// floor_final_output_amount_u128.
+message RouteCommitFallbackV1 {
+  repeated RouteCommitHopV1 hops = 1;
 }
 
 // Off-chain routing proof produced by chunk #2's path search and
@@ -1010,11 +1065,22 @@ message RouteCommitV1 {
   // computation is the input to the BLAKE3-derived external
   // commitment X — sign-and-commit once.
   bytes  initiator_signature                = 10 [(dsm_max_len)=65535];
+  // Tier 2 envelope-level floor: minimum total output the trader is
+  // willing to accept across the full path (or any fallback path).
+  // Empty bytes = no floor (trade succeeds at any output the picked
+  // path produces). When set, the unlock-routed gate rejects any
+  // path whose simulated final output < this value.
+  bytes  floor_final_output_amount_u128     = 11 [(dsm_max_len)=16];
+  // Tier 2 fallback hop groups. Tried in order when the primary `hops`
+  // fail intent-bound or state-move checks. All groups share the
+  // single envelope (X = BLAKE3 of canonical bytes including these
+  // groups) and one initiator_signature.
+  repeated RouteCommitFallbackV1 fallbacks  = 12;
 }
 
 // Storage-node anchor proving an external commitment X has been
 // published.  Each unlock-time verifier fetches this record at key
-// `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
+// `sofi/extcommit/{x_b32}`; existence implies "all vaults bound by X
 // may now unlock" (atomic visibility, SoFi spec §3.2).
 //
 // The record is INTENTIONALLY minimal — storage nodes are dumb
@@ -1034,9 +1100,106 @@ message ExternalCommitmentV1 {
   string label                  = 4;
 }
 
+// Request wrapper for `route.publishExternalCommitment`. The handler
+// accepts either this wrapper OR a bare ExternalCommitmentV1 (legacy
+// callers). When `signed_route_commit_bytes` is non-empty, the handler
+// additionally derives and publishes one VaultPendingPointerV1 per hop
+// (composition discovery aid; see VaultPendingPointerV1 docs).
+//
+// Decode discriminator: try this wrapper first; if it fails to decode
+// or `anchor` is unset, fall back to decoding the body as bare
+// ExternalCommitmentV1. This keeps the old wire shape working for any
+// non-SoFi external-commitment users.
+message PublishExternalCommitmentRequest {
+  ExternalCommitmentV1 anchor                  = 1;
+  // Optional. Pass the signed RouteCommitV1 bytes returned by
+  // `route.signRouteCommit` so the handler can derive + publish vault-
+  // keyed pending pointers. Empty bytes → handler publishes the anchor
+  // only, identical to the legacy path.
+  bytes                signed_route_commit_bytes = 2 [(dsm_max_len)=131072];
+}
+
+// Vault-keyed pointer to a pending state advance, published alongside
+// each ExternalCommitmentV1 (one pointer per hop's vault). Lets the
+// NEXT trader discover pending trades on a specific vault in O(pending)
+// rather than scanning the global defi/extcommit/* prefix.
+//
+// Storage key: defi/vault-pending/{vault_id_b32}/{new_sequence_be_pad16}/{x_b32}
+//
+// The signature payload is BLAKE3("DSM/vault-pending\0" || vault_id ||
+// parent_sequence_be || new_sequence_be || x || new_reserves_digest).
+//
+// Anyone can verify. Composition flow (vault_state_composition.rs):
+// trader 2 lists the vault's defi/vault-pending/ prefix, verifies each
+// pointer's signature, confirms each referenced X anchor is published,
+// chains them by new_sequence onto the owner-signed baseline anchor,
+// and uses the resulting composed state for quote-time reserves
+// (rather than the potentially stale owner-published anchor alone).
+//
+// SoFi spec §2.3, §4.1: "Once a valid σ is constructed (by anyone), the
+// unlock becomes computable and settlement executes deterministically."
+// This proto turns that property into discoverable behaviour for the
+// next-trader quote path.
+message VaultPendingPointerV1 {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  uint64 parent_sequence       = 2;
+  uint64 new_sequence          = 3;
+  bytes  x                     = 4 [(dsm_fixed_len)=32];
+  bytes  new_reserves_digest   = 5 [(dsm_fixed_len)=32];
+  bytes  publisher_public_key  = 6 [(dsm_max_len)=65535];
+  bytes  publisher_signature   = 7 [(dsm_max_len)=65535];
+}
+
+// SoFi spec §4.1.2 / §8.4 step 2: vault state committed in Per-Device
+// SMT.  Published by the vault owner at
+//
+//     sofi/vault-state-inclusion/{vault_id_b32}/seq-{sequence_be_pad16}
+//
+// after each DlvCreate / DlvUnlock that advances the vault's state,
+// with a mirror at
+//
+//     sofi/vault-state-inclusion/{vault_id_b32}/latest
+//
+// for fast lookup at quote time.  Off-device traders verify the
+// inclusion proof BEFORE binding the route commit; the chunks-#7
+// unlock gate re-verifies before emitting Operation::DlvUnlock.
+//
+// Strictly stronger than VaultStateAnchorV1: the anchor only signs
+// (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
+// forge a signed anchor.  The inclusion proof additionally commits the
+// device's PD-SMT root + a 256-sibling Merkle path that
+// dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
+// against the device's actual SMT — forgery requires also fabricating
+// SMT consistency, which a stateless attacker cannot.
+message VaultStateInclusionProofV1 {
+  // The vault whose state is being committed.
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  // Monotonic state sequence (0 at creation, +1 per accepted unlock).
+  uint64 sequence              = 2;
+  // BLAKE3 reserves-digest per dsm::dlv::vault_state_anchor::compute_reserves_digest.
+  bytes  reserves_digest       = 3 [(dsm_fixed_len)=32];
+  // The owner's PD-SMT root AT the moment this leaf was written.
+  // Inclusion proof verifies against this root.
+  bytes  smt_root              = 4 [(dsm_fixed_len)=32];
+  // The 256 sibling hashes in leaf-to-root order produced by
+  // SparseMerkleTree::get_inclusion_proof for the vault-state SMT
+  // leaf key (DSM/vault-smt-key\0 || vault_id).  The verifier
+  // recomputes the proof's `key` from vault_id and `value` from
+  // (sequence, reserves_digest); the wire format only carries the
+  // siblings to keep records compact.
+  repeated bytes smt_siblings  = 5;
+  // SPHINCS+ public key of the vault owner.
+  bytes  owner_public_key      = 6 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
+  // vault_id || sequence_be || reserves_digest || smt_root).  Binds
+  // the SMT root into the signature so a compromised K_DBRW cannot
+  // forge a proof against a different root.
+  bytes  owner_signature       = 7 [(dsm_max_len)=65535];
+}
+
 // Storage-node-mirrored advertisement for a SoFi routing vault.
 //
-// Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
+// Keyed under `sofi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
 // PUBLIC discovery by ordered token pair, no recipient scoping.  The
 // router enumerates all vaults matching `(tokenA, tokenB)` (or its
 // reverse, in which case reserves swap roles) and feeds the result
@@ -1045,7 +1208,7 @@ message ExternalCommitmentV1 {
 //
 // Storage nodes are dumb mirrors.  Authenticity for routing purposes
 // is rooted in `vault_proto_digest` binding the ad to a full vault
-// proto under `defi/vault-proto/{..}/{..}` — exactly the same pattern
+// proto under `sofi/vault-proto/{..}/{..}` — exactly the same pattern
 // as DbtcVaultAdvertisementV1 and PostedDlvAdvertisementV1, mounted
 // in a different keyspace.
 //
@@ -1446,7 +1609,10 @@ message SystemGenesisRequest {
   bytes device_entropy = 3 [(dsm_fixed_len)=32];
   bytes cdbrw_hw_entropy = 4 [(dsm_max_len)=1024];
   bytes cdbrw_env_fingerprint = 5 [(dsm_max_len)=1024];
-  bytes cdbrw_salt = 6 [(dsm_fixed_len)=32];
+  reserved 6; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
+              // from K_DBRW preimage so wallet survives uninstall +
+              // reinstall on same device.  Layer B (opportunistic
+              // re-prove) still enforces cross-device anti-clone.
 }
 message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
 message GenesisCreated {
@@ -1905,7 +2071,8 @@ message BootstrapMeasurementReport {
   uint32 progress_percent = 4;
   bytes cdbrw_hw_entropy = 5 [(dsm_max_len)=1024];
   bytes cdbrw_env_fingerprint = 6 [(dsm_max_len)=1024];
-  bytes cdbrw_salt = 7 [(dsm_fixed_len)=32];
+  reserved 7; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
+              // from K_DBRW preimage.  See SystemGenesisRequest.
   TrustLevel trust_level = 8;
   string error_message = 9;
 }
@@ -2765,6 +2932,12 @@ enum CdbrwResonantStatus {
 // One PUF orbit trial (ARX interrogation walk timings).
 message CdbrwOrbitTrial {
   repeated int64 timings = 1 [(dsm_max_len)=16384]; // per-step ARX timing samples
+  // Per-trial CSPRNG challenge that seeded x_0 = H("DSM/cdbrw-seed\0" || challenge || K_DBRW) mod 2^32
+  // per Alg 1 step 1. For enrollment trials before K_DBRW is bound, callers pass the random 32-byte
+  // challenge alone and the Rust writer treats it as authoritative (Alg 2 line 1491).
+  // Empty bytes are treated as "this trial was not challenge-seeded" — Rust rejects such enrollments
+  // so a regression that strips per-trial challenges fails closed instead of silently downgrading.
+  bytes challenge = 2 [(dsm_max_len)=32];
 }
 
 // cdbrw.measure_trust args — compute resonant health and current access verdict
@@ -2802,18 +2975,32 @@ message CdbrwVerifyRequest {
   float epsilon_inter         = 10;
 }
 
-// cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
-// Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
-// reference histogram, ε_intra, and attractor commitment AC_D, and persists
-// the `dsm_silicon_fp_v4.bin` binary loaded by load_cdbrw_enrollment.
+// cdbrw.enroll args — M-sample, K-trial-per-sample admission (Phase 9).
+//
+// Replaces the single-K-trial enrollment with median-of-M admission.
+// The Kotlin caller batches all M*K trials (default 3*21=63) into a
+// single request; Rust partitions them by `trials_per_sample`, runs
+// the per-sample health flow on each chunk, and applies
+// `classify_resonant_m_sample` to produce a stable admission verdict
+// that absorbs silicon trial-to-trial variance.
 message CdbrwEnrollRequest {
   bytes env_bytes                 = 1 [(dsm_max_len)=1024];
-  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=64]; // K ≥ 16 per §6.1
+  // Flat list of M*trials_per_sample trials (e.g. 3*21=63).
+  // Partitioned by Rust into M contiguous chunks of trials_per_sample
+  // each.  Order matters: chunk i = trials[i*K .. (i+1)*K].
+  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=192];
   uint32 arena_bytes              = 3;
   uint32 probes                   = 4;
   uint32 steps_per_probe          = 5;
   uint32 histogram_bins           = 6;
   uint32 rotation_bits            = 7;
+  // Phase 9: number of independent K-trial admission samples (M).
+  // Must equal the SDK's compiled ADMISSION_M (default 3); version
+  // skew is rejected as AdmissionShapeMismatch.
+  uint32 admission_samples        = 8;
+  // Phase 9: K, the trials per sample.  Must satisfy K >= 16 per §6.1.
+  // Rust rejects if trials.length != admission_samples * trials_per_sample.
+  uint32 trials_per_sample        = 9;
 }
 
 // Shared trust state returned with every C-DBRW op. Frontend/UI reads this
@@ -3265,7 +3452,8 @@ message RestoreIdentityContextOp {
   bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
   bytes cdbrw_hw_entropy      = 3 [(dsm_fixed_len)=32];
   bytes cdbrw_env_fingerprint = 4 [(dsm_max_len)=1024];
-  bytes cdbrw_salt            = 5 [(dsm_fixed_len)=32];
+  reserved 5; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
+              // from K_DBRW preimage.  See SystemGenesisRequest.
 }
 
 // Canonical startup/bootstrap request shared by native platforms.

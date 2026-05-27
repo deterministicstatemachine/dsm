@@ -9,9 +9,7 @@
 mod tests {
     use crate::crypto::cdbrw_binding;
     use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
-    use crate::crypto::kyber::{
-        generate_kyber_keypair_from_entropy, generate_deterministic_kyber_keypair,
-    };
+    use crate::crypto::kyber::generate_kyber_keypair_from_entropy;
     use crate::crypto::rng::{generate_deterministic_random, mix_entropy};
     use crate::crypto::canonical_lp::{hash_lp1, hash_lp2, hash_lp3};
     use crate::crypto::blake3::domain_hash;
@@ -43,12 +41,19 @@ mod tests {
 
         #[test]
         fn pbt_cdbrw_binding_is_deterministic(
+            genesis_hash in any::<[u8; 32]>(),
+            device_id in any::<[u8; 32]>(),
             hw in proptest::collection::vec(any::<u8>(), 1..=128),
             env in proptest::collection::vec(any::<u8>(), 1..=128),
-            salt in proptest::collection::vec(any::<u8>(), 1..=128),
         ) {
-            let b1 = cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt).expect("valid inputs");
-            let b2 = cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt).expect("valid inputs");
+            let b1 = cdbrw_binding::derive_cdbrw_binding_key(
+                &genesis_hash, &device_id, &hw, &env,
+            )
+            .expect("valid inputs");
+            let b2 = cdbrw_binding::derive_cdbrw_binding_key(
+                &genesis_hash, &device_id, &hw, &env,
+            )
+            .expect("valid inputs");
             prop_assert_eq!(b1.len(), 32);
             prop_assert_eq!(b2.len(), 32);
             prop_assert_eq!(b1, b2);
@@ -63,9 +68,9 @@ mod tests {
         }
 
         #[test]
-        fn pbt_kyber_deterministic_keypair_is_deterministic(seed in any::<[u8;32]>(), context in ".*") {
-            let kp1 = generate_deterministic_kyber_keypair(&seed, &context).expect("deterministic kyber keygen must succeed");
-            let kp2 = generate_deterministic_kyber_keypair(&seed, &context).expect("deterministic kyber keygen must succeed");
+        fn pbt_kyber_keypair_from_entropy_context_is_deterministic(seed in any::<[u8;32]>(), context in ".*") {
+            let kp1 = generate_kyber_keypair_from_entropy(&seed, &context).expect("deterministic kyber keygen must succeed");
+            let kp2 = generate_kyber_keypair_from_entropy(&seed, &context).expect("deterministic kyber keygen must succeed");
             prop_assert_eq!(kp1, kp2);
         }
 

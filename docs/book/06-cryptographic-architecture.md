@@ -36,7 +36,7 @@ The null byte (`\0`) terminates the domain tag, preventing prefix collisions.
 | `DSM/commit\0` | State commit hashing |
 | `DSM/bilateral\0` | Bilateral transaction hashing |
 | `DSM/token\0` | Token operation hashing |
-| `DSM/dbrw-bind\0` | DBRW hardware binding |
+| `DSM/cdbrw/bind\0` | C-DBRW binding key (canonical 4-input) |
 | `DSM/cpta\0` | Content-Addressed Token Policy Anchor |
 | `DSM/dlv-unlock\0` | DLV vault unlock key derivation |
 | `DSM/assign\0` | Storage node assignment |
@@ -115,8 +115,16 @@ Device-Bound Random Walk (DBRW) prevents state cloning attacks by binding each i
 ### DBRW Hash
 
 ```
-dbrw_hash = BLAKE3("DSM/dbrw-bind\0" || silicon_fingerprint || env_entropy)
+K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
+                 || LP(genesis_hash) || LP(device_id)
+                 || LP(silicon_fingerprint) || LP(env_entropy))
 ```
+
+where `LP(x) = LE32(len(x)) || x` and the root-device invariant binds
+`device_id = genesis_hash`. K_DBRW is derived post-MPC inside the
+genesis session (so `genesis_hash` exists before the binding key is
+needed), and on restore is recomputed deterministically from the four
+already-persisted inputs.
 
 ### Health States
 

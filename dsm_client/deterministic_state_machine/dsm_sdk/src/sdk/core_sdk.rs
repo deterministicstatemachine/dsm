@@ -696,6 +696,41 @@ impl CoreSDK {
         self.state_machine.lock().device_head().map(|ds| ds.root())
     }
 
+    /// Commit a vault state leaf into the Per-Device SMT (SoFi spec
+    /// §4.1.2 / §8.4 step 2).
+    ///
+    /// Mirrors `execute_on_relationship`'s prepare/write/commit
+    /// pattern:
+    ///   1. PREPARE — clone the head, write the leaf, capture root +
+    ///      siblings (pure; no head mutation).
+    ///   2. WRITE   — persist the new head into `bcr_device_heads`.
+    ///      If this fails, the in-memory head is unchanged.
+    ///   3. COMMIT  — install the new head on the StateMachine.
+    ///
+    /// Returns `(new_root, siblings)` ready for the caller to embed in
+    /// a `VaultStateInclusionProofV1`.  The lock is held across all
+    /// three steps so the prepare/write/commit sequence is atomic
+    /// with respect to other writers.
+    pub fn install_vault_state_leaf(
+        &self,
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserves_digest: &[u8; 32],
+    ) -> Result<([u8; 32], Vec<[u8; 32]>), DsmError> {
+        use crate::storage::client_db::update_bcr_device_head;
+
+        let mut sm = self.state_machine.lock();
+        let outcome = sm.prepare_vault_state_leaf(vault_id, sequence, reserves_digest)?;
+        update_bcr_device_head(&outcome.new_device_state).map_err(|e| {
+            DsmError::storage(
+                format!("install_vault_state_leaf: device-head write failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        sm.commit_vault_state_leaf(&outcome);
+        Ok((outcome.new_root, outcome.siblings))
+    }
+
     pub fn register_token_manager(
         &self,
         _manager: Box<dyn TokenManagerTrait>,
@@ -763,17 +798,47 @@ impl CoreSDK {
         }
 
         let device_entropy = generate_device_entropy(&device_id_arr);
-        let k_dbrw = crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key("core_sdk")
-            .map_err(dsm::types::error::DsmError::invalid_operation)?;
+        // Peek (don't take) the silicon inputs so the slot stays alive for
+        // any later restore-path probes; the genesis session derives the
+        // canonical K_DBRW from (genesis_id, device_id = genesis_id, hw, env)
+        // internally. The slot is cleared after K_DBRW is staged below.
+        let silicon =
+            crate::sdk::app_state::AppState::peek_platform_entropy_inputs().ok_or_else(|| {
+                dsm::types::error::DsmError::invalid_operation(
+                    "core_sdk: platform silicon inputs (hw, env) required for genesis",
+                )
+            })?;
 
         let genesis_state = create_genesis_via_blind_mpc_with_contributors(
             device_id_arr,
             storage_nodes,
-            k_dbrw,
+            silicon.hw_entropy.clone(),
+            silicon.env_fingerprint.clone(),
             device_entropy,
             contributor_entropies,
             client_entropy,
         )?;
+
+        // Stage the canonical K_DBRW under the binding-key slot so post-genesis
+        // signing/Kyber-coins paths can read it, then take + drop the silicon
+        // inputs to zeroize.
+        let k_dbrw = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+            &genesis_state.hash,
+            &genesis_state.hash,
+            &silicon.hw_entropy,
+            &silicon.env_fingerprint,
+        )
+        .map_err(|e| {
+            dsm::types::error::DsmError::invalid_operation(format!(
+                "core_sdk: canonical K_DBRW derivation failed: {e}"
+            ))
+        })?;
+        crate::binding_key::install_binding_key(k_dbrw.to_vec()).map_err(|e| {
+            dsm::types::error::DsmError::invalid_operation(format!(
+                "core_sdk: install canonical K_DBRW failed: {e}"
+            ))
+        })?;
+        let _ = crate::sdk::app_state::AppState::take_platform_entropy_inputs();
         let public_key = genesis_state.signing_key.public_key.clone();
         let smt_root = genesis_state.merkle_root.unwrap_or(genesis_state.hash);
 

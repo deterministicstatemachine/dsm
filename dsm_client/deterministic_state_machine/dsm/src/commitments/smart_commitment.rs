@@ -795,7 +795,7 @@ impl SmartCommitment {
         let key = crate::crypto::blake3::domain_hash("DSM/smart-commit", &shared)
             .as_bytes()
             .to_vec();
-        let ct = kyber::aes_encrypt(&key, &nonce, &payload)
+        let ct = crate::crypto::aead::aes_encrypt(&key, &nonce, &payload)
             .map_err(|e| DsmError::crypto(format!("AEAD encrypt failed: {e}"), Some(e)))?;
 
         let mut out = Vec::with_capacity(12 + ct.len());
@@ -822,7 +822,7 @@ impl SmartCommitment {
         let key = crate::crypto::blake3::domain_hash("DSM/smart-commit", &shared)
             .as_bytes()
             .to_vec();
-        let plain = kyber::aes_decrypt(&key, nonce, ct)
+        let plain = crate::crypto::aead::aes_decrypt(&key, nonce, ct)
             .map_err(|e| DsmError::crypto(format!("AEAD decrypt failed: {e}"), Some(e)))?;
 
         if plain.len() <= 32 {
