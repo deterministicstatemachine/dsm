@@ -305,18 +305,6 @@ fn kat_dsm_receipt_bind_session() {
     );
 }
 
-// =============================================================================
-// §2.2 — Device Tree canonical padding leaf (Issue #182 Finding #4 resolution)
-// =============================================================================
-
-/// Pins the canonical padding-leaf value used in the Device Tree's
-/// odd-count Merkle level promotion. Replaces the previous self-
-/// duplication pattern (`hash_node(c, c)`) so that `[A, B, C]` and
-/// `[A, B, C, C]` produce distinct roots. The distinct
-/// `DSM/dev-tree-pad` domain tag — separate from `DSM/dev-leaf` —
-/// guarantees the pad value cannot collide with any legitimate
-/// `hash_leaf(devid)` for any DevID. Empty-input hash so the value is
-/// canonical and reproducible across implementations.
 #[test]
 fn kat_dsm_dev_tree_pad() {
     let expected = spec_digest("DSM/dev-tree-pad", &[]);

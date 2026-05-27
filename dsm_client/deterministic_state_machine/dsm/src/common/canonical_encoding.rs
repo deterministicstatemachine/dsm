@@ -24,21 +24,6 @@ pub trait CanonicalEncode {
     fn domain_tag(&self) -> &'static str;
 }
 
-// `pub mod cbor` REMOVED — Issue #182 Finding #1.
-//
-// Storagenodes spec §3 (normative) and whitepaper §2.1/§4.2.1 forbid CBOR
-// in canonical encoding paths: "No JSON, no base64, no hex, no CBOR." The
-// helpers were `pub` and reachable by any downstream caller, which would
-// silently produce a commitment byte sequence incompatible with the
-// canonical Envelope wire v3 protobuf-only path. Removed entirely. The
-// only surviving exports from this module are the `CanonicalEncode`
-// trait, `length_prefix` helpers (used for `dsm_max_len`-bounded
-// length-prefixed framing inside protobuf), and `domain_separated_hash`.
-//
-// If a future protocol extension genuinely needs structured byte streams
-// outside protobuf, define a new domain-tagged primitive — do not
-// resurrect generic CBOR.
-
 /// Length-prefixed encoding helpers (replaces scattered pushLP/writeLP/putU32 functions)
 pub mod length_prefix {
     use crate::DsmError;
