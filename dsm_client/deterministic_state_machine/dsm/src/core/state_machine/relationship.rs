@@ -427,42 +427,63 @@ impl RelationshipManager {
         }
     }
 
-    /// Derive a canonical relationship key using entity and counterparty IDs.
-    /// For `Hashed`, renders as "H:<u128_low>:<u128_high>" (decimal; no hex/base64).
+    /// Derive a relationship key from binary device identifiers.
+    ///
+    /// Issue #194 fix: all live strategies derive the key from raw binary IDs
+    /// via a domain-separated BLAKE3 hash. No Base32/hex/utf-8 text encodings
+    /// on the derivation path — those caused cross-implementation key-space
+    /// drift when peers derived keys directly from binary IDs.
+    ///
+    /// Strategy semantics:
+    /// * `Canonical`  — order-independent (relationship is symmetric).
+    /// * `EntityCentric` — order-dependent (entity-first; per-side view).
+    /// * `Hashed` — order-independent alias, retained for back-compat.
     pub fn get_relationship_key(&self, entity_id: &[u8; 32], counterparty_id: &[u8; 32]) -> String {
+        fn binary_key(domain: &str, a: &[u8; 32], b: &[u8; 32]) -> String {
+            let mut h = dsm_domain_hasher(domain);
+            h.update(a.as_bytes());
+            h.update(b.as_bytes());
+            let d = h.finalize();
+            let bytes = d.as_bytes();
+            let (lo, hi) = bytes.split_at(16);
+            let mut lo_arr = [0u8; 16];
+            lo_arr.copy_from_slice(lo);
+            let mut hi_arr = [0u8; 16];
+            hi_arr.copy_from_slice(hi);
+            // Decimal "lo:hi" — String shape, but derived from binary only.
+            format!(
+                "{}:{}",
+                u128::from_le_bytes(lo_arr),
+                u128::from_le_bytes(hi_arr)
+            )
+        }
+
         match self.key_derivation_strategy {
             KeyDerivationStrategy::Canonical => {
-                let entity_str = base32::encode(base32::Alphabet::Crockford, entity_id);
-                let counterparty_str = base32::encode(base32::Alphabet::Crockford, counterparty_id);
-                let mut ids = [entity_str, counterparty_str];
-                ids.sort();
-                format!("{}:{}", ids[0], ids[1])
+                // Order-independent: sort bytes, then hash.
+                let (a, b) = if entity_id <= counterparty_id {
+                    (entity_id, counterparty_id)
+                } else {
+                    (counterparty_id, entity_id)
+                };
+                format!("C:{}", binary_key("DSM/RELKEY/canonical/v3", a, b))
             }
             KeyDerivationStrategy::EntityCentric => {
-                let entity_str = base32::encode(base32::Alphabet::Crockford, entity_id);
-                let counterparty_str = base32::encode(base32::Alphabet::Crockford, counterparty_id);
-                format!("{entity_str}:{counterparty_str}")
+                // Order-dependent: entity first.
+                format!(
+                    "E:{}",
+                    binary_key("DSM/RELKEY/entity-centric/v3", entity_id, counterparty_id)
+                )
             }
             KeyDerivationStrategy::Hashed => {
-                let mut h = dsm_domain_hasher("DSM/RELKEY/v2");
-                // order-independent mix (domain tag already applied via dsm_domain_hasher)
-                if entity_id <= counterparty_id {
-                    h.update(entity_id.as_bytes());
-                    h.update(counterparty_id.as_bytes());
+                // Order-independent legacy alias (kept for tests / call-sites
+                // that explicitly select the hashed variant).
+                let (a, b) = if entity_id <= counterparty_id {
+                    (entity_id, counterparty_id)
                 } else {
-                    h.update(counterparty_id.as_bytes());
-                    h.update(entity_id.as_bytes());
-                }
-                let d = h.finalize();
-                let b = d.as_bytes();
-                let (l, r) = b.split_at(16);
-                let mut arr_l = [0u8; 16];
-                arr_l.copy_from_slice(l);
-                let a = u128::from_le_bytes(arr_l);
-                let mut arr_r = [0u8; 16];
-                arr_r.copy_from_slice(r);
-                let c = u128::from_le_bytes(arr_r);
-                format!("H:{a}:{c}")
+                    (counterparty_id, entity_id)
+                };
+                format!("H:{}", binary_key("DSM/RELKEY/v2", a, b))
             }
         }
     }

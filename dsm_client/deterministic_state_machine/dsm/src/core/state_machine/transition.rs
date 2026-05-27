@@ -883,9 +883,23 @@ pub fn create_next_state(
             let is_local_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
             if is_local_recipient && matches!(mode, TransactionMode::Unilateral) {
-                log::warn!(
-                    "Transfer signature verified upstream for incoming unilateral transfer; skipping local key check"
-                );
+                // Issue #194 fix: previously this path logged "verified
+                // upstream" and skipped the local signature check. That made
+                // acceptance depend on caller trust instead of local
+                // cryptographic proof — tampered transfers could advance
+                // further than a fail-closed verifier would allow.
+                //
+                // `current_state.device_info.public_key` is the LOCAL device's
+                // key, not the sender's, so we can't usefully verify here
+                // without sender pubkey provenance. Until `apply_transition`
+                // gains a sender-pubkey argument (or the operation embeds it
+                // in a way derivable from accepted state), the only safe
+                // posture is fail-closed.
+                return Err(DsmError::invalid_operation(
+                    "Incoming unilateral transfer rejected: sender public key is not in scope at \
+                     this layer; local signature verification cannot be performed. Use the \
+                     bilateral receive path, or call a sender-aware acceptance API.",
+                ));
             } else {
                 verify_operation_signature(
                     &operation,
@@ -1777,19 +1791,13 @@ mod tests {
     }
 
     #[test]
-    fn test_create_next_state_incoming_transfer_adds_balance() {
-        // Whitepaper §8: balance delta is applied atomically inside create_next_state.
-        // When this device is the recipient (to_device_id == local device_id),
-        // apply_token_balance_delta credits using the device's public_key (not device_id),
-        // because all balance reads derive keys from public_key.
+    fn test_create_next_state_incoming_unilateral_transfer_is_rejected_fail_closed() {
+        // Issue #194 regression: incoming Unilateral transfers MUST fail closed
+        // at this layer because the sender's public key is not in scope —
+        // local signature verification cannot be performed without it. The
+        // previous code logged "verified upstream" and skipped the check;
+        // that's now a hard error.
         let current_state = create_test_state(1);
-        let policy_commit =
-            crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
-        let recipient_key = crate::core::token::derive_canonical_balance_key(
-            &policy_commit,
-            &current_state.device_info.public_key,
-            "ERA",
-        );
 
         let operation = Operation::Transfer {
             amount: Balance::from_state(10, current_state.hash),
@@ -1806,20 +1814,19 @@ mod tests {
         };
 
         let entropy = vec![1, 2, 3, 4];
-        let next_state = create_next_state(
+        let err = create_next_state(
             &current_state,
             operation,
             &entropy,
             &super::VerificationType::Standard,
             false,
         )
-        .unwrap_or_else(|e| panic!("incoming transfer should succeed: {e}"));
-
-        let bal = next_state
-            .token_balances
-            .get(&recipient_key)
-            .unwrap_or_else(|| panic!("recipient balance key should exist after credit"));
-        assert_eq!(bal.value(), 10, "receiver should be credited 10 ERA");
+        .expect_err("incoming unilateral transfer must be rejected fail-closed");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Incoming unilateral transfer rejected"),
+            "expected fail-closed unilateral-receive error, got: {msg}"
+        );
     }
 
     #[test]
