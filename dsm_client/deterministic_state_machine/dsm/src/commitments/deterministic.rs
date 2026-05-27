@@ -529,4 +529,306 @@ mod tests {
         // Empty-after-trim is rejected by canonical_text.
         assert!(create_deterministic_commitment(&h, &op, r, Some("   ")).is_err());
     }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #179 regression — strengthen deterministic commitment tests.
+    // Each test below builds the expected digest via a raw `blake3::Hasher`
+    // walk so the verifier and the expected value do not share construction
+    // code. If `hash_fields` drifts (domain tag, framing, length-prefix
+    // format), these tests fail.
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Independent length-prefix writer matching `canonical_lp::write_lp`:
+    /// `u32 LE length || bytes`.
+    fn write_lp_raw(h: &mut blake3::Hasher, bytes: &[u8]) {
+        let len: u32 = bytes.len().try_into().unwrap_or(u32::MAX);
+        h.update(&len.to_le_bytes());
+        h.update(bytes);
+    }
+
+    /// Independent BLAKE3 evaluation of `hash_fields(domain, ...)`.
+    /// Does NOT call into `crate::crypto::blake3` or `canonical_lp`.
+    fn independent_hash_fields(
+        domain_v2: &[u8],
+        state_hash: &[u8],
+        op_bytes: &[u8],
+        recipient_info: &[u8],
+        opt_text: Option<&str>,
+        opt_extra: Option<&[u8]>,
+    ) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        // dsm_domain_hasher("DSM/commitment-fields") = BLAKE3 state primed with
+        // the tag + NUL terminator.
+        h.update(b"DSM/commitment-fields");
+        h.update(&[0u8]);
+        h.update(domain_v2);
+        write_lp_raw(&mut h, state_hash);
+        write_lp_raw(&mut h, op_bytes);
+        write_lp_raw(&mut h, recipient_info);
+        match opt_text {
+            Some(s) => write_lp_raw(&mut h, s.as_bytes()),
+            None => write_lp_raw(&mut h, &[]),
+        }
+        match opt_extra {
+            Some(e) => write_lp_raw(&mut h, e),
+            None => write_lp_raw(&mut h, &[]),
+        }
+        *h.finalize().as_bytes()
+    }
+
+    #[test]
+    fn deterministic_commitment_matches_independent_construction() {
+        let state_hash = [0x11u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"recipient-bytes";
+
+        // No conditions.
+        let from_api = create_deterministic_commitment(&state_hash, &op, recipient, None)
+            .expect("commitment must construct");
+        let expected = independent_hash_fields(
+            b"DSM/commit/base/v2\0",
+            &state_hash,
+            &op.to_bytes(),
+            recipient,
+            None,
+            None,
+        );
+        assert_eq!(
+            from_api.as_slice(),
+            expected.as_slice(),
+            "deterministic commitment must equal independent BLAKE3 walk"
+        );
+
+        // With canonicalized conditions text.
+        let from_api_cond = create_deterministic_commitment(
+            &state_hash,
+            &op,
+            recipient,
+            Some("Payment For Services"),
+        )
+        .expect("commitment must construct");
+        let canonical_cond = "payment for services"; // trim + ASCII-lowercase
+        let expected_cond = independent_hash_fields(
+            b"DSM/commit/base/v2\0",
+            &state_hash,
+            &op.to_bytes(),
+            recipient,
+            Some(canonical_cond),
+            None,
+        );
+        assert_eq!(
+            from_api_cond.as_slice(),
+            expected_cond.as_slice(),
+            "deterministic commitment with conditions must equal independent walk"
+        );
+    }
+
+    #[test]
+    fn time_locked_commitment_matches_independent_construction() {
+        let state_hash = [0x22u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+        let unlock_slot = 0xDEAD_BEEFu64;
+
+        let from_api =
+            create_time_locked_commitment(&state_hash, &op, recipient, unlock_slot)
+                .expect("commitment");
+        let mut extra = [0u8; 8];
+        extra.copy_from_slice(&unlock_slot.to_le_bytes());
+        let expected = independent_hash_fields(
+            b"DSM/commit/timelock/v2\0",
+            &state_hash,
+            &op.to_bytes(),
+            recipient,
+            None,
+            Some(&extra),
+        );
+        assert_eq!(from_api.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn conditional_commitment_matches_independent_construction() {
+        let state_hash = [0x33u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+        // Force canonicalization through trim + lowercase.
+        let cond = "  BTC_Price_GT_50000  ";
+        let oracle = "  Crypto_Price_Oracle  ";
+        let from_api =
+            create_conditional_commitment(&state_hash, &op, recipient, cond, oracle)
+                .expect("commitment");
+
+        let combined = format!(
+            "cond={};oracle={}",
+            "btc_price_gt_50000", "crypto_price_oracle"
+        );
+        let expected = independent_hash_fields(
+            b"DSM/commit/conditional/v2\0",
+            &state_hash,
+            &op.to_bytes(),
+            recipient,
+            Some(&combined),
+            None,
+        );
+        assert_eq!(
+            from_api.as_slice(),
+            expected.as_slice(),
+            "canonicalized condition + oracle must reproduce the digest independently"
+        );
+    }
+
+    #[test]
+    fn recurring_commitment_matches_independent_construction() {
+        let state_hash = [0x44u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+        let period: u64 = 17;
+        let end: u64 = 999;
+
+        let from_api =
+            create_recurring_commitment(&state_hash, &op, recipient, period, end)
+                .expect("commitment");
+        let mut extra = [0u8; 16];
+        extra[0..8].copy_from_slice(&period.to_le_bytes());
+        extra[8..16].copy_from_slice(&end.to_le_bytes());
+        let expected = independent_hash_fields(
+            b"DSM/commit/recurring/v2\0",
+            &state_hash,
+            &op.to_bytes(),
+            recipient,
+            None,
+            Some(&extra),
+        );
+        assert_eq!(from_api.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn deterministic_commitment_canonicalization_is_case_and_whitespace_invariant() {
+        // The canonical_text helper trims and ASCII-lowercases. Inputs that
+        // differ only in case or leading/trailing whitespace must produce
+        // identical digests.
+        let state_hash = [0x55u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+
+        let a = create_deterministic_commitment(&state_hash, &op, recipient, Some("hello"))
+            .expect("a");
+        let b = create_deterministic_commitment(&state_hash, &op, recipient, Some("HELLO"))
+            .expect("b");
+        let c = create_deterministic_commitment(
+            &state_hash,
+            &op,
+            recipient,
+            Some("  HeLLo   "),
+        )
+        .expect("c");
+        assert_eq!(a, b, "case must be canonicalized");
+        assert_eq!(a, c, "whitespace must be canonicalized");
+
+        // Verify the canonical form is independent-recomputable.
+        let independent = independent_hash_fields(
+            b"DSM/commit/base/v2\0",
+            &state_hash,
+            &op.to_bytes(),
+            recipient,
+            Some("hello"),
+            None,
+        );
+        assert_eq!(a.as_slice(), independent.as_slice());
+    }
+
+    #[test]
+    fn deterministic_commitment_each_field_independently_affects_digest() {
+        // For every input field, mutate it minimally and assert the digest
+        // changes. Catches accidental field-omission bugs in `hash_fields`.
+        let state_hash = [0x66u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+        let baseline =
+            create_deterministic_commitment(&state_hash, &op, recipient, Some("cond"))
+                .expect("baseline");
+
+        // Mutate state_hash.
+        let mut sh = state_hash;
+        sh[0] ^= 0x01;
+        let mutated = create_deterministic_commitment(&sh, &op, recipient, Some("cond"))
+            .expect("mutated state_hash");
+        assert_ne!(baseline, mutated, "state_hash must affect digest");
+
+        // Mutate operation (different amount).
+        let op2 = mk_transfer(101);
+        let mutated = create_deterministic_commitment(&state_hash, &op2, recipient, Some("cond"))
+            .expect("mutated op");
+        assert_ne!(baseline, mutated, "operation must affect digest");
+
+        // Mutate recipient_info.
+        let mutated = create_deterministic_commitment(
+            &state_hash,
+            &op,
+            b"different-recipient",
+            Some("cond"),
+        )
+        .expect("mutated recipient");
+        assert_ne!(baseline, mutated, "recipient_info must affect digest");
+
+        // Mutate condition.
+        let mutated = create_deterministic_commitment(&state_hash, &op, recipient, Some("cond2"))
+            .expect("mutated cond");
+        assert_ne!(baseline, mutated, "conditions must affect digest");
+
+        // None vs Some — must differ.
+        let no_cond = create_deterministic_commitment(&state_hash, &op, recipient, None)
+            .expect("no cond");
+        assert_ne!(baseline, no_cond, "presence of conditions must affect digest");
+    }
+
+    #[test]
+    fn time_locked_commitment_domain_tag_differs_from_base_and_recurring() {
+        // Two commitments built over identical fields but with different
+        // domain tags must produce different digests. Catches a class of
+        // refactor bugs where DOM_BASE / DOM_TIMELOCK / DOM_RECURRING are
+        // swapped.
+        let state_hash = [0x77u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+
+        let base = create_deterministic_commitment(&state_hash, &op, recipient, None)
+            .expect("base");
+        let timelock = create_time_locked_commitment(&state_hash, &op, recipient, 0)
+            .expect("timelock");
+        let recurring = create_recurring_commitment(&state_hash, &op, recipient, 0, 0)
+            .expect("recurring");
+
+        assert_ne!(base, timelock, "base != timelock");
+        assert_ne!(base, recurring, "base != recurring");
+        assert_ne!(timelock, recurring, "timelock != recurring");
+    }
+
+    #[test]
+    fn verify_deterministic_commitment_rejects_single_byte_corruption() {
+        let state_hash = [0x88u8; 32];
+        let op = mk_transfer(100);
+        let recipient = b"r";
+        let cond = Some("payment");
+        let commitment =
+            create_deterministic_commitment(&state_hash, &op, recipient, cond).expect("c");
+        assert_eq!(commitment.len(), OUT_LEN);
+
+        for byte_idx in 0..commitment.len() {
+            for bit in 0..8u8 {
+                let mut corrupted = commitment.clone();
+                corrupted[byte_idx] ^= 1 << bit;
+                assert!(
+                    !verify_deterministic_commitment(
+                        &corrupted,
+                        &state_hash,
+                        &op,
+                        recipient,
+                        cond,
+                    ),
+                    "verify must reject corruption at byte {byte_idx} bit {bit}"
+                );
+            }
+        }
+    }
 }

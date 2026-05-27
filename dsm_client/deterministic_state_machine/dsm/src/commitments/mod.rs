@@ -82,6 +82,99 @@ mod tests {
         assert_ne!(opened, opened2);
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #179 regression — strengthen commitment verification tests beyond
+    // shared-implementation self-recomputation. The tests below build the
+    // expected digest using a raw `blake3::Hasher` (bypassing
+    // `dsm_domain_hasher` + `domain_hash`) so a bug in the wrapper layer
+    // cannot be reflected back into the verifier.
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Independent BLAKE3 evaluation of `H("DSM/commitment\0" || data)`.
+    /// Reads NOTHING from `crate::crypto::blake3::*` so the verifier and
+    /// the test do not share construction code.
+    fn independent_basic_commitment_digest(data: &[u8]) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"DSM/commitment");
+        h.update(&[0u8]);
+        h.update(data);
+        *h.finalize().as_bytes()
+    }
+
+    #[test]
+    fn basic_commitment_matches_independent_construction_for_known_inputs() {
+        // Known-answer tests: each input has a digest that an independent
+        // raw-BLAKE3 walk reproduces. If the wrapper drifts (domain tag,
+        // NUL placement, framing), this test fails immediately.
+        let cases: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"DSM-test",
+            b"\x00\x01\x02\x03\x04\x05\x06\x07",
+            &[0xFFu8; 64],
+        ];
+        for data in cases {
+            let from_api = create_commitment(data);
+            let from_independent = independent_basic_commitment_digest(data);
+            assert_eq!(
+                from_api.as_slice(),
+                from_independent.as_slice(),
+                "commitment digest must match H(\"DSM/commitment\\0\" || data) \
+                 for input of len {}",
+                data.len()
+            );
+        }
+    }
+
+    #[test]
+    fn basic_commitment_domain_tag_is_load_bearing() {
+        // The literal "DSM/commitment\0" prefix MUST be present in the
+        // preimage. Recompute without the tag — must NOT match.
+        let data = b"DSM-test";
+        let from_api = create_commitment(data);
+        let mut h_no_tag = blake3::Hasher::new();
+        h_no_tag.update(data);
+        let without_tag = *h_no_tag.finalize().as_bytes();
+        assert_ne!(
+            from_api.as_slice(),
+            without_tag.as_slice(),
+            "domain-tag-less hash must NOT equal create_commitment output"
+        );
+    }
+
+    #[test]
+    fn basic_commitment_verify_rejects_single_byte_corruption() {
+        // For every byte position, flipping any bit must cause verify to fail.
+        let data = b"DSM-test";
+        let commitment = create_commitment(data);
+        assert_eq!(commitment.len(), 32);
+        for byte_idx in 0..commitment.len() {
+            for bit in 0..8u8 {
+                let mut corrupted = commitment.clone();
+                corrupted[byte_idx] ^= 1 << bit;
+                assert!(
+                    !verify_commitment(&corrupted, data),
+                    "verify_commitment must reject corruption at byte {byte_idx}, bit {bit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn basic_commitment_verify_rejects_corrupted_data() {
+        // Mutating any byte of the input must break the digest.
+        let data = b"DSM-test-input-payload";
+        let commitment = create_commitment(data);
+        for byte_idx in 0..data.len() {
+            let mut corrupted = data.to_vec();
+            corrupted[byte_idx] ^= 0xFF;
+            assert!(
+                !verify_commitment(&commitment, &corrupted),
+                "verify_commitment must reject input corruption at byte {byte_idx}"
+            );
+        }
+    }
+
     // Integration test between different commitment types
     #[test]
     fn test_commitment_integration() {
