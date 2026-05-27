@@ -3,24 +3,32 @@
 // ============================================================================
 //
 // This barrel file is the public API for frontend consumers of the DSM stack.
-// Import from 'dsm/' to access all domain modules.
+// Import from 'dsm/' to access the exported domain modules below.
 //
-// MODULE MAP:
+// MODULE MAP (kept in sync with the `export * from './<name>'` lines below):
 //   types         — TypeScript types for State, Token, Policy, etc.
 //   crypto        — Client-side crypto utilities (hashing, encoding)
-//   cache         — Local caching for policies and state
 //   resolution    — Name/address resolution
 //   identity      — Device identity, genesis, pairing
 //   contacts      — Contact management (device IDs, metadata)
 //   wallet        — Balance queries, transaction history
 //   policies      — Token policy management (CPTA)
+//   dlv           — Deterministic Limbo Vaults (sovereign finance primitives)
 //   storage       — Storage node communication
 //   transactions  — Bilateral/unilateral transfer logic
 //   diagnostics   — telemetry, debug
 //   nfc           — NFC ring backup (write/read recovery capsules)
 //
-// FLAT NAMESPACE EXPORT:
-//   `dsmClient` re-exports all modules as a flat namespace.
+// BRIDGE HELPER RE-EXPORTS (not part of the curated `dsmClient` namespace):
+//   eventBridgeOn / eventBridgeEmit  — pub/sub on the native bridge
+//   getBridgeInstance                — bridge handle accessor
+//
+// CURATED FLAT NAMESPACE EXPORT (`dsmClient`):
+//   `dsmClient` exposes a curated, object-style API combining the modules
+//   that need name-collision-free access: identity, contacts, wallet,
+//   policies, dlv, storage, transactions, diagnostics, resolution, nfc.
+//   It intentionally OMITS `crypto` and `types` (too generic to flatten
+//   safely) and the bridge-helper re-exports above (imported by name).
 //
 // All exports ultimately call through WebViewBridge.ts (protobuf-only).
 // See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
