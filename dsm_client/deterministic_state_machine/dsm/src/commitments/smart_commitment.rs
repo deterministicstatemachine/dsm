@@ -620,11 +620,9 @@ impl SmartCommitment {
                         let Some(sig) = ctx.signatures.get(required_pk) else {
                             continue;
                         };
-                        if let Ok(true) = crate::crypto::sphincs::sphincs_verify(
-                            required_pk,
-                            msg.as_bytes(),
-                            sig,
-                        ) {
+                        if let Ok(true) =
+                            crate::crypto::sphincs::sphincs_verify(required_pk, msg.as_bytes(), sig)
+                        {
                             ok += 1;
                         }
                     }
@@ -713,7 +711,8 @@ impl SmartCommitment {
                 let Some(sig) = oracle_signature else {
                     return Ok(false);
                 };
-                let mut buf = Vec::with_capacity(32 + 32 + self.recipient.len() + 8 + condition.len());
+                let mut buf =
+                    Vec::with_capacity(32 + 32 + self.recipient.len() + 8 + condition.len());
                 buf.extend_from_slice(&self.commitment_hash);
                 buf.extend_from_slice(&self.origin_state_hash);
                 buf.extend_from_slice(&self.recipient);
@@ -1560,10 +1559,7 @@ mod tests {
     // signature against a commitment-bound message, not just check presence.
     // ────────────────────────────────────────────────────────────────────────
 
-    fn make_multisig_commitment(
-        required_pks: Vec<Vec<u8>>,
-        threshold: usize,
-    ) -> SmartCommitment {
+    fn make_multisig_commitment(required_pks: Vec<Vec<u8>>, threshold: usize) -> SmartCommitment {
         let (origin_hash, origin_entropy) = test_origin();
         let op = signed_update("ms_op", vec![1, 2, 3], "Multi-sig payment");
         SmartCommitment::new(
@@ -1590,8 +1586,7 @@ mod tests {
 
         let kps: Vec<_> = (0..3)
             .map(|i| {
-                SignatureKeyPair::generate_from_entropy(format!("ms-{i}").as_bytes())
-                    .expect("kp")
+                SignatureKeyPair::generate_from_entropy(format!("ms-{i}").as_bytes()).expect("kp")
             })
             .collect();
         let required: Vec<Vec<u8>> = kps.iter().map(|k| k.public_key().to_vec()).collect();
@@ -1613,8 +1608,7 @@ mod tests {
 
         let kps: Vec<_> = (0..3)
             .map(|i| {
-                SignatureKeyPair::generate_from_entropy(format!("ms-{i}").as_bytes())
-                    .expect("kp")
+                SignatureKeyPair::generate_from_entropy(format!("ms-{i}").as_bytes()).expect("kp")
             })
             .collect();
         let required: Vec<Vec<u8>> = kps.iter().map(|k| k.public_key().to_vec()).collect();
@@ -1687,9 +1681,7 @@ mod tests {
 
         let msg = oracle_signing_msg(&c, &condition);
         let sig = kp.sign(&msg).expect("sign");
-        let ok = c
-            .is_executable(Some(sig))
-            .expect("verify must not error");
+        let ok = c.is_executable(Some(sig)).expect("verify must not error");
         assert!(ok, "valid commitment-bound oracle sig must verify");
     }
 

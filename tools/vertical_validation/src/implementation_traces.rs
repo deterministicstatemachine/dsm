@@ -2085,12 +2085,33 @@ fn build_djte_transition(
 }
 
 fn build_test_jap(id_byte: u8, nonce_byte: u8) -> JoinActivationProof {
-    let jap = JoinActivationProof {
-        id: [id_byte; 32],
-        gate_proof: vec![id_byte, id_byte.wrapping_add(1), id_byte.wrapping_add(2)],
+    let id = [id_byte; 32];
+    JoinActivationProof {
+        id,
+        gate_proof: build_paidk_gate_proof(id, id_byte),
         nonce: [nonce_byte; 32],
-    };
-    jap
+    }
+}
+
+fn build_paidk_gate_proof(device_id: [u8; 32], seed: u8) -> Vec<u8> {
+    let receipts = (0..dsm::emissions::paidk_proof::PAIDK_K)
+        .map(|operator_offset| {
+            let operator_byte = seed.wrapping_add(operator_offset as u8).wrapping_add(1);
+            pb::StoragePaymentReceiptV3 {
+                device_id: device_id.to_vec(),
+                operator_node_id: vec![operator_byte; 32],
+                amount: dsm::emissions::paidk_proof::PAIDK_FLAT_RATE,
+                receipt_digest: vec![operator_byte ^ 0xA5; 32],
+            }
+        })
+        .collect();
+
+    let proof = pb::PaidKGateProofV1 { receipts };
+    let mut encoded = Vec::new();
+    proof
+        .encode(&mut encoded)
+        .expect("PaidK gate_proof protobuf encoding");
+    encoded
 }
 
 fn apply_djte_transition(

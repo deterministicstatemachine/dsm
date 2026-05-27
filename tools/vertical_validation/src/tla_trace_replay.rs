@@ -10,6 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context};
+use prost::Message;
 use serde::Serialize;
 
 use crate::tla_runner::TlaSpec;
@@ -21,6 +22,7 @@ use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVari
 use dsm::emissions::{JoinActivationProof, SourceDlvState};
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::proto as pb;
 use dsm::types::receipt_types::ParentConsumptionTracker;
 use dsm::types::state_types::{DeviceInfo, State};
 use dsm::types::token_types::Balance;
@@ -1154,9 +1156,32 @@ impl DsmImplementationHarness {
         let nonce = trace_seed("DSM/VV/jap", &format!("{label}:{ordinal}"));
         Ok(JoinActivationProof {
             id: activation_id,
-            gate_proof: ordinal.to_le_bytes().to_vec(),
+            gate_proof: Self::paidk_gate_proof(activation_id, ordinal),
             nonce,
         })
+    }
+
+    fn paidk_gate_proof(device_id: [u8; 32], seed: u64) -> Vec<u8> {
+        let receipts = (0..dsm::emissions::paidk_proof::PAIDK_K)
+            .map(|operator_offset| {
+                let operator_byte = (seed as u8)
+                    .wrapping_add(operator_offset as u8)
+                    .wrapping_add(1);
+                pb::StoragePaymentReceiptV3 {
+                    device_id: device_id.to_vec(),
+                    operator_node_id: vec![operator_byte; 32],
+                    amount: dsm::emissions::paidk_proof::PAIDK_FLAT_RATE,
+                    receipt_digest: vec![operator_byte ^ 0x5A; 32],
+                }
+            })
+            .collect();
+
+        let proof = pb::PaidKGateProofV1 { receipts };
+        let mut encoded = Vec::new();
+        proof
+            .encode(&mut encoded)
+            .expect("PaidK gate proof protobuf encoding");
+        encoded
     }
 
     fn activation_identity(
