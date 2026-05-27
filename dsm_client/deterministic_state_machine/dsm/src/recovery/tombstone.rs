@@ -231,8 +231,18 @@ pub fn verify_recovery_pair(
         return Ok(false);
     }
 
-    // Verify succession was created after tombstone (monotone tick ordering)
-    if succession.tick <= tombstone.tick {
+    // Verify succession was not created before the tombstone.
+    //
+    // Issue #187 fix: previously this was `succession.tick <= tombstone.tick`,
+    // i.e. strict monotonicity. That rejected valid back-to-back recovery
+    // pairs because both `create_tombstone` and `create_succession` derive
+    // their tick from the non-advancing `dt::tick_index()` — by design, DSM
+    // is clockless and has no advancing tick source. Pair integrity is
+    // already enforced cryptographically by `succession.tombstone_hash`
+    // pointing at this tombstone (checked above), so the tick check only
+    // needs to reject the case where the succession claims to predate the
+    // tombstone (which would indicate tampering).
+    if succession.tick < tombstone.tick {
         return Ok(false);
     }
 
@@ -257,6 +267,93 @@ mod tests {
         assert!(verify_tombstone(&tombstone, &pk)?);
         assert_eq!(tombstone.device_id, device_id);
 
+        Ok(())
+    }
+
+    // Issue #187 regression: a tombstone + succession pair with equal ticks
+    // (which is what `tick_index()` produces back-to-back in DSM's clockless
+    // model) must verify. We construct receipts with explicitly-set equal
+    // ticks so the test is robust to parallel-test runs that may mutate the
+    // shared global PROGRESS_CONTEXT between calls.
+    #[test]
+    fn issue_187_equal_tick_pair_verifies() -> Result<(), DsmError> {
+        init_tombstone_subsystem();
+
+        let device_id = "test_device";
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair()?;
+        let fixed_tick: u64 = 0xCAFE_BABE_DEAD_BEEF;
+
+        let mut tombstone = TombstoneReceipt {
+            device_id: device_id.to_string(),
+            old_smt_root: vec![1u8; 32],
+            old_counter: 42,
+            old_rollup_hash: vec![2u8; 32],
+            tick: fixed_tick,
+            signature: Vec::new(),
+            tombstone_hash: Vec::new(),
+        };
+        tombstone.tombstone_hash = tombstone.compute_hash().to_vec();
+        tombstone.signature = sphincs_sign(&sk, &tombstone.tombstone_hash)?;
+
+        let mut succession = SuccessionReceipt {
+            device_id: device_id.to_string(),
+            tombstone_hash: tombstone.tombstone_hash.clone(),
+            new_device_commitment: vec![3u8; 32],
+            tick: fixed_tick, // explicitly equal to tombstone
+            signature: Vec::new(),
+            succession_hash: Vec::new(),
+        };
+        succession.succession_hash = succession.compute_hash().to_vec();
+        succession.signature = sphincs_sign(&sk, &succession.succession_hash)?;
+
+        let verified = verify_recovery_pair(&tombstone, &succession, &pk)?;
+        assert!(
+            verified,
+            "issue #187: equal-tick recovery pair must verify"
+        );
+        Ok(())
+    }
+
+    // Issue #187 boundary: succession claiming a tick BEFORE the tombstone
+    // must still be rejected (tampering signal). Equal ticks are valid, but
+    // strictly-earlier ticks are not. Built with explicit ticks for parallel
+    // safety (no shared PROGRESS_CONTEXT dependency).
+    #[test]
+    fn issue_187_succession_with_earlier_tick_is_rejected() -> Result<(), DsmError> {
+        init_tombstone_subsystem();
+
+        let device_id = "test_device";
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair()?;
+        let tomb_tick: u64 = 0x0123_4567_89AB_CDEF;
+
+        let mut tombstone = TombstoneReceipt {
+            device_id: device_id.to_string(),
+            old_smt_root: vec![1u8; 32],
+            old_counter: 42,
+            old_rollup_hash: vec![2u8; 32],
+            tick: tomb_tick,
+            signature: Vec::new(),
+            tombstone_hash: Vec::new(),
+        };
+        tombstone.tombstone_hash = tombstone.compute_hash().to_vec();
+        tombstone.signature = sphincs_sign(&sk, &tombstone.tombstone_hash)?;
+
+        let mut succession = SuccessionReceipt {
+            device_id: device_id.to_string(),
+            tombstone_hash: tombstone.tombstone_hash.clone(),
+            new_device_commitment: vec![3u8; 32],
+            tick: tomb_tick - 1, // strictly less → tamper signal
+            signature: Vec::new(),
+            succession_hash: Vec::new(),
+        };
+        succession.succession_hash = succession.compute_hash().to_vec();
+        succession.signature = sphincs_sign(&sk, &succession.succession_hash)?;
+
+        let verified = verify_recovery_pair(&tombstone, &succession, &pk)?;
+        assert!(
+            !verified,
+            "succession tick strictly before tombstone tick must reject"
+        );
         Ok(())
     }
 
