@@ -259,9 +259,16 @@ impl PolicyEnforcer {
             }
 
             PolicyCondition::OperationRestriction { allowed_operations } => {
+                // Issue #183 Finding 3 fix: match the case-sensitive canonical
+                // encoding. `CanonicalPolicy` sorts `allowed_operations` with
+                // a case-sensitive `Vec::sort()`, so `["transfer"]` and
+                // `["Transfer"]` are distinct policy_commits. Enforcement
+                // previously used `eq_ignore_ascii_case`, which let
+                // `"Transfer"` (uppercase) pass under a policy committed to
+                // `"transfer"` only — semantic gap. Match exactly.
                 let allowed = allowed_operations
                     .iter()
-                    .any(|op| op.eq_ignore_ascii_case(&ctx.operation_type));
+                    .any(|op| op == &ctx.operation_type);
                 if allowed {
                     Ok(EnforcementResult::allowed("Operation permitted", tick))
                 } else {
@@ -487,10 +494,13 @@ impl PolicyEnforcer {
 
         for role in roles {
             if self.user_has_role(identity, &role.id).await {
+                // Issue #183 Finding 3 fix: role-permission match must use
+                // case-sensitive comparison to align with the case-sensitive
+                // canonical sort of role permissions in `CanonicalPolicy`.
                 let permitted = role
                     .permissions
                     .iter()
-                    .any(|op| op.eq_ignore_ascii_case(&ctx.operation_type));
+                    .any(|op| op == &ctx.operation_type);
                 if permitted {
                     return Ok(true);
                 }
@@ -570,6 +580,50 @@ mod tests {
         ctx.insert("vault.balance_u64".into(), 150_u64.to_le_bytes().to_vec());
         let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
         assert!(res.allowed);
+
+        Ok(())
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #183 Finding 3 regression — OperationRestriction must be
+    // case-sensitive so enforcement aligns with the case-sensitive canonical
+    // sort that goes into the policy_commit anchor.
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn operation_restriction_is_case_sensitive() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
+        let enforcer = PolicyEnforcer::new(cache);
+
+        let mut pf = PolicyFile::new("OP", "1.0.0", "a");
+        pf.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["transfer".into()],
+        });
+        let pol = TokenPolicy::new(pf)?;
+
+        let mut ctx = HashMap::new();
+        ctx.insert("tick".into(), 1_u64.to_le_bytes().to_vec());
+
+        // Exact-case match — must allow.
+        let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
+        assert!(res.allowed, "exact-case operation must be allowed");
+
+        // Uppercase variant — must reject (canonical anchor sees only
+        // "transfer"; allowing "Transfer" would diverge enforcement from
+        // the anchored permission set).
+        let res = enforcer.enforce_policy(&pol, "Transfer", &ctx).await?;
+        assert!(
+            !res.allowed,
+            "uppercase \"Transfer\" must NOT match a policy committed to \"transfer\""
+        );
+
+        // Mixed case — must reject.
+        let res = enforcer.enforce_policy(&pol, "TraNsFeR", &ctx).await?;
+        assert!(
+            !res.allowed,
+            "mixed-case \"TraNsFeR\" must NOT match a policy committed to \"transfer\""
+        );
 
         Ok(())
     }

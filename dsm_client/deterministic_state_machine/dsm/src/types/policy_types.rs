@@ -430,6 +430,19 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                 constraint_type,
                 parameters,
             } => {
+                // Issue #183 Finding 1 fix: `CustomConstraintProto.parameters`
+                // is a `map<string,string>` with non-deterministic
+                // iteration order — the proto schema comment explicitly says
+                // "UI/interop only (non-deterministic ordering). Do not
+                // hash." Encoding it into `canonical_bytes()` made the
+                // policy anchor depend on `HashMap` iteration order, which
+                // varies across runs/platforms.
+                //
+                // The canonical projection emits ONLY `parameters_kv` (the
+                // sorted `Vec<ParamKv>`); `parameters` is left empty.
+                // Reverse conversion already prefers `parameters_kv` and
+                // falls back to `parameters` for legacy protos, so
+                // round-tripping is unaffected.
                 let mut kv: Vec<ParamKv> = parameters
                     .iter()
                     .map(|(k, v)| ParamKv {
@@ -440,7 +453,7 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                 kv.sort_by(|a, b| a.key.cmp(&b.key));
                 Kind::Custom(CustomConstraintProto {
                     constraint_type: constraint_type.clone(),
-                    parameters: parameters.clone(),
+                    parameters: std::collections::HashMap::new(),
                     parameters_kv: kv,
                 })
             }
@@ -601,14 +614,12 @@ impl TokenPolicy {
         self.last_verified = dt::tick().1;
     }
 
-    /// No time-based conditions are supported.
-    pub fn is_condition_satisfied(&self, _condition: &PolicyCondition) -> bool {
-        true
-    }
-
-    pub fn are_time_conditions_satisfied(&self) -> bool {
-        true
-    }
+    // Issue #183 Finding 2 fix: `is_condition_satisfied` and
+    // `are_time_conditions_satisfied` previously returned `true`
+    // unconditionally — a silent total bypass of policy enforcement. They
+    // had no production callers and have been removed. Use
+    // `crate::core::token::policy::policy_enforcement::PolicyEnforcer::enforce_policy(...)`
+    // for the real condition-evaluation path (whitepaper §9.5).
 }
 
 /// Audit record for policy verification operations.
@@ -842,16 +853,26 @@ mod tests {
         assert!(tp.verified);
     }
 
+    // Issue #183 Finding 2 regression: the removed `is_condition_satisfied`
+    // and `are_time_conditions_satisfied` methods unconditionally returned
+    // `true`. They no longer exist on `TokenPolicy`. The real evaluation
+    // path is `PolicyEnforcer::enforce_policy`, exercised by tests in
+    // `core::token::policy::policy_enforcement` — there is no public
+    // shortcut on `TokenPolicy` that can silently approve a condition.
     #[test]
-    fn token_policy_conditions_always_satisfied() {
+    fn token_policy_has_no_unconditional_satisfaction_shortcut() {
+        // Compile-time evidence: if a future refactor reintroduces a
+        // `bool`-returning method named `is_condition_satisfied` directly
+        // on `TokenPolicy`, this test still passes (it doesn't reference
+        // the symbol). The point is the API surface no longer offers
+        // anything that LOOKS like a satisfaction check but unconditionally
+        // approves. Reviewer signal: don't add one without delegating to
+        // `PolicyEnforcer`.
         let pf = PolicyFile::new("tp", "v1", "auth");
         let tp = TokenPolicy::new(pf).unwrap();
-        let cond = PolicyCondition::LogicalTimeConstraint {
-            min_tick: 0,
-            max_tick: 100,
-        };
-        assert!(tp.is_condition_satisfied(&cond));
-        assert!(tp.are_time_conditions_satisfied());
+        // Construction succeeds; verification status reflects the real
+        // verified flag, not a placeholder predicate.
+        assert!(!tp.verified, "freshly constructed policy is not verified");
     }
 
     #[test]
@@ -895,5 +916,59 @@ mod tests {
         let a1 = p1.generate_anchor().unwrap();
         let a2 = p2.generate_anchor().unwrap();
         assert_ne!(a1.0, a2.0);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Issue #183 Finding 1 regression — Custom policy anchor determinism.
+    //
+    // Repeatedly building the same logical Custom policy must produce
+    // byte-identical `canonical_bytes()` output. The previous code carried
+    // `parameters: HashMap<String,String>` into the canonical proto, and
+    // HashMap iteration order is non-deterministic, so anchors drifted across
+    // runs. The fix zeroes `parameters` in the canonical projection and keeps
+    // only the sorted `parameters_kv` Vec.
+    // ────────────────────────────────────────────────────────────────────────
+
+    fn make_custom_policy(author: &str) -> PolicyFile {
+        let mut params = std::collections::HashMap::new();
+        // Insert many keys in varied order so HashMap's pseudo-random
+        // iteration would naturally permute them. If `canonical_bytes`
+        // depended on iteration order, the digest would differ between
+        // constructions of the same logical policy.
+        for k in &["zeta", "alpha", "mu", "beta", "iota", "kappa", "delta"] {
+            params.insert(k.to_string(), format!("v_{k}"));
+        }
+        let mut pf = PolicyFile::new("cust-policy", "v1", author);
+        pf.add_condition(PolicyCondition::Custom {
+            constraint_type: "test-constraint".into(),
+            parameters: params,
+        });
+        pf
+    }
+
+    #[test]
+    fn custom_policy_canonical_bytes_are_deterministic_across_constructions() {
+        let p1 = make_custom_policy("alice");
+        let p2 = make_custom_policy("alice");
+        let b1 = p1.canonical_bytes().expect("canonical bytes p1");
+        let b2 = p2.canonical_bytes().expect("canonical bytes p2");
+        assert_eq!(
+            b1, b2,
+            "Custom policy canonical_bytes must be byte-identical across constructions"
+        );
+    }
+
+    #[test]
+    fn custom_policy_anchor_is_deterministic_across_constructions() {
+        // Repeat a few times — non-deterministic HashMap ordering would
+        // typically reveal itself within a handful of attempts.
+        let baseline = make_custom_policy("alice").generate_anchor().unwrap();
+        for _ in 0..16 {
+            let again = make_custom_policy("alice").generate_anchor().unwrap();
+            assert_eq!(
+                baseline.0, again.0,
+                "Custom policy anchor drifted across construction"
+            );
+        }
     }
 }
