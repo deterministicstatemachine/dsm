@@ -23,6 +23,7 @@
 //! All emission data structures (ShardCountSMT, SpentProofSMT, SAA) live on storage
 //! nodes as part of the Source DLV state. Devices verify proofs against committed roots.
 
+pub mod paidk_proof;
 pub mod shard_activation_accumulator;
 pub mod shard_count_smt;
 pub mod spent_proof_smt;
@@ -318,12 +319,22 @@ fn reseed(seed: &[u8; 32], counter: u64) -> [u8; 32] {
     domain_hash_bytes("DJTE.RESEED", &buf)
 }
 
-/// Deterministic exact-uniform sampling over [0, n).
+/// Deterministic exact-uniform sampling over `[0, n)`.
 ///
 /// Consumes a full 256-bit candidate. Values in the incomplete top range are
 /// rejected and deterministically reseeded until the sample is unbiased.
+///
+/// Issue #186 Finding 4 fix: `n == 0` previously returned `Ok(0)`, which is
+/// undefined for an exact-uniform sample over an empty range and weakened the
+/// contract. The function now returns an explicit error for `n == 0` and
+/// keeps the trivial `n == 1 => 0` shortcut.
 pub fn uniform_index(seed: &[u8; 32], n: u64) -> Result<u64, DsmError> {
-    if n <= 1 {
+    if n == 0 {
+        return Err(DsmError::Verification(
+            "DJTE uniform_index undefined for n=0 (empty range)".into(),
+        ));
+    }
+    if n == 1 {
         return Ok(0);
     }
 
@@ -434,6 +445,13 @@ pub fn verify_emission(
     receipt: &EmissionReceipt,
     witness: &EmissionWitness,
 ) -> Result<bool, DsmError> {
+    // Issue #186 Finding 2 fix: validate the PaidK spend-gate proof before
+    // accepting the activation event. Previously `jap.gate_proof` was opaque
+    // and unverified — any bytes were accepted. Now the verifier enforces
+    // structural shape, device binding, distinct-operator count, and amount
+    // floor per whitepaper §16 PaidK.
+    paidk_proof::verify_paidk_gate_proof(&jap.gate_proof, &jap.id)?;
+
     if next_state.count_smt.shard_depth != prev_state.count_smt.shard_depth {
         return Err(DsmError::Verification("Shard depth changed".into()));
     }
@@ -670,6 +688,27 @@ fn extract_shard_index(hash: &[u8; 32], depth: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::proto::{PaidKGateProofV1, StoragePaymentReceiptV3};
+    use prost::Message;
+
+    /// Build a minimal valid PaidK gate-proof for `device_id` so emission tests
+    /// can satisfy the issue #186 Finding 2 check without re-deriving the
+    /// PaidK shape every time.
+    fn make_valid_gate_proof(device_id: &[u8; 32]) -> Vec<u8> {
+        let proof = PaidKGateProofV1 {
+            receipts: (1u8..=3u8)
+                .map(|op| StoragePaymentReceiptV3 {
+                    device_id: device_id.to_vec(),
+                    operator_node_id: vec![op; 32],
+                    amount: paidk_proof::PAIDK_FLAT_RATE,
+                    receipt_digest: vec![0u8; 32],
+                })
+                .collect(),
+        };
+        let mut buf = Vec::new();
+        proof.encode(&mut buf).expect("encode PaidKGateProofV1");
+        buf
+    }
 
     #[test]
     fn test_uniform_index_determinism_and_bounds() {
@@ -734,9 +773,10 @@ mod tests {
     fn test_verify_emission_happy_path() {
         let prev = SourceDlvState::new(2, 10);
 
+        let device_id = [7u8; 32];
         let jap = JoinActivationProof {
-            id: [7u8; 32],
-            gate_proof: vec![1, 2, 3],
+            id: device_id,
+            gate_proof: make_valid_gate_proof(&device_id),
             nonce: [9u8; 32],
         };
 
@@ -786,9 +826,10 @@ mod tests {
     #[test]
     fn test_verify_emission_rejects_arbitrary_amount() {
         let prev = SourceDlvState::new(2, 10);
+        let device_id = [7u8; 32];
         let jap = JoinActivationProof {
-            id: [7u8; 32],
-            gate_proof: vec![1, 2, 3],
+            id: device_id,
+            gate_proof: make_valid_gate_proof(&device_id),
             nonce: [9u8; 32],
         };
         let jap_hash = jap.digest();
@@ -822,6 +863,63 @@ mod tests {
         let err = verify_emission(&prev, &next, &jap, &receipt, &witness)
             .expect_err("arbitrary amount must be rejected");
         assert!(err.to_string().contains("Emission amount mismatch"));
+    }
+
+    // Issue #186 Finding 2 regression: verify_emission must reject any
+    // JAP whose gate_proof is not a well-formed PaidK proof.
+    #[test]
+    fn test_verify_emission_rejects_opaque_gate_proof() {
+        let prev = SourceDlvState::new(2, 10);
+        let jap = JoinActivationProof {
+            id: [7u8; 32],
+            gate_proof: vec![0xDE, 0xAD, 0xBE, 0xEF], // arbitrary opaque bytes
+            nonce: [9u8; 32],
+        };
+        let jap_hash = jap.digest();
+        let emission_index = prev.emission_index + 1;
+        let mut next = prev.clone();
+        next.emission_index = emission_index;
+        next.remaining_supply = prev.remaining_supply - 1;
+        next.add_activation(&jap).unwrap();
+        next.spent_smt.mark_spent(jap_hash).unwrap();
+        let receipt = EmissionReceipt {
+            emission_index,
+            winner_id: jap.id,
+            amount: 1,
+            jap_hash,
+        };
+        let receipt_digest = receipt.digest();
+        let count_root = next.count_smt.root();
+        let spent_root = next.spent_smt.root();
+        let shard_commit = shard_roots_commitment(&next);
+        next.dlv_tip = compute_next_tip(
+            &prev.dlv_tip,
+            &receipt_digest,
+            &count_root,
+            &spent_root,
+            &shard_commit,
+        );
+        let witness = EmissionWitness::from_states(&prev, &next, &jap).unwrap();
+
+        let err = verify_emission(&prev, &next, &jap, &receipt, &witness)
+            .expect_err("opaque gate_proof must be rejected (#186 Finding 2 fail-closed)");
+        assert!(
+            err.to_string().contains("PaidK"),
+            "expected PaidK-related rejection, got: {err}"
+        );
+    }
+
+    // Issue #186 Finding 4 regression: n=0 must fail-closed; n=1 stays trivial.
+    #[test]
+    fn test_uniform_index_n_zero_is_error_n_one_is_zero() {
+        let seed = [0xAAu8; 32];
+        let err = uniform_index(&seed, 0).expect_err("n=0 must fail closed");
+        assert!(format!("{err}").contains("undefined"));
+        assert_eq!(
+            uniform_index(&seed, 1).expect("n=1 must succeed"),
+            0,
+            "n=1 must return the only valid index"
+        );
     }
 
     #[test]

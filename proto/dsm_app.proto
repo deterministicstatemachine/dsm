@@ -3493,6 +3493,24 @@ message StoragePaymentReceiptV3 {
   bytes receipt_digest   = 4; // H("DSM/pay/storage\0" || ProtoDet(this without digest))
 }
 
+// PaidK spend-gate proof, carried inside JoinActivationProof.gate_proof.
+//
+// Whitepaper §16 PaidK predicate:
+//   PaidK(G, DevID, R) := |{r in R | VerifyPayment(r) AND amt(r) >= FLAT_RATE}| >= K
+//
+// The emissions verifier checks structurally:
+//   * exactly the same `device_id` across every receipt
+//   * `>= K` distinct `operator_node_id` values
+//   * `amount >= FLAT_RATE` per receipt
+//
+// Per-receipt operator signature verification (the `VerifyPayment(r)` step) is
+// tracked as a follow-on issue — receipts are not signed by operators in this
+// schema yet, so this proof structure pins shape + distinctness + floor, not
+// payment authenticity.
+message PaidKGateProofV1 {
+  repeated StoragePaymentReceiptV3 receipts = 1;
+}
+
 // Registry update result (informational, for mirroring).
 message RegistryUpdateV3 {
   bytes previous_registry_addr = 1;
