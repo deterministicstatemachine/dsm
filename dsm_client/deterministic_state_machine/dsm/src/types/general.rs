@@ -20,7 +20,12 @@ pub struct KeyPair {
     /// Public key
     pub public_key: Vec<u8>,
 
-    /// Private key - should be stored securely or in a TEE
+    /// Private key — held in plain memory; protect via the C-DBRW anti-clone
+    /// mechanism (`dsm_sdk::security::cdbrw_reprove`), not by a sealed-module
+    /// TEE/Keystore/StrongBox/Secure Enclave. The whole DSM design is
+    /// deliberately enclave-free: silicon binding is established by C-DBRW's
+    /// observed statistical signature (`AC_D` attractor commitment), and the
+    /// in-memory K_DBRW slot is zeroed on every drift-detection failure.
     pub private_key: Vec<u8>,
 }
 impl fmt::Debug for KeyPair {

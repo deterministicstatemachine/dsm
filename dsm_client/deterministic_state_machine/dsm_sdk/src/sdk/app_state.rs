@@ -100,8 +100,17 @@ static STORAGE: Mutex<Option<AppStateStorage>> = Mutex::new(None);
 /// device_id, hw, env)` once genesis_hash + device_id are known.
 #[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PlatformEntropyInputs {
-    /// Hardware-bound entropy: BLAKE3 mix of StrongBox / hardware-Keystore
-    /// / attestation chain root (Android side). Must be non-empty.
+    /// Hardware-bound entropy. On the canonical 4-input K_DBRW preimage
+    /// (whitepaper §12 / Phase 13 spec form), this is the 32-byte `AC_D`
+    /// attractor commitment produced by C-DBRW live enrollment
+    /// (`crate::security::cdbrw_enrollment_writer::EnrollOutputs.reference_anchor`).
+    /// `AC_D` binds K_DBRW to the device's silicon via the *observed*
+    /// statistical signature of orbit histograms — no Android Keystore,
+    /// no StrongBox, no Secure Enclave, no sealed-module attestation
+    /// chain is involved. The Phase 13 salt-drop (commits c6c622df,
+    /// ea718d94) removed the previous Keystore-wrapped random salt
+    /// entirely. Must be non-empty; strict mode rejects empty or
+    /// session-derived bytes.
     pub hw_entropy: Vec<u8>,
     /// Canonical environment fingerprint: BLAKE3 hash of stable platform
     /// identifiers (manufacturer, model, hardware, board, bootloader, OS

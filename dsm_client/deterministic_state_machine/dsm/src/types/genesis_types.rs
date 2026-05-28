@@ -59,7 +59,15 @@ pub struct MPCContribution {
 /// DBRW (Dual-Binding Random Walk) proof
 #[derive(Clone, Debug)]
 pub struct DBRWProof {
-    /// Device fingerprint used in DBRW (binds to hardware/TPM/TEE/etc.)
+    /// Device fingerprint used in DBRW. Binds to the device's silicon via
+    /// C-DBRW's *observed* statistical signature — the 32-byte `AC_D`
+    /// attractor commitment produced by live orbit enrollment
+    /// (`dsm_sdk::security::cdbrw_enrollment_writer`). DSM is deliberately
+    /// enclave-free: this field is NOT sourced from TPM / TEE / StrongBox /
+    /// Secure Enclave or any sealed-module attestation chain. Anti-clone
+    /// enforcement is provided by the live re-prove gate
+    /// (`dsm_sdk::security::cdbrw_reprove`), which zeroes the in-memory
+    /// K_DBRW slot when a live orbit drifts outside the enrollment envelope.
     pub device_fingerprint: Vec<u8>,
     /// Environmental state hash (`domain_hash("DSM/genesis/dbrw-env", proof_data)`)
     pub env_state_hash: Digest32,
