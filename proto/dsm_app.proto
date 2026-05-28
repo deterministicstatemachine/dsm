@@ -2813,6 +2813,92 @@ message DeviceTreeProof {
 }
 
 // ========================= Device Tree =========================
+//
+// Whitepaper §16.3 ("Two Merkle Structures (No Renames)") + §2.3 device-set
+// commitment. The Device Tree is the deterministic Merkle commitment over
+// the owner's enrolled device identifiers (sorted lexicographic, padded
+// with `Hpad = BLAKE3("DSM/dev-tree-pad\0")` on odd-arity levels). The
+// root `R_G` is what gets published to storage on PUT /devtree/root.
+//
+// Domain tags (per `dsm::common::domain_tags`):
+//   • `DSM/dev-leaf\0`     — Hleaf(DevID)
+//   • `DSM/dev-merkle\0`   — Hnode(L, R)
+//   • `DSM/dev-empty\0`    — empty-tree root
+//   • `DSM/dev-tree-pad\0` — odd-arity padding leaf (distinct from Hleaf
+//                            to block the CVE-2012-2459 second-preimage
+//                            vector)
+//
+// V1 schema family (added in Phase B.1 / issue #272). The pre-existing
+// `DeviceTreeEntry` + `DeviceTreeProof` messages remain in service for
+// the registry-evidence flow that has production callers in
+// `dsm_sdk::sdk::storage_node_sdk`, `ingress::self-heal`, and
+// `verification::proof_primitives`. They are NOT deprecated by V1: V1
+// adds the missing canonical-state-anchor + portable-proof carriers the
+// PUT /devtree/root / GET /devtree/proof flow needs. Tasks B.3 (SDK
+// add/remove_secondary_device) and B.4 (storage validator) consume the
+// V1 messages directly; legacy flows keep using the pre-V1 messages.
+
+// Sorted (by `device_id` ascending) leaf of the Device Tree. Optional
+// `device_name` carries a UI-only label; it is NOT included in
+// Hleaf(DevID) — the leaf hash binds the device_id only.
+message DeviceLeafV1 {
+  bytes  device_id   = 1 [(dsm_fixed_len)=32];
+  string device_name = 2 [(dsm_max_len)=128];
+}
+
+// Canonical state anchor for a published Device Tree at a given version.
+// `version_number` is the monotone counter the storage-node validator
+// enforces on PUT /devtree/root; it MUST strictly increase between
+// successive writes for a given genesis. `device_count` is the count of
+// real (non-padding) leaves. `root_hash` is the 32-byte Merkle root.
+//
+// The `schema_version` byte is a forward-compatibility tag carried
+// distinct from `version_number` (which is per-tree-state). Current
+// value is 1; future changes to the canonical encoding will bump it.
+message DeviceTreeV1 {
+  uint32 schema_version = 1;                          // canonical-encoding version; currently 1
+  bytes  root_hash      = 2 [(dsm_fixed_len)=32];     // 32-byte Merkle root R_G
+  uint32 device_count   = 3;                          // count of real DevID leaves (>= 1 post-genesis)
+  uint64 version_number = 4;                          // monotone counter; strictly increases per update
+}
+
+// Audit-trail record for a Device Tree root transition. Storage nodes
+// retain this alongside the current `DeviceTreeV1` so consumers can
+// reconstruct the version history without reading every prior tree.
+//
+// `signature` is a SPHINCS+ signature over the canonical concatenation
+// `domain_hash("DSM/dev-tree-root-update/v1", old_root || new_root ||
+// version_number_le_bytes)` by the root-binding key; verification is
+// out of scope for B.1 and lands with the bounded-validator work in
+// Phase B.4 (issue #275) once `RootBindingRecord` is in place
+// (enrollment hardening, Phase 3).
+message DeviceTreeRootUpdateV1 {
+  bytes  old_root       = 1 [(dsm_fixed_len)=32];
+  bytes  new_root       = 2 [(dsm_fixed_len)=32];
+  uint64 version_number = 3;
+  bytes  signature      = 4 [(dsm_max_len)=65536]; // SPHINCS+ SPX256f signature
+}
+
+// Portable Merkle inclusion proof for a specific Device Tree leaf. This
+// is the wire format returned by GET /devtree/proof in Phase B.5
+// (issue #276); the verifier reconstructs the path by walking siblings
+// using `path_bits` (LSB-first per-level: 0 = current is left child,
+// 1 = current is right child) and Hnode (`DSM/dev-merkle\0`) /
+// Hleaf (`DSM/dev-leaf\0`) per `dsm::common::device_tree::DevTreeProof`.
+//
+// `path_bits` is a packed bitfield; `path_bits_len` is the number of
+// valid bits (equal to `siblings.len()`). The `root_hash` field carries
+// the root the proof was derived against, so a verifier can fail-closed
+// if the caller-supplied tree state doesn't match.
+message DeviceInclusionProofV1 {
+  bytes  device_id     = 1 [(dsm_fixed_len)=32];
+  bytes  root_hash     = 2 [(dsm_fixed_len)=32];
+  repeated bytes siblings = 3 [(dsm_fixed_len)=32]; // root → leaf order
+  uint32 path_bits_len = 4;
+  bytes  path_bits     = 5 [(dsm_max_len)=2048]; // LSB-first packed bits
+}
+
+// Legacy / registry-evidence types — production callers retained.
 message DeviceTreeEntry {
   bytes device_id = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash = 2 [(dsm_fixed_len)=32];
