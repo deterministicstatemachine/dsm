@@ -312,6 +312,37 @@ pub struct GenesisCreationResponse {
     pub participating_nodes: Vec<String>,
     /// Deterministic tick
     pub tick: u64,
+    /// Post-update Device Tree snapshot — populated by
+    /// [`StorageNodeSDK::add_secondary_device`] and
+    /// [`StorageNodeSDK::remove_secondary_device`] so that the JNI / Kotlin
+    /// layer can persist the new R_G locally without rebuilding the tree.
+    /// `None` for primary-genesis responses (which do not modify a tree).
+    pub device_tree: Option<DeviceTreeSnapshot>,
+}
+
+/// Lightweight snapshot of a published Device Tree. Mirrors the wire
+/// [`generated::DeviceTreeV1`] message but uses native Rust types
+/// (`[u8; 32]` root) so callers do not need a prost decode round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceTreeSnapshot {
+    /// 32-byte Merkle root R_G of the current Device Tree.
+    pub root_hash: [u8; 32],
+    /// Count of real (non-padding) DevID leaves. Always `>= 1` post-genesis.
+    pub device_count: u32,
+    /// Monotone counter; strictly increases on every successful add/remove.
+    pub version_number: u64,
+}
+
+impl DeviceTreeSnapshot {
+    /// Convert to the wire [`generated::DeviceTreeV1`] proto.
+    pub fn to_proto(&self) -> generated::DeviceTreeV1 {
+        generated::DeviceTreeV1 {
+            schema_version: 1,
+            root_hash: self.root_hash.to_vec(),
+            device_count: self.device_count,
+            version_number: self.version_number,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1275,6 +1306,7 @@ impl StorageNodeSDK {
                         participating_nodes: g.storage_nodes.clone(),
                         // No wall-clock time in protocol; use deterministic monotonic tick
                         tick: dt::tick(),
+                        device_tree: None,
                     };
                     #[cfg(feature = "perf-metrics")]
                     self.update_metrics(start_time, 0, 0, true).await;
@@ -1898,14 +1930,43 @@ impl StorageNodeSDK {
                 .map(|p| crate::util::text_id::encode_base32_crockford(p))
                 .collect(),
             tick: dt::tick(),
+            // Primary genesis does not publish the initial Device Tree
+            // here; that is the Phase B.6 (issue #277) responsibility.
+            device_tree: None,
         };
 
         Ok(genesis_response)
     }
 
-    /// Add a secondary device to an existing genesis
-    /// This requires scanning a QR code from the root device to get the genesis hash
-    /// The new device_id = H(DSM/device\0 || client_entropy || genesis_hash || DBRW)
+    /// Add a secondary device to an existing genesis.
+    ///
+    /// This requires scanning a QR code from the root device to get the
+    /// genesis hash. The new device_id is derived as
+    /// `H(DSM/device\0 || client_entropy || genesis_hash || DBRW)`.
+    ///
+    /// After deriving the new DevID, the SDK updates the Device Tree
+    /// (§16.3) by:
+    ///
+    /// 1. Loading the persisted [`DeviceTreeStateV1`] for this genesis.
+    ///    If no state exists yet (i.e. this is the first secondary
+    ///    device and the initial root-device-only tree has not been
+    ///    written), the tree is seeded with `genesis_hash` as the root
+    ///    device leaf — the protocol invariant is
+    ///    `device_id_root == genesis_hash`.
+    /// 2. Inserting the new DevID. [`dsm::common::device_tree::DeviceTree::new`]
+    ///    enforces lexicographic sort + deduplication, so adding the
+    ///    same device twice is idempotent and produces the same root.
+    /// 3. Bumping `version_number` (strictly increases on every
+    ///    accepted add or remove — the storage-node validator landing
+    ///    in Phase B.4 (issue #275) rejects non-monotonic writes).
+    /// 4. Persisting the new [`DeviceTreeStateV1`] proto under the local
+    ///    KV key `device_tree:{genesis_b32}` so future add / remove /
+    ///    proof derivations can rebuild the tree byte-exactly.
+    ///
+    /// On return the response carries the new
+    /// [`DeviceTreeSnapshot`] (R_G, device_count, version_number) so
+    /// the calling JNI/Kotlin layer can persist it as the bilateral-
+    /// settlement device tree root without redoing the Merkle work.
     pub async fn add_secondary_device(
         &self,
         genesis_hash: Vec<u8>,
@@ -1934,6 +1995,10 @@ impl StorageNodeSDK {
         hasher.update(&cdbrw_binding);
 
         let new_device_id = hasher.finalize().as_bytes().to_vec();
+        let new_device_id_array: [u8; 32] = new_device_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("derived device_id is not 32 bytes"))?;
 
         log::info!(
             "Derived secondary device ID: {}",
@@ -1944,76 +2009,18 @@ impl StorageNodeSDK {
             crate::util::text_id::encode_base32_crockford(&genesis_hash)
         );
 
-        // Add this device to the Device Tree on storage nodes
-        // 1. Fetch current Device Tree (list of device IDs for this genesis)
-        let device_tree_key = format!(
-            "device_tree:{}",
-            crate::util::text_id::encode_base32_crockford(&genesis_hash)
-        );
-        let mut device_ids = match self.inner.get(&device_tree_key).await {
-            Ok(bytes) if !bytes.is_empty() => {
-                // Try to decode as a simple repeated bytes message
-                // For now, assume it's stored as: [count: u32][device_id_1: 32 bytes][device_id_2: 32 bytes]...
-                if bytes.len() >= 4 {
-                    let count =
-                        u32::from_le_bytes(bytes[0..4].try_into().unwrap_or([0u8; 4])) as usize;
-                    let mut ids = Vec::new();
-                    for i in 0..count {
-                        let offset = 4 + i * 32;
-                        if offset + 32 <= bytes.len() {
-                            let mut id = [0u8; 32];
-                            id.copy_from_slice(&bytes[offset..offset + 32]);
-                            ids.push(id);
-                        }
-                    }
-                    ids
-                } else {
-                    Vec::new()
+        // Load + mutate the persisted DeviceTreeStateV1.
+        let mut genesis_hash_array = [0u8; 32];
+        genesis_hash_array.copy_from_slice(&genesis_hash);
+
+        let snapshot = self
+            .mutate_device_tree_state(genesis_hash_array, |device_ids| {
+                if !device_ids.contains(&new_device_id_array) {
+                    device_ids.push(new_device_id_array);
                 }
-            }
-            _ => Vec::new(), // No existing tree or error
-        };
+            })
+            .await?;
 
-        // 2. Add new_device_id as a leaf (if not already present)
-        let new_device_id_array: [u8; 32] = new_device_id.clone().try_into().unwrap_or([0u8; 32]);
-        if !device_ids.contains(&new_device_id_array) {
-            device_ids.push(new_device_id_array);
-        }
-
-        // 3. Sort lexicographically (big-endian byte order as per spec)
-        device_ids.sort();
-
-        // Compute the new Device Tree root
-        let new_root = compute_device_tree_root(&device_ids);
-        log::info!(
-            "New Device Tree root for genesis {}: {}",
-            crate::util::text_id::encode_base32_crockford(&genesis_hash),
-            crate::util::text_id::encode_base32_crockford(&new_root)
-        );
-
-        // 4. Store updated tree on storage nodes
-        // Encode as: [count: u32][device_id_1: 32 bytes][device_id_2: 32 bytes]...
-        let mut tree_bytes = Vec::new();
-        tree_bytes.extend_from_slice(&(device_ids.len() as u32).to_le_bytes());
-        for id in &device_ids {
-            tree_bytes.extend_from_slice(id);
-        }
-
-        // Store the updated device tree
-        match self.inner.put(&device_tree_key, &tree_bytes, None).await {
-            Ok(_) => {
-                log::info!(
-                    "Successfully updated Device Tree for genesis {}",
-                    crate::util::text_id::encode_base32_crockford(&genesis_hash)
-                );
-            }
-            Err(e) => {
-                log::warn!("Failed to update Device Tree: {}", e);
-                // Continue anyway - the device was created locally
-            }
-        }
-
-        // For now, return a response indicating the device was added locally
         let response = GenesisCreationResponse {
             session_id: crate::util::text_id::encode_base32_crockford(&new_device_id[0..16]),
             genesis_device_id: new_device_id,
@@ -2023,10 +2030,165 @@ impl StorageNodeSDK {
             genesis_hash: Some(genesis_hash),
             participating_nodes: vec![],
             tick: dt::tick(),
+            device_tree: Some(snapshot),
         };
 
         Ok(response)
     }
+
+    /// Remove a secondary device from an existing Device Tree.
+    ///
+    /// Symmetric to [`Self::add_secondary_device`]: loads the persisted
+    /// [`DeviceTreeStateV1`], drops `device_id_to_remove`, bumps
+    /// `version_number`, and writes the new state back.
+    ///
+    /// Enforces:
+    /// * `genesis_hash` and `device_id_to_remove` are 32 bytes each.
+    /// * A Device Tree state must already exist for this genesis
+    ///   (returns [`DsmError::not_found`] otherwise — there is nothing
+    ///   to remove from).
+    /// * The device must currently be a member (returns
+    ///   [`DsmError::not_found`] otherwise so callers can distinguish
+    ///   "already gone" from "tree missing").
+    /// * `device_count >= 1` after removal — the root device leaf is
+    ///   permanent; removing the last remaining leaf is rejected with
+    ///   [`DsmError::invalid_operation`]. This preserves the post-
+    ///   genesis non-empty-tree invariant.
+    ///
+    /// Returns a [`GenesisCreationResponse`] whose `device_tree` field
+    /// carries the post-removal snapshot.
+    pub async fn remove_secondary_device(
+        &self,
+        genesis_hash: Vec<u8>,
+        device_id_to_remove: Vec<u8>,
+    ) -> Result<GenesisCreationResponse, DsmError> {
+        log::info!("Removing secondary device from existing genesis");
+
+        if genesis_hash.len() != 32 {
+            return Err(DsmError::invalid_operation("Genesis hash must be 32 bytes"));
+        }
+        if device_id_to_remove.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "device_id_to_remove must be 32 bytes",
+            ));
+        }
+
+        let mut genesis_hash_array = [0u8; 32];
+        genesis_hash_array.copy_from_slice(&genesis_hash);
+        let mut target = [0u8; 32];
+        target.copy_from_slice(&device_id_to_remove);
+
+        // Read first so we can fail-closed if the tree is absent or the
+        // device is not currently a member — distinct from the
+        // post-mutation device_count >= 1 check inside the mutator.
+        let device_tree_key = Self::device_tree_state_key(&genesis_hash_array);
+        let bytes = self.inner.get(&device_tree_key).await.map_err(|e| {
+            DsmError::network(
+                format!(
+                    "remove_secondary_device: failed to read DeviceTreeStateV1 for genesis: {e}"
+                ),
+                None::<std::io::Error>,
+            )
+        })?;
+        if bytes.is_empty() {
+            return Err(DsmError::not_found(
+                "DeviceTreeStateV1",
+                Some(format!(
+                    "no Device Tree state for genesis {}",
+                    crate::util::text_id::encode_base32_crockford(&genesis_hash)
+                )),
+            ));
+        }
+        let existing = decode_device_tree_state(&bytes)?;
+        if !existing.device_ids.contains(&target) {
+            return Err(DsmError::not_found(
+                "DeviceTreeStateV1.device_ids",
+                Some(format!(
+                    "device {} not in tree for genesis {}",
+                    crate::util::text_id::encode_base32_crockford(&device_id_to_remove),
+                    crate::util::text_id::encode_base32_crockford(&genesis_hash)
+                )),
+            ));
+        }
+
+        let snapshot = self
+            .mutate_device_tree_state(genesis_hash_array, |device_ids| {
+                device_ids.retain(|id| id != &target);
+            })
+            .await?;
+
+        let response = GenesisCreationResponse {
+            session_id: crate::util::text_id::encode_base32_crockford(&device_id_to_remove[0..16]),
+            genesis_device_id: device_id_to_remove,
+            state: "complete".to_string(),
+            contributions_received: 0,
+            complete: true,
+            genesis_hash: Some(genesis_hash),
+            participating_nodes: vec![],
+            tick: dt::tick(),
+            device_tree: Some(snapshot),
+        };
+
+        Ok(response)
+    }
+
+    /// Local KV key for the persisted [`generated::DeviceTreeStateV1`].
+    fn device_tree_state_key(genesis_hash: &[u8; 32]) -> String {
+        format!(
+            "device_tree:{}",
+            crate::util::text_id::encode_base32_crockford(genesis_hash)
+        )
+    }
+
+    /// Read-modify-write the persisted [`generated::DeviceTreeStateV1`]
+    /// for `genesis_hash`. The `mutate` closure receives a mutable
+    /// device-id list; on return, the list is canonicalised via
+    /// [`dsm::common::device_tree::DeviceTree::new`] (sort + dedup) and
+    /// the new state is persisted with `version_number` strictly
+    /// greater than the previous value. Enforces the post-genesis
+    /// non-empty-tree invariant (`device_count >= 1`).
+    async fn mutate_device_tree_state<F: FnOnce(&mut Vec<[u8; 32]>)>(
+        &self,
+        genesis_hash: [u8; 32],
+        mutate: F,
+    ) -> Result<DeviceTreeSnapshot, DsmError> {
+        let device_tree_key = Self::device_tree_state_key(&genesis_hash);
+
+        // Read prior state (if any). Empty bytes means the initial
+        // root-device-only tree has not been written yet (Phase B.6
+        // issue #277 lands the genesis-time write).
+        let prior_bytes = self.inner.get(&device_tree_key).await.map_err(|e| {
+            DsmError::network(
+                format!("mutate_device_tree_state: read failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        let (snapshot, new_bytes) =
+            apply_device_tree_mutation(&prior_bytes, genesis_hash, mutate)?;
+
+        // Persist the new state.
+        self.inner
+            .put(&device_tree_key, &new_bytes, None)
+            .await
+            .map_err(|e| {
+                DsmError::network(
+                    format!("mutate_device_tree_state: write failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+
+        log::info!(
+            "Device Tree state for genesis {}: root={}, count={}, version={}",
+            crate::util::text_id::encode_base32_crockford(&genesis_hash),
+            crate::util::text_id::encode_base32_crockford(&snapshot.root_hash),
+            snapshot.device_count,
+            snapshot.version_number
+        );
+
+        Ok(snapshot)
+    }
+
 
     /// Retrieve the complete device identity after Genesis creation
     pub async fn retrieve_device_identity(
@@ -3137,37 +3299,142 @@ impl StorageNodeConfig {
     }
 }
 
-/// Compute the Device Tree root from a sorted list of device IDs.
-/// Uses domain-separated BLAKE3 hashing as per device_tree.rs.
-fn compute_device_tree_root(device_ids: &[[u8; 32]]) -> [u8; 32] {
-    use dsm::common::device_tree::{hash_leaf, hash_node, empty_root};
+/// Pure read-modify-canonicalise step for a Device Tree.
+///
+/// Given the prior-persisted [`generated::DeviceTreeStateV1`] bytes (or
+/// an empty slice if no tree has been written yet), the `genesis_hash`
+/// (used to seed the root-device leaf when no tree exists yet), and a
+/// caller `mutate` closure, this function:
+///
+/// 1. Decodes the prior state if non-empty, or initialises a single-
+///    leaf tree containing `genesis_hash` (== root device_id).
+/// 2. Applies `mutate` to the mutable leaf list.
+/// 3. Canonicalises through [`dsm::common::device_tree::DeviceTree::new`]
+///    (sort + dedup).
+/// 4. Enforces `device_count >= 1` post-genesis.
+/// 5. Bumps `version_number` strictly.
+/// 6. Re-encodes a fresh [`generated::DeviceTreeStateV1`] as bytes.
+///
+/// Returns the new [`DeviceTreeSnapshot`] alongside the bytes the
+/// caller persists. Pure: no I/O, no global state, so it's directly
+/// unit-testable.
+fn apply_device_tree_mutation<F: FnOnce(&mut Vec<[u8; 32]>)>(
+    prior_bytes: &[u8],
+    genesis_hash: [u8; 32],
+    mutate: F,
+) -> Result<(DeviceTreeSnapshot, Vec<u8>), DsmError> {
+    let (mut device_ids, prior_version) = if prior_bytes.is_empty() {
+        (vec![genesis_hash], 0u64)
+    } else {
+        let prior = decode_device_tree_state(prior_bytes)?;
+        (prior.device_ids, prior.version_number)
+    };
 
-    if device_ids.is_empty() {
-        return empty_root();
+    mutate(&mut device_ids);
+
+    // Canonicalise (sort + dedup) via DeviceTree::new.
+    let tree = dsm::common::device_tree::DeviceTree::new(device_ids);
+    let device_count = tree.len() as u32;
+    if device_count == 0 {
+        return Err(DsmError::invalid_operation(
+            "Device Tree must contain at least one device post-genesis",
+        ));
     }
 
-    // Build leaf hashes
-    let mut leaves: Vec<[u8; 32]> = device_ids.iter().map(hash_leaf).collect();
+    let sorted_ids: Vec<[u8; 32]> = tree.leaves().to_vec();
+    let root = tree.root();
+    let new_version = prior_version.checked_add(1).ok_or_else(|| {
+        DsmError::invalid_operation(
+            "Device Tree version_number overflowed u64; refusing to wrap",
+        )
+    })?;
 
-    // Build the Merkle tree bottom-up
-    while leaves.len() > 1 {
-        let mut next_level = Vec::new();
-        for chunk in leaves.chunks(2) {
-            match chunk {
-                [left] => {
-                    // Odd number of nodes - this node becomes its own parent
-                    next_level.push(*left);
-                }
-                [left, right] => {
-                    next_level.push(hash_node(left, right));
-                }
-                _ => unreachable!(),
-            }
+    let snapshot = DeviceTreeSnapshot {
+        root_hash: root,
+        device_count,
+        version_number: new_version,
+    };
+
+    let new_state = generated::DeviceTreeStateV1 {
+        tree: Some(snapshot.to_proto()),
+        device_ids: sorted_ids.iter().map(|id| id.to_vec()).collect(),
+    };
+    let mut buf = Vec::with_capacity(new_state.encoded_len());
+    new_state.encode(&mut buf).map_err(|e| {
+        DsmError::internal(
+            format!("encode DeviceTreeStateV1: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+
+    Ok((snapshot, buf))
+}
+
+/// Owned view of a persisted [`generated::DeviceTreeStateV1`].
+///
+/// Carries the canonical sorted + deduplicated 32-byte DevID list and
+/// the prior `version_number` so [`StorageNodeSDK::mutate_device_tree_state`]
+/// can apply a strictly-monotonic bump on every accepted update.
+#[derive(Debug, Clone)]
+struct PersistedDeviceTreeState {
+    device_ids: Vec<[u8; 32]>,
+    version_number: u64,
+}
+
+/// Decode the persisted [`generated::DeviceTreeStateV1`] proto and
+/// project it into a normalised [`PersistedDeviceTreeState`].
+///
+/// Returns [`DsmError::deserialization`] on any of:
+///   - body fails prost decoding,
+///   - the inner `tree` summary is missing,
+///   - any `device_ids` element is not exactly 32 bytes.
+///
+/// The list is re-canonicalised via
+/// [`dsm::common::device_tree::DeviceTree::new`] so a future restart
+/// reproduces the byte-exact root even if the on-disk encoding was
+/// produced by an older SDK that didn't sort + dedup pre-persist.
+fn decode_device_tree_state(bytes: &[u8]) -> Result<PersistedDeviceTreeState, DsmError> {
+    let state = generated::DeviceTreeStateV1::decode(bytes)
+        .map_err(|e| DsmError::serialization_error(
+            format!("decode DeviceTreeStateV1: {e}"),
+            "DeviceTreeStateV1",
+            None::<String>,
+            Some(e),
+        ))?;
+    let tree = state.tree.ok_or_else(|| {
+        DsmError::serialization_error(
+            "DeviceTreeStateV1.tree is missing",
+            "DeviceTreeStateV1",
+            None::<String>,
+            None::<std::io::Error>,
+        )
+    })?;
+    let mut ids: Vec<[u8; 32]> = Vec::with_capacity(state.device_ids.len());
+    for (i, id) in state.device_ids.iter().enumerate() {
+        if id.len() != 32 {
+            return Err(DsmError::serialization_error(
+                format!(
+                    "DeviceTreeStateV1.device_ids[{i}] is {} bytes, expected 32",
+                    id.len()
+                ),
+                "DeviceTreeStateV1",
+                None::<String>,
+                None::<std::io::Error>,
+            ));
         }
-        leaves = next_level;
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(id);
+        ids.push(buf);
     }
-
-    leaves[0]
+    // Re-canonicalise via DeviceTree::new so any earlier writer that
+    // happened to persist an unsorted / non-deduped list still yields
+    // the same recovered list this code path produces. Idempotent
+    // when the list is already canonical.
+    let canon = dsm::common::device_tree::DeviceTree::new(ids);
+    Ok(PersistedDeviceTreeState {
+        device_ids: canon.leaves().to_vec(),
+        version_number: tree.version_number,
+    })
 }
 
 #[cfg(test)]
@@ -3271,5 +3538,234 @@ mod tests {
             .expect_err("tampered pre-commitment should fail");
         let msg = format!("{}", err);
         assert!(msg.contains("Pre-commitment hash verification failed") || msg.contains("crypto"));
+    }
+
+    // ---------------------------------------------------------------
+    // Phase B.3 (issue #274): Device Tree mutation invariants.
+    // The mutator is split out as `apply_device_tree_mutation` so the
+    // I/O-free core is directly unit-testable.
+    // ---------------------------------------------------------------
+
+    fn build_state_bytes(device_ids: Vec<[u8; 32]>, version: u64) -> Vec<u8> {
+        let tree = dsm::common::device_tree::DeviceTree::new(device_ids.clone());
+        let state = generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: tree.root().to_vec(),
+                device_count: tree.len() as u32,
+                version_number: version,
+            }),
+            device_ids: tree.leaves().iter().map(|id| id.to_vec()).collect(),
+        };
+        state.encode_to_vec()
+    }
+
+    #[test]
+    fn add_first_secondary_seeds_with_root_device_and_bumps_version_to_1() {
+        let genesis = [0x11u8; 32];
+        let new_devid = [0x22u8; 32];
+        let (snapshot, _bytes) =
+            super::apply_device_tree_mutation(&[], genesis, |ids| {
+                ids.push(new_devid);
+            })
+            .expect("first add must succeed");
+
+        // Expect a 2-leaf tree: {genesis (root), new_devid}.
+        assert_eq!(snapshot.device_count, 2);
+        assert_eq!(snapshot.version_number, 1);
+        let expected_root =
+            dsm::common::device_tree::DeviceTree::new(vec![genesis, new_devid]).root();
+        assert_eq!(snapshot.root_hash, expected_root);
+    }
+
+    #[test]
+    fn add_is_idempotent_on_duplicate_device_id() {
+        let genesis = [0x11u8; 32];
+        let new_devid = [0x22u8; 32];
+
+        // First add: empty -> {genesis, new_devid}.
+        let (snap1, bytes1) =
+            super::apply_device_tree_mutation(&[], genesis, |ids| ids.push(new_devid))
+                .expect("first add");
+
+        // Second add of the same device_id: should dedup and produce
+        // identical root + device_count, but version_number must still
+        // monotonically bump because a caller invoked the mutator.
+        let (snap2, _bytes2) =
+            super::apply_device_tree_mutation(&bytes1, genesis, |ids| ids.push(new_devid))
+                .expect("second add");
+        assert_eq!(snap2.root_hash, snap1.root_hash);
+        assert_eq!(snap2.device_count, snap1.device_count);
+        assert_eq!(snap2.version_number, snap1.version_number + 1);
+    }
+
+    #[test]
+    fn add_then_remove_cycles_back_to_root_only() {
+        let genesis = [0x11u8; 32];
+        let dev_a = [0x22u8; 32];
+
+        let (_snap1, bytes1) =
+            super::apply_device_tree_mutation(&[], genesis, |ids| ids.push(dev_a))
+                .expect("add A");
+
+        let (snap2, _bytes2) =
+            super::apply_device_tree_mutation(&bytes1, genesis, |ids| ids.retain(|id| id != &dev_a))
+                .expect("remove A");
+
+        // After removing A we should be back to a single-leaf tree
+        // containing only the root device (genesis_hash).
+        assert_eq!(snap2.device_count, 1);
+        let expected_root =
+            dsm::common::device_tree::DeviceTree::single(genesis).root();
+        assert_eq!(snap2.root_hash, expected_root);
+        // Two mutations applied, so version_number must be 2.
+        assert_eq!(snap2.version_number, 2);
+    }
+
+    #[test]
+    fn version_number_is_strictly_monotonic_across_multiple_updates() {
+        let genesis = [0x11u8; 32];
+        let dev_a = [0x22u8; 32];
+        let dev_b = [0x33u8; 32];
+        let dev_c = [0x44u8; 32];
+
+        let (s1, b1) = super::apply_device_tree_mutation(&[], genesis, |ids| ids.push(dev_a))
+            .expect("add A");
+        let (s2, b2) = super::apply_device_tree_mutation(&b1, genesis, |ids| ids.push(dev_b))
+            .expect("add B");
+        let (s3, b3) = super::apply_device_tree_mutation(&b2, genesis, |ids| ids.push(dev_c))
+            .expect("add C");
+        let (s4, _b4) = super::apply_device_tree_mutation(&b3, genesis, |ids| {
+            ids.retain(|id| id != &dev_b)
+        })
+        .expect("remove B");
+
+        assert_eq!(s1.version_number, 1);
+        assert_eq!(s2.version_number, 2);
+        assert_eq!(s3.version_number, 3);
+        assert_eq!(s4.version_number, 4);
+    }
+
+    #[test]
+    fn input_order_is_canonicalised_via_lexicographic_sort_and_dedup() {
+        let genesis = [0x11u8; 32];
+        let dev_a = [0xAAu8; 32];
+        let dev_b = [0xBBu8; 32];
+
+        // Different insertion orders must produce the same persisted
+        // bytes (modulo proto field-ordering, which prost emits
+        // deterministically for the same input).
+        let (snap_ab, bytes_ab) = super::apply_device_tree_mutation(&[], genesis, |ids| {
+            ids.push(dev_a);
+            ids.push(dev_b);
+        })
+        .expect("AB order");
+        let (snap_ba, bytes_ba) = super::apply_device_tree_mutation(&[], genesis, |ids| {
+            ids.push(dev_b);
+            ids.push(dev_a);
+        })
+        .expect("BA order");
+
+        assert_eq!(snap_ab.root_hash, snap_ba.root_hash);
+        assert_eq!(snap_ab.device_count, snap_ba.device_count);
+        assert_eq!(bytes_ab, bytes_ba);
+    }
+
+    #[test]
+    fn removing_the_last_device_post_genesis_is_rejected() {
+        // Construct a one-leaf state (just genesis) directly so we can
+        // attempt to drain it.
+        let genesis = [0x11u8; 32];
+        let bytes = build_state_bytes(vec![genesis], 1);
+
+        // Caller asks to remove the single leaf -> mutator must fail
+        // closed with an InvalidOperation.
+        let err = super::apply_device_tree_mutation(&bytes, genesis, |ids| ids.clear())
+            .expect_err("empty post-mutation tree must be rejected");
+        assert!(
+            format!("{err}").contains("at least one device"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_state_bytes_are_rejected_with_serialization_error() {
+        let genesis = [0x11u8; 32];
+        let garbage = b"this is not a valid DeviceTreeStateV1 proto".to_vec();
+        let err = super::apply_device_tree_mutation(&garbage, genesis, |ids| {
+            ids.push([0x99u8; 32])
+        })
+        .expect_err("garbage prior state must fail decode");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("DeviceTreeStateV1") || msg.contains("Serialization") || msg.contains("decode"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn decode_device_tree_state_rejects_non_32_byte_device_ids() {
+        let bad_state = generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: vec![0u8; 32],
+                device_count: 1,
+                version_number: 1,
+            }),
+            device_ids: vec![vec![0u8; 31]], // 31 bytes, not 32
+        };
+        let bytes = bad_state.encode_to_vec();
+        let err =
+            super::decode_device_tree_state(&bytes).expect_err("non-32-byte device_id rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("31 bytes"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn decode_device_tree_state_rejects_missing_tree_field() {
+        let bad_state = generated::DeviceTreeStateV1 {
+            tree: None,
+            device_ids: vec![],
+        };
+        let bytes = bad_state.encode_to_vec();
+        let err = super::decode_device_tree_state(&bytes)
+            .expect_err("missing tree summary rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("tree is missing"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn snapshot_to_proto_round_trips_through_prost() {
+        let snap = DeviceTreeSnapshot {
+            root_hash: [0x42u8; 32],
+            device_count: 7,
+            version_number: 123,
+        };
+        let proto = snap.to_proto();
+        let bytes = proto.encode_to_vec();
+        let decoded = generated::DeviceTreeV1::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(decoded.root_hash, snap.root_hash.to_vec());
+        assert_eq!(decoded.device_count, 7);
+        assert_eq!(decoded.version_number, 123);
+    }
+
+    #[test]
+    fn root_hash_matches_canonical_device_tree_root() {
+        // Cross-check: the snapshot.root_hash from apply_device_tree_mutation
+        // must equal dsm::common::device_tree::DeviceTree::new(...).root().
+        let genesis = [0x11u8; 32];
+        let dev_a = [0x22u8; 32];
+        let dev_b = [0x33u8; 32];
+
+        let (snap, _bytes) = super::apply_device_tree_mutation(&[], genesis, |ids| {
+            ids.push(dev_a);
+            ids.push(dev_b);
+        })
+        .expect("add A then B");
+
+        let expected =
+            dsm::common::device_tree::DeviceTree::new(vec![genesis, dev_a, dev_b]).root();
+        assert_eq!(snap.root_hash, expected);
     }
 }

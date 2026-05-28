@@ -119,13 +119,35 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_addSecondaryDevice<'a>(
                         smt_root,
                     );
                     crate::sdk::app_state::AppState::set_has_identity(true);
-                    // Compute and persist Device Tree root (§2.3) — same as primary genesis path.
-                    if device_id.len() == 32 {
+                    // Persist the multi-device R_G returned by
+                    // add_secondary_device (Phase B.3 issue #274). The
+                    // previous flow stored the single-leaf root
+                    // `DeviceTree::single(new_devid).root()`, which is
+                    // wrong for any tree with > 1 leaf and would have
+                    // caused bilateral receipts to verify against the
+                    // wrong R_G. The new path takes the canonical
+                    // snapshot the SDK already computed.
+                    if let Some(snapshot) = res.device_tree {
+                        crate::sdk::app_state::AppState::set_device_tree_root(snapshot.root_hash);
+                        log::info!(
+                            "[SecondaryDevice] Device tree root persisted (count={}, version={})",
+                            snapshot.device_count,
+                            snapshot.version_number
+                        );
+                    } else if device_id.len() == 32 {
+                        // Fallback only for the unreachable case where
+                        // the SDK omitted the snapshot (e.g. a future
+                        // mock SDK build). Build a single-leaf tree
+                        // from the new device_id so the AppState slot
+                        // is always populated — fail-closed elsewhere
+                        // depends on this slot being non-empty.
                         let mut dev_arr = [0u8; 32];
                         dev_arr.copy_from_slice(&device_id);
                         let root = dsm::common::device_tree::DeviceTree::single(dev_arr).root();
                         crate::sdk::app_state::AppState::set_device_tree_root(root);
-                        log::info!("[SecondaryDevice] Device tree root persisted for bilateral receipt verification");
+                        log::warn!(
+                            "[SecondaryDevice] add_secondary_device returned no DeviceTreeSnapshot; persisted single-leaf fallback"
+                        );
                     }
                     let _ = crate::initialize_sdk_context(
                         device_id.clone(),

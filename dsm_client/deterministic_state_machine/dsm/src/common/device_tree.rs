@@ -217,6 +217,21 @@ impl DeviceTree {
         self.leaves.is_empty()
     }
 
+    /// Canonical sorted + deduplicated leaf list as stored.
+    ///
+    /// Callers that persist a Device Tree across restarts (e.g. the
+    /// SDK's `device_tree:{genesis}` KV slot used by
+    /// `add_secondary_device` / `remove_secondary_device` in Phase B.3,
+    /// issue #274) need to round-trip the exact leaf sequence so a
+    /// future `DeviceTree::new(leaves)` reproduces the same root and
+    /// proofs byte-exactly. This accessor is the only sanctioned way
+    /// to read the canonical sequence — direct field access is gated
+    /// by privacy so the canonicalisation invariant (sort + dedup)
+    /// remains the constructor's responsibility.
+    pub fn leaves(&self) -> &[[u8; 32]] {
+        &self.leaves
+    }
+
     /// Generate an inclusion proof for `dev_id`.
     /// Returns `None` if `dev_id` is not a member of this tree.
     pub fn proof(&self, dev_id: &[u8; 32]) -> Option<DevTreeProof> {

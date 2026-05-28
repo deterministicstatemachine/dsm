@@ -1638,6 +1638,13 @@ message SecondaryDeviceResponse {
   bytes device_id = 1 [(dsm_fixed_len)=32]; // New device ID bound to genesis
   Hash32 genesis_hash = 2; // Same genesis as root device
   bool success = 3;
+  // Post-update Device Tree snapshot (root_hash, device_count,
+  // version_number). Populated by add_secondary_device and
+  // remove_secondary_device so the WebView / Kotlin layer can persist
+  // the new R_G locally without rederiving the tree. Optional —
+  // omitted only if a producer is unable to compute the new state
+  // (older clients, error paths).
+  DeviceTreeV1 device_tree = 4;
 }
 
 // ============================ AUTH / REGISTRATION ==========================
@@ -2896,6 +2903,24 @@ message DeviceInclusionProofV1 {
   repeated bytes siblings = 3 [(dsm_fixed_len)=32]; // root → leaf order
   uint32 path_bits_len = 4;
   bytes  path_bits     = 5 [(dsm_max_len)=2048]; // LSB-first packed bits
+}
+
+// Persistent state of a Device Tree for one genesis: the `DeviceTreeV1`
+// summary (root, count, version) together with the canonical sorted +
+// deduplicated `device_ids` list that produced it. The list is the
+// authoritative source from which the root is recomputed; storing it
+// alongside the summary lets callers (B.4 issue #276 inclusion-proof
+// derivation) rebuild the Merkle tree byte-exactly from disk.
+//
+// Used as the SDK's local KV value under key `device_tree:{genesis}`
+// (Phase B.3 issue #274) and as the persistence record alongside the
+// validated published anchor on the storage node side (Phase B.4
+// issue #275).
+//
+// Each `device_ids` element is fixed-width 32 bytes (the DevID width).
+message DeviceTreeStateV1 {
+  DeviceTreeV1 tree = 1;
+  repeated bytes device_ids = 2 [(dsm_fixed_len)=32];
 }
 
 // Legacy / registry-evidence types — production callers retained.

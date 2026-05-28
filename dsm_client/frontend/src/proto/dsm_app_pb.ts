@@ -11819,6 +11819,18 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
    */
   success = false;
 
+  /**
+   * Post-update Device Tree snapshot (root_hash, device_count,
+   * version_number). Populated by add_secondary_device and
+   * remove_secondary_device so the WebView / Kotlin layer can persist
+   * the new R_G locally without rederiving the tree. Optional —
+   * omitted only if a producer is unable to compute the new state
+   * (older clients, error paths).
+   *
+   * @generated from field: dsm.DeviceTreeV1 device_tree = 4;
+   */
+  deviceTree?: DeviceTreeV1;
+
   constructor(data?: PartialMessage<SecondaryDeviceResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11830,6 +11842,7 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "genesis_hash", kind: "message", T: Hash32 },
     { no: 3, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "device_tree", kind: "message", T: DeviceTreeV1 },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecondaryDeviceResponse {
@@ -21066,6 +21079,63 @@ export class DeviceInclusionProofV1 extends Message<DeviceInclusionProofV1> {
 
   static equals(a: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined, b: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined): boolean {
     return proto3.util.equals(DeviceInclusionProofV1, a, b);
+  }
+}
+
+/**
+ * Persistent state of a Device Tree for one genesis: the `DeviceTreeV1`
+ * summary (root, count, version) together with the canonical sorted +
+ * deduplicated `device_ids` list that produced it. The list is the
+ * authoritative source from which the root is recomputed; storing it
+ * alongside the summary lets callers (B.4 issue #276 inclusion-proof
+ * derivation) rebuild the Merkle tree byte-exactly from disk.
+ *
+ * Used as the SDK's local KV value under key `device_tree:{genesis}`
+ * (Phase B.3 issue #274) and as the persistence record alongside the
+ * validated published anchor on the storage node side (Phase B.4
+ * issue #275).
+ *
+ * Each `device_ids` element is fixed-width 32 bytes (the DevID width).
+ *
+ * @generated from message dsm.DeviceTreeStateV1
+ */
+export class DeviceTreeStateV1 extends Message<DeviceTreeStateV1> {
+  /**
+   * @generated from field: dsm.DeviceTreeV1 tree = 1;
+   */
+  tree?: DeviceTreeV1;
+
+  /**
+   * @generated from field: repeated bytes device_ids = 2;
+   */
+  deviceIds: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<DeviceTreeStateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeStateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "tree", kind: "message", T: DeviceTreeV1 },
+    { no: 2, name: "device_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeStateV1 {
+    return new DeviceTreeStateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeStateV1 {
+    return new DeviceTreeStateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeStateV1 {
+    return new DeviceTreeStateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeStateV1 | PlainMessage<DeviceTreeStateV1> | undefined, b: DeviceTreeStateV1 | PlainMessage<DeviceTreeStateV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeStateV1, a, b);
   }
 }
 
