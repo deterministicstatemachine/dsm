@@ -1893,11 +1893,81 @@ impl StorageNodeSDK {
         use crate::sdk::core_sdk::CoreSDK;
         let core_sdk = CoreSDK::new()?;
 
+        // Phase B.6 (issue #277): publish the initial DeviceTreeStateV1
+        // to a quorum of storage nodes BEFORE the core SDK installs the
+        // genesis into the state machine. If quorum cannot be reached
+        // the closure returns Err, the core SDK aborts before touching
+        // any local state, and the caller sees a clean fail-closed
+        // error with no partial-genesis residue.
+        //
+        // The initial tree has exactly one leaf: the root device, whose
+        // DevID equals the genesis hash by protocol invariant. The
+        // SDK publishes against `/api/v2/identity/{genesis_b32}/devtree/root`
+        // (Phase B.4 issue #275 validator) and counts 2xx responses
+        // toward `REGISTRY_QUORUM_THRESHOLD`. A 409 Conflict (rejected
+        // stale by the validator) also counts as a successful publish
+        // because it confirms the storage node already holds a
+        // DeviceTreeStateV1 row for this genesis at version >= 1,
+        // which is the same end-state we wanted.
+        let publisher_node_urls = node_urls.clone();
+        let publisher_client = self.inner.client.clone();
+        let initial_tree_snapshot: std::sync::Arc<
+            tokio::sync::OnceCell<DeviceTreeSnapshot>,
+        > = std::sync::Arc::new(tokio::sync::OnceCell::new());
+        let snapshot_for_publisher = initial_tree_snapshot.clone();
+        let publisher = move |genesis_hash: [u8; 32]| {
+            let publisher_node_urls = publisher_node_urls.clone();
+            let publisher_client = publisher_client.clone();
+            let snapshot_for_publisher = snapshot_for_publisher.clone();
+            async move {
+                let (snapshot, payload) =
+                    Self::build_initial_device_tree_payload(genesis_hash)?;
+                // Stash the snapshot so the outer scope can build the
+                // GenesisCreationResponse without recomputing it.
+                let _ = snapshot_for_publisher.set(snapshot);
+
+                let genesis_b32 =
+                    crate::util::text_id::encode_base32_crockford(&genesis_hash);
+                let acks = Self::publish_initial_device_tree_to_quorum(
+                    &publisher_client,
+                    &publisher_node_urls,
+                    &genesis_b32,
+                    &payload,
+                )
+                .await;
+
+                if acks < REGISTRY_QUORUM_THRESHOLD {
+                    return Err(DsmError::network(
+                        format!(
+                            "Phase B.6: initial Device Tree publish reached only {}/{} \
+                             storage nodes; need >= {} for quorum. Genesis aborted; \
+                             no local state installed.",
+                            acks,
+                            publisher_node_urls.len(),
+                            REGISTRY_QUORUM_THRESHOLD
+                        ),
+                        None::<std::io::Error>,
+                    ));
+                }
+
+                log::info!(
+                    "Phase B.6: initial Device Tree published to {}/{} storage nodes \
+                     (quorum {} satisfied) for genesis={}",
+                    acks,
+                    publisher_node_urls.len(),
+                    REGISTRY_QUORUM_THRESHOLD,
+                    genesis_b32,
+                );
+                Ok::<(), DsmError>(())
+            }
+        };
+
         let genesis_info = core_sdk
             .create_genesis_with_passive_contributors(
                 temp_device_id.clone(),
                 mpc_participants.clone(),
                 client_entropy.clone(),
+                publisher,
             )
             .await?;
 
@@ -1915,6 +1985,14 @@ impl StorageNodeSDK {
             crate::util::text_id::encode_base32_crockford(&device_id)
         );
 
+        // Persist the initial R_G as the bilateral-settlement device
+        // tree root so receipts post-genesis verify against the
+        // canonical anchor that storage nodes now hold.
+        let initial_snapshot = initial_tree_snapshot.get().copied();
+        if let Some(snapshot) = initial_snapshot {
+            crate::sdk::app_state::AppState::set_device_tree_root(snapshot.root_hash);
+        }
+
         // Build response matching expected structure
         let genesis_response = GenesisCreationResponse {
             session_id: crate::util::text_id::encode_base32_crockford(
@@ -1930,12 +2008,106 @@ impl StorageNodeSDK {
                 .map(|p| crate::util::text_id::encode_base32_crockford(p))
                 .collect(),
             tick: dt::tick(),
-            // Primary genesis does not publish the initial Device Tree
-            // here; that is the Phase B.6 (issue #277) responsibility.
-            device_tree: None,
+            // Phase B.6 (issue #277): the initial single-leaf tree
+            // snapshot the publisher just anchored to quorum-N storage
+            // nodes. None only on the unreachable case where the
+            // OnceCell wasn't initialised before the publisher Ok'd.
+            device_tree: initial_snapshot,
         };
 
         Ok(genesis_response)
+    }
+
+    /// Build the canonical initial `DeviceTreeStateV1` proto payload
+    /// for a freshly-created genesis. Single leaf = `genesis_hash`
+    /// (root device's DevID by protocol invariant). Used by the
+    /// Phase B.6 (issue #277) initial-tree publish path.
+    pub(crate) fn build_initial_device_tree_payload(
+        genesis_hash: [u8; 32],
+    ) -> Result<(DeviceTreeSnapshot, Vec<u8>), DsmError> {
+        let tree = dsm::common::device_tree::DeviceTree::single(genesis_hash);
+        let snapshot = DeviceTreeSnapshot {
+            root_hash: tree.root(),
+            device_count: 1,
+            version_number: 1,
+        };
+        let state = generated::DeviceTreeStateV1 {
+            tree: Some(snapshot.to_proto()),
+            device_ids: vec![genesis_hash.to_vec()],
+        };
+        let mut payload = Vec::with_capacity(state.encoded_len());
+        state.encode(&mut payload).map_err(|e| {
+            DsmError::internal(
+                format!("encode initial DeviceTreeStateV1: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        Ok((snapshot, payload))
+    }
+
+    /// PUT `payload` to `/api/v2/identity/{genesis_b32}/devtree/root` on
+    /// every node in `node_urls`. Returns the count of nodes that
+    /// confirmed the write (HTTP 2xx OR 409 Conflict).
+    ///
+    /// 409 Conflict from the Phase B.4 validator means the storage node
+    /// already holds a DeviceTreeStateV1 row for this genesis at a
+    /// version >= the candidate version. For the initial publish
+    /// (`version_number = 1`) this can only happen if a prior
+    /// successful publish landed on that node, so it's the same
+    /// end-state we wanted and counts toward quorum.
+    async fn publish_initial_device_tree_to_quorum(
+        client: &reqwest::Client,
+        node_urls: &[String],
+        genesis_b32: &str,
+        payload: &[u8],
+    ) -> usize {
+        let mut acks: usize = 0;
+        for node_url in node_urls {
+            let trimmed = node_url.trim_end_matches('/');
+            if trimmed.is_empty() {
+                continue;
+            }
+            let url = format!(
+                "{}/api/v2/identity/{}/devtree/root",
+                trimmed, genesis_b32
+            );
+            match client
+                .put(&url)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/octet-stream",
+                )
+                .body(payload.to_vec())
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+                        acks += 1;
+                        log::info!(
+                            "Phase B.6 publish: {} accepted (HTTP {})",
+                            trimmed,
+                            status.as_u16()
+                        );
+                    } else {
+                        log::warn!(
+                            "Phase B.6 publish: {} returned HTTP {}",
+                            trimmed,
+                            status.as_u16()
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Phase B.6 publish: network error against {}: {}",
+                        trimmed,
+                        e
+                    );
+                }
+            }
+        }
+        acks
     }
 
     /// Add a secondary device to an existing genesis.
@@ -3767,5 +3939,84 @@ mod tests {
         let expected =
             dsm::common::device_tree::DeviceTree::new(vec![genesis, dev_a, dev_b]).root();
         assert_eq!(snap.root_hash, expected);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase B.6 (issue #277): initial Device Tree publish at genesis-MPC
+    // finalisation. The fail-closed publish-before-install contract is
+    // implemented in `create_genesis_with_mpc`; the pure helper
+    // `build_initial_device_tree_payload` is directly testable.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn initial_device_tree_payload_has_single_root_leaf() {
+        let genesis_hash = [0x77u8; 32];
+        let (snapshot, payload) =
+            StorageNodeSDK::build_initial_device_tree_payload(genesis_hash)
+                .expect("initial payload");
+
+        assert_eq!(snapshot.device_count, 1);
+        assert_eq!(snapshot.version_number, 1);
+        let expected_root =
+            dsm::common::device_tree::DeviceTree::single(genesis_hash).root();
+        assert_eq!(snapshot.root_hash, expected_root);
+
+        // Decode the payload back and confirm the contained state
+        // matches the snapshot exactly.
+        let state = generated::DeviceTreeStateV1::decode(payload.as_slice())
+            .expect("decode payload");
+        let tree = state.tree.expect("tree summary");
+        assert_eq!(tree.root_hash, expected_root.to_vec());
+        assert_eq!(tree.device_count, 1);
+        assert_eq!(tree.version_number, 1);
+        assert_eq!(state.device_ids, vec![genesis_hash.to_vec()]);
+    }
+
+    #[test]
+    fn initial_device_tree_payload_round_trips_through_validator_shape() {
+        // The payload the publisher PUTs must be acceptable to the
+        // Phase B.4 validator. Re-encode + decode it through the same
+        // proto definitions and confirm the round-trip preserves
+        // everything the validator cares about (CHECK 1: parses;
+        // CHECK 2: 32-byte non-zero root; CHECK 3: device_count >= 1
+        // and matches list length).
+        let genesis_hash = [0xABu8; 32];
+        let (_snapshot, payload) =
+            StorageNodeSDK::build_initial_device_tree_payload(genesis_hash)
+                .expect("payload");
+
+        let decoded = generated::DeviceTreeStateV1::decode(payload.as_slice())
+            .expect("decode round-trip");
+        let tree = decoded.tree.expect("tree present");
+        assert_eq!(tree.root_hash.len(), 32);
+        assert!(tree.root_hash.iter().any(|&b| b != 0), "root_hash must be non-zero");
+        assert!(tree.device_count >= 1);
+        assert_eq!(tree.device_count as usize, decoded.device_ids.len());
+        for id in &decoded.device_ids {
+            assert_eq!(id.len(), 32);
+        }
+    }
+
+    #[test]
+    fn initial_device_tree_payload_is_deterministic() {
+        // Two calls with the same genesis_hash must produce
+        // byte-identical payloads — prost emits deterministic output
+        // for the same input, so the storage-node-side dedup logic
+        // (idempotent PUT on retries) holds.
+        let genesis_hash = [0x12u8; 32];
+        let (s1, p1) = StorageNodeSDK::build_initial_device_tree_payload(genesis_hash).unwrap();
+        let (s2, p2) = StorageNodeSDK::build_initial_device_tree_payload(genesis_hash).unwrap();
+        assert_eq!(s1, s2);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn initial_device_tree_payloads_differ_across_genesis() {
+        let (s1, p1) =
+            StorageNodeSDK::build_initial_device_tree_payload([0x01u8; 32]).unwrap();
+        let (s2, p2) =
+            StorageNodeSDK::build_initial_device_tree_payload([0x02u8; 32]).unwrap();
+        assert_ne!(s1.root_hash, s2.root_hash);
+        assert_ne!(p1, p2);
     }
 }

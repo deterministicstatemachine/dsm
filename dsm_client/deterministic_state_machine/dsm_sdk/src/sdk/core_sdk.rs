@@ -762,13 +762,34 @@ impl CoreSDK {
 
     /* -------------------- Proto-only, non-removed paths ---------------- */
 
-    /// MPC genesis (blind MPC) — no wall-clock time
-    pub async fn create_genesis_with_passive_contributors(
+    /// MPC genesis (blind MPC) — no wall-clock time.
+    ///
+    /// `before_install` runs once the genesis hash is known but BEFORE
+    /// any local installation steps fire. It is the integration point
+    /// for Phase B.6 (issue #277): the storage-node SDK publishes the
+    /// initial `DeviceTreeStateV1` to a quorum of storage nodes here.
+    /// If the publisher returns `Err`, the genesis aborts:
+    ///
+    /// * K_DBRW is NOT installed into the binding-key slot.
+    /// * Platform silicon inputs (hw, env) are NOT zeroized — so the
+    ///   user can retry without re-running CDBRW enrollment.
+    /// * No state-machine state or BCR device-head row is written.
+    /// * No partial-genesis residue is left behind.
+    ///
+    /// Pass `|_| async { Ok(()) }` for the noop publisher (legacy
+    /// callers + offline test fixtures that don't talk to a storage
+    /// node cluster).
+    pub async fn create_genesis_with_passive_contributors<P, Fut>(
         &self,
         device_id: Vec<u8>,
         mpc_participants: Vec<Vec<u8>>,
         client_entropy: Option<Vec<u8>>,
-    ) -> Result<GenesisInfo, DsmError> {
+        before_install: P,
+    ) -> Result<GenesisInfo, DsmError>
+    where
+        P: FnOnce([u8; 32]) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<(), DsmError>> + Send,
+    {
         if device_id.is_empty() {
             return Err(DsmError::invalid_operation("Device ID cannot be empty"));
         }
@@ -801,9 +822,9 @@ impl CoreSDK {
 
         let device_entropy = generate_device_entropy(&device_id_arr);
         // Peek (don't take) the silicon inputs so the slot stays alive for
-        // any later restore-path probes; the genesis session derives the
-        // canonical K_DBRW from (genesis_id, device_id = genesis_id, hw, env)
-        // internally. The slot is cleared after K_DBRW is staged below.
+        // any later restore-path probes. The slot is cleared only AFTER
+        // the publisher succeeds and K_DBRW is staged below — see the
+        // "fail-closed before install" contract in the doc comment.
         let silicon =
             crate::sdk::app_state::AppState::peek_platform_entropy_inputs().ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(
@@ -821,9 +842,11 @@ impl CoreSDK {
             client_entropy,
         )?;
 
-        // Stage the canonical K_DBRW under the binding-key slot so post-genesis
-        // signing/Kyber-coins paths can read it, then take + drop the silicon
-        // inputs to zeroize.
+        // Derive (but do NOT install) the canonical K_DBRW. We need the
+        // genesis hash before this, but installation must wait until
+        // `before_install` confirms the network publish succeeded so a
+        // publisher error leaves the binding-key slot empty and the
+        // signing path gated.
         let k_dbrw = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
             &genesis_state.hash,
             &genesis_state.hash,
@@ -835,6 +858,21 @@ impl CoreSDK {
                 "core_sdk: canonical K_DBRW derivation failed: {e}"
             ))
         })?;
+
+        // Run the pre-install hook with the freshly-computed genesis
+        // hash. Storage-node SDK uses this slot to publish the initial
+        // `DeviceTreeStateV1` to a quorum of storage nodes (Phase B.6
+        // issue #277); if quorum cannot be reached, the publisher
+        // returns Err and the genesis aborts with zero local residue.
+        if let Err(e) = before_install(genesis_state.hash).await {
+            log::warn!(
+                "Genesis aborting before local install: pre-install hook returned: {}",
+                e
+            );
+            return Err(e);
+        }
+
+        // From here on: COMMITTED. Install local state.
         crate::binding_key::install_binding_key(k_dbrw.to_vec()).map_err(|e| {
             dsm::types::error::DsmError::invalid_operation(format!(
                 "core_sdk: install canonical K_DBRW failed: {e}"
