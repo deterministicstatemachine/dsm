@@ -295,6 +295,22 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     proof_bytes    BLOB NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_drain_proofs_node ON drain_proofs(node_id);
+
+                -- Phase B.4 (issue #275): bounded validator for the
+                -- published Device Tree state. Each row is one genesis's
+                -- current `DeviceTreeStateV1` proto with the version
+                -- counter and Merkle root broken out for indexed lookup
+                -- and monotonic-version enforcement.
+                CREATE TABLE IF NOT EXISTS device_tree_states (
+                    genesis_b32     TEXT PRIMARY KEY,
+                    version_number  INTEGER NOT NULL,
+                    device_count    INTEGER NOT NULL,
+                    root_hash       BLOB NOT NULL,
+                    payload         BLOB NOT NULL,
+                    updated_at_tick INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
+                    ON device_tree_states(genesis_b32, version_number);
             "#,
         )?;
         Ok(())
@@ -490,6 +506,155 @@ pub async fn create_slot(
             params![dlv_id, capacity_bytes, stake_hash],
         )?;
         Ok(())
+    })
+    .await
+}
+
+// ============================================================
+// Phase B.4 (issue #275): Device Tree state — bounded validator
+// ============================================================
+
+/// Outcome of a [`upsert_device_tree_state_if_monotonic`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTreeUpsertOutcome {
+    /// No prior row existed for this genesis; the row was newly inserted.
+    Inserted,
+    /// A prior row existed and was replaced because
+    /// `new_version > prior_version`.
+    Updated { prior_version: u64 },
+    /// A prior row existed and the write was rejected because
+    /// `new_version <= prior_version`. The persisted state is unchanged.
+    RejectedStale { prior_version: u64 },
+}
+
+/// Atomically upsert a `DeviceTreeStateV1` row for `genesis_b32`,
+/// enforcing strictly-monotonic `version_number`.
+///
+/// Wraps the read-then-write in a single `BEGIN IMMEDIATE`-equivalent
+/// rusqlite transaction so two concurrent writers serialise. Returns
+/// [`DeviceTreeUpsertOutcome::Inserted`] / [`Updated`] / [`RejectedStale`]
+/// based on what the row looked like before the write.
+///
+/// `payload` is the canonical `DeviceTreeStateV1` proto bytes the
+/// caller already validated upstream (root_hash 32-byte non-zero,
+/// device_count >= 1, device_count matches device_ids.len()).
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_device_tree_state_if_monotonic(
+    pool: &DBPool,
+    genesis_b32: &str,
+    new_version: u64,
+    device_count: u32,
+    root_hash: &[u8],
+    payload: &[u8],
+    updated_at_tick: u64,
+) -> Result<DeviceTreeUpsertOutcome> {
+    let genesis_b32 = genesis_b32.to_string();
+    let new_version_i64 = i64::try_from(new_version)
+        .map_err(|_| anyhow!("version_number {new_version} does not fit in i64"))?;
+    let device_count_i64 = i64::from(device_count);
+    let updated_at_tick_i64 = i64::try_from(updated_at_tick)
+        .map_err(|_| anyhow!("updated_at_tick {updated_at_tick} does not fit in i64"))?;
+    let root_hash = root_hash.to_vec();
+    let payload = payload.to_vec();
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        let prior_version_i64: Option<i64> = tx
+            .query_row(
+                "SELECT version_number FROM device_tree_states WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let outcome = match prior_version_i64 {
+            Some(prior_i64) => {
+                let prior_u64 = u64::try_from(prior_i64).unwrap_or(0);
+                if new_version_i64 <= prior_i64 {
+                    DeviceTreeUpsertOutcome::RejectedStale {
+                        prior_version: prior_u64,
+                    }
+                } else {
+                    tx.execute(
+                        "UPDATE device_tree_states
+                         SET version_number=?2, device_count=?3, root_hash=?4,
+                             payload=?5, updated_at_tick=?6
+                         WHERE genesis_b32=?1",
+                        params![
+                            genesis_b32,
+                            new_version_i64,
+                            device_count_i64,
+                            root_hash,
+                            payload,
+                            updated_at_tick_i64,
+                        ],
+                    )?;
+                    DeviceTreeUpsertOutcome::Updated {
+                        prior_version: prior_u64,
+                    }
+                }
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO device_tree_states
+                       (genesis_b32, version_number, device_count, root_hash, payload, updated_at_tick)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        genesis_b32,
+                        new_version_i64,
+                        device_count_i64,
+                        root_hash,
+                        payload,
+                        updated_at_tick_i64,
+                    ],
+                )?;
+                DeviceTreeUpsertOutcome::Inserted
+            }
+        };
+
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Return the persisted `DeviceTreeStateV1` payload bytes for a
+/// genesis, or `None` if no state has been written yet.
+pub async fn get_device_tree_state_payload(
+    pool: &DBPool,
+    genesis_b32: &str,
+) -> Result<Option<Vec<u8>>> {
+    let genesis_b32 = genesis_b32.to_string();
+    with_conn(pool, move |conn| {
+        let payload: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM device_tree_states WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload)
+    })
+    .await
+}
+
+/// Return only the current `version_number` for a genesis's persisted
+/// Device Tree state, or `None`. Used by tests asserting monotonic
+/// enforcement without re-decoding the full proto.
+pub async fn get_device_tree_state_version(
+    pool: &DBPool,
+    genesis_b32: &str,
+) -> Result<Option<u64>> {
+    let genesis_b32 = genesis_b32.to_string();
+    with_conn(pool, move |conn| {
+        let version_i64: Option<i64> = conn
+            .query_row(
+                "SELECT version_number FROM device_tree_states WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(version_i64.map(|v| u64::try_from(v).unwrap_or(0)))
     })
     .await
 }
@@ -1439,5 +1604,208 @@ mod tests {
         assert_eq!(dec[1].1, b"a".to_vec());
         assert_eq!(dec[2].0, "x-test");
         assert_eq!(dec[2].1, b"b".to_vec());
+    }
+
+    // -----------------------------------------------------------------
+    // Phase B.4 (issue #275) — atomic monotonic Device Tree state upsert.
+    // -----------------------------------------------------------------
+
+    async fn make_inmem_pool() -> DBPool {
+        // Each test gets its own private in-memory DB so they don't
+        // collide on shared file state.
+        let conn = Connection::open_in_memory().expect("open :memory:");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        let pool = Arc::new(Mutex::new(conn));
+        init_db(&pool).await.expect("init schema");
+        pool
+    }
+
+    #[tokio::test]
+    async fn devtree_first_insert_returns_inserted() {
+        let pool = make_inmem_pool().await;
+        let outcome = upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            1,
+            1,
+            &[0x11u8; 32],
+            b"payload1",
+            42,
+        )
+        .await
+        .expect("insert");
+        assert_eq!(outcome, DeviceTreeUpsertOutcome::Inserted);
+
+        let v = get_device_tree_state_version(&pool, "GENESISA")
+            .await
+            .expect("read");
+        assert_eq!(v, Some(1u64));
+        let p = get_device_tree_state_payload(&pool, "GENESISA")
+            .await
+            .expect("read payload");
+        assert_eq!(p.as_deref(), Some(b"payload1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn devtree_strictly_greater_version_is_accepted() {
+        let pool = make_inmem_pool().await;
+        upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            1,
+            1,
+            &[0x11u8; 32],
+            b"payload1",
+            10,
+        )
+        .await
+        .expect("v1");
+        let outcome = upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            2,
+            2,
+            &[0x22u8; 32],
+            b"payload2",
+            11,
+        )
+        .await
+        .expect("v2");
+        assert_eq!(
+            outcome,
+            DeviceTreeUpsertOutcome::Updated { prior_version: 1 }
+        );
+
+        let v = get_device_tree_state_version(&pool, "GENESISA")
+            .await
+            .expect("read");
+        assert_eq!(v, Some(2u64));
+        let p = get_device_tree_state_payload(&pool, "GENESISA")
+            .await
+            .expect("read payload");
+        assert_eq!(p.as_deref(), Some(b"payload2".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn devtree_equal_version_is_rejected_as_stale() {
+        let pool = make_inmem_pool().await;
+        upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            5,
+            1,
+            &[0x11u8; 32],
+            b"payload-v5",
+            10,
+        )
+        .await
+        .expect("v5");
+        let outcome = upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            5,
+            1,
+            &[0x99u8; 32],
+            b"payload-replay",
+            11,
+        )
+        .await
+        .expect("replay");
+        assert_eq!(
+            outcome,
+            DeviceTreeUpsertOutcome::RejectedStale { prior_version: 5 }
+        );
+
+        // Persisted state must be unchanged.
+        let p = get_device_tree_state_payload(&pool, "GENESISA")
+            .await
+            .expect("read");
+        assert_eq!(p.as_deref(), Some(b"payload-v5".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn devtree_lesser_version_is_rejected_as_stale() {
+        let pool = make_inmem_pool().await;
+        upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            10,
+            1,
+            &[0x11u8; 32],
+            b"payload-v10",
+            10,
+        )
+        .await
+        .expect("v10");
+        let outcome = upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            3,
+            1,
+            &[0x33u8; 32],
+            b"payload-v3",
+            11,
+        )
+        .await
+        .expect("attempt v3");
+        assert_eq!(
+            outcome,
+            DeviceTreeUpsertOutcome::RejectedStale { prior_version: 10 }
+        );
+        let p = get_device_tree_state_payload(&pool, "GENESISA")
+            .await
+            .expect("read");
+        assert_eq!(p.as_deref(), Some(b"payload-v10".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn devtree_different_genesis_keys_are_isolated() {
+        let pool = make_inmem_pool().await;
+        let a = upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISA",
+            1,
+            1,
+            &[0x11u8; 32],
+            b"a-v1",
+            10,
+        )
+        .await
+        .expect("a v1");
+        let b = upsert_device_tree_state_if_monotonic(
+            &pool,
+            "GENESISB",
+            1,
+            1,
+            &[0x22u8; 32],
+            b"b-v1",
+            10,
+        )
+        .await
+        .expect("b v1");
+        assert_eq!(a, DeviceTreeUpsertOutcome::Inserted);
+        assert_eq!(b, DeviceTreeUpsertOutcome::Inserted);
+
+        let v_a = get_device_tree_state_version(&pool, "GENESISA")
+            .await
+            .expect("read a");
+        let v_b = get_device_tree_state_version(&pool, "GENESISB")
+            .await
+            .expect("read b");
+        assert_eq!(v_a, Some(1u64));
+        assert_eq!(v_b, Some(1u64));
+    }
+
+    #[tokio::test]
+    async fn devtree_get_returns_none_when_absent() {
+        let pool = make_inmem_pool().await;
+        let v = get_device_tree_state_version(&pool, "DOES_NOT_EXIST")
+            .await
+            .expect("read");
+        assert_eq!(v, None);
+        let p = get_device_tree_state_payload(&pool, "DOES_NOT_EXIST")
+            .await
+            .expect("read payload");
+        assert!(p.is_none());
     }
 }

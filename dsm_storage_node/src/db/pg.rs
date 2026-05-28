@@ -427,6 +427,27 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
         )
         .await?;
 
+    // Phase B.4 (issue #275): bounded validator for the published
+    // Device Tree state. One row per genesis. `version_number` is the
+    // monotone counter the PUT /devtree/root validator enforces;
+    // `root_hash` and `device_count` are broken out for indexed lookup.
+    // `payload` is the canonical `DeviceTreeStateV1` proto bytes.
+    client
+        .batch_execute(
+            r#"CREATE TABLE IF NOT EXISTS device_tree_states (
+                    genesis_b32     TEXT PRIMARY KEY,
+                    version_number  BIGINT NOT NULL,
+                    device_count    BIGINT NOT NULL,
+                    root_hash       BYTEA NOT NULL,
+                    payload         BYTEA NOT NULL,
+                    updated_at_tick BIGINT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
+                    ON device_tree_states(genesis_b32, version_number);
+            "#,
+        )
+        .await?;
+
     Ok(())
 }
 
@@ -530,7 +551,161 @@ pub async fn create_slot(
 
 // Removed unused helpers: bump_used_bytes, get_object_size
 
-/// Upsert an object by key.
+// ============================================================
+// Phase B.4 (issue #275): Device Tree state — bounded validator
+// ============================================================
+
+/// Outcome of a [`upsert_device_tree_state_if_monotonic`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceTreeUpsertOutcome {
+    /// No prior row existed for this genesis; the row was newly inserted.
+    Inserted,
+    /// A prior row existed and was replaced because
+    /// `new_version > prior_version`.
+    Updated { prior_version: u64 },
+    /// A prior row existed and the write was rejected because
+    /// `new_version <= prior_version`. The persisted state is unchanged.
+    RejectedStale { prior_version: u64 },
+}
+
+/// Atomically upsert a `DeviceTreeStateV1` row for `genesis_b32`,
+/// enforcing strictly-monotonic `version_number`. Runs as a single
+/// `SERIALIZABLE` transaction so concurrent writers cannot bypass the
+/// monotonicity check.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_device_tree_state_if_monotonic(
+    pool: &Pool,
+    genesis_b32: &str,
+    new_version: u64,
+    device_count: u32,
+    root_hash: &[u8],
+    payload: &[u8],
+    updated_at_tick: u64,
+) -> Result<DeviceTreeUpsertOutcome> {
+    use tokio_postgres::IsolationLevel;
+
+    let new_version_i64 = i64::try_from(new_version)
+        .map_err(|_| anyhow::anyhow!("version_number {new_version} does not fit in i64"))?;
+    let device_count_i64 = i64::from(device_count);
+    let updated_at_tick_i64 = i64::try_from(updated_at_tick).map_err(|_| {
+        anyhow::anyhow!("updated_at_tick {updated_at_tick} does not fit in i64")
+    })?;
+
+    let mut client = pool.get().await?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .await?;
+
+    let row = tx
+        .query_opt(
+            "SELECT version_number FROM device_tree_states WHERE genesis_b32 = $1 FOR UPDATE",
+            &[&genesis_b32],
+        )
+        .await?;
+
+    let outcome = match row {
+        Some(r) => {
+            let prior_i64: i64 = r.get(0);
+            let prior_u64 = u64::try_from(prior_i64).unwrap_or(0);
+            if new_version_i64 <= prior_i64 {
+                DeviceTreeUpsertOutcome::RejectedStale {
+                    prior_version: prior_u64,
+                }
+            } else {
+                let stmt = tx
+                    .prepare_cached(
+                        "UPDATE device_tree_states
+                         SET version_number=$2, device_count=$3, root_hash=$4,
+                             payload=$5, updated_at_tick=$6
+                         WHERE genesis_b32=$1",
+                    )
+                    .await?;
+                tx.execute(
+                    &stmt,
+                    &[
+                        &genesis_b32,
+                        &new_version_i64,
+                        &device_count_i64,
+                        &root_hash,
+                        &payload,
+                        &updated_at_tick_i64,
+                    ],
+                )
+                .await?;
+                DeviceTreeUpsertOutcome::Updated {
+                    prior_version: prior_u64,
+                }
+            }
+        }
+        None => {
+            let stmt = tx
+                .prepare_cached(
+                    "INSERT INTO device_tree_states
+                       (genesis_b32, version_number, device_count, root_hash, payload, updated_at_tick)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .await?;
+            tx.execute(
+                &stmt,
+                &[
+                    &genesis_b32,
+                    &new_version_i64,
+                    &device_count_i64,
+                    &root_hash,
+                    &payload,
+                    &updated_at_tick_i64,
+                ],
+            )
+            .await?;
+            DeviceTreeUpsertOutcome::Inserted
+        }
+    };
+
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Return the persisted `DeviceTreeStateV1` payload bytes for a
+/// genesis, or `None` if no state has been written yet.
+pub async fn get_device_tree_state_payload(
+    pool: &Pool,
+    genesis_b32: &str,
+) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT payload FROM device_tree_states WHERE genesis_b32 = $1",
+            &[&genesis_b32],
+        )
+        .await?;
+    Ok(row.map(|r| {
+        let payload: Vec<u8> = r.get(0);
+        payload
+    }))
+}
+
+/// Return only the current `version_number` for a genesis's persisted
+/// Device Tree state, or `None`. Used by tests asserting monotonic
+/// enforcement without re-decoding the full proto.
+pub async fn get_device_tree_state_version(
+    pool: &Pool,
+    genesis_b32: &str,
+) -> Result<Option<u64>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT version_number FROM device_tree_states WHERE genesis_b32 = $1",
+            &[&genesis_b32],
+        )
+        .await?;
+    Ok(row.map(|r| {
+        let v: i64 = r.get(0);
+        u64::try_from(v).unwrap_or(0)
+    }))
+}
+
 /// Atomicity: Uses explicit transaction + ON CONFLICT for deterministic concurrent inserts.
 /// The `key` column has PRIMARY KEY constraint, ensuring unique constraint enforcement.
 /// PostgreSQL's default READ COMMITTED isolation + PRIMARY KEY prevents race conditions:

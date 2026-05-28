@@ -1,6 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Identity mirrors: Device Tree root and inclusion proofs (protobuf-only, raw bytes).
-//! Storage node is dumb: deterministic keys, raw bytes; clients verify.
+//!
+//! `PUT /api/v2/identity/{genesis}/devtree/root` is a *bounded* validator
+//! for the Device Tree state. The Phase B.4 (issue #275) policy is:
+//!
+//! 1. Body is non-empty and within [`MAX_DEVTREE_STATE_BYTES`].
+//! 2. Body parses as a [`dsm::types::proto::DeviceTreeStateV1`] proto
+//!    with an inner `tree` summary present.
+//! 3. The summary's `root_hash` is exactly 32 bytes and non-zero.
+//! 4. The summary's `device_count >= 1` and equals `device_ids.len()`,
+//!    and every `device_ids` element is exactly 32 bytes.
+//! 5. `version_number > prior_version_number` (enforced atomically
+//!    inside the DB via `upsert_device_tree_state_if_monotonic`).
+//!
+//! The validator is bounded: it does **not** verify Merkle structure,
+//! signatures, or DevID derivation — those are client-side concerns
+//! (Phase 3 enrollment hardening). All it guarantees is that the
+//! published anchor is well-formed and monotonic so downstream
+//! consumers (GET /devtree/root, GET /devtree/proof in Phase B.5) read
+//! a consistent state per genesis.
 
 use axum::{
     body::Bytes,
@@ -10,12 +28,18 @@ use axum::{
     routing::get,
     Router,
 };
+use prost::Message;
 use std::sync::Arc;
 
 use crate::api::infra::hardening::blake3_tagged;
 use crate::AppState;
+use dsm::types::proto as generated;
 
-const MAX_ROOT_BYTES: usize = 256; // small protobuf
+/// Upper bound for the persisted DeviceTreeStateV1 payload. Each leaf is
+/// 32 bytes; with proto overhead, 1024 devices fit comfortably within
+/// 64 KiB. We cap at 128 KiB to leave headroom and reject obvious DoS
+/// payloads at the boundary before decode.
+const MAX_DEVTREE_STATE_BYTES: usize = 128 * 1024;
 const MAX_PROOF_BYTES: usize = 128 * 1024; // 128 KiB cap
 
 fn key_root(genesis_b: &[u8]) -> String {
@@ -47,13 +71,25 @@ async fn get_root(
     Extension(state): Extension<Arc<AppState>>,
     Path(genesis): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // GET reads from the bounded-validator table first; falls back to
+    // the legacy /devtree/root KV slot only if no validated state has
+    // been published yet, so pre-Phase-B.4 callers still see whatever
+    // bytes they wrote. New writes only land in `device_tree_states`.
     let genesis_b =
         dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
-    let key = key_root(&genesis_b);
-    let bytes = crate::db::get_object_by_key(&state.db_pool, &key)
+    let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
+    let payload = crate::db::get_device_tree_state_payload(&state.db_pool, &genesis_key)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let bytes = match payload {
+        Some(b) => b,
+        None => crate::db::get_object_by_key(&state.db_pool, &key_root(&genesis_b))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?,
+    };
+
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
@@ -62,22 +98,206 @@ async fn get_root(
     Ok((StatusCode::OK, headers, bytes))
 }
 
+/// Structured rejection reasons for `validate_devtree_state` so the
+/// route handler can map each cause to a stable HTTP status + reason
+/// log. Keeping the enum out of the route function lets the unit tests
+/// drive every branch without going through axum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DevTreeValidationError {
+    /// Body failed prost decoding (CHECK 1).
+    Malformed(String),
+    /// Inner `DeviceTreeV1` summary field is missing (CHECK 1).
+    MissingTree,
+    /// `root_hash` length != 32 bytes (CHECK 2).
+    RootHashLength { actual: usize },
+    /// `root_hash` is all zeros (CHECK 2).
+    RootHashAllZeros,
+    /// `device_count < 1` (CHECK 3 lower bound).
+    DeviceCountZero,
+    /// `device_count != device_ids.len()` (CHECK 3 consistency).
+    DeviceCountMismatch { declared: u32, actual: usize },
+    /// Some `device_ids` entry is not exactly 32 bytes (CHECK 3).
+    DeviceIdLength { index: usize, actual: usize },
+}
+
+impl DevTreeValidationError {
+    pub(crate) fn http_status(&self) -> StatusCode {
+        // All validation failures are client-input errors -> 400.
+        StatusCode::BAD_REQUEST
+    }
+
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            DevTreeValidationError::Malformed(e) => format!("malformed DeviceTreeStateV1: {e}"),
+            DevTreeValidationError::MissingTree => "missing DeviceTreeStateV1.tree".into(),
+            DevTreeValidationError::RootHashLength { actual } => {
+                format!("root_hash must be 32 bytes, got {actual}")
+            }
+            DevTreeValidationError::RootHashAllZeros => "root_hash must not be all zeros".into(),
+            DevTreeValidationError::DeviceCountZero => "device_count must be >= 1".into(),
+            DevTreeValidationError::DeviceCountMismatch { declared, actual } => format!(
+                "device_count {declared} does not match device_ids.len() {actual}"
+            ),
+            DevTreeValidationError::DeviceIdLength { index, actual } => {
+                format!("device_ids[{index}] must be 32 bytes, got {actual}")
+            }
+        }
+    }
+}
+
+/// Successful validation extract — what the route handler hands to the
+/// atomic-monotonic upsert layer.
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedDevTreeState {
+    pub version_number: u64,
+    pub device_count: u32,
+    pub root_hash: [u8; 32],
+}
+
+/// Run CHECKs 1–4 on a candidate DeviceTreeStateV1 body. Returns the
+/// extracted summary on success; structured error on rejection.
+/// Pure: no I/O, so directly unit-testable for every branch.
+pub(crate) fn validate_devtree_state(
+    body: &[u8],
+) -> Result<ValidatedDevTreeState, DevTreeValidationError> {
+    // CHECK 1: decode
+    let state = generated::DeviceTreeStateV1::decode(body)
+        .map_err(|e| DevTreeValidationError::Malformed(e.to_string()))?;
+    let tree = state.tree.ok_or(DevTreeValidationError::MissingTree)?;
+
+    // CHECK 2: root_hash is exactly 32 bytes and non-zero
+    if tree.root_hash.len() != 32 {
+        return Err(DevTreeValidationError::RootHashLength {
+            actual: tree.root_hash.len(),
+        });
+    }
+    if tree.root_hash.iter().all(|&b| b == 0) {
+        return Err(DevTreeValidationError::RootHashAllZeros);
+    }
+    let mut root_hash = [0u8; 32];
+    root_hash.copy_from_slice(&tree.root_hash);
+
+    // CHECK 3: device_count >= 1, matches device_ids.len(), all 32 bytes
+    if tree.device_count == 0 {
+        return Err(DevTreeValidationError::DeviceCountZero);
+    }
+    if (tree.device_count as usize) != state.device_ids.len() {
+        return Err(DevTreeValidationError::DeviceCountMismatch {
+            declared: tree.device_count,
+            actual: state.device_ids.len(),
+        });
+    }
+    for (i, id) in state.device_ids.iter().enumerate() {
+        if id.len() != 32 {
+            return Err(DevTreeValidationError::DeviceIdLength {
+                index: i,
+                actual: id.len(),
+            });
+        }
+    }
+
+    // CHECK 4 (version_number monotonicity) is enforced atomically by
+    // `upsert_device_tree_state_if_monotonic` in the DB layer; we cannot
+    // do it here without a TOCTOU race against concurrent writers.
+
+    Ok(ValidatedDevTreeState {
+        version_number: tree.version_number,
+        device_count: tree.device_count,
+        root_hash,
+    })
+}
+
 async fn put_root(
     Extension(state): Extension<Arc<AppState>>,
     Path(genesis): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    if body.is_empty() || body.len() > MAX_ROOT_BYTES {
+    // Size guard before decode so the validator never has to allocate
+    // against an attacker-controlled blob.
+    if body.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if body.len() > MAX_DEVTREE_STATE_BYTES {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    let genesis_b =
-        dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
-    let key = key_root(&genesis_b);
-    let pool = &*state.db_pool;
-    crate::db::upsert_object(pool, &key, body.as_ref(), b"identity", body.len() as i64)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
+
+    let genesis_b = dsm_sdk::util::text_id::decode_base32_crockford(&genesis)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    if genesis_b.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // CHECKs 1–3 (structure + shape).
+    let validated = match validate_devtree_state(body.as_ref()) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "PUT /devtree/root for genesis={}: rejected: {}",
+                genesis,
+                e.reason()
+            );
+            return Err(e.http_status());
+        }
+    };
+
+    // Use the canonical 32-byte-Base32 form for the table key so future
+    // GETs that decode the same genesis path land on the same row.
+    let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
+
+    // CHECK 4 (monotonic version) is enforced atomically here.
+    let now_tick = state
+        .current_tick
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::db::upsert_device_tree_state_if_monotonic(
+        &state.db_pool,
+        &genesis_key,
+        validated.version_number,
+        validated.device_count,
+        &validated.root_hash,
+        body.as_ref(),
+        now_tick.max(0) as u64,
+    )
+    .await
+    .map_err(|e| {
+        log::error!(
+            "PUT /devtree/root for genesis={}: DB write failed: {}",
+            genesis,
+            e
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    match outcome {
+        crate::db::DeviceTreeUpsertOutcome::Inserted => {
+            log::info!(
+                "PUT /devtree/root for genesis={}: inserted version_number={}",
+                genesis,
+                validated.version_number
+            );
+            Ok(StatusCode::CREATED)
+        }
+        crate::db::DeviceTreeUpsertOutcome::Updated { prior_version } => {
+            log::info!(
+                "PUT /devtree/root for genesis={}: updated version_number={} (was {})",
+                genesis,
+                validated.version_number,
+                prior_version
+            );
+            Ok(StatusCode::OK)
+        }
+        crate::db::DeviceTreeUpsertOutcome::RejectedStale { prior_version } => {
+            log::warn!(
+                "PUT /devtree/root for genesis={}: rejected stale version_number={} (current={})",
+                genesis,
+                validated.version_number,
+                prior_version
+            );
+            // 409 Conflict matches the semantics: the resource exists at
+            // a higher version, so the client's request is incompatible
+            // with the current state.
+            Err(StatusCode::CONFLICT)
+        }
+    }
 }
 
 async fn get_proof(
@@ -281,7 +501,180 @@ mod tests {
 
     #[test]
     fn size_constants_are_reasonable() {
-        assert_eq!(MAX_ROOT_BYTES, 256);
+        assert_eq!(MAX_DEVTREE_STATE_BYTES, 128 * 1024);
         assert_eq!(MAX_PROOF_BYTES, 128 * 1024);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase B.4 (issue #275) — `validate_devtree_state` covers CHECK 1–3.
+    // CHECK 4 (monotonic version_number) is enforced atomically inside
+    // the DB layer and is exercised by the
+    // `upsert_device_tree_state_if_monotonic` integration test in
+    // `dsm_storage_node::db::sqlite` below.
+    // -----------------------------------------------------------------
+
+    fn build_state(
+        device_ids: Vec<[u8; 32]>,
+        version: u64,
+        override_root: Option<[u8; 32]>,
+    ) -> generated::DeviceTreeStateV1 {
+        let tree = dsm::common::device_tree::DeviceTree::new(device_ids.clone());
+        let root_hash = override_root.unwrap_or_else(|| tree.root());
+        generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: root_hash.to_vec(),
+                device_count: tree.len() as u32,
+                version_number: version,
+            }),
+            device_ids: tree.leaves().iter().map(|id| id.to_vec()).collect(),
+        }
+    }
+
+    #[test]
+    fn validator_accepts_well_formed_state() {
+        let state = build_state(vec![[0x11u8; 32], [0x22u8; 32]], 7, None);
+        let bytes = state.encode_to_vec();
+
+        let v = validate_devtree_state(&bytes).expect("well-formed state must validate");
+        assert_eq!(v.version_number, 7);
+        assert_eq!(v.device_count, 2);
+        let expected_root = dsm::common::device_tree::DeviceTree::new(vec![[0x11u8; 32], [0x22u8; 32]]).root();
+        assert_eq!(v.root_hash, expected_root);
+    }
+
+    #[test]
+    fn validator_rejects_malformed_proto() {
+        let bytes = b"not a valid DeviceTreeStateV1".to_vec();
+        let err = validate_devtree_state(&bytes).expect_err("malformed must reject");
+        assert!(matches!(err, DevTreeValidationError::Malformed(_)));
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validator_rejects_missing_tree_summary() {
+        let state = generated::DeviceTreeStateV1 {
+            tree: None,
+            device_ids: vec![],
+        };
+        let bytes = state.encode_to_vec();
+        let err = validate_devtree_state(&bytes).expect_err("missing tree must reject");
+        assert_eq!(err, DevTreeValidationError::MissingTree);
+    }
+
+    #[test]
+    fn validator_rejects_root_hash_wrong_length() {
+        let mut state = build_state(vec![[0x11u8; 32]], 1, None);
+        // Truncate root_hash to 16 bytes.
+        if let Some(t) = state.tree.as_mut() {
+            t.root_hash = vec![0x42u8; 16];
+        }
+        let bytes = state.encode_to_vec();
+        let err = validate_devtree_state(&bytes).expect_err("wrong-length root must reject");
+        assert!(
+            matches!(err, DevTreeValidationError::RootHashLength { actual: 16 }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validator_rejects_all_zero_root_hash() {
+        let state = build_state(vec![[0x11u8; 32]], 1, Some([0u8; 32]));
+        let bytes = state.encode_to_vec();
+        let err = validate_devtree_state(&bytes).expect_err("zero root must reject");
+        assert_eq!(err, DevTreeValidationError::RootHashAllZeros);
+    }
+
+    #[test]
+    fn validator_rejects_zero_device_count() {
+        // Construct an empty tree summary by hand (DeviceTree::new
+        // would have already rejected an empty leaf list).
+        let state = generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: vec![0x99u8; 32], // non-zero so we reach CHECK 3
+                device_count: 0,
+                version_number: 1,
+            }),
+            device_ids: vec![],
+        };
+        let bytes = state.encode_to_vec();
+        let err = validate_devtree_state(&bytes).expect_err("zero device_count must reject");
+        assert_eq!(err, DevTreeValidationError::DeviceCountZero);
+    }
+
+    #[test]
+    fn validator_rejects_device_count_mismatch() {
+        // declared = 3, actual = 2.
+        let state = generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: vec![0x99u8; 32],
+                device_count: 3,
+                version_number: 1,
+            }),
+            device_ids: vec![vec![0x11u8; 32], vec![0x22u8; 32]],
+        };
+        let bytes = state.encode_to_vec();
+        let err = validate_devtree_state(&bytes).expect_err("count mismatch must reject");
+        assert!(
+            matches!(
+                err,
+                DevTreeValidationError::DeviceCountMismatch {
+                    declared: 3,
+                    actual: 2,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validator_rejects_device_id_wrong_length() {
+        let state = generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: vec![0x99u8; 32],
+                device_count: 2,
+                version_number: 1,
+            }),
+            device_ids: vec![vec![0x11u8; 32], vec![0x22u8; 31]], // second is 31 bytes
+        };
+        let bytes = state.encode_to_vec();
+        let err =
+            validate_devtree_state(&bytes).expect_err("wrong-length device_id must reject");
+        assert!(
+            matches!(
+                err,
+                DevTreeValidationError::DeviceIdLength {
+                    index: 1,
+                    actual: 31,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validator_rejects_empty_body() {
+        // An empty body decodes as an all-defaults DeviceTreeStateV1
+        // with `tree: None`, which the next check rejects as MissingTree.
+        let err = validate_devtree_state(&[]).expect_err("empty body must reject");
+        assert_eq!(err, DevTreeValidationError::MissingTree);
+    }
+
+    #[test]
+    fn http_status_is_always_bad_request_for_validation_failures() {
+        for e in [
+            DevTreeValidationError::Malformed("x".into()),
+            DevTreeValidationError::MissingTree,
+            DevTreeValidationError::RootHashLength { actual: 16 },
+            DevTreeValidationError::RootHashAllZeros,
+            DevTreeValidationError::DeviceCountZero,
+            DevTreeValidationError::DeviceCountMismatch { declared: 3, actual: 2 },
+            DevTreeValidationError::DeviceIdLength { index: 0, actual: 31 },
+        ] {
+            assert_eq!(e.http_status(), StatusCode::BAD_REQUEST);
+        }
     }
 }
