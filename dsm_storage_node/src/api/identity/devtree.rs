@@ -40,17 +40,9 @@ use dsm::types::proto as generated;
 /// 64 KiB. We cap at 128 KiB to leave headroom and reject obvious DoS
 /// payloads at the boundary before decode.
 const MAX_DEVTREE_STATE_BYTES: usize = 128 * 1024;
-const MAX_PROOF_BYTES: usize = 128 * 1024; // 128 KiB cap
 
 fn key_root(genesis_b: &[u8]) -> String {
     let k = blake3_tagged("DSM/identity/devtree/root", genesis_b);
-    dsm_sdk::util::text_id::encode_base32_crockford(&k)
-}
-fn key_proof(genesis_b: &[u8], devid_b: &[u8]) -> String {
-    let mut buf = Vec::with_capacity(genesis_b.len() + devid_b.len());
-    buf.extend_from_slice(genesis_b);
-    buf.extend_from_slice(devid_b);
-    let k = blake3_tagged("DSM/identity/devtree/proof", &buf);
     dsm_sdk::util::text_id::encode_base32_crockford(&k)
 }
 
@@ -60,9 +52,13 @@ pub fn create_router(state: Arc<AppState>) -> Router<()> {
             "/api/v2/identity/{genesis}/devtree/root",
             get(get_root).put(put_root),
         )
+        // PUT /devtree/proof was removed in Phase B.5 (issue #276).
+        // The endpoint still routes so out-of-date callers receive a
+        // 405 with the post-migration explanation rather than a 404
+        // that silently dead-letters.
         .route(
             "/api/v2/identity/{genesis}/devtree/proof",
-            get(get_proof).put(put_proof),
+            get(get_proof).put(put_proof_removed),
         )
         .layer(Extension(state))
 }
@@ -300,6 +296,24 @@ async fn put_root(
     }
 }
 
+/// Derive a `DeviceInclusionProofV1` for the requested DevID against
+/// the genesis's currently-published Device Tree (Phase B.5, issue
+/// #276).
+///
+/// Trust model: the storage node never accepts caller-supplied proof
+/// bytes. The proof is rebuilt deterministically on every GET from
+/// the persisted `DeviceTreeStateV1.device_ids`, so two GETs against
+/// the same persisted state yield byte-identical proof bytes and the
+/// returned `root_hash` always matches `DeviceTreeStateV1.tree.root_hash`.
+///
+/// HTTP semantics:
+/// - 200 OK + `DeviceInclusionProofV1` proto bytes if the device is a
+///   member of the current tree.
+/// - 400 Bad Request if `genesis` or `devid` is missing / malformed.
+/// - 404 Not Found if no tree has been published for this genesis
+///   *or* the device is not currently a member.
+/// - 500 Internal if the persisted state cannot be decoded (data
+///   corruption).
 async fn get_proof(
     Extension(state): Extension<Arc<AppState>>,
     Path(genesis): Path<String>,
@@ -307,44 +321,188 @@ async fn get_proof(
 ) -> Result<impl IntoResponse, StatusCode> {
     let genesis_b =
         dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
+    if genesis_b.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let devid_b = parse_devid(raw.as_deref())?;
     if devid_b.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let key = key_proof(&genesis_b, &devid_b);
-    let bytes = crate::db::get_object_by_key(&state.db_pool, &key)
+    let mut devid_arr = [0u8; 32];
+    devid_arr.copy_from_slice(&devid_b);
+
+    let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
+    let payload = crate::db::get_device_tree_state_payload(&state.db_pool, &genesis_key)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            log::error!(
+                "GET /devtree/proof for genesis={}: DB read failed: {}",
+                genesis,
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    let proof_bytes = derive_inclusion_proof(&payload, &devid_arr).map_err(|e| {
+        log::warn!(
+            "GET /devtree/proof for genesis={} devid={}: {}",
+            genesis,
+            dsm_sdk::util::text_id::encode_base32_crockford(&devid_arr),
+            e.reason()
+        );
+        e.http_status()
+    })?;
+
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    Ok((StatusCode::OK, headers, bytes))
+    Ok((StatusCode::OK, headers, proof_bytes))
 }
 
-async fn put_proof(
-    Extension(state): Extension<Arc<AppState>>,
-    Path(genesis): Path<String>,
-    RawQuery(raw): RawQuery,
-    body: Bytes,
-) -> Result<impl IntoResponse, StatusCode> {
-    if body.is_empty() || body.len() > MAX_PROOF_BYTES {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+/// `PUT /devtree/proof` is removed (Phase B.5, issue #276).
+///
+/// Inclusion proofs are now derived on GET from the storage node's
+/// persisted `DeviceTreeStateV1`. Accepting caller-supplied proofs
+/// would let an arbitrary client install bytes that subsequent
+/// readers would consume as authoritative; derive-on-GET is the only
+/// path where the served proof is provably consistent with the
+/// validated published anchor.
+///
+/// Returns `405 Method Not Allowed` for every call so out-of-date
+/// callers fail loudly instead of silently storing bytes that will
+/// never be read (the prior endpoint stored proofs under a key the
+/// new GET never reads).
+async fn put_proof_removed() -> impl IntoResponse {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(
+            axum::http::header::ALLOW,
+            HeaderValue::from_static("GET"),
+        )],
+        "PUT /devtree/proof was removed in Phase B.5 (issue #276); \
+         inclusion proofs are derived on GET from the persisted \
+         DeviceTreeStateV1. See docs/plans/2026-04-24-genesis-mpc-and-device-tree.md.",
+    )
+}
+
+/// Structured rejection reasons for `derive_inclusion_proof`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DevTreeProofError {
+    /// Persisted DeviceTreeStateV1 failed prost decoding (data
+    /// corruption — the validator rejected malformed inputs at PUT).
+    CorruptState(String),
+    /// Persisted state's `tree` summary is missing (data corruption).
+    CorruptStateMissingTree,
+    /// Any persisted `device_ids` element is not 32 bytes (corruption).
+    CorruptStateDeviceIdLength { index: usize, actual: usize },
+    /// The requested DevID is not currently a member of the published
+    /// Device Tree.
+    DevIdNotInTree,
+    /// `DeviceTree::proof` declined to produce a proof. With
+    /// `DeviceTree::new` having already canonicalised the leaf list
+    /// this can only happen if the leaf list is empty; we still
+    /// surface it distinctly from `DevIdNotInTree` so corruption can
+    /// be distinguished from absence.
+    ProofUnavailable,
+}
+
+impl DevTreeProofError {
+    pub(crate) fn http_status(&self) -> StatusCode {
+        match self {
+            DevTreeProofError::CorruptState(_)
+            | DevTreeProofError::CorruptStateMissingTree
+            | DevTreeProofError::CorruptStateDeviceIdLength { .. }
+            | DevTreeProofError::ProofUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
+            DevTreeProofError::DevIdNotInTree => StatusCode::NOT_FOUND,
+        }
     }
-    let genesis_b =
-        dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
-    let devid_b = parse_devid(raw.as_deref())?;
-    if devid_b.len() != 32 {
-        return Err(StatusCode::BAD_REQUEST);
+
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            DevTreeProofError::CorruptState(e) => format!("corrupt persisted state: {e}"),
+            DevTreeProofError::CorruptStateMissingTree => {
+                "corrupt persisted state: tree summary missing".into()
+            }
+            DevTreeProofError::CorruptStateDeviceIdLength { index, actual } => format!(
+                "corrupt persisted state: device_ids[{index}] is {actual} bytes, expected 32"
+            ),
+            DevTreeProofError::DevIdNotInTree => "device_id is not in the current tree".into(),
+            DevTreeProofError::ProofUnavailable => {
+                "DeviceTree could not produce a proof for this device".into()
+            }
+        }
     }
-    let key = key_proof(&genesis_b, &devid_b);
-    let pool = &*state.db_pool;
-    crate::db::upsert_object(pool, &key, body.as_ref(), b"identity", body.len() as i64)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
+}
+
+/// Decode a persisted [`generated::DeviceTreeStateV1`], rebuild the
+/// `DeviceTree` deterministically from the canonical leaf list, and
+/// emit a [`generated::DeviceInclusionProofV1`] for `target_devid`.
+///
+/// Pure: no I/O. The proof's `siblings`, `path_bits`, and `root_hash`
+/// are completely determined by the persisted leaf list, so this is
+/// directly unit-testable against the leaf vectors `DeviceTree`
+/// already covers.
+pub(crate) fn derive_inclusion_proof(
+    persisted_payload: &[u8],
+    target_devid: &[u8; 32],
+) -> Result<Vec<u8>, DevTreeProofError> {
+    let state = generated::DeviceTreeStateV1::decode(persisted_payload)
+        .map_err(|e| DevTreeProofError::CorruptState(e.to_string()))?;
+    let _summary = state
+        .tree
+        .as_ref()
+        .ok_or(DevTreeProofError::CorruptStateMissingTree)?;
+
+    let mut devids: Vec<[u8; 32]> = Vec::with_capacity(state.device_ids.len());
+    for (i, id) in state.device_ids.iter().enumerate() {
+        if id.len() != 32 {
+            return Err(DevTreeProofError::CorruptStateDeviceIdLength {
+                index: i,
+                actual: id.len(),
+            });
+        }
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(id);
+        devids.push(buf);
+    }
+
+    let tree = dsm::common::device_tree::DeviceTree::new(devids);
+
+    // Fast-fail with a NotFound (404) before invoking DeviceTree::proof
+    // so callers can distinguish "device not in tree" from
+    // "DeviceTree internal error" by HTTP status alone.
+    if tree.proof(target_devid).is_none() {
+        return Err(DevTreeProofError::DevIdNotInTree);
+    }
+    let dev_proof = tree
+        .proof(target_devid)
+        .ok_or(DevTreeProofError::ProofUnavailable)?;
+
+    let root_hash = tree.root();
+
+    // Pack path_bits LSB-first per Phase B.1's `DeviceInclusionProofV1`
+    // encoding convention.
+    let path_bits_len = dev_proof.path_bits.len();
+    let packed_len = path_bits_len.div_ceil(8);
+    let mut packed_bits = vec![0u8; packed_len];
+    for (i, &bit) in dev_proof.path_bits.iter().enumerate() {
+        if bit {
+            packed_bits[i / 8] |= 1 << (i % 8);
+        }
+    }
+
+    let proof_proto = generated::DeviceInclusionProofV1 {
+        device_id: target_devid.to_vec(),
+        root_hash: root_hash.to_vec(),
+        siblings: dev_proof.siblings.iter().map(|s| s.to_vec()).collect(),
+        path_bits_len: path_bits_len as u32,
+        path_bits: packed_bits,
+    };
+
+    Ok(proof_proto.encode_to_vec())
 }
 
 fn parse_devid(raw: Option<&str>) -> Result<Vec<u8>, StatusCode> {
@@ -419,26 +577,10 @@ mod tests {
         assert_ne!(key_root(&g1), key_root(&g2));
     }
 
-    #[test]
-    fn key_proof_is_deterministic_and_order_sensitive() {
-        let genesis = [0x01u8; 32];
-        let devid = [0x02u8; 32];
-        let k1 = key_proof(&genesis, &devid);
-        let k2 = key_proof(&genesis, &devid);
-        assert_eq!(k1, k2);
-
-        // Swapping genesis/devid must produce different key
-        let swapped = key_proof(&devid, &genesis);
-        assert_ne!(k1, swapped, "key_proof must be order-sensitive");
-    }
-
-    #[test]
-    fn key_proof_differs_for_different_devid() {
-        let genesis = [0x01u8; 32];
-        let d1 = [0x0Au8; 32];
-        let d2 = [0x0Bu8; 32];
-        assert_ne!(key_proof(&genesis, &d1), key_proof(&genesis, &d2));
-    }
+    // key_proof was removed alongside the PUT /devtree/proof endpoint
+    // (Phase B.5, issue #276). Inclusion proofs are now derived on GET
+    // from the persisted DeviceTreeStateV1, so the storage node no
+    // longer needs an opaque proof-keyed KV slot.
 
     #[test]
     fn parse_devid_extracts_value() {
@@ -502,7 +644,6 @@ mod tests {
     #[test]
     fn size_constants_are_reasonable() {
         assert_eq!(MAX_DEVTREE_STATE_BYTES, 128 * 1024);
-        assert_eq!(MAX_PROOF_BYTES, 128 * 1024);
     }
 
     // -----------------------------------------------------------------
@@ -676,5 +817,188 @@ mod tests {
         ] {
             assert_eq!(e.http_status(), StatusCode::BAD_REQUEST);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase B.5 (issue #276) — derive_inclusion_proof:
+    // Inclusion proofs are reconstructed deterministically on GET from
+    // the persisted `DeviceTreeStateV1`. The storage node never accepts
+    // caller-supplied proof bytes; the only sanctioned path is this
+    // pure derivation.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn proof_derivation_returns_valid_proof_for_member() {
+        let dev_a = [0x11u8; 32];
+        let dev_b = [0x22u8; 32];
+        let state = build_state(vec![dev_a, dev_b], 1, None);
+        let payload = state.encode_to_vec();
+
+        let proof_bytes = derive_inclusion_proof(&payload, &dev_a).expect("proof for member");
+
+        let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
+            .expect("decode proof");
+        assert_eq!(proof.device_id, dev_a.to_vec());
+
+        // Reconstruct DevTreeProof from the encoded bits and verify
+        // against the published root.
+        let mut path_bits = Vec::with_capacity(proof.path_bits_len as usize);
+        for i in 0..(proof.path_bits_len as usize) {
+            let byte = proof.path_bits[i / 8];
+            path_bits.push((byte & (1 << (i % 8))) != 0);
+        }
+        let siblings: Vec<[u8; 32]> = proof
+            .siblings
+            .iter()
+            .map(|s| {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(s);
+                a
+            })
+            .collect();
+        let dev_proof = dsm::common::device_tree::DevTreeProof {
+            siblings,
+            path_bits,
+            leaf_to_root: true,
+        };
+
+        let mut expected_root = [0u8; 32];
+        expected_root.copy_from_slice(&proof.root_hash);
+        assert!(
+            dev_proof.verify(&dev_a, &expected_root),
+            "derived proof must verify against the published root"
+        );
+        // And the root in the proof must match the one in the persisted state.
+        let canonical_root = dsm::common::device_tree::DeviceTree::new(vec![dev_a, dev_b]).root();
+        assert_eq!(expected_root, canonical_root);
+    }
+
+    #[test]
+    fn proof_derivation_is_byte_deterministic() {
+        let dev_a = [0x11u8; 32];
+        let dev_b = [0x22u8; 32];
+        let dev_c = [0x33u8; 32];
+        let state = build_state(vec![dev_a, dev_b, dev_c], 5, None);
+        let payload = state.encode_to_vec();
+
+        let p1 = derive_inclusion_proof(&payload, &dev_b).expect("proof 1");
+        let p2 = derive_inclusion_proof(&payload, &dev_b).expect("proof 2");
+        assert_eq!(p1, p2, "repeated GETs must return byte-identical proofs");
+    }
+
+    #[test]
+    fn proof_derivation_returns_not_found_for_non_member() {
+        let dev_a = [0x11u8; 32];
+        let dev_b = [0x22u8; 32];
+        let stranger = [0x99u8; 32];
+        let state = build_state(vec![dev_a, dev_b], 1, None);
+        let payload = state.encode_to_vec();
+
+        let err = derive_inclusion_proof(&payload, &stranger).expect_err("stranger rejected");
+        assert_eq!(err, DevTreeProofError::DevIdNotInTree);
+        assert_eq!(err.http_status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn proof_derivation_returns_correct_sibling_count_for_balanced_tree() {
+        // 4 leaves → 2 siblings (ceil(log2(4)) = 2)
+        let devs: Vec<[u8; 32]> = (1u8..=4).map(|i| [i; 32]).collect();
+        let state = build_state(devs.clone(), 1, None);
+        let payload = state.encode_to_vec();
+
+        for d in &devs {
+            let proof_bytes = derive_inclusion_proof(&payload, d).expect("proof");
+            let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
+                .expect("decode");
+            assert_eq!(
+                proof.siblings.len(),
+                2,
+                "4-leaf balanced tree must yield 2 siblings"
+            );
+            assert_eq!(proof.path_bits_len, 2);
+        }
+    }
+
+    #[test]
+    fn proof_derivation_single_leaf_yields_empty_proof() {
+        let dev_a = [0x11u8; 32];
+        let state = build_state(vec![dev_a], 1, None);
+        let payload = state.encode_to_vec();
+
+        let proof_bytes = derive_inclusion_proof(&payload, &dev_a).expect("proof");
+        let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
+            .expect("decode");
+        assert!(proof.siblings.is_empty());
+        assert_eq!(proof.path_bits_len, 0);
+        // single-leaf: root = hash_leaf(dev)
+        let expected_root = dsm::common::device_tree::DeviceTree::single(dev_a).root();
+        assert_eq!(proof.root_hash, expected_root.to_vec());
+    }
+
+    #[test]
+    fn proof_derivation_rejects_corrupt_state_bytes() {
+        let err = derive_inclusion_proof(b"garbage", &[0x11u8; 32])
+            .expect_err("corrupt state rejected");
+        assert!(matches!(err, DevTreeProofError::CorruptState(_)));
+        assert_eq!(err.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn proof_derivation_rejects_missing_tree_summary() {
+        let state = generated::DeviceTreeStateV1 {
+            tree: None,
+            device_ids: vec![vec![0x11u8; 32]],
+        };
+        let payload = state.encode_to_vec();
+        let err = derive_inclusion_proof(&payload, &[0x11u8; 32])
+            .expect_err("missing tree rejected");
+        assert_eq!(err, DevTreeProofError::CorruptStateMissingTree);
+    }
+
+    #[test]
+    fn proof_derivation_rejects_non_32_byte_device_ids() {
+        let state = generated::DeviceTreeStateV1 {
+            tree: Some(generated::DeviceTreeV1 {
+                schema_version: 1,
+                root_hash: vec![0u8; 32],
+                device_count: 1,
+                version_number: 1,
+            }),
+            device_ids: vec![vec![0x11u8; 31]],
+        };
+        let payload = state.encode_to_vec();
+        let err = derive_inclusion_proof(&payload, &[0x11u8; 32])
+            .expect_err("bad device_id length rejected");
+        assert!(matches!(
+            err,
+            DevTreeProofError::CorruptStateDeviceIdLength {
+                index: 0,
+                actual: 31,
+            }
+        ));
+    }
+
+    #[test]
+    fn proof_derivation_matches_canonical_devtree_proof() {
+        // Cross-check: storage-node derived proof bytes must match what
+        // a client running DeviceTree::new(...).proof(...).to_bytes()
+        // would produce on the same canonical leaf list.
+        let dev_a = [0x11u8; 32];
+        let dev_b = [0x22u8; 32];
+        let dev_c = [0x33u8; 32];
+        let state = build_state(vec![dev_a, dev_b, dev_c], 1, None);
+        let payload = state.encode_to_vec();
+
+        let proof_bytes = derive_inclusion_proof(&payload, &dev_b).expect("proof");
+        let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
+            .expect("decode");
+
+        let tree = dsm::common::device_tree::DeviceTree::new(vec![dev_a, dev_b, dev_c]);
+        let dev_proof = tree.proof(&dev_b).expect("canonical proof");
+        let expected_siblings: Vec<Vec<u8>> =
+            dev_proof.siblings.iter().map(|s| s.to_vec()).collect();
+        assert_eq!(proof.siblings, expected_siblings);
+        assert_eq!(proof.path_bits_len as usize, dev_proof.path_bits.len());
+        assert_eq!(proof.root_hash, tree.root().to_vec());
     }
 }
