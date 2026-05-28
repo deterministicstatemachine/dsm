@@ -301,6 +301,61 @@ jobs:
         run: ./scripts/check-spdx.sh
 
   # --------------------------------------------------------------------------
+  # SBOM: full supply-chain inventory (Issue #26).
+  #
+  # Invokes the workspace SBOM generator (`scripts/generate-sbom.sh`),
+  # which produces a consolidated CycloneDX 1.5 bundle covering:
+  #   • Rust workspace (every crate, resolved via cargo-cyclonedx)
+  #   • Frontend (resolved via package-lock.json)
+  #   • Optional MCP server (resolved via its package-lock.json)
+  #   • Root JS workspace manifest snapshot
+  #   • Android Gradle dependencies (manifest snapshot)
+  #
+  # Run on every push to main + every PR so any dependency drift is
+  # visible in PR diff via the uploaded artifact. The script also writes
+  # a per-run metadata.json summarizing component counts + git state.
+  #
+  # `--skip-validation` is set: the `formal-validation` job already runs
+  # `dsm_vertical_validation tla-check` end-to-end. Re-running it here
+  # would double the validation cost. Tag-release SBOM (with validation
+  # evidence + GitHub Release attachment) is handled separately by the
+  # release workflow.
+  #
+  # No untrusted GitHub event inputs are used by any `run:` step below.
+  # --------------------------------------------------------------------------
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    needs: [rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install SBOM tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq protobuf-compiler
+          cargo install cargo-cyclonedx --quiet --locked
+
+      - name: Generate workspace SBOM bundle
+        run: ./scripts/generate-sbom.sh --skip-validation
+
+      - name: Show consolidated component count
+        run: |
+          jq '.summary' "sbom/latest/metadata.json"
+
+      - name: Upload SBOM bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsm-sbom
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 90
+
+  # --------------------------------------------------------------------------
   # Docker: storage node image
   # --------------------------------------------------------------------------
   docker:
