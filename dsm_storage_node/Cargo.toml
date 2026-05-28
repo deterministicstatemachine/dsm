@@ -16,7 +16,11 @@ axum = { version = "0.8", features = ["macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }              # TLS listener
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
-rustls-pemfile = "2"             # load PEM cert/key
+# PEM cert/key parsing via the maintained rustls-pki-types crate (Issue #24).
+# Replaces the unmaintained rustls-pemfile (RUSTSEC-2025-0134); the
+# `alloc` feature gates the PEM-reading helpers (`from_pem_slice`,
+# `from_pem_reader`, etc.) on `rustls::pki_types::CertificateDer` and friends.
+rustls-pki-types = { version = "1", features = ["alloc"] }
 tower = { version = "0.5", features = ["limit", "timeout"] }
 tower-http = { version = "0.6", features = ["trace", "set-header", "limit", "metrics"] }
 

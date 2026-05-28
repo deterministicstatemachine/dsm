@@ -19,12 +19,10 @@ use dsm::types::proto as pb;
 use prost::Message;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, Method};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pemfile::certs;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -105,17 +103,17 @@ fn status_from_i32(value: i32) -> Option<pb::StorageNodeStatus> {
     pb::StorageNodeStatus::try_from(value).ok()
 }
 
-/// Load certificate from PEM file for TLS pinning
+/// Load the first certificate from a PEM file for TLS pinning.
+///
+/// Issue #24 migration: previously used `rustls_pemfile::certs` (unmaintained
+/// per RUSTSEC-2025-0134). Now uses `rustls::pki_types::pem::PemObject`,
+/// which is the maintained upstream PEM-reading helper exposed by
+/// `rustls-pki-types` v1.10+ under the `alloc` feature.
 fn load_certificate(
     cert_path: &Path,
 ) -> Result<CertificateDer<'static>, Box<dyn std::error::Error + Send + Sync>> {
-    let file = File::open(cert_path)?;
-    let mut reader = BufReader::new(file);
-    let certs = certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
-    certs
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No certificate found in file".into())
+    CertificateDer::from_pem_file(cert_path)
+        .map_err(|e| format!("Failed to load PEM certificate from {cert_path:?}: {e}").into())
 }
 
 /// Create a reqwest client with certificate pinning
