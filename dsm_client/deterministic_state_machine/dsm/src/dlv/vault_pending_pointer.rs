@@ -57,6 +57,10 @@ pub enum PointerError {
         parent_sequence: u64,
         new_sequence: u64,
     },
+    /// `parent_sequence == u64::MAX` cannot be advanced by one. This
+    /// must fail closed instead of silently accepting a saturated
+    /// pseudo-step.
+    SequenceOverflow { parent_sequence: u64 },
 }
 
 impl core::fmt::Display for PointerError {
@@ -71,11 +75,21 @@ impl core::fmt::Display for PointerError {
                 f,
                 "pointer must advance sequence by exactly 1 (parent={parent_sequence}, new={new_sequence})",
             ),
+            PointerError::SequenceOverflow { parent_sequence } => write!(
+                f,
+                "pointer sequence overflow: parent={parent_sequence} cannot advance by 1",
+            ),
         }
     }
 }
 
 impl std::error::Error for PointerError {}
+
+fn expected_next_sequence(parent_sequence: u64) -> Result<u64, PointerError> {
+    parent_sequence
+        .checked_add(1)
+        .ok_or(PointerError::SequenceOverflow { parent_sequence })
+}
 
 /// Canonical signing payload for a vault pending pointer.
 ///
@@ -117,7 +131,8 @@ pub fn sign_vault_pending_pointer(
     publisher_public_key: &[u8],
     publisher_secret_key: &[u8],
 ) -> Result<SignedVaultPendingPointer, PointerError> {
-    if new_sequence != parent_sequence.saturating_add(1) {
+    let expected_new = expected_next_sequence(parent_sequence)?;
+    if new_sequence != expected_new {
         return Err(PointerError::NonUnitStep {
             parent_sequence,
             new_sequence,
@@ -156,7 +171,8 @@ pub fn sign_vault_pending_pointer(
 pub fn verify_vault_pending_pointer(
     pointer: &SignedVaultPendingPointer,
 ) -> Result<(), PointerError> {
-    if pointer.new_sequence != pointer.parent_sequence.saturating_add(1) {
+    let expected_new = expected_next_sequence(pointer.parent_sequence)?;
+    if pointer.new_sequence != expected_new {
         return Err(PointerError::NonUnitStep {
             parent_sequence: pointer.parent_sequence,
             new_sequence: pointer.new_sequence,
@@ -281,6 +297,39 @@ mod tests {
         signed.new_sequence = 7;
         let err = verify_vault_pending_pointer(&signed).expect_err("non-unit step rejected");
         assert!(matches!(err, PointerError::NonUnitStep { .. }));
+    }
+
+    #[test]
+    fn rejects_sequence_overflow_at_sign_time() {
+        let (vault_id, x, digest) = sample_inputs();
+        let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
+        let err = sign_vault_pending_pointer(
+            &vault_id,
+            u64::MAX,
+            u64::MAX,
+            &x,
+            &digest,
+            &kp.public_key,
+            &kp.secret_key,
+        )
+        .expect_err("overflow parent must be rejected");
+        assert!(matches!(err, PointerError::SequenceOverflow { .. }));
+    }
+
+    #[test]
+    fn rejects_sequence_overflow_at_verify_time() {
+        let (vault_id, x, digest) = sample_inputs();
+        let pointer = SignedVaultPendingPointer {
+            vault_id,
+            parent_sequence: u64::MAX,
+            new_sequence: u64::MAX,
+            x,
+            new_reserves_digest: digest,
+            publisher_public_key: vec![],
+            publisher_signature: vec![],
+        };
+        let err = verify_vault_pending_pointer(&pointer).expect_err("overflow parent rejected");
+        assert!(matches!(err, PointerError::SequenceOverflow { .. }));
     }
 
     #[test]
