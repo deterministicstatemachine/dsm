@@ -2634,7 +2634,8 @@ impl AppRouter for AppRouterImpl {
             // Identity routes
             "identity.transport_headers_v3"
             | "identity.pairing_qr"
-            | "identity.pairing_compact" => self.handle_identity_query(q).await,
+            | "identity.pairing_compact"
+            | "identity.devtree.snapshot" => self.handle_identity_query(q).await,
             // Balance/wallet query routes
             "balance.get" | "balance.list" | "wallet.history" => self.handle_wallet_query(q).await,
             // Contacts routes

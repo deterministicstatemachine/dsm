@@ -2018,6 +2018,83 @@ impl StorageNodeSDK {
         Ok(genesis_response)
     }
 
+    /// Fetch + re-verify one genesis's Device Tree from any node in
+    /// the configured cluster.
+    ///
+    /// The Phase B.4 validator guarantees that every node holds the
+    /// same `DeviceTreeStateV1` for a given genesis at version >= the
+    /// monotone counter, so picking any one node is sufficient. We
+    /// walk `self.config.node_urls` in order and return on the first
+    /// successful GET; if every node returns an error or 404, the
+    /// outer call returns `Err`.
+    ///
+    /// On success returns a [`DeviceTreeSnapshotView`] whose
+    /// `inclusion_verified` flags are all `true` for an honest
+    /// server (since we re-derive proofs from the same canonical
+    /// leaf list before verifying), but the
+    /// `claimed_root_matches_recomputed` gate can still be `false`
+    /// if the storage node lied about its `root_hash` while serving
+    /// a tampered `device_ids` list.
+    pub async fn fetch_device_tree_snapshot(
+        &self,
+        genesis_hash: &[u8; 32],
+    ) -> Result<DeviceTreeSnapshotView, DsmError> {
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(genesis_hash);
+
+        let mut last_err: Option<String> = None;
+        for node_url in &self.config.node_urls {
+            let trimmed = node_url.trim_end_matches('/');
+            if trimmed.is_empty() {
+                continue;
+            }
+            let url = format!(
+                "{}/api/v2/identity/{}/devtree/root",
+                trimmed, genesis_b32
+            );
+            match self.inner.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let bytes = resp.bytes().await.map_err(|e| {
+                        DsmError::network(
+                            format!("fetch_device_tree_snapshot: read body: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                    return build_device_tree_snapshot_view(&bytes);
+                }
+                Ok(resp) => {
+                    last_err = Some(format!(
+                        "{} returned HTTP {}",
+                        trimmed,
+                        resp.status().as_u16()
+                    ));
+                    log::debug!(
+                        "fetch_device_tree_snapshot: {} returned HTTP {}",
+                        trimmed,
+                        resp.status().as_u16()
+                    );
+                }
+                Err(e) => {
+                    last_err = Some(format!("{trimmed}: {e}"));
+                    log::debug!(
+                        "fetch_device_tree_snapshot: network error against {}: {}",
+                        trimmed,
+                        e
+                    );
+                }
+            }
+        }
+
+        Err(DsmError::not_found(
+            "DeviceTreeStateV1",
+            Some(format!(
+                "no storage node returned a published Device Tree for genesis {genesis_b32}{}",
+                last_err
+                    .map(|e| format!(" (last error: {e})"))
+                    .unwrap_or_default()
+            )),
+        ))
+    }
+
     /// Build the canonical initial `DeviceTreeStateV1` proto payload
     /// for a freshly-created genesis. Single leaf = `genesis_hash`
     /// (root device's DevID by protocol invariant). Used by the
@@ -3540,6 +3617,123 @@ fn apply_device_tree_mutation<F: FnOnce(&mut Vec<[u8; 32]>)>(
     })?;
 
     Ok((snapshot, buf))
+}
+
+/// Phase B.7 (issue #278) — DeviceTreeViewer one-row-per-leaf view
+/// of one genesis's currently-published Device Tree.
+///
+/// Returned by [`StorageNodeSDK::fetch_device_tree_snapshot`] and
+/// consumed by the `identity.devtree.snapshot` query handler (in
+/// `dsm_sdk::handlers::identity_routes`). Carries:
+///
+/// * `claimed_tree` — the storage-node-published `DeviceTreeV1`
+///   summary (claimed root_hash, device_count, version_number).
+/// * `recomputed_root` — the R_G we get from rebuilding
+///   `DeviceTree::new` over the persisted `device_ids` list.
+/// * `claimed_root_matches_recomputed` — trust-but-verify gate.
+///   `false` means the storage node is serving a state whose
+///   declared root doesn't match its declared leaf set.
+/// * `leaves` — per-leaf `(device_id, encoded DeviceInclusionProofV1
+///   bytes, inclusion_verified)`. `inclusion_verified` is the
+///   Rust-side result of `DevTreeProof::verify(device_id,
+///   recomputed_root)`.
+#[derive(Debug, Clone)]
+pub struct DeviceTreeSnapshotView {
+    pub claimed_tree: generated::DeviceTreeV1,
+    pub recomputed_root: [u8; 32],
+    pub claimed_root_matches_recomputed: bool,
+    pub leaves: Vec<DeviceTreeLeafViewRust>,
+}
+
+/// Phase B.7 (issue #278) — one row in [`DeviceTreeSnapshotView`].
+#[derive(Debug, Clone)]
+pub struct DeviceTreeLeafViewRust {
+    pub device_id: [u8; 32],
+    /// Encoded [`generated::DeviceInclusionProofV1`] proto bytes
+    /// — produced via `DevTreeProof::to_v1_proto_bytes` so the
+    /// storage-node-served and SDK-served bytes are byte-identical
+    /// for the same input.
+    pub proof_bytes: Vec<u8>,
+    /// `DevTreeProof::verify(device_id, recomputed_root)` result.
+    pub inclusion_verified: bool,
+}
+
+/// Pure helper for Phase B.7 (issue #278). Decodes a persisted
+/// [`generated::DeviceTreeStateV1`] body, rebuilds the canonical
+/// `DeviceTree`, derives a fresh inclusion proof for every leaf, and
+/// verifies each proof locally with `DevTreeProof::verify`. Returns a
+/// [`DeviceTreeSnapshotView`] suitable for handing to the
+/// `identity.devtree.snapshot` route.
+///
+/// Pure: no I/O, so directly unit-testable.
+pub(crate) fn build_device_tree_snapshot_view(
+    persisted_bytes: &[u8],
+) -> Result<DeviceTreeSnapshotView, DsmError> {
+    let state = generated::DeviceTreeStateV1::decode(persisted_bytes).map_err(|e| {
+        DsmError::serialization_error(
+            format!("decode DeviceTreeStateV1: {e}"),
+            "DeviceTreeStateV1",
+            None::<String>,
+            Some(e),
+        )
+    })?;
+    let claimed_tree = state.tree.clone().ok_or_else(|| {
+        DsmError::serialization_error(
+            "DeviceTreeStateV1.tree is missing",
+            "DeviceTreeStateV1",
+            None::<String>,
+            None::<std::io::Error>,
+        )
+    })?;
+
+    let mut devids: Vec<[u8; 32]> = Vec::with_capacity(state.device_ids.len());
+    for (i, id) in state.device_ids.iter().enumerate() {
+        if id.len() != 32 {
+            return Err(DsmError::serialization_error(
+                format!(
+                    "DeviceTreeStateV1.device_ids[{i}] is {} bytes, expected 32",
+                    id.len()
+                ),
+                "DeviceTreeStateV1",
+                None::<String>,
+                None::<std::io::Error>,
+            ));
+        }
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(id);
+        devids.push(buf);
+    }
+
+    let tree = dsm::common::device_tree::DeviceTree::new(devids);
+    let recomputed_root = tree.root();
+
+    let claimed_root_matches_recomputed = claimed_tree.root_hash.len() == 32
+        && claimed_tree.root_hash.as_slice() == recomputed_root.as_slice();
+
+    let mut leaves: Vec<DeviceTreeLeafViewRust> =
+        Vec::with_capacity(tree.leaves().len());
+    for leaf in tree.leaves() {
+        let dev_proof = tree.proof(leaf).ok_or_else(|| {
+            DsmError::internal(
+                "build_device_tree_snapshot_view: DeviceTree::proof returned None for own leaf",
+                None::<std::io::Error>,
+            )
+        })?;
+        let proof_bytes = dev_proof.to_v1_proto_bytes(leaf, &recomputed_root);
+        let inclusion_verified = dev_proof.verify(leaf, &recomputed_root);
+        leaves.push(DeviceTreeLeafViewRust {
+            device_id: *leaf,
+            proof_bytes,
+            inclusion_verified,
+        });
+    }
+
+    Ok(DeviceTreeSnapshotView {
+        claimed_tree,
+        recomputed_root,
+        claimed_root_matches_recomputed,
+        leaves,
+    })
 }
 
 /// Owned view of a persisted [`generated::DeviceTreeStateV1`].

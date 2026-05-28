@@ -481,28 +481,10 @@ pub(crate) fn derive_inclusion_proof(
         .proof(target_devid)
         .ok_or(DevTreeProofError::ProofUnavailable)?;
 
-    let root_hash = tree.root();
-
-    // Pack path_bits LSB-first per Phase B.1's `DeviceInclusionProofV1`
-    // encoding convention.
-    let path_bits_len = dev_proof.path_bits.len();
-    let packed_len = path_bits_len.div_ceil(8);
-    let mut packed_bits = vec![0u8; packed_len];
-    for (i, &bit) in dev_proof.path_bits.iter().enumerate() {
-        if bit {
-            packed_bits[i / 8] |= 1 << (i % 8);
-        }
-    }
-
-    let proof_proto = generated::DeviceInclusionProofV1 {
-        device_id: target_devid.to_vec(),
-        root_hash: root_hash.to_vec(),
-        siblings: dev_proof.siblings.iter().map(|s| s.to_vec()).collect(),
-        path_bits_len: path_bits_len as u32,
-        path_bits: packed_bits,
-    };
-
-    Ok(proof_proto.encode_to_vec())
+    // Use the canonical Phase B.1 encoder so storage-node-served and
+    // SDK-derived proof bytes stay byte-identical for the same input
+    // (see also `dsm_sdk::sdk::storage_node_sdk` Phase B.7 path).
+    Ok(dev_proof.to_v1_proto_bytes(target_devid, &tree.root()))
 }
 
 fn parse_devid(raw: Option<&str>) -> Result<Vec<u8>, StatusCode> {

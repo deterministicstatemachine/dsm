@@ -17975,6 +17975,14 @@ export class Envelope extends Message<Envelope> {
      */
     value: CdbrwEnrollResponse;
     case: "cdbrwEnrollResponse";
+  } | {
+    /**
+     * Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
+     *
+     * @generated from field: dsm.DeviceTreeSnapshotResponse device_tree_snapshot_response = 107;
+     */
+    value: DeviceTreeSnapshotResponse;
+    case: "deviceTreeSnapshotResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18080,6 +18088,7 @@ export class Envelope extends Message<Envelope> {
     { no: 104, name: "cdbrw_respond_response", kind: "message", T: CdbrwRespondResponse, oneof: "payload" },
     { no: 105, name: "cdbrw_verify_response", kind: "message", T: CdbrwVerifyResponse, oneof: "payload" },
     { no: 106, name: "cdbrw_enroll_response", kind: "message", T: CdbrwEnrollResponse, oneof: "payload" },
+    { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
@@ -21079,6 +21088,175 @@ export class DeviceInclusionProofV1 extends Message<DeviceInclusionProofV1> {
 
   static equals(a: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined, b: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined): boolean {
     return proto3.util.equals(DeviceInclusionProofV1, a, b);
+  }
+}
+
+/**
+ * Phase B.7 (issue #278) — frontend DeviceTreeViewer payload.
+ *
+ * Returned by the `identity.devtree.snapshot` query route. The SDK
+ * fetches the persisted `DeviceTreeStateV1` from a storage node,
+ * re-canonicalises the leaf list through
+ * `dsm::common::device_tree::DeviceTree::new`, derives a fresh
+ * inclusion proof for every leaf via `DeviceTree::proof`, and
+ * verifies each proof locally with `DevTreeProof::verify`. All
+ * verification booleans are produced Rust-side; the React renderer
+ * does no hashing.
+ *
+ * `claimed_root_matches_recomputed` is the trust-but-verify gate
+ * against the storage node: if the storage-node-served `root_hash`
+ * does not equal the SDK's recomputation from `device_ids`, the
+ * frontend renders a "Tampered" badge instead of "Verified".
+ *
+ * @generated from message dsm.DeviceTreeSnapshotResponse
+ */
+export class DeviceTreeSnapshotResponse extends Message<DeviceTreeSnapshotResponse> {
+  /**
+   * @generated from field: dsm.DeviceTreeV1 tree = 1;
+   */
+  tree?: DeviceTreeV1;
+
+  /**
+   * @generated from field: bytes recomputed_root = 2;
+   */
+  recomputedRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bool claimed_root_matches_recomputed = 3;
+   */
+  claimedRootMatchesRecomputed = false;
+
+  /**
+   * @generated from field: repeated dsm.DeviceTreeLeafView leaves = 4;
+   */
+  leaves: DeviceTreeLeafView[] = [];
+
+  constructor(data?: PartialMessage<DeviceTreeSnapshotResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeSnapshotResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "tree", kind: "message", T: DeviceTreeV1 },
+    { no: 2, name: "recomputed_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "claimed_root_matches_recomputed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "leaves", kind: "message", T: DeviceTreeLeafView, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeSnapshotResponse {
+    return new DeviceTreeSnapshotResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotResponse {
+    return new DeviceTreeSnapshotResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotResponse {
+    return new DeviceTreeSnapshotResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeSnapshotResponse | PlainMessage<DeviceTreeSnapshotResponse> | undefined, b: DeviceTreeSnapshotResponse | PlainMessage<DeviceTreeSnapshotResponse> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeSnapshotResponse, a, b);
+  }
+}
+
+/**
+ * One row in the DeviceTreeViewer table.
+ *
+ * `proof_bytes` is a fully encoded [`DeviceInclusionProofV1`] so the
+ * frontend can persist it verbatim (e.g. into a contact card export)
+ * without rebuilding from siblings + path_bits. `inclusion_verified`
+ * is the Rust-side result of `DevTreeProof::verify(device_id,
+ * recomputed_root)`.
+ *
+ * @generated from message dsm.DeviceTreeLeafView
+ */
+export class DeviceTreeLeafView extends Message<DeviceTreeLeafView> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes proof_bytes = 2;
+   */
+  proofBytes = new Uint8Array(0);
+
+  /**
+   * @generated from field: bool inclusion_verified = 3;
+   */
+  inclusionVerified = false;
+
+  constructor(data?: PartialMessage<DeviceTreeLeafView>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeLeafView";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "proof_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "inclusion_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeLeafView {
+    return new DeviceTreeLeafView().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeLeafView {
+    return new DeviceTreeLeafView().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeLeafView {
+    return new DeviceTreeLeafView().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeLeafView | PlainMessage<DeviceTreeLeafView> | undefined, b: DeviceTreeLeafView | PlainMessage<DeviceTreeLeafView> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeLeafView, a, b);
+  }
+}
+
+/**
+ * Request envelope for `identity.devtree.snapshot`. The frontend
+ * passes the genesis_hash it wants a viewer for (typically its own
+ * from `AppState::get_genesis_hash`).
+ *
+ * @generated from message dsm.DeviceTreeSnapshotRequest
+ */
+export class DeviceTreeSnapshotRequest extends Message<DeviceTreeSnapshotRequest> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceTreeSnapshotRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeSnapshotRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeSnapshotRequest {
+    return new DeviceTreeSnapshotRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotRequest {
+    return new DeviceTreeSnapshotRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotRequest {
+    return new DeviceTreeSnapshotRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeSnapshotRequest | PlainMessage<DeviceTreeSnapshotRequest> | undefined, b: DeviceTreeSnapshotRequest | PlainMessage<DeviceTreeSnapshotRequest> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeSnapshotRequest, a, b);
   }
 }
 

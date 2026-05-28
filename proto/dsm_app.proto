@@ -2552,6 +2552,9 @@ message Envelope {
     CdbrwRespondResponse              cdbrw_respond_response           = 104;
     CdbrwVerifyResponse               cdbrw_verify_response            = 105;
     CdbrwEnrollResponse               cdbrw_enroll_response            = 106;
+
+    // Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
+    DeviceTreeSnapshotResponse        device_tree_snapshot_response    = 107;
   }
 }
 
@@ -2903,6 +2906,48 @@ message DeviceInclusionProofV1 {
   repeated bytes siblings = 3 [(dsm_fixed_len)=32]; // root → leaf order
   uint32 path_bits_len = 4;
   bytes  path_bits     = 5 [(dsm_max_len)=2048]; // LSB-first packed bits
+}
+
+// Phase B.7 (issue #278) — frontend DeviceTreeViewer payload.
+//
+// Returned by the `identity.devtree.snapshot` query route. The SDK
+// fetches the persisted `DeviceTreeStateV1` from a storage node,
+// re-canonicalises the leaf list through
+// `dsm::common::device_tree::DeviceTree::new`, derives a fresh
+// inclusion proof for every leaf via `DeviceTree::proof`, and
+// verifies each proof locally with `DevTreeProof::verify`. All
+// verification booleans are produced Rust-side; the React renderer
+// does no hashing.
+//
+// `claimed_root_matches_recomputed` is the trust-but-verify gate
+// against the storage node: if the storage-node-served `root_hash`
+// does not equal the SDK's recomputation from `device_ids`, the
+// frontend renders a "Tampered" badge instead of "Verified".
+message DeviceTreeSnapshotResponse {
+  DeviceTreeV1 tree                            = 1;
+  bytes        recomputed_root                 = 2 [(dsm_fixed_len)=32];
+  bool         claimed_root_matches_recomputed = 3;
+  repeated DeviceTreeLeafView leaves           = 4;
+}
+
+// One row in the DeviceTreeViewer table.
+//
+// `proof_bytes` is a fully encoded [`DeviceInclusionProofV1`] so the
+// frontend can persist it verbatim (e.g. into a contact card export)
+// without rebuilding from siblings + path_bits. `inclusion_verified`
+// is the Rust-side result of `DevTreeProof::verify(device_id,
+// recomputed_root)`.
+message DeviceTreeLeafView {
+  bytes device_id          = 1 [(dsm_fixed_len)=32];
+  bytes proof_bytes        = 2 [(dsm_max_len)=4096];
+  bool  inclusion_verified = 3;
+}
+
+// Request envelope for `identity.devtree.snapshot`. The frontend
+// passes the genesis_hash it wants a viewer for (typically its own
+// from `AppState::get_genesis_hash`).
+message DeviceTreeSnapshotRequest {
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
 }
 
 // Persistent state of a Device Tree for one genesis: the `DeviceTreeV1`

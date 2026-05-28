@@ -76,6 +76,41 @@ impl DevTreeProof {
         &acc == expected_root
     }
 
+    /// Encode this proof as the canonical [`crate::types::proto::DeviceInclusionProofV1`]
+    /// wire message (Phase B.1 issue #272). `device_id` and `root_hash`
+    /// are the trust-but-verify pair the receiver checks against.
+    ///
+    /// `path_bits` is packed LSB-first per the proto's documented
+    /// convention (`DeviceInclusionProofV1.path_bits`). The encoding
+    /// here is canonical so the storage-node-derived bytes (Phase B.5
+    /// issue #276) and the SDK-derived bytes (Phase B.7 issue #278)
+    /// are byte-identical for the same input.
+    ///
+    /// Returns the serialized proto bytes.
+    pub fn to_v1_proto_bytes(
+        &self,
+        device_id: &[u8; 32],
+        root_hash: &[u8; 32],
+    ) -> Vec<u8> {
+        use prost::Message;
+        let path_bits_len = self.path_bits.len();
+        let packed_len = path_bits_len.div_ceil(8);
+        let mut packed_bits = vec![0u8; packed_len];
+        for (i, &bit) in self.path_bits.iter().enumerate() {
+            if bit {
+                packed_bits[i / 8] |= 1 << (i % 8);
+            }
+        }
+        let proto = crate::types::proto::DeviceInclusionProofV1 {
+            device_id: device_id.to_vec(),
+            root_hash: root_hash.to_vec(),
+            siblings: self.siblings.iter().map(|s| s.to_vec()).collect(),
+            path_bits_len: path_bits_len as u32,
+            path_bits: packed_bits,
+        };
+        proto.encode_to_vec()
+    }
+
     /// Serialize proof to bytes
     /// Format: `[num_siblings: u32][leaf_to_root: u8][path_bits_len: u32][path_bits_packed][siblings...]`
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -469,6 +504,70 @@ mod tests {
                 &dev[..4]
             );
         }
+    }
+
+    /// Phase B.7 (issue #278) — the proto-bytes encoder must round-trip
+    /// through prost decode and produce a proof that
+    /// [`DevTreeProof::verify`] accepts. Locking the canonical
+    /// `path_bits` packing here so the storage-node and SDK paths stay
+    /// byte-aligned.
+    #[test]
+    fn to_v1_proto_bytes_round_trips_and_verifies() {
+        use crate::types::proto::DeviceInclusionProofV1;
+        use prost::Message;
+
+        let dev_a = [1u8; 32];
+        let dev_b = [2u8; 32];
+        let dev_c = [3u8; 32];
+        let tree = DeviceTree::new(vec![dev_a, dev_b, dev_c]);
+        let root = tree.root();
+        let proof = tree.proof(&dev_b).expect("proof");
+
+        let encoded = proof.to_v1_proto_bytes(&dev_b, &root);
+        let decoded =
+            DeviceInclusionProofV1::decode(encoded.as_slice()).expect("decode");
+        assert_eq!(decoded.device_id, dev_b.to_vec());
+        assert_eq!(decoded.root_hash, root.to_vec());
+        assert_eq!(decoded.siblings.len(), proof.siblings.len());
+        assert_eq!(decoded.path_bits_len as usize, proof.path_bits.len());
+
+        // Reconstruct a DevTreeProof from the wire form and re-verify.
+        let mut path_bits = Vec::with_capacity(decoded.path_bits_len as usize);
+        for i in 0..(decoded.path_bits_len as usize) {
+            let byte = decoded.path_bits[i / 8];
+            path_bits.push((byte & (1 << (i % 8))) != 0);
+        }
+        let siblings: Vec<[u8; 32]> = decoded
+            .siblings
+            .iter()
+            .map(|s| {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(s);
+                a
+            })
+            .collect();
+        let round_tripped = DevTreeProof {
+            siblings,
+            path_bits,
+            leaf_to_root: true,
+        };
+        assert!(round_tripped.verify(&dev_b, &root));
+    }
+
+    #[test]
+    fn to_v1_proto_bytes_single_leaf_yields_empty_path() {
+        use crate::types::proto::DeviceInclusionProofV1;
+        use prost::Message;
+
+        let dev_a = [0xAAu8; 32];
+        let tree = DeviceTree::single(dev_a);
+        let proof = tree.proof(&dev_a).expect("proof");
+        let bytes = proof.to_v1_proto_bytes(&dev_a, &tree.root());
+        let decoded = DeviceInclusionProofV1::decode(bytes.as_slice()).expect("decode");
+        assert!(decoded.siblings.is_empty());
+        assert_eq!(decoded.path_bits_len, 0);
+        assert!(decoded.path_bits.is_empty());
+        assert_eq!(decoded.root_hash, hash_leaf(&dev_a).to_vec());
     }
 
     /// Pin the canonical padding-leaf value so external implementations

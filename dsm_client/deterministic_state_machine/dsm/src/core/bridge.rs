@@ -1318,7 +1318,11 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::CdbrwTrustSnapshot(_))
         | Some(gp::envelope::Payload::CdbrwRespondResponse(_))
         | Some(gp::envelope::Payload::CdbrwVerifyResponse(_))
-        | Some(gp::envelope::Payload::CdbrwEnrollResponse(_)) => {
+        | Some(gp::envelope::Payload::CdbrwEnrollResponse(_))
+        // Phase B.7 (issue #278) — DeviceTreeViewer payload is owned by
+        // the SDK's identity routes (`identity.devtree.snapshot`); the
+        // core bridge never constructs or consumes it.
+        | Some(gp::envelope::Payload::DeviceTreeSnapshotResponse(_)) => {
             gp::envelope::Payload::Error(gp::Error {
                 code: 501,
                 message: "SDK-owned payloads are handled at the SDK layer".to_string(),
