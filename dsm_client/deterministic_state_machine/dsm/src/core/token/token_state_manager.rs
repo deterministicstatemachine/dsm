@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token State Manager (DSM: state-integrated, atomic)
 //!
 //! Token truth must come from state transitions. This module applies token-related operations

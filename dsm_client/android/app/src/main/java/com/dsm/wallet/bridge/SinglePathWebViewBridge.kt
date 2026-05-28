@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // File: android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt
 @file:Suppress("KotlinJniMissingFunction", "UNUSED_PARAMETER")
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Policy persistence endpoints (transport-only, deterministic, binary-only)
 //! - POST /api/v2/policy        (body = canonical policy bytes) -> 200 + 32-byte anchor in body
 //! - POST /api/v2/policy/get    (body = 32-byte anchor)         -> 200 + canonical bytes, or 404

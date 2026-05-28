@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # SDK Handler Installation
 //!
 //! Configures and installs the core handler bridge that connects the SDK

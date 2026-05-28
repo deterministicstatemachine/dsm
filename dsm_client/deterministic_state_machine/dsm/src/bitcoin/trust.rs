@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Formal trust-boundary predicates for dBTC settlement verification.
 //!
 //! This module is the code-side correspondence boundary for the formal dBTC

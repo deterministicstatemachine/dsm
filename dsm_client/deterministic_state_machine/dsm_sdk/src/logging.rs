@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Portable Logging and Panic Handling
 //!
 //! Provides platform-adaptive logging (Android logcat via `android_logger`,

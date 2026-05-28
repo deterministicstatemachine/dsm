@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token types for DSM
 //!
 //! This module defines the comprehensive token system for DSM, including:

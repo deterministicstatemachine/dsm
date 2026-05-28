@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { decodeBalancesListResponseStrict } from '../decoding';
 import { BalancesListResponse, BalanceGetResponse, Envelope, Error as PbError } from '../../proto/dsm_app_pb';
 

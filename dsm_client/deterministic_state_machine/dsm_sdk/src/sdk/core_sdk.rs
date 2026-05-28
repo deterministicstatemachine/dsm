@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Core SDK Module (strict / proto-only / clockless)
 //!
 //! Deterministic state & crypto semantics only:

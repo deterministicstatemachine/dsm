@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token Initialization - Default ERA token setup
 //!
 //! This module provides functionality to initialize the default ERA token

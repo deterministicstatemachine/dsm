@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Storage node DB layer — unified interface.
 //!
 //! Default (PostgreSQL): `deadpool_postgres::Pool` via `db::pg`.

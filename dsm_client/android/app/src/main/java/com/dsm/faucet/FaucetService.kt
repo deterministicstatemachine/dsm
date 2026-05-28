@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // File: android/app/src/main/java/com/dsm/faucet/FaucetService.kt
 @file:Suppress("UNUSED_PARAMETER")
 

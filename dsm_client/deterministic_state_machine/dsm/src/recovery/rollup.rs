@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Receipt Rollup Accumulator Implementation
 //!
 //! Implements the receipt rollup accumulator as described in the whitepaper:

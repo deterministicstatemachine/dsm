@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 #![allow(unused_variables)]
 //! # Token SDK Module (protobuf-only, deterministic)
 //!

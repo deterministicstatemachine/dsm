@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Encrypted recovery capsule implementation.
 //!
 //! Live recovery capsules follow the whitepaper recovery-ring path:

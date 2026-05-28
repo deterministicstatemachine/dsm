@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import React, { PropsWithChildren, useEffect } from 'react';
 import type { AndroidBridgeV3 } from '../dsm/bridgeTypes';
 import { setBridgeInstance } from './BridgeRegistry';

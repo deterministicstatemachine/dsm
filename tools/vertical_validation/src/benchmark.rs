@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Scaling Benchmark Engine
 //!
 //! Proves linear (additive) throughput scaling by running parallel independent

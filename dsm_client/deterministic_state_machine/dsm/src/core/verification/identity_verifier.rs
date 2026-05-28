@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Identity verification for anchoring and authentication.
 //!
 //! Supports both decentralized (storage-node-based genesis lookup) and

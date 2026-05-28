@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import React from 'react';
 import { act, render } from '@testing-library/react';
 

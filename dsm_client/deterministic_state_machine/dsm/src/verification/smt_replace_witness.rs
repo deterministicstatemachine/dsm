@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! SMT Replace Witness (Tripwire)
 //!
 //! Centralized parsing and verification utilities for the per-device SMT "replace" witness.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Proof primitives (centralized)
 //!
 //! Centralizes proof parsing + verification helpers so acceptance predicates

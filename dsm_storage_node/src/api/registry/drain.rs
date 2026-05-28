@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DrainProof & Stake Unlock endpoints (clockless, advisory).
 //!
 //! Spec §15: StakeDLV unlocks iff d=2 consecutive ByteCommits have bytes_used=0.

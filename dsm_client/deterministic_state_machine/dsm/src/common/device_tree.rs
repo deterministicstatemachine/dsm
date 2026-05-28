@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Standard Merkle Device Tree utilities (non-sparse) used for π_dev proofs.
 //! Leaves are 32-byte DevID values, sorted lexicographically big-endian.
 //! Internal nodes are BLAKE3 hashes with domain tag TAG_DEV_MERKLE.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 jest.mock('../../../dsm/WebViewBridge', () => {
   const actual = jest.requireActual('../../../dsm/WebViewBridge');
   return {

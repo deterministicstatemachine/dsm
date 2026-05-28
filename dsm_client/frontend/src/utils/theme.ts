@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable security/detect-object-injection */
 // Theme utilities: apply palettes by setting CSS variables on <html> so every
 // element that references var(--bg), var(--text-dark), etc. picks up the change.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { ContactQrV3 } from "../proto/dsm_app_pb";
 import type { ContactAddEvent, ContactAddFailure, ContactAddProgress, ContactAddSuccess, DsmEventListener } from "./types";
 import { callBin } from "./WebViewBridge";

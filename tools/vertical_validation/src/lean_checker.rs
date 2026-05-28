@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Lean 4 proof checker.
 //!
 //! Discovers all `.lean` files under `lean4/`, type-checks each one,

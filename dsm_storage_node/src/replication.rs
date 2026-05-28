@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Production-grade replication for DSM storage nodes.
 //!
 //! This module implements distributed storage replication with dynamic node

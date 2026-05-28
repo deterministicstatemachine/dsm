@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable security/detect-object-injection */
 // Internal anchor display helpers for debugging policy/token anchors
 // STRICT: These functions are for DISPLAY ONLY of internal cryptographic anchors.

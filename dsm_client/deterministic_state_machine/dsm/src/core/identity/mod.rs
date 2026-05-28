@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Identity Module
 //!
 //! This module handles all aspects of identity management in DSM, including:

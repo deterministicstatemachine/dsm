@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic Limbo Vault (DLV) Implementation
 //!
 //! Core implementation of quantum-resistant cryptographic vaults.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { RejectCode } from "./rejectCodes";
 import type { VectorAdapter } from "./runner";
 import { processEnvelopeV3Bin } from "../dsm/WebViewBridge";

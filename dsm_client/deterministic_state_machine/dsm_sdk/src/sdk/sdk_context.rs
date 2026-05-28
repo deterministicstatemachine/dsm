@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # SDK Context Management
 //!
 //! This module provides centralized context management for the DSM SDK,

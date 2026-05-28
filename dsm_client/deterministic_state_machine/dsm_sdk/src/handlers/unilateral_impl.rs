@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Unilateral Handler Implementation
 //!
 //! Implements the `UnilateralHandler` trait for one-sided state transitions
 //! (token transfers, balance queries) that do not require bilateral handshake.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use async_trait::async_trait;
 use prost::Message;

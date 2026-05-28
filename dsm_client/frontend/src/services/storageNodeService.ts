@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Storage node service: node health, object operations, deterministic placement
 // Per spec: nodes are index-only mirrors. No primaries, no failover.

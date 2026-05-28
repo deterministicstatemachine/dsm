@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! ML-KEM-768 (Kyber) post-quantum key encapsulation.
 //!
 //! Provides the DSM protocol's key exchange mechanism using NIST-standardized

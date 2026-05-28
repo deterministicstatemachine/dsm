@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! ERA Token Manager
 //!
 //! Mainnet: Pre-minted, capped, no mint after genesis.

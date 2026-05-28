@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM Recovery SDK
 //!
 //! SDK wrapper for the offline-first, post-quantum recovery system.

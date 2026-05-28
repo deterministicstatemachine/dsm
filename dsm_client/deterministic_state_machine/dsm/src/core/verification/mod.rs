@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Core verification mechanisms for DSM state transitions.
 //!
 //! Whitepaper §30 dual-mode verification (bilateral + unilateral) is now

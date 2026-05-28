@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { sendOnlineTransfer } from '../index';
 import { encodeBase32Crockford as base32CrockfordEncode } from '../../utils/textId';
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token Registry (STRICT: view + name index, not a second source of truth)
 //!
 //! This module is intentionally *not* an authoritative token database.

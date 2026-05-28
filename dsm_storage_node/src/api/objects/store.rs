@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM Object Store (deterministic, clockless)
 //! - Raw bytes only ("application/octet-stream").
 //! - Deterministic addresses: H("DSM/object\0" || dlv_id || path || H("DSM/obj-bytes\0" || content)).

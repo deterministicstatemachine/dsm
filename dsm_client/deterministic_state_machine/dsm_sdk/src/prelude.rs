@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # DSM SDK Prelude
 //!
 //! Convenience re-exports for common types used across the SDK crate.

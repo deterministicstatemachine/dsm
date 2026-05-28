@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral envelope construction and payload extraction.
 //!
 //! Stateless free functions for building outgoing Envelope v3 messages and

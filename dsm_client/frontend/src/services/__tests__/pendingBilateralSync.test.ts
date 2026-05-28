@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import * as pb from '../../proto/dsm_app_pb';
 import { encodeBase32Crockford as base32CrockfordEncode } from '../../utils/textId';
 import { initializeEventBridge } from '../../dsm/EventBridge';

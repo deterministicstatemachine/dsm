@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Contact types for DSM protocol
 //!
 //! This module contains shared contact-related types used across the DSM system.

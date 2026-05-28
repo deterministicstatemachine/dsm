@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token Policy Module
 //!
 //! This module implements Content-Addressed Token Policy Anchors (CTPA), a core

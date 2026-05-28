@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Relationship Management Module
 //!
 //! This module implements bilateral state isolation for DSM as described in

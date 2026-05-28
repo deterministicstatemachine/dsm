@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Counterparty Genesis State Helpers
 //!
 //! Utility functions for working with counterparty Genesis states in

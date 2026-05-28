@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Canonical Encoding Module
 //!
 //! Centralized, audited canonical encoding for cryptographic commitments.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { bridgeEvents } from '../bridge/bridgeEvents';
 
 export type DeterministicSafetyDetail = {

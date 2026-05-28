@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # JNI Unified Protobuf Bridge — APP INTEGRATION BOUNDARY
 //!
 //! This module contains all 87+ `#[no_mangle] pub extern "system"` JNI exports
@@ -39,7 +41,6 @@
 //! and accepts/returns raw `jbyteArray` (prost-encoded protobuf). The
 //! `SDK_READY` atomic flag gates all post-bootstrap operations.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::generated as pb;
 use crate::jni::helpers;

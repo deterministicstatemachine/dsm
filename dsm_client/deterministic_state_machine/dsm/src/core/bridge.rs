@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Core envelope routing and handler dispatch module.
 //!
 //! This module implements the central routing contract for the DSM protocol's Envelope v3

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Minimal SDK smoke tests (bytes-only). Keep this file small and syntactically valid.
 
 #[cfg(test)]

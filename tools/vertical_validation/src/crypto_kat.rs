@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Cryptographic Known-Answer Tests (KATs)
 //!
 //! Verifies internal consistency and correctness properties of all

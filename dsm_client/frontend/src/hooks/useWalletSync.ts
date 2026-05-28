@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // path: src/hooks/useWalletSync.ts
 // Centralized wallet event synchronization hook.

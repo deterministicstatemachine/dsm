@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! src/core/token/mod.rs
 
 pub mod era_token;

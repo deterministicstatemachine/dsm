@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Asset management within Deterministic Limbo Vaults (DLVs).
 //!
 //! Provides functionality for tracking, locking, and unlocking digital assets

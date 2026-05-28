@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Storage node DB layer (clean, DLV-only)
 //! Minimal schema + helpers used by the DLV-backed object store.
 

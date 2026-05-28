@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Core module of the Deterministic State Machine (DSM).
 //!
 //! This module is the heart of the DSM protocol, providing the foundational components

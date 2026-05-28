@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Higher-level, semantically named hash operations for the DSM protocol.
 //!
 //! This module builds on the lower-level primitives in [`super::blake3`] and

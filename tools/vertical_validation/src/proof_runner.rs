@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! TLAPS proof runner.
 //!
 //! Runs machine-checked TLA+ proof modules via `tlapm` and parses theorem-level

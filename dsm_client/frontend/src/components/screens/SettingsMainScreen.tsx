@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/components/screens/SettingsMainScreen.tsx
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';

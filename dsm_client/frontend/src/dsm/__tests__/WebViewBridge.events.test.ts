@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* Jest tests for WebViewBridge event channel and error surfacing */
 // Jest globals (describe, test, expect) are available without import in configured test environment.

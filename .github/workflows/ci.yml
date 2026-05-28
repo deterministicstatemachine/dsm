@@ -286,6 +286,21 @@ jobs:
             dsm_client/frontend/coverage/lcov.info
 
   # --------------------------------------------------------------------------
+  # SPDX: every source file under the primary code paths must carry an
+  # SPDX-License-Identifier header (Issue #23). The check itself is just
+  # a bash script (`scripts/check-spdx.sh`) — fast, no toolchain needed.
+  # No untrusted GitHub event inputs are used.
+  # --------------------------------------------------------------------------
+  spdx:
+    name: SPDX headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify SPDX headers
+        run: ./scripts/check-spdx.sh
+
+  # --------------------------------------------------------------------------
   # Docker: storage node image
   # --------------------------------------------------------------------------
   docker:

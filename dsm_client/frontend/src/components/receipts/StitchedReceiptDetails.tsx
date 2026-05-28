@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import React from 'react';
 import { ReceiptCommit } from '../../proto/dsm_app_pb';
 import { encodeBase32Crockford } from '../../utils/textId';

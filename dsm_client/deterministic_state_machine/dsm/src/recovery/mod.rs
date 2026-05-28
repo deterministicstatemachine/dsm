@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM Recovery Module
 //!
 //! Implements the offline-first, post-quantum recovery protocol described in the whitepaper.

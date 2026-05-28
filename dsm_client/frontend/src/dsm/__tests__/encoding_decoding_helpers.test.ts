@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /// <reference types="jest" />
 // Local aliases for Jest globals to satisfy TS when @types/jest is not picked up.
 // Runtime uses Jest-provided globals.

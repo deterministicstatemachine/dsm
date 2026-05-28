@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Storage node DB layer — SQLite backend for local development.
 //!
 //! Provides the same public API as `db::pg` but backed by a single SQLite file.

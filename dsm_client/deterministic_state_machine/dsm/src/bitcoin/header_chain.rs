@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin header chain verification for SPV proof hardening.
 //!
 //! Validates that a block header connects back to a known checkpoint via

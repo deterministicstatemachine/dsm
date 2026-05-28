@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Storage Node Discovery (Development Only)
 //!
 //! Automatic discovery of DSM storage nodes via mDNS, network scanning,

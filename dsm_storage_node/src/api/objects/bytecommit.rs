@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM ByteCommit endpoints (deterministic, clockless, raw bytes)
 //! - Publish ByteCommit or mirror under deterministic address.
 //! - Capacity enforced per DLV slot.

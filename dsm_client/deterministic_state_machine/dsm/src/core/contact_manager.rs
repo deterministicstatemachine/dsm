@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // dsm_client/deterministic_state_machine/dsm/src/core/contact_manager.rs
 
 //! DSM Contact Manager - Production Implementation (STRICT, bytes-only, no wall-clock)

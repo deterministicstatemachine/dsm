@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /// <reference types="jest" />
 /* eslint-disable no-console */
 // E2E integration test against local dev storage nodes.

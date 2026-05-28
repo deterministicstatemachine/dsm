@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Token Policy Module
 //!
 //! Built-in CPTA (Content-Addressed Token Policy Anchor) definitions and

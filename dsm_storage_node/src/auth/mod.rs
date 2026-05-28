@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Storage Node Authentication Layer
 //!
 //! Strict, fail-closed, protobuf-only device authentication middleware.
 //! Validates `Authorization: DSM <device_id>:<token>` headers and enforces
 //! replay protection via `x-dsm-message-id` headers.
 
-// SPDX-License-Identifier: Apache-2.0
 
 use axum::{
     body::{to_bytes, Body, Bytes},

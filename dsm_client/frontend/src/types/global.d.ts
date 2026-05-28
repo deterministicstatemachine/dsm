@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Global bridge typings (loose) to keep TS happy without enforcing runtime availability
 export {};

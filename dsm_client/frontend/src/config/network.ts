@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Centralized network ID resolution (strict)
 // Single source of truth: dsm_network_config.json
 // - Uses client.mode if present; otherwise _generated.environment

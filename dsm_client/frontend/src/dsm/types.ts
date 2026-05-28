@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Lightweight shared types for DSM UI flows and events
 import * as pb from '../proto/dsm_app_pb';
 
@@ -49,7 +51,6 @@ export const getDsmBridge = (): DsmBridgeLike | undefined => {
   }
 };
 // path: dsm_client/frontend/src/lib/types.ts
-// SPDX-License-Identifier: Apache-2.0
 
 // Strict discriminated result types for DSM API (protobuf-only boundary)
 export type Ok<T>  = { success: true; data: T };

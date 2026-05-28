@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! SPHINCS+ (BLAKE3-only) — DSM Module
 //!
 //! **SECURITY NOTICE:** This is a custom SPHINCS+ implementation using BLAKE3

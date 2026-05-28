@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Wallet SDK Module (no JSON, no Base64/b64, no hex, no wall clock)
 //!
 //! Deterministic, offline-capable wallet operations for DSM.

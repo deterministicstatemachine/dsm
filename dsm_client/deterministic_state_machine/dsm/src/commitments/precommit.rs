@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Pre-commitment and forward-linked commitment support.
 //!
 //! Deterministic commitments for future state transitions. A pre-commitment

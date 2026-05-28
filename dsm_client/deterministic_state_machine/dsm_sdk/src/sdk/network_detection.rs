@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! STRICT PROTOBUF-ONLY / CLOCKLESS / NO SERDE-JSON-BASE64-HEX
 //! Deterministic step-bounded networking (no wall clocks, no tokio::time).
 //! HTTP is used only as a transport wrapper; payloads must be protobuf bytes.

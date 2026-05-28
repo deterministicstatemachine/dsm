@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM Core Prelude - Minimal, Protocol-Compliant Imports
 //!
 //! DSM is a non-Turing complete system focused on forward-only hash chains

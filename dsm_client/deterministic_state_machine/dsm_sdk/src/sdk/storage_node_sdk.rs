@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Storage Node SDK (protobuf-only, clockless, signature-free nodes)
 //!
 //! - Protobuf octet-stream only; no JSON/CBOR/base64/hex on the wire.

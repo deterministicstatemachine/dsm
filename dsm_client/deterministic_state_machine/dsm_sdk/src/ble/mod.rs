@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! BLE backend bridge for handling platform BLE commands via SDK (protobuf-only).
 //!
 //! Policy:

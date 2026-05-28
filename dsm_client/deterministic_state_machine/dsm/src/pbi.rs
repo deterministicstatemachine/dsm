@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Platform Boundary Interface (PBI)
 //!
 //! This module implements the hard platform boundary described in the public

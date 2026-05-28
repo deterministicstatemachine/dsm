@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # JNI Secondary Device Registration
 //!
 //! Android JNI entry point for `addSecondaryDevice`. Returns a prost-encoded
 //! Envelope v3 with headers populated (device_id + genesis_hash) for
 //! secondary device pairing.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 #![allow(clippy::too_many_arguments)]
 

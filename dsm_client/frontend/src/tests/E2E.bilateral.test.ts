@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* E2E Test: Bilateral (Offline/Bluetooth) Transaction Flow

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Generated protobuf types for DSM SDK
 //!
 //! This module contains the protobuf message types for the DSM envelope system.

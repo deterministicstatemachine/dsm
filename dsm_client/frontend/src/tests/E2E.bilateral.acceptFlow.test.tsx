@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { act } from '@testing-library/react';
 import { acceptOfflineTransfer } from '@/dsm/index';
 import { bridgeEvents } from '../bridge/bridgeEvents';

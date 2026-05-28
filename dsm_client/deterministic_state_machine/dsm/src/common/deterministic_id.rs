@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic ID Generation (No UUID, No Wall-Clock)
 //!
 //! This module provides deterministic, reproducible ID generation for all DSM components.

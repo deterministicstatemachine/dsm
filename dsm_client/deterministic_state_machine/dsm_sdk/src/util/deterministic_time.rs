@@ -6,7 +6,6 @@
 //! `peek()` to inspect without advancing. The `reset()` helper is only available
 //! in test builds or when the `testutils` feature is enabled.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Deterministic logical tick provider — clockless time substitute.
 //!
 //! IMPORTANT:

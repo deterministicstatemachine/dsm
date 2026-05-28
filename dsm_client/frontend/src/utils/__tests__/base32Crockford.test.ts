@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import {
   decodeBase32Crockford,
   encodeBase32Crockford,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic implementation traces for direct Rust validation.
 //!
 //! Unlike TLC model checking, these traces execute the real DSM transition code

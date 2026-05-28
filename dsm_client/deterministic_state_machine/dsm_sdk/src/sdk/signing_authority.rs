@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use dsm::crypto::SignatureKeyPair;
 use dsm::types::error::DsmError;
 

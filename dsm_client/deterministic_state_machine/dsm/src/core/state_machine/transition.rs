@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! State transition creation and application for the DSM hash chain.
 //!
 //! A [`StateTransition`] encapsulates all data needed to evolve the hash chain

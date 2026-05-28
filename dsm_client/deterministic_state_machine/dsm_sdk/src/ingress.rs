@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Shared Native Ingress
 //!
 //! Platform-agnostic native boundary shared by Android JNI and iOS FFI.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin SPV (Simplified Payment Verification) proof verification.
 //!
 //! Verifies that a transaction is included in a Bitcoin block by checking

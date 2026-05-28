@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Newtype wrappers for type-safe identifiers
 //!
 //! This module provides compile-time guarantees that identifiers cannot be mixed up.

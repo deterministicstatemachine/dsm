@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Vault Fulfillment Mechanisms
 //!
 //! This module defines the fulfillment mechanisms for Deterministic Limbo Vaults (DLVs).

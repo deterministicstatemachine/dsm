@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Device testing utilities for Android WebView
 export function isAndroidWebView(): boolean {

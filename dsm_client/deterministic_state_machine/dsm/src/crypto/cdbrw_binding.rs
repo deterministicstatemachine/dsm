@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! C-DBRW (Challenge-seeded Dual-Binding Random Walk) binding module.
 //!
 //! Replaces the old timing-based DBRW with the challenge-seeded protocol

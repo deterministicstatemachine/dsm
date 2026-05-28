@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! UI-facing error types for the DSM Android WebView frontend.
 //!
 //! [`DsmUiError`] wraps [`DsmCoreError`] with additional context specific to the

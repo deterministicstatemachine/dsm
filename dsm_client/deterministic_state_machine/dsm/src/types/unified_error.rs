@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Cross-layer unified error type for the DSM protocol.
 //!
 //! [`UnifiedDsmError`] provides a single error enum that spans all subsystems

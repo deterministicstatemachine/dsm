@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { routerQueryBin } from '../WebViewBridge';
 import { BridgeRpcRequest, BridgeRpcResponse, IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
 

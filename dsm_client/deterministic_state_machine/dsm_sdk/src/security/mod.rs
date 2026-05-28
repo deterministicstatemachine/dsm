@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # DSM Security Module
 //!
 //! Provides cryptographic security primitives that maintain offline capabilities.

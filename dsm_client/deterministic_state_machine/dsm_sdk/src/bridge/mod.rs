@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # SDK Bridge API — APP INTEGRATION BOUNDARY
 //!
 //! If you are building a custom wallet, terminal app, CLI tool, or mobile
@@ -48,7 +50,6 @@
 //! used by the SDK handler implementations. This keeps the transport/UI
 //! bridge entirely out of the pure `dsm` core crate.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, RwLock};

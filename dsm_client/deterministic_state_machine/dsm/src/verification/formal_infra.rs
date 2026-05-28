@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Formal verification & property-test infrastructure for DSM (issue #162 split).
 //!
 //! Issue #162 carved this out of the top-level `verification.rs` so the

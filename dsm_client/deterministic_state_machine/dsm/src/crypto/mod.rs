@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Cryptographic primitives and operations for the DSM protocol.
 //!
 //! This module is the root of the DSM cryptographic stack. Every primitive

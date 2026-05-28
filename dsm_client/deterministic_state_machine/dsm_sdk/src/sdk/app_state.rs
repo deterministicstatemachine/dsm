@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Persistent Application State
 //!
 //! Manages the SDK's on-disk identity and preference store. All data is
@@ -11,7 +13,6 @@
 //!
 //! The state file lives at `<storage_base_dir>/dsm_app_state.pb`.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashMap;
 use std::fs;

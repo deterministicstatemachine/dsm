@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM Storage Hardening Pack v2.0 (deterministic helpers)
 //! Clockless, quorum-based mirroring; unbiased permutation; windowing and caps.
 //! These helpers are pure functions used by object_store/bytecommit and indexers.

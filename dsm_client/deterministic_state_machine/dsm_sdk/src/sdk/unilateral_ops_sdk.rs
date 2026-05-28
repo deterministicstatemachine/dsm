@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Unilateral Operations SDK
 //!
 //! Production-ready, protobuf-only, deterministic SDK for unilateral

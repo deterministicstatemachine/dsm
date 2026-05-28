@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! iOS Bluetooth Implementation
 //!
 //! This module provides iOS-specific Bluetooth functionality using Swift/Objective-C

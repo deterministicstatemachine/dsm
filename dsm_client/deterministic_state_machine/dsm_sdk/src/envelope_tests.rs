@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Envelope v3 Roundtrip and Validation Tests
 //!
 //! Ensures protobuf serialization preserves all required fields

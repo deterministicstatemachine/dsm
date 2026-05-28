@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # SQLite Chain Tip Store
 //!
 //! Implements the [`ChainTipStore`]

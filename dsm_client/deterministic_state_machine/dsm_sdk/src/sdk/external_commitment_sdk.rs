@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # External Commitment SDK
 //!
 //! Creates, publishes, and verifies External Commitments — cryptographic

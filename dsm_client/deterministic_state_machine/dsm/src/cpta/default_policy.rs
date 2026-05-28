@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Default Token Policy Generator
 //!
 //! Provides a standardized default policy for tokens when no custom policy

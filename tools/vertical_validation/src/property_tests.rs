@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Property-Based Tests for DSM State Machine
 //!
 //! Exercises the real `StateMachine::execute_transition()` and supporting

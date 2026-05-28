@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Network Auto-Detection
 //!
 //! Clockless, Serde-free network interface detection for the storage node.
 //! Discovers the primary listening address and advertises it to peers
 //! during gossip and replication setup.
 
-// SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
 use dsm_sdk::util::text_id;

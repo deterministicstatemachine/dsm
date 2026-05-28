@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! TLA+ Model Checker Runner
 //!
 //! Shells out to TLC (the TLA+ model checker) via `java -cp tla2tools.jar tlc2.TLC`

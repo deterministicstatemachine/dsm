@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Registry Evidence API
 //!
 //! Deterministic, clockless evidence submission gate. Accepts raw protobuf
 //! bytes with `Content-Type: application/octet-stream` and returns the
 //! domain-separated BLAKE3 object address in the `x-object-address` header.
 
-// SPDX-License-Identifier: Apache-2.0
 
 use axum::{
     body::Bytes,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # DSM Vertical Validation
 //!
 //! Proves DSM's formal scaling argument from TLA+ math down to real-time

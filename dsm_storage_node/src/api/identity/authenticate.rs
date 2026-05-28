@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Validation helpers for content carried through storage-node APIs.
 //! These are deterministic, side-effect-free checks used to reject
 //! malformed payloads early at the distribution/anchoring layer.

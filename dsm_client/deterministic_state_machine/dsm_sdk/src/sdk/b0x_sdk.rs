@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # B0x SDK — Unilateral Envelope Transport
 //!
 //! Deterministic, protobuf-only client for the b0x spool protocol.

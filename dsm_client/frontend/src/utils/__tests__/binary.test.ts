@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { binStringToUint8Array, toUint8Array, uint8ArrayToBinString } from '../binary';
 

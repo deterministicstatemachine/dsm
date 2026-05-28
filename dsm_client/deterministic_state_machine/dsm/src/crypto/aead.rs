@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Symmetric AEAD helpers (AES-256-GCM).
 //!
 //! This module intentionally owns generic symmetric encryption helpers so

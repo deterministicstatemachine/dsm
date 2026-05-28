@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Built-in CPTA for the native token: immutable bytes + fixed 32-byte commit.
 //! Protobuf-only, no JSON/base64, no clocks.
 

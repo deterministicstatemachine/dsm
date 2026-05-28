@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token Factory (STRICT, deterministic combiner; BLAKE3-only)
 //!
 //! DSM has no blocks. "Token genesis" here is an initial *anchor* record that can be

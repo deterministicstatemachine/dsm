@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Structured telemetry and logging for DSM (clockless, deterministic)
 //!
 //! This module provides production-grade observability with structured logging,

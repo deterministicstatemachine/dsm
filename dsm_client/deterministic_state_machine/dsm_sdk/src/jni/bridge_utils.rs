@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # JNI Bridge Utility Functions
 //!
 //! Shared helpers for JNI entry points: `SDK_READY` gate checks,
 //! protobuf request/response marshalling, and error-to-`OpResult`
 //! conversion.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::generated as pb;
 use crate::sdk::session_manager::SDK_READY;
 use jni::objects::{JByteArray, JString};

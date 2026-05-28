@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral state machine operations (3-phase commit protocol).
 //!
 //! Implements the bilateral transfer protocol described in whitepaper Section 3.4:

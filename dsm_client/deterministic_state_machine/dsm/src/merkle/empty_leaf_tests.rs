@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests for canonical empty SMT defaults.
 use crate::merkle::sparse_merkle_tree::{empty_leaf, empty_root, SparseMerkleTree, ZERO_LEAF};
 

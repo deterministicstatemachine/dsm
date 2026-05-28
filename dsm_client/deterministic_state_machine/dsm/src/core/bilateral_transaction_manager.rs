@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral Transaction Manager - Production Implementation (STRICT, bytes-only, no wall-clock)
 //!
 //! Invariants:

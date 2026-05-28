@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! BLE Bilateral Transaction Handler
 //!
 //! Implements the complete offline bilateral transaction protocol over Bluetooth Low Energy:

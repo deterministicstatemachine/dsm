@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DLV Pre-Commitment SDK Module (STRICT, fail-closed)
 //! - Deterministic hashing (BLAKE3) with canonical ordering
 //! - Explicit fork→vault bindings (no guesswork, no stubs)

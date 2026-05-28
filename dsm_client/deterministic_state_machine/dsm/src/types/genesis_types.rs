@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Genesis Types - DSM Genesis State Structures (binary-only digests).
 //!
 //! Deterministic, protobuf-first core types for Genesis state creation,

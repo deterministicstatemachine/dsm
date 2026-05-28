@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! SpentProofSMT: single-use JAP consumption tracking (emissions spec §3.6)
 //!
 //! An SMT mapping `jap_hash → 1` if consumed, else absent.

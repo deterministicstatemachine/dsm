@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # BLE Pairing Orchestrator
 //!
 //! Deterministic state machine for bilateral identity exchange over BLE.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // This module has been removed as part of the protobuf-only and clockless purge.
 // Reintroducing a JSON-based Web3 transport is forbidden by policy.
 // If chain interaction is required, implement a protobuf-native transport and

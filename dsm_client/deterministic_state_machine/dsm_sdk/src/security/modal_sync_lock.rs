@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! §5.4 Modal Synchronization Lock: a per-relationship flag that prevents
 //! concurrent online and offline transfers for the same (A, B) pair.
 //!

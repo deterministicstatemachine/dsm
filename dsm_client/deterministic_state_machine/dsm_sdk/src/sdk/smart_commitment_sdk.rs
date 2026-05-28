@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Smart Commitment SDK Module (no `hex` crate, no postcard in hashes)
 //!
 //! Deterministic, non-Turing smart commitments per DSM §10.

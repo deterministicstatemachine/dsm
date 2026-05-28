@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Diagnostics helper for beta support flows. Tests should mock this module.
 export const DIAGNOSTICS_LOG_METHOD = 'diagnosticsLog';

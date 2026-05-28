@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Centralized domain tag constants for BLAKE3 domain-separated hashing.
 //!
 //! # NUL terminator convention (Issue #182 Finding #3 resolution)

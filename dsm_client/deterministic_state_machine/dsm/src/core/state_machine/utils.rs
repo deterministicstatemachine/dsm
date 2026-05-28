@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Utility functions for the DSM state machine
 //!
 //! This module contains common utility functions used across the state machine

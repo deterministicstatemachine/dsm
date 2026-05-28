@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Canonical serialization utilities.
 //!
 //! This module centralizes canonical byte generation to avoid divergent encodings

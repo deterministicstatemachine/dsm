@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Structured error hierarchy for core DSM operations.
 //!
 //! [`DsmCoreError`] covers all failure modes within the core library:

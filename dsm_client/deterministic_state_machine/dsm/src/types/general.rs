@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! General-purpose shared types for the DSM protocol.
 //!
 //! This module contains foundational types that are used across multiple subsystems:

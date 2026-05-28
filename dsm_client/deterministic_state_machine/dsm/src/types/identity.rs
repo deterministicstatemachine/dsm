@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Cryptographic identity types for the DSM protocol.
 //!
 //! Provides [`IdentityClaim`] (an unverified request to establish identity) and

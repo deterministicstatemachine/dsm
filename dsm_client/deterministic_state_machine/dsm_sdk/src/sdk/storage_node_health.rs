@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM Storage Node Communication Health Monitor
 //!
 //! This module provides comprehensive health monitoring and recovery mechanisms

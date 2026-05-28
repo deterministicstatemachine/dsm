@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Device and genesis identity surface: registration, authentication,
 //! Device Tree (devtree), and Per-Device SMT tips.
 

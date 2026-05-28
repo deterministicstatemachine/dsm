@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import React, { useState, useCallback, useRef } from 'react';
 import './TokenCreationDialog.css';
 import { dsmClient } from '@/services/dsmClient';

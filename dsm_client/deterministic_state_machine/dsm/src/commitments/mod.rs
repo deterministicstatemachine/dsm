@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Commitments Module
 //!
 //! This module contains implementations of various commitment schemes used in DSM,
