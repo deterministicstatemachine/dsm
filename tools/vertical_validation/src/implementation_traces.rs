@@ -589,9 +589,9 @@ fn trace_bilateral_precomputed_finalize_hash(
             "trace-precomputed-finalize",
             0x11,
         );
-        let entropy = match manager.generate_entropy() {
+        let entropy = match manager.derive_transition_entropy(&remote_device_id, &operation) {
             Ok(entropy) => entropy,
-            Err(e) => return vec![format!("generate_entropy failed: {e}")],
+            Err(e) => return vec![format!("derive_transition_entropy failed: {e}")],
         };
         let predicted_tip =
             match manager.peek_post_finalize_hash(&remote_device_id, &operation, &entropy) {

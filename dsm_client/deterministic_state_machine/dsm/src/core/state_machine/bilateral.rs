@@ -251,7 +251,7 @@ mod tests {
     fn id_from_32_zero_bytes() {
         let id = [0u8; 32];
         let result = BilateralStateManager::id_from_32(&id);
-        assert_eq!(result, "0-0");
+        assert_eq!(result, "0-0-0-0");
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         let mut id = [0u8; 32];
         id[0] = 1; // lo u64 = 1 (little-endian)
         let result = BilateralStateManager::id_from_32(&id);
-        assert_eq!(result, "1-0");
+        assert_eq!(result, "1-0-0-0");
     }
 
     #[test]
