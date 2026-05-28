@@ -4,9 +4,9 @@
 //!
 //! A [`StateTransition`] encapsulates all data needed to evolve the hash chain
 //! by one step: the operation, new entropy, random walk positions, and the
-//! resulting next state. The [`apply_transition`] function validates invariants
-//! (entropy evolution, hash chain linkage, token conservation) and produces
-//! the successor state.
+//! resulting next state. Integrity invariants are validated by
+//! [`verify_transition_integrity`], and [`apply_transition`] produces the
+//! successor state from a validated operation.
 
 use crate::core::state_machine::random_walk::algorithms::{
     generate_positions, generate_seed, RandomWalkConfig,
@@ -260,7 +260,7 @@ impl StateTransition {
                 if let Some(value) = fc.fixed_parameters.get(&key) {
                     fixed_params.push(crate::types::proto::ParamKv {
                         key: key.clone(),
-                        value: String::from_utf8_lossy(value).to_string(),
+                        value: canonical_param_value(value),
                     });
                 }
             }
@@ -301,6 +301,17 @@ impl StateTransition {
             proof_of_authorization: self.proof_of_authorization.clone(),
             signature: self.signature.clone(),
         }
+    }
+}
+
+/// Canonical, collision-resistant string encoding for arbitrary parameter bytes.
+///
+/// UTF-8 values are preserved as-is for readability. Non-UTF8 values are encoded
+/// as `b32:<BASE32_NO_PAD>` to avoid lossy replacement behavior.
+fn canonical_param_value(value: &[u8]) -> String {
+    match std::str::from_utf8(value) {
+        Ok(s) => s.to_owned(),
+        Err(_) => format!("b32:{}", base32::encode(base32::Alphabet::Crockford, value)),
     }
 }
 
@@ -696,7 +707,7 @@ pub fn verify_token_balance_consistency(
             let previous = token_balance_map_for_verification(previous_state, token_id);
             let current = token_balance_map_for_verification(current_state, token_id);
             if previous.is_empty() && current.is_empty() {
-                return Ok(true);
+                return Ok(false);
             }
 
             let deltas =

@@ -3094,7 +3094,7 @@ impl BilateralBleHandler {
         // 3. Pre-generate finalize entropy
         let pre_entropy = {
             let m = self.bilateral_tx_manager.read().await;
-            m.generate_entropy()?
+            m.derive_transition_entropy(&session.counterparty_device_id, &session.operation)?
         };
 
         // Store entropy in session for finalize reuse
@@ -4036,7 +4036,10 @@ impl BilateralBleHandler {
             // entropy only valid if the confirm omitted pre_entropy entirely.
             let entropy = match pre_entropy {
                 Some(pe) => pe,
-                None => manager.generate_entropy()?,
+                None => manager.derive_transition_entropy(
+                    &session.counterparty_device_id,
+                    &session.operation,
+                )?,
             };
             (h_n, entropy)
         };
