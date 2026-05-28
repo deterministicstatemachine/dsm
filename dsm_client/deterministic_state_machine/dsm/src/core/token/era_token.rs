@@ -8,6 +8,15 @@
 use std::collections::HashMap;
 use crate::types::error::DsmError;
 
+#[inline]
+fn u128_to_u64_saturating(value: u128) -> u64 {
+    if value > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        value as u64
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkType {
     Mainnet,
@@ -51,8 +60,8 @@ impl EraTokenManager {
         if bal < amount {
             return Err(DsmError::InsufficientBalance {
                 token_id: "ERA".to_string(),
-                available: bal as u64,
-                requested: amount as u64,
+                available: u128_to_u64_saturating(bal),
+                requested: u128_to_u64_saturating(amount),
             });
         }
         *self.balances.entry(from.to_string()).or_insert(0) -= amount;
@@ -81,8 +90,8 @@ impl EraTokenManager {
                 if bal < amount {
                     return Err(DsmError::InsufficientBalance {
                         token_id: "ERA".to_string(),
-                        available: bal as u64,
-                        requested: amount as u64,
+                        available: u128_to_u64_saturating(bal),
+                        requested: u128_to_u64_saturating(amount),
                     });
                 }
                 *self.balances.entry(from.to_string()).or_insert(0) -= amount;

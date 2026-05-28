@@ -1048,8 +1048,11 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let signer_pk = current_state.device_info.public_key.clone();
                 let authorized_by = current_state.device_info.device_id.to_vec();
                 let signing_key = crate::sdk::signing_authority::current_secret_key()?;
-                let mut mint_msg = b"mint|".to_vec();
+                let mut mint_msg = b"mint|v2|".to_vec();
                 mint_msg.extend_from_slice(&authorized_by);
+                mint_msg.extend_from_slice(token_id.as_bytes());
+                mint_msg.extend_from_slice(&amount.to_le_bytes());
+                mint_msg.extend_from_slice(&state_hash);
                 let mint_hash =
                     dsm::crypto::blake3::token_domain_hash(&policy_commit, "mint", &mint_msg);
                 let mint_sig =
@@ -1130,8 +1133,11 @@ impl<I: Send + Sync> TokenSDK<I> {
                 // 2. Sign the serialised op with the device's SPHINCS+ key
                 {
                     let signing_key = crate::sdk::signing_authority::current_secret_key()?;
-                    let mut burn_msg = b"burn|".to_vec();
+                    let mut burn_msg = b"burn|v2|".to_vec();
                     burn_msg.extend_from_slice(token_id.as_bytes());
+                    burn_msg.extend_from_slice(&signer_pk);
+                    burn_msg.extend_from_slice(&amount.to_le_bytes());
+                    burn_msg.extend_from_slice(&state_hash);
                     let burn_hash =
                         dsm::crypto::blake3::token_domain_hash(&policy_commit, "burn", &burn_msg);
                     let sig =

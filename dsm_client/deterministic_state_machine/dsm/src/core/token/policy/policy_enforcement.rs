@@ -491,7 +491,7 @@ impl PolicyEnforcer {
         ctx: &EnforcementContext,
     ) -> Result<bool, DsmError> {
         let Some(identity) = ctx.identity.as_ref() else {
-            return Ok(true);
+            return Ok(false);
         };
 
         for role in roles {
