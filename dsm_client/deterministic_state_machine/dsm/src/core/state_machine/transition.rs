@@ -1346,6 +1346,19 @@ fn verify_burn_authorization_for_transition(
     proof: &[u8],
 ) -> Result<(), DsmError> {
     let (pk, sig) = parse_embedded_proof(proof, "burn_proof")?;
+
+    // The signed message binds the token owner's public key, but the signature
+    // is verified with `pk` taken from the (attacker-controlled) proof. Every
+    // byte of the message is public, so without binding `pk` to the owner key
+    // anyone could sign with their own keypair and pass. Fail closed unless the
+    // proof key IS the current owner key.
+    if pk.as_slice() != current_state.device_info.public_key.as_slice() {
+        return Err(DsmError::unauthorized(
+            "Burn proof public key does not match token owner",
+            None::<std::io::Error>,
+        ));
+    }
+
     let policy_commit = crate::core::token::resolve_policy_commit(token_id)?;
 
     let mut msg = b"burn|v2|".to_vec();
@@ -1437,6 +1450,37 @@ mod tests {
         let mut state = create_test_state(seed);
         state.device_info.public_key = pk.clone();
         (state, pk, sk)
+    }
+
+    /// Regression: a burn proof carrying a public key that is NOT the current
+    /// token owner's key must be rejected before any signature work. Previously
+    /// the owner key was only bound into the signed *message* (all public
+    /// bytes) while verification used the attacker-supplied `pk`, so anyone
+    /// could sign with their own keypair and pass.
+    #[test]
+    fn burn_proof_with_non_owner_key_is_rejected() {
+        let (state, _owner_pk, _owner_sk) = create_test_state_with_keypair(7);
+        let (attacker_pk, _attacker_sk) =
+            generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
+        assert_ne!(
+            attacker_pk, state.device_info.public_key,
+            "attacker key must differ from owner key for this test"
+        );
+
+        // Well-formed embedded proof: [pk_len LE u16][pk][sig_len LE u16][sig].
+        // The signature is never reached — the owner-key guard fails first.
+        let dummy_sig = vec![0u8; 16];
+        let mut proof = Vec::new();
+        proof.extend_from_slice(&(attacker_pk.len() as u16).to_le_bytes());
+        proof.extend_from_slice(&attacker_pk);
+        proof.extend_from_slice(&(dummy_sig.len() as u16).to_le_bytes());
+        proof.extend_from_slice(&dummy_sig);
+
+        let result = verify_burn_authorization_for_transition(&state, "ERA", 50, &proof);
+        assert!(
+            result.is_err(),
+            "burn proof signed by a non-owner key must be rejected"
+        );
     }
 
     fn signed_transfer_op_amount(

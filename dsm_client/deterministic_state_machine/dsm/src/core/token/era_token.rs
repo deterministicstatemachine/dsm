@@ -64,8 +64,14 @@ impl EraTokenManager {
                 requested: u128_to_u64_saturating(amount),
             });
         }
-        *self.balances.entry(from.to_string()).or_insert(0) -= amount;
-        *self.balances.entry(to.to_string()).or_insert(0) += amount;
+        let from_bal = self.balances.entry(from.to_string()).or_insert(0);
+        *from_bal = from_bal
+            .checked_sub(amount)
+            .ok_or_else(|| DsmError::invalid_operation("ERA balance underflow"))?;
+        let to_bal = self.balances.entry(to.to_string()).or_insert(0);
+        *to_bal = to_bal
+            .checked_add(amount)
+            .ok_or_else(|| DsmError::invalid_operation("ERA balance overflow"))?;
         Ok(())
     }
 
@@ -74,8 +80,14 @@ impl EraTokenManager {
         match self.network {
             NetworkType::Mainnet => Err(DsmError::MintNotAllowed),
             NetworkType::Testnet => {
-                *self.balances.entry(to.to_string()).or_insert(0) += amount;
-                self.total_supply += amount;
+                let to_bal = self.balances.entry(to.to_string()).or_insert(0);
+                *to_bal = to_bal
+                    .checked_add(amount)
+                    .ok_or_else(|| DsmError::invalid_operation("ERA balance overflow"))?;
+                self.total_supply = self
+                    .total_supply
+                    .checked_add(amount)
+                    .ok_or_else(|| DsmError::invalid_operation("ERA total_supply overflow"))?;
                 Ok(())
             }
         }
@@ -94,8 +106,14 @@ impl EraTokenManager {
                         requested: u128_to_u64_saturating(amount),
                     });
                 }
-                *self.balances.entry(from.to_string()).or_insert(0) -= amount;
-                self.total_supply -= amount;
+                let from_bal = self.balances.entry(from.to_string()).or_insert(0);
+                *from_bal = from_bal
+                    .checked_sub(amount)
+                    .ok_or_else(|| DsmError::invalid_operation("ERA balance underflow"))?;
+                self.total_supply = self
+                    .total_supply
+                    .checked_sub(amount)
+                    .ok_or_else(|| DsmError::invalid_operation("ERA total_supply underflow"))?;
                 Ok(())
             }
         }
