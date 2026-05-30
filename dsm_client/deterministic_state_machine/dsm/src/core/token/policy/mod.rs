@@ -139,6 +139,18 @@ impl TokenPolicySystem {
             self.enforcer
                 .enforce_policy(&policy, operation_type, context)
                 .await
+        } else if crate::core::token::token_state_manager::builtin_policy_commit_for_token(token_id)
+            .is_some()
+        {
+            // Built-in tokens (ERA, dBTC) carry their constraints in dedicated
+            // code paths (e.g. the Bitcoin-tap flow) and were never gated by the
+            // TokenPolicySystem. Default-denying them here is a regression, so
+            // the fail-closed default applies only to genuinely-unknown,
+            // user-created tokens that registered no policy.
+            Ok(EnforcementResult::allowed(
+                "Built-in token; no TokenPolicySystem restrictions",
+                0,
+            ))
         } else {
             Ok(EnforcementResult::denied(
                 "No policy registered for token",
@@ -329,6 +341,33 @@ mod tests {
             "missing_token",
         );
         assert!(resolved.is_err());
+    }
+
+    /// Regression: the fail-closed default for an unregistered token must NOT
+    /// catch built-in tokens (ERA, dBTC) — they were never gated by the
+    /// TokenPolicySystem and carry their constraints elsewhere. Only genuinely
+    /// unknown, user-created tokens with no registered policy are denied.
+    #[tokio::test]
+    async fn enforce_policy_allows_unregistered_builtin_but_denies_unknown() {
+        let system = TokenPolicySystem::new().unwrap();
+        let ctx = std::collections::HashMap::new();
+
+        // dBTC: builtin, no TokenPolicySystem policy registered -> allowed.
+        let dbtc = system.enforce_policy("dBTC", "transfer", &ctx).await.unwrap();
+        assert!(
+            dbtc.allowed,
+            "unregistered builtin dBTC must not be default-denied"
+        );
+
+        // Unknown user token, no policy -> denied (fail closed).
+        let unknown = system
+            .enforce_policy("UNKNOWN_USER_TOKEN", "transfer", &ctx)
+            .await
+            .unwrap();
+        assert!(
+            !unknown.allowed,
+            "unknown unregistered token must be denied"
+        );
     }
 
     #[tokio::test]
