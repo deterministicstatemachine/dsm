@@ -57,6 +57,24 @@ Tree, and each device’s Per-Device SMT defines the user’s bilateral relation
 principles—eliminating custodial account recovery, authorization servers, and third-party
 revocation lists. The result is a continuously evolving, self-verifying user-controlled state,
 rather than institution-controlled accounts.
+1.1 Specification Status Convention (Layer A / Layer B)
+This specification is reconciled against the running implementation; where the code and an
+earlier draft disagreed, the code is authoritative. To keep "what ships today" distinct from
+"where the architecture is headed," the document is read in two layers:
+
+• Layer A — Current normative implementation. Default. Every claim outside an
+explicitly labeled Layer-B block describes behavior realized in the codebase
+(dsm_client/deterministic_state_machine and dsm_storage_node) and is binding for
+conformance. Acceptance predicates are drawn exclusively from Layer A.
+
+• Layer B — Planned extensions / architecture targets. Subsections (or call-outs)
+explicitly marked "Planned / not in current implementation" describe intended future
+structure. They are preserved as design intent but are NOT shipped and MUST NOT be
+relied upon as acceptance criteria.
+
+Where a feature is only partially realized, the implemented part is stated normatively (Layer A)
+and the unfinished portion is flagged as a "remaining gap." Where a construct cannot be
+confirmed from the repository, it is marked "design target, not confirmed in current code."
 2 Cryptographic Foundations
 2.1 Straight Hash Chains
 A hash chain encodes ordering by linking each state to the hash of its predecessor. Formally,
@@ -168,9 +186,32 @@ Device identifier (normative). specific, but deterministic). Then
 Let AttA be the stable device attestation digest (platform-
 DevIDA := BLAKE3-256 "DSM/devid\0" ∥pkA ∥AttA.
 2.5 Genesis State Creation
-Let b1,...,bt be independent entropy contributions and A contextual binding parameters.
-Define
-G= BLAKE3-256 "DSM/genesis\0" ∥b1∥···∥bt∥A . (3)
+Genesis is a structured n-of-n multi-party computation (MPC), not a single flat hash.
+Let {m_1,...,m_t} be the per-participant MPC contributions, π_DBRW the DBRW anti-cloning
+proof (Sec. 12), and the public-key bundle (pk_sign, pk_encap). The genesis commitment is
+computed over a single domain hasher seeded with the parent tag "DSM/genesis\0", into which
+three sub-domain separators are folded so that contributions, binding proof, and key bundle
+occupy disjoint regions of the preimage:
+
+  "DSM/genesis/keys\0"  — public-key bundle region (signing + encapsulation keys),
+  "DSM/genesis/mpc\0"   — per-participant MPC contribution region,
+  "DSM/genesis/dbrw\0"  — DBRW binding / device-fingerprint region.
+
+Concretely (normative; see genesis_types.rs::recompute_genesis_hash and
+core/identity/genesis_mpc.rs), with H_g := dsm_domain_hasher("DSM/genesis"):
+
+  G := H_g( device_id
+          ∥ ( "DSM/genesis/mpc\0"  ∥ H(m_i) for each contribution m_i in sorted order )
+          ∥   "DSM/genesis/dbrw\0" ∥ device_fingerprint ∥ verification_hash
+          ∥   "DSM/genesis/keys\0" ∥ pk_sign ∥ pk_encap ∥ key_hash ).
+
+MPC contributions are hashed in a deterministic sorted order. Wall-clock and mutable
+metadata (e.g. created_at) are explicitly EXCLUDED from the preimage so that genesis is
+clockless and reproducible. K_DBRW is derived post-MPC inside the same genesis session
+(so the genesis_hash exists before K_DBRW); see Sec. 12. The classical flat form
+G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_t ∥ A) (3) is the conceptual single-party
+degenerate case; the structured MPC construction above is the implemented normative form,
+and §12's "n-of-n MPC genesis from §2.5" refers to it.
 3 Two Merkle Structures: Storage and Replication
 Device Tree (standard Merkle). The Device Tree (leaves = device IDs) is fully replicated
 across storage nodes and across all devices under G. Adding a device is an online event: a
@@ -186,6 +227,14 @@ Fix parties (A,B) with local parent tip hn for the relationship CA↔B at device
 Initiator prepares a precommit with fresh entropy e:
 Cpre = BLAKE3-256 "DSM/precommit\0" ∥hn∥payload∥e . (4)
 Counterparty verifies and co-signs Cpre. The successor Sn+1 embeds hn; hn+1 = H(Sn+1).
+
+Implementation note (normative). The bare single-tag "DSM/precommit\0" of (4) is retained
+only as the legacy v1 domain (commitments/precommit.rs::LEGACY_V1_DOMAIN). Production
+code derives pre-commits under the versioned fork-aware v2 family defined in §4.1.1; the
+bilateral path computes C_pre = BLAKE3-256("DSM/precommit/commitment-hash/v2\0" ∥ h_n ∥
+payload ∥ e) (bilateral_transaction_manager.rs::compute_precommit →
+CanonicalPreCommitment::branch_commitment_hash). Treat §4.1.1 as the implemented normative
+pre-commit form and (4) as its degenerate, single-candidate conceptual case.
 
 4.1.1 Fork-Aware Pre-Commit Family (Deterministic Smart Commitments)
 The single-tag form (4) covers the classical "one candidate per parent" case.
@@ -253,26 +302,32 @@ ReceiptCommit fields (normative) receipt-commit serializes the following fields 
 semantic order (the Protobuf tags are defined in the DSM schema v2.4.0 / Envelope wire
 v3):
 ReceiptCommit {
-genesis: bytes (size 32) devid_a: bytes (size 32) devid_b: bytes (size 32) parent_tip: bytes (size 32) child_tip: bytes (size 32) parent_root: bytes (size 32) child_root: bytes (size 32) rel_proof_parent: bytes rel_proof_child: bytes dev_proof: bytes ; G
-; DevID_A
-; DevID_B
-; h_n
-; h_{n+1}
-; r_A
-; r_A’
-; pi_rel(h_n in r_A)
-; pi’_rel(h_{n+1} in r_A’)
-; pi_dev(DevID_A in R_G)
+  1  genesis:            bytes (size 32)   ; G
+  2  devid_a:            bytes (size 32)   ; DevID_A
+  3  devid_b:            bytes (size 32)   ; DevID_B
+  4  parent_tip:         bytes (size 32)   ; h_n
+  5  child_tip:          bytes (size 32)   ; h_{n+1}
+  6  parent_root:        bytes (size 32)   ; r_A
+  7  child_root:         bytes (size 32)   ; r_A'
+  8  rel_proof_parent:   bytes             ; pi_rel(h_n in r_A)            (variable length)
+  9  rel_proof_child:    bytes             ; pi'_rel(h_{n+1} in r_A')      (variable length)
+ 10  dev_proof:          bytes             ; pi_dev(DevID_A in R_G)        (variable length)
+ 11  rel_replace_witness: bytes            ; SMT replace witness (h_n -> h_{n+1})  (variable length)
 }
 Deterministicserializationrules(normative) AllimplementationsMUSTproduceidentical
 bytes for the same logical ReceiptCommit:
 1. Protobuf encoding is DSM Envelope wire v3, deterministic: fields are serialized in strictly
 increasing tag order; unknown fields are forbidden.
 2. All bytes fields use definite length (length-delimited) encoding.
-3. The first seven bytes fields are exactly 32 bytes; any other length is invalid.
-4. Prooffieldsarerawproofbytesoftheirrespectiveproofmessages(alsoProtobuf-deterministic).
-Nested proof messages MUST themselves be deterministically serialized with no unknown
-fields.
+3. The first seven bytes fields (tags 1–7: genesis, devid_a, devid_b, parent_tip, child_tip,
+parent_root, child_root) are exactly 32 bytes; any other length is invalid. The remaining
+four fields (tags 8–11: rel_proof_parent, rel_proof_child, dev_proof, rel_replace_witness) are
+variable-length proof/witness byte strings bounded only by the 128 KiB receipt size cap.
+4. Proof and witness fields are raw bytes of their respective proof messages (also
+Protobuf-deterministic). All four of tags 8–11 are hashed into the commit preimage; in
+particular rel_replace_witness (tag 11) — the SMT replace witness binding h_n → h_{n+1} —
+is part of the canonical commit, not merely transport. Nested proof messages MUST themselves
+be deterministically serialized with no unknown fields.
 5. map fields are forbidden in canonical commit forms. repeated fields (if any appear inside
 proof messages) are order-significant and MUST be serialized in the given order.
 6. No optional fields, extensions, or forward-compatible padding are permitted in canonical
@@ -537,7 +592,7 @@ DSM: Deterministic State Machines 16
 - halving_interval: u64 (number of emissions per halving epoch).
 - base_amount: u128 (epoch-0 emission amount before halving).
 - recipient_mode: WINNER_UNIFORM (deterministic exact-uniform selection over activated
-set; Sec. ??).
+set; Sec. 14).
 • authority (discretionary operations): threshold t-of-N over a sorted list of issuer
 genesis IDs. Discretionary mint/burn is OPTIONAL and, if enabled, MUST still respect
 cap. DJTE emissions never require human signatures.
@@ -556,18 +611,46 @@ proof is required by the policy (e.g., a Merkle proof against an anchored root).
 check digest equality and proof soundness.
 9.3 Canonical Commit Form (CPTA)
 Protobuf (deterministic, normative). The canonical CPTA bytes are the deterministic
-Protobuf serialization (DSM Envelope wire v3) of the CptaPolicy message as defined in the
-DSM schema. No CBOR, JSON, base64, or hex-text encodings are permitted in normative
+Protobuf serialization (DSM Envelope wire v3) of the policy object — implemented as the Rust
+core TokenPolicy / PolicyFile (policy_types.rs), carried on the wire as TokenPolicyV3
+(§9.4). No CBOR, JSON, base64, or hex-text encodings are permitted in normative
 commit paths. The CPTA commitment is the BLAKE3-256 of the domain-separated prefix
-plus the encoded bytes:
+plus the encoded bytes (policy_types.rs::PolicyAnchor::from_policy uses
+blake3::domain_hash("DSM/cpta", bytes)):
 policy_
 commit := BLAKE3-256 "DSM/cpta\0" ∥canonical_cpta_bytes.
 Deterministic Protobuf rules match Sec. 4.2.1: increasing tag order, no unknown fields, no
 maps in canonical objects, and order-significant repeated fields.
 DSM: Deterministic State Machines 17
-9.4 dsm_app.proto Additions (Transport Only)
-Listing 1: Transport messages for CPTA and token ops; commits/verification are produced
-and checked by the Rust core, not by transport.
+9.4 Token Policy Object and Transport
+Implemented object model (Layer A; normative). There is NO CptaPolicy message in
+proto/dsm_app.proto. The shipped policy object is the Rust core type (policy_types.rs):
+
+  TokenPolicy { file: PolicyFile, anchor: PolicyAnchor, verified: bool, last_verified: u64 }
+  PolicyFile  { name, version, created_tick, author, description,
+                conditions: Vec<PolicyCondition>, roles: Vec<PolicyRole>, metadata }
+
+The commitment is policy_commit := BLAKE3-256("DSM/cpta\0" ∥ canonical_policy_bytes)
+(PolicyAnchor::from_policy). The shipped wire transport (proto/dsm_app.proto:800–826) is:
+
+  message TokenPolicyV3   { bytes policy_bytes; }                       // domain "DSM/policy\0"
+  message PolicyAnchorV3  { bytes policy_digest(32); bytes author_device_id(32);
+                            bytes parent_digest(32); }                  // domain "DSM/policy/anchor\0"
+  message TokenCreateRequest  { string ticker; string alias; uint32 decimals;
+                                bytes max_supply_u128(16); bytes policy_anchor(32); }
+  message TokenCreateResponse { bool success; string token_id; bytes policy_anchor(32);
+                                string message; }
+
+Related stored/canonical policy messages (CanonicalPolicy, StoredPolicy, PolicyRoleProto,
+PolicyConditionProto) also exist in the schema. Commits and acceptance predicates are produced
+and verified by the Rust core, not by transport.
+
+Planned / not in current implementation (Layer B). The richer single-message CptaPolicy
+transport schema below (inline supply/DJTE/authority/allowlist/anchor fields) is preserved as a
+design target for a future consolidated token-policy transport. It is NOT in the current schema —
+do not treat its field layout as normative. The shipped path uses TokenPolicyV3 + PolicyAnchorV3
++ TokenCreateRequest/Response above.
+Listing 1 (Layer B, planned): a future consolidated CPTA transport message.
 message CptaPolicy {
 bytes token_genesis = 1; // 32B G_T
 uint32 version = 2; // must match canonical commit
@@ -668,7 +751,7 @@ Emissions (DJTE). DJTE emissions are deterministic reveals from the CPTA-bound
 source_dlv, triggered only by spend-gate unlock events (JAPs). A DjteEmission is valid
 iff:
 1. jap_hash is valid and unspent under the global SpentProofSMT transition for this emission
-index (Sec. ??);
+index (Sec. 14);
 2. selection_proof proves the exact eligible population size N (ShardCountSMT root) and
 inclusion of the selected winner in the shard activation accumulator (SAA);
 3. the winner derivation is reproduced deterministically from the public seed and maps to
@@ -760,6 +843,24 @@ demand, and (c) submit to objective audits. Sustainability follows from the subs
 model (Sec. 7.1); incentive alignment follows from hardware-bound identity and staking.
 Nodes are dumb by design and signature-free; all enforcement is derived from mirrored
 Protobuf bytes, deterministic hashes, and device-signed stitched receipts.
+
+Implementation locus (Layer A; normative). The storage-node audit machinery of this section is
+implemented in the separate `dsm_storage_node` crate (not in `dsm_client`). Confirmed against
+that crate's source: hardware-bound node identity "DSM/node-id" (network_config.rs, main.rs);
+Fisher-Yates replica placement "DSM/place" (replication.rs); ByteCommitV3 under "DSM/bytecommit"
+and mirror addressing "DSM/obj-bytecommit" (api/objects/bytecommit.rs); the Node Registry and
+its evidence records, content-addressed under "DSM/registry" (api/registry/core.rs) and persisted
+by store_registry_evidence into the registry_evidence table (publish_evidence); and DrainProof
+"DSM/drain" / DrainProofV3 (api/registry/drain.rs). The PaidK gate (§10.3 step 1) is implemented.
+
+Remaining gap. Two §10.4 constructs are design targets, not shipped acceptance predicates: (1)
+the distinct evidence-leaf tag "DSM/evidence" (Eq. hE below) — in code evidence is content-
+addressed under the "DSM/registry" tag instead, with no separate "DSM/evidence" domain; and (2)
+the Node Denylist SMT with root R_deny (§10.2 step 2 and §10.3 step 4), which is NOT confirmed as
+a distinct SMT construct in `dsm_storage_node` — no denylist tag or denylist-SMT symbol was found.
+Evidence records ARE produced and persisted (above), but their binding into a dedicated denylist
+sparse-Merkle root under a "DSM/evidence" leaf tag is, at present, a design target; treat both the
+"DSM/evidence" tag and the R_deny non-inclusion check accordingly until confirmed in code.
 10.1 Hardware-Bound Cryptographic Identity
 Each node derives a non-forgeable identity from a network genesis anchor and DBRW
 binding:
@@ -886,33 +987,53 @@ DSM: Deterministic State Machines 26
 • stake and subscription pricing recorded in DLVs.
 Any verifier with access to the same bytes reaches the same slashing and admission decisions.
 11 Post-Quantum Key Evolution and Transport
-DSMusesaKyberKEMtoderiveper-transitionstepmaterialandSPHINCS+toauthenticate
-receipts. All derivations are clockless and deterministically bound to adjacency inputs.
-Deterministic Kyber encapsulation (normative). from public and local secret inputs:
+DSM uses an ML-KEM-768 (FIPS 203, the standardized successor to Kyber768) KEM to derive
+per-transition step material and a custom BLAKE3 SPHINCS+ construction to authenticate
+receipts. All derivations are clockless and deterministically bound to adjacency inputs. (Domain
+tags retain the historical literal "kyber" string — e.g. "DSM/kyber-ss\0",
+"DSM/kyber-coins\0" — but the underlying primitive is the ml-kem crate's ML-KEM-768; see
+crypto/kyber.rs. Real KEM seed tags are "DSM/ml-kem-seed", "DSM/ml-kem-keygen-d",
+"DSM/ml-kem-keygen-z".)
+Deterministic ML-KEM-768 encapsulation (normative). from public and local secret inputs:
 Let coins be deterministically derived
 coins := BLAKE3-256 "DSM/kyber-coins\0" ∥hn ∥Cpre ∥DevIDsender ∥KDBRW.
 Encapsulation uses a deterministic coins interface (equivalently, a seeded KEM):
-(ct,ss) = KyberEncDet(pkrecipient,coins), kstep = BLAKE3-256 "DSM/kyber-ss\0" ∥ss ,
+(ct,ss) = MlKem768EncDet(pkrecipient,coins), kstep = BLAKE3-256 "DSM/kyber-ss\0" ∥ss ,
 (12)
 where all hashing uses BLAKE3-256 with domain separation. Second-preimage resistance of
 chained commitments prevents forks; SPHINCS+ ensures non-repudiation.
 11.1 SPHINCS+ Ephemeral Keys Chained to Parent (Clockless)
-Signatures (normative). Parameter set: SPHINCS+ BLAKE3, level = NIST Category
-5, variant = ‘f‘ (fast). The DSM implementation uses BLAKE3 for all hash, PRF, and
-thash operations within SPHINCS+ (not SHAKE). Receipts MUST admit a hard maximum
-serialized size ≤128 KiB (including two signatures and included proof material). Submissions
-exceeding the cap are invalid and MUST be rejected prior to proof verification.
+Signatures (normative). DSM uses a custom BLAKE3 SPHINCS+ construction (crypto/sphincs.rs):
+the FORS + WOTS+ + hypertree structure and parameter sizes mirror the standardized SLH-DSA
+parameter sets, but every hash, PRF, and thash operation uses BLAKE3 instead of SHA2/SHAKE.
+This is therefore NOT a certified NIST variant and carries no NIST security-category
+certification; the implementation is self-flagged as not formally audited (crypto/sphincs.rs:3-8).
+Six presets are defined — SPX128{s,f}, SPX192{s,f}, SPX256{s,f} — selecting the small (`s`) or
+fast (`f`) trade-off at the 128/192/256-bit structural levels; the per-step ephemeral signing path
+uses SPX256f (ephemeral_key.rs). Do not describe this construction as "NIST Category 5" or
+"certified." (A migration to certified SLH-DSA is a Layer-B target, below.)
+Receipts MUST admit a hard maximum serialized size ≤128 KiB (including two signatures and
+included proof material). Submissions exceeding the cap are invalid and MUST be rejected prior
+to proof verification.
+
+Planned / not in current implementation (Layer B). Migration to a certified, audited
+SLH-DSA (FIPS 205) signer — replacing the custom BLAKE3 SPHINCS+ above with a standardized
+SHA2/SHAKE parameter set carrying an actual NIST security category — is an architecture target,
+not shipped.
 Key derivation (normative). Let KDBRW be the DBRW binding (Sec. 12). KDBRW MUST
 NEVER be serialized, logged, or included in any commitment. Derive a master seed using
 HKDF-BLAKE3:
 Smaster = HKDF-ExtractBLAKE3(salt= "DSM/dev\0", IKM= G∥DevID ∥KDBRW ∥s0),
 (13)
 and an attestation key (AKsk,AKpk) ←SPHINCS+.KeyGen(Smaster).
-Given parent hn and precommit Cpre, derive the per-step seed
-En+1 = HKDFBLAKE3("DSM/ek\0", hn ∥Cpre ∥kstep ∥KDBRW), (14)
+Given parent hn and precommit Cpre, derive the per-step seed using plain domain-separated
+keyed BLAKE3 (NOT HKDF; see ephemeral_key.rs::derive_ephemeral_seed, lines 29–41):
+En+1 = BLAKE3-256("DSM/ek\0" ∥ hn ∥ Cpre ∥ kstep ∥ KDBRW), (14)
 then generate the ephemeral keypair (EKsk
 n+1,EKpk
-n+1).
+n+1). (Only the master seed Smaster of (13) uses
+RFC-5869 HKDF; the per-step EK chain is a plain keyed-BLAKE3 chain — see §11 note on KDF
+primitives.)
 DSM: Deterministic State Machines 27
 Ephemeral certification (normative). Define the certification hash with domain separa-
 tion
@@ -933,7 +1054,7 @@ the proposed transition context:
 The response is the side signature under the freshly derived EK key for that
 same transition:
 
-  E_{n+1} = HKDF-BLAKE3("DSM/ek\0", h_n || C_pre || k_step || K_DBRW)
+  E_{n+1} = BLAKE3-256("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)   (plain keyed BLAKE3)
   EK_{n+1} = SPHINCS+.KeyGen(E_{n+1})
   sig_side = Sign_{EKsk_{n+1}}(receipt_commit or session-bound target)
 
@@ -953,7 +1074,7 @@ and certificate chain for the proposed transition.
 11.2 Identity Pre-commitment
 Let P0 be a provisioning seed; define Pi = BLAKE3-256("DSM/provision\0" ∥Pi−1). Under
 collision resistance, adversaries cannot forge a different identity chain consistent with {Pi}
-without breaking P0. For transport, commitments may be sealed via Kyber and verified upon
+without breaking P0. For transport, commitments may be sealed via ML-KEM-768 and verified upon
 decryption by checking BLAKE3-256("DSM/commit\0" ∥Sn ∥P) = expected.
 12 Dual-Binding Random Walk (DBRW)
 Definition 1 (Hardware Entropy). H(d) ∈{0,1}n extracts device-specific microarchitectural
@@ -999,11 +1120,12 @@ entropy source; it MUST NOT be time-based). Mixing KDBRW into key derivations bi
 signatures to the device and environment without introducing any external authority.
 
 Realization (normative). Implementations MUST realize the per-step KDBRW
-binding by mixing KDBRW into the per-step HKDF inputs that produce signing
-material — not as a separately maintained ρ/C state walk. Specifically, the
-per-step ephemeral seed (Eq. 14) and the deterministic Kyber coins (Sec. 11)
-both fold KDBRW into their preimage:
-  E_{n+1} = HKDF-BLAKE3("DSM/ek\0",   h_n ∥ C_pre ∥ k_step ∥ K_DBRW)
+binding by mixing KDBRW into the per-step keyed-BLAKE3 derivation inputs that
+produce signing material — not as a separately maintained ρ/C state walk.
+Specifically, the per-step ephemeral seed (Eq. 14) and the deterministic
+ML-KEM-768 coins (Sec. 11) both fold KDBRW into their preimage (both are plain
+domain-separated BLAKE3, NOT HKDF):
+  E_{n+1} = BLAKE3-256("DSM/ek\0" ∥ h_n ∥ C_pre ∥ k_step ∥ K_DBRW)
   coins   = BLAKE3-256("DSM/kyber-coins\0" ∥ h_n ∥ C_pre ∥ DevID ∥ K_DBRW)
 
 Because every per-step seed inherits K_DBRW, advancing the chain is
@@ -1040,12 +1162,14 @@ verification binds to full 32-byte DevIDs elsewhere.
 • challenget binds the capsule to its creation context and prevents replay between streams.
 DSM: Deterministic State Machines 29
 Key derivation (normative; mnemonic ring). Let the user supply a 24-word mnemonic.
-Derive a fixed-length seed using a memory-hard KDF with fixed parameters (no time-based
-tuning):
-Smn := Argon2id "DSM/recovery-ring\0", mnemonic
-_bytes,
-then derive the AEAD key using HKDF-BLAKE3:
-KR := HKDFBLAKE3 "DSM/recovery-aead\0", Smn.
+Derive a fixed-length 32-byte seed using a memory-hard KDF with the following fixed
+parameters (no time-based tuning). The profile is Argon2id v=0x13 with m=19456 KiB, t=2,
+p=1, 32-byte output — this is the `argon2` crate's `Argon2::default()` (OWASP-baseline) and is
+pinned here so it cannot drift (capsule.rs:245,266):
+Smn := Argon2id(version=0x13, m=19456, t=2, p=1, salt="DSM/recovery-ring\0", password=mnemonic_bytes, outlen=32),
+then derive the AEAD key using BLAKE3 derive_key (KDF mode) — NOT HKDF
+(capsule.rs:251, blake3::Hasher::new_derive_key):
+KR := BLAKE3-derive_key(context="DSM/recovery-aead\0", key_material=Smn).
 (mnemonic
 _bytes is the canonical wordlist encoding; implementations MUST NOT treat
 locale or whitespace as significant.)
@@ -1055,8 +1179,13 @@ noncet := BLAKE3-256 "DSM/recovery-nonce\0" ∥u64le(ct) ∥Rollt 0..23,
 i.e., the first 24 bytes for XChaCha20-Poly1305. Nonce reuse is prevented by the monotone
 ct.
 Capsule encryption (normative). Use XChaCha20-Poly1305:
-Captt = XChaCha20-Poly1305.EncKR, nonce=noncet Plaint; AD = "DSM/recovery-capsule-v3\0".
+Captt = XChaCha20-Poly1305.EncKR, nonce=noncet Plaint;
+AD = "DSM/recovery-capsule-v3\0" ∥ rt ∥ u64le(ct).
 (18)
+The associated data binds the capsule to the current Per-Device SMT root rt and the monotone
+capsule index ct (capsule.rs::build_capsule_aad, lines 117–122); this is the same AD pinned
+normatively in §16.10. (Earlier drafts listed AD as the bare tag "DSM/recovery-capsule-v3\0";
+the implemented form includes rt and u64le(ct).)
 Roll accumulator (normative). Let Receiptt be the accepted stitched receipt bytes (trans-
 port envelope excluded; hash the canonical commit form). Update:
 Rollt+1 = BLAKE3-256 "DSM/recovery-roll\0" ∥Rollt ∥BLAKE3-256 "DSM/receipt\0" ∥Receiptt ∥
@@ -1096,9 +1225,36 @@ receipt before initiating a new offline transaction with A; otherwise B would at
 consume a different parent.
 14 Genesis-Gated Emission Reveal and Deterministic Faucet Claims
 This section replaces geo-emissions and geometry attestation. DSM emissions are
-now specified as genesis-gated, CPTA-bound reveals sourced from a protocol DLV, with
-optional faucet-style discovery implemented via a pinned spawn registry and deterministic
-claim selection. There are no clocks, timestamps, or global ordering requirements.
+now specified as genesis-gated, CPTA-bound reveals sourced from a protocol DLV. There are
+no clocks, timestamps, or global ordering requirements.
+
+Implemented namespace (Layer A; normative). The core DJTE machinery is implemented under
+a distinct "DJTE." commitment namespace (emissions/mod.rs, shard_activation_accumulator.rs,
+spent_proof_smt.rs, paidk_proof.rs). The canonical tags are:
+  DJTE.JAP         — Join Activation Proof (spend-gate unlock witness),
+  DJTE.ACTIVE      — activated-population marker,
+  DJTE.SHARD       — per-shard activation accumulator entry,
+  DJTE.SHARDS.ROOT — global sparse-Merkle root binding shard counts,
+  DJTE.SPENT       — spent-proof SMT leaf (JAP unspent → spent under strict-fail),
+  DJTE.SEED        — emission seed,
+  DJTE.RESEED      — seed advance,
+  DJTE.POLICY      — emission policy commitment,
+  DJTE.RCPT        — emission receipt,
+  DJTE.DLV.TIP     — source-DLV chain-tip anchor.
+Winner selection, JAP→spent transitions, shard activation accumulators (SAA) and the
+spent-proof SMT referenced throughout this section are realized under these "DJTE." tags;
+the PaidK gate (§14.2) is implemented (paidk_proof.rs). Where this section's narrative uses
+ad-hoc symbols (e.g. ShardCountSMT, SAA), they denote the corresponding DJTE.* objects.
+
+Planned / not in current implementation (Layer B). The optional faucet-style discovery layer
+— pinned spawn registry, regional spawn mapping, Fast-Withdraw-Window (FWW) capacity
+selection, and the spawn-bound claim tag "DSM/emit-spawn" — is NOT present in the codebase
+(no "DSM/emit-spawn" tag and no spawn-registry/spawn_id symbols were found in dsm_client or
+dsm_storage_node). §14.4, §14.5's spawn-bound capsule, and §14.6 below are retained as design
+targets and MUST NOT be treated as acceptance criteria. The shipped faucet path
+(wallet_sdk.rs::build_faucet_protocol_payload) uses a "faucet.claim" payload tag and the DJTE
+emission machinery above — it does not use the spawn-registry "DSM/faucet-claim\0" capsule of
+§14.5.
 DSM: Deterministic State Machines 31
 14.1 Source Vault (CPTA-Bound DLV) and Fixed Supply
 Let policy_
@@ -1136,6 +1292,8 @@ mismatch), or if amt(i) >supply_remaining. Supply is reduced deterministically:
 supply_remaining′= supply_remaining−amt(i).
 DSM: Deterministic State Machines 32
 14.4 Regional Mapping and Pinned Spawn Registry (Optional Discovery Layer)
+[Layer B — Planned / not in current implementation. The "DSM/emit-spawn" tag and the
+pinned spawn registry below are not present in the codebase; this subsection is a design target.]
 Each emission is mapped to a coarse region identifier region_
 id associated with Gnew (e.g.,
 state/province class). The mapping is deterministic and coarse-grained; it is not a proof-of-
@@ -1152,6 +1310,11 @@ where SelectSpawn(·) is a fixed, published selection function over the ordered 
 region_
 id.
 14.5 Faucet Claim Capsule (Deterministic, No Geo-Attestation)
+[Layer B — Planned / not in current implementation. This capsule is spawn-bound (it carries
+spawn_id and an inclusion proof πspawn under the §14.4 spawn-registry root) and uses the
+"DSM/faucet-claim\0" tag, neither of which exists in the code. The shipped faucet uses the
+DJTE.* emission path and a "faucet.claim" payload tag instead — see the Layer-B note at the
+top of §14.]
 A claim is a one-shot capsule that binds the claimant to the spawn and to its current adjacency
 state. Define:
 capclaim = (spawn_id, Gclaimant, DevIDclaimant, chain_tip, C, σ, πspawn, policy_commit),
@@ -1166,6 +1329,8 @@ this version of the spec. The protocol-level invariants are: (1) spawn authentic
 (2) device binding via signatures and DevID inclusion, and (3) capacity enforcement via
 deterministic selection below.
 14.6 Deterministic Capacity Enforcement (No Timestamps)
+[Layer B — Planned / not in current implementation. The Fast-Withdraw-Window (FWW)
+selector depends on the spawn registry of §14.4 and is not implemented; design target only.]
 Let Cspawn be the set of valid claim commitments C for a spawn observed by verifiers. Define
 a deterministic first-writer-wins selector:
 FWWc(Cspawn) = the c lexicographically smallest C ∈Cspawn,
@@ -1246,7 +1411,7 @@ and verification. It is transport-agnostic and exposes stable ABI surfaces for m
 other bindings.
 • core/: Genesis/device creation, relationship (pair) straight-hash-chains, Per-Device SMT
 maintenance, Device Tree verification.
-• crypto/: Post-quantum primitives (Kyber KEM, SPHINCS+ signatures), BLAKE3,
+• crypto/: Post-quantum primitives (ML-KEM-768 KEM, custom BLAKE3 SPHINCS+ signatures), BLAKE3,
 HKDF-BLAKE3, Argon2id, AEAD.
 • receipt/: Stitched receipts, inclusion proofs, canonical commit bytes, Tripwire enforce-
 ment.
@@ -1260,7 +1425,9 @@ relevant to recovery predicates.
 Scope and authority (normative). The Rust protocol core crate dsm_core is the sole
 execution authority for: (1) canonical commit bytes, (2) acceptance predicates, (3) Merkle
 and SMT inclusion proof verification, (4) Per-Device SMT replace semantics, (5) signature
-creation/verification, and (6) all KDFs (HKDF-BLAKE3, Argon2id). Platform SDKs and
+creation/verification, and (6) all KDFs — RFC-5869 HKDF over BLAKE3 (master seed only), plain
+domain-separated keyed BLAKE3 (per-step EK/coins, b0x salts), BLAKE3 derive_key (recovery
+keys), and Argon2id (recovery ring). Platform SDKs and
 bindings are non-authoritative shims that MUST delegate these operations to dsm_core and
 MUST NOT re-implement canonical encodings or predicates.
 DSM: Deterministic State Machines 36
@@ -1339,10 +1506,17 @@ uppercase, no padding) of three 32-byte digests:
 addrA→B := b0x[B32 BLAKE3 "DSM/addr-G\0" ∥G∥saltG.B32 BLAKE3 "DSM/addr-D\0" ∥DevID
 Here hn is the current relationship chain tip digest for (A↔B), and nonce is sender-chosen
 per submission. B32(·) is a pure text encoding; it carries no security assumptions.
-Salt derivation (normative). exposed:
-Per-user blinding salts are derived inside dsm_core and never
-saltG := HKDFBLAKE3 "DSM/b0x-salt-G\0", Smaster , saltD := HKDFBLAKE3 "DSM/b0x-salt-D\0", Sm
-where Smaster is the device’s master secret seed (Sec. 11.1).
+Salt derivation (normative). Per-user blinding salts are derived inside the SDK and never
+exposed. They use plain domain-separated BLAKE3 (NOT HKDF) over the secret hardware-bound
+binding K_DBRW plus public material (b0x_sdk.rs::derive_salt, lines 509–531):
+  saltG := BLAKE3-256("DSM/b0x-salt-G\0" ∥ [K_DBRW] ∥ [genesis_hash] ∥ device_id),
+  saltD := BLAKE3-256("DSM/b0x-salt-D\0" ∥ [K_DBRW] ∥ [genesis_hash] ∥ device_id).
+K_DBRW (the device's hardware-bound secret, Sec. 12 — it approximates the master-secret role
+here and is never serialized) is folded in on the production Android/JNI build; genesis_hash is
+folded in when available. On builds or tests lacking K_DBRW, the salt falls back to
+(genesis_hash ∥ device_id) over public inputs (weaker blinding, same construction). This
+differs from earlier drafts, which specified HKDF-BLAKE3 over Smaster; the implemented form
+is plain keyed BLAKE3 as above.
 Rotation and privacy. Each stitched receipt advancing (A↔B) changes hn, rotating the
 final component and thus the full b0x[...] key. Only counterparties tracking the live tip
 can derive the current spool key; storage nodes store opaque bytes keyed by b0x[...] and
@@ -1378,9 +1552,12 @@ commit hashing, receipt signing, storage addressing keys).
 DSM uses the bilateral straight hash chain itself for strict ordering; no timestamps or heights
 appear in any predicate. Concurrency is resolved by stitched receipts and Per-Device SMT
 replace:
-1. Each proposed successor at tip hn carries a pre-commit Cpre = BLAKE3 "DSM/pre\0" ∥
-hn ∥op ∥e and an inclusion proof that hn is the current Per-Device SMT leaf.
-2. The successor hn+1 = BLAKE3 "DSM/tip\0" ∥hn ∥op ∥e∥σ is accepted iff the stitched
+1. Each proposed successor at tip hn carries a pre-commit Cpre = BLAKE3-256
+"DSM/precommit/commitment-hash/v2\0" ∥ hn ∥ op ∥ e (the fork-aware v2 branch-commitment tag
+of §4.1.1; bilateral_transaction_manager.rs::compute_precommit) and an inclusion proof that hn is
+the current Per-Device SMT leaf. (Earlier drafts wrote a bare "DSM/pre\0" tag here, which does
+not exist in code.)
+2. The successor hn+1 = BLAKE3-256 "DSM/tip\0" ∥hn ∥op ∥e∥σ is accepted iff the stitched
 receipt validates and the Per-Device SMT replace hn →hn+1 recomputes the advertised
 new root r′
 A with valid inclusion proofs (old and new).
@@ -1395,9 +1572,11 @@ DSM: Deterministic State Machines 40
 Per-step key derivation is specified in Sec. 11.1 and Sec. 12. In summary:
 • Device-bound secret KDBRW derives from hardware and environment (DBRW) and is never
 serialized, logged, or committed.
-• Master seed Smaster derives via HKDF-BLAKE3 from (G,DevID,KDBRW,s0).
-• For each parent hn and pre-commit Cpre, a per-step seed En+1 derives via HKDF-BLAKE3
-from (hn,Cpre,kstep,KDBRW), where kstep is derived from Kyber shared secret material.
+• Master seed Smaster derives via RFC-5869 HKDF over BLAKE3 from (G,DevID,KDBRW,s0).
+This is the one genuinely-HKDF derivation in DSM (crypto/hkdf.rs, genesis_mpc.rs).
+• For each parent hn and pre-commit Cpre, a per-step seed En+1 derives via plain
+domain-separated keyed BLAKE3 (NOT HKDF) from (hn,Cpre,kstep,KDBRW), where kstep is
+derived from ML-KEM-768 shared-secret material.
 • Ephemeral SPHINCS+ keys are deterministically generated from En+1 and certified by
 the previous key (AK or prior EK).
 No long-term signing key is exposed at the protocol layer; all signatures are ephemeral and
@@ -1454,12 +1633,12 @@ for the same relationship domain.
 DSM: Deterministic State Machines 42
 16.12 Operational Parameters (Recommended)
 • Hash: BLAKE3 (256-bit digests) for commits and deterministic counters.
-• Signatures: SPHINCS+ (per-step, deterministic derivation; size capped as specified in
-Sec. 11.1).
-• KEM: Kyber for step secrets; secrets never serialized.
+• Signatures: custom BLAKE3 SPHINCS+ (per-step SPX256f, deterministic derivation; NOT a
+certified NIST variant — see §11.1; size capped as specified in Sec. 11.1).
+• KEM: ML-KEM-768 (FIPS 203) for step secrets; secrets never serialized.
 • SMT: 256-bit key space; inclusion proofs logarithmic; device-local authoritative.
 • Device Tree: Standard Merkle; replicated to storage nodes and user devices.
-• Entropy: s0 from CSPRNG (Phase 13: sdevice removed from K_DBRW preimage — K_DBRW is now deterministic per device); per-step seeds via HKDF-BLAKE3 over (hn, Cpre, kstep, KDBRW).
+• Entropy: s0 from CSPRNG (Phase 13: sdevice removed from K_DBRW preimage — K_DBRW is now deterministic per device); per-step seeds via plain domain-separated keyed BLAKE3 (not HKDF) over (hn, Cpre, kstep, KDBRW).
 • Time: No timestamps, epochs, or heights in predicates or encodings.
 • Modal rule: Pending online for (A,B) blocks offline for (A,B) until synchronized; other
 relationships commute.
@@ -1468,7 +1647,7 @@ library (NDK), invoked through a thin JNI layer, and surfaced to a React UI via 
 bridge. Transport uses protobuf (Envelope v3). All cryptographic commits are canonical
 protobuf commit bytes emitted and verified solely by dsm_core. Ordering is enforced by
 bilateral hash adjacency and Per-Device SMT replace, not by time or height. SPHINCS+ is
-per-step and deterministically derived with Kyber and DBRW binding.
+per-step and deterministically derived with ML-KEM-768 and DBRW binding.
 17 Conclusion
 DSM is a clockless bilateral trust fabric with two Merkle layers: a replicated Device Tree
 that binds DevIDs to a single genesis, and a Per-Device SMT that indexes relationship
@@ -1480,7 +1659,7 @@ suitable for large-scale deployment.
 DSM: Deterministic State Machines 43
 terminology (source of truth)
 BLAKE3 hash used for commitments and calibrated iteration budgets
-Kyber post-quantum KEM used to derive per-step shared secrets
+ML-KEM-768 post-quantum KEM (FIPS 203, Kyber768 lineage) used to derive per-step shared secrets; domain tags retain the literal "kyber" string
 Argon2id memory-hard KDF used to derive the ring key from a mnemonic
 genesis root commitment that binds all device identities of a user
 DevID stable device identifier (domain-separated hash of a post-quantum attestation key
@@ -1569,7 +1748,7 @@ re-encode canonical commits or re-implement validation logic.
 We use the following fixed notations throughout:
 GA,GB,GC ∈{0,1}256 (genesis digests)
 DevIDA,DevIDB,DevIDC ∈{0,1}256
-H := BLAKE3-256, SPX := SPHINCS+ (BLAKE3, Cat-5, f)
+H := BLAKE3-256, SPX := custom BLAKE3 SPHINCS+ (SPX256f; not a certified NIST variant — see §11.1)
 Key(A,B) := H("DSM/smt-key\0" ∥min(DevIDA,DevIDB) ∥max(DevIDA,DevIDB))
 kA↔B := Key(A,B), ZERO_LEAF := 0x0032
 Per-Device SMT roots: rA,rB,rC
@@ -1701,7 +1880,8 @@ commitments to its digest are referenced.
 DSM: Deterministic State Machines 50
 18.6 Canonical Protobuf Transport (Illustrative Snippet)
 Transport messages are Protobuf; cryptographic commits are canonical commit bytes emitted
-by the Rust core crate dsm_core (e.g., a fixed-length, length-prefixed CBOR layout).
+by the Rust core crate dsm_core (the deterministic Protobuf bytes of the ReceiptCommit message;
+commit := BLAKE3-256("DSM/receipt-commit\0" ∥ canonical_protobuf_bytes); see Sec. 4.2.1).
 Listing 2: Protobuf envelope (illustrative transport fields only; commits are canonical bytes
 from the Rust core)
 message StitchedReceipt {
