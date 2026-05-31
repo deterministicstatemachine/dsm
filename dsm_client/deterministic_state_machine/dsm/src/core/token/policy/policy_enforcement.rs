@@ -499,10 +499,7 @@ impl PolicyEnforcer {
                 // Issue #183 Finding 3 fix: role-permission match must use
                 // case-sensitive comparison to align with the case-sensitive
                 // canonical sort of role permissions in `CanonicalPolicy`.
-                let permitted = role
-                    .permissions
-                    .iter()
-                    .any(|op| op == &ctx.operation_type);
+                let permitted = role.permissions.iter().any(|op| op == &ctx.operation_type);
                 if permitted {
                     return Ok(true);
                 }
@@ -593,8 +590,7 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn operation_restriction_is_case_sensitive() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn operation_restriction_is_case_sensitive() -> Result<(), Box<dyn std::error::Error>> {
         let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
         let enforcer = PolicyEnforcer::new(cache);
 
