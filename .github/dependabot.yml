@@ -7,6 +7,21 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 10
+    ignore:
+      # The rand stack drives the seeded ChaCha20 RNG used for DETERMINISTIC
+      # SPHINCS+ keygen (crypto/rng.rs, crypto/sphincs.rs). rand_chacha 0.10 /
+      # rand 0.10 change both the API (ChaCha20Rng::from_seed, SeedableRng) and
+      # the RNG output stream — silently altering crypto keygen output, a
+      # determinism break the current KATs (intra-run equality only) do NOT
+      # catch. Hold minor/major bumps until a coordinated migration that pins
+      # byte-exact RNG/keygen KATs proves output is unchanged. Patch bumps OK.
+      # See PRs #379 (rand_chacha 0.10) and #383 (rand 0.10).
+      - dependency-name: "rand"
+        update-types:
+          ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "rand_chacha"
+        update-types:
+          ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/dsm_client/frontend"
