@@ -351,7 +351,10 @@ mod v1_proto_roundtrip {
         assert_eq!(decoded.device_id, original.device_id);
         assert_eq!(decoded.root_hash, original.root_hash);
         assert_eq!(decoded.siblings.len(), 5);
-        assert_eq!(decoded.siblings, siblings, "sibling ORDER must be preserved");
+        assert_eq!(
+            decoded.siblings, siblings,
+            "sibling ORDER must be preserved"
+        );
         assert_eq!(decoded.path_bits_len, 5);
         assert_eq!(decoded.path_bits, vec![0b10101]);
     }

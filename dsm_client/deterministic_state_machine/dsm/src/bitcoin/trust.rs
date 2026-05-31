@@ -199,8 +199,8 @@ mod tests {
                 },
                 spv_inclusion_valid: true,
                 pow_valid: true,
-                checkpoint_rooted: false,    // would have passed under bypass
-                same_chain_anchored: false,  // would have passed under bypass
+                checkpoint_rooted: false,   // would have passed under bypass
+                same_chain_anchored: false, // would have passed under bypass
             };
             assert_eq!(
                 evidence.observation.trust_profile(),

@@ -1505,8 +1505,8 @@ mod tests {
 
         for id in signer_ids {
             let entropy = format!("DSM/test/{id}").into_bytes();
-            let kp = SignatureKeyPair::generate_from_entropy(&entropy)
-                .expect("generate test keypair");
+            let kp =
+                SignatureKeyPair::generate_from_entropy(&entropy).expect("generate test keypair");
             let sig = kp.sign(&digest).expect("sign test digest");
             signatures.insert((*id).to_string(), sig);
             public_keys.insert((*id).to_string(), kp.public_key().to_vec());
@@ -1528,13 +1528,8 @@ mod tests {
 
     #[test]
     fn verify_integrity_accepts_valid_signatures() {
-        let (proof, pks, _sks) = signed_invalidation_proof(
-            &["s1", "s2", "s3"],
-            "forkA",
-            [0x11; 32],
-            [0x22; 32],
-            42,
-        );
+        let (proof, pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2", "s3"], "forkA", [0x11; 32], [0x22; 32], 42);
         let ok = proof
             .verify_integrity(&proof.fork_hash, 3, &pks)
             .expect("verify must not error on well-formed input");
@@ -1544,13 +1539,8 @@ mod tests {
     #[test]
     fn verify_integrity_rejects_when_signatures_dont_verify() {
         // Tamper with one signature so cryptographic verify fails on it.
-        let (mut proof, pks, _sks) = signed_invalidation_proof(
-            &["s1", "s2", "s3"],
-            "forkA",
-            [0x11; 32],
-            [0x22; 32],
-            42,
-        );
+        let (mut proof, pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2", "s3"], "forkA", [0x11; 32], [0x22; 32], 42);
         if let Some(sig) = proof.signatures.get_mut("s2") {
             sig[0] ^= 0xFF; // flip a byte so verification fails
         }
@@ -1574,13 +1564,8 @@ mod tests {
     fn verify_integrity_rejects_unknown_signer_ids() {
         // Build a proof with 3 signatures, but only supply 1 public key. The
         // other two signer_ids are unknown to the verifier and must NOT count.
-        let (proof, mut pks, _sks) = signed_invalidation_proof(
-            &["s1", "s2", "s3"],
-            "forkA",
-            [0x11; 32],
-            [0x22; 32],
-            42,
-        );
+        let (proof, mut pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2", "s3"], "forkA", [0x11; 32], [0x22; 32], 42);
         pks.remove("s2");
         pks.remove("s3");
         let ok = proof
@@ -1594,13 +1579,8 @@ mod tests {
 
     #[test]
     fn verify_integrity_rejects_fork_hash_mismatch() {
-        let (proof, pks, _sks) = signed_invalidation_proof(
-            &["s1", "s2", "s3"],
-            "forkA",
-            [0x11; 32],
-            [0x22; 32],
-            42,
-        );
+        let (proof, pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2", "s3"], "forkA", [0x11; 32], [0x22; 32], 42);
         let wrong = [0x99u8; 32];
         let ok = proof
             .verify_integrity(&wrong, 3, &pks)

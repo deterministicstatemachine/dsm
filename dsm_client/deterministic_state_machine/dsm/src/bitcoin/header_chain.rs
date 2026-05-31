@@ -146,10 +146,9 @@ pub fn verify_header_chain(
         {
             let _ = network;
             return Err(DsmError::Validation {
-                context:
-                    "No checkpoints available for network; SPV verification cannot proceed (\
+                context: "No checkpoints available for network; SPV verification cannot proceed (\
                      production build — testnet bypass disabled)"
-                        .to_string(),
+                    .to_string(),
                 source: None,
             });
         }

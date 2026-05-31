@@ -13,7 +13,6 @@
 //!
 //! The state file lives at `<storage_base_dir>/dsm_app_state.pb`.
 
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
