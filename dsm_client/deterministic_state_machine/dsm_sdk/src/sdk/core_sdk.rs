@@ -775,7 +775,11 @@ impl CoreSDK {
                     })?;
                 rt.block_on(async {
                     policy_system
-                        .enforce_policy(&token_id_for_thread, &op_type_for_thread, &context_for_thread)
+                        .enforce_policy(
+                            &token_id_for_thread,
+                            &op_type_for_thread,
+                            &context_for_thread,
+                        )
                         .await
                 })
             })

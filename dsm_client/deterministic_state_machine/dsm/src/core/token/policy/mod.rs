@@ -90,7 +90,6 @@ impl TokenPolicySystem {
         policy_file: PolicyFile,
         anchor: PolicyAnchor,
     ) -> Result<(), DsmError> {
-
         // Validate policy deterministically
         let validation_context = ValidationContext::new(token_id, &policy_file);
         let validation_result = self.validator.validate_policy(&validation_context).await?;
@@ -353,7 +352,10 @@ mod tests {
         let ctx = std::collections::HashMap::new();
 
         // dBTC: builtin, no TokenPolicySystem policy registered -> allowed.
-        let dbtc = system.enforce_policy("dBTC", "transfer", &ctx).await.unwrap();
+        let dbtc = system
+            .enforce_policy("dBTC", "transfer", &ctx)
+            .await
+            .unwrap();
         assert!(
             dbtc.allowed,
             "unregistered builtin dBTC must not be default-denied"

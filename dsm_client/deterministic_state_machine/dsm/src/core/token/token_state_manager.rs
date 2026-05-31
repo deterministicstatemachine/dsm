@@ -586,7 +586,9 @@ impl TokenStateManager {
                     amount.value().to_string().into_bytes(),
                 );
             }
-            Operation::LockToken { amount, purpose, .. } => {
+            Operation::LockToken {
+                amount, purpose, ..
+            } => {
                 let amount_u64 = u64::try_from(*amount).map_err(|_| {
                     DsmError::invalid_operation(
                         "Policy verification rejected: LockToken amount must be non-negative",
@@ -596,7 +598,9 @@ impl TokenStateManager {
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
                 context.insert("purpose".to_string(), purpose.clone());
             }
-            Operation::UnlockToken { amount, purpose, .. } => {
+            Operation::UnlockToken {
+                amount, purpose, ..
+            } => {
                 let amount_u64 = u64::try_from(*amount).map_err(|_| {
                     DsmError::invalid_operation(
                         "Policy verification rejected: UnlockToken amount must be non-negative",
