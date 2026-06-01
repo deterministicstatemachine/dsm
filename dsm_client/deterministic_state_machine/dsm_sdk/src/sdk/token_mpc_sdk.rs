@@ -1517,7 +1517,7 @@ mod tests {
     use super::*;
 
     #[cfg(all(test, target_os = "android"))]
-    use crate::jni::unified_protobuf_bridge::create_genesis_mpc;
+    use crate::jni::unified_protobuf_bridge::create_genesis;
 
     #[cfg(feature = "local-mpc")]
     #[tokio::test]
@@ -1673,7 +1673,7 @@ mod tests {
         println!("   Device Entropy: {} bytes", device_entropy.len());
 
         // Create genesis
-        let genesis_result = create_genesis_mpc(locale, network_id, device_entropy)?;
+        let genesis_result = create_genesis(locale, network_id, device_entropy)?;
 
         println!("✅ Genesis creation successful!");
         println!("📋 Genesis Details:");

@@ -166,7 +166,7 @@ fn get_enabled_features() -> Vec<String> {
 /// the MPC session from `(genesis_id, device_id = genesis_id, hw, env)`
 /// per `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
 pub async fn create_trustless_genesis<
-    S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
+    S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,

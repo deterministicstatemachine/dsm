@@ -4305,12 +4305,12 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_getBilateralPollTelemetry(
 MPC shim (matches handler call-site; stays fail-closed until enabled)
 ============================================================================= */
 
-pub fn create_genesis_mpc<A, B, C>(
+pub fn create_genesis<A, B, C>(
     _locale: &A,
     _network_id: &B,
     _entropy: &C,
 ) -> Result<pb::Envelope, String> {
-    Err("MPC-over-JNI is disabled in Unified Bridge".to_string())
+    Err("genesis-over-JNI is disabled in Unified Bridge".to_string())
 }
 
 /* =============================================================================

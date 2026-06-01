@@ -3,7 +3,8 @@
 // File: dsm/src/core/identity/genesis.rs
 //! DSM Genesis (STRICT, bytes-first)
 //!
-//! - Enforces MPC security invariants in-core (threshold ≥3; participants ≥3).
+//! - n-of-n commit-then-reveal entropy aggregation (participants ≥3); NOT
+//!   threshold cryptography — every participant's contribution is required.
 //! - DBRW is a local, optional anti-cloning signal; it must not be required for
 //!   genesis / identity creation and is not part of genesis binding.
 //! - No system wall-clock dependence.
@@ -179,22 +180,6 @@ impl KyberKey {
 
 // -------------------- Core hashing --------------------
 
-/// Recompute the genesis hash from a flat contribution list.
-///
-/// Retained for verifying replayed/imported genesis records: callers
-/// reconstruct the contribution list and compare against a stored hash.
-/// New flows should consume `session.genesis_id` directly (computed per
-/// whitepaper §2.5 in `genesis_mpc::compute_genesis_id`).
-#[allow(dead_code)]
-fn calculate_genesis_hash(contributions: &[Vec<u8>], anchor: &[u8]) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis-replay");
-    hasher.update(anchor);
-    for contrib in contributions {
-        hasher.update(contrib);
-    }
-    Ok(*hasher.finalize().as_bytes())
-}
-
 /// Per-genesis initial entropy seed (distinct sub-domain so the value
 /// is independent of the genesis hash even when inputs partially overlap).
 fn calculate_initial_entropy(
@@ -325,41 +310,53 @@ pub fn process_invalidation(identity: &Identity, request: &[u8]) -> Result<bool,
 
 // -------------------- Verification --------------------
 
-/// Structural sanity check on a `GenesisState`.
+/// Strict §2.5 verification of a `GenesisState`.
 ///
-/// Byte-exact spec-conformant recomputation of `G` requires the full
-/// public input tuple `(device_id, sorted participants, device_entropy,
-/// mpc_entropies, metadata)` — that lives on `GenesisSession`, not on
-/// the post-conversion `GenesisState`.  This check therefore validates
-/// only the structural invariants:
-///   - ≥3 MPC contributions (whitepaper §2.5 floor; n-of-n).
-///   - Genesis hash and initial-entropy fields are non-zero.
-///   - Initial entropy matches the deterministic re-derivation from
-///     `(genesis_hash, contributions)` under the
-///     `"DSM/genesis-initial-entropy"` sub-domain.
-///
-/// For full §2.5 byte-recompute, see
-/// `genesis_mpc::tests::genesis_id_is_recomputable_from_public_inputs`,
-/// which operates on a `GenesisSession` where the inputs are still
-/// available.
+/// Because the canonical genesis hash `G` is acyclic and publicly
+/// recomputable (it folds only `device_id` and `H(contribution_i)`), the
+/// post-conversion `GenesisState` carries everything needed to recompute it.
+/// This check therefore strict-fails unless:
+///   - there are ≥3 contributions (whitepaper §2.5 floor; n-of-n),
+///   - `hash`, `initial_entropy`, and `device_id` are present/non-zero,
+///   - the canonical `G` recomputed from `(device_id, contributions)` equals
+///     the stored `hash` (the substantive §2.5 check), and
+///   - the initial-entropy seed re-derives from `(hash, contributions)` under
+///     the `"DSM/genesis-initial-entropy"` sub-domain (defense in depth).
 pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
+    use crate::types::genesis_types::{compute_genesis_hash, hash_contribution, MPCContribution};
+
     if genesis.contributions.len() < 3 {
         return Ok(false);
     }
-    if genesis.hash == [0u8; 32] {
+    if genesis.hash == [0u8; 32] || genesis.initial_entropy == [0u8; 32] {
         return Ok(false);
     }
-    if genesis.initial_entropy == [0u8; 32] {
+    let device_id = match genesis.device_id {
+        Some(d) => d,
+        None => return Ok(false),
+    };
+
+    // Substantive §2.5 check: recompute the canonical genesis hash `G` from the
+    // public inputs and strict-fail on mismatch. `contributor_id` is irrelevant
+    // to `G` (sort tie-breaker only), so the empty id used here reproduces the
+    // session's hash exactly.
+    let contributions: Vec<MPCContribution> = genesis
+        .contributions
+        .iter()
+        .map(|c| MPCContribution::new(String::new(), hash_contribution(&c.data), Vec::new(), 0))
+        .collect();
+    if compute_genesis_hash(&device_id, &contributions) != genesis.hash {
         return Ok(false);
     }
 
+    // Defense in depth: the initial-entropy seed must re-derive from the same
+    // `(hash, contributions)` tuple.
     let contribs: Vec<Vec<u8>> = genesis
         .contributions
         .iter()
         .map(|c| c.data.clone())
         .collect();
-    let calc_entropy = calculate_initial_entropy(&genesis.hash, &contribs)?;
-    if calc_entropy != genesis.initial_entropy {
+    if calculate_initial_entropy(&genesis.hash, &contribs)? != genesis.initial_entropy {
         return Ok(false);
     }
 
@@ -375,7 +372,7 @@ pub async fn create_genesis_via_blind_mpc(
     env_fingerprint: Vec<u8>,
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisState, DsmError> {
-    let session = crate::core::identity::genesis_mpc::create_mpc_genesis(
+    let session = crate::core::identity::genesis_session::create_genesis(
         device_id,
         storage_nodes,
         hw_entropy,
@@ -404,7 +401,7 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
 ) -> Result<GenesisState, DsmError> {
     let metadata = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
 
-    let mut session = crate::core::identity::genesis_mpc::GenesisSession::new(metadata)?;
+    let mut session = crate::core::identity::genesis_session::GenesisSession::new(metadata)?;
     session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
     session.set_silicon_inputs(hw_entropy, env_fingerprint)?;
@@ -469,38 +466,25 @@ impl std::fmt::Display for GenesisState {
 // -------------------- Session compatibility --------------------
 
 pub fn convert_session_to_genesis_state_compat(
-    session: &crate::core::identity::genesis_mpc::GenesisSession,
+    session: &crate::core::identity::genesis_session::GenesisSession,
 ) -> Result<GenesisState, DsmError> {
-    // Build deterministic contribution set from the session (bytes-only)
-    let mut contribs: Vec<Vec<u8>> = Vec::new();
-
-    // Device contribution = device_id || device_entropy
-    let mut dev = Vec::with_capacity(64);
-    dev.extend_from_slice(&session.device_id);
-    dev.extend_from_slice(&session.device_entropy);
-    contribs.push(dev);
-
-    // NOTE: DBRW is record-only; do not bind genesis to it.
-
-    // MPC entropies
-    for m in &session.mpc_entropies {
-        contribs.push(m.to_vec());
-    }
-
-    // Include metadata to stabilize derivation
-    contribs.push(session.metadata.clone());
+    // Canonical contribution materials `[device_id ∥ device_entropy, b_1, …, b_n]`
+    // — exactly the bytes the session hashed into `G`. Metadata and DBRW are
+    // NOT contributions and are excluded (they don't bind `G`).
+    let contribs: Vec<Vec<u8>> = session.canonical_contribution_materials();
 
     // Use the session's genesis_id directly (computed per whitepaper §2.5 in
-    // genesis_mpc::compute_genesis_id) so the value the caller sees matches
+    // genesis_session::compute_genesis_id) so the value the caller sees matches
     // the value the session validated.  This closes Issue #252's sub-bug 3
-    // (caller-returned hash differing from session-level hash).
+    // (caller-returned hash differing from session-level hash) and is exactly
+    // what `verify_genesis_state` recomputes from these stored contributions.
     let hash = session.genesis_id;
     let initial_entropy = calculate_initial_entropy(&hash, &contribs)?;
 
     // Silicon-bound master keypair per whitepaper §11.1 eq.13.  K_DBRW
     // is folded into S_master and both keypairs are deterministic given
-    // (device_id, participants, metadata, contributions, K_DBRW).  The
-    // genesis_mpc derivation zeroises its IKM/seed buffers internally.
+    // (device_id, contributions, K_DBRW).  The genesis_session derivation
+    // zeroises its IKM/seed buffers internally.
     let mk = session.derive_silicon_bound_keypair()?;
     let signing_key = SigningKey {
         public_key: mk.sphincs_public.clone(),
@@ -661,7 +645,9 @@ mod tests {
         )
         .expect("provided contributors should build a valid genesis state");
 
-        assert_eq!(genesis.contributions.len(), 1 + node_entropies.len() + 1);
+        // Canonical materials: device contribution + one per node. Metadata is
+        // NOT a contribution and is excluded from `G`.
+        assert_eq!(genesis.contributions.len(), 1 + node_entropies.len());
 
         let mut expected_device_contribution = Vec::with_capacity(64);
         expected_device_contribution.extend_from_slice(&device_id);
@@ -670,7 +656,9 @@ mod tests {
         assert_eq!(genesis.contributions[1].data, node_entropies[0].to_vec());
         assert_eq!(genesis.contributions[2].data, node_entropies[1].to_vec());
         assert_eq!(genesis.contributions[3].data, node_entropies[2].to_vec());
-        assert_eq!(genesis.contributions[4].data, metadata);
+
+        // The produced hash must strictly re-verify (canonical §2.5 recompute).
+        assert!(verify_genesis_state(&genesis).expect("verify is callable"));
     }
 
     #[tokio::test]

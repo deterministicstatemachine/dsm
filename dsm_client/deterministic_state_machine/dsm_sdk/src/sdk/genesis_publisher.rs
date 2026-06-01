@@ -2,13 +2,13 @@
 
 //! # Genesis Publisher
 //!
-//! Implements the [`GenesisPublisher`](dsm::core::identity::genesis_mpc::GenesisPublisher)
+//! Implements the [`GenesisPublisher`](dsm::core::identity::genesis_session::GenesisPublisher)
 //! trait to publish sanitized genesis payloads to storage nodes via the
-//! `StorageNodeSDK`. Used during MPC-based genesis creation to anchor the
-//! new device identity across storage nodes.
+//! `StorageNodeSDK`. Used during genesis creation to anchor the new device
+//! identity across storage nodes.
 
 use async_trait::async_trait;
-use dsm::core::identity::genesis_mpc::{GenesisPublisher, SanitizedGenesisPayload};
+use dsm::core::identity::genesis_session::{GenesisPublisher, SanitizedGenesisPayload};
 use dsm::types::error::DsmError;
 use dsm::types::identifiers::NodeId;
 use crate::sdk::storage_node_sdk::StorageNodeSDK;

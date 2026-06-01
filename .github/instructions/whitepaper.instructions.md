@@ -186,32 +186,35 @@ Device identifier (normative). specific, but deterministic). Then
 Let AttA be the stable device attestation digest (platform-
 DevIDA := BLAKE3-256 "DSM/devid\0" ∥pkA ∥AttA.
 2.5 Genesis State Creation
-Genesis is a structured n-of-n multi-party computation (MPC), not a single flat hash.
-Let {m_1,...,m_t} be the per-participant MPC contributions, π_DBRW the DBRW anti-cloning
-proof (Sec. 12), and the public-key bundle (pk_sign, pk_encap). The genesis commitment is
-computed over a single domain hasher seeded with the parent tag "DSM/genesis\0", into which
-three sub-domain separators are folded so that contributions, binding proof, and key bundle
-occupy disjoint regions of the preimage:
+Genesis is an n-of-n commit-then-reveal entropy aggregation, NOT threshold cryptography.
+The n ≥ 3 storage-node participants each contribute one entropy value b_i, and the device
+contributes its own b_0 = device_id ∥ device_entropy; the contributions are committed, then
+revealed, then folded into a single deterministic hash. "n-of-n" means all n contributions
+are required — there is no t-of-n DKG or Shamir, and "b_1,...,b_n" is index notation for
+"all n contributions".
 
-  "DSM/genesis/keys\0"  — public-key bundle region (signing + encapsulation keys),
-  "DSM/genesis/mpc\0"   — per-participant MPC contribution region,
-  "DSM/genesis/dbrw\0"  — DBRW binding / device-fingerprint region.
-
-Concretely (normative; see genesis_types.rs::recompute_genesis_hash and
-core/identity/genesis_mpc.rs), with H_g := dsm_domain_hasher("DSM/genesis"):
+The genesis hash is computed over a single domain hasher seeded with the parent tag
+"DSM/genesis\0", folding each contribution under the sub-domain separator "DSM/genesis/mpc\0"
+so contribution digests occupy a collision-isolated region of the preimage. Concretely
+(normative; see types/genesis_types.rs::compute_genesis_hash and
+core/identity/genesis_session.rs::compute_genesis_id), with H_g := dsm_domain_hasher("DSM/genesis")
+and H(·) := domain_hash("DSM/genesis/contribution", ·):
 
   G := H_g( device_id
-          ∥ ( "DSM/genesis/mpc\0"  ∥ H(m_i) for each contribution m_i in sorted order )
-          ∥   "DSM/genesis/dbrw\0" ∥ device_fingerprint ∥ verification_hash
-          ∥   "DSM/genesis/keys\0" ∥ pk_sign ∥ pk_encap ∥ key_hash ).
+          ∥ ( "DSM/genesis/mpc\0" ∥ H(b_i)  for each contribution b_i, sorted by H(b_i) ) ).
 
-MPC contributions are hashed in a deterministic sorted order. Wall-clock and mutable
-metadata (e.g. created_at) are explicitly EXCLUDED from the preimage so that genesis is
-clockless and reproducible. K_DBRW is derived post-MPC inside the same genesis session
-(so the genesis_hash exists before K_DBRW); see Sec. 12. The classical flat form
-G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_t ∥ A) (3) is the conceptual single-party
-degenerate case; the structured MPC construction above is the implemented normative form,
-and §12's "n-of-n MPC genesis from §2.5" refers to it.
+Contributions are folded in deterministic sorted order so transport-time ordering cannot
+change G. The public-key bundle (pk_sign, pk_encap) and the DBRW anti-cloning binding
+K_DBRW (Sec. 12) are deliberately EXCLUDED from G: they are *derived from* G
+(keys ← S_master ← K_DBRW ← G, §11.1), so folding them back into G's preimage would be
+circular. They bind to genesis by derivation, not by inclusion — a clone with identical
+public inputs derives a different K_DBRW and hence different keys (Sec. 12), so inclusion
+buys nothing. Wall-clock and mutable metadata (e.g. created_at) are likewise EXCLUDED,
+keeping G clockless and publicly recomputable from device_id plus the revealed contributions
+alone. K_DBRW is derived post-genesis inside the same session (so G exists before K_DBRW);
+see Sec. 12. The classical flat form G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_n ∥ A)
+(3) is the conceptual presentation; the domain-separated, sorted construction above is the
+implemented normative form, and §12's "n-of-n genesis from §2.5" refers to it.
 3 Two Merkle Structures: Storage and Replication
 Device Tree (standard Merkle). The Device Tree (leaves = device IDs) is fully replicated
 across storage nodes and across all devices under G. Adding a device is an online event: a
@@ -1573,7 +1576,7 @@ Per-step key derivation is specified in Sec. 11.1 and Sec. 12. In summary:
 • Device-bound secret KDBRW derives from hardware and environment (DBRW) and is never
 serialized, logged, or committed.
 • Master seed Smaster derives via RFC-5869 HKDF over BLAKE3 from (G,DevID,KDBRW,s0).
-This is the one genuinely-HKDF derivation in DSM (crypto/hkdf.rs, genesis_mpc.rs).
+This is the one genuinely-HKDF derivation in DSM (crypto/hkdf.rs, genesis_session.rs).
 • For each parent hn and pre-commit Cpre, a per-step seed En+1 derives via plain
 domain-separated keyed BLAKE3 (NOT HKDF) from (hn,Cpre,kstep,KDBRW), where kstep is
 derived from ML-KEM-768 shared-secret material.

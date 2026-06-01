@@ -1,213 +1,60 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Genesis Types - DSM Genesis State Structures (binary-only digests).
+//! Genesis hashing — the canonical DSM genesis hash `G` (binary-only).
 //!
-//! Deterministic, protobuf-first core types for Genesis state creation,
-//! verification, and integrity checks. Canonical hashing uses BLAKE3 with
-//! explicit domain separators. No hex/json/base64/serde anywhere.
+//! Deterministic, BLAKE3 domain-separated computation of the genesis hash per
+//! whitepaper §2.5. Genesis is an n-of-n commit-then-reveal entropy aggregation
+//! (≥3 storage nodes each contribute `b_i`, revealed and folded into one hash) —
+//! NOT threshold cryptography; `b_1, …, b_n` is index notation for "all n
+//! contributions", with no t-of-n DKG or Shamir. This module is the single
+//! source of truth for `G`, used by both the genesis session (producer) and
+//! `verify_genesis_state` (verifier).
 //!
-//! IMPORTANT: `created_at` is *non-canonical* and intentionally excluded from
-//! the Genesis hash to preserve determinism and our "no wall clock in protocol"
-//! rule. Treat it as UI/ops metadata only.
-
-use std::collections::HashMap;
+//! Acyclic form (whitepaper §2.5):
+//!
+//! ```text
+//! G := H_g("DSM/genesis"
+//!          ∥ device_id
+//!          ∥ ( "DSM/genesis/mpc\0" ∥ H(m_i)  for each contribution, sorted ))
+//! ```
+//!
+//! The public-key bundle and the K_DBRW anti-cloning binding are deliberately
+//! EXCLUDED from `G`: keys and K_DBRW are *derived from* `G`
+//! (`keys ← S_master ← K_DBRW ← G`), so folding them back into the preimage
+//! would be circular. They bind to genesis by derivation, not by inclusion;
+//! anti-cloning is enforced downstream by K_DBRW (a clone derives a different
+//! K_DBRW, hence different keys). Wall-clock and mutable metadata are likewise
+//! excluded, keeping `G` clockless and publicly recomputable from the public
+//! `device_id` plus the revealed contributions. No hex/json/base64/serde here.
 
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
-
-use crate::types::error::DsmError;
 
 /// Fixed-length digest (BLAKE3).
 pub type Digest32 = [u8; 32];
 
-/// Sub-domain separators for intra-hash field isolation within `recompute_genesis_hash`.
-/// These are fed as data delimiters inside an already domain-separated hasher
-/// (`dsm_domain_hasher("DSM/genesis")`), preventing cross-field collisions.
-const DOMAIN_KEYS: &[u8] = b"DSM/genesis/keys\0";
+/// Sub-domain separator isolating each per-contribution digest inside the
+/// already domain-separated genesis hasher (`dsm_domain_hasher("DSM/genesis")`),
+/// so contribution folds cannot collide with any other region of the preimage.
 const DOMAIN_MPC: &[u8] = b"DSM/genesis/mpc\0";
-const DOMAIN_DBRW: &[u8] = b"DSM/genesis/dbrw\0";
 
-/// Genesis state structure
-#[derive(Clone, Debug)]
-pub struct GenesisState {
-    /// Device ID that owns this Genesis state
-    pub device_id: [u8; 32],
-    /// Genesis hash (canonical BLAKE3 over canonical fields)
-    pub genesis_hash: Digest32,
-    /// MPC contributions used in Genesis creation
-    pub mpc_contributions: Vec<MPCContribution>,
-    /// DBRW proof for device binding
-    pub dbrw_proof: DBRWProof,
-    /// Public keys associated with this Genesis
-    pub public_keys: GenesisPublicKeys,
-    /// Non-canonical creation time (UI/ops only; NOT used in hashing)
-    pub created_at: u64,
-    /// Arbitrary metadata (UI/ops only; NOT used in hashing)
-    pub metadata: HashMap<String, String>,
-}
-
-/// MPC contribution in Genesis creation
+/// A single genesis contribution: one storage node's revealed entropy, or the
+/// device's own contribution. Only `contribution_hash` is folded into `G`;
+/// `contributor_id` is a deterministic tie-breaker for the canonical sort and
+/// is never part of the preimage.
 #[derive(Clone, Debug)]
 pub struct MPCContribution {
-    /// ID of the contributing party (storage node or client)
+    /// ID of the contributing party (storage node or device). Tie-breaker only.
     pub contributor_id: String,
-    /// Cryptographic contribution (32-byte digest)
+    /// Canonical 32-byte digest of the contribution material, `H(m_i)`.
     pub contribution_hash: Digest32,
-    /// Signature over the contribution (verification handled upstream)
+    /// Signature over the contribution (verified upstream; not folded into `G`).
     pub signature: Vec<u8>,
-    /// Non-canonical tick of contribution (UI/ops only)
+    /// Non-canonical tick of contribution (UI/ops only; not folded into `G`).
     pub tick: u64,
 }
 
-/// DBRW (Dual-Binding Random Walk) proof
-#[derive(Clone, Debug)]
-pub struct DBRWProof {
-    /// Device fingerprint used in DBRW. Binds to the device's silicon via
-    /// C-DBRW's *observed* statistical signature — the 32-byte `AC_D`
-    /// attractor commitment produced by live orbit enrollment
-    /// (`dsm_sdk::security::cdbrw_enrollment_writer`). DSM is deliberately
-    /// enclave-free: this field is NOT sourced from TPM / TEE / StrongBox /
-    /// Secure Enclave or any sealed-module attestation chain. Anti-clone
-    /// enforcement is provided by the live re-prove gate
-    /// (`dsm_sdk::security::cdbrw_reprove`), which zeroes the in-memory
-    /// K_DBRW slot when a live orbit drifts outside the enrollment envelope.
-    pub device_fingerprint: Vec<u8>,
-    /// Environmental state hash (`domain_hash("DSM/genesis/dbrw-env", proof_data)`)
-    pub env_state_hash: Digest32,
-    /// Raw random-walk proof bytes (large; not included directly in genesis hash)
-    pub proof_data: Vec<u8>,
-    /// DBRW verification hash (compact attestation result)
-    pub verification_hash: Digest32,
-}
-
-/// Public keys in Genesis state
-#[derive(Clone, Debug)]
-pub struct GenesisPublicKeys {
-    /// Signing public key (SPHINCS+)
-    pub signing_key: Vec<u8>,
-    /// Key encapsulation public key (Kyber/ML-KEM)
-    pub encapsulation_key: Vec<u8>,
-    /// Canonical hash of the key bundle (BLAKE3)
-    pub key_hash: Digest32,
-}
-
-impl GenesisState {
-    /// Create a new Genesis state (does NOT auto-compute `genesis_hash`).
-    /// Call `recompute_genesis_hash()` and set it on the struct in your constructor flow.
-    pub fn new(
-        device_id: [u8; 32],
-        genesis_hash: Digest32,
-        mpc_contributions: Vec<MPCContribution>,
-        dbrw_proof: DBRWProof,
-        public_keys: GenesisPublicKeys,
-        created_at: u64,
-    ) -> Self {
-        Self {
-            device_id,
-            genesis_hash,
-            mpc_contributions,
-            dbrw_proof,
-            public_keys,
-            created_at,
-            metadata: HashMap::new(),
-        }
-    }
-
-    /// Verify Genesis state integrity with deterministic rules only.
-    ///
-    /// Checks performed:
-    /// - Non-empty MPC set and keys present
-    /// - DBRW env hash matches proof_data
-    /// - Key bundle hash matches `key_hash`
-    /// - Canonical recomputed genesis hash equals stored `genesis_hash`
-    ///
-    /// Returns:
-    /// - Ok(true)  => passes all checks
-    /// - Ok(false) => any check fails (deterministic fail; no partial passes)
-    pub fn verify_integrity(&self) -> Result<bool, DsmError> {
-        // Basic presence checks
-        if self.mpc_contributions.is_empty() {
-            return Ok(false);
-        }
-        if self.public_keys.signing_key.is_empty() || self.public_keys.encapsulation_key.is_empty()
-        {
-            return Ok(false);
-        }
-        if self.dbrw_proof.device_fingerprint.is_empty() {
-            return Ok(false);
-        }
-
-        // DBRW env hash must be domain-separated BLAKE3(proof_data)
-        let env_calc = domain_hash("DSM/genesis/dbrw-env", &self.dbrw_proof.proof_data);
-        if !ct_eq(env_calc.as_bytes(), &self.dbrw_proof.env_state_hash) {
-            return Ok(false);
-        }
-
-        // Public key bundle hash must match
-        let expected_key_hash = GenesisPublicKeys::compute_key_hash(
-            &self.public_keys.signing_key,
-            &self.public_keys.encapsulation_key,
-        );
-        if !ct_eq(&expected_key_hash, &self.public_keys.key_hash) {
-            return Ok(false);
-        }
-
-        // Canonical Genesis hash must match
-        let computed = self.recompute_genesis_hash()?;
-        if !ct_eq(&computed, &self.genesis_hash) {
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-
-    /// Recompute the canonical Genesis hash (BLAKE3 -> 32 bytes).
-    ///
-    /// Canonical inputs (in order):
-    /// - Domain prefix via `dsm_domain_hasher("DSM/genesis")`
-    /// - device_id (UTF-8 bytes)
-    /// - MPC contributions (sorted by `contribution_hash`, then contributor_id)
-    ///   Each contribution folded as: DOMAIN_MPC || contribution_hash (32 bytes)
-    /// - DBRW fold: DOMAIN_DBRW || device_fingerprint || verification_hash (32 bytes)
-    /// - Keys fold: DOMAIN_KEYS || signing_key || encapsulation_key || key_hash (32 bytes)
-    ///
-    /// Excluded: `created_at`, `metadata`, `DBRW.proof_data`, `DBRW.env_state_hash`
-    pub fn recompute_genesis_hash(&self) -> Result<Digest32, DsmError> {
-        let mut h = dsm_domain_hasher("DSM/genesis");
-        h.update(&self.device_id);
-
-        // MPC contributions: deterministic order by (contribution_hash, contributor_id)
-        let mut contributions = self.mpc_contributions.clone();
-        contributions.sort_by(|a, b| {
-            let hcmp = a.contribution_hash.cmp(&b.contribution_hash);
-            if hcmp == std::cmp::Ordering::Equal {
-                a.contributor_id.cmp(&b.contributor_id)
-            } else {
-                hcmp
-            }
-        });
-        for c in &contributions {
-            h.update(DOMAIN_MPC);
-            h.update(&c.contribution_hash);
-        }
-
-        // DBRW (compact attestation only)
-        h.update(DOMAIN_DBRW);
-        h.update(&self.dbrw_proof.device_fingerprint);
-        h.update(&self.dbrw_proof.verification_hash);
-
-        // Keys (include key_hash for belt-and-suspenders binding)
-        h.update(DOMAIN_KEYS);
-        h.update(&self.public_keys.signing_key);
-        h.update(&self.public_keys.encapsulation_key);
-        h.update(&self.public_keys.key_hash);
-
-        let digest = h.finalize();
-        Ok(*digest.as_bytes())
-    }
-}
-
 impl MPCContribution {
-    /// Create a new MPC contribution (does not verify signature content here).
+    /// Create a new contribution record (does not verify signature content).
     pub fn new(
         contributor_id: String,
         contribution_hash: Digest32,
@@ -223,273 +70,126 @@ impl MPCContribution {
     }
 }
 
-impl DBRWProof {
-    /// Create a new DBRW proof. `env_state_hash` must equal `domain_hash("DSM/genesis/dbrw-env", proof_data)`.
-    pub fn new(
-        device_fingerprint: Vec<u8>,
-        env_state_hash: Digest32,
-        proof_data: Vec<u8>,
-        verification_hash: Digest32,
-    ) -> Self {
-        Self {
-            device_fingerprint,
-            env_state_hash,
-            proof_data,
-            verification_hash,
-        }
-    }
+/// Canonical digest of one contribution's raw material, `H(m_i)`.
+///
+/// Domain-separated so contribution digests cannot collide with any other
+/// BLAKE3 use, and so variable-length materials (the device contribution is
+/// `device_id ∥ device_entropy`; node contributions are 32-byte entropies) all
+/// normalise to a uniform 32-byte fold input.
+pub fn hash_contribution(material: &[u8]) -> Digest32 {
+    *domain_hash("DSM/genesis/contribution", material).as_bytes()
 }
 
-impl GenesisPublicKeys {
-    /// Create new Genesis public keys; computes and sets `key_hash` deterministically.
-    pub fn new(signing_key: Vec<u8>, encapsulation_key: Vec<u8>) -> Self {
-        let key_hash = Self::compute_key_hash(&signing_key, &encapsulation_key);
-        Self {
-            signing_key,
-            encapsulation_key,
-            key_hash,
-        }
+/// Compute the canonical genesis hash `G` (whitepaper §2.5, acyclic form).
+///
+/// ```text
+/// G := H_g("DSM/genesis" ∥ device_id ∥ ⟦ "DSM/genesis/mpc\0" ∥ H(m_i) ⟧ sorted )
+/// ```
+///
+/// Contributions are folded in canonical order — sorted by
+/// `(contribution_hash, contributor_id)` — so transport-time ordering cannot
+/// change `G`. Only `contribution_hash` enters the preimage; `contributor_id`
+/// breaks ties solely in the (cryptographically unreachable) event of equal
+/// contribution hashes, where the folded bytes are identical regardless.
+///
+/// `G` is acyclic and publicly recomputable: it depends only on `device_id`
+/// and the revealed contributions, never on values derived from `G` (keys,
+/// K_DBRW), which bind to genesis by being derived from it.
+pub fn compute_genesis_hash(device_id: &[u8; 32], contributions: &[MPCContribution]) -> Digest32 {
+    let mut h = dsm_domain_hasher("DSM/genesis");
+    h.update(device_id);
+
+    let mut ordered: Vec<&MPCContribution> = contributions.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.contribution_hash
+            .cmp(&b.contribution_hash)
+            .then_with(|| a.contributor_id.cmp(&b.contributor_id))
+    });
+    for c in &ordered {
+        h.update(DOMAIN_MPC);
+        h.update(&c.contribution_hash);
     }
 
-    /// Deterministic key bundle hash (BLAKE3 -> 32 bytes).
-    #[inline]
-    pub fn compute_key_hash(signing_key: &[u8], encapsulation_key: &[u8]) -> Digest32 {
-        let mut h = dsm_domain_hasher("DSM/genesis/keys");
-        h.update(signing_key);
-        h.update(encapsulation_key);
-        *h.finalize().as_bytes()
-    }
-}
-
-/// Constant-time byte equality (branchless XOR-accumulate).
-#[inline]
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
+    *h.finalize().as_bytes()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn key_hash_is_stable() {
-        let pk = GenesisPublicKeys::new(b"sign".to_vec(), b"kem".to_vec());
-        let expected = GenesisPublicKeys::compute_key_hash(b"sign", b"kem");
-        assert!(ct_eq(&pk.key_hash, &expected));
+    fn contrib(id: &str, material: &[u8]) -> MPCContribution {
+        MPCContribution::new(id.to_string(), hash_contribution(material), Vec::new(), 0)
     }
 
     #[test]
-    fn genesis_hash_excludes_created_at() {
-        let keys = GenesisPublicKeys::new(b"S+".to_vec(), b"KEM".to_vec());
-
-        let proof_data = b"walk".to_vec();
-        let env = blake3::hash(&proof_data);
-        let dbrw = DBRWProof::new(
-            vec![1, 2, 3],
-            *env.as_bytes(),
-            proof_data,
-            *blake3::hash(b"att").as_bytes(),
-        );
-
-        let mpc = vec![
-            MPCContribution::new("n1".into(), *blake3::hash(b"aa").as_bytes(), vec![9], 0),
-            MPCContribution::new("n2".into(), *blake3::hash(b"ab").as_bytes(), vec![9], 0),
+    fn genesis_hash_is_order_independent() {
+        let did = [0x42u8; 32];
+        let ab = vec![
+            contrib("a", b"c1"),
+            contrib("b", b"c2"),
+            contrib("c", b"c3"),
         ];
-
-        let device_id = blake3::hash(b"dev").into();
-
-        let s1 = GenesisState::new(
-            device_id,
-            [0u8; 32],
-            mpc.clone(),
-            dbrw.clone(),
-            keys.clone(),
-            1,
-        );
-        let h1 = s1.recompute_genesis_hash().unwrap();
-
-        let s2 = GenesisState::new(device_id, [0u8; 32], mpc, dbrw, keys, 9_999_999);
-        let h2 = s2.recompute_genesis_hash().unwrap();
-
-        assert!(ct_eq(&h1, &h2), "created_at must not affect canonical hash");
-    }
-
-    #[test]
-    fn integrity_verifies_when_consistent() {
-        use crate::crypto::blake3::domain_hash as dh;
-        let keys = GenesisPublicKeys::new(b"S+".to_vec(), b"KEM".to_vec());
-        let proof_data = b"walk".to_vec();
-        let env_hash = *dh("DSM/genesis/dbrw-env", &proof_data).as_bytes();
-        let dbrw = DBRWProof::new(
-            vec![7, 7, 7],
-            env_hash,
-            proof_data,
-            *blake3::hash(b"attest").as_bytes(),
-        );
-        let mpc = vec![
-            MPCContribution::new("a".into(), *blake3::hash(b"01").as_bytes(), vec![1], 0),
-            MPCContribution::new("b".into(), *blake3::hash(b"02").as_bytes(), vec![2], 0),
+        let ba = vec![
+            contrib("c", b"c3"),
+            contrib("a", b"c1"),
+            contrib("b", b"c2"),
         ];
-
-        let device_id = blake3::hash(b"devX").into();
-        let mut gs = GenesisState::new(device_id, [0u8; 32], mpc, dbrw, keys, 0);
-        let computed = gs.recompute_genesis_hash().unwrap();
-        gs.genesis_hash = computed;
-
-        assert!(gs.verify_integrity().unwrap());
-    }
-
-    fn make_valid_genesis() -> GenesisState {
-        use crate::crypto::blake3::domain_hash as dh;
-        let keys = GenesisPublicKeys::new(b"sign-key".to_vec(), b"kem-key".to_vec());
-        let proof_data = b"random-walk-data".to_vec();
-        let env_hash = *dh("DSM/genesis/dbrw-env", &proof_data).as_bytes();
-        let dbrw = DBRWProof::new(
-            vec![0xDE, 0xAD],
-            env_hash,
-            proof_data,
-            *blake3::hash(b"attestation").as_bytes(),
-        );
-        let mpc = vec![MPCContribution::new(
-            "node1".into(),
-            *blake3::hash(b"contrib1").as_bytes(),
-            vec![1, 2, 3],
-            0,
-        )];
-        let device_id: [u8; 32] = *blake3::hash(b"device").as_bytes();
-        let mut gs = GenesisState::new(device_id, [0u8; 32], mpc, dbrw, keys, 42);
-        gs.genesis_hash = gs.recompute_genesis_hash().unwrap();
-        gs
-    }
-
-    #[test]
-    fn integrity_fails_with_empty_mpc() {
-        let mut gs = make_valid_genesis();
-        gs.mpc_contributions.clear();
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn integrity_fails_with_empty_signing_key() {
-        let mut gs = make_valid_genesis();
-        gs.public_keys.signing_key.clear();
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn integrity_fails_with_empty_encapsulation_key() {
-        let mut gs = make_valid_genesis();
-        gs.public_keys.encapsulation_key.clear();
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn integrity_fails_with_empty_device_fingerprint() {
-        let mut gs = make_valid_genesis();
-        gs.dbrw_proof.device_fingerprint.clear();
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn integrity_fails_with_wrong_env_hash() {
-        let mut gs = make_valid_genesis();
-        gs.dbrw_proof.env_state_hash = [0xFFu8; 32];
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn integrity_fails_with_wrong_key_hash() {
-        let mut gs = make_valid_genesis();
-        gs.public_keys.key_hash = [0xFFu8; 32];
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn integrity_fails_with_wrong_genesis_hash() {
-        let mut gs = make_valid_genesis();
-        gs.genesis_hash = [0xFFu8; 32];
-        assert!(!gs.verify_integrity().unwrap());
-    }
-
-    #[test]
-    fn mpc_order_does_not_affect_genesis_hash() {
-        let h1 = *blake3::hash(b"c1").as_bytes();
-        let h2 = *blake3::hash(b"c2").as_bytes();
-        let keys = GenesisPublicKeys::new(b"S".to_vec(), b"K".to_vec());
-        let pd = b"pdata".to_vec();
-        let env = *domain_hash("DSM/genesis/dbrw-env", &pd).as_bytes();
-        let dbrw = DBRWProof::new(vec![1], env, pd, *blake3::hash(b"v").as_bytes());
-        let did: [u8; 32] = *blake3::hash(b"d").as_bytes();
-
-        let mpc_ab = vec![
-            MPCContribution::new("a".into(), h1, vec![], 0),
-            MPCContribution::new("b".into(), h2, vec![], 0),
-        ];
-        let mpc_ba = vec![
-            MPCContribution::new("b".into(), h2, vec![], 0),
-            MPCContribution::new("a".into(), h1, vec![], 0),
-        ];
-
-        let gs1 = GenesisState::new(did, [0u8; 32], mpc_ab, dbrw.clone(), keys.clone(), 0);
-        let gs2 = GenesisState::new(did, [0u8; 32], mpc_ba, dbrw, keys, 0);
         assert_eq!(
-            gs1.recompute_genesis_hash().unwrap(),
-            gs2.recompute_genesis_hash().unwrap(),
-            "MPC contribution order must not affect canonical hash"
+            compute_genesis_hash(&did, &ab),
+            compute_genesis_hash(&did, &ba),
+            "contribution order must not affect canonical G"
         );
     }
 
     #[test]
-    fn genesis_state_new_metadata_is_empty() {
-        let gs = make_valid_genesis();
-        assert!(gs.metadata.is_empty());
-    }
-
-    #[test]
-    fn ct_eq_with_different_lengths() {
-        assert!(!ct_eq(&[1, 2], &[1, 2, 3]));
-    }
-
-    #[test]
-    fn ct_eq_with_equal_bytes() {
-        assert!(ct_eq(&[0xAB; 32], &[0xAB; 32]));
-    }
-
-    #[test]
-    fn ct_eq_with_single_bit_difference() {
-        let a = [0u8; 32];
-        let mut b = [0u8; 32];
-        b[31] = 1;
-        assert!(!ct_eq(&a, &b));
-    }
-
-    #[test]
-    fn different_device_ids_produce_different_hashes() {
-        let keys = GenesisPublicKeys::new(b"S".to_vec(), b"K".to_vec());
-        let pd = b"p".to_vec();
-        let env = *domain_hash("DSM/genesis/dbrw-env", &pd).as_bytes();
-        let dbrw = DBRWProof::new(vec![1], env, pd, [0u8; 32]);
-        let mpc = vec![MPCContribution::new("n".into(), [0u8; 32], vec![], 0)];
-
-        let gs1 = GenesisState::new(
-            [1u8; 32],
-            [0u8; 32],
-            mpc.clone(),
-            dbrw.clone(),
-            keys.clone(),
-            0,
-        );
-        let gs2 = GenesisState::new([2u8; 32], [0u8; 32], mpc, dbrw, keys, 0);
+    fn genesis_hash_depends_on_device_id() {
+        let c = vec![contrib("a", b"x"), contrib("b", b"y")];
         assert_ne!(
-            gs1.recompute_genesis_hash().unwrap(),
-            gs2.recompute_genesis_hash().unwrap()
+            compute_genesis_hash(&[1u8; 32], &c),
+            compute_genesis_hash(&[2u8; 32], &c),
+            "device_id must bind into G"
         );
+    }
+
+    #[test]
+    fn genesis_hash_depends_on_contributions() {
+        let did = [7u8; 32];
+        let base = vec![contrib("a", b"x"), contrib("b", b"y")];
+        let changed = vec![contrib("a", b"x"), contrib("b", b"z")];
+        assert_ne!(
+            compute_genesis_hash(&did, &base),
+            compute_genesis_hash(&did, &changed),
+            "changing any contribution must change G"
+        );
+    }
+
+    #[test]
+    fn genesis_hash_excludes_contributor_id() {
+        // Same contribution hashes, different contributor ids ⇒ identical G:
+        // contributor_id is a sort tie-breaker only, never folded in.
+        let did = [9u8; 32];
+        let h1 = hash_contribution(b"m1");
+        let h2 = hash_contribution(b"m2");
+        let a = vec![
+            MPCContribution::new("alpha".into(), h1, Vec::new(), 0),
+            MPCContribution::new("bravo".into(), h2, Vec::new(), 0),
+        ];
+        let b = vec![
+            MPCContribution::new("zulu".into(), h1, Vec::new(), 9),
+            MPCContribution::new("yankee".into(), h2, Vec::new(), 9),
+        ];
+        assert_eq!(
+            compute_genesis_hash(&did, &a),
+            compute_genesis_hash(&did, &b),
+            "contributor_id must not affect G"
+        );
+    }
+
+    #[test]
+    fn hash_contribution_is_deterministic_and_domain_separated() {
+        let m = b"some-contribution-material";
+        assert_eq!(hash_contribution(m), hash_contribution(m));
+        // Domain-separated: not equal to a raw BLAKE3 of the same bytes.
+        assert_ne!(hash_contribution(m), *blake3::hash(m).as_bytes());
     }
 }
