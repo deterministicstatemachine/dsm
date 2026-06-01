@@ -67,7 +67,7 @@ use prost::Message;
 
 use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::sdk::route_commit_sdk::{
-    compute_external_commitment, external_commitment_key, external_commitment_rc_key,
+    compute_external_commitment, external_commitment_rc_key,
     verify_route_commit_unlock_eligibility, vault_pending_prefix,
 };
 use crate::sdk::routing_path_sdk::constant_product_output;
@@ -337,12 +337,6 @@ pub(crate) async fn compose_vault_state(
             chain_skipped += 1;
             continue;
         }
-        // Confirm the X anchor exists.
-        let x_key = external_commitment_key(&ptr.x);
-        if BitcoinTapSdk::storage_get_bytes(&x_key).await.is_err() {
-            chain_skipped += 1;
-            continue;
-        }
         // Fetch the full signed RouteCommit paired with X.
         let rc_key = external_commitment_rc_key(&ptr.x);
         let rc_bytes = match BitcoinTapSdk::storage_get_bytes(&rc_key).await {
@@ -608,7 +602,7 @@ mod tests {
             publisher_public_key: publisher_pk.to_vec(),
             label: "test".into(),
         };
-        let key = external_commitment_key(x);
+        let key = crate::sdk::route_commit_sdk::external_commitment_key(x);
         BitcoinTapSdk::storage_put_bytes(&key, &anchor.encode_to_vec())
             .await
             .expect("X publish");
