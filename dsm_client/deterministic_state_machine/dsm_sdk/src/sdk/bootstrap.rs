@@ -8,7 +8,6 @@
 //! loading device identity into the SDK; it either succeeds with a fully
 //! valid context or returns an error.
 
-
 use crate::sdk::app_state::AppState;
 use dsm::types::error::DsmError;
 
