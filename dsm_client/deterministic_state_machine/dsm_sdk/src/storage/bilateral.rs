@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral Storage SDK Interface
 //!
 //! This module provides a clean SDK interface for bilateral storage operations,

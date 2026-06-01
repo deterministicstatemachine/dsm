@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Comprehensive error types for DSM protocol operations.
 //!
 //! The primary error type is [`DsmError`], which covers all failure modes across

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Protocol type definitions for the DSM core crate.
 //!
 //! This module organizes all data types used throughout the DSM protocol:

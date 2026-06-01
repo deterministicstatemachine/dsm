@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin Key Store — BIP84 HD wallet derived from DSM device entropy.
 //!
 //! Derives Bitcoin keys from the 32-byte `device_entropy` stored in `SdkContext`.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Cryptographically secure random number generation
 //!
 //! This module is initialized at startup to ensure proper randomness.

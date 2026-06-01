@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // path: src/components/SplashController.tsx
 // Isolates the intro cutscene rendering from App.tsx.

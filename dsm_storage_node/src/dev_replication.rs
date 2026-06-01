@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Durable replication (clockless).
 //!
 //! This module implements a storage-node-local *reliable multicast* transport helper.

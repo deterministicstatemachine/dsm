@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 #![forbid(unsafe_code)]
 // Keep critical compiler lints strict, but do not blanket-deny all warnings or clippy groups here.
 // This allows the workspace-level [lints] configuration to control clippy behavior (e.g., treating

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Random walk verification for commitment proofs.
 //!
 //! Provides functionality for verifying the validity of commitments without

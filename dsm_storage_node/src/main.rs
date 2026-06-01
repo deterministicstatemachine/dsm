@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # DSM Storage Node Binary
 //!
 //! Index-only, clockless, signature-free storage node for the DSM network.

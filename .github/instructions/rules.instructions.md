@@ -74,7 +74,7 @@ No mocks, stubs, placeholders, TODOs, fallbacks, deprecated paths. Purge depreca
 ## Cryptography & Security
 - BLAKE3 everywhere (domain-separated per spec).
 - SPHINCS+ signatures (EUF-CMA), constant-time verification; no FFI timing leaks.
-- PQ KEM (if used): Kyber/ML-KEM per spec.
+- PQ KEM (if used): ML-KEM-768 (FIPS 203) per spec.
 - No `unsafe` in hot paths (if unavoidable: audited, fenced, justified in comments).
 - Tripwire fork exclusion on every parent tip; duplicates reject deterministically.
 - DBRW device/environment binding wherever required; no stubs.

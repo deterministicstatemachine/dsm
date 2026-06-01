@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Global type augmentations for the DSM WebView bridge.
 // Jest types are provided by @types/jest (do not redeclare here).
 

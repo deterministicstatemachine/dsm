@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { syncWithStorage } from '../index';
 import { Envelope, Error as PbError, ResultPack } from '../../proto/dsm_app_pb';
 

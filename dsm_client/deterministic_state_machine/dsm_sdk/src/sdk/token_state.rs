@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Transport-layer shared helpers for extracting transfer metadata.
 //!
 //! # Whitepaper alignment (post-§2.2 / §4.2 / §8 refactor)

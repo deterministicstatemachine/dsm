@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic Limbo Vault SDK (STRICT, fail-closed)
 //!
 //! This SDK exposes high-level, *identity-centric* helpers for DLVs.

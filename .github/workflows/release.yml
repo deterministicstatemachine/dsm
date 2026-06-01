@@ -1,0 +1,387 @@
+name: Release
+
+# Tag-triggered release pipeline (Issue #13).
+#
+# Triggers only on annotated/lightweight semver tags `v*` (e.g. v0.1.0-beta.4).
+# Builds the canonical shippable artifacts, runs the full test suite as a
+# gate, generates the SBOM bundle, and publishes a GitHub Release with
+# every artifact attached.
+#
+# Scope of this workflow:
+#   • storage node binary (Linux x86_64, the primary deployment target)
+#   • frontend bundle (built React assets, tar.gz)
+#   • SBOM bundle (CycloneDX 1.5, with TLA validation evidence)
+#   • GitHub Release entry with release notes
+#
+# Out of scope (separate workflows, tracked separately if/when needed):
+#   • Android NDK cross-builds (`.so` files for aarch64-linux-android,
+#     armv7-linux-androideabi). The Gradle / NDK build is non-trivial in
+#     hosted runners; ship as a follow-on once the NDK pipeline is
+#     stable enough to gate a tag on.
+#   • macOS / iOS artifacts (require macos-latest runner; deferred).
+#   • Docker image push to a registry (current ci.yml builds the image
+#     for lint; pushing to a registry needs a credentials decision).
+#
+# Security: every `${{ github.* }}` expansion is read into an `env:`
+# variable and consumed via "$NAME" in shell — no direct interpolation
+# in any `run:` step. The only untrusted input is `github.ref_name`
+# (the tag name), validated by a strict semver regex in the very first
+# job before any build step runs.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create GitHub Releases
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Validate the tag matches semver before doing any expensive work. Rejects
+  # ad-hoc tags like `v-test` that would otherwise burn 20 minutes of CI
+  # building artifacts under an invalid release name.
+  # --------------------------------------------------------------------------
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: Parse + validate semver tag
+        id: parse
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.-]+)?$ ]]; then
+            echo "::error::Tag '$REF_NAME' is not a valid semver release tag." >&2
+            echo "Expected format: v<major>.<minor>.<patch>[-prerelease][+build]" >&2
+            exit 1
+          fi
+          echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "OK: tag '$REF_NAME' is a valid semver release tag"
+
+  # --------------------------------------------------------------------------
+  # Run the full test gate before publishing. A red test suite must NEVER
+  # produce a tagged release — these tests run on the exact tagged commit.
+  # --------------------------------------------------------------------------
+  test-gate:
+    name: Test gate
+    runs-on: ubuntu-latest
+    needs: [validate-tag]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler ripgrep jq
+
+      - name: Build (release)
+        run: cargo build --locked --workspace --release
+
+      - name: Test (workspace, excluding storage node default features)
+        run: |
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture
+          cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet --locked || true
+          cargo audit
+
+  # --------------------------------------------------------------------------
+  # Build the storage node binary for Linux x86_64 — the primary deployment
+  # target for the public 6-node beta cluster.
+  # --------------------------------------------------------------------------
+  build-storage-node:
+    name: Build storage node (linux-x86_64)
+    runs-on: ubuntu-latest
+    needs: [test-gate]
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Build storage node (release)
+        run: cargo build --locked -p dsm_storage_node --release
+
+      - name: Stage artifact
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          mkdir -p dist
+          cp target/release/dsm_storage_node "dist/dsm_storage_node-${VERSION}-linux-x86_64"
+
+      - name: Compute SHA-256
+        id: hash
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          cd dist
+          sha256sum "dsm_storage_node-${VERSION}-linux-x86_64" \
+            | tee "dsm_storage_node-${VERSION}-linux-x86_64.sha256"
+          HASH=$(awk '{print $1}' "dsm_storage_node-${VERSION}-linux-x86_64.sha256")
+          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload storage node artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsm-storage-node-linux-x86_64
+          path: |
+            dist/dsm_storage_node-*-linux-x86_64
+            dist/dsm_storage_node-*-linux-x86_64.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  # --------------------------------------------------------------------------
+  # Build the frontend bundle (React/webpack production build).
+  # --------------------------------------------------------------------------
+  build-frontend:
+    name: Build frontend bundle
+    runs-on: ubuntu-latest
+    needs: [test-gate]
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dsm_client/frontend/package-lock.json
+
+      - name: Install deps
+        working-directory: dsm_client/frontend
+        run: npm ci
+
+      - name: Build (production)
+        working-directory: dsm_client/frontend
+        run: npm run build
+
+      - name: Package bundle
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          mkdir -p dist
+          tar -C dsm_client/frontend -czf "dist/dsm-frontend-${VERSION}.tar.gz" dist
+          ls -la "dist/dsm-frontend-${VERSION}.tar.gz"
+
+      - name: Compute SHA-256
+        id: hash
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          cd dist
+          sha256sum "dsm-frontend-${VERSION}.tar.gz" \
+            | tee "dsm-frontend-${VERSION}.tar.gz.sha256"
+          HASH=$(awk '{print $1}' "dsm-frontend-${VERSION}.tar.gz.sha256")
+          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsm-frontend-bundle
+          path: |
+            dist/dsm-frontend-*.tar.gz
+            dist/dsm-frontend-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  # --------------------------------------------------------------------------
+  # Generate the SBOM bundle WITH validation evidence (tag releases run
+  # the full TLA check, unlike ci.yml's per-push SBOM which skips it).
+  # --------------------------------------------------------------------------
+  build-sbom:
+    name: Build SBOM (with validation evidence)
+    runs-on: ubuntu-latest
+    needs: [test-gate]
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install SBOM tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq protobuf-compiler
+          cargo install cargo-cyclonedx --quiet --locked
+
+      - name: Generate SBOM with validation
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}"
+
+      - name: Package SBOM bundle
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          mkdir -p dist
+          tar -C sbom -czf "dist/dsm-sbom-${VERSION}.tar.gz" "v${VERSION}"
+          ls -la "dist/dsm-sbom-${VERSION}.tar.gz"
+
+      - name: Compute SHA-256
+        id: hash
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          cd dist
+          sha256sum "dsm-sbom-${VERSION}.tar.gz" \
+            | tee "dsm-sbom-${VERSION}.tar.gz.sha256"
+          HASH=$(awk '{print $1}' "dsm-sbom-${VERSION}.tar.gz.sha256")
+          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SBOM bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsm-sbom-bundle
+          path: |
+            dist/dsm-sbom-*.tar.gz
+            dist/dsm-sbom-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  # --------------------------------------------------------------------------
+  # Publish the GitHub Release entry with every artifact attached and the
+  # SHA-256 manifest in the release body. The job pulls each artifact from
+  # the previous jobs' uploads, writes a deterministic manifest, then uses
+  # softprops/action-gh-release to publish.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - validate-tag
+      - build-storage-node
+      - build-frontend
+      - build-sbom
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download storage node artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: dsm-storage-node-linux-x86_64
+          path: dist/
+
+      - name: Download frontend bundle
+        uses: actions/download-artifact@v6
+        with:
+          name: dsm-frontend-bundle
+          path: dist/
+
+      - name: Download SBOM bundle
+        uses: actions/download-artifact@v6
+        with:
+          name: dsm-sbom-bundle
+          path: dist/
+
+      - name: Inventory + manifest
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          STORAGE_SHA256: ${{ needs.build-storage-node.outputs.sha256 }}
+          FRONTEND_SHA256: ${{ needs.build-frontend.outputs.sha256 }}
+          SBOM_SHA256: ${{ needs.build-sbom.outputs.sha256 }}
+        run: |
+          ls -la dist/
+          cat > dist/SHA256SUMS <<EOF
+          ${STORAGE_SHA256}  dsm_storage_node-${VERSION}-linux-x86_64
+          ${FRONTEND_SHA256}  dsm-frontend-${VERSION}.tar.gz
+          ${SBOM_SHA256}  dsm-sbom-${VERSION}.tar.gz
+          EOF
+          echo "Manifest:"
+          cat dist/SHA256SUMS
+
+      - name: Compose release notes
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          STORAGE_SHA256: ${{ needs.build-storage-node.outputs.sha256 }}
+          FRONTEND_SHA256: ${{ needs.build-frontend.outputs.sha256 }}
+          SBOM_SHA256: ${{ needs.build-sbom.outputs.sha256 }}
+        run: |
+          # If a curated release-notes file exists for this version, use it
+          # verbatim; otherwise emit a structured default body. Auto-generated
+          # commit-log notes are appended by `generate_release_notes: true` on
+          # the publish step.
+          NOTES_FILE="reports/DSM-RELEASE-NOTES-v${VERSION}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" dist/RELEASE_BODY.md
+          else
+            cat > dist/RELEASE_BODY.md <<EOF
+          # DSM v${VERSION}
+
+          ## Artifacts
+
+          | Artifact | SHA-256 |
+          |---|---|
+          | \`dsm_storage_node-${VERSION}-linux-x86_64\` | \`${STORAGE_SHA256}\` |
+          | \`dsm-frontend-${VERSION}.tar.gz\` | \`${FRONTEND_SHA256}\` |
+          | \`dsm-sbom-${VERSION}.tar.gz\` | \`${SBOM_SHA256}\` |
+
+          See \`SHA256SUMS\` for verification.
+
+          ## Verification
+
+          \`\`\`bash
+          sha256sum -c SHA256SUMS
+          \`\`\`
+
+          ## SBOM
+
+          The \`dsm-sbom-${VERSION}.tar.gz\` bundle contains the full
+          CycloneDX 1.5 inventory (Rust + frontend + Android + workspace
+          manifests) plus the TLA+ validation evidence from
+          \`dsm_vertical_validation tla-check\` captured at this tag.
+
+          ## Security
+
+          See [SECURITY.md](./SECURITY.md) for the coordinated-disclosure
+          policy and the DSM Security PGP key.
+          EOF
+          fi
+          echo "Release body preview:"
+          head -40 dist/RELEASE_BODY.md
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DSM ${{ github.ref_name }}
+          body_path: dist/RELEASE_BODY.md
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/dsm_storage_node-*-linux-x86_64
+            dist/dsm_storage_node-*-linux-x86_64.sha256
+            dist/dsm-frontend-*.tar.gz
+            dist/dsm-frontend-*.tar.gz.sha256
+            dist/dsm-sbom-*.tar.gz
+            dist/dsm-sbom-*.tar.gz.sha256
+            dist/SHA256SUMS

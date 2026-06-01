@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 export type KvMap = Map<string, string>;
 
 export function parseKv(text: string): KvMap {

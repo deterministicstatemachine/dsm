@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /** Format a unix unix_ts (seconds) as a relative time string. */
 export function formatTimeAgo(unixSec: number): string {
   if (!unixSec || unixSec <= 0) return '';

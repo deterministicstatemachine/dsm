@@ -84,12 +84,11 @@ license-files = [{ path = "LICENSE", hash = 0xa9ee426b }]
 [advisories]
 yanked = "deny"
 
-# We fail the build only on vulnerabilities. Unmaintained crates are tracked here
-# so cargo-deny can remain strict without blocking development.
+# We fail the build only on vulnerabilities. Unmaintained crates are tracked
+# here so cargo-deny can remain strict without blocking development. Every
+# entry must carry a real reason or a tracking issue — no
+# "leave it and hope" entries.
 ignore = [
-    # Transitive; rustls recommends migrating to rustls-pki-types PEM APIs.
-    "RUSTSEC-2025-0134", # rustls-pemfile: unmaintained
-
     # Bincode is frozen/unmaintained upstream, but current usage is intentional
     # and tracked for future migration.
     "RUSTSEC-2025-0141", # bincode: unmaintained

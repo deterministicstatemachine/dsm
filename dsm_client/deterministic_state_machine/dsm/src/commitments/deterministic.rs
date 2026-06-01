@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic commitment generation for state transitions.
 //!
 //! Produces canonical, domain-separated BLAKE3 commitments over operations

@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Storage Codecs
 //!
 //! Binary-first encoding and decoding helpers for persisting DSM types
 //! (operations, genesis records, contacts) to SQLite. No JSON, no Base64;
 //! uses BLAKE3-tagged length-prefixed binary format.
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use dsm::crypto::blake3::dsm_domain_hasher;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { decodeFramedEnvelopeV3 } from '../decoding';
 
 function makeGarbageBytes(): Uint8Array {

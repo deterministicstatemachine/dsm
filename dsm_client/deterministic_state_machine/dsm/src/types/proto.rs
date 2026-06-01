@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Protocol Buffer Types
 //!
 //! This module includes the generated protobuf types from the build script.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # JNI Global State
 //!
 //! Process-global atomic flags and state slots shared across all JNI entry
@@ -5,7 +7,6 @@
 //!
 //! `SDK_READY` has moved to `sdk::session_manager` (always compiled, not cfg-gated).
 
-// SPDX-License-Identifier: MIT OR Apache-2.0
 use std::sync::Mutex;
 use std::collections::HashMap;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]

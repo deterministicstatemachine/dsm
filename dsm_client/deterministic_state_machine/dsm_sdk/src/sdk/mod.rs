@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # DSM SDK Core Module
 //!
 //! This module provides the foundation for the DSM Software Development Kit,

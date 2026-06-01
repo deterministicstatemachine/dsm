@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral Throughput Benchmark
 //!
 //! Measures REAL protocol throughput — actual `StateMachine::execute_transition()`

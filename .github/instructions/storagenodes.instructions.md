@@ -52,9 +52,11 @@ DSM maximizes determinism and minimizes trust in infrastructure:
 2
 2 Notation and Primitives
 Hash. H := BLAKE3-256.
-KDF. HKDF for key stepping.
+KDF. RFC-5869 HKDF-over-BLAKE3 for the device master seed only; per-step key stepping uses plain
+domain-separated keyed BLAKE3 (not HKDF).
 Device signatures. SPHINCS+ (post-quantum). Nodes never sign.
-Optional secrecy. ML-KEM with deterministic HKDF.
+Optional secrecy. ML-KEM-768 (FIPS 203) with deterministic encapsulation; shared-secret/coins
+derived via domain-separated keyed BLAKE3 (not HKDF).
 Domain separation. ASCII tag with NUL, e.g. DSM/object\0, DSM/place\0, DSM/registry\0,
 DSM/bytecommit\0,DSM/signal/up\0,DSM/signal/down\0,DSM/pay/storage\0,DSM/genesis\0,DSM/policy\0,
 DSM/policy/anchor\0,DSM/dlv/create\0,DSM/dlv/open\0,DSM/contact/add\0,DSM/contact/accept\0.
@@ -86,8 +88,8 @@ s0 = H(DSM/step-salt\0∥G).
 Commit-reveal produces η0 = H(DSM/anchor/eta\0∥Dcommit∥Dreveal); withholding a reveal cannot
 bias ordering post-commit.
 Genesis Parameters (normative).
-P = [ H= BLAKE3-256, Sig = SPHINCS+, KDF = HKDF, N, K, U↑, U↓, w, Gnew, FLAT
-_RATE ].
+P = [ H= BLAKE3-256, Sig = SPHINCS+ (custom BLAKE3), KDF = HKDF (master seed) + keyed BLAKE3
+(stepping), N, K, U↑, U↓, w, Gnew, FLAT_RATE ].
 6 Addressing, Placement, and Enforcement
 Object address. For node-local partition DLVnode, path, and content:
 addr= H DSM/object\0∥DLVnode∥path∥H(content).

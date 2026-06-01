@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /**
  * Global coin sound player — plays the retro coin.mp3 whenever the user
  * receives tokens (BLE bilateral or online inbox).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic implementation traces for direct Rust validation.
 //!
 //! Unlike TLC model checking, these traces execute the real DSM transition code
@@ -2085,33 +2087,30 @@ fn build_djte_transition(
 }
 
 fn build_test_jap(id_byte: u8, nonce_byte: u8) -> JoinActivationProof {
-    let id = [id_byte; 32];
+    use dsm::emissions::paidk_proof::{PAIDK_FLAT_RATE, PAIDK_K};
+
+    let device_id = [id_byte; 32];
+
+    // issue #186: `gate_proof` is now decoded as a `PaidKGateProofV1` and
+    // structurally verified, so the trace must carry a REAL proof — at least
+    // K receipts bound to the activating device, each at >= FLAT_RATE, across
+    // K distinct operators. A dummy byte string fails decode (buffer underflow).
+    let proof = pb::PaidKGateProofV1 {
+        receipts: (0u8..PAIDK_K as u8)
+            .map(|op| pb::StoragePaymentReceiptV3 {
+                device_id: device_id.to_vec(),
+                operator_node_id: vec![op.wrapping_add(1); 32],
+                amount: PAIDK_FLAT_RATE,
+                receipt_digest: vec![0u8; 32],
+            })
+            .collect(),
+    };
+
     JoinActivationProof {
-        id,
-        gate_proof: build_paidk_gate_proof(id, id_byte),
+        id: device_id,
+        gate_proof: proof.encode_to_vec(),
         nonce: [nonce_byte; 32],
     }
-}
-
-fn build_paidk_gate_proof(device_id: [u8; 32], seed: u8) -> Vec<u8> {
-    let receipts = (0..dsm::emissions::paidk_proof::PAIDK_K)
-        .map(|operator_offset| {
-            let operator_byte = seed.wrapping_add(operator_offset as u8).wrapping_add(1);
-            pb::StoragePaymentReceiptV3 {
-                device_id: device_id.to_vec(),
-                operator_node_id: vec![operator_byte; 32],
-                amount: dsm::emissions::paidk_proof::PAIDK_FLAT_RATE,
-                receipt_digest: vec![operator_byte ^ 0xA5; 32],
-            }
-        })
-        .collect();
-
-    let proof = pb::PaidKGateProofV1 { receipts };
-    let mut encoded = Vec::new();
-    proof
-        .encode(&mut encoded)
-        .expect("PaidK gate_proof protobuf encoding");
-    encoded
 }
 
 fn apply_djte_transition(

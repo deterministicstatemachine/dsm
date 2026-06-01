@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Envelope Construction and Encoding
 //!
 //! Protobuf-only on-wire encoding for Envelope v3. Provides canonical

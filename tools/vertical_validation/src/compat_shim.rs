@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Compatibility shims for the vertical-validation tool.
 //!
 //! Bridges the legacy `StateMachine::execute_transition` and

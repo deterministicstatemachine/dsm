@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Micro-level property-based tests for determinism-critical primitives.
 //!
 //! These tests intentionally target small building blocks (uniform sampling,

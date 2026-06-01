@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { getAllBalancesStrictBridge } from '../WebViewBridge';
 
 function createSuccessResponse(data: Uint8Array): Uint8Array {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import React, { useEffect } from 'react';
 import { useUX } from '@/contexts/UXContext';
 

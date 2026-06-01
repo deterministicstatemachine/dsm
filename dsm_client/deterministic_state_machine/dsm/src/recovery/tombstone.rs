@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tombstone and Succession Receipt Implementation
 //!
 //! Implements self-anchored receipts for device recovery:

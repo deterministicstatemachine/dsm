@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Domain-separated BLAKE3-256 hashing for the DSM protocol.
 //!
 //! Every hash computation in the DSM protocol is domain-separated to prevent

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // File: dsm/src/core/identity/genesis_mpc.rs
 //! DSM Genesis MPC Protocol Implementation (STRICT, bytes-only)
 //!

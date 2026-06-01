@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! JNI Error types - minimal implementation for production bridge
 
 #[derive(Debug, Clone)]

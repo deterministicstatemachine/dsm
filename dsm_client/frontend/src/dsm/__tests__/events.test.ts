@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 jest.mock('../../bridge/bridgeEvents', () => {
   const handlers = new Map<string, Set<(payload: any) => void>>();
   return {

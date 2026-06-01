@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import BitcoinTapTab from '../bitcoin/BitcoinTapTab';

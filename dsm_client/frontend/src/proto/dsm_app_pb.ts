@@ -11819,6 +11819,18 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
    */
   success = false;
 
+  /**
+   * Post-update Device Tree snapshot (root_hash, device_count,
+   * version_number). Populated by add_secondary_device and
+   * remove_secondary_device so the WebView / Kotlin layer can persist
+   * the new R_G locally without rederiving the tree. Optional —
+   * omitted only if a producer is unable to compute the new state
+   * (older clients, error paths).
+   *
+   * @generated from field: dsm.DeviceTreeV1 device_tree = 4;
+   */
+  deviceTree?: DeviceTreeV1;
+
   constructor(data?: PartialMessage<SecondaryDeviceResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11830,6 +11842,7 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "genesis_hash", kind: "message", T: Hash32 },
     { no: 3, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "device_tree", kind: "message", T: DeviceTreeV1 },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecondaryDeviceResponse {
@@ -17962,6 +17975,14 @@ export class Envelope extends Message<Envelope> {
      */
     value: CdbrwEnrollResponse;
     case: "cdbrwEnrollResponse";
+  } | {
+    /**
+     * Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
+     *
+     * @generated from field: dsm.DeviceTreeSnapshotResponse device_tree_snapshot_response = 107;
+     */
+    value: DeviceTreeSnapshotResponse;
+    case: "deviceTreeSnapshotResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18067,6 +18088,7 @@ export class Envelope extends Message<Envelope> {
     { no: 104, name: "cdbrw_respond_response", kind: "message", T: CdbrwRespondResponse, oneof: "payload" },
     { no: 105, name: "cdbrw_verify_response", kind: "message", T: CdbrwVerifyResponse, oneof: "payload" },
     { no: 106, name: "cdbrw_enroll_response", kind: "message", T: CdbrwEnrollResponse, oneof: "payload" },
+    { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
@@ -20805,7 +20827,498 @@ export class DeviceTreeProof extends Message<DeviceTreeProof> {
 }
 
 /**
- * ========================= Device Tree =========================
+ * Sorted (by `device_id` ascending) leaf of the Device Tree. Optional
+ * `device_name` carries a UI-only label; it is NOT included in
+ * Hleaf(DevID) — the leaf hash binds the device_id only.
+ *
+ * @generated from message dsm.DeviceLeafV1
+ */
+export class DeviceLeafV1 extends Message<DeviceLeafV1> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: string device_name = 2;
+   */
+  deviceName = "";
+
+  constructor(data?: PartialMessage<DeviceLeafV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceLeafV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceLeafV1 {
+    return new DeviceLeafV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceLeafV1 {
+    return new DeviceLeafV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceLeafV1 {
+    return new DeviceLeafV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceLeafV1 | PlainMessage<DeviceLeafV1> | undefined, b: DeviceLeafV1 | PlainMessage<DeviceLeafV1> | undefined): boolean {
+    return proto3.util.equals(DeviceLeafV1, a, b);
+  }
+}
+
+/**
+ * Canonical state anchor for a published Device Tree at a given version.
+ * `version_number` is the monotone counter the storage-node validator
+ * enforces on PUT /devtree/root; it MUST strictly increase between
+ * successive writes for a given genesis. `device_count` is the count of
+ * real (non-padding) leaves. `root_hash` is the 32-byte Merkle root.
+ *
+ * The `schema_version` byte is a forward-compatibility tag carried
+ * distinct from `version_number` (which is per-tree-state). Current
+ * value is 1; future changes to the canonical encoding will bump it.
+ *
+ * @generated from message dsm.DeviceTreeV1
+ */
+export class DeviceTreeV1 extends Message<DeviceTreeV1> {
+  /**
+   * canonical-encoding version; currently 1
+   *
+   * @generated from field: uint32 schema_version = 1;
+   */
+  schemaVersion = 0;
+
+  /**
+   * 32-byte Merkle root R_G
+   *
+   * @generated from field: bytes root_hash = 2;
+   */
+  rootHash = new Uint8Array(0);
+
+  /**
+   * count of real DevID leaves (>= 1 post-genesis)
+   *
+   * @generated from field: uint32 device_count = 3;
+   */
+  deviceCount = 0;
+
+  /**
+   * monotone counter; strictly increases per update
+   *
+   * @generated from field: uint64 version_number = 4;
+   */
+  versionNumber = protoInt64.zero;
+
+  constructor(data?: PartialMessage<DeviceTreeV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "schema_version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "root_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "device_count", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "version_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeV1 {
+    return new DeviceTreeV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeV1 {
+    return new DeviceTreeV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeV1 {
+    return new DeviceTreeV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeV1 | PlainMessage<DeviceTreeV1> | undefined, b: DeviceTreeV1 | PlainMessage<DeviceTreeV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeV1, a, b);
+  }
+}
+
+/**
+ * Audit-trail record for a Device Tree root transition. Storage nodes
+ * retain this alongside the current `DeviceTreeV1` so consumers can
+ * reconstruct the version history without reading every prior tree.
+ *
+ * `signature` is a SPHINCS+ signature over the canonical concatenation
+ * `domain_hash("DSM/dev-tree-root-update/v1", old_root || new_root ||
+ * version_number_le_bytes)` by the root-binding key; verification is
+ * out of scope for B.1 and lands with the bounded-validator work in
+ * Phase B.4 (issue #275) once `RootBindingRecord` is in place
+ * (enrollment hardening, Phase 3).
+ *
+ * @generated from message dsm.DeviceTreeRootUpdateV1
+ */
+export class DeviceTreeRootUpdateV1 extends Message<DeviceTreeRootUpdateV1> {
+  /**
+   * @generated from field: bytes old_root = 1;
+   */
+  oldRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_root = 2;
+   */
+  newRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 version_number = 3;
+   */
+  versionNumber = protoInt64.zero;
+
+  /**
+   * SPHINCS+ SPX256f signature
+   *
+   * @generated from field: bytes signature = 4;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceTreeRootUpdateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeRootUpdateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "old_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "new_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "version_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeRootUpdateV1 {
+    return new DeviceTreeRootUpdateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeRootUpdateV1 {
+    return new DeviceTreeRootUpdateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeRootUpdateV1 {
+    return new DeviceTreeRootUpdateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeRootUpdateV1 | PlainMessage<DeviceTreeRootUpdateV1> | undefined, b: DeviceTreeRootUpdateV1 | PlainMessage<DeviceTreeRootUpdateV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeRootUpdateV1, a, b);
+  }
+}
+
+/**
+ * Portable Merkle inclusion proof for a specific Device Tree leaf. This
+ * is the wire format returned by GET /devtree/proof in Phase B.5
+ * (issue #276); the verifier reconstructs the path by walking siblings
+ * using `path_bits` (LSB-first per-level: 0 = current is left child,
+ * 1 = current is right child) and Hnode (`DSM/dev-merkle\0`) /
+ * Hleaf (`DSM/dev-leaf\0`) per `dsm::common::device_tree::DevTreeProof`.
+ *
+ * `path_bits` is a packed bitfield; `path_bits_len` is the number of
+ * valid bits (equal to `siblings.len()`). The `root_hash` field carries
+ * the root the proof was derived against, so a verifier can fail-closed
+ * if the caller-supplied tree state doesn't match.
+ *
+ * @generated from message dsm.DeviceInclusionProofV1
+ */
+export class DeviceInclusionProofV1 extends Message<DeviceInclusionProofV1> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes root_hash = 2;
+   */
+  rootHash = new Uint8Array(0);
+
+  /**
+   * root → leaf order
+   *
+   * @generated from field: repeated bytes siblings = 3;
+   */
+  siblings: Uint8Array[] = [];
+
+  /**
+   * @generated from field: uint32 path_bits_len = 4;
+   */
+  pathBitsLen = 0;
+
+  /**
+   * LSB-first packed bits
+   *
+   * @generated from field: bytes path_bits = 5;
+   */
+  pathBits = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceInclusionProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceInclusionProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "root_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 4, name: "path_bits_len", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "path_bits", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceInclusionProofV1 {
+    return new DeviceInclusionProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceInclusionProofV1 {
+    return new DeviceInclusionProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceInclusionProofV1 {
+    return new DeviceInclusionProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined, b: DeviceInclusionProofV1 | PlainMessage<DeviceInclusionProofV1> | undefined): boolean {
+    return proto3.util.equals(DeviceInclusionProofV1, a, b);
+  }
+}
+
+/**
+ * Phase B.7 (issue #278) — frontend DeviceTreeViewer payload.
+ *
+ * Returned by the `identity.devtree.snapshot` query route. The SDK
+ * fetches the persisted `DeviceTreeStateV1` from a storage node,
+ * re-canonicalises the leaf list through
+ * `dsm::common::device_tree::DeviceTree::new`, derives a fresh
+ * inclusion proof for every leaf via `DeviceTree::proof`, and
+ * verifies each proof locally with `DevTreeProof::verify`. All
+ * verification booleans are produced Rust-side; the React renderer
+ * does no hashing.
+ *
+ * `claimed_root_matches_recomputed` is the trust-but-verify gate
+ * against the storage node: if the storage-node-served `root_hash`
+ * does not equal the SDK's recomputation from `device_ids`, the
+ * frontend renders a "Tampered" badge instead of "Verified".
+ *
+ * @generated from message dsm.DeviceTreeSnapshotResponse
+ */
+export class DeviceTreeSnapshotResponse extends Message<DeviceTreeSnapshotResponse> {
+  /**
+   * @generated from field: dsm.DeviceTreeV1 tree = 1;
+   */
+  tree?: DeviceTreeV1;
+
+  /**
+   * @generated from field: bytes recomputed_root = 2;
+   */
+  recomputedRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bool claimed_root_matches_recomputed = 3;
+   */
+  claimedRootMatchesRecomputed = false;
+
+  /**
+   * @generated from field: repeated dsm.DeviceTreeLeafView leaves = 4;
+   */
+  leaves: DeviceTreeLeafView[] = [];
+
+  constructor(data?: PartialMessage<DeviceTreeSnapshotResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeSnapshotResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "tree", kind: "message", T: DeviceTreeV1 },
+    { no: 2, name: "recomputed_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "claimed_root_matches_recomputed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "leaves", kind: "message", T: DeviceTreeLeafView, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeSnapshotResponse {
+    return new DeviceTreeSnapshotResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotResponse {
+    return new DeviceTreeSnapshotResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotResponse {
+    return new DeviceTreeSnapshotResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeSnapshotResponse | PlainMessage<DeviceTreeSnapshotResponse> | undefined, b: DeviceTreeSnapshotResponse | PlainMessage<DeviceTreeSnapshotResponse> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeSnapshotResponse, a, b);
+  }
+}
+
+/**
+ * One row in the DeviceTreeViewer table.
+ *
+ * `proof_bytes` is a fully encoded [`DeviceInclusionProofV1`] so the
+ * frontend can persist it verbatim (e.g. into a contact card export)
+ * without rebuilding from siblings + path_bits. `inclusion_verified`
+ * is the Rust-side result of `DevTreeProof::verify(device_id,
+ * recomputed_root)`.
+ *
+ * @generated from message dsm.DeviceTreeLeafView
+ */
+export class DeviceTreeLeafView extends Message<DeviceTreeLeafView> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes proof_bytes = 2;
+   */
+  proofBytes = new Uint8Array(0);
+
+  /**
+   * @generated from field: bool inclusion_verified = 3;
+   */
+  inclusionVerified = false;
+
+  constructor(data?: PartialMessage<DeviceTreeLeafView>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeLeafView";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "proof_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "inclusion_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeLeafView {
+    return new DeviceTreeLeafView().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeLeafView {
+    return new DeviceTreeLeafView().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeLeafView {
+    return new DeviceTreeLeafView().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeLeafView | PlainMessage<DeviceTreeLeafView> | undefined, b: DeviceTreeLeafView | PlainMessage<DeviceTreeLeafView> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeLeafView, a, b);
+  }
+}
+
+/**
+ * Request envelope for `identity.devtree.snapshot`. The frontend
+ * passes the genesis_hash it wants a viewer for (typically its own
+ * from `AppState::get_genesis_hash`).
+ *
+ * @generated from message dsm.DeviceTreeSnapshotRequest
+ */
+export class DeviceTreeSnapshotRequest extends Message<DeviceTreeSnapshotRequest> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceTreeSnapshotRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeSnapshotRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeSnapshotRequest {
+    return new DeviceTreeSnapshotRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotRequest {
+    return new DeviceTreeSnapshotRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeSnapshotRequest {
+    return new DeviceTreeSnapshotRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeSnapshotRequest | PlainMessage<DeviceTreeSnapshotRequest> | undefined, b: DeviceTreeSnapshotRequest | PlainMessage<DeviceTreeSnapshotRequest> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeSnapshotRequest, a, b);
+  }
+}
+
+/**
+ * Persistent state of a Device Tree for one genesis: the `DeviceTreeV1`
+ * summary (root, count, version) together with the canonical sorted +
+ * deduplicated `device_ids` list that produced it. The list is the
+ * authoritative source from which the root is recomputed; storing it
+ * alongside the summary lets callers (B.4 issue #276 inclusion-proof
+ * derivation) rebuild the Merkle tree byte-exactly from disk.
+ *
+ * Used as the SDK's local KV value under key `device_tree:{genesis}`
+ * (Phase B.3 issue #274) and as the persistence record alongside the
+ * validated published anchor on the storage node side (Phase B.4
+ * issue #275).
+ *
+ * Each `device_ids` element is fixed-width 32 bytes (the DevID width).
+ *
+ * @generated from message dsm.DeviceTreeStateV1
+ */
+export class DeviceTreeStateV1 extends Message<DeviceTreeStateV1> {
+  /**
+   * @generated from field: dsm.DeviceTreeV1 tree = 1;
+   */
+  tree?: DeviceTreeV1;
+
+  /**
+   * @generated from field: repeated bytes device_ids = 2;
+   */
+  deviceIds: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<DeviceTreeStateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceTreeStateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "tree", kind: "message", T: DeviceTreeV1 },
+    { no: 2, name: "device_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceTreeStateV1 {
+    return new DeviceTreeStateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceTreeStateV1 {
+    return new DeviceTreeStateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceTreeStateV1 {
+    return new DeviceTreeStateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceTreeStateV1 | PlainMessage<DeviceTreeStateV1> | undefined, b: DeviceTreeStateV1 | PlainMessage<DeviceTreeStateV1> | undefined): boolean {
+    return proto3.util.equals(DeviceTreeStateV1, a, b);
+  }
+}
+
+/**
+ * Legacy / registry-evidence types — production callers retained.
  *
  * @generated from message dsm.DeviceTreeEntry
  */
@@ -26523,6 +27036,58 @@ export class StoragePaymentReceiptV3 extends Message<StoragePaymentReceiptV3> {
 
   static equals(a: StoragePaymentReceiptV3 | PlainMessage<StoragePaymentReceiptV3> | undefined, b: StoragePaymentReceiptV3 | PlainMessage<StoragePaymentReceiptV3> | undefined): boolean {
     return proto3.util.equals(StoragePaymentReceiptV3, a, b);
+  }
+}
+
+/**
+ * PaidK spend-gate proof, carried inside JoinActivationProof.gate_proof.
+ *
+ * Whitepaper §16 PaidK predicate:
+ *   PaidK(G, DevID, R) := |{r in R | VerifyPayment(r) AND amt(r) >= FLAT_RATE}| >= K
+ *
+ * The emissions verifier checks structurally:
+ *   * exactly the same `device_id` across every receipt
+ *   * `>= K` distinct `operator_node_id` values
+ *   * `amount >= FLAT_RATE` per receipt
+ *
+ * Per-receipt operator signature verification (the `VerifyPayment(r)` step) is
+ * tracked as a follow-on issue — receipts are not signed by operators in this
+ * schema yet, so this proof structure pins shape + distinctness + floor, not
+ * payment authenticity.
+ *
+ * @generated from message dsm.PaidKGateProofV1
+ */
+export class PaidKGateProofV1 extends Message<PaidKGateProofV1> {
+  /**
+   * @generated from field: repeated dsm.StoragePaymentReceiptV3 receipts = 1;
+   */
+  receipts: StoragePaymentReceiptV3[] = [];
+
+  constructor(data?: PartialMessage<PaidKGateProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PaidKGateProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipts", kind: "message", T: StoragePaymentReceiptV3, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PaidKGateProofV1 {
+    return new PaidKGateProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PaidKGateProofV1 {
+    return new PaidKGateProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PaidKGateProofV1 {
+    return new PaidKGateProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PaidKGateProofV1 | PlainMessage<PaidKGateProofV1> | undefined, b: PaidKGateProofV1 | PlainMessage<PaidKGateProofV1> | undefined): boolean {
+    return proto3.util.equals(PaidKGateProofV1, a, b);
   }
 }
 

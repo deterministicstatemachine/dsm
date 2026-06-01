@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token Policy Storage
 //!
 //! Persistent storage and retrieval for token policies (CTPAs), with an

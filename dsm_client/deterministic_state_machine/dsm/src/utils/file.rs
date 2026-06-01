@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /// File utilities  
 ///
 ///  Contains helper functions for file operations, such as reading and writing files.

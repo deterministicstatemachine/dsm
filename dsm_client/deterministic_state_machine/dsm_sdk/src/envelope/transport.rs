@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Transport encoding helpers for SDK side (protobuf only)
 //!
 //! The SDK uses its own generated Envelope type and enforces the same strict

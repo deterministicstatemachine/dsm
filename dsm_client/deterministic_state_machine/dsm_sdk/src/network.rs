@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! STRICT multi-node network registry for DSM SDK.
 //! - No auto-discovery, no LAN scans, no silent defaults.
 //! - Requires DSM_ENV_CONFIG_PATH (TOML) OR DSM_SDK_TEST_MODE=1 for hermetic tests.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Client-side DLV helpers mirroring storage node derivations.
 //! No network I/O, pure computations for routable addresses.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! PaidK Spend-Gate endpoints (clockless, signature-free at node level).
 //!
 //! Spec §16: PaidK(G, DevID, R) := |{r in R | VerifyPayment(r) AND amt(r) >= FLAT_RATE}| >= K

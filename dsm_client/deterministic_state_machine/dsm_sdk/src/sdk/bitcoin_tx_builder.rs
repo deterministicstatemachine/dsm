@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin Transaction Builder — HTLC claim and sweep transactions.
 //!
 //! Constructs and signs Bitcoin transactions for claiming funds locked in

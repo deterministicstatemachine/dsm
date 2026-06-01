@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Library crate for dsm_storage_node: shared types and routers for tests
 #![deny(warnings)]
 

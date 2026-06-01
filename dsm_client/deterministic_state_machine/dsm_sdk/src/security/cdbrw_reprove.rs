@@ -1,13 +1,23 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! C-DBRW opportunistic ACD re-prove — Phase 3 deliverable 2 Layer B.
+//! C-DBRW opportunistic ACD re-prove — the sole anti-clone gate.
 //!
-//! Layer A of Phase 3 deliverable 2 moves the C-DBRW salt into Android
-//! Keystore-wrapped storage so a clone with filesystem access cannot
-//! decrypt it. Layer B (this module) is the complementary protection: it
-//! makes the salt useless on different hardware even if the Keystore is
-//! somehow compromised.
+//! DSM does not depend on Android Keystore / StrongBox / Secure Enclave /
+//! any sealed-module attestation chain. The C-DBRW design is the
+//! white-box alternative: silicon binding is established by *observing*
+//! the device's statistical signature (the attractor commitment `AC_D`
+//! produced during live enrollment), not by trusting a sealed module to
+//! seal a secret. The canonical 4-input K_DBRW preimage on `main` is
 //!
-//! On every cold boot, the device runs a single live orbit, builds its
+//!     K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
+//!         || LP(genesis_hash) || LP(device_id)
+//!         || LP(hw_entropy)   || LP(env_fingerprint))
+//!
+//! where `hw_entropy = AC_D` and `env_fingerprint` is a stable platform
+//! identifiers hash. The Phase 13 salt-drop (commits c6c622df, ea718d94)
+//! removed the previous Keystore-wrapped random salt entirely — there is
+//! no Keystore dependency anywhere in the K_DBRW derivation path now.
+//!
+//! On every cold boot, this module runs a single live orbit, builds its
 //! histogram, and compares against the stored mean histogram from
 //! enrollment. If the live W1 distance exceeds a clone-detection
 //! threshold (set well below the cross-device noise floor we measured at
@@ -23,8 +33,8 @@
 //! `epsilon_intra + margin` used by `cdbrw.measure_trust`. Measure-trust
 //! degrades to PinRequired on routine drift; reprove fires only when W1
 //! is clone-class large. This split keeps boot resume tolerant of
-//! day-to-day drift while still catching the "clone with stolen salt
-//! ran on different hardware" attack.
+//! day-to-day drift while still catching the "clone running on different
+//! hardware" attack — without ever relying on a sealed enclave.
 
 use crate::security::cdbrw_access_gate::{
     next_iter, store_trust, AccessLevel, ResonantStatus, TrustSnapshot,

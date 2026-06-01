@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Tests for generated schema hash helper
 #[test]
 fn contact_add_response_schema_hash_is_canonical() {

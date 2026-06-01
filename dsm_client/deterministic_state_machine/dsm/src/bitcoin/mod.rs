@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin primitives for the DSM-Bitcoin bridge (deposits/withdrawals via HTLC vaults).
 //!
 //! Provides SPV proof verification, HTLC script construction, and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Bilateral Transaction Preview (Android JNI)
 //!
 //! Provides preview / dry-run computation for bilateral transfers before

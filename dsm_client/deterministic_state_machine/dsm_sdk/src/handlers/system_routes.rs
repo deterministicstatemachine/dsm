@@ -320,17 +320,45 @@ impl AppRouterImpl {
                     );
                     crate::sdk::app_state::AppState::set_has_identity(true);
 
+                    // Persist the post-add Device Tree root so bilateral
+                    // settlement (which reads the head's device_tree_root
+                    // out of AppState) verifies against the multi-device
+                    // R_G — not the single-leaf root the prior flow
+                    // installed. Source of truth is the
+                    // DeviceTreeSnapshot the SDK returned.
+                    if let Some(snapshot) = res.device_tree {
+                        crate::sdk::app_state::AppState::set_device_tree_root(snapshot.root_hash);
+                    }
+
                     let _ = crate::initialize_sdk_context(
                         device_id.clone(),
                         genesis_hash.clone(),
                         req.device_entropy.clone(),
                     );
 
-                    // Build SecondaryDeviceResponse
+                    // Build SecondaryDeviceResponse, surfacing the new
+                    // Device Tree summary to the WebView so the frontend
+                    // can render the post-add R_G / device_count /
+                    // version_number without rederiving the tree.
+                    //
+                    // `res.device_tree` is a [`DeviceTreeSnapshot`] which
+                    // converts to the `crate::generated::DeviceTreeV1`
+                    // prost type. Here we need the
+                    // `dsm::types::proto::DeviceTreeV1` instance — they
+                    // are distinct prost generations of the same .proto
+                    // message, so we copy fields by hand rather than
+                    // re-routing through a serialised round-trip.
+                    let device_tree_proto = res.device_tree.map(|s| generated::DeviceTreeV1 {
+                        schema_version: 1,
+                        root_hash: s.root_hash.to_vec(),
+                        device_count: s.device_count,
+                        version_number: s.version_number,
+                    });
                     let resp = generated::SecondaryDeviceResponse {
                         device_id,
                         genesis_hash: Some(generated::Hash32 { v: genesis_hash }),
                         success: true,
+                        device_tree: device_tree_proto,
                     };
                     Ok::<generated::SecondaryDeviceResponse, String>(resp)
                 };

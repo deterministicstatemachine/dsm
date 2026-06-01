@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Jest setup for React Testing Library and bridge shims
 import '@testing-library/jest-dom';

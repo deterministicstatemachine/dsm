@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Canonical Serialization Helpers
 //!
 //! Centralized, auditable serialization primitives for DSM.

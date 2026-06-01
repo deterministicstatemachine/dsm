@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Genesis Publisher
 //!
 //! Implements the [`GenesisPublisher`](dsm::core::identity::genesis_mpc::GenesisPublisher)

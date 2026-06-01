@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Minimal, JSON-free key/value encoding helpers for SDK storage.
 //! This intentionally avoids serde/serde_json per project policy.
 use std::collections::BTreeMap;

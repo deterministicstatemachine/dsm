@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import * as dsm from '../index';
 import * as pb from '../../proto/dsm_app_pb';
 import { emit } from '../EventBridge';

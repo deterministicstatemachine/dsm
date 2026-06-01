@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Token MPC SDK Module
 //!
 //! This module implements Multi-Party Computation (MPC) for secure token creation

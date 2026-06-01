@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Core state types for the DSM protocol.
 //!
 //! This module defines [`State`] -- the central data type of the Decentralized State

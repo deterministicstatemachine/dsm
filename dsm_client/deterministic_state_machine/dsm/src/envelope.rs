@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Envelope wire encoding/decoding for DSM (prost/protobuf only).
 //!
 //! Issue #161 cleanup: this module is the single source of truth for

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable no-console */
 // Simple environment-aware logger. No-ops in production, console in development.
 const isProd = typeof process !== 'undefined' && process.env.NODE_ENV === 'production';

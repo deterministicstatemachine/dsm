@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Node discovery endpoint — returns alive peer addresses for SDK auto-discovery.
 //!
 //! Protobuf-only, clockless, index-only. Responds with `DiscoverLocalResponse`

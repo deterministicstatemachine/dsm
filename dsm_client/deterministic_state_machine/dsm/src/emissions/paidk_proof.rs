@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! PaidK spend-gate proof verification for DJTE emissions (issue #186 Finding 2).
 //!
 //! `JoinActivationProof.gate_proof` is the opaque byte field that demonstrates

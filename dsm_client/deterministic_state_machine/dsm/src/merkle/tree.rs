@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Generic Merkle tree utility (untagged, non-domain-separated).
 //!
 //! **WARNING**: Do NOT use this for Device Tree (`π_dev`). For `π_dev`, use

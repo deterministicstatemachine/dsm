@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Local Storage Node Manager
 //!
 //! Wraps the existing `dsm_storage_node/start_dev_cluster.sh` script to

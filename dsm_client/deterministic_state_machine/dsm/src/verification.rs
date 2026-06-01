@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Production verification namespace for DSM.
 //!
 //! Issue #162 cleanup: this module is the single home for **runtime**

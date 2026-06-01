@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! SPHINCS+ ephemeral key chain for C-DBRW verification protocol.
 //!
 //! Implements Alg. 3 steps 6-8 from the C-DBRW paper Rev 2.0:

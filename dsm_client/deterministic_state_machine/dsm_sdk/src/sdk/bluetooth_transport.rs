@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bluetooth Transport Module (Protobuf-only, Transport Timers Allowed, Production)
 //!
 //! - Encodes/decodes `pb::Envelope` (prost) for BLE transport.

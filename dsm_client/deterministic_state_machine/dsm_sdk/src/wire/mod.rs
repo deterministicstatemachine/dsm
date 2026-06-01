@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Wire Adapters
 //!
 //! Conversion adapters between SDK-level types and core DSM types

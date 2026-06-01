@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Report Generator
 //!
 //! Produces investor-ready output from TLA+ verification results and scaling

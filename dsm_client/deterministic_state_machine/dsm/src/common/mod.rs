@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Common Module
 //!
 //! Dependency-free, circular-import-safe primitives shared across DSM.

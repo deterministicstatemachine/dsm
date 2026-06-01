@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
 import { queryTransportHeadersV3, getDeviceIdBinBridgeAsync, getPreference as getPreferenceBridge, setPreference as setPreferenceBridge } from './WebViewBridge';

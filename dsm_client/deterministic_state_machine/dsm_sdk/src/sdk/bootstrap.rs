@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # SDK Bootstrap (Platform Boundary Interface)
 //!
 //! Provides the [`SdkBootstrap`] loader that transactionally validates
@@ -5,8 +7,6 @@
 //! with fixed-size `[u8; 32]` fields. This is the single entry point for
 //! loading device identity into the SDK; it either succeeds with a fully
 //! valid context or returns an error.
-
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::sdk::app_state::AppState;
 use dsm::types::error::DsmError;

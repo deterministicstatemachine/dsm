@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! External commitment functionality
 //!
 //! This module provides functions to create and verify external commitments,

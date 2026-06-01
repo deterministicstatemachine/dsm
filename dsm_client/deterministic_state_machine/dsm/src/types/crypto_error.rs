@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Structured error type for cryptographic operations.
 //!
 //! [`CryptoError`] captures the context, operation name, and optional source

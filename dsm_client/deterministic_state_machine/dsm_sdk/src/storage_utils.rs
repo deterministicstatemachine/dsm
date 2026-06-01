@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Storage Base Directory Management
 //!
 //! Manages the root filesystem path for all SDK-persisted data (AppState,

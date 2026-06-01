@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Pre-commitment and forward-linked commitment support.
 //!
 //! Deterministic commitments for future state transitions. A pre-commitment
@@ -1480,8 +1482,13 @@ mod tests {
     // cryptographically verify each signature, not just count entries.
     // ────────────────────────────────────────────────────────────────────────
 
-    type SignerKeyMap = HashMap<String, Vec<u8>>;
-    type SignedInvalidationProofFixture = (ForkInvalidationProof, SignerKeyMap, SignerKeyMap);
+    /// `(proof, public-keys-by-id, secret-keys-by-id)`. Secret keys are
+    /// returned only so the forging tests can re-sign with the wrong key.
+    type SignedInvalidationFixture = (
+        ForkInvalidationProof,
+        HashMap<String, Vec<u8>>,
+        HashMap<String, Vec<u8>>,
+    );
 
     fn signed_invalidation_proof(
         signer_ids: &[&str],
@@ -1489,7 +1496,7 @@ mod tests {
         fork_hash: [u8; 32],
         selected_fork_hash: [u8; 32],
         tick: u64,
-    ) -> SignedInvalidationProofFixture {
+    ) -> SignedInvalidationFixture {
         use crate::crypto::signatures::SignatureKeyPair;
 
         let canonical_bytes =

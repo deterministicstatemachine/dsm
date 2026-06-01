@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Canonical Receipt Types
 //!
 //! This module implements the stitched receipt structures as specified in the

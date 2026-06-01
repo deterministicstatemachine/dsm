@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic Smart Commitments Module
 //!
 //! Non–Turing-complete commitments with deterministic hashing/binding,

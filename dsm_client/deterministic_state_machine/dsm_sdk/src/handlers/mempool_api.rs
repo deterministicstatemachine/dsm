@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! mempool.space REST API client for Bitcoin Signet/Testnet/Mainnet.
 //!
 //! Provides UTXO lookup, transaction broadcast, confirmation polling,

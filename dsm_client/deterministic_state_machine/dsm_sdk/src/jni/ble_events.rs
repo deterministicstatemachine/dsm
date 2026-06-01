@@ -1,11 +1,11 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # BLE Event Envelope Builders
 //!
 //! Constructs protobuf-encoded BLE event envelopes for the JNI bridge.
 //! Uses `Payload::BleEvent` from the updated proto schema to wrap BLE
 //! scan results, connection events, and data payloads for delivery to
 //! the Kotlin layer.
-
-// SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::generated as pb;
 use jni::objects::{JByteArray, JObject, JString};

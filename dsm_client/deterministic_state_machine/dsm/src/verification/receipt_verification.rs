@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Receipt Verification Module
 //!
 //! Implements cryptographic stitched-receipt verification predicates.

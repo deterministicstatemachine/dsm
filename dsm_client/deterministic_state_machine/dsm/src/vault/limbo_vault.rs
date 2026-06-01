@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Deterministic Limbo Vault (DLV)
 //!
 //! Protobuf-only I/O (prost). Binary digests internally.

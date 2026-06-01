@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Canonical bridge interface type, separated from WebViewBridge implementation
 // to avoid circular imports when providing/injecting the bridge instance.
 export interface AndroidBridgeV3 {

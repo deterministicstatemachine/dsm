@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin-specific types for the DSM tap.
 //! Minimal wrappers — no wall clocks, no serde, deterministic only.
 

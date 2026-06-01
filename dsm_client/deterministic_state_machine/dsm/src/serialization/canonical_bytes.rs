@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Canonical byte encoding helpers for DSM.
 //!
 //! Canon 2: centralize internal canonical serialization.

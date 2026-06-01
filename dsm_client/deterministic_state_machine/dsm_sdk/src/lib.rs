@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # DSM SDK — Platform Integration Layer
 //!
 //! The `dsm_sdk` crate bridges the pure, deterministic [`dsm`] core library to

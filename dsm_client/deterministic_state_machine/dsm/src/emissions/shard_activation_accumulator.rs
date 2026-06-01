@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Shard Activation Accumulator / SAA (emissions spec §3.4)
 //!
 //! Per-shard append-only accumulator whose leaves are activated identities:

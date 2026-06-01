@@ -1254,7 +1254,8 @@ message ReceiptCommit {
   // Per-step ephemeral-key certificates (whitepaper §11.1).
   //   cert_{n+1} = Sign_{SK_n}( BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )
   // Carried in the envelope alongside sig_a/sig_b. NOT part of canonical
-  // commit preimage (§4.2.1 freezes the 10-field commit form). The cert
+  // commit preimage (§4.2.1 freezes the 11-field commit form: fields 1–11,
+  // incl. rel_replace_witness at field 11, are in the hashed preimage). The cert
   // binds the per-step EK to the prior chain head (AK at n=0, else EK_n)
   // and lets a verifier walk the chain back to the device-attested AK_pk.
   // Empty bytes are omitted by proto3, so receipts without a chain-head

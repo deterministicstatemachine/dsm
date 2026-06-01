@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Registry Scaling & Applicant Ranking (clockless, deterministic).
 //!
 //! Spec §8-10: Up/Down capacity signals → position delta ΔP → add/prune nodes.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Gossip protocol API for node state synchronization
 //!
 //! This module provides HTTP endpoints for the gossip protocol used by

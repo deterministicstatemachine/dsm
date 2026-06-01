@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral BLE session types and session store.
 //!
 //! This module owns the core types for the 3-phase bilateral protocol

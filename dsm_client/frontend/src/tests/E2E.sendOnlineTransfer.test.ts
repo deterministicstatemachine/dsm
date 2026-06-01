@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /// <reference types="jest" />
 import * as dsm from '../dsm/index';
 import * as pb from '../proto/dsm_app_pb';

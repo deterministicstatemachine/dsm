@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! src/core/token/policy/policy_enforcement.rs
 //! Policy Enforcement Engine (protobuf-only; binary comparisons; no hex/base64/JSON).
 //!
@@ -489,7 +491,7 @@ impl PolicyEnforcer {
         ctx: &EnforcementContext,
     ) -> Result<bool, DsmError> {
         let Some(identity) = ctx.identity.as_ref() else {
-            return Ok(true);
+            return Ok(false);
         };
 
         for role in roles {

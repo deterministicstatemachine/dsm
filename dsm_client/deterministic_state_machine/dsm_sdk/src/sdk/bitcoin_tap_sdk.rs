@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin Tap SDK — Sovereign Bitcoin Settlement via DSM
 //!
 //! Orchestrates the full lifecycle of vault deposits between Bitcoin and DSM dBTC tokens.

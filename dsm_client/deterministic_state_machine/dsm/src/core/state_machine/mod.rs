@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Core State Machine Module
 //!
 //! This module implements the core state machine functionality for DSM, including:

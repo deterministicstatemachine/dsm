@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Performance optimization and resource management for DSM (STRICT: no wall/epoch time)
 //!
 //! This module provides CPU/I/O offloading, concurrency control, and cryptographic

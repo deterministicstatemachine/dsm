@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bitcoin HTLC script construction for DSM vaults.
 //!
 //! Builds dual-hashlock HTLC scripts per the dBTC spec (main.tex, Definition 7.1):

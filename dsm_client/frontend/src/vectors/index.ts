@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 import { loadVectorCases } from "./loader";
 import { runVectorCases } from "./runner";
 import { realWebviewInboundAdapter } from "./webviewAdapter";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! BLE Frame Coordinator — Protobuf-only transport framing.
 //!
 //! - Strict prost/protobuf framing for BLE GATT transport (no serde, no bincode).

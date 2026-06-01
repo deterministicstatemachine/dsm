@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bilateral Relationship Manager - Contact Establishment and Genesis Anchoring (STRICT, no wall-clock)
 //!
 //! - No wall-clock APIs anywhere. All time references use deterministic, global ticks (u64)

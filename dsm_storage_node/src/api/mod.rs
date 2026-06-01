@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Storage Node API Endpoints
 //!
 //! All HTTP handler modules for the storage node. Each module exposes

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Per-relationship chain tip tracking for bilateral state synchronization.
 //!
 //! Provides the [`ChainTipStore`] trait, an abstraction over persistent storage

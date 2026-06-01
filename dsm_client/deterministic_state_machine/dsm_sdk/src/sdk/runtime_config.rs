@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! # Runtime Configuration Module (no serde / no JSON / no base64 / no `hex` crate)
 //!
 //! Binary-first, protobuf-friendly runtime config for the DSM SDK. This module

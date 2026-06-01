@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! State transition operations for the DSM protocol.
 //!
 //! This module defines [`Operation`], the enum representing every kind of state

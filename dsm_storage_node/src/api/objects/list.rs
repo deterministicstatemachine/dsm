@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Object listing API (admin/management UI helper)
 //!
 //! IMPORTANT:

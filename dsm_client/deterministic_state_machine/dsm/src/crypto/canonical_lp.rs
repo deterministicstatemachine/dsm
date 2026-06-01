@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Canonical length-prefixed byte writer for commitment hashing.
 //!
 //! Motivation: avoid scattering

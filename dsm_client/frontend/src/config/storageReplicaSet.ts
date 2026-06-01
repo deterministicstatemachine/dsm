@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Centralized storage node configuration for the frontend.
 // Single source of truth: `dsm_network_config.json` (checked-in bootstrap config)

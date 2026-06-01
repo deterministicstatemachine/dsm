@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // dsm/src/crypto/signatures.rs
 //! Enhanced signature implementation using pure cryptographic guarantees,
 //! wrapping the BLAKE3-only SPHINCS+ engine in `crate::crypto::sphincs`.

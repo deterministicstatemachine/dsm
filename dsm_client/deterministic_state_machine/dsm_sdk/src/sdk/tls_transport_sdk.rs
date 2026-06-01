@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // dsm_sdk/src/sdk/tls_transport_sdk.rs
 //! SDK wrapper for DSM Core TLS-over-TCP Transport API.
 

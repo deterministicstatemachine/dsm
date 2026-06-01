@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Android BLE Bridge for BLE transport sessions.
 //!
 //! Integrates with Android DsmBluetoothService.kt to coordinate BLE transport

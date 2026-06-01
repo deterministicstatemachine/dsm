@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Parameter comparison utilities for pre-commitment verification.
 //!
 //! Compares operation parameters against pre-committed fixed parameters

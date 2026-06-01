@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! iOS Transport Bridge - Protobuf-Native
 //!
 //! This module provides protobuf-native transport functions for iOS/Swift bridging.

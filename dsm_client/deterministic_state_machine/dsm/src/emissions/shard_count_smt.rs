@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! ShardCountSMT: proof-carrying global counts (emissions spec §3.5)
 //!
 //! A complete binary tree over shard prefixes up to depth `b`.

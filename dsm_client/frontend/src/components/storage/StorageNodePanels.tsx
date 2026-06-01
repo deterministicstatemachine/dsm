@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Storage node dashboard panels — inverted design
 // Per spec: nodes are equal index-only mirrors. No primaries, no failover.

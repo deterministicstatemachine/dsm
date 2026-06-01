@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // path: src/utils/safeJsonStringify.ts
 // Explicit BigInt-aware JSON stringify helper to avoid global prototype patches.

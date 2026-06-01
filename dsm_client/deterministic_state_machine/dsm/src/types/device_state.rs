@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Device state: the canonical per-device head per whitepaper §2.2, §4, §8.
 //!
 //! This module defines [`DeviceState`] — the authoritative representation of a
