@@ -57,9 +57,8 @@ pub fn verify_paidk_gate_proof(
         ));
     }
 
-    let proof = PaidKGateProofV1::decode(gate_proof_bytes).map_err(|e| {
-        DsmError::Verification(format!("PaidK gate_proof decode failed: {e}"))
-    })?;
+    let proof = PaidKGateProofV1::decode(gate_proof_bytes)
+        .map_err(|e| DsmError::Verification(format!("PaidK gate_proof decode failed: {e}")))?;
 
     if proof.receipts.len() < PAIDK_K {
         return Err(DsmError::Verification(format!(
@@ -167,8 +166,7 @@ mod tests {
                 mk_receipt(device, 2, PAIDK_FLAT_RATE),
             ],
         };
-        let err = verify_paidk_gate_proof(&encode(&proof), &device)
-            .expect_err("k-1 must reject");
+        let err = verify_paidk_gate_proof(&encode(&proof), &device).expect_err("k-1 must reject");
         assert!(format!("{err}").contains("requires >="));
     }
 
