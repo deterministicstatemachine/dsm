@@ -20,7 +20,7 @@ This document formalizes C-DBRW as a post-quantum-secure hardware identity
 primitive. We sofine a discrete chaotic interrogation map implemented via Add-Rotate-
 XOR (ARX) networks, prove attractor invariance under bounded thermal perturbation, es-
 tablish the uniqueness and inseparability of device fingerprints, and specify a zero-knowledge
-verification protocol layered with Kyber key encapsulation and BLAKE3 commitments.
+verification protocol layered with ML-KEM-768 key encapsulation and BLAKE3 commitments.
 Phase-space orbit verification provides a statistical proof of authenticity while maintain-
 ing resilience against temperature, power, and timing perturbations.
 We prove that the chaotic attractor structure of each device acts as a hardware-anchored
@@ -120,7 +120,7 @@ with deterministic bit-level behavior (Section 3.3).
 (iii) Formal security proofs establishing device uniqueness, unclonability, and resilience under
 bounded environmental perturbation (Section 5).
 (iv) A post-quantum-secure zero-knowledge verification protocol integrating BLAKE3 commit-
-ments and Kyber key encapsulation (Section 6).
+ments and ML-KEM-768 key encapsulation (Section 6).
 (v) A complete integration specification with the DSM architecture, including DBRW binding,
 ephemeral SPHINCS+ key derivation, and normative encoding rules (Section 8).
 (vi) Normative algorithms, test vector requirements, and implementation architecture (Sec-
@@ -161,7 +161,7 @@ the device’s internal orbit trajectory, attractor geometry, or DBRW binding ke
 the binary accept/reject decision.
 G5. Post-Quantum Security: All cryptographic bindings remain secure under quantum ad-
 versaries with access to Grover and Shor oracles, under standard assumptions on Module-
-LWE (for Kyber) and collision resistance of BLAKE3.
+LWE (for ML-KEM-768) and collision resistance of BLAKE3.
 3 Chaotic Interrogation Model
 3.1 Silicon Substrate State
 Definition 3.1 (Substrate State Vector). Let S = (t,v,τ) ∈R3 represent the instantaneous
@@ -971,10 +971,16 @@ negl(λ).
 (iii) Grover bound: A quantum adversary requires Ω(2128) queries to find a preimage or
 collision (via birthday/Grover bounds on 256-bit output).
 Axiom 5.2 (Module-LWE Hardness). The Module Learning-With-Errors problem with param-
-eters as specified by Kyber-1024 is computationally hard for all PPT (classical and quantum)
-adversaries. This implies IND-CCA2 security of Kyber key encapsulation.
-Axiom 5.3 (SPHINCS+ Unforgeability). SPHINCS+ (BLAKE3, NIST Category 5, variant ‘f’)
-is EUF-CMA secure under the second-preimage resistance of BLAKE3.
+eters as specified by ML-KEM-768 (FIPS 203; the standardized successor to Kyber768) is
+computationally hard for all PPT (classical and quantum) adversaries. This implies IND-CCA2
+security of ML-KEM-768 key encapsulation. (The implementation uses the `ml-kem` crate,
+crypto/kyber.rs; domain tags retain the literal "kyber" string for historical reasons.)
+Axiom 5.3 (SPHINCS+ Unforgeability). The custom BLAKE3 SPHINCS+ construction used by DSM
+(crypto/sphincs.rs; SPX256f on the per-step path) is assumed EUF-CMA secure under the
+second-preimage resistance of BLAKE3. NOTE: this is a custom BLAKE3 construction whose
+FORS+WOTS+hypertree structure mirrors the standardized SLH-DSA sets but is NOT a certified
+NIST variant and is self-flagged as not formally audited; it carries no NIST security-category
+certification. A certified SLH-DSA (FIPS 205) migration is a planned, not-yet-shipped target.
 5.2 Device Unclonability
 Theorem 5.1 (C-DBRW Unclonability). Let D be a target device. Given polynomially many
 challenge-response pairs {(ci,HD(Si,N))}q
@@ -1117,14 +1123,15 @@ The zeroize is best-effort cleanup of in-memory residue; the access
 gate is the strong fence.
 5.4 Forward Secrecy of Per-Step Keys
 Theorem 5.3 (Per-Step Key Independence). Let En+1 be the per-step seed derived as
-En+1 = HKDF-BLAKE3 “DSM/ek\0”, hn∥Cpre∥kstep∥KDBRW ,
-where hn is the current chain tip, Cpre the pre-commitment, and kstep the Kyber shared secret.
+En+1 = BLAKE3-256 “DSM/ek\0” ∥ hn∥Cpre∥kstep∥KDBRW ,
+plain domain-separated keyed BLAKE3 (NOT HKDF; ephemeral_key.rs:29–41), where hn is the current
+chain tip, Cpre the pre-commitment, and kstep the ML-KEM-768 shared secret.
 Then knowledge of En reveals no information about En+1 or En−1.
-Proof. Each En+1 is the output of HKDF-BLAKE3 over inputs that include the fresh Kyber
-shared secret kstep. Under IND-CCA2 security of Kyber (Definition 5.2), kstep is computation-
-ally indistinguishable from uniform. HKDF with a pseudorandom key input produces outputs
-indistinguishable from random (by the extract-then-expand paradigm and the PRF security of
-BLAKE3-HMAC). Since kstep is fresh for each step (derived from a new encapsulation), En+1 is
+Proof. Each En+1 is the output of domain-separated keyed BLAKE3 over inputs that include the fresh
+ML-KEM-768 shared secret kstep. Under IND-CCA2 security of ML-KEM-768 (Definition 5.2), kstep is
+computationally indistinguishable from uniform. Modeling BLAKE3 as a PRF / random oracle
+(Definition 5.1) on a pseudorandom input produces outputs indistinguishable from random. Since
+kstep is fresh for each step (derived from a new encapsulation), En+1 is
 independent of all prior seeds. Backward secrecy follows from preimage resistance of BLAKE3:
 given En+1, recovering En requires inverting the hash.
 5.5 End-to-End Security
@@ -1136,8 +1143,9 @@ N and acceptance threshold τ. Assume:
 (A2) Manufacturing variance. Device-level manufacturing variation satisfies σdevice > σthermal
 (Definition 4.13).
 (A3) Orbit length. N ≥8192.
-(A4) Cryptographic hardness. Kyber-1024 is IND-CCA2 secure (Definition 5.2), SPHINCS+ is
-EUF-CMA secure (Definition 5.3), and BLAKE3-256 is a random oracle (Definition 5.1).
+(A4) Cryptographic hardness. ML-KEM-768 (FIPS 203) is IND-CCA2 secure (Definition 5.2), the
+custom BLAKE3 SPHINCS+ construction is EUF-CMA secure (Definition 5.3) under the random-oracle
+heuristic for BLAKE3, and BLAKE3-256 is a random oracle (Definition 5.1).
 Then the following security properties hold simultaneously:
 (i) Mixing. The ARX random dynamical system is uniformly ergodic with geometric rate
 γ ≤1−2−k(h0−ϵ)
@@ -1161,7 +1169,7 @@ Pr[predict] ≤2−Nh0
 (vi) Cryptographic hardening. Any successful attack on the full C-DBRW protocol implies at
 least one of:
 (a) distinguishing stationary measures ρD,ρD′ with W1 <ϵinter (contradicts (A2)),
-(b) breaking IND-CCA2 security of Kyber (contradicts (A4)),
+(b) breaking IND-CCA2 security of ML-KEM-768 (contradicts (A4)),
 (c) forging a SPHINCS+ signature (contradicts (A4)),
 (d) inverting BLAKE3 (contradicts (A4)).
 Proof. Properties (i)-(iv) follow directly from the theorems cited. We prove (v) and (vi).
@@ -1171,7 +1179,7 @@ probability of correctly predicting an N-byte sequence is at most 2−Nh0 by the
 converse. For N = 8192 and h0 = 2.5, this gives 2−20480 ≈10−6165
 .
 Property (vi). Consider an adversary Athat breaks the full authentication protocol. The
-verification accepts if and only if: (1) the presented histogram is within τ of ρD, (2) the Kyber
+verification accepts if and only if: (1) the presented histogram is within τ of ρD, (2) the ML-KEM-768
 key exchange succeeds, (3) the SPHINCS+ signature on the commitment verifies, and (4) the
 BLAKE3 chain derivation is consistent. Breaking (1) without the physical device contradicts (v)
 and (A2). Breaking (2), (3), or (4) contradicts (A4) by direct reduction to the assumed hardness
@@ -1215,8 +1223,8 @@ argument:
 rate assumption ((A1)): the environment cannot distinguish νD from˜
 ν without physical
 access, as this would require predicting entropy at rate h0 (probability ≤2−Nh0 ).
-3. Hybrid 2: Replace Kyber shared secret with uniform random. Indistinguishable by IND-
-CCA2 security of Kyber (Definition 5.2).
+3. Hybrid 2: Replace ML-KEM-768 shared secret with uniform random. Indistinguishable by IND-
+CCA2 security of ML-KEM-768 (Definition 5.2).
 4. Hybrid 3: Replace BLAKE3 outputs with random oracle responses. Indistinguishable by
 Definition 5.1.
 5. Hybrid 4: Replace SPHINCS+ signatures with simulated signatures. Indistinguishable by
@@ -1227,7 +1235,7 @@ uses no shared randomness with the cryptographic layer, and no helper data is tr
 ensures the standard UC composition theorem applies.
 Remark 5.2 (Advantage Decomposition). The distinguishing advantage decomposes as
 AdvΠ ≤ Advstat
-+ AdvKyber
++ AdvML-KEM-768
 + AdvSPHINCS+
 + AdvRO
 entropy/mixing
@@ -1347,10 +1355,10 @@ E4. Master Seed Derivation. Derive the device master seed:
 Smaster = HKDF-ExtractBLAKE3 salt= "DSM/dev\0", IKM= G∥DevID∥KDBRW∥s0 , (9)
 where G is the user’s genesis digest and s0 is initial entropy from CSPRNG.
 E5. AttestationKeypair. Generatetheattestationkey(AKsk,AKpk) ←SPHINCS+.KeyGen(Smaster).
-E6. Kyber StaticKey. GeneratethestaticKyber keypair(KSsk,KSpk) ←Kyber.KeyGen(HDSM/kyber-static(S
+E6. ML-KEM-768 StaticKey. GeneratethestaticML-KEM-768 keypair(KSsk,KSpk) ←MlKem768.KeyGen(HDSM/kyber-static(S
 Security Claim
 The enrollment protocol reveals only ACD (a 32-byte hash), AKpk (a SPHINCS+ public
-key), and KSpk (a Kyber public key) to any external party. No raw histogram data,
+key), and KSpk (an ML-KEM-768 public key) to any external party. No raw histogram data,
 thermal measurements, or DBRW binding keys are exposed. Under Definition 5.1, ACD
 reveals no information about¯
 HD beyond its commitment.
@@ -1364,9 +1372,9 @@ V2. Orbit Execution. Dcomputes the initial state x0 = HDSM/cdbrw-seed(c∥KDBRW)
 executes the ARX orbit OD(Scurrent,N), and computes the histogram HD(Scurrent,N).
 V3. Commitment. D computes
 γ := HDSM/cdbrw-response HD(Scurrent,N)∥c . (10)
-V4. Kyber Encapsulation. D computes deterministic coins
+V4. ML-KEM-768 Encapsulation. D computes deterministic coins
 coins := HDSM/kyber-coins(hn∥Cpre∥DevID∥KDBRW), (11)
-and encapsulates: (ct,ss) = Kyber.EncDet(KSV
+and encapsulates: (ct,ss) = MlKem768.EncDet(KSV
 pk,coins).
 V5. Response. D sends (γ,ct,σ) to V, where σ = SPHINCS+.Sign(EKsk,γ∥ct∥c) using the
 current ephemeral step key.
@@ -1374,7 +1382,7 @@ current ephemeral step key.
 V6. Verification. V checks:
 (a) SPHINCS+.Verify(EKpk,σ,γ∥ct∥c) = 1.
 (b) The ephemeral key certificate chain traces to AKpk.
-(c) Kyber.Decaps(KSV
+(c) MlKem768.Decaps(KSV
 sk,ct) = ss (shared secret recovery succeeds).
 (d) γ is consistent with ACD under the attractor envelope test (Section 6.3).
 Accept if and only if all checks pass.
@@ -1387,9 +1395,9 @@ Simulating γ: Under the random oracle model for HDSM/cdbrw-response, the commit
 uniformly random 256-bit string from the verifier’s perspective (since HD is unknown and acts
 as a high-entropy preimage component). Sdraws γ∗ $ ←−{0,1}256
 .
-Simulating ct: Under IND-CCA2 security of Kyber, the ciphertext ct is indistinguishable
+Simulating ct: Under IND-CCA2 security of ML-KEM-768, the ciphertext ct is indistinguishable
 from a random ciphertext of the same length. Sgenerates (ct∗
-,ss∗) ←Kyber.Enc(KSV
+,ss∗) ←MlKem768.Enc(KSV
 pk) using
 fresh random coins.
 Simulating σ: Under EUF-CMA security of SPHINCS+, the signature σ is unforgeable but
@@ -1613,21 +1621,21 @@ H∥ϵintra∥B∥N∥r)
 9: KDBRW ←HDSM/cdbrw/bind(LP(G)∥LP(DevID)∥LP(ACD)∥LP(E(e)))   ▷ DevID=G (root)
 10: Smaster ←HKDF-Extract("DSM/dev\0",G∥DevID∥KDBRW∥s0)
 11: (AKsk,AKpk) ←SPHINCS+.KeyGen(Smaster)
-12: (KSsk,KSpk) ←Kyber.KeyGen(HDSM/kyber-static(Smaster))
+12: (KSsk,KSpk) ←MlKem768.KeyGen(HDSM/kyber-static(Smaster))
 13: return (ACD,ϵintra,KDBRW,AKpk,KSpk)
 ▷ Alg. 1
 33
 Algorithm 3 C-DBRW Verification (Device Side)
-Require: Challenge c, verifier’s Kyber public key KSV
+Require: Challenge c, verifier’s ML-KEM-768 public key KSV
 pk, current chain tip hn, pre-commit Cpre
 Ensure: Response (γ,ct,σ)
 1: H ←OrbitExecution(c,KDBRW,N,r,B) ▷ Alg. 1
 2: γ ←HDSM/cdbrw-response(H∥c)
 3: coins ←HDSM/kyber-coins(hn∥Cpre∥DevID∥KDBRW)
-4: (ct,ss) ←Kyber.EncDet(KSV
+4: (ct,ss) ←MlKem768.EncDet(KSV
 pk,coins)
 5: kstep ←HDSM/kyber-ss(ss)
-6: En+1 ←HKDF-BLAKE3("DSM/ek\0",hn∥Cpre∥kstep∥KDBRW)
+6: En+1 ←BLAKE3-256("DSM/ek\0" ∥ hn∥Cpre∥kstep∥KDBRW)
 7: (EKsk,EKpk) ←SPHINCS+.KeyGen(En+1)
 8: σ←SPHINCS+.Sign(EKsk,γ∥ct∥c)
 9: return (γ,ct,σ)
@@ -1637,7 +1645,7 @@ mitment ACD
 Ensure: Accept / Reject
 1: Verify SPHINCS+.Verify(EKpk,σ,γ∥ct∥c) ? = 1; if not, reject
 2: Verify ephemeral key certificate chain to AKpk; if invalid, reject
-3: ss ←Kyber.Decaps(KSV
+3: ss ←MlKem768.Decaps(KSV
 sk,ct); if ⊥, reject
 4: Verify γ passes attractor envelope test against ACD (Definition 6.3); if not, reject
 5: accept
@@ -1649,8 +1657,8 @@ Operation Budget Notes
 ARX orbit (N = 4096) ≤10 µs Single-core, pinned
 Histogram computation ≤5 µs In-place binning
 BLAKE3 commitment ≤1 µs 32-byte output
-Kyber-1024 encapsulation ≤1 ms liboqs reference
-SPHINCS+ signing (Cat-5, fast) ≤50 ms Includes tree generation
+ML-KEM-768 encapsulation ≤1 ms ml-kem crate (FIPS 203)
+custom BLAKE3 SPHINCS+ (SPX256f) signing ≤50 ms Includes tree generation
 SPHINCS+ verification ≤10 ms
 Total verification round-trip ≤80 ms End-to-end
 34
@@ -1662,7 +1670,7 @@ MUST be bit-identical across all platforms. Test vectors are distributed as bina
 fixtures (not hex strings).
 (b) BLAKE3 commitment vectors: Given fixed histogram bytes and enrollment
 parameters, ACD MUST match the reference digest exactly.
-(c) Kyber deterministic encapsulation: Given fixed coins and public key, (ct,ss)
+(c) ML-KEM-768 deterministic encapsulation: Given fixed coins and public key, (ct,ss)
 MUST be bit-identical to the reference.
 (d) End-to-end vectors: Given a fixed challenge, fixed thermal byte sequence, and
 fixed enrollment state, the full response (γ,ct,σ) MUST match the reference.
@@ -1670,9 +1678,9 @@ fixed enrollment state, the full response (γ,ct,σ) MUST match the reference.
 Theorem 10.1 (Composite Security). Under Definition 4.2, Definition 5.1, Definition 5.2, and
 Definition 5.3, the C-DBRW system with post-quantum binding achieves:
 (i) 128-bit post-quantum security against device cloning (Theorem 5.1), via Grover bound
-on BLAKE3 and Module-LWE hardness of Kyber.
+on BLAKE3 and Module-LWE hardness of ML-KEM-768.
 (ii) Zero-knowledge verification (Theorem 6.1), in the random oracle model.
-(iii) Forward secrecy of per-step keys (Theorem 5.3), under IND-CCA2 of Kyber.
+(iii) Forward secrecy of per-step keys (Theorem 5.3), under IND-CCA2 of ML-KEM-768.
 (iv) Receipt-device binding(Theorem 8.2), ensuring that DSMstitchedreceipts are hardware-
 anchored.
 (v) Thermal resilience(Theorem 4.10, Theorem 4.29), with configurable false-rejection rate.
@@ -1681,7 +1689,7 @@ Proof sketch. Each claim follows from the corresponding theorem cited above. The
 security holds by the standard composition argument: breaking any individual component is
 sufficient to break the system, but each component reduces to a standard hardness assumption.
 The absence of helper data follows from the commitment-based verification model: the verifier
-never receives raw PUF responses, only BLAKE3 commitments and Kyber ciphertexts.
+never receives raw PUF responses, only BLAKE3 commitments and ML-KEM-768 ciphertexts.
 35
 11 Comparison with Prior Art
 Property Static PUF Fuzzy Ext. QPUF C-DBRW (ours)
@@ -1719,7 +1727,7 @@ By embracing chaos rather than suppressing it, the system derives a robust, self
 of identity rooted in physics. The attractor of each chip is its own secret key—one that cannot
 be read, duplicated, or recomputed without access to the physical substrate. Authentication
 becomes an act of recognizing a chaotic “heartbeat” rather than comparing static data.
-The integration with post-quantum primitives (Kyber for key encapsulation, BLAKE3 for
+The integration with post-quantum primitives (ML-KEM-768 for key encapsulation, BLAKE3 for
 commitments, SPHINCS+ for signatures) ensures that the hardware identity layer remains se-
 cure against both classical and quantum adversaries. The zero-knowledge verification protocol
 guarantees that no PUF response data leaks during authentication, eliminating the helper-data
@@ -1766,9 +1774,9 @@ DSM/cdbrw/bind\0 K_DBRW binding key derivation (four-input canonical)
 DSM/attractor-commit\0 Attractor commitment ACD
 DSM/cdbrw-seed\0 Challenge-seeded orbit initialization
 DSM/cdbrw-response\0 Verification response commitment
-DSM/kyber-coins\0 Deterministic Kyber encapsulation coins
-DSM/kyber-ss\0 Kyber shared secret derivation
-DSM/kyber-static\0 Static Kyber key derivation
+DSM/kyber-coins\0 Deterministic ML-KEM-768 encapsulation coins
+DSM/kyber-ss\0 ML-KEM-768 shared secret derivation
+DSM/kyber-static\0 Static ML-KEM-768 key derivation
 DSM/moment\0 Moment commitment in envelope test
 DSM/dev\0 Master seed extraction
 DSM/ek\0 Ephemeral key derivation
@@ -1786,7 +1794,7 @@ Moment count m 8 ≥8
 Margin factor δmargin/ϵintra 0.1 ∈[0.05,0.2]
 ARX word size W 32 Fixed
 Hash function H BLAKE3-256 Fixed
-KEM — Kyber-1024 NIST PQC Level 5
-Signature — SPHINCS+ Cat-5 fast BLAKE3 variant
+KEM — ML-KEM-768 FIPS 203 (ml-kem crate)
+Signature — custom BLAKE3 SPHINCS+ (SPX256f); not a certified NIST variant
 Receipt size cap — 128 KiB Fixed
 38
