@@ -2087,12 +2087,30 @@ fn build_djte_transition(
 }
 
 fn build_test_jap(id_byte: u8, nonce_byte: u8) -> JoinActivationProof {
-    let jap = JoinActivationProof {
-        id: [id_byte; 32],
-        gate_proof: vec![id_byte, id_byte.wrapping_add(1), id_byte.wrapping_add(2)],
-        nonce: [nonce_byte; 32],
+    use dsm::emissions::paidk_proof::{PAIDK_FLAT_RATE, PAIDK_K};
+
+    let device_id = [id_byte; 32];
+
+    // issue #186: `gate_proof` is now decoded as a `PaidKGateProofV1` and
+    // structurally verified, so the trace must carry a REAL proof — at least
+    // K receipts bound to the activating device, each at >= FLAT_RATE, across
+    // K distinct operators. A dummy byte string fails decode (buffer underflow).
+    let proof = pb::PaidKGateProofV1 {
+        receipts: (0u8..PAIDK_K as u8)
+            .map(|op| pb::StoragePaymentReceiptV3 {
+                device_id: device_id.to_vec(),
+                operator_node_id: vec![op.wrapping_add(1); 32],
+                amount: PAIDK_FLAT_RATE,
+                receipt_digest: vec![0u8; 32],
+            })
+            .collect(),
     };
-    jap
+
+    JoinActivationProof {
+        id: device_id,
+        gate_proof: proof.encode_to_vec(),
+        nonce: [nonce_byte; 32],
+    }
 }
 
 fn apply_djte_transition(

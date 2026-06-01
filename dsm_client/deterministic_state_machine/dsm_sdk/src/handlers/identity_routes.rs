@@ -84,22 +84,14 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
                 };
                 if pack.codec != generated::Codec::Proto as i32 {
-                    return err(
-                        "identity.devtree.snapshot: ArgPack.codec must be PROTO".into(),
-                    );
+                    return err("identity.devtree.snapshot: ArgPack.codec must be PROTO".into());
                 }
                 let req = match generated::DeviceTreeSnapshotRequest::decode(&*pack.body) {
                     Ok(r) => r,
-                    Err(e) => {
-                        return err(format!(
-                            "decode DeviceTreeSnapshotRequest failed: {e}"
-                        ))
-                    }
+                    Err(e) => return err(format!("decode DeviceTreeSnapshotRequest failed: {e}")),
                 };
                 if req.genesis_hash.len() != 32 {
-                    return err(
-                        "identity.devtree.snapshot: genesis_hash must be 32 bytes".into(),
-                    );
+                    return err("identity.devtree.snapshot: genesis_hash must be 32 bytes".into());
                 }
                 let mut genesis_hash = [0u8; 32];
                 genesis_hash.copy_from_slice(&req.genesis_hash);
@@ -110,11 +102,7 @@ impl AppRouterImpl {
                             .await
                         {
                             Ok(c) => c,
-                            Err(e) => {
-                                return Err(format!(
-                                    "No storage node config available: {e}"
-                                ))
-                            }
+                            Err(e) => return Err(format!("No storage node config available: {e}")),
                         };
                     let sdk = crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg)
                         .await
@@ -154,7 +142,9 @@ impl AppRouterImpl {
                         })
                         .collect(),
                 };
-                pack_envelope_ok(generated::envelope::Payload::DeviceTreeSnapshotResponse(resp))
+                pack_envelope_ok(generated::envelope::Payload::DeviceTreeSnapshotResponse(
+                    resp,
+                ))
             }
 
             _ => err(format!("unknown identity query: {}", q.path)),
@@ -202,9 +192,8 @@ mod tests {
 
         let decoded_pack = generated::ArgPack::decode(&*pack_bytes).expect("decode pack");
         assert_eq!(decoded_pack.codec, generated::Codec::Proto as i32);
-        let decoded_req =
-            generated::DeviceTreeSnapshotRequest::decode(&*decoded_pack.body)
-                .expect("decode request");
+        let decoded_req = generated::DeviceTreeSnapshotRequest::decode(&*decoded_pack.body)
+            .expect("decode request");
         assert_eq!(decoded_req.genesis_hash.len(), 32);
         assert_eq!(decoded_req.genesis_hash, vec![0x42u8; 32]);
     }
@@ -234,8 +223,7 @@ mod tests {
             ],
         };
         let bytes = resp.encode_to_vec();
-        let decoded =
-            generated::DeviceTreeSnapshotResponse::decode(&*bytes).expect("decode");
+        let decoded = generated::DeviceTreeSnapshotResponse::decode(&*bytes).expect("decode");
         assert!(decoded.claimed_root_matches_recomputed);
         assert_eq!(decoded.recomputed_root, vec![0xABu8; 32]);
         assert_eq!(decoded.leaves.len(), 2);
@@ -255,8 +243,7 @@ mod tests {
 
         let dev_a = [0x11u8; 32];
         let dev_b = [0x22u8; 32];
-        let canonical_root =
-            dsm::common::device_tree::DeviceTree::new(vec![dev_a, dev_b]).root();
+        let canonical_root = dsm::common::device_tree::DeviceTree::new(vec![dev_a, dev_b]).root();
 
         // Honest: claimed root matches recomputed.
         let honest = generated::DeviceTreeStateV1 {
@@ -268,8 +255,8 @@ mod tests {
             }),
             device_ids: vec![dev_a.to_vec(), dev_b.to_vec()],
         };
-        let view = build_device_tree_snapshot_view(&honest.encode_to_vec())
-            .expect("honest snapshot");
+        let view =
+            build_device_tree_snapshot_view(&honest.encode_to_vec()).expect("honest snapshot");
         assert!(view.claimed_root_matches_recomputed);
         assert_eq!(view.leaves.len(), 2);
         assert!(view.leaves.iter().all(|l| l.inclusion_verified));
@@ -284,8 +271,8 @@ mod tests {
             }),
             device_ids: vec![dev_a.to_vec(), dev_b.to_vec()],
         };
-        let view = build_device_tree_snapshot_view(&tampered.encode_to_vec())
-            .expect("tampered snapshot");
+        let view =
+            build_device_tree_snapshot_view(&tampered.encode_to_vec()).expect("tampered snapshot");
         assert!(!view.claimed_root_matches_recomputed);
         // Per-leaf verification still passes because proofs are
         // re-derived against the recomputed (not claimed) root —
