@@ -50,7 +50,6 @@
 //! used by the SDK handler implementations. This keeps the transport/UI
 //! bridge entirely out of the pure `dsm` core crate.
 
-
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, RwLock};
 use once_cell::sync::Lazy;

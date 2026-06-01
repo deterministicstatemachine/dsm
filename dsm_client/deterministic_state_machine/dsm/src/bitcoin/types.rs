@@ -149,9 +149,18 @@ mod tests {
     // back to Mainnet (the STRICTEST profile), never to Signet.
     #[test]
     fn try_from_u32_accepts_only_known_values() {
-        assert_eq!(BitcoinNetwork::try_from_u32(0).unwrap(), BitcoinNetwork::Mainnet);
-        assert_eq!(BitcoinNetwork::try_from_u32(1).unwrap(), BitcoinNetwork::Testnet);
-        assert_eq!(BitcoinNetwork::try_from_u32(2).unwrap(), BitcoinNetwork::Signet);
+        assert_eq!(
+            BitcoinNetwork::try_from_u32(0).unwrap(),
+            BitcoinNetwork::Mainnet
+        );
+        assert_eq!(
+            BitcoinNetwork::try_from_u32(1).unwrap(),
+            BitcoinNetwork::Testnet
+        );
+        assert_eq!(
+            BitcoinNetwork::try_from_u32(2).unwrap(),
+            BitcoinNetwork::Signet
+        );
         for n in [3u32, 4, 5, 99, 1000, u32::MAX] {
             assert!(
                 BitcoinNetwork::try_from_u32(n).is_err(),

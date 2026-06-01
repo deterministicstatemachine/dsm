@@ -165,13 +165,18 @@ impl TokenStateManager {
     /// Resolve a `token_id` to its 32-byte CPTA `policy_commit` for use as
     /// a hierarchical domain separator in BLAKE3 hashing.
     ///
-    /// Uses an explicit token-local anchor when available, otherwise delegates
-    /// to the configured `TokenPolicySystem`. Missing anchors fail closed.
+    /// Uses an explicit token-local anchor when available, then checks
+    /// builtin policy commits (ERA/dBTC), otherwise delegates to the
+    /// configured `TokenPolicySystem`. Missing anchors fail closed.
     fn resolve_policy_commit(&self, token_id: &str) -> Result<[u8; 32], DsmError> {
         if let Some(token) = self.token_store.read().get(token_id) {
             if let Some(policy_anchor) = token.policy_anchor() {
                 return Ok(*policy_anchor);
             }
+        }
+
+        if let Some(policy_commit) = builtin_policy_commit_for_token(token_id) {
+            return Ok(policy_commit);
         }
 
         if let Some(ps) = &self.policy_system {
@@ -270,6 +275,8 @@ impl TokenStateManager {
                 if !self.verify_mint_authorization(
                     token_id_str,
                     authorized_by,
+                    amount.value(),
+                    current_state.hash,
                     proof_of_authorization,
                 )? {
                     return Err(DsmError::unauthorized(
@@ -305,7 +312,14 @@ impl TokenStateManager {
                 let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
                     DsmError::invalid_operation("Burn has malformed or empty token_id")
                 })?;
-                if !self.verify_token_ownership(token_id_str, proof_of_ownership)? {
+                let owner_pk = current_state.device_info.public_key.as_slice();
+                if !self.verify_token_ownership(
+                    token_id_str,
+                    owner_pk,
+                    amount.value(),
+                    current_state.hash,
+                    proof_of_ownership,
+                )? {
                     return Err(DsmError::unauthorized(
                         "Invalid burn authorization",
                         None::<std::io::Error>,
@@ -435,6 +449,8 @@ impl TokenStateManager {
         &self,
         token_id: &str,
         authorized_by: &[u8],
+        amount: u64,
+        state_hash: [u8; 32],
         proof: &[u8],
     ) -> Result<bool, DsmError> {
         if proof.is_empty() {
@@ -472,14 +488,24 @@ impl TokenStateManager {
         let sig = read_bytes(proof, &mut idx, sig_len)?;
 
         let policy_commit = self.resolve_policy_commit(token_id)?;
-        let mut msg = b"mint|".to_vec();
+        let mut msg = b"mint|v2|".to_vec();
         msg.extend_from_slice(authorized_by);
+        msg.extend_from_slice(token_id.as_bytes());
+        msg.extend_from_slice(&amount.to_le_bytes());
+        msg.extend_from_slice(&state_hash);
         let msg_hash = crate::crypto::blake3::token_domain_hash(&policy_commit, "mint", &msg);
 
         sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)
     }
 
-    fn verify_token_ownership(&self, token_id: &str, proof: &[u8]) -> Result<bool, DsmError> {
+    fn verify_token_ownership(
+        &self,
+        token_id: &str,
+        owner_pk: &[u8],
+        amount: u64,
+        state_hash: [u8; 32],
+        proof: &[u8],
+    ) -> Result<bool, DsmError> {
         if proof.is_empty() {
             return Ok(false);
         }
@@ -516,8 +542,11 @@ impl TokenStateManager {
         let sig = read_bytes(proof, &mut idx, sig_len)?;
 
         let policy_commit = self.resolve_policy_commit(token_id)?;
-        let mut msg = b"burn|".to_vec();
+        let mut msg = b"burn|v2|".to_vec();
         msg.extend_from_slice(token_id.as_bytes());
+        msg.extend_from_slice(owner_pk);
+        msg.extend_from_slice(&amount.to_le_bytes());
+        msg.extend_from_slice(&state_hash);
         let msg_hash = crate::crypto::blake3::token_domain_hash(&policy_commit, "burn", &msg);
 
         sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)
@@ -541,10 +570,20 @@ impl TokenStateManager {
         };
 
         let mut context = std::collections::HashMap::new();
+        context.insert(
+            "tick".to_string(),
+            crate::utils::deterministic_time::tick_index()
+                .to_le_bytes()
+                .to_vec(),
+        );
         match operation {
             Operation::Transfer {
                 amount, recipient, ..
             } => {
+                context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
                 context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
@@ -557,6 +596,10 @@ impl TokenStateManager {
                 ..
             } => {
                 context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
+                context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
                 );
@@ -564,9 +607,37 @@ impl TokenStateManager {
             }
             Operation::Burn { amount, .. } => {
                 context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
+                context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
                 );
+            }
+            Operation::LockToken {
+                amount, purpose, ..
+            } => {
+                let amount_u64 = u64::try_from(*amount).map_err(|_| {
+                    DsmError::invalid_operation(
+                        "Policy verification rejected: LockToken amount must be non-negative",
+                    )
+                })?;
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
+            }
+            Operation::UnlockToken {
+                amount, purpose, ..
+            } => {
+                let amount_u64 = u64::try_from(*amount).map_err(|_| {
+                    DsmError::invalid_operation(
+                        "Policy verification rejected: UnlockToken amount must be non-negative",
+                    )
+                })?;
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
             }
             Operation::Lock {
                 amount,
@@ -574,6 +645,10 @@ impl TokenStateManager {
                 owner,
                 ..
             } => {
+                context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
                 context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
@@ -587,6 +662,10 @@ impl TokenStateManager {
                 owner,
                 ..
             } => {
+                context.insert(
+                    "amount_u64".to_string(),
+                    amount.value().to_le_bytes().to_vec(),
+                );
                 context.insert(
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
@@ -606,6 +685,8 @@ impl TokenStateManager {
             Operation::Transfer { .. } => "transfer",
             Operation::Mint { .. } => "mint",
             Operation::Burn { .. } => "burn",
+            Operation::LockToken { .. } => "lock",
+            Operation::UnlockToken { .. } => "unlock",
             Operation::Lock { .. } => "lock",
             Operation::Unlock { .. } => "unlock",
             _ => "unknown",

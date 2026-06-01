@@ -49,8 +49,20 @@ impl PolicyCache {
 
     pub async fn get_policy(&self, anchor: &PolicyAnchor) -> Result<Option<TokenPolicy>, DsmError> {
         let mut entries = self.entries.write();
+        let now = crate::utils::deterministic_time::tick_index();
+
+        let is_expired = entries
+            .get(anchor)
+            .map(|entry| now.saturating_sub(entry.last_accessed) > self.config.ttl_ticks)
+            .unwrap_or(false);
+
+        if is_expired {
+            entries.remove(anchor);
+            return Ok(None);
+        }
+
         if let Some(entry) = entries.get_mut(anchor) {
-            entry.last_accessed = crate::utils::deterministic_time::tick_index();
+            entry.last_accessed = now;
             return Ok(Some(entry.policy.clone()));
         }
         Ok(None)
@@ -58,6 +70,10 @@ impl PolicyCache {
 
     pub fn store_policy(&self, anchor: PolicyAnchor, policy: TokenPolicy) {
         let mut entries = self.entries.write();
+        let now = crate::utils::deterministic_time::tick_index();
+
+        entries.retain(|_, entry| now.saturating_sub(entry.last_accessed) <= self.config.ttl_ticks);
+
         // LRU eviction: remove the least-recently-accessed entry when at capacity.
         if entries.len() >= self.config.max_entries && !entries.contains_key(&anchor) {
             if let Some(k) = entries
@@ -73,7 +89,7 @@ impl PolicyCache {
             anchor,
             PolicyCacheEntry {
                 policy,
-                last_accessed: crate::utils::deterministic_time::tick_index(),
+                last_accessed: now,
             },
         );
     }

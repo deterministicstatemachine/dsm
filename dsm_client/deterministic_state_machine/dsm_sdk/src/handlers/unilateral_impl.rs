@@ -5,7 +5,6 @@
 //! Implements the `UnilateralHandler` trait for one-sided state transitions
 //! (token transfers, balance queries) that do not require bilateral handshake.
 
-
 use async_trait::async_trait;
 use prost::Message;
 use std::sync::Arc;

@@ -251,62 +251,67 @@ mod v1_proto_roundtrip {
     };
     use prost::Message;
 
-    fn round_trip_bytes<M: Message + Default>(msg: &M) -> M {
-        let mut buf = Vec::with_capacity(msg.encoded_len());
-        msg.encode(&mut buf).expect("encode succeeds");
-        let decoded = M::decode(buf.as_slice()).expect("decode succeeds");
+    // `.expect()` is a banned panic-path even in tests (production-safety
+    // mandate). Encoding into a `Vec` is infallible via `encode_to_vec`; the
+    // only genuinely-fallible step is decode, so the helper returns a
+    // `Result` and each test propagates with `?` and returns `Result<()>`.
+    fn round_trip_bytes<M: Message + Default>(msg: &M) -> Result<M, prost::DecodeError> {
+        let buf = msg.encode_to_vec();
+        let decoded = M::decode(buf.as_slice())?;
         // Second encode must be bitwise identical to the first — protobuf is
         // not strictly canonical, but prost's encode is deterministic for
         // these structurally-simple messages.
-        let mut buf2 = Vec::with_capacity(decoded.encoded_len());
-        decoded.encode(&mut buf2).expect("re-encode succeeds");
+        let buf2 = decoded.encode_to_vec();
         assert_eq!(buf, buf2, "encode → decode → encode must be deterministic");
-        decoded
+        Ok(decoded)
     }
 
     #[test]
-    fn device_leaf_v1_round_trip() {
+    fn device_leaf_v1_round_trip() -> Result<(), prost::DecodeError> {
         let original = DeviceLeafV1 {
             device_id: vec![0xAB; 32],
             device_name: "Brandon's phone".to_string(),
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.device_id, original.device_id);
         assert_eq!(decoded.device_name, original.device_name);
+        Ok(())
     }
 
     #[test]
-    fn device_leaf_v1_empty_name_is_preserved() {
+    fn device_leaf_v1_empty_name_is_preserved() -> Result<(), prost::DecodeError> {
         // Empty UI label is legal (the leaf hash binds device_id only).
         let original = DeviceLeafV1 {
             device_id: vec![0x01; 32],
             device_name: String::new(),
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.device_id, original.device_id);
         assert!(
             decoded.device_name.is_empty(),
             "empty device_name must survive the wire"
         );
+        Ok(())
     }
 
     #[test]
-    fn device_tree_v1_round_trip() {
+    fn device_tree_v1_round_trip() -> Result<(), prost::DecodeError> {
         let original = DeviceTreeV1 {
             schema_version: 1,
             root_hash: vec![0xCD; 32],
             device_count: 7,
             version_number: 42,
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.schema_version, 1);
         assert_eq!(decoded.root_hash, original.root_hash);
         assert_eq!(decoded.device_count, 7);
         assert_eq!(decoded.version_number, 42);
+        Ok(())
     }
 
     #[test]
-    fn device_tree_v1_large_version_number_round_trip() {
+    fn device_tree_v1_large_version_number_round_trip() -> Result<(), prost::DecodeError> {
         // version_number is u64 — verify the full range survives.
         let original = DeviceTreeV1 {
             schema_version: 1,
@@ -314,29 +319,31 @@ mod v1_proto_roundtrip {
             device_count: u32::MAX,
             version_number: u64::MAX,
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.version_number, u64::MAX);
         assert_eq!(decoded.device_count, u32::MAX);
+        Ok(())
     }
 
     #[test]
-    fn device_tree_root_update_v1_round_trip() {
+    fn device_tree_root_update_v1_round_trip() -> Result<(), prost::DecodeError> {
         let original = DeviceTreeRootUpdateV1 {
             old_root: vec![0xAAu8; 32],
             new_root: vec![0xBBu8; 32],
             version_number: 100,
             signature: vec![0xCCu8; 49_856], // SPHINCS+ SPX256f signature length
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.old_root, original.old_root);
         assert_eq!(decoded.new_root, original.new_root);
         assert_eq!(decoded.version_number, 100);
         assert_eq!(decoded.signature.len(), 49_856);
         assert_eq!(decoded.signature, original.signature);
+        Ok(())
     }
 
     #[test]
-    fn device_inclusion_proof_v1_round_trip_with_siblings() {
+    fn device_inclusion_proof_v1_round_trip_with_siblings() -> Result<(), prost::DecodeError> {
         // Realistic 5-level Merkle path; siblings + path_bits + counts must
         // all survive round-trip.
         let siblings: Vec<Vec<u8>> = (0u8..5).map(|i| vec![i; 32]).collect();
@@ -347,17 +354,21 @@ mod v1_proto_roundtrip {
             path_bits_len: 5,
             path_bits: vec![0b10101], // 5 valid bits
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.device_id, original.device_id);
         assert_eq!(decoded.root_hash, original.root_hash);
         assert_eq!(decoded.siblings.len(), 5);
-        assert_eq!(decoded.siblings, siblings, "sibling ORDER must be preserved");
+        assert_eq!(
+            decoded.siblings, siblings,
+            "sibling ORDER must be preserved"
+        );
         assert_eq!(decoded.path_bits_len, 5);
         assert_eq!(decoded.path_bits, vec![0b10101]);
+        Ok(())
     }
 
     #[test]
-    fn device_inclusion_proof_v1_empty_siblings_round_trip() {
+    fn device_inclusion_proof_v1_empty_siblings_round_trip() -> Result<(), prost::DecodeError> {
         // Single-leaf tree: no siblings, path_bits_len = 0.
         let original = DeviceInclusionProofV1 {
             device_id: vec![0x11u8; 32],
@@ -366,24 +377,26 @@ mod v1_proto_roundtrip {
             path_bits_len: 0,
             path_bits: Vec::new(),
         };
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.device_id, original.device_id);
         assert_eq!(decoded.root_hash, original.root_hash);
         assert!(decoded.siblings.is_empty());
         assert_eq!(decoded.path_bits_len, 0);
         assert!(decoded.path_bits.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn device_tree_v1_zero_defaults_round_trip() {
+    fn device_tree_v1_zero_defaults_round_trip() -> Result<(), prost::DecodeError> {
         // All-default message must encode + decode cleanly. Default()
         // gives an empty `root_hash` Vec, which is legal on the wire even
         // though the storage validator (Phase B.4) will reject it.
         let original = DeviceTreeV1::default();
-        let decoded = round_trip_bytes(&original);
+        let decoded = round_trip_bytes(&original)?;
         assert_eq!(decoded.schema_version, 0);
         assert!(decoded.root_hash.is_empty());
         assert_eq!(decoded.device_count, 0);
         assert_eq!(decoded.version_number, 0);
+        Ok(())
     }
 }

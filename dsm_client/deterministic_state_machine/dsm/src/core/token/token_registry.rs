@@ -98,8 +98,10 @@ impl TokenRegistry {
     /// 1) TokenStateManager
     /// 2) local cache
     pub fn get_token(&self, token_id: &str) -> Result<Token, DsmError> {
-        if let Ok(t) = self.token_state_manager.get_token(token_id) {
-            return Ok(t);
+        match self.token_state_manager.get_token(token_id) {
+            Ok(t) => return Ok(t),
+            Err(DsmError::NotFound { .. }) => {}
+            Err(e) => return Err(e),
         }
 
         let cache = self.token_cache.read().map_err(|_| {
@@ -199,15 +201,12 @@ impl TokenRegistry {
             )
         })?;
 
-        // Remove any existing name pointing to token_id
-        let mut to_remove: Option<String> = None;
-        for (k, v) in names.iter() {
-            if v == token_id {
-                to_remove = Some(k.clone());
-                break;
-            }
-        }
-        if let Some(k) = to_remove {
+        // Remove all existing names pointing to token_id
+        let to_remove: Vec<String> = names
+            .iter()
+            .filter_map(|(k, v)| if v == token_id { Some(k.clone()) } else { None })
+            .collect();
+        for k in to_remove {
             names.remove(&k);
         }
 
