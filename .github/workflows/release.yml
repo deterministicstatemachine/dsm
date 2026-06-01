@@ -286,19 +286,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download storage node artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: dsm-storage-node-linux-x86_64
           path: dist/
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: dsm-frontend-bundle
           path: dist/
 
       - name: Download SBOM bundle
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: dsm-sbom-bundle
           path: dist/
