@@ -6,7 +6,6 @@
 //! Validates `Authorization: DSM <device_id>:<token>` headers and enforces
 //! replay protection via `x-dsm-message-id` headers.
 
-
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::State,
