@@ -6,7 +6,6 @@
 //! Discovers the primary listening address and advertises it to peers
 //! during gossip and replication setup.
 
-
 use anyhow::Result;
 use dsm_sdk::util::text_id;
 use log::{debug, info};

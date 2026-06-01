@@ -6,7 +6,6 @@
 //! bytes with `Content-Type: application/octet-stream` and returns the
 //! domain-separated BLAKE3 object address in the `x-object-address` header.
 
-
 use axum::{
     body::Bytes,
     extract::{Extension, Path},

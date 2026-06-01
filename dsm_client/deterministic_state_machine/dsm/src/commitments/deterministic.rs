@@ -632,9 +632,8 @@ mod tests {
         let recipient = b"r";
         let unlock_slot = 0xDEAD_BEEFu64;
 
-        let from_api =
-            create_time_locked_commitment(&state_hash, &op, recipient, unlock_slot)
-                .expect("commitment");
+        let from_api = create_time_locked_commitment(&state_hash, &op, recipient, unlock_slot)
+            .expect("commitment");
         let mut extra = [0u8; 8];
         extra.copy_from_slice(&unlock_slot.to_le_bytes());
         let expected = independent_hash_fields(
@@ -656,9 +655,8 @@ mod tests {
         // Force canonicalization through trim + lowercase.
         let cond = "  BTC_Price_GT_50000  ";
         let oracle = "  Crypto_Price_Oracle  ";
-        let from_api =
-            create_conditional_commitment(&state_hash, &op, recipient, cond, oracle)
-                .expect("commitment");
+        let from_api = create_conditional_commitment(&state_hash, &op, recipient, cond, oracle)
+            .expect("commitment");
 
         let combined = format!(
             "cond={};oracle={}",
@@ -687,9 +685,8 @@ mod tests {
         let period: u64 = 17;
         let end: u64 = 999;
 
-        let from_api =
-            create_recurring_commitment(&state_hash, &op, recipient, period, end)
-                .expect("commitment");
+        let from_api = create_recurring_commitment(&state_hash, &op, recipient, period, end)
+            .expect("commitment");
         let mut extra = [0u8; 16];
         extra[0..8].copy_from_slice(&period.to_le_bytes());
         extra[8..16].copy_from_slice(&end.to_le_bytes());
@@ -713,17 +710,12 @@ mod tests {
         let op = mk_transfer(100);
         let recipient = b"r";
 
-        let a = create_deterministic_commitment(&state_hash, &op, recipient, Some("hello"))
-            .expect("a");
-        let b = create_deterministic_commitment(&state_hash, &op, recipient, Some("HELLO"))
-            .expect("b");
-        let c = create_deterministic_commitment(
-            &state_hash,
-            &op,
-            recipient,
-            Some("  HeLLo   "),
-        )
-        .expect("c");
+        let a =
+            create_deterministic_commitment(&state_hash, &op, recipient, Some("hello")).expect("a");
+        let b =
+            create_deterministic_commitment(&state_hash, &op, recipient, Some("HELLO")).expect("b");
+        let c = create_deterministic_commitment(&state_hash, &op, recipient, Some("  HeLLo   "))
+            .expect("c");
         assert_eq!(a, b, "case must be canonicalized");
         assert_eq!(a, c, "whitespace must be canonicalized");
 
@@ -746,9 +738,8 @@ mod tests {
         let state_hash = [0x66u8; 32];
         let op = mk_transfer(100);
         let recipient = b"r";
-        let baseline =
-            create_deterministic_commitment(&state_hash, &op, recipient, Some("cond"))
-                .expect("baseline");
+        let baseline = create_deterministic_commitment(&state_hash, &op, recipient, Some("cond"))
+            .expect("baseline");
 
         // Mutate state_hash.
         let mut sh = state_hash;
@@ -764,13 +755,9 @@ mod tests {
         assert_ne!(baseline, mutated, "operation must affect digest");
 
         // Mutate recipient_info.
-        let mutated = create_deterministic_commitment(
-            &state_hash,
-            &op,
-            b"different-recipient",
-            Some("cond"),
-        )
-        .expect("mutated recipient");
+        let mutated =
+            create_deterministic_commitment(&state_hash, &op, b"different-recipient", Some("cond"))
+                .expect("mutated recipient");
         assert_ne!(baseline, mutated, "recipient_info must affect digest");
 
         // Mutate condition.
@@ -779,9 +766,12 @@ mod tests {
         assert_ne!(baseline, mutated, "conditions must affect digest");
 
         // None vs Some — must differ.
-        let no_cond = create_deterministic_commitment(&state_hash, &op, recipient, None)
-            .expect("no cond");
-        assert_ne!(baseline, no_cond, "presence of conditions must affect digest");
+        let no_cond =
+            create_deterministic_commitment(&state_hash, &op, recipient, None).expect("no cond");
+        assert_ne!(
+            baseline, no_cond,
+            "presence of conditions must affect digest"
+        );
     }
 
     #[test]
@@ -794,12 +784,12 @@ mod tests {
         let op = mk_transfer(100);
         let recipient = b"r";
 
-        let base = create_deterministic_commitment(&state_hash, &op, recipient, None)
-            .expect("base");
-        let timelock = create_time_locked_commitment(&state_hash, &op, recipient, 0)
-            .expect("timelock");
-        let recurring = create_recurring_commitment(&state_hash, &op, recipient, 0, 0)
-            .expect("recurring");
+        let base =
+            create_deterministic_commitment(&state_hash, &op, recipient, None).expect("base");
+        let timelock =
+            create_time_locked_commitment(&state_hash, &op, recipient, 0).expect("timelock");
+        let recurring =
+            create_recurring_commitment(&state_hash, &op, recipient, 0, 0).expect("recurring");
 
         assert_ne!(base, timelock, "base != timelock");
         assert_ne!(base, recurring, "base != recurring");
@@ -821,13 +811,7 @@ mod tests {
                 let mut corrupted = commitment.clone();
                 corrupted[byte_idx] ^= 1 << bit;
                 assert!(
-                    !verify_deterministic_commitment(
-                        &corrupted,
-                        &state_hash,
-                        &op,
-                        recipient,
-                        cond,
-                    ),
+                    !verify_deterministic_commitment(&corrupted, &state_hash, &op, recipient, cond,),
                     "verify must reject corruption at byte {byte_idx} bit {bit}"
                 );
             }

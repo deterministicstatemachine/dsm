@@ -50,6 +50,12 @@ pub fn initialize_root_token_with_balance(
     device_id: &str,
     initial_amount: u64,
 ) -> Result<EraTokenManager, DsmError> {
+    if matches!(network, NetworkType::Mainnet) && initial_amount > 0 {
+        return Err(DsmError::invalid_operation(
+            "Mainnet initialization cannot mint post-genesis balance",
+        ));
+    }
+
     let mut manager = initialize_root_token(network)?;
     manager.mint(device_id, initial_amount as u128)?;
     Ok(manager)
