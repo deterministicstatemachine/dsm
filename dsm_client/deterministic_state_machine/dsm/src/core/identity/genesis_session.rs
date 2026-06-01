@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// File: dsm/src/core/identity/genesis_mpc.rs
-//! DSM Genesis MPC Protocol Implementation (STRICT, bytes-only)
+// File: dsm/src/core/identity/genesis_session.rs
+//! DSM Genesis session (STRICT, bytes-only) — commit-then-reveal entropy aggregation.
 //!
 //! Invariants:
 //! - No wall-clock APIs. Use deterministic ticks (u64) from utils::deterministic_time.
@@ -11,9 +11,10 @@
 //!   notation for "all n contributions"; there is no t-of-n DKG or Shamir.
 //! - Storage/publishing is trait-only (SDK implements I/O).
 //!
-//! This module implements the MPC genesis creation protocol with commitment–reveal,
-//! optional DBRW binding (record-only; not part of genesis binding), SPHINCS+ signing
-//! keygen and Kyber KEM keygen hooks.
+//! This module drives the genesis session: per-participant commitment–reveal,
+//! the canonical genesis hash `G` (computed by `crate::types::genesis_types`),
+//! the post-genesis K_DBRW binding (record-only; not part of `G`), and the
+//! silicon-bound SPHINCS+/Kyber keypair derivation (whitepaper §11.1).
 
 use crate::crypto::blake3::dsm_domain_hasher;
 
@@ -23,6 +24,7 @@ use std::io::Read;
 use crate::crypto::kyber;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
+use crate::types::genesis_types::{compute_genesis_hash, hash_contribution, MPCContribution};
 use crate::types::identifiers::NodeId;
 use crate::utils::deterministic_time;
 
@@ -57,12 +59,12 @@ pub trait GenesisStorage {
     async fn get(&self, genesis_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError>;
 }
 
-/// Optional network transport for real MPC collection.
+/// Optional network transport for real contribution collection.
 ///
-/// This is NOT required by the core convenience entrypoint (`create_mpc_genesis`),
+/// This is NOT required by the core convenience entrypoint (`create_genesis`),
 /// but is provided for SDK integration.
 #[async_trait]
-pub trait GenesisMpcTransport {
+pub trait GenesisTransport {
     async fn collect_node_entropy(
         &self,
         node: &NodeId,
@@ -152,8 +154,9 @@ pub struct GenesisSession {
     pub commitments: Vec<[u8; 32]>,
     /// Reveals: exact contribution materials used for each commitment
     pub reveals: Vec<Vec<u8>>,
-    /// Genesis hash per whitepaper §2.5:
-    /// G = BLAKE3("DSM/genesis\0" || device_entropy || mpc_i... || A)
+    /// Canonical genesis hash `G` per whitepaper §2.5 (acyclic form):
+    /// `G = H_g("DSM/genesis" ∥ device_id ∥ sorted H(contribution_i))`,
+    /// computed by `crate::types::genesis_types::compute_genesis_hash`.
     pub genesis_id: [u8; 32],
     /// Participants
     pub storage_nodes: Vec<NodeId>,
@@ -170,7 +173,7 @@ impl GenesisSession {
     /// Create a new session with random session_id; other fields zero/empty.
     /// `dbrw_binding` MUST be set via `set_dbrw_binding` before
     /// `compute_genesis_id` finalises (or, for end-to-end production,
-    /// is supplied to `create_mpc_genesis*` and routed through here).
+    /// is supplied to `create_genesis*` and routed through here).
     pub fn new(metadata: Vec<u8>) -> Result<Self, DsmError> {
         let mut sid = [0u8; 32];
         crate::crypto::rng::random_bytes(32)
@@ -332,38 +335,70 @@ impl GenesisSession {
         true
     }
 
-    /// Compute genesis id per whitepaper §2.5:
+    /// Canonical ordered contribution materials — the raw byte-strings that
+    /// get hashed into `G`:
     ///
     /// ```text
-    /// G = BLAKE3("DSM/genesis\0" ‖ b_1 ‖ ... ‖ b_n ‖ A)
+    /// [ device_id ∥ device_entropy,  b_1,  …,  b_n ]
     /// ```
     ///
-    /// where `b_1 = device_entropy`, `b_2..b_n = mpc_entropies` (n-of-n),
-    /// and `A` is the contextual binding parameters: device_id ‖ sorted
-    /// participants ‖ metadata.  The participant ordering is the
-    /// canonical lex-sort of NodeId bytes so the hash is independent of
-    /// transport-time order.
-    ///
-    /// `K_DBRW` is intentionally NOT part of `A` — silicon binding
-    /// happens one layer down at master-seed derivation (whitepaper
-    /// §11.1 eq.13), not at the genesis hash.
-    pub fn compute_genesis_id(&mut self) {
-        let mut h = dsm_domain_hasher("DSM/genesis");
-        // b_1 = device_entropy
-        h.update(&self.device_entropy);
-        // b_2..b_n = mpc_entropies (n-of-n contributions)
+    /// i.e. the device's own contribution followed by each storage node's
+    /// revealed entropy (n-of-n).  Metadata is NOT a contribution and is
+    /// excluded from `G` (whitepaper §2.5: `G` is publicly recomputable from
+    /// `device_id` + the revealed contributions, nothing else).
+    pub fn canonical_contribution_materials(&self) -> Vec<Vec<u8>> {
+        let mut materials = Vec::with_capacity(1 + self.mpc_entropies.len());
+
+        let mut device = Vec::with_capacity(self.device_id.len() + self.device_entropy.len());
+        device.extend_from_slice(&self.device_id);
+        device.extend_from_slice(&self.device_entropy);
+        materials.push(device);
+
         for m in &self.mpc_entropies {
-            h.update(m);
+            materials.push(m.to_vec());
         }
-        // A = contextual binding parameters
-        h.update(&canonical_a(
-            &self.device_id,
-            &self.storage_nodes,
-            &self.metadata,
-        ));
-        let mut out = [0u8; 32];
-        out.copy_from_slice(h.finalize().as_bytes());
-        self.genesis_id = out;
+        materials
+    }
+
+    /// Canonical contribution records for `G`: `H(m_i)` per material, paired
+    /// with a deterministic `contributor_id` (empty for the device
+    /// contribution; the storage node id for each node contribution).
+    /// `contributor_id` is a sort tie-breaker only and is never folded into
+    /// `G`, so the verifier — which lacks node ids post-conversion — recomputes
+    /// the identical hash from the materials alone.
+    fn canonical_contributions(&self) -> Vec<MPCContribution> {
+        self.canonical_contribution_materials()
+            .iter()
+            .enumerate()
+            .map(|(i, material)| {
+                let contributor_id = match i.checked_sub(1) {
+                    None => String::new(), // device contribution
+                    Some(node_idx) => self
+                        .storage_nodes
+                        .get(node_idx)
+                        .map(|n| String::from_utf8_lossy(n.as_bytes()).into_owned())
+                        .unwrap_or_default(),
+                };
+                MPCContribution::new(contributor_id, hash_contribution(material), Vec::new(), 0)
+            })
+            .collect()
+    }
+
+    /// Compute the canonical genesis hash `G` per whitepaper §2.5 (acyclic
+    /// form) and store it on the session:
+    ///
+    /// ```text
+    /// G := H_g("DSM/genesis" ∥ device_id ∥ ⟦ "DSM/genesis/mpc\0" ∥ H(m_i) ⟧ sorted )
+    /// ```
+    ///
+    /// Contributions are `[device_id ∥ device_entropy, b_1, …, b_n]`, sorted by
+    /// contribution hash so transport-time order cannot change `G`.  The
+    /// public-key bundle and `K_DBRW` are NOT folded in: they bind to genesis
+    /// by being *derived from* `G` (`keys ← S_master ← K_DBRW ← G`); folding
+    /// them back would be circular.  Silicon binding happens one layer down at
+    /// master-seed derivation (whitepaper §11.1 eq.13), not at the genesis hash.
+    pub fn compute_genesis_id(&mut self) {
+        self.genesis_id = compute_genesis_hash(&self.device_id, &self.canonical_contributions());
     }
 
     /// Validate full session.  Requires DBRW binding (K_DBRW) to be set
@@ -489,55 +524,6 @@ impl Drop for GenesisSession {
 
 // -------------------- Helpers --------------------
 
-#[inline]
-#[allow(dead_code)]
-fn to_arr32(v: &[u8]) -> Result<[u8; 32], DsmError> {
-    if v.len() != 32 {
-        return Err(DsmError::invalid_parameter("expected 32 bytes"));
-    }
-    let mut a = [0u8; 32];
-    a.copy_from_slice(v);
-    Ok(a)
-}
-
-/// Canonical encoding of the contextual binding parameters `A` from
-/// whitepaper §2.5.  Bytes-only, length-prefixed, deterministic given
-/// the same inputs regardless of transport-time NodeId ordering.
-///
-/// Layout:
-/// ```text
-/// device_id           : 32 bytes
-/// participant_count   : u32 little-endian
-/// for each participant (lex-sorted by raw NodeId bytes):
-///   length            : u32 little-endian
-///   bytes
-/// metadata_length     : u32 little-endian
-/// metadata            : bytes
-/// ```
-fn canonical_a(device_id: &[u8; 32], storage_nodes: &[NodeId], metadata: &[u8]) -> Vec<u8> {
-    let mut sorted: Vec<&[u8]> = storage_nodes.iter().map(|n| n.as_bytes()).collect();
-    sorted.sort();
-
-    let participant_bytes_total: usize = sorted.iter().map(|p| p.len() + 4).sum();
-    let mut a = Vec::with_capacity(32 + 4 + participant_bytes_total + 4 + metadata.len());
-
-    // device_id
-    a.extend_from_slice(device_id);
-
-    // sorted participants (canonical lex order on raw bytes)
-    a.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
-    for p in &sorted {
-        a.extend_from_slice(&(p.len() as u32).to_le_bytes());
-        a.extend_from_slice(p);
-    }
-
-    // metadata
-    a.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
-    a.extend_from_slice(metadata);
-
-    a
-}
-
 /// Per-genesis step-salt: `s_0 = BLAKE3("DSM/step-salt\0" || G)` per
 /// storage-nodes spec §5.  Mixed into the master-seed IKM (whitepaper
 /// §11.1 eq.13) at keypair derivation time.
@@ -604,14 +590,14 @@ pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-// -------------------- High-level MPC creation (no I/O) --------------------
+// -------------------- High-level genesis creation (no I/O) --------------------
 
-/// Production DSM MPC Creation (bytes-only).
+/// Production DSM genesis creation (bytes-only).
 ///
-/// This entrypoint is the core, no-I/O version: it models the MPC entropies
+/// This entrypoint is the core, no-I/O version: it models the node entropies
 /// without performing network collection. SDK integrations should use
-/// `create_mpc_genesis_with_transport`.
-pub async fn create_mpc_genesis(
+/// `create_genesis_with_transport`.
+pub async fn create_genesis(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
     hw_entropy: Vec<u8>,
@@ -664,7 +650,7 @@ pub async fn create_mpc_genesis(
     Ok(session)
 }
 
-/// SDK-integrated MPC Creation using a transport for node entropy collection.
+/// SDK-integrated genesis creation using a transport for node entropy collection.
 ///
 /// Silicon-binding inputs `(hw_entropy, env_fingerprint)` are mandatory
 /// — they feed the canonical K_DBRW derivation (whitepaper Definition 3,
@@ -672,7 +658,7 @@ pub async fn create_mpc_genesis(
 ///         LP(hw) || LP(env))`) once `genesis_id` is computed, which is
 /// then mixed into `S_master` IKM (whitepaper §11.1 eq.13) for the
 /// SPHINCS+/Kyber keypair derivation.
-pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
+pub async fn create_genesis_with_transport<T: GenesisTransport + Sync>(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
     hw_entropy: Vec<u8>,
@@ -860,31 +846,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_mpc_genesis_path() {
+    async fn test_create_genesis_path() {
         let dev = id32(0xAA);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let hw = vec![0xCC; 32];
         let env = vec![0xDD; 32];
-        let s = create_mpc_genesis(dev, nodes, hw, env, Some(b"DSMv2|test".to_vec())).await;
+        let s = create_genesis(dev, nodes, hw, env, Some(b"DSMv2|test".to_vec())).await;
 
         let sess = match s {
             Ok(sess) => sess,
-            Err(e) => panic!("create_mpc_genesis should succeed: {e:?}"),
+            Err(e) => panic!("create_genesis should succeed: {e:?}"),
         };
         assert_ne!(sess.genesis_id, [0u8; 32]);
         assert!(sess.verify_commitments());
         assert_eq!(sess.mpc_entropies.len(), sess.storage_nodes.len());
     }
 
-    /// Whitepaper §2.5 conformance: an external verifier with the same
-    /// public inputs (device_id, participants, metadata, contributions)
-    /// must independently recompute the genesis hash byte-for-byte.
+    /// Independently recompute `G` from the canonical materials
+    /// `[device_id ∥ device_entropy, b_1, …, b_n]` per whitepaper §2.5
+    /// (acyclic form), folding `H(m_i)` in sorted order with the
+    /// `DSM/genesis` domain. Mirrors what the verifier does from the public
+    /// inputs alone.
+    fn recompute_g(device_id: &[u8; 32], device_entropy: &[u8; 32], mpc: &[[u8; 32]]) -> [u8; 32] {
+        let mut materials: Vec<Vec<u8>> = Vec::new();
+        let mut dev = Vec::new();
+        dev.extend_from_slice(device_id);
+        dev.extend_from_slice(device_entropy);
+        materials.push(dev);
+        for m in mpc {
+            materials.push(m.to_vec());
+        }
+        let contribs: Vec<MPCContribution> = materials
+            .iter()
+            .map(|m| MPCContribution::new(String::new(), hash_contribution(m), Vec::new(), 0))
+            .collect();
+        compute_genesis_hash(device_id, &contribs)
+    }
+
+    /// Whitepaper §2.5 conformance: an external verifier with the same public
+    /// inputs (device_id + revealed contributions) must independently recompute
+    /// `G` byte-for-byte, and transport-time participant order must not change it.
     #[test]
     fn genesis_id_is_recomputable_from_public_inputs() {
         let mut s = GenesisSession::new(b"meta".to_vec()).unwrap();
-        // Deliberately scramble the participant order on input — the
-        // canonical_a() helper sorts internally, so order at call time
-        // must not change the hash.
+        // Deliberately scramble the participant order on input — `G` folds the
+        // contribution hashes in sorted order, so call-time order must not
+        // change the result.
         let nodes = vec![
             NodeId::new("zeta"),
             NodeId::new("alpha"),
@@ -896,30 +903,16 @@ mod tests {
         s.compute_commitments();
         s.compute_genesis_id();
 
-        // Independent recomputation following whitepaper §2.5 exactly.
-        let expected = {
-            let mut h = dsm_domain_hasher("DSM/genesis");
-            h.update(&s.device_entropy);
-            for m in &s.mpc_entropies {
-                h.update(m);
-            }
-            h.update(&canonical_a(&s.device_id, &s.storage_nodes, &s.metadata));
-            let mut out = [0u8; 32];
-            out.copy_from_slice(h.finalize().as_bytes());
-            out
-        };
+        let expected = recompute_g(&s.device_id, &s.device_entropy, &s.mpc_entropies);
         assert_eq!(s.genesis_id, expected);
 
-        // Permuting the participant order at the call site must NOT
-        // change the hash (canonical_a sorts).
+        // Permuting the participant order at the call site must NOT change `G`.
         let mut s2 = GenesisSession::new(b"meta".to_vec()).unwrap();
         let permuted = vec![
             NodeId::new("middle"),
             NodeId::new("zeta"),
             NodeId::new("alpha"),
         ];
-        // Same session_id needs the same metadata + device_id, but
-        // session_id is random so we copy from s.
         s2.session_id = s.session_id;
         s2.initialize_mpc(id32(0x42), permuted).unwrap();
         s2.device_entropy = id32(0xD0);
@@ -938,9 +931,9 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let hw = vec![0xCC; 32];
         let env = vec![0xDD; 32];
-        let session = create_mpc_genesis(dev, nodes, hw, env, Some(b"meta".to_vec()))
+        let session = create_genesis(dev, nodes, hw, env, Some(b"meta".to_vec()))
             .await
-            .expect("create_mpc_genesis succeeds");
+            .expect("create_genesis succeeds");
 
         let gs = convert_session_to_genesis_state_compat(&session).expect("convert succeeds");
 
@@ -1152,7 +1145,7 @@ mod tests {
         );
     }
 
-    /// Mock GenesisMpcTransport for Issue #252 regression tests:
+    /// Mock GenesisTransport for Issue #252 regression tests:
     /// returns a pre-set entropy byte-pattern per node and records
     /// every call so tests can assert no node was skipped (sub-bug 2:
     /// prefix-bias from `threshold_count` truncation).
@@ -1178,7 +1171,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl GenesisMpcTransport for FixedEntropyTransport {
+    impl GenesisTransport for FixedEntropyTransport {
         async fn collect_node_entropy(
             &self,
             node: &NodeId,
@@ -1209,7 +1202,7 @@ mod tests {
         let transport = FixedEntropyTransport::new(&map);
         let hw = vec![0xCC; 32];
         let env = vec![0xDD; 32];
-        let session = create_mpc_genesis_with_transport(
+        let session = create_genesis_with_transport(
             device_id,
             nodes.clone(),
             hw,
@@ -1227,21 +1220,14 @@ mod tests {
         assert_eq!(session.mpc_entropies[1], id32(0xA2));
         assert_eq!(session.mpc_entropies[2], id32(0xA3));
 
-        // Independent recomputation of G per whitepaper §2.5.  The
-        // device_entropy is sampled locally inside
-        // `create_mpc_genesis_with_transport`, so we read it back.
-        let mut h = dsm_domain_hasher("DSM/genesis");
-        h.update(&session.device_entropy);
-        for m in &session.mpc_entropies {
-            h.update(m);
-        }
-        h.update(&canonical_a(
+        // Independent recomputation of G per whitepaper §2.5 (acyclic form).
+        // The device_entropy is sampled locally inside
+        // `create_genesis_with_transport`, so we read it back.
+        let expected = recompute_g(
             &session.device_id,
-            &session.storage_nodes,
-            &session.metadata,
-        ));
-        let mut expected = [0u8; 32];
-        expected.copy_from_slice(h.finalize().as_bytes());
+            &session.device_entropy,
+            &session.mpc_entropies,
+        );
         assert_eq!(
             session.genesis_id, expected,
             "transport-supplied entropy bytes did not survive the call path"
@@ -1273,7 +1259,7 @@ mod tests {
         let hw = vec![0xCC; 32];
         let env = vec![0xDD; 32];
         let session =
-            create_mpc_genesis_with_transport(device_id, nodes.clone(), hw, env, None, &transport)
+            create_genesis_with_transport(device_id, nodes.clone(), hw, env, None, &transport)
                 .await
                 .expect("5-node genesis should succeed");
 
@@ -1318,7 +1304,7 @@ mod tests {
         let transport = FixedEntropyTransport::new(&map);
         let hw = vec![0xCC; 32];
         let env = vec![0xDD; 32];
-        let session = create_mpc_genesis_with_transport(
+        let session = create_genesis_with_transport(
             device_id,
             nodes,
             hw,

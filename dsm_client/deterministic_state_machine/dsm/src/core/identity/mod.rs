@@ -26,7 +26,7 @@ const _: () = assert!(
 );
 
 pub mod genesis;
-pub mod genesis_mpc;
+pub mod genesis_session;
 // hierarchical_device_management deleted: 1180-line module with zero external
 // callers. Its own doc comment noted "DO NOT use this Merkle implementation for
 // π_dev" — it's legacy superseded by crate::common::device_tree (§5 Device Tree)
@@ -45,8 +45,8 @@ use blake3;
 use tracing;
 use zeroize::Zeroize;
 
-// Import MPC types
-use crate::core::identity::genesis_mpc::{create_mpc_genesis, GenesisSession};
+// Import genesis-session types
+use crate::core::identity::genesis_session::{create_genesis, GenesisSession};
 // Re-export GenesisState for other modules
 pub use crate::core::identity::genesis::{verify_genesis_state, GenesisState};
 
@@ -196,7 +196,7 @@ impl TrustlessGenesisArtifacts {
 /// threshold cryptography.  All `storage_nodes` participate; the `≥3`
 /// floor is enforced (per spec invariant; resists 2-collusion-only).
 pub async fn create_trustless_genesis<
-    S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
+    S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<NodeId>,
@@ -223,7 +223,7 @@ pub async fn create_trustless_genesis<
     // Deterministic 32B device hash label for MPC inputs
     let device_id_bytes: [u8; 32] = *domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes();
 
-    let session = create_mpc_genesis(
+    let session = create_genesis(
         device_id_bytes,
         storage_nodes,
         hw_entropy,
@@ -406,7 +406,7 @@ impl IdentityStore {
 
     /// Create a new identity with MANDATORY MPC genesis creation
     pub async fn create_identity<
-        S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
+        S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
     >(
         &self,
         name: &str,
@@ -489,7 +489,7 @@ impl IdentityStore {
     /// Per whitepaper §2.5 the MPC is n-of-n; all storage nodes contribute.
     /// No threshold parameter — `≥3` floor enforced.
     pub async fn create_identity_with_storage_nodes<
-        S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
+        S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
     >(
         &self,
         name: &str,
