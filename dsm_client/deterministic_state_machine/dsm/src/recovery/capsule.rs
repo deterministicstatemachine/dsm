@@ -525,6 +525,18 @@ fn validate_capsule(capsule: &RecoveryCapsule, metadata: &CapsuleMetadata) -> Re
     if capsule.challenge.len() != 32 {
         return Err(DsmError::verification("Invalid capsule challenge length"));
     }
+    if !capsule.source_device_id.is_empty() && capsule.source_device_id.len() != 32 {
+        return Err(DsmError::verification(format!(
+            "Invalid source_device_id length: expected 32 or empty, got {}",
+            capsule.source_device_id.len()
+        )));
+    }
+    if !capsule.genesis_hash.is_empty() && capsule.genesis_hash.len() != 32 {
+        return Err(DsmError::verification(format!(
+            "Invalid genesis_hash length: expected 32 or empty, got {}",
+            capsule.genesis_hash.len()
+        )));
+    }
     if capsule.metadata.version != metadata.version
         || capsule.metadata.counter != metadata.counter
         || capsule.metadata.logical_time != metadata.logical_time
@@ -1030,6 +1042,58 @@ mod tests {
 
         assert!(plaintext.cert_chain_heads.is_empty());
         assert!(plaintext.last_certs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_capsule_rejects_invalid_source_device_id_length() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let key = derive_recovery_key(MNEMONIC)?;
+
+        let capsule = RecoveryCapsule {
+            smt_root: vec![0x11; 32],
+            counterparty_tips: HashMap::new(),
+            rollup_hash: vec![0x22; 32],
+            challenge: derive_challenge(&[0x22; 32], &[0x11; 32], 1).to_vec(),
+            metadata: CapsuleMetadata {
+                version: 3,
+                flags: 0,
+                logical_time: 1,
+                counter: 1,
+            },
+            source_device_id: vec![0x44; 31],
+            genesis_hash: vec![0x55; 32],
+            cert_chain_heads: HashMap::new(),
+            last_certs: HashMap::new(),
+        };
+
+        assert!(encrypt_capsule_with_key(&capsule, &key).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_capsule_rejects_invalid_genesis_hash_length() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let key = derive_recovery_key(MNEMONIC)?;
+
+        let capsule = RecoveryCapsule {
+            smt_root: vec![0x11; 32],
+            counterparty_tips: HashMap::new(),
+            rollup_hash: vec![0x22; 32],
+            challenge: derive_challenge(&[0x22; 32], &[0x11; 32], 2).to_vec(),
+            metadata: CapsuleMetadata {
+                version: 3,
+                flags: 0,
+                logical_time: 2,
+                counter: 2,
+            },
+            source_device_id: vec![0x44; 32],
+            genesis_hash: vec![0x55; 31],
+            cert_chain_heads: HashMap::new(),
+            last_certs: HashMap::new(),
+        };
+
+        assert!(encrypt_capsule_with_key(&capsule, &key).is_err());
         Ok(())
     }
 }

@@ -87,6 +87,23 @@ pub fn update_rollup(
     counterparty_id: &str,
     new_height: u64,
 ) -> Result<(), DsmError> {
+    if receipt_id.is_empty() {
+        return Err(DsmError::invalid_parameter(
+            "receipt_id must not be empty for recovery rollup updates",
+        ));
+    }
+    if receipt_hash.len() != 32 {
+        return Err(DsmError::invalid_parameter(format!(
+            "receipt_hash must be 32 bytes, got {}",
+            receipt_hash.len()
+        )));
+    }
+    if counterparty_id.is_empty() {
+        return Err(DsmError::invalid_parameter(
+            "counterparty_id must not be empty for recovery rollup updates",
+        ));
+    }
+
     // Create 8-byte counterparty digest from counterparty_id
     let peer_digest = create_peer_digest(counterparty_id);
 
@@ -219,5 +236,22 @@ mod tests {
         assert_eq!(digest2.len(), 8);
         assert_ne!(digest1, digest2);
         assert_eq!(digest1, digest1_again);
+    }
+
+    #[test]
+    fn test_rollup_rejects_invalid_inputs() {
+        let mut rollup = ReceiptRollup::new();
+
+        let err = update_rollup(&mut rollup, b"", &[1; 32], "peer1", 1)
+            .expect_err("empty receipt id must reject");
+        assert!(matches!(err, DsmError::InvalidParameter(_)));
+
+        let err = update_rollup(&mut rollup, b"r1", &[1; 31], "peer1", 1)
+            .expect_err("short receipt hash must reject");
+        assert!(matches!(err, DsmError::InvalidParameter(_)));
+
+        let err = update_rollup(&mut rollup, b"r1", &[1; 32], "", 1)
+            .expect_err("empty counterparty id must reject");
+        assert!(matches!(err, DsmError::InvalidParameter(_)));
     }
 }
