@@ -1614,7 +1614,8 @@ mod tests {
         // Each test gets its own private in-memory DB so they don't
         // collide on shared file state.
         let conn = Connection::open_in_memory().expect("open :memory:");
-        conn.execute_batch("PRAGMA foreign_keys=ON;").expect("pragma");
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("pragma");
         let pool = Arc::new(Mutex::new(conn));
         init_db(&pool).await.expect("init schema");
         pool
