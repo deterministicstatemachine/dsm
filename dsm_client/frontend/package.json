@@ -83,7 +83,7 @@
     "prettier": "^3.8.3",
     "style-loader": "^4.0.0",
     "ts-jest": "^29.4.9",
-    "ts-loader": "^9.5.0",
+    "ts-loader": "^9.6.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.0",
     "webpack": "^5.106.2",
