@@ -112,13 +112,9 @@ impl DevTreeProof {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Number of siblings
         buf.extend_from_slice(&(self.siblings.len() as u32).to_le_bytes());
-
-        // leaf_to_root flag
         buf.push(if self.leaf_to_root { 1 } else { 0 });
 
-        // Pack path_bits into bytes
         let mut packed_bits = vec![0u8; self.path_bits.len().div_ceil(8)];
         for (i, &bit) in self.path_bits.iter().enumerate() {
             if bit {
@@ -128,7 +124,6 @@ impl DevTreeProof {
         buf.extend_from_slice(&(self.path_bits.len() as u32).to_le_bytes());
         buf.extend_from_slice(&packed_bits);
 
-        // Siblings (each 32 bytes)
         for sib in &self.siblings {
             buf.extend_from_slice(sib);
         }
@@ -136,31 +131,27 @@ impl DevTreeProof {
         buf
     }
 
-    /// Deserialize proof from bytes
+    /// Deserialize proof from bytes.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < 9 {
-            return None; // Need at least num_siblings(4) + flag(1) + path_bits_len(4)
+            return None;
         }
 
         let mut offset = 0;
 
-        // Read num_siblings
         let mut num_siblings_bytes = [0u8; 4];
         num_siblings_bytes.copy_from_slice(&data[offset..offset + 4]);
         let num_siblings = u32::from_le_bytes(num_siblings_bytes) as usize;
         offset += 4;
 
-        // Read leaf_to_root flag
         let leaf_to_root = data[offset] != 0;
         offset += 1;
 
-        // Read path_bits length
         let mut path_bits_len_bytes = [0u8; 4];
         path_bits_len_bytes.copy_from_slice(&data[offset..offset + 4]);
         let path_bits_len = u32::from_le_bytes(path_bits_len_bytes) as usize;
         offset += 4;
 
-        // Read packed path_bits
         let packed_len = path_bits_len.div_ceil(8);
         if offset + packed_len > data.len() {
             return None;
@@ -174,9 +165,8 @@ impl DevTreeProof {
             path_bits.push(bit);
         }
 
-        // Read siblings
         if offset + num_siblings * 32 != data.len() {
-            return None; // Size mismatch
+            return None;
         }
 
         let mut siblings = Vec::with_capacity(num_siblings);
@@ -195,20 +185,11 @@ impl DevTreeProof {
     }
 }
 
-// ---------------------------------------------------------------------------
-// DeviceTree builder — standard binary Merkle tree over sorted DevIDs.
-// ---------------------------------------------------------------------------
-
-/// Device Tree builder for one genesis account (§2.2, §2.3).
+/// Device Tree builder for one genesis account.
 ///
 /// Leaves are DevIDs sorted lexicographically. Root is R_G.
-/// For N=0: root = empty_root()
-/// For N=1: root = hash_leaf(devid) — empty proof
-/// For N>1: sorted leaves, standard balanced binary Merkle construction
 pub struct DeviceTree {
-    /// Sorted, deduplicated leaves (DevIDs).
     leaves: Vec<[u8; 32]>,
-    /// Precomputed root hash R_G.
     root: [u8; 32],
 }
 
@@ -228,7 +209,7 @@ impl DeviceTree {
         }
     }
 
-    /// Convenience: single-device tree (current default).
+    /// Convenience constructor for single-device trees.
     pub fn single(dev_id: [u8; 32]) -> Self {
         Self::new(vec![dev_id])
     }
@@ -264,13 +245,10 @@ impl DeviceTree {
     }
 
     /// Generate an inclusion proof for `dev_id`.
-    /// Returns `None` if `dev_id` is not a member of this tree.
+    /// Returns `None` if `dev_id` is not in this tree.
     pub fn proof(&self, dev_id: &[u8; 32]) -> Option<DevTreeProof> {
         let idx = self.leaves.iter().position(|l| l == dev_id)?;
         if self.leaves.len() == 1 {
-            // Single-device: empty proof is correct.
-            // verify_device_tree_inclusion_proof_bytes() accepts this when
-            // root == hash_leaf(devid).
             return Some(DevTreeProof {
                 siblings: Vec::new(),
                 path_bits: Vec::new(),
@@ -280,8 +258,6 @@ impl DeviceTree {
         Some(Self::build_merkle_proof(&self.leaves, idx))
     }
 
-    // --- Private: balanced binary Merkle tree construction ---
-
     fn compute_merkle_root(sorted_leaves: &[[u8; 32]]) -> [u8; 32] {
         let mut level: Vec<[u8; 32]> = sorted_leaves.iter().map(hash_leaf).collect();
         while level.len() > 1 {
@@ -290,10 +266,6 @@ impl DeviceTree {
                 if chunk.len() == 2 {
                     next.push(hash_node(&chunk[0], &chunk[1]));
                 } else {
-                    // Odd promotion: pair with the canonical padding
-                    // leaf (Issue #182 Finding #4) instead of duplicating
-                    // the lone child. Different domain tag prevents any
-                    // collision with a real DevID-derived leaf.
                     next.push(hash_node(&chunk[0], &pad_leaf()));
                 }
             }
@@ -317,12 +289,10 @@ impl DeviceTree {
             let sib = if sib_idx < level.len() {
                 level[sib_idx]
             } else {
-                // Odd promotion at this level: sibling is the canonical
-                // padding leaf, NOT the lone child duplicated.
                 pad_leaf()
             };
             siblings.push(sib);
-            path_bits.push(!idx.is_multiple_of(2)); // true = right child
+            path_bits.push(!idx.is_multiple_of(2));
 
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for chunk in level.chunks(2) {

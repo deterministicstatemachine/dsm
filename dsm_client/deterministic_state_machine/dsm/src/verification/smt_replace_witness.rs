@@ -7,17 +7,11 @@
 //! Used by acceptance predicates that must be able to recompute an SMT root
 //! from a leaf hash and a sibling path, deterministically and fail-closed.
 
+use crate::common::domain_tags::{TAG_SMT_LEAF, TAG_SMT_NODE};
 use crate::types::error::DsmError;
 
-// Domain tag constants for `DSM/smt-key` / `DSM/smt-leaf` / `DSM/smt-node`
-// REMOVED — Issue #182 Finding #3. The constants were `pub const &[u8]`
-// with trailing `\0` and never consumed (every hash site in this module
-// uses inline string literals like `dsm_domain_hasher("DSM/smt-leaf")`,
-// which produces the canonical `"DSM/smt-leaf\0" || data` preimage via
-// the auto-NUL hasher primitive). The dead constants were inconsistent
-// with the unified `domain_tags::TAG_*` set that drops the trailing NUL
-// per the new module-level convention. If a future caller wants
-// pre-resolved constants, use `dsm::common::domain_tags::TAG_SMT_*`.
+// Domain tags are centralized in `common::domain_tags` and intentionally do
+// not include trailing NUL (`dsm_domain_hasher` appends NUL internally).
 
 /// Hard cap for witness path length (DoS resistance).
 pub const MAX_SMT_WITNESS_PATH_LEN: usize = 256;
@@ -88,14 +82,14 @@ pub use crate::core::bilateral_transaction_manager::compute_smt_key;
 /// Per spec §2.2: `Leaf(X) := BLAKE3("DSM/smt-leaf\0" ∥ X)`.
 /// The relationship key is NOT part of the leaf hash.
 pub fn hash_smt_leaf(tip: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/smt-leaf");
+    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_SMT_LEAF);
     hasher.update(tip);
     *hasher.finalize().as_bytes()
 }
 
 /// Hash an SMT internal node deterministically.
 pub fn hash_smt_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/smt-node");
+    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_SMT_NODE);
     hasher.update(left);
     hasher.update(right);
     *hasher.finalize().as_bytes()

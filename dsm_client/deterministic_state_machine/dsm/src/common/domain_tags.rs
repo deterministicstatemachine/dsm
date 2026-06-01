@@ -24,10 +24,16 @@
 //! tag identifier. So tag identifiers carried as Rust `&str` constants
 //! should NOT include the NUL byte.
 
+// Receipt canonical commit domain.
 pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit";
+
+// SMT node/leaf domains.
 pub const TAG_SMT_NODE: &str = "DSM/smt-node";
 pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf";
+
+// DBRW root domain.
 pub const TAG_DBRW: &str = "DSM/dbrw";
+
 // Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
 // open spec ambiguity between §2.2 (`merkle-node`/`merkle-leaf`) and
 // §16.3 (`dev-merkle`/`dev-empty`). Implementation continues to use
