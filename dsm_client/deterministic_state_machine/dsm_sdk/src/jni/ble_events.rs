@@ -7,7 +7,6 @@
 //! scan results, connection events, and data payloads for delivery to
 //! the Kotlin layer.
 
-
 use crate::generated as pb;
 use jni::objects::{JByteArray, JObject, JString};
 use jni::JNIEnv;

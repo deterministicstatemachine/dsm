@@ -105,7 +105,7 @@ Add `cpp/blake3/`, `cpp/dsm_domain_hash.h`, update CMakeLists, add JNI `nativeBl
 
 **Goal:** Alg. 3 steps 6-8. Ephemeral key derivation + signing.
 
-- `E_{n+1} = HKDF-BLAKE3("DSM/ek\0", h_n || C_pre || k_step || K_DBRW)`
+- `E_{n+1} = BLAKE3-256("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)` — plain domain-separated keyed BLAKE3, NOT HKDF (ephemeral_key.rs:29-41)
 - `(EK_sk, EK_pk) = SPHINCS+.KeyGen(E_{n+1})` using SPX256f
 - `sigma = SPHINCS+.Sign(EK_sk, gamma || ct || c)`
 - Add `ephemeral_key.rs`, `CdbrwEphemeralNative.kt`

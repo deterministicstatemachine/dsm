@@ -44,14 +44,23 @@ pub fn reset() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
+    // These tests read/reset the process-global PROGRESS_CONTEXT. Without
+    // serialization they race other tests in this binary (e.g. SDK-init paths
+    // that call update_progress_context): one test's reset()/init() holds the
+    // write lock while another's tick() does a `try_read()`, which falls back
+    // to 0 on contention — making assertions like reset_is_idempotent flaky.
+    // `#[serial]` runs them in the global serial group, eliminating the race.
     #[test]
+    #[serial]
     fn tick_returns_value() {
         reset();
         let _t = tick();
     }
 
     #[test]
+    #[serial]
     fn tick_index_matches_tick() {
         reset();
         let a = tick();
@@ -63,6 +72,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn clean_tick_index_matches_tick() {
         reset();
         let a = tick();
@@ -71,12 +81,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn peek_returns_value() {
         reset();
         let _p = peek();
     }
 
     #[test]
+    #[serial]
     fn reset_is_idempotent() {
         reset();
         let a = tick();

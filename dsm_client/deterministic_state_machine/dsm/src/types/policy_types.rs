@@ -602,13 +602,22 @@ pub struct TokenPolicy {
 impl TokenPolicy {
     pub fn new(file: PolicyFile) -> Result<Self, DsmError> {
         let anchor = file.generate_anchor()?;
+        Ok(Self::new_with_anchor(file, anchor))
+    }
+
+    /// Construct a runtime policy using an already-authoritative anchor.
+    ///
+    /// This is used when the canonical policy commitment is obtained from a
+    /// storage-layer anchor (for example, `DSM/policy` anchored bytes) and
+    /// must be preserved exactly in runtime mapping.
+    pub fn new_with_anchor(file: PolicyFile, anchor: PolicyAnchor) -> Self {
         let now = dt::tick().1;
-        Ok(Self {
+        Self {
             file,
             anchor,
             verified: false,
             last_verified: now,
-        })
+        }
     }
 
     pub fn mark_verified(&mut self) {

@@ -6,7 +6,6 @@
 //! Envelope v3 with headers populated (device_id + genesis_hash) for
 //! secondary device pairing.
 
-
 #![allow(clippy::too_many_arguments)]
 
 use crate::generated as pb;

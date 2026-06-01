@@ -1186,11 +1186,22 @@ fn apply_token_balance_delta(
             }
         }
         Operation::Mint {
-            token_id, amount, ..
+            token_id,
+            amount,
+            authorized_by,
+            proof_of_authorization,
+            ..
         } => {
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Mint has malformed or empty token_id"))?
                 .to_string();
+            verify_mint_authorization_for_transition(
+                current_state,
+                &token_id_str,
+                amount.value(),
+                authorized_by,
+                proof_of_authorization,
+            )?;
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
@@ -1214,11 +1225,20 @@ fn apply_token_balance_delta(
             );
         }
         Operation::Burn {
-            token_id, amount, ..
+            token_id,
+            amount,
+            proof_of_ownership,
+            ..
         } => {
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Burn has malformed or empty token_id"))?
                 .to_string();
+            verify_burn_authorization_for_transition(
+                current_state,
+                &token_id_str,
+                amount.value(),
+                proof_of_ownership,
+            )?;
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
@@ -1248,6 +1268,115 @@ fn apply_token_balance_delta(
     }
 
     Ok(())
+}
+
+fn parse_embedded_proof(proof: &[u8], label: &str) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    if proof.len() < 4 {
+        return Err(DsmError::invalid_parameter(format!(
+            "{label}: embedded proof too short"
+        )));
+    }
+
+    let mut idx: usize = 0;
+    let read_u16 = |buf: &[u8], i: &mut usize| -> Result<u16, DsmError> {
+        if *i + 2 > buf.len() {
+            return Err(DsmError::invalid_parameter(format!(
+                "{label}: truncated length field"
+            )));
+        }
+        let v = u16::from_le_bytes([buf[*i], buf[*i + 1]]);
+        *i += 2;
+        Ok(v)
+    };
+    let read_bytes = |buf: &[u8], i: &mut usize, n: usize| -> Result<Vec<u8>, DsmError> {
+        if *i + n > buf.len() {
+            return Err(DsmError::invalid_parameter(format!(
+                "{label}: truncated field"
+            )));
+        }
+        let out = buf[*i..*i + n].to_vec();
+        *i += n;
+        Ok(out)
+    };
+
+    let pk_len = read_u16(proof, &mut idx)? as usize;
+    let pk = read_bytes(proof, &mut idx, pk_len)?;
+    let sig_len = read_u16(proof, &mut idx)? as usize;
+    let sig = read_bytes(proof, &mut idx, sig_len)?;
+    if idx != proof.len() {
+        return Err(DsmError::invalid_parameter(format!(
+            "{label}: trailing bytes in embedded proof"
+        )));
+    }
+    Ok((pk, sig))
+}
+
+fn verify_mint_authorization_for_transition(
+    current_state: &State,
+    token_id: &str,
+    amount: u64,
+    authorized_by: &[u8],
+    proof: &[u8],
+) -> Result<(), DsmError> {
+    let (pk, sig) = parse_embedded_proof(proof, "mint_proof")?;
+    let policy_commit = crate::core::token::resolve_policy_commit(token_id)?;
+
+    let mut msg = b"mint|v2|".to_vec();
+    msg.extend_from_slice(authorized_by);
+    msg.extend_from_slice(token_id.as_bytes());
+    msg.extend_from_slice(&amount.to_le_bytes());
+    msg.extend_from_slice(&current_state.hash);
+
+    let msg_hash = crate::crypto::blake3::token_domain_hash(&policy_commit, "mint", &msg);
+    let verified = crate::crypto::sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)?;
+    if verified {
+        Ok(())
+    } else {
+        Err(DsmError::unauthorized(
+            "Invalid mint authorization proof",
+            None::<std::io::Error>,
+        ))
+    }
+}
+
+fn verify_burn_authorization_for_transition(
+    current_state: &State,
+    token_id: &str,
+    amount: u64,
+    proof: &[u8],
+) -> Result<(), DsmError> {
+    let (pk, sig) = parse_embedded_proof(proof, "burn_proof")?;
+
+    // The signed message binds the token owner's public key, but the signature
+    // is verified with `pk` taken from the (attacker-controlled) proof. Every
+    // byte of the message is public, so without binding `pk` to the owner key
+    // anyone could sign with their own keypair and pass. Fail closed unless the
+    // proof key IS the current owner key.
+    if pk.as_slice() != current_state.device_info.public_key.as_slice() {
+        return Err(DsmError::unauthorized(
+            "Burn proof public key does not match token owner",
+            None::<std::io::Error>,
+        ));
+    }
+
+    let policy_commit = crate::core::token::resolve_policy_commit(token_id)?;
+
+    let mut msg = b"burn|v2|".to_vec();
+    msg.extend_from_slice(token_id.as_bytes());
+    msg.extend_from_slice(current_state.device_info.public_key.as_slice());
+    msg.extend_from_slice(&amount.to_le_bytes());
+    msg.extend_from_slice(&current_state.hash);
+
+    let msg_hash = crate::crypto::blake3::token_domain_hash(&policy_commit, "burn", &msg);
+    let verified = crate::crypto::sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)?;
+    if verified {
+        Ok(())
+    } else {
+        Err(DsmError::unauthorized(
+            "Invalid burn authorization proof",
+            None::<std::io::Error>,
+        ))
+    }
 }
 
 /// Convert operations verification type to local verification type
@@ -1321,6 +1450,37 @@ mod tests {
         let mut state = create_test_state(seed);
         state.device_info.public_key = pk.clone();
         (state, pk, sk)
+    }
+
+    /// Regression: a burn proof carrying a public key that is NOT the current
+    /// token owner's key must be rejected before any signature work. Previously
+    /// the owner key was only bound into the signed *message* (all public
+    /// bytes) while verification used the attacker-supplied `pk`, so anyone
+    /// could sign with their own keypair and pass.
+    #[test]
+    fn burn_proof_with_non_owner_key_is_rejected() {
+        let (state, _owner_pk, _owner_sk) = create_test_state_with_keypair(7);
+        let (attacker_pk, _attacker_sk) =
+            generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
+        assert_ne!(
+            attacker_pk, state.device_info.public_key,
+            "attacker key must differ from owner key for this test"
+        );
+
+        // Well-formed embedded proof: [pk_len LE u16][pk][sig_len LE u16][sig].
+        // The signature is never reached — the owner-key guard fails first.
+        let dummy_sig = vec![0u8; 16];
+        let mut proof = Vec::new();
+        proof.extend_from_slice(&(attacker_pk.len() as u16).to_le_bytes());
+        proof.extend_from_slice(&attacker_pk);
+        proof.extend_from_slice(&(dummy_sig.len() as u16).to_le_bytes());
+        proof.extend_from_slice(&dummy_sig);
+
+        let result = verify_burn_authorization_for_transition(&state, "ERA", 50, &proof);
+        assert!(
+            result.is_err(),
+            "burn proof signed by a non-owner key must be rejected"
+        );
     }
 
     fn signed_transfer_op_amount(

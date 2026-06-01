@@ -587,9 +587,8 @@ pub async fn upsert_device_tree_state_if_monotonic(
     let new_version_i64 = i64::try_from(new_version)
         .map_err(|_| anyhow::anyhow!("version_number {new_version} does not fit in i64"))?;
     let device_count_i64 = i64::from(device_count);
-    let updated_at_tick_i64 = i64::try_from(updated_at_tick).map_err(|_| {
-        anyhow::anyhow!("updated_at_tick {updated_at_tick} does not fit in i64")
-    })?;
+    let updated_at_tick_i64 = i64::try_from(updated_at_tick)
+        .map_err(|_| anyhow::anyhow!("updated_at_tick {updated_at_tick} does not fit in i64"))?;
 
     let mut client = pool.get().await?;
     let tx = client
@@ -689,10 +688,7 @@ pub async fn get_device_tree_state_payload(
 /// Return only the current `version_number` for a genesis's persisted
 /// Device Tree state, or `None`. Used by tests asserting monotonic
 /// enforcement without re-decoding the full proto.
-pub async fn get_device_tree_state_version(
-    pool: &Pool,
-    genesis_b32: &str,
-) -> Result<Option<u64>> {
+pub async fn get_device_tree_state_version(pool: &Pool, genesis_b32: &str) -> Result<Option<u64>> {
     let client = pool.get().await?;
     let row = client
         .query_opt(
