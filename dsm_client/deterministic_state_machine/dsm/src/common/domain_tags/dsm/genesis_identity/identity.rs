@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: identity claim and label domains
 
 pub const TAG_DSM_IDENTITY_ANCHOR: &str = "DSM/identity/anchor";

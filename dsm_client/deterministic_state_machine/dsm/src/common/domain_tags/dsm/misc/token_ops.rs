@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: token and external operation domains
 
 pub const TAG_DSM_BTC_DEPOSIT_ID: &str = "DSM/btc-deposit-id";

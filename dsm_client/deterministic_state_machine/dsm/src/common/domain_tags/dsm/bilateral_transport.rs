@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: bilateral transport
 
 pub const TAG_DSM_B0X: &str = "DSM/b0x";

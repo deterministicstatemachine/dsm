@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: protocol/state domains
 
 pub const TAG_DSM_ANCHOR_TICK: &str = "DSM/anchor-tick";

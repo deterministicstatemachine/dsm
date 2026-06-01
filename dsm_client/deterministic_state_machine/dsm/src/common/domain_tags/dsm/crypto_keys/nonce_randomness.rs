@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: nonce and randomness domains
 
 pub const TAG_DSM_BTC_NONCE: &str = "DSM/btc-nonce";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Domain tag constants for BLAKE3 domain-separated hashing.
 //!
 //! The dsm_domain_hasher(tag) primitive appends the trailing NUL byte at
@@ -35,8 +37,8 @@ mod tests {
     fn all_tags_have_expected_prefixes() {
         for tag in all_tags() {
             assert!(
-                tag.starts_with("DSM/") || tag.starts_with("DJTE.") || tag == TAG_NOT_DSM,
-                "Tag {tag:?} must use DSM/ or DJTE. prefix (except TAG_NOT_DSM test sentinel)"
+                tag.starts_with("DSM/") || tag.starts_with("DJTE."),
+                "Tag {tag:?} must use DSM/ or DJTE. prefix"
             );
         }
     }

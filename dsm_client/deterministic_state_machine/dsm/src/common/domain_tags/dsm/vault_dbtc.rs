@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: vault dbtc
 
 pub const TAG_DSM_BITCOIN_ACCOUNT_ID: &str = "DSM/bitcoin-account-id";

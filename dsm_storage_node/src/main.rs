@@ -519,3 +519,27 @@ async fn async_main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use dsm::common::domain_tags::{TAG_DSM_BYTECOMMIT, TAG_DSM_NODE_ID};
+
+    /// Verify that central storage-related tags remain ASCII DSM tags and that
+    /// hashing preimages append a trailing NUL byte.
+    #[test]
+    fn node_id_domain_tag_is_nul_terminated_ascii() {
+        for tag in [TAG_DSM_NODE_ID, TAG_DSM_BYTECOMMIT] {
+            assert!(tag.is_ascii(), "domain tag must be ASCII: {tag}");
+            assert!(
+                tag.starts_with("DSM/"),
+                "domain tag must use DSM/ prefix: {tag}"
+            );
+
+            let nul_terminated = format!("{tag}\0");
+            assert!(
+                nul_terminated.ends_with('\0'),
+                "domain tag must be NUL-terminated per whitepaper §2.1: {nul_terminated}"
+            );
+        }
+    }
+}

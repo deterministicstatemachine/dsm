@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: compatibility aliases for test/tooling paths
 
 pub const TAG_DSM_TEST: &str = "DSM/test";
@@ -11,12 +13,9 @@ pub const TAG_DSM_TEST_NEXT_TIP: &str = "DSM/test-next-tip";
 pub const TAG_DSM_TEST_COMMIT: &str = "DSM/test-commit";
 pub const TAG_DSM_TEST_PARENT: &str = "DSM/test-parent";
 pub const TAG_DSM_TEST_CHILD: &str = "DSM/test-child";
-pub const TAG_DSM_PBT_VALID_STATE: &str = "DSM/pbt-valid-state";
 pub const TAG_DSM_BENCH: &str = "DSM/bench";
 pub const TAG_DSM_TRACE_GENESIS: &str = "DSM/trace-genesis";
 pub const TAG_DSM_TRACE_DEVICE: &str = "DSM/trace-device";
-pub const TAG_DSM_AB: &str = "DSM/ab";
-pub const TAG_DSM_ABC: &str = "DSM/abc";
 pub const TAG_DSM_TAG: &str = "DSM/tag";
 pub const TAG_DSM_TAG_A: &str = "DSM/tag-a";
 pub const TAG_DSM_TAG_B: &str = "DSM/tag-b";

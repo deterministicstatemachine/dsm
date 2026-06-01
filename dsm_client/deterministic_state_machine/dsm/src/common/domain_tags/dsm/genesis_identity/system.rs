@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: system and envelope identity domains
 
 pub const TAG_DSM_CONTACT_GENESIS: &str = "DSM/contact-genesis";

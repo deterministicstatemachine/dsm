@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: commitment and hash domains
 
 pub const TAG_DSM_BALANCE_COMMIT: &str = "DSM/balance-commit";

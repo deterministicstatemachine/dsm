@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM-prefixed domain tag constants grouped by protocol surface.
 
 mod bilateral_transport;

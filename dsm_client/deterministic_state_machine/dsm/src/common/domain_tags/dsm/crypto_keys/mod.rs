@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: crypto keys
 
 mod cdbrw;
@@ -28,8 +30,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_DBRW_COMMIT_COND,
     TAG_DSM_DBRW_COMMIT_RECUR,
     TAG_DSM_DBRW_COMMIT_TIMELOCK,
-    TAG_DSM_DBRW_RHO,
-    TAG_DSM_DBRW_STEP,
     TAG_DSM_DBRW_RWP_SEED,
     TAG_DSM_DBRW_RWP_STEP,
     TAG_DSM_DETERMINISTIC_NONCE_32,
@@ -43,7 +43,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_HASH_MULTIPLE,
     TAG_DSM_KYBER_COINS,
     TAG_DSM_KYBER_SS,
-    TAG_DSM_KYBER_STATIC,
     TAG_DSM_MERKLE_PATH,
     TAG_DSM_ML_KEM_KEYGEN_D,
     TAG_DSM_ML_KEM_KEYGEN_Z,

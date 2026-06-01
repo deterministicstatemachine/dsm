@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DJTE-prefixed domain tags
 //!
 //! Domain tags under the DJTE.* namespace used by deterministic emissions logic.

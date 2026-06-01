@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Core/common domain tags
 //!
 //! High-signal shared tags used broadly in core hashing primitives and identity/state wiring.
@@ -9,6 +11,8 @@ pub const TAG_DBRW: &str = "DSM/dbrw";
 pub const TAG_HASH_DATA: &str = "DSM/hash-data";
 pub const TAG_ENTITY_ID: &str = "DSM/entity-id";
 pub const TAG_DEVICE_ID: &str = "DSM/device-id";
+pub const TAG_DSM_NODE_ID: &str = "DSM/node-id";
+pub const TAG_DSM_BYTECOMMIT: &str = "DSM/bytecommit";
 pub const TAG_BILATERAL_SESSION: &str = "DSM/bilateral-session";
 pub const TAG_SMT_KEY: &str = "DSM/smt-key";
 pub const TAG_TIP: &str = "DSM/tip";
@@ -27,8 +31,6 @@ pub const TAG_DEV_LEAF: &str = "DSM/dev-leaf";
 pub const TAG_DEV_EMPTY: &str = "DSM/dev-empty";
 /// Canonical padding leaf for odd-count Merkle levels in the Device Tree.
 pub const TAG_DEV_PAD: &str = "DSM/dev-tree-pad";
-/// Deliberately invalid prefix used by negative tests.
-pub const TAG_NOT_DSM: &str = "not-dsm";
 
 #[cfg(test)]
 pub(super) const TAGS: &[&str] = &[
@@ -39,6 +41,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_HASH_DATA,
     TAG_ENTITY_ID,
     TAG_DEVICE_ID,
+    TAG_DSM_NODE_ID,
+    TAG_DSM_BYTECOMMIT,
     TAG_BILATERAL_SESSION,
     TAG_SMT_KEY,
     TAG_TIP,
@@ -52,5 +56,4 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DEV_LEAF,
     TAG_DEV_EMPTY,
     TAG_DEV_PAD,
-    TAG_NOT_DSM,
 ];

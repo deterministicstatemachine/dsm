@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: misc
 
 mod addressing;
@@ -40,7 +42,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_PROTOCOL_TRANSITION,
     TAG_DSM_RECEIPT,
     TAG_DSM_RECEIPT_BIND_SESSION,
-    TAG_DSM_RELKEY_V2,
     TAG_DSM_SILICON_FP_V4,
     TAG_DSM_SMT_PROOF,
     TAG_DSM_SPARSE_IDX,

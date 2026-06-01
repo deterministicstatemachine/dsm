@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: policy registry
 
 pub const TAG_DSM_CPTA: &str = "DSM/cpta";

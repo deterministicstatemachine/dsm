@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! DSM namespace tags: genesis lifecycle domains
 
 pub const TAG_DSM_GENESIS: &str = "DSM/genesis";

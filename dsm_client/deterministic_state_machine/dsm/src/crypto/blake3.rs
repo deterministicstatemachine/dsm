@@ -185,20 +185,24 @@ pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {
 mod tests_domain_hash {
     use super::*;
 
+    const TAG_DSM_AB_FIXTURE: &str = "DSM/ab";
+    const TAG_DSM_ABC_FIXTURE: &str = "DSM/abC";
+    const TAG_NOT_DSM_FIXTURE: &str = "not-dsm";
+
     #[test]
     fn domain_hash_includes_nul_terminator() {
         // Without a NUL, the two would be ambiguous in naive concatenation:
         // tag="DSM/ab", data="Cxyz"  vs tag="DSM/abC", data="xyz".
         // With NUL included, these MUST produce different digests.
-        let h1 = domain_hash(crate::common::domain_tags::TAG_DSM_AB, b"Cxyz");
-        let h2 = domain_hash(crate::common::domain_tags::TAG_DSM_ABC, b"xyz");
+        let h1 = domain_hash(TAG_DSM_AB_FIXTURE, b"Cxyz");
+        let h2 = domain_hash(TAG_DSM_ABC_FIXTURE, b"xyz");
         assert_ne!(h1.as_bytes(), h2.as_bytes());
     }
 
     #[test]
     #[should_panic(expected = "domain tag must start")]
     fn domain_hash_rejects_non_dsm_tag() {
-        let _ = domain_hash(crate::common::domain_tags::TAG_NOT_DSM, b"payload");
+        let _ = domain_hash(TAG_NOT_DSM_FIXTURE, b"payload");
     }
 }
 
