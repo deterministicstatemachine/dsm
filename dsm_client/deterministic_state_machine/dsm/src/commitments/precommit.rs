@@ -1503,9 +1503,9 @@ mod tests {
             build_invalidation_proof_bytes(fork_id, &fork_hash, &selected_fork_hash, tick);
         let digest = canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &canonical_bytes);
 
-        let mut signatures: SignerKeyMap = HashMap::new();
-        let mut public_keys: SignerKeyMap = HashMap::new();
-        let mut secret_keys: SignerKeyMap = HashMap::new();
+        let mut signatures: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut public_keys: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut secret_keys: HashMap<String, Vec<u8>> = HashMap::new();
 
         for id in signer_ids {
             let entropy = format!("DSM/test/{id}").into_bytes();
