@@ -169,7 +169,7 @@ prost-types = "0.14"
 criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"] }
 mockall = "0.14.0"
 tempfile = "3.10.0"
-test-log = { version = "0.2.20", features = ["trace"] }
+test-log = { version = "0.2.21", features = ["trace"] }
 proptest = "1.11.0"
 quickcheck = "1.0.3"
 rstest = "0.26.1"
