@@ -309,10 +309,7 @@ mod tests {
         succession.signature = sphincs_sign(&sk, &succession.succession_hash)?;
 
         let verified = verify_recovery_pair(&tombstone, &succession, &pk)?;
-        assert!(
-            verified,
-            "issue #187: equal-tick recovery pair must verify"
-        );
+        assert!(verified, "issue #187: equal-tick recovery pair must verify");
         Ok(())
     }
 
