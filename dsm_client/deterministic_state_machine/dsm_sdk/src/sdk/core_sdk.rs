@@ -14,6 +14,7 @@ use blake3::{hash, Hasher};
 use dsm::crypto::blake3 as dsm_blake3;
 use parking_lot::Mutex;
 use prost::Message;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
 use dsm::core::identity::genesis::create_genesis_via_blind_mpc_with_contributors;
@@ -573,6 +574,255 @@ impl CoreSDK {
             .await
     }
 
+    /// Register policy bytes while preserving an externally-authoritative
+    /// policy anchor (for example, a storage-layer `DSM/policy` commitment).
+    pub async fn register_token_policy_with_anchor(
+        &self,
+        token_id: &str,
+        policy_file: dsm::types::policy_types::PolicyFile,
+        anchor: [u8; 32],
+    ) -> Result<(), DsmError> {
+        self.policy_system
+            .register_token_policy_with_anchor(
+                token_id,
+                policy_file,
+                dsm::types::policy_types::PolicyAnchor::from_bytes(anchor),
+            )
+            .await
+    }
+
+    fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
+        std::str::from_utf8(token_id)
+            .ok()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    fn build_token_policy_context(
+        operation: &dsm::types::operations::Operation,
+        state_hash: [u8; 32],
+    ) -> Result<Option<(String, String, HashMap<String, Vec<u8>>)>, DsmError> {
+        let mut context = HashMap::new();
+        context.insert(
+            "tick".to_string(),
+            dsm::utils::deterministic_time::tick_index()
+                .to_le_bytes()
+                .to_vec(),
+        );
+        context.insert("state_hash".to_string(), state_hash.to_vec());
+
+        match operation {
+            DsmOperation::Transfer {
+                token_id,
+                amount,
+                recipient,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = amount.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("recipient".to_string(), recipient.clone());
+                Ok(Some((
+                    token_id.to_string(),
+                    "transfer".to_string(),
+                    context,
+                )))
+            }
+            DsmOperation::Mint {
+                token_id,
+                amount,
+                authorized_by,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = amount.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("authorized_by".to_string(), authorized_by.clone());
+                Ok(Some((token_id.to_string(), "mint".to_string(), context)))
+            }
+            DsmOperation::Burn {
+                token_id, amount, ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = amount.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                Ok(Some((token_id.to_string(), "burn".to_string(), context)))
+            }
+            DsmOperation::Lock {
+                token_id,
+                amount,
+                purpose,
+                owner,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = amount.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
+                context.insert("owner".to_string(), owner.clone());
+                Ok(Some((token_id.to_string(), "lock".to_string(), context)))
+            }
+            DsmOperation::Unlock {
+                token_id,
+                amount,
+                purpose,
+                owner,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = amount.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
+                context.insert("owner".to_string(), owner.clone());
+                Ok(Some((token_id.to_string(), "unlock".to_string(), context)))
+            }
+            DsmOperation::LockToken {
+                token_id,
+                amount,
+                purpose,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = u64::try_from(*amount).map_err(|_| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: LockToken amount must be non-negative",
+                    )
+                })?;
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
+                Ok(Some((token_id.to_string(), "lock".to_string(), context)))
+            }
+            DsmOperation::UnlockToken {
+                token_id,
+                amount,
+                purpose,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = u64::try_from(*amount).map_err(|_| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: UnlockToken amount must be non-negative",
+                    )
+                })?;
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                context.insert("purpose".to_string(), purpose.clone());
+                Ok(Some((token_id.to_string(), "unlock".to_string(), context)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn enforce_policy_for_operation(
+        &self,
+        operation: &dsm::types::operations::Operation,
+        state_hash: [u8; 32],
+    ) -> Result<(), DsmError> {
+        let Some((token_id, op_type, context)) =
+            Self::build_token_policy_context(operation, state_hash)?
+        else {
+            return Ok(());
+        };
+
+        let result = if tokio::runtime::Handle::try_current().is_ok() {
+            let policy_system = self.policy_system.clone();
+            let token_id_for_thread = token_id.clone();
+            let op_type_for_thread = op_type.clone();
+            let context_for_thread = context.clone();
+            let join_res = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        DsmError::internal(
+                            format!("Failed to build runtime for policy enforcement: {e}"),
+                            None::<std::convert::Infallible>,
+                        )
+                    })?;
+                rt.block_on(async {
+                    policy_system
+                        .enforce_policy(
+                            &token_id_for_thread,
+                            &op_type_for_thread,
+                            &context_for_thread,
+                        )
+                        .await
+                })
+            })
+            .join();
+
+            match join_res {
+                Ok(res) => res?,
+                Err(_) => {
+                    return Err(DsmError::internal(
+                        "Failed to join policy enforcement thread",
+                        None::<std::convert::Infallible>,
+                    ));
+                }
+            }
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    DsmError::internal(
+                        format!("Failed to build runtime for policy enforcement: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })?;
+
+            rt.block_on(async {
+                self.policy_system
+                    .enforce_policy(&token_id, &op_type, &context)
+                    .await
+            })?
+        };
+
+        if !result.allowed {
+            return Err(DsmError::policy_violation(
+                token_id,
+                result.reason,
+                None::<std::convert::Infallible>,
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
     ///
     /// Returns `(State, AdvanceOutcome)` where the `State` is a compatibility
@@ -588,6 +838,12 @@ impl CoreSDK {
         initial_chain_tip: Option<[u8; 32]>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         let mut sm = self.state_machine.lock();
+
+        // Enforce token policy constraints on the operation that will advance
+        // state. This closes the previous gap where registration existed but
+        // execution path skipped policy checks.
+        let current_state_hash = sm.device_head().map(|ds| ds.root()).unwrap_or([0u8; 32]);
+        self.enforce_policy_for_operation(&operation, current_state_hash)?;
 
         // Phase 4.1 fail-closed pattern (§4.3 acceptance, §6.1 single-writer):
         //   1. PREPARE — derive the AdvanceOutcome (pure; no head mutation).
