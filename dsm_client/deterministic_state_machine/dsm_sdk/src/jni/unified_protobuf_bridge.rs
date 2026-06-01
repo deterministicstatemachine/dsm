@@ -41,7 +41,6 @@
 //! and accepts/returns raw `jbyteArray` (prost-encoded protobuf). The
 //! `SDK_READY` atomic flag gates all post-bootstrap operations.
 
-
 use crate::generated as pb;
 use crate::jni::helpers;
 use jni::objects::{JByteArray, JString};
