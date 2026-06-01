@@ -12,6 +12,7 @@
 //! - Update frequency limits are expressed in ticks windows.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -308,6 +309,8 @@ pub struct PolicyManager {
     active_votes: Arc<RwLock<HashMap<String, PolicyVote>>>,
     auth_cache: Arc<RwLock<HashMap<String, AuthorizationEntry>>>,
     update_frequency: Arc<RwLock<HashMap<String, Vec<u64>>>>,
+    update_id_counter: AtomicU64,
+    vote_id_counter: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +328,8 @@ impl PolicyManager {
             active_votes: Arc::new(RwLock::new(HashMap::new())),
             auth_cache: Arc::new(RwLock::new(HashMap::new())),
             update_frequency: Arc::new(RwLock::new(HashMap::new())),
+            update_id_counter: AtomicU64::new(0),
+            vote_id_counter: AtomicU64::new(0),
         }
     }
 
@@ -421,8 +426,9 @@ impl PolicyManager {
         self.check_update_frequency(&request.token_id).await?;
 
         let new_anchor = PolicyAnchor::from_policy(&request.new_policy)?;
+        let update_id = self.generate_update_id(&request.token_id, &new_anchor, request.tick);
         let history_entry = PolicyUpdateHistory {
-            update_id: self.generate_update_id(),
+            update_id,
             token_id: request.token_id.clone(),
             previous_anchor: None,
             new_anchor: new_anchor.clone(),
@@ -556,7 +562,8 @@ impl PolicyManager {
         duration_ticks: u64,
         approval_threshold: f64,
     ) -> Result<String, DsmError> {
-        let vote_id = self.generate_vote_id();
+        let policy_anchor = PolicyAnchor::from_policy(&proposed_policy)?;
+        let vote_id = self.generate_vote_id(token_id, &policy_anchor);
         let t = now_tick();
 
         let vote = PolicyVote {
@@ -740,12 +747,47 @@ impl PolicyManager {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    fn generate_update_id(&self) -> String {
-        format!("update_{}", now_tick())
+    fn deterministic_policy_id(
+        &self,
+        id_domain: &str,
+        id_prefix: &str,
+        token_id: &str,
+        policy_anchor: &PolicyAnchor,
+        tick: u64,
+        nonce: u64,
+    ) -> String {
+        let mut material = Vec::with_capacity(token_id.len() + 32 + 16);
+        material.extend_from_slice(token_id.as_bytes());
+        material.extend_from_slice(policy_anchor.as_bytes());
+        material.extend_from_slice(&tick.to_le_bytes());
+        material.extend_from_slice(&nonce.to_le_bytes());
+        let digest = blake3::domain_hash(id_domain, &material);
+        let suffix = base32::encode(base32::Alphabet::Crockford, digest.as_bytes());
+        format!("{id_prefix}_{suffix}")
     }
 
-    fn generate_vote_id(&self) -> String {
-        format!("vote_{}", now_tick())
+    fn generate_update_id(&self, token_id: &str, new_anchor: &PolicyAnchor, tick: u64) -> String {
+        let nonce = self.update_id_counter.fetch_add(1, Ordering::Relaxed);
+        self.deterministic_policy_id(
+            "DSM/policy/update-id",
+            "update",
+            token_id,
+            new_anchor,
+            tick,
+            nonce,
+        )
+    }
+
+    fn generate_vote_id(&self, token_id: &str, policy_anchor: &PolicyAnchor) -> String {
+        let nonce = self.vote_id_counter.fetch_add(1, Ordering::Relaxed);
+        self.deterministic_policy_id(
+            "DSM/policy/vote-id",
+            "vote",
+            token_id,
+            policy_anchor,
+            now_tick(),
+            nonce,
+        )
     }
 
     fn check_vote_completion(&self, vote: &mut PolicyVote) {
@@ -815,5 +857,35 @@ mod tests {
 
         let result = manager.submit_policy_update(request).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_update_id_is_prefixed_and_unique() {
+        let manager = PolicyManager::new(PolicyManagerConfig::default());
+        let mut policy = PolicyFile::new("Test Policy", "1.0.0", "author");
+        policy.add_metadata("case", "update-id");
+        let anchor = PolicyAnchor::from_policy(&policy).expect("anchor should build");
+
+        let first = manager.generate_update_id("token-1", &anchor, 7);
+        let second = manager.generate_update_id("token-1", &anchor, 7);
+
+        assert!(first.starts_with("update_"));
+        assert!(second.starts_with("update_"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_generate_vote_id_is_prefixed_and_unique() {
+        let manager = PolicyManager::new(PolicyManagerConfig::default());
+        let mut policy = PolicyFile::new("Vote Policy", "1.0.0", "author");
+        policy.add_metadata("case", "vote-id");
+        let anchor = PolicyAnchor::from_policy(&policy).expect("anchor should build");
+
+        let first = manager.generate_vote_id("token-1", &anchor);
+        let second = manager.generate_vote_id("token-1", &anchor);
+
+        assert!(first.starts_with("vote_"));
+        assert!(second.starts_with("vote_"));
+        assert_ne!(first, second);
     }
 }

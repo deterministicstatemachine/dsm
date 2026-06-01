@@ -706,6 +706,11 @@ pub fn verify_token_balance_consistency(
         } => {
             let previous = token_balance_map_for_verification(previous_state, token_id);
             let current = token_balance_map_for_verification(current_state, token_id);
+            // Acceptance-predicate guard: if the transferred token is absent from both
+            // states, there is no debited sender leaf and no credited recipient leaf to
+            // prove under this transition. Allowing this case would admit a transfer op
+            // with no on-ledger token movement, which is indistinguishable from an
+            // unauthorized mint/burn bypass path at verification time.
             if previous.is_empty() && current.is_empty() {
                 return Ok(false);
             }
@@ -2194,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_token_balance_consistency_transfer_missing_token() {
+    fn test_verify_token_balance_consistency_transfer_missing_token_is_rejected() {
         let prev_state = create_test_state(1);
         let current_state = create_test_state(2);
 
@@ -2211,7 +2216,9 @@ mod tests {
 
         let result = verify_token_balance_consistency(&prev_state, &current_state, &transfer_op);
         assert!(result.is_ok());
-        // Should pass when token doesn't exist in either state
+        assert!(!result.unwrap_or_else(|e| panic!(
+            "missing token transfer must be rejected by balance consistency: {e}"
+        )));
     }
 
     #[test]
