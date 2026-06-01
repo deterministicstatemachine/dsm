@@ -20,6 +20,7 @@ use crate::types::{
     error::DsmError,
     policy_types::{PolicyAnchor, PolicyCondition, PolicyFile, PolicyRole, VaultCondition},
 };
+use crate::crypto::{blake3, sphincs};
 use crate::utils::deterministic_time as dt;
 
 #[inline]
@@ -451,6 +452,10 @@ impl PolicyManager {
         token_id: &str,
         authorization: &[u8],
     ) -> Result<(), DsmError> {
+        if authorization.is_empty() {
+            return Err(DsmError::invalid_parameter("Authorization cannot be empty"));
+        }
+
         {
             let auth_cache = self.auth_cache.read();
             if let Some(entry) = auth_cache.get(token_id) {
@@ -461,8 +466,47 @@ impl PolicyManager {
             }
         }
 
-        if authorization.is_empty() {
-            return Err(DsmError::invalid_parameter("Authorization cannot be empty"));
+        let mut idx: usize = 0;
+        let read_u16 = |buf: &[u8], i: &mut usize| -> Result<u16, DsmError> {
+            if *i + 2 > buf.len() {
+                return Err(DsmError::invalid_parameter(
+                    "authorization: truncated length field",
+                ));
+            }
+            let value = u16::from_le_bytes([buf[*i], buf[*i + 1]]);
+            *i += 2;
+            Ok(value)
+        };
+        let read_bytes = |buf: &[u8], i: &mut usize, n: usize| -> Result<Vec<u8>, DsmError> {
+            if *i + n > buf.len() {
+                return Err(DsmError::invalid_parameter(
+                    "authorization: truncated field",
+                ));
+            }
+            let out = buf[*i..*i + n].to_vec();
+            *i += n;
+            Ok(out)
+        };
+
+        let pk_len = read_u16(authorization, &mut idx)? as usize;
+        let pk = read_bytes(authorization, &mut idx, pk_len)?;
+        let sig_len = read_u16(authorization, &mut idx)? as usize;
+        let sig = read_bytes(authorization, &mut idx, sig_len)?;
+        if idx != authorization.len() {
+            return Err(DsmError::invalid_parameter(
+                "authorization: trailing bytes in proof payload",
+            ));
+        }
+
+        let mut msg = b"policy-update|v1|".to_vec();
+        msg.extend_from_slice(token_id.as_bytes());
+        let msg_hash = blake3::domain_hash("DSM/policy-update-auth-v1", &msg);
+        let verified = sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)?;
+        if !verified {
+            return Err(DsmError::unauthorized(
+                "Invalid policy update authorization proof",
+                None::<std::io::Error>,
+            ));
         }
 
         let t = now_tick();

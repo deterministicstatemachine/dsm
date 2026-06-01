@@ -87,11 +87,7 @@ impl DevTreeProof {
     /// are byte-identical for the same input.
     ///
     /// Returns the serialized proto bytes.
-    pub fn to_v1_proto_bytes(
-        &self,
-        device_id: &[u8; 32],
-        root_hash: &[u8; 32],
-    ) -> Vec<u8> {
+    pub fn to_v1_proto_bytes(&self, device_id: &[u8; 32], root_hash: &[u8; 32]) -> Vec<u8> {
         use prost::Message;
         let path_bits_len = self.path_bits.len();
         let packed_len = path_bits_len.div_ceil(8);
@@ -524,8 +520,7 @@ mod tests {
         let proof = tree.proof(&dev_b).expect("proof");
 
         let encoded = proof.to_v1_proto_bytes(&dev_b, &root);
-        let decoded =
-            DeviceInclusionProofV1::decode(encoded.as_slice()).expect("decode");
+        let decoded = DeviceInclusionProofV1::decode(encoded.as_slice()).expect("decode");
         assert_eq!(decoded.device_id, dev_b.to_vec());
         assert_eq!(decoded.root_hash, root.to_vec());
         assert_eq!(decoded.siblings.len(), proof.siblings.len());

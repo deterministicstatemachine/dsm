@@ -399,6 +399,12 @@ impl AppRouterImpl {
                 if req.policy_anchor.len() != 32 {
                     return err("token.create: policy_anchor must be 32 bytes".into());
                 }
+                let policy_anchor: [u8; 32] = match req.policy_anchor.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        return err("token.create: policy_anchor must be 32 bytes".into());
+                    }
+                };
 
                 let mut max_supply: u128 = 0;
                 for b in &req.max_supply_u128 {
@@ -406,18 +412,18 @@ impl AppRouterImpl {
                 }
 
                 let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/token-id");
-                id_hasher.update(&req.policy_anchor);
+                id_hasher.update(&policy_anchor);
                 id_hasher.update(ticker.as_bytes());
                 let token_id =
                     crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
 
-                let anchor_b32 = crate::util::text_id::encode_base32_crockford(&req.policy_anchor);
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(&policy_anchor);
                 let mut fields = HashMap::new();
                 fields.insert("max_supply".to_string(), max_supply.to_string());
                 fields.insert("policy_anchor".to_string(), anchor_b32.clone());
 
                 let parsed = self
-                    .load_policy_bytes(req.policy_anchor[..].try_into().unwrap_or([0u8; 32]))
+                    .load_policy_bytes(policy_anchor)
                     .await
                     .ok()
                     .flatten()
@@ -453,9 +459,8 @@ impl AppRouterImpl {
                     fields,
                 };
 
-                // Build a PolicyFile matching the parsed TLV so
-                // `PolicyAnchor::from_policy` produces the authoritative
-                // policy_commit used by every subsequent balance op.
+                // Build a PolicyFile matching parsed policy bytes, then bind it
+                // to the externally supplied policy_anchor commitment.
                 let policy_file = {
                     let transferable = parsed.as_ref().map(|p| p.transferable).unwrap_or(true);
                     let description = parsed.as_ref().and_then(|p| p.description.clone());
@@ -474,20 +479,16 @@ impl AppRouterImpl {
                     pf
                 };
 
-                // Register the policy with TokenPolicySystem so PolicyEnforcer
-                // (and resolve_policy_commit_strict) can bind policy_commit for
-                // every downstream op on this token_id.
-                let anchor = match self
+                // Register policy mapping using the explicit anchor from the
+                // request so token_id -> policy_commit remains stable.
+                if let Err(e) = self
                     .core_sdk
-                    .register_token_policy(&token_id, policy_file)
+                    .register_token_policy_with_anchor(&token_id, policy_file, policy_anchor)
                     .await
                 {
-                    Ok(a) => a,
-                    Err(e) => {
-                        return err(format!("token.create: register_token_policy failed: {e}"));
-                    }
-                };
-                let policy_commit: [u8; 32] = *anchor.as_bytes();
+                    return err(format!("token.create: register_token_policy failed: {e}"));
+                }
+                let policy_commit: [u8; 32] = policy_anchor;
 
                 // Cache authoritative TokenMetadata (no Generic shim op).
                 if let Err(e) = self
@@ -557,7 +558,7 @@ impl AppRouterImpl {
                 let resp = generated::TokenCreateResponse {
                     success: true,
                     token_id,
-                    policy_anchor: req.policy_anchor,
+                    policy_anchor: policy_anchor.to_vec(),
                     message: "Token created".to_string(),
                 };
                 pack_envelope_ok(generated::envelope::Payload::TokenCreateResponse(resp))

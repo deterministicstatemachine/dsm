@@ -131,9 +131,9 @@ impl DevTreeValidationError {
             }
             DevTreeValidationError::RootHashAllZeros => "root_hash must not be all zeros".into(),
             DevTreeValidationError::DeviceCountZero => "device_count must be >= 1".into(),
-            DevTreeValidationError::DeviceCountMismatch { declared, actual } => format!(
-                "device_count {declared} does not match device_ids.len() {actual}"
-            ),
+            DevTreeValidationError::DeviceCountMismatch { declared, actual } => {
+                format!("device_count {declared} does not match device_ids.len() {actual}")
+            }
             DevTreeValidationError::DeviceIdLength { index, actual } => {
                 format!("device_ids[{index}] must be 32 bytes, got {actual}")
             }
@@ -217,8 +217,8 @@ async fn put_root(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let genesis_b = dsm_sdk::util::text_id::decode_base32_crockford(&genesis)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let genesis_b =
+        dsm_sdk::util::text_id::decode_base32_crockford(&genesis).ok_or(StatusCode::BAD_REQUEST)?;
     if genesis_b.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -241,9 +241,7 @@ async fn put_root(
     let genesis_key = dsm_sdk::util::text_id::encode_base32_crockford(&genesis_b);
 
     // CHECK 4 (monotonic version) is enforced atomically here.
-    let now_tick = state
-        .current_tick
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let now_tick = state.current_tick.load(std::sync::atomic::Ordering::SeqCst);
     let outcome = crate::db::upsert_device_tree_state_if_monotonic(
         &state.db_pool,
         &genesis_key,
@@ -378,10 +376,7 @@ async fn get_proof(
 async fn put_proof_removed() -> impl IntoResponse {
     (
         StatusCode::METHOD_NOT_ALLOWED,
-        [(
-            axum::http::header::ALLOW,
-            HeaderValue::from_static("GET"),
-        )],
+        [(axum::http::header::ALLOW, HeaderValue::from_static("GET"))],
         "PUT /devtree/proof was removed in Phase B.5 (issue #276); \
          inclusion proofs are derived on GET from the persisted \
          DeviceTreeStateV1. See docs/plans/2026-04-24-genesis-mpc-and-device-tree.md.",
@@ -662,7 +657,8 @@ mod tests {
         let v = validate_devtree_state(&bytes).expect("well-formed state must validate");
         assert_eq!(v.version_number, 7);
         assert_eq!(v.device_count, 2);
-        let expected_root = dsm::common::device_tree::DeviceTree::new(vec![[0x11u8; 32], [0x22u8; 32]]).root();
+        let expected_root =
+            dsm::common::device_tree::DeviceTree::new(vec![[0x11u8; 32], [0x22u8; 32]]).root();
         assert_eq!(v.root_hash, expected_root);
     }
 
@@ -764,8 +760,7 @@ mod tests {
             device_ids: vec![vec![0x11u8; 32], vec![0x22u8; 31]], // second is 31 bytes
         };
         let bytes = state.encode_to_vec();
-        let err =
-            validate_devtree_state(&bytes).expect_err("wrong-length device_id must reject");
+        let err = validate_devtree_state(&bytes).expect_err("wrong-length device_id must reject");
         assert!(
             matches!(
                 err,
@@ -794,8 +789,14 @@ mod tests {
             DevTreeValidationError::RootHashLength { actual: 16 },
             DevTreeValidationError::RootHashAllZeros,
             DevTreeValidationError::DeviceCountZero,
-            DevTreeValidationError::DeviceCountMismatch { declared: 3, actual: 2 },
-            DevTreeValidationError::DeviceIdLength { index: 0, actual: 31 },
+            DevTreeValidationError::DeviceCountMismatch {
+                declared: 3,
+                actual: 2,
+            },
+            DevTreeValidationError::DeviceIdLength {
+                index: 0,
+                actual: 31,
+            },
         ] {
             assert_eq!(e.http_status(), StatusCode::BAD_REQUEST);
         }
@@ -890,8 +891,8 @@ mod tests {
 
         for d in &devs {
             let proof_bytes = derive_inclusion_proof(&payload, d).expect("proof");
-            let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
-                .expect("decode");
+            let proof =
+                generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice()).expect("decode");
             assert_eq!(
                 proof.siblings.len(),
                 2,
@@ -908,8 +909,8 @@ mod tests {
         let payload = state.encode_to_vec();
 
         let proof_bytes = derive_inclusion_proof(&payload, &dev_a).expect("proof");
-        let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
-            .expect("decode");
+        let proof =
+            generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice()).expect("decode");
         assert!(proof.siblings.is_empty());
         assert_eq!(proof.path_bits_len, 0);
         // single-leaf: root = hash_leaf(dev)
@@ -919,8 +920,8 @@ mod tests {
 
     #[test]
     fn proof_derivation_rejects_corrupt_state_bytes() {
-        let err = derive_inclusion_proof(b"garbage", &[0x11u8; 32])
-            .expect_err("corrupt state rejected");
+        let err =
+            derive_inclusion_proof(b"garbage", &[0x11u8; 32]).expect_err("corrupt state rejected");
         assert!(matches!(err, DevTreeProofError::CorruptState(_)));
         assert_eq!(err.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -932,8 +933,8 @@ mod tests {
             device_ids: vec![vec![0x11u8; 32]],
         };
         let payload = state.encode_to_vec();
-        let err = derive_inclusion_proof(&payload, &[0x11u8; 32])
-            .expect_err("missing tree rejected");
+        let err =
+            derive_inclusion_proof(&payload, &[0x11u8; 32]).expect_err("missing tree rejected");
         assert_eq!(err, DevTreeProofError::CorruptStateMissingTree);
     }
 
@@ -972,8 +973,8 @@ mod tests {
         let payload = state.encode_to_vec();
 
         let proof_bytes = derive_inclusion_proof(&payload, &dev_b).expect("proof");
-        let proof = generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice())
-            .expect("decode");
+        let proof =
+            generated::DeviceInclusionProofV1::decode(proof_bytes.as_slice()).expect("decode");
 
         let tree = dsm::common::device_tree::DeviceTree::new(vec![dev_a, dev_b, dev_c]);
         let dev_proof = tree.proof(&dev_b).expect("canonical proof");
