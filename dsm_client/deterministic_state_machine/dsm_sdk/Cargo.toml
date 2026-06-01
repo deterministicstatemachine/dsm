@@ -105,7 +105,7 @@ merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 
 subtle = "2.5.0"
-ff = "0.13.0"
+ff = "0.14.0"
 
 # Post-quantum cryptography (pqcrypto-mlkem used via smart_commitment_sdk)
 
