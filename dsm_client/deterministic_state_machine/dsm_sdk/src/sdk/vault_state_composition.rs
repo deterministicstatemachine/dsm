@@ -67,7 +67,8 @@ use prost::Message;
 
 use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::sdk::route_commit_sdk::{
-    external_commitment_key, external_commitment_rc_key, vault_pending_prefix,
+    compute_external_commitment, external_commitment_rc_key,
+    verify_route_commit_unlock_eligibility, vault_pending_prefix,
 };
 use crate::sdk::routing_path_sdk::constant_product_output;
 
@@ -336,12 +337,6 @@ pub(crate) async fn compose_vault_state(
             chain_skipped += 1;
             continue;
         }
-        // Confirm the X anchor exists.
-        let x_key = external_commitment_key(&ptr.x);
-        if BitcoinTapSdk::storage_get_bytes(&x_key).await.is_err() {
-            chain_skipped += 1;
-            continue;
-        }
         // Fetch the full signed RouteCommit paired with X.
         let rc_key = external_commitment_rc_key(&ptr.x);
         let rc_bytes = match BitcoinTapSdk::storage_get_bytes(&rc_key).await {
@@ -361,24 +356,21 @@ pub(crate) async fn compose_vault_state(
                 continue;
             }
         };
-        // Locate the hop touching this vault.  Walks primary hops then
-        // every fallback group; we accept the first match because each
-        // RouteCommit visits each vault at most once across all paths.
-        let hop_opt = rc
-            .hops
-            .iter()
-            .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
-            .or_else(|| {
-                rc.fallbacks.iter().find_map(|group| {
-                    group
-                        .hops
-                        .iter()
-                        .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
-                })
-            });
-        let hop = match hop_opt {
-            Some(h) => h,
-            None => {
+        // Bind pointer.x to the canonical RouteCommit commitment.
+        // Storage keys are untrusted labels, so we MUST recompute X
+        // from RouteCommit bytes and require exact equality.
+        let computed_x = compute_external_commitment(&rc);
+        if computed_x != ptr.x {
+            chain_skipped += 1;
+            continue;
+        }
+        // Enforce routed-unlock eligibility gate:
+        //   1) initiator SPHINCS+ signature valid over canonical RC bytes
+        //   2) this vault is present in the route
+        //   3) external commitment anchor for X is visible
+        let hop = match verify_route_commit_unlock_eligibility(&rc_bytes, vault_id).await {
+            Ok(h) => h,
+            Err(_) => {
                 chain_skipped += 1;
                 continue;
             }
@@ -610,7 +602,7 @@ mod tests {
             publisher_public_key: publisher_pk.to_vec(),
             label: "test".into(),
         };
-        let key = external_commitment_key(x);
+        let key = crate::sdk::route_commit_sdk::external_commitment_key(x);
         BitcoinTapSdk::storage_put_bytes(&key, &anchor.encode_to_vec())
             .await
             .expect("X publish");
@@ -618,13 +610,14 @@ mod tests {
 
     /// Publish a `RouteCommitV1` with a single AMM hop touching
     /// `vault_id` at `sofi/extcommit-rc/{X_b32}`.  Returns the swap's
-    /// post-trade reserves so callers can assert on what the composer
-    /// will derive.  The hop's `vault_state_reserves_digest` is bound
+    /// post-trade reserves plus the canonical commitment `X` so callers
+    /// can publish matching anchors/pointers.  The hop's
+    /// `vault_state_reserves_digest` is bound
     /// to the supplied parent reserves so the composer's
     /// cursor-vs-hop digest check passes.
     #[allow(clippy::too_many_arguments)]
     async fn publish_rc_for_swap(
-        x: &[u8; 32],
+        nonce_seed: &[u8; 32],
         vault_id: &[u8; 32],
         token_a: &[u8],
         token_b: &[u8],
@@ -634,7 +627,9 @@ mod tests {
         parent_sequence: u64,
         input_is_a: bool,
         input_amount: u128,
-    ) -> (u128, u128) {
+        trader_pk: &[u8],
+        trader_sk: &[u8],
+    ) -> (u128, u128, [u8; 32]) {
         // Reserves cursor logic mirrors compose_vault_state.
         let (reserve_in, reserve_out) = if input_is_a {
             (parent_reserve_a, parent_reserve_b)
@@ -693,23 +688,29 @@ mod tests {
         };
         let rc = generated::RouteCommitV1 {
             version: 1,
-            nonce: x.to_vec(), // any non-zero 32 bytes; not verified here
+            nonce: nonce_seed.to_vec(),
             input_token: token_a.to_vec(),
             output_token: token_b.to_vec(),
             input_amount_u128: input_amount.to_be_bytes().to_vec(),
             expected_final_output_amount_u128: simulated.to_be_bytes().to_vec(),
             total_fee_bps: fee_bps as u64,
             hops: vec![hop],
-            initiator_public_key: Vec::new(),
+            initiator_public_key: trader_pk.to_vec(),
             initiator_signature: Vec::new(),
             floor_final_output_amount_u128: Vec::new(),
             fallbacks: Vec::new(),
         };
-        let rc_key = crate::sdk::route_commit_sdk::external_commitment_rc_key(x);
-        BitcoinTapSdk::storage_put_bytes(&rc_key, &rc.encode_to_vec())
+        let canonical_bytes = rc.encode_to_vec();
+        let sig = dsm::crypto::sphincs::sphincs_sign(trader_sk, &canonical_bytes)
+            .expect("sign route commit");
+        let mut signed_rc = rc;
+        signed_rc.initiator_signature = sig;
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&signed_rc);
+        let rc_key = crate::sdk::route_commit_sdk::external_commitment_rc_key(&x);
+        BitcoinTapSdk::storage_put_bytes(&rc_key, &signed_rc.encode_to_vec())
             .await
-            .expect("RC publish");
-        (new_a, new_b)
+            .expect("signed RC publish");
+        (new_a, new_b, x)
     }
 
     async fn publish_pointer(
@@ -752,7 +753,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     async fn publish_trade(
         vault_id: &[u8; 32],
-        x: &[u8; 32],
+        nonce_seed: &[u8; 32],
         token_a: &[u8],
         token_b: &[u8],
         parent_reserve_a: u128,
@@ -764,9 +765,8 @@ mod tests {
         trader_pk: &[u8],
         trader_sk: &[u8],
     ) -> (u128, u128) {
-        publish_extcommit(x, trader_pk).await;
-        let (new_a, new_b) = publish_rc_for_swap(
-            x,
+        let (new_a, new_b, x) = publish_rc_for_swap(
+            nonce_seed,
             vault_id,
             token_a,
             token_b,
@@ -776,14 +776,17 @@ mod tests {
             parent_sequence,
             input_is_a,
             input_amount,
+            trader_pk,
+            trader_sk,
         )
         .await;
+        publish_extcommit(&x, trader_pk).await;
         publish_pointer(
             vault_id,
             parent_sequence,
             parent_sequence + 1,
-            x,
-            &marker_digest(x, 0),
+            &x,
+            &marker_digest(&x, 0),
             trader_pk,
             trader_sk,
         )
@@ -1139,16 +1142,25 @@ mod tests {
             &owner.secret_key,
         )
         .await;
-        let x = x_seed(0x71);
+        let nonce_seed = x_seed(0x71);
         // Build the RC with WRONG parent reserves (777, 888 instead of
         // the real 1_000_000, 500_000).
-        publish_extcommit(&x, &trader.public_key).await;
-        publish_rc_for_swap(
-            &x, &vault_id, b"AAA", b"BBB", 777, // wrong parent_reserve_a
+        let (_, _, x) = publish_rc_for_swap(
+            &nonce_seed,
+            &vault_id,
+            b"AAA",
+            b"BBB",
+            777, // wrong parent_reserve_a
             888, // wrong parent_reserve_b
-            30, 0, true, 10,
+            30,
+            0,
+            true,
+            10,
+            &trader.public_key,
+            &trader.secret_key,
         )
         .await;
+        publish_extcommit(&x, &trader.public_key).await;
         publish_pointer(
             &vault_id,
             0,
@@ -1159,6 +1171,86 @@ mod tests {
             &trader.secret_key,
         )
         .await;
+        let composed = compose_vault_state(
+            &vault_id,
+            &baseline,
+            (1_000_000, 500_000),
+            b"AAA",
+            b"BBB",
+            30,
+        )
+        .await
+        .expect("compose succeeds");
+        assert_eq!(composed.sequence, 0);
+        assert_eq!(composed.reserves_a, 1_000_000);
+        assert_eq!(composed.reserves_b, 500_000);
+        assert_eq!(composed.pending_chain_len, 0);
+        assert_eq!(composed.pending_chain_skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_pointer_when_route_commit_x_mismatches_pointer_x() {
+        let vault_id = vid_seed(0x18);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            b"AAA",
+            b"BBB",
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+
+        // Publish a valid signed RouteCommit and obtain its canonical X.
+        let nonce_seed = x_seed(0x81);
+        let (_, _, canonical_x) = publish_rc_for_swap(
+            &nonce_seed,
+            &vault_id,
+            b"AAA",
+            b"BBB",
+            1_000_000,
+            500_000,
+            30,
+            0,
+            true,
+            1_000,
+            &trader.public_key,
+            &trader.secret_key,
+        )
+        .await;
+
+        // Copy the same RC bytes under a different storage key to simulate
+        // storage-key spoofing (keys are untrusted labels).
+        let spoofed_x = x_seed(0x82);
+        let canonical_key = external_commitment_rc_key(&canonical_x);
+        let spoofed_key = external_commitment_rc_key(&spoofed_x);
+        let rc_bytes = BitcoinTapSdk::storage_get_bytes(&canonical_key)
+            .await
+            .expect("fetch canonical rc");
+        BitcoinTapSdk::storage_put_bytes(&spoofed_key, &rc_bytes)
+            .await
+            .expect("publish spoofed rc");
+
+        // Make both anchors visible; eligibility-by-signature alone would pass,
+        // so only pointer.x ↔ canonical X binding should reject folding.
+        publish_extcommit(&canonical_x, &trader.public_key).await;
+        publish_extcommit(&spoofed_x, &trader.public_key).await;
+        publish_pointer(
+            &vault_id,
+            0,
+            1,
+            &spoofed_x,
+            &marker_digest(&spoofed_x, 0),
+            &trader.public_key,
+            &trader.secret_key,
+        )
+        .await;
+
         let composed = compose_vault_state(
             &vault_id,
             &baseline,
