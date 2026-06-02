@@ -31,18 +31,19 @@ The null byte (`\0`) terminates the domain tag, preventing prefix collisions.
 
 ### Domain Tags
 
-| Domain Tag         | Usage                                  |
-| ------------------ | -------------------------------------- |
-| `DSM/commit\0`     | State commit hashing                   |
-| `DSM/bilateral\0`  | Bilateral transaction hashing          |
-| `DSM/token\0`      | Token operation hashing                |
-| `DSM/cdbrw/bind\0` | C-DBRW binding key (canonical 4-input) |
-| `DSM/cpta\0`       | Content-Addressed Token Policy Anchor  |
-| `DSM/dlv-unlock\0` | DLV vault unlock key derivation        |
-| `DSM/assign\0`     | Storage node assignment                |
-| `DSM/smt\0`        | Sparse Merkle Tree node hashing        |
-| `DSM/device\0`     | Device identity derivation             |
-| `DSM/recovery\0`   | Recovery capsule hashing               |
+| Domain Tag             | Usage                                         |
+| ---------------------- | --------------------------------------------- |
+| `DSM/commit\0`         | State commit hashing                          |
+| `DSM/bilateral-sign\0` | Bilateral signature message domain separation |
+| `DSM/bilateral\0`      | Bilateral transaction hashing                 |
+| `DSM/token\0`          | Token operation hashing                       |
+| `DSM/cdbrw/bind\0`     | C-DBRW binding key (canonical 4-input)        |
+| `DSM/cpta\0`           | Content-Addressed Token Policy Anchor         |
+| `DSM/dlv-unlock\0`     | DLV vault unlock key derivation               |
+| `DSM/assign\0`         | Storage node assignment                       |
+| `DSM/smt\0`            | Sparse Merkle Tree node hashing               |
+| `DSM/device\0`         | Device identity derivation                    |
+| `DSM/recovery\0`       | Recovery capsule hashing                      |
 
 All domain tags are defined in `common/domain_tags/mod.rs` (with submodules under `common/domain_tags/`) and referenced throughout the core crate. Adding a new hashing context requires defining a new domain tag — never reuse existing tags.
 

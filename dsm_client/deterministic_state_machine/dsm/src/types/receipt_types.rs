@@ -16,6 +16,7 @@
 use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 use crate::types::error::DsmError;
 use std::collections::HashMap;
+use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 
 /// Canonical Stitched Receipt V2
 ///

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
 use dsm::core::identity::genesis::create_genesis_via_blind_mpc_with_contributors;
-use dsm::core::identity::genesis_mpc::generate_device_entropy;
+use dsm::core::identity::genesis_session::generate_device_entropy;
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;

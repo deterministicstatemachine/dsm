@@ -38,7 +38,7 @@ use crate::sdk::storage_node_sdk::StorageNodeSDK;
 #[cfg(feature = "storage")]
 use crate::sdk::genesis_publisher::SdkGenesisPublisher;
 #[cfg(feature = "storage")]
-use dsm::core::identity::genesis_mpc::{GenesisPublisher, SanitizedGenesisPayload};
+use dsm::core::identity::genesis_session::{GenesisPublisher, SanitizedGenesisPayload};
 use crate::util::text_id;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
