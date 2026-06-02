@@ -11,7 +11,7 @@
 //! - [`identifiers`] — Type-safe wrappers: [`NodeId`], [`VaultId`], [`SessionId`], [`TransactionId`], etc.
 //! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`], [`IdOps`], [`SmartCommitOps`]
 //! - [`identity`] — [`IdentityAnchor`] and [`IdentityClaim`] for device identity
-//! - [`genesis_types`] — Genesis state and MPC genesis artifacts
+//! - [`genesis_types`] — Canonical genesis hash `G` (§2.5) and the contribution type
 //! - [`policy_types`] — [`TokenPolicy`], [`PolicyAnchor`], [`PolicyFile`] for CPTA
 //! - [`receipt_types`] — Stitched receipts and verification contexts
 //! - [`contact_types`] — Verified contact information
