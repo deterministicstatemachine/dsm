@@ -1166,6 +1166,47 @@ impl BilateralTransactionManager {
         Ok(true)
     }
 
+    fn verify_receiver_acceptance_proof(
+        &self,
+        remote_device_id: &[u8; 32],
+        pre_commitment_hash: &[u8; 32],
+        receiver_acceptance_proof: &[u8],
+    ) -> Result<(), DsmError> {
+        if receiver_acceptance_proof.is_empty() {
+            return Err(DsmError::InvalidOperation(
+                "receiver acceptance proof required".into(),
+            ));
+        }
+
+        let counterparty_pubkey = self
+            .contact_manager
+            .get_contact(remote_device_id)
+            .ok_or_else(|| DsmError::InvalidOperation("missing counterparty contact".into()))?
+            .public_key
+            .clone();
+
+        let mut signature_msg = Vec::with_capacity(22 + 32);
+        signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
+        signature_msg.extend_from_slice(pre_commitment_hash);
+
+        let valid = SignatureKeyPair::verify_raw(
+            &signature_msg,
+            receiver_acceptance_proof,
+            &counterparty_pubkey,
+        )
+        .map_err(|e| {
+            DsmError::InvalidOperation(format!("receiver acceptance proof verification error: {e}"))
+        })?;
+
+        if !valid {
+            return Err(DsmError::InvalidOperation(
+                "invalid receiver acceptance proof signature".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     pub async fn prepare_offline_transfer(
         &mut self,
         remote_device_id: &[u8; 32],
@@ -1363,11 +1404,11 @@ impl BilateralTransactionManager {
                 DsmError::InvalidOperation("pre-commitment not found or expired".into())
             })?
             .clone();
-        if receiver_acceptance_proof.is_empty() {
-            return Err(DsmError::InvalidOperation(
-                "receiver acceptance proof required".into(),
-            ));
-        }
+        self.verify_receiver_acceptance_proof(
+            remote_device_id,
+            pre_commitment_hash,
+            receiver_acceptance_proof,
+        )?;
         let mut anchor = self
             .relationships
             .get(remote_device_id)

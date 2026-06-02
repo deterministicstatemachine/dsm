@@ -34,6 +34,7 @@ The null byte (`\0`) terminates the domain tag, preventing prefix collisions.
 | Domain Tag | Usage |
 |-----------|-------|
 | `DSM/commit\0` | State commit hashing |
+| `DSM/bilateral-sign\0` | Bilateral signature message domain separation |
 | `DSM/bilateral\0` | Bilateral transaction hashing |
 | `DSM/token\0` | Token operation hashing |
 | `DSM/cdbrw/bind\0` | C-DBRW binding key (canonical 4-input) |
