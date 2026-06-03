@@ -782,7 +782,6 @@ impl WalletSDK {
         })
     }
 
-    /// Return the canonical C-DBRW-derived signing keypair used by wallet operations.
     /// Return the local Kyber/ML-KEM public key used for vault content encryption.
     pub fn get_kyber_public_key(&self) -> Result<Vec<u8>, DsmError> {
         if *self.locked.read() {
