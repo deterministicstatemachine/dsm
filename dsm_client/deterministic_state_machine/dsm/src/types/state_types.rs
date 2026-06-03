@@ -1161,6 +1161,18 @@ mod tests {
     }
 
     #[test]
+    fn serializable_merkle_proof_trailing_bytes_rejected() {
+        let root = vec![1, 2, 3, 4, 5];
+        let proof = vec![vec![10, 20], vec![30, 40, 50]];
+        let smp = SerializableMerkleProof::new(root, proof);
+        let mut bytes = smp.serialize();
+        // Exact bytes decode fine; trailing bytes are non-canonical (issue #450).
+        assert!(SerializableMerkleProof::from_bytes(&bytes).is_some());
+        bytes.push(0x00);
+        assert!(SerializableMerkleProof::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
     fn serializable_merkle_proof_verify_valid_path() {
         use crate::crypto::blake3::dsm_domain_hasher;
 
@@ -1533,6 +1545,11 @@ impl SerializableMerkleProof {
             crate::common::domain_tags::TAG_DSM_PROOF_ROOT,
             &root,
         ));
+        // Canonical decode requires full byte exhaustion: reject trailing bytes
+        // so a proof has exactly one byte encoding. (issue #450)
+        if off != data.len() {
+            return None;
+        }
         Some(Self {
             root,
             proof,
