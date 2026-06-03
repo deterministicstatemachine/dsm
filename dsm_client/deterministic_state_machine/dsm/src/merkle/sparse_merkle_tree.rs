@@ -331,6 +331,14 @@ impl SparseMerkleTree {
             None => return false,
         };
 
+        // The SMT is fixed-depth (256 levels), so a valid inclusion proof has at
+        // most 256 siblings. Reject longer proofs up front: otherwise `255 - i`
+        // underflows at i == 256 (debug panic; release wraparound → out-of-bounds
+        // `get_bit` panic), turning an over-long peer-supplied proof into a crash.
+        if proof.siblings.len() > 256 {
+            return false;
+        }
+
         let mut current_hash = hash_smt_leaf(&value);
 
         // Siblings are leaf-to-root order: sibling[0] is at the deepest level (255),
