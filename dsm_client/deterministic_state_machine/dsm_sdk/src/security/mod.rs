@@ -12,13 +12,4 @@ pub mod cdbrw_ffi;
 pub mod cdbrw_reprove;
 pub mod cdbrw_responder;
 pub mod cdbrw_verifier;
-pub mod identity;
 pub mod modal_sync_lock;
-pub mod offline_security;
-pub mod wal_transaction_queue;
-
-pub use offline_security::{
-    DeviceMasterKey, EncryptedAppState, EncryptedTransaction, OfflineTransactionQueue,
-    SecureAppState, SensitiveAppData,
-};
-pub use wal_transaction_queue::WalTransactionQueue;
