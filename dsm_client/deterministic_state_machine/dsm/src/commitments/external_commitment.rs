@@ -104,7 +104,7 @@ impl ExternalCommitmentVerifier for DefaultExternalCommitmentVerifier {
 
 /// Canonical source id for external commitments
 pub fn external_source_id(source: &str) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/external-source-id");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_EXTERNAL_SOURCE_ID);
     hasher.update(source.as_bytes());
     *hasher.finalize().as_bytes()
 }
@@ -114,7 +114,7 @@ pub fn external_evidence_hash(evidence: &[u8]) -> [u8; 32] {
     if evidence.is_empty() {
         return [0u8; 32];
     }
-    let mut hasher = dsm_domain_hasher("DSM/external-evidence");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_EXTERNAL_EVIDENCE);
     hasher.update(evidence);
     *hasher.finalize().as_bytes()
 }
@@ -132,7 +132,7 @@ pub fn create_external_commitment(
     source_id: &[u8; 32],
     evidence_hash: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/external-commit-id");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_EXTERNAL_COMMIT_ID);
     hasher.update(source_id);
     hasher.update(payload);
     hasher.update(evidence_hash);

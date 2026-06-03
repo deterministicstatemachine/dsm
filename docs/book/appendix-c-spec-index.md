@@ -8,17 +8,17 @@ Index into the public, repository-owned protocol references.
 
 Open-source contributors should treat the following repository-owned files as the public authoritative surface:
 
-| Source | File | Scope |
-|------|------|-------|
-| DSM Primitive Paper | `docs/papers/dsm_primitive.pdf` | Primitive boundary, closure rule, acceptance surface, composition limits |
-| Protocol Reference | `docs/book/05-protocol-reference.md` | Wire format, bridge protocol, JNI and transport-facing interfaces |
-| Proto Schema | `proto/dsm_app.proto` | Envelope v3, protobuf messages, field-level wire contract |
-| Storage Nodes | `docs/book/07-storage-nodes.md` | Storage-node design, local dev topology, deploy model |
-| Bitcoin and dBTC | `docs/book/08-bitcoin-dbtc.md` | Signet-backed Bitcoin integration and bridge flow |
-| Testing and CI | `docs/book/10-testing-and-ci.md` | CI surfaces, validation passes, enforcement points |
-| Integration Guide | `docs/book/11-integration-guide.md` | Extension workflow, client integration, spec-first process |
-| Security Model | `docs/book/15-security-model.md` | Trust boundaries, attacker model, protocol guarantees |
-| Hard Invariants | `docs/book/appendix-b-hard-invariants.md` | Non-negotiable protocol and implementation constraints |
+| Source              | File                                      | Scope                                                                    |
+| ------------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
+| DSM Primitive Paper | `docs/papers/dsm_primitive.pdf`           | Primitive boundary, closure rule, acceptance surface, composition limits |
+| Protocol Reference  | `docs/book/05-protocol-reference.md`      | Wire format, bridge protocol, JNI and transport-facing interfaces        |
+| Proto Schema        | `proto/dsm_app.proto`                     | Envelope v3, protobuf messages, field-level wire contract                |
+| Storage Nodes       | `docs/book/07-storage-nodes.md`           | Storage-node design, local dev topology, deploy model                    |
+| Bitcoin and dBTC    | `docs/book/08-bitcoin-dbtc.md`            | Signet-backed Bitcoin integration and bridge flow                        |
+| Testing and CI      | `docs/book/10-testing-and-ci.md`          | CI surfaces, validation passes, enforcement points                       |
+| Integration Guide   | `docs/book/11-integration-guide.md`       | Extension workflow, client integration, spec-first process               |
+| Security Model      | `docs/book/15-security-model.md`          | Trust boundaries, attacker model, protocol guarantees                    |
+| Hard Invariants     | `docs/book/appendix-b-hard-invariants.md` | Non-negotiable protocol and implementation constraints                   |
 
 ## Notes
 
@@ -82,7 +82,7 @@ Every feature maps to an authoritative spec and code modules across all layers.
 ### BLAKE3 Domain Separation
 
 - **Source:** `docs/book/appendix-b-hard-invariants.md`, `docs/book/15-security-model.md`
-- **Core:** `crypto/blake3.rs`, `crypto/hash.rs`, `common/domain_tags.rs`
+- **Core:** `crypto/blake3.rs`, `crypto/hash.rs`, `common/domain_tags/mod.rs` (module tree under `common/domain_tags/`)
 
 ### SPHINCS+ Signatures
 
@@ -161,11 +161,11 @@ Every feature maps to an authoritative spec and code modules across all layers.
 
 Each layer has its own CLAUDE.md with layer-specific conventions:
 
-| Layer | File | Scope |
-|-------|------|-------|
-| Rust | `dsm_client/deterministic_state_machine/CLAUDE.md` | Core logic, SDK, JNI, BLE, crypto |
-| Android | `dsm_client/android/CLAUDE.md` | Kotlin, JNI, BLE actor, DBRW gate, WebView bridge |
-| Frontend | `dsm_client/frontend/CLAUDE.md` | React UI, bridge protocol, contexts, services |
+| Layer    | File                                               | Scope                                             |
+| -------- | -------------------------------------------------- | ------------------------------------------------- |
+| Rust     | `dsm_client/deterministic_state_machine/CLAUDE.md` | Core logic, SDK, JNI, BLE, crypto                 |
+| Android  | `dsm_client/android/CLAUDE.md`                     | Kotlin, JNI, BLE actor, DBRW gate, WebView bridge |
+| Frontend | `dsm_client/frontend/CLAUDE.md`                    | React UI, bridge protocol, contexts, services     |
 
 For cross-layer changes, consult all relevant CLAUDE.md files.
 

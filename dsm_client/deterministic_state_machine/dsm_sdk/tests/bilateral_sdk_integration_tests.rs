@@ -213,8 +213,10 @@ async fn biimpl_prepare_computes_deterministic_commitment() {
     // Non-Android prepare uses a domain-separated deterministic commitment over
     // the raw operation bytes. Plain `blake3::hash` would violate DSM's
     // domain-separation invariant.
-    let expected_commitment =
-        dsm::crypto::blake3::domain_hash("DSM/bilateral-op-commit", &operation_data);
+    let expected_commitment = dsm::crypto::blake3::domain_hash(
+        dsm::common::domain_tags::TAG_DSM_BILATERAL_OP_COMMIT,
+        &operation_data,
+    );
     assert_eq!(
         first_resp
             .commitment_hash

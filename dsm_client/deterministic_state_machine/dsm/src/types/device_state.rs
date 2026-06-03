@@ -25,6 +25,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::common::domain_tags::TAG_STATE_HASH;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::merkle::sparse_merkle_tree::{SmtReplaceResult, SparseMerkleTree};
 use crate::types::error::DsmError;
@@ -177,7 +178,7 @@ impl RelationshipChainState {
     /// Signatures are NOT hashed — they sign this digest, not the other
     /// way around.
     pub fn compute_chain_tip(&self) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/state-hash");
+        let mut hasher = dsm_domain_hasher(TAG_STATE_HASH);
 
         hasher.update(&self.rel_key);
         hasher.update(&self.embedded_parent);
@@ -687,7 +688,9 @@ mod tests {
     }
 
     fn entropy(seed: u8) -> Vec<u8> {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/test-entropy");
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_TEST_ENTROPY,
+        );
         h.update(&[seed]);
         h.finalize().as_bytes().to_vec()
     }

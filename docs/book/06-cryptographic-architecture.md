@@ -6,16 +6,16 @@ DSM's post-quantum cryptographic stack for contributors and integrators.
 
 ## Cryptographic Stack Overview
 
-| Primitive | Algorithm | Usage | Source |
-|-----------|-----------|-------|--------|
-| Hashing | BLAKE3-256 | All protocol hashing, domain-separated | `crypto/blake3.rs`, `crypto/hash.rs` |
-| Signatures | SPHINCS+ | Post-quantum digital signatures (EUF-CMA) | `crypto/sphincs.rs` |
-| Key Exchange | ML-KEM-768 (Kyber) | Post-quantum key encapsulation | `crypto/kyber.rs` |
-| Anti-Cloning | DBRW | Dual-factor: silicon fingerprint + env binding | `crypto/dbrw.rs` |
-| Commitments | Salted BLAKE3 | Hiding + binding commitments via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` | `crypto/blake3.rs` (primitive); per-use call sites |
-| Storage Encryption | ChaCha20-Poly1305 | At-rest encryption | — |
-| Key Derivation | BLAKE3 keyed | Domain-separated KDF | Per-use domain |
-| Policy Anchors | CPTA | Token policy content addressing | `cpta/mod.rs` |
+| Primitive          | Algorithm          | Usage                                                                                 | Source                                             |
+| ------------------ | ------------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Hashing            | BLAKE3-256         | All protocol hashing, domain-separated                                                | `crypto/blake3.rs`, `crypto/hash.rs`               |
+| Signatures         | SPHINCS+           | Post-quantum digital signatures (EUF-CMA)                                             | `crypto/sphincs.rs`                                |
+| Key Exchange       | ML-KEM-768 (Kyber) | Post-quantum key encapsulation                                                        | `crypto/kyber.rs`                                  |
+| Anti-Cloning       | DBRW               | Dual-factor: silicon fingerprint + env binding                                        | `crypto/dbrw.rs`                                   |
+| Commitments        | Salted BLAKE3      | Hiding + binding commitments via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` | `crypto/blake3.rs` (primitive); per-use call sites |
+| Storage Encryption | ChaCha20-Poly1305  | At-rest encryption                                                                    | —                                                  |
+| Key Derivation     | BLAKE3 keyed       | Domain-separated KDF                                                                  | Per-use domain                                     |
+| Policy Anchors     | CPTA               | Token policy content addressing                                                       | `cpta/mod.rs`                                      |
 
 ---
 
@@ -31,21 +31,21 @@ The null byte (`\0`) terminates the domain tag, preventing prefix collisions.
 
 ### Domain Tags
 
-| Domain Tag | Usage |
-|-----------|-------|
-| `DSM/commit\0` | State commit hashing |
+| Domain Tag             | Usage                                         |
+| ---------------------- | --------------------------------------------- |
+| `DSM/commit\0`         | State commit hashing                          |
 | `DSM/bilateral-sign\0` | Bilateral signature message domain separation |
-| `DSM/bilateral\0` | Bilateral transaction hashing |
-| `DSM/token\0` | Token operation hashing |
-| `DSM/cdbrw/bind\0` | C-DBRW binding key (canonical 4-input) |
-| `DSM/cpta\0` | Content-Addressed Token Policy Anchor |
-| `DSM/dlv-unlock\0` | DLV vault unlock key derivation |
-| `DSM/assign\0` | Storage node assignment |
-| `DSM/smt\0` | Sparse Merkle Tree node hashing |
-| `DSM/device\0` | Device identity derivation |
-| `DSM/recovery\0` | Recovery capsule hashing |
+| `DSM/bilateral\0`      | Bilateral transaction hashing                 |
+| `DSM/token\0`          | Token operation hashing                       |
+| `DSM/cdbrw/bind\0`     | C-DBRW binding key (canonical 4-input)        |
+| `DSM/cpta\0`           | Content-Addressed Token Policy Anchor         |
+| `DSM/dlv-unlock\0`     | DLV vault unlock key derivation               |
+| `DSM/assign\0`         | Storage node assignment                       |
+| `DSM/smt\0`            | Sparse Merkle Tree node hashing               |
+| `DSM/device\0`         | Device identity derivation                    |
+| `DSM/recovery\0`       | Recovery capsule hashing                      |
 
-All domain tags are defined in `common/domain_tags.rs` and referenced throughout the core crate. Adding a new hashing context requires defining a new domain tag — never reuse existing tags.
+All domain tags are defined in `common/domain_tags/mod.rs` (with submodules under `common/domain_tags/`) and referenced throughout the core crate. Adding a new hashing context requires defining a new domain tag — never reuse existing tags.
 
 ### Implementation
 
@@ -75,6 +75,7 @@ DSM uses SPHINCS+ for all digital signatures. SPHINCS+ is a hash-based signature
 ### Role in Protocol
 
 SPHINCS+ signatures appear in:
+
 - **State commits** — every commit is signed by the device's SPHINCS+ key
 - **Bilateral transfers** — both parties sign their respective state transitions
 - **Tripwire Fork-Exclusion** — the theorem relies on SPHINCS+ EUF-CMA to guarantee that an adversary cannot produce two valid successors from the same parent
@@ -84,6 +85,7 @@ SPHINCS+ signatures appear in:
 ## ML-KEM-768 (Kyber) Key Encapsulation
 
 ML-KEM-768 (formerly known as Kyber) is used for post-quantum key encapsulation in:
+
 - **BLE session establishment** — secure key exchange between two devices
 - **Storage node TLS** — post-quantum transport security
 - **Recovery capsule encryption** — protecting recovery data
@@ -130,6 +132,7 @@ already-persisted inputs.
 ### Health States
 
 The DBRW module (`crypto/dbrw_health.rs`) tracks three health states:
+
 - **Healthy** — fingerprint measurements are within expected variance
 - **Degraded** — some measurements show anomalies (e.g., battery replacement)
 - **MeasurementAnomaly** — significant deviation detected, potential cloning attempt
@@ -237,6 +240,7 @@ sk_V = BLAKE3("DSM/dlv-unlock\0" || L || C || σ)
 ```
 
 Where:
+
 - `L` = DLV lineage identifier
 - `C` = commit hash at the time of burn
 - `σ` = stitched proof-of-completion from the bilateral burn

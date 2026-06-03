@@ -411,8 +411,10 @@ impl AppRouterImpl {
                     max_supply = (max_supply << 8) | (*b as u128);
                 }
 
-                let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/token-id");
-                id_hasher.update(&policy_anchor);
+                let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_TOKEN_ID,
+                );
+                id_hasher.update(&req.policy_anchor);
                 id_hasher.update(ticker.as_bytes());
                 let token_id =
                     crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
@@ -570,8 +572,10 @@ impl AppRouterImpl {
                     return err("tokens.publishPolicy: empty body".into());
                 }
 
-                let fallback_anchor: [u8; 32] =
-                    dsm::crypto::blake3::domain_hash_bytes("DSM/policy", body);
+                let fallback_anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+                    dsm::common::domain_tags::TAG_DSM_POLICY,
+                    body,
+                );
                 let anchor = match try_publish_policy_to_network(body).await {
                     Ok(Some(network_anchor)) => network_anchor,
                     Ok(None) => fallback_anchor,

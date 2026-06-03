@@ -29,7 +29,7 @@ impl PolicyAnchor {
     /// NOTE: `PolicyFile::canonical_bytes()` is stable across platforms/runs.
     pub fn from_policy(policy: &PolicyFile) -> Result<Self, DsmError> {
         let bytes = policy.canonical_bytes()?;
-        let h = blake3::domain_hash("DSM/cpta", &bytes);
+        let h = blake3::domain_hash(crate::common::domain_tags::TAG_DSM_CPTA, &bytes);
         Ok(PolicyAnchor(*h.as_bytes()))
     }
 

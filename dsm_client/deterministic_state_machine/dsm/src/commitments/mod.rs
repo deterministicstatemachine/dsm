@@ -33,9 +33,11 @@ pub use smart_commitment::{
     SmartCommitmentRegistry, ThresholdOperator,
 };
 
+use crate::common::domain_tags::{TAG_COMMITMENT, TAG_COMMITMENT_OPEN};
+
 /// Create a basic commitment by hashing the data with BLAKE3
 pub fn create_commitment(data: &[u8]) -> Vec<u8> {
-    crate::crypto::blake3::domain_hash("DSM/commitment", data)
+    crate::crypto::blake3::domain_hash(TAG_COMMITMENT, data)
         .as_bytes()
         .to_vec()
 }
@@ -49,7 +51,7 @@ pub fn verify_commitment(commitment: &[u8], data: &[u8]) -> bool {
 /// Open a commitment using a nonce
 /// Returns Some(data) if successful, None if invalid
 pub fn open_commitment(commitment: &[u8], nonce: &[u8]) -> Option<Vec<u8>> {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/commitment-open");
+    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_COMMITMENT_OPEN);
     hasher.update(commitment);
     hasher.update(nonce);
     Some(hasher.finalize().as_bytes().to_vec())

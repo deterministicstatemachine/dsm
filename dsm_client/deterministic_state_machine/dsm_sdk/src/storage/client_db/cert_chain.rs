@@ -53,7 +53,9 @@ const CERT_CHAIN_SK_AAD: &[u8] = b"DSM/cert-chain-sk-aead-v1\0";
 /// Derive the AEAD key for cert-chain SK encryption from the device's
 /// `K_DBRW`. Whitepaper §12 binds this key to hardware/environment.
 fn derive_chain_sk_aead_key(k_dbrw: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/cert-chain-sk-aead");
+    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(
+        dsm::common::domain_tags::TAG_DSM_CERT_CHAIN_SK_AEAD,
+    );
     hasher.update(k_dbrw);
     *hasher.finalize().as_bytes()
 }

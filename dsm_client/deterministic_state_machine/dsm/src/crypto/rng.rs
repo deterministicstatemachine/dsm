@@ -170,7 +170,8 @@ pub fn generate_deterministic_random(seed: &[u8], len: usize) -> Vec<u8> {
 /// Domain separation is included via a context string.
 pub fn mix_entropy(sources: &[&[u8]], output_len: usize) -> Vec<u8> {
     // Hash all sources with a domain separator
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/det-rng-seed");
+    let mut hasher =
+        crate::crypto::blake3::dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DET_RNG_SEED);
     for src in sources {
         // Prefix each source with its length to avoid ambiguous concatenations
         let len = (src.len() as u64).to_le_bytes();

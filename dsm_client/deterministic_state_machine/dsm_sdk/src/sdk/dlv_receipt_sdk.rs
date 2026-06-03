@@ -333,7 +333,10 @@ impl DlvReceiptSdk {
         let url = format!("{}/api/v2/object/put", endpoint.trim_end_matches('/'));
 
         // Compute DLV partition ID (same pattern as StorageNodeSDK::store_data)
-        let dlv_id = dsm::crypto::blake3::domain_hash("DSM/dlv-partition\0", obj_key.as_bytes());
+        let dlv_id = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_DLV_PARTITION_NUL,
+            obj_key.as_bytes(),
+        );
         let dlv_id_b32 = text_id::encode_base32_crockford(dlv_id.as_bytes());
         let stake_hash_b32 = text_id::encode_base32_crockford(&[0u8; 32]);
 

@@ -9,6 +9,7 @@
 
 #[cfg(test)]
 use blake3;
+use crate::common::domain_tags::{TAG_MERKLE_LEAF, TAG_MERKLE_NODE};
 use crate::crypto::blake3::dsm_domain_hasher;
 
 /// Constant-time-ish equality without external deps.
@@ -57,7 +58,7 @@ impl MerkleProof {
         if leaf_hash.len() >= 32 {
             hash.copy_from_slice(&leaf_hash[0..32]);
         } else {
-            let mut hasher = dsm_domain_hasher("DSM/merkle-leaf");
+            let mut hasher = dsm_domain_hasher(TAG_MERKLE_LEAF);
             hasher.update(leaf_hash);
             let result = hasher.finalize();
             hash.copy_from_slice(result.as_bytes());
@@ -67,7 +68,7 @@ impl MerkleProof {
         if root_hash.len() >= 32 {
             root.copy_from_slice(&root_hash[0..32]);
         } else {
-            let mut hasher = dsm_domain_hasher("DSM/merkle-leaf");
+            let mut hasher = dsm_domain_hasher(TAG_MERKLE_LEAF);
             hasher.update(root_hash);
             let result = hasher.finalize();
             root.copy_from_slice(result.as_bytes());
@@ -87,7 +88,7 @@ impl MerkleNode {
     }
 
     fn combine_hashes(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/merkle-node");
+        let mut hasher = dsm_domain_hasher(TAG_MERKLE_NODE);
         hasher.update(left);
         hasher.update(right);
         let result = hasher.finalize();
@@ -111,7 +112,7 @@ impl MerkleTree {
                 h.copy_from_slice(&leaf);
                 h
             } else {
-                *crate::crypto::blake3::domain_hash("DSM/merkle-leaf", &leaf).as_bytes()
+                *crate::crypto::blake3::domain_hash(TAG_MERKLE_LEAF, &leaf).as_bytes()
             };
             tree.add_leaf(hash);
         }

@@ -515,7 +515,7 @@ impl StorageNodeClient {
         _ttl_seconds: Option<u64>, // Unused: clockless system
     ) -> Result<String, StorageNodeError> {
         // Generate DLV ID from key
-        let mut hasher = dsm_domain_hasher("DSM/dlv-partition");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DLV_PARTITION);
         hasher.update(key.as_bytes());
         let dlv_id = hasher.finalize();
 
@@ -646,7 +646,7 @@ impl StorageNodeClient {
 
     pub async fn delete(&self, key: &str) -> Result<(), StorageNodeError> {
         // Generate DLV ID from key
-        let mut hasher = dsm_domain_hasher("DSM/dlv-partition");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DLV_PARTITION);
         hasher.update(key.as_bytes());
         let dlv_id = hasher.finalize();
 
@@ -1580,7 +1580,8 @@ impl StorageNodeSDK {
 
         // Generate deterministic entry ID from transaction parameters hash
         let params_hash = {
-            let mut hasher = dsm_domain_hasher("DSM/bilateral-params-hash");
+            let mut hasher =
+                dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BILATERAL_PARAMS_HASH);
             for (k, v) in transaction_params.iter() {
                 hasher.update(k.as_bytes());
                 hasher.update(v.as_bytes());
@@ -1622,8 +1623,10 @@ impl StorageNodeSDK {
         preimage.extend_from_slice(&state_hash_bytes);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&next_state.to_le_bytes());
-        let pre_commitment_hash =
-            dsm::crypto::blake3::domain_hash("DSM/sdk/bilateral-entry/v1", &preimage);
+        let pre_commitment_hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_SDK_BILATERAL_ENTRY_V1,
+            &preimage,
+        );
 
         // transaction_payload is the canonical proto bytes for parameters
         let transaction_payload = params_bytes.clone();
@@ -1694,8 +1697,10 @@ impl StorageNodeSDK {
         expected_preimage.extend_from_slice(&next_state.to_le_bytes());
         // Match the SDK-internal domain used by submit_bilateral_entry above;
         // this is intentionally distinct from the protocol precommit family.
-        let expected_hash =
-            dsm::crypto::blake3::domain_hash("DSM/sdk/bilateral-entry/v1", &expected_preimage);
+        let expected_hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_SDK_BILATERAL_ENTRY_V1,
+            &expected_preimage,
+        );
 
         if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
             bilateral_entry.status = BilateralTransactionStatus::Rejected;
@@ -1806,7 +1811,8 @@ impl StorageNodeSDK {
                 id.copy_from_slice(&entropy[..32]);
                 id.to_vec()
             } else {
-                let mut hasher = dsm_domain_hasher("DSM/genesis-entropy-pad");
+                let mut hasher =
+                    dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_GENESIS_ENTROPY_PAD);
                 hasher.update(entropy);
                 hasher.finalize().as_bytes().to_vec()
             }
@@ -2223,7 +2229,7 @@ impl StorageNodeSDK {
 
         // Derive new device ID bound to the existing genesis
         // DevID_N = H(DSM/device\0 || client_entropy || genesis_hash || DBRW)
-        let mut hasher = dsm_domain_hasher("DSM/device");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DEVICE);
         hasher.update(&client_entropy);
         hasher.update(&genesis_hash);
 
@@ -3851,7 +3857,10 @@ mod tests {
         preimage.extend_from_slice(&state_hash_bytes_for_test);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&2u64.to_le_bytes());
-        let expected = dsm::crypto::blake3::domain_hash("DSM/sdk/bilateral-entry/v1", &preimage);
+        let expected = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_SDK_BILATERAL_ENTRY_V1,
+            &preimage,
+        );
         assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
         assert_eq!(entry.state_number, 1);
         assert_eq!(entry.status, BilateralTransactionStatus::Pending);

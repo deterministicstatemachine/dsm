@@ -140,7 +140,7 @@ impl StateTransition {
         }
 
         // Create hash combining current state and operation
-        let mut hasher = dsm_domain_hasher("DSM/transition");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TRANSITION);
         hasher.update(&current_state.hash);
 
         // Serialize operation deterministically
@@ -180,7 +180,11 @@ impl StateTransition {
             hash: [0u8; 32],
             value: Vec::new(),
             commitment: Vec::new(),
-            counterparty_id: domain_hash("DSM/counterparty-id", counterparty_id.as_bytes()).into(),
+            counterparty_id: domain_hash(
+                crate::common::domain_tags::TAG_DSM_COUNTERPARTY_ID,
+                counterparty_id.as_bytes(),
+            )
+            .into(),
         };
         self.forward_commitment = Some(commitment);
         self
@@ -576,7 +580,7 @@ pub fn verify_transition_integrity(
     // not from a counter.
     let serialized_op = operation.to_bytes();
     {
-        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
         hasher.update(&previous_state.entropy);
         hasher.update(&serialized_op);
         hasher.update(&current_state.prev_state_hash);
@@ -844,7 +848,7 @@ fn verify_operation_signature(
     }
     let cleared = operation.with_cleared_signature();
     let op_bytes = cleared.to_bytes();
-    let verify_hash = domain_hash("DSM/op-verify", &op_bytes);
+    let verify_hash = domain_hash(crate::common::domain_tags::TAG_DSM_OP_VERIFY, &op_bytes);
     log::info!(
         "[verify_operation_signature] {op_name}: op_bytes.len={} hash(first8)={:?} sig.len={} pk.len={}",
         op_bytes.len(),
@@ -1699,8 +1703,11 @@ mod tests {
         assert_eq!(commitment.min_state_number, 100);
         assert_eq!(
             commitment.counterparty_id,
-            *crate::crypto::blake3::domain_hash("DSM/counterparty-id", b"counterparty123")
-                .as_bytes()
+            *crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_COUNTERPARTY_ID,
+                b"counterparty123"
+            )
+            .as_bytes()
         );
     }
 

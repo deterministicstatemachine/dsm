@@ -286,8 +286,10 @@ impl TokenPolicyCache {
                 } else {
                     // Pre-compute the storage-level anchor on the client side for verification.
                     // This MUST match what the storage node returns.
-                    let expected_storage_anchor =
-                        dsm::crypto::blake3::domain_hash("DSM/policy", &canonical_bytes);
+                    let expected_storage_anchor = dsm::crypto::blake3::domain_hash(
+                        dsm::common::domain_tags::TAG_DSM_POLICY,
+                        &canonical_bytes,
+                    );
 
                     let mut published_count = 0u32;
                     for url in &self.storage_node_urls {

@@ -32,7 +32,7 @@ pub fn author_dlv_open(
 /// Convenience: deterministic digest for the authored DlvOpenV3.
 pub fn dlv_open_digest(open: &pb::DlvOpenV3) -> [u8; 32] {
     let bytes = open.encode_to_vec();
-    domain_hash_bytes("DSM/dlv/open\0", &bytes)
+    domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_DLV_OPEN_NUL, &bytes)
 }
 
 #[cfg(test)]

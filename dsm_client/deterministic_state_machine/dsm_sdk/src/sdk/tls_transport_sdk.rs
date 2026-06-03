@@ -222,9 +222,11 @@ impl TlsTransport {
             let end_entity = certs.first().ok_or_else(|| {
                 DsmError::network("tls peer certificate missing", None::<std::io::Error>)
             })?;
-            let cert_hash =
-                *dsm::crypto::blake3::domain_hash("DSM/tls-cert-hash", end_entity.as_ref())
-                    .as_bytes();
+            let cert_hash = *dsm::crypto::blake3::domain_hash(
+                dsm::common::domain_tags::TAG_DSM_TLS_CERT_HASH,
+                end_entity.as_ref(),
+            )
+            .as_bytes();
             if !self.pins.contains(&cert_hash) {
                 return Err(DsmError::network(
                     "tls peer certificate pin mismatch",

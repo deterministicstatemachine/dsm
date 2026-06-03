@@ -64,7 +64,7 @@ pub fn author_contact_accept(
     local_tip: &[u8; 32],
 ) -> pb::ContactAcceptV3 {
     let add_bytes = add_req.encode_to_vec();
-    let add_digest = domain_hash_bytes("DSM/contact/add", &add_bytes);
+    let add_digest = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_CONTACT_ADD, &add_bytes);
 
     pb::ContactAcceptV3 {
         accepter_device_id: accepter_id.to_vec(),

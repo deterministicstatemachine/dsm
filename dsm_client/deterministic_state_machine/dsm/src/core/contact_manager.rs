@@ -67,8 +67,10 @@ impl LocalSmtVerifier {
         match self.local_genesis_cache.get(device_id) {
             None => false,
             Some(genesis_data) => {
-                let computed =
-                    crate::crypto::blake3::domain_hash("DSM/genesis-verify", genesis_data);
+                let computed = crate::crypto::blake3::domain_hash(
+                    crate::common::domain_tags::TAG_DSM_GENESIS_VERIFY,
+                    genesis_data,
+                );
                 let mut bytes = [0u8; 32];
                 bytes.copy_from_slice(computed.as_bytes());
                 &bytes == expected_genesis_hash
@@ -193,7 +195,9 @@ fn deterministic_tx_id(
     tick: u64,
     index: u64,
 ) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/B0X/UNILATERAL");
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_B0X_UNILATERAL,
+    );
     h.update(sender);
     h.update(recipient);
     h.update(chain_tip);

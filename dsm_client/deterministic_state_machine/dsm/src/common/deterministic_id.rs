@@ -21,7 +21,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 /// # Returns
 /// Hex string of first 16 bytes of BLAKE3 hash (UUID-compatible format)
 pub fn derive_id_from_hash(domain: &str, inputs: &[&[u8]]) -> String {
-    let mut hasher = dsm_domain_hasher("DSM/deterministic-id");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DETERMINISTIC_ID);
     hasher.update(domain.as_bytes());
 
     for input in inputs {

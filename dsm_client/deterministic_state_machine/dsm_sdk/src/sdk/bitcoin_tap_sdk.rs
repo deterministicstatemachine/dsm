@@ -1153,7 +1153,8 @@ impl BitcoinTapSdk {
                 "remote vault advertisement missing valid 32-byte digest",
             ));
         }
-        let digest = dsm::crypto::blake3::domain_hash("DSM/vault-ad", &payload);
+        let digest =
+            dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_VAULT_AD, &payload);
         if digest.as_bytes() != advertisement.vault_proto_digest.as_slice() {
             return Err(DsmError::invalid_operation(
                 "remote vault proto digest mismatch after download",
@@ -1413,7 +1414,7 @@ impl BitcoinTapSdk {
         // Derive refund hash lock: h_r = SHA256(rk_V)
         let fulfillment_bytes = hash_lock.to_vec();
         let refund_key = dsm::crypto::blake3::domain_hash_bytes(
-            "DSM/dlv-refund",
+            dsm::common::domain_tags::TAG_DSM_DLV_REFUND,
             &[&fulfillment_bytes[..], &refund_iterations.to_le_bytes()].concat(),
         );
         let refund_hash_lock = sha256_hash_lock(&refund_key);
@@ -1661,7 +1662,7 @@ impl BitcoinTapSdk {
         // Derive refund hash lock for successor vault
         let successor_fulfillment_bytes = successor_hash_lock.to_vec();
         let successor_refund_key = dsm::crypto::blake3::domain_hash_bytes(
-            "DSM/dlv-refund",
+            dsm::common::domain_tags::TAG_DSM_DLV_REFUND,
             &[
                 &successor_fulfillment_bytes[..],
                 &refund_iterations.to_le_bytes(),
@@ -3115,7 +3116,11 @@ impl BitcoinTapSdk {
             .as_ref()
             .and_then(|record| record.htlc_script.as_ref())
             .map(|script| {
-                dsm::crypto::blake3::domain_hash_bytes("DSM/script-commit", script).to_vec()
+                dsm::crypto::blake3::domain_hash_bytes(
+                    dsm::common::domain_tags::TAG_DSM_SCRIPT_COMMIT,
+                    script,
+                )
+                .to_vec()
             });
 
         // spec Definition 9/11: redeem_params = public construction data for HTLC spend
@@ -3211,7 +3216,7 @@ impl BitcoinTapSdk {
             updated_state_number: storage_node_view.updated_state_number,
             vault_proto_key: Self::vault_proto_key(&storage_node_view.vault_id),
             vault_proto_digest: dsm::crypto::blake3::domain_hash(
-                "DSM/vault-ad",
+                dsm::common::domain_tags::TAG_DSM_VAULT_AD,
                 &storage_node_view.vault_proto_bytes,
             )
             .as_bytes()
@@ -3522,7 +3527,8 @@ impl BitcoinTapSdk {
         }
 
         let payload = Self::storage_get_bytes(&advertisement.vault_proto_key).await?;
-        let digest = dsm::crypto::blake3::domain_hash("DSM/vault-ad", &payload);
+        let digest =
+            dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_VAULT_AD, &payload);
         if digest.as_bytes() != advertisement.vault_proto_digest.as_slice() {
             return Err(DsmError::invalid_operation(
                 "published vault artifact digest mismatch",
@@ -4207,7 +4213,10 @@ impl BitcoinTapSdk {
         }
 
         let vault_content_hash = {
-            let digest = dsm::crypto::blake3::domain_hash("DSM/vault-ad", &ad_bytes);
+            let digest = dsm::crypto::blake3::domain_hash(
+                dsm::common::domain_tags::TAG_DSM_VAULT_AD,
+                &ad_bytes,
+            );
             let mut h = [0u8; 32];
             h.copy_from_slice(digest.as_bytes());
             h
@@ -4579,7 +4588,7 @@ impl BitcoinTapSdk {
         candidate: &WithdrawalRouteCandidate,
         shortfall_sats: u64,
     ) -> String {
-        let mut hasher = dsm_domain_hasher("DSM/dbtc-withdrawal-plan");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DBTC_WITHDRAWAL_PLAN);
         hasher.update(&requested_net_sats.to_le_bytes());
         hasher.update(destination_address.as_bytes());
         hasher.update(&candidate.planned_net_sats.to_le_bytes());
@@ -4657,7 +4666,8 @@ impl BitcoinTapSdk {
     /// Derive the HTLC preimage deterministically from η.
     /// s = BLAKE3("DSM/dbtc-preimage\0" || η)
     fn derive_preimage_from_eta(eta: &[u8; 32]) -> Vec<u8> {
-        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-preimage", eta).to_vec()
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_DBTC_PREIMAGE, eta)
+            .to_vec()
     }
 
     /// Derive bearer η from manifold_seed + deposit_nonce.
@@ -4665,7 +4675,7 @@ impl BitcoinTapSdk {
     /// Any bearer holding manifold_seed can compute η for any vault whose deposit_nonce
     /// they discover from storage node advertisements.
     fn derive_bearer_eta(manifold_seed: &[u8; 32], deposit_nonce: &[u8; 32]) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/dbtc-bearer-eta");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DBTC_BEARER_ETA);
         hasher.update(manifold_seed);
         hasher.update(deposit_nonce);
         *hasher.finalize().as_bytes()
@@ -4688,7 +4698,7 @@ impl BitcoinTapSdk {
 
     /// Generate a deterministic vault op ID from hash_lock and vault_id
     pub(crate) fn generate_vault_op_id(hash_lock: &[u8; 32], vault_id: &str) -> String {
-        let mut hasher = dsm_domain_hasher("DSM/btc-deposit-id");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BTC_DEPOSIT_ID);
         hasher.update(hash_lock);
         hasher.update(vault_id.as_bytes());
         let h = hasher.finalize();
@@ -4823,7 +4833,10 @@ mod tests {
     /// Test labels stay descriptive in source while the on-disk + on-wire id is
     /// the strict 32-byte form `LimboVaultProto.id` requires.
     fn vid_from_label(label: &str) -> [u8; 32] {
-        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+        dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_DBTC_TEST_VAULT,
+            label.as_bytes(),
+        )
     }
 
     fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {
@@ -4928,7 +4941,7 @@ mod tests {
             updated_state_number,
             vault_proto_key: BitcoinTapSdk::vault_proto_key(&vid_b32),
             vault_proto_digest: dsm::crypto::blake3::domain_hash(
-                "DSM/vault-ad",
+                dsm::common::domain_tags::TAG_DSM_VAULT_AD,
                 &test_vault_proto(vault_id, amount_sats),
             )
             .as_bytes()

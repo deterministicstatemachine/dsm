@@ -12,6 +12,7 @@
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use dsm::{
+    common::domain_tags::TAG_STATE_HASH,
     commitments::SmartCommitment as DsmSmartCommitment,
     core::identity::{verify_genesis_state, GenesisState},
     types::{
@@ -330,7 +331,7 @@ impl EraToken {
             fields,
             token_id: "ERA".to_string(),
             token_type: TokenType::Native,
-            owner_id: *dsm::crypto::blake3::domain_hash("DSM/system-owner", b"").as_bytes(),
+            owner_id: *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_SYSTEM_OWNER, b"").as_bytes(),
             creation_tick: crate::util::deterministic_time::tick(),
             metadata_uri: Some("ipfs://QmTokenMetadataHash".to_string()),
             policy_anchor: builtin_policy_anchor_uri("ERA"),
@@ -799,8 +800,10 @@ impl<I: Send + Sync> TokenSDK<I> {
         );
 
         // Diagnostic: log preimage hash for debugging sender/receiver mismatch
-        let preimage_hash =
-            dsm::crypto::blake3::domain_hash("DSM/signing-preimage", &signing_bytes);
+        let preimage_hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_SIGNING_PREIMAGE,
+            &signing_bytes,
+        );
         log::info!(
             "🔐 sign_transfer_canonical_v3: preimage_hash(first8)={:?} amount={} token={}",
             &preimage_hash.as_bytes()[..8],
@@ -1915,7 +1918,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             memo.as_deref(),
             &next_entropy,
         );
-        let _next_state_hash = dsm::crypto::blake3::domain_hash("DSM/state-hash", &preimage)
+        let _next_state_hash = dsm::crypto::blake3::domain_hash(TAG_STATE_HASH, &preimage)
             .as_bytes()
             .to_vec();
 
@@ -2339,7 +2342,10 @@ impl<I: Send + Sync> TokenSDK<I> {
     ) -> Result<String, DsmError> {
         let proto = token_metadata_to_proto(metadata);
         let metadata_bytes = proto.encode_to_vec();
-        let hash = dsm::crypto::blake3::domain_hash("DSM/token-metadata", &metadata_bytes);
+        let hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_TOKEN_METADATA,
+            &metadata_bytes,
+        );
         let short_hash = crate::util::text_id::encode_base32_crockford(&hash.as_bytes()[0..8]);
         let creator_id_str = crate::util::text_id::encode_base32_crockford(creator_id);
 
@@ -2391,9 +2397,11 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         // Fee: relationship is device↔system.fee (deterministic system counterparty)
-        let fee_counterparty =
-            *dsm::crypto::blake3::domain_hash("DSM/system-fee-device", b"system.fee.device_id")
-                .as_bytes();
+        let fee_counterparty = *dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_SYSTEM_FEE_DEVICE,
+            b"system.fee.device_id",
+        )
+        .as_bytes();
         let fee_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &current_state.device_info.device_id,
             &fee_counterparty,

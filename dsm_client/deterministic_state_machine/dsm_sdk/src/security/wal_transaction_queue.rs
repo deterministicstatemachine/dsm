@@ -297,9 +297,12 @@ impl WalTransactionQueue {
 
     /// Encrypt transaction (same as original)
     fn encrypt_transaction(&self, transaction: &[u8]) -> Result<EncryptedTransaction, DsmError> {
-        let key_context = dsm::crypto::blake3::domain_hash("DSM/wal-key-ctx", transaction)
-            .as_bytes()
-            .to_vec();
+        let key_context = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_WAL_KEY_CTX,
+            transaction,
+        )
+        .as_bytes()
+        .to_vec();
         let enc_key = self
             .master_key
             .derive_storage_key("transaction", &key_context);

@@ -685,7 +685,10 @@ pub fn respond_to_challenge(inputs: &RespondInputs<'_>) -> Result<RespondOutputs
     let mut gamma_preimage = Vec::with_capacity(h_bar_bytes.len() + 32);
     gamma_preimage.extend_from_slice(&h_bar_bytes);
     gamma_preimage.extend_from_slice(inputs.challenge);
-    let gamma = domain_hash_bytes("DSM/cdbrw-response", &gamma_preimage);
+    let gamma = domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_CDBRW_RESPONSE,
+        &gamma_preimage,
+    );
 
     // Step 5-6: deterministic Kyber encapsulation against verifier PK
     let coins = derive_kyber_coins(

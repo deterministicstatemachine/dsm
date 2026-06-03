@@ -28,7 +28,7 @@ pub fn write_lp(hasher: &mut Hasher, bytes: &[u8]) {
 /// Hash a domain-separated sequence of 1 length-prefixed fields.
 #[inline]
 pub fn hash_lp1(domain: &[u8], a: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/canonical-lp");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CANONICAL_LP);
     h.update(domain);
     write_lp(&mut h, a);
     *h.finalize().as_bytes()
@@ -37,7 +37,7 @@ pub fn hash_lp1(domain: &[u8], a: &[u8]) -> [u8; 32] {
 /// Hash a domain-separated sequence of 2 length-prefixed fields.
 #[inline]
 pub fn hash_lp2(domain: &[u8], a: &[u8], b: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/canonical-lp");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CANONICAL_LP);
     h.update(domain);
     write_lp(&mut h, a);
     write_lp(&mut h, b);
@@ -47,7 +47,7 @@ pub fn hash_lp2(domain: &[u8], a: &[u8], b: &[u8]) -> [u8; 32] {
 /// Hash a domain-separated sequence of 3 length-prefixed fields.
 #[inline]
 pub fn hash_lp3(domain: &[u8], a: &[u8], b: &[u8], c: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/canonical-lp");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_CANONICAL_LP);
     h.update(domain);
     write_lp(&mut h, a);
     write_lp(&mut h, b);
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn write_lp_prepends_length_prefix() {
-        let mut h = dsm_domain_hasher("DSM/test");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TEST);
         write_lp(&mut h, b"hello");
         let digest = h.finalize();
         assert_eq!(digest.as_bytes().len(), 32);
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn write_lp_empty_input() {
-        let mut h = dsm_domain_hasher("DSM/test");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TEST);
         write_lp(&mut h, b"");
         let digest = h.finalize();
         assert_eq!(digest.as_bytes().len(), 32);

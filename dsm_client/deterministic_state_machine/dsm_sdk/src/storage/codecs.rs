@@ -13,11 +13,11 @@ use dsm::types::operations::Operation;
 use crate::storage::client_db::GenesisRecord;
 
 pub fn hash_blake3_bytes(data: &[u8]) -> [u8; 32] {
-    *dsm::crypto::blake3::domain_hash("DSM/codec-hash", data).as_bytes()
+    *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_CODEC_HASH, data).as_bytes()
 }
 
 pub fn smt_proof_bytes(root: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher("DSM/smt-proof");
+    let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMT_PROOF);
     hasher.update(root);
     hasher.update(data);
     *hasher.finalize().as_bytes()

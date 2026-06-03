@@ -541,7 +541,7 @@ pub fn enroll_device(
     let mut preimage = Vec::with_capacity(inputs.env_bytes.len() + anchor_input.len());
     preimage.extend_from_slice(inputs.env_bytes);
     preimage.extend_from_slice(&anchor_input);
-    let anchor32 = domain_hash_bytes("DSM/silicon_fp/v4", &preimage);
+    let anchor32 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_SILICON_FP_V4, &preimage);
 
     // ---- step 6: serialize to disk (BE layout consumed by load_cdbrw_enrollment) ----
     let file_path = base_dir.join(ENROLLMENT_FILE_NAME);

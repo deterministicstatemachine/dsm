@@ -182,7 +182,7 @@ impl StateMachine {
         } else {
             let root = ds.root();
             let entropy = {
-                let mut h = dsm_domain_hasher("DSM/genesis-entropy");
+                let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
                 h.update(&root);
                 h.finalize().as_bytes().to_vec()
             };
@@ -190,7 +190,7 @@ impl StateMachine {
         };
         let entropy = {
             let op_data = operation.to_bytes();
-            let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+            let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
             hasher.update(&prior_entropy);
             hasher.update(&op_data);
             hasher.update(&prior_hash);
@@ -449,7 +449,9 @@ mod state_machine_tests {
             // §11 eq.14 entropy derivation
             let op_bytes = op.to_bytes();
             let new_entropy = {
-                let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+                let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+                    crate::common::domain_tags::TAG_DSM_STATE_ENTROPY,
+                );
                 hasher.update(&current_state.entropy);
                 hasher.update(&op_bytes);
                 hasher.update(&current_state.hash);
@@ -563,7 +565,9 @@ mod state_machine_tests {
         // Compute entropy with DSM/state-entropy domain tag matching §11 eq.14
         let op1_bytes = op1.to_bytes();
         let entropy1 = {
-            let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+            let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+                crate::common::domain_tags::TAG_DSM_STATE_ENTROPY,
+            );
             hasher.update(&genesis.entropy);
             hasher.update(&op1_bytes);
             hasher.update(&genesis.hash);
@@ -578,7 +582,9 @@ mod state_machine_tests {
 
         let op2_bytes = op2.to_bytes();
         let entropy2 = {
-            let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+            let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+                crate::common::domain_tags::TAG_DSM_STATE_ENTROPY,
+            );
             hasher.update(&state1.entropy);
             hasher.update(&op2_bytes);
             hasher.update(&state1.hash);

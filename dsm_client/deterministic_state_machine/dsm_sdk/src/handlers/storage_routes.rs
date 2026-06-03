@@ -644,8 +644,10 @@ impl AppRouterImpl {
                                                 };
 
                                         // Diagnostic: hash public key for cross-device comparison
-                                        let pk_hash =
-                                            dsm::crypto::blake3::domain_hash("DSM/pk-hash", &pk);
+                                        let pk_hash = dsm::crypto::blake3::domain_hash(
+                                            dsm::common::domain_tags::TAG_DSM_PK_HASH,
+                                            &pk,
+                                        );
                                         log::info!("[storage.sync] 🔑 signer pk hash(first8)={:?} source={} tx={}", &pk_hash.as_bytes()[..8], pk_source, entry.transaction_id);
 
                                         let valid = match dsm::crypto::sphincs::sphincs_verify(

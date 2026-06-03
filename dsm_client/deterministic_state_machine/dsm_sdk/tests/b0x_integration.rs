@@ -37,7 +37,8 @@ fn initial_relationship_tip(
         )
     };
 
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/bilateral-session");
+    let mut hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_BILATERAL_SESSION);
     hasher.update(&genesis_a);
     hasher.update(&device_a);
     hasher.update(&genesis_b);
@@ -256,7 +257,8 @@ async fn test_b0x_live_recipient_roundtrip() {
         receiver_device,
         receiver_genesis,
     );
-    let mut next_tip_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/test-next-tip");
+    let mut next_tip_hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_TEST_NEXT_TIP);
     next_tip_hasher.update(&initial_tip);
     let next_tip = *next_tip_hasher.finalize().as_bytes();
     let routing_address =

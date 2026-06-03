@@ -95,7 +95,7 @@ impl Default for SpentProofSmt {
 }
 
 fn spent_leaf_value(jap_hash: &[u8; 32]) -> [u8; 32] {
-    domain_hash_bytes("DJTE.SPENT", jap_hash)
+    domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_SPENT, jap_hash)
 }
 
 impl std::fmt::Debug for SpentProofSmt {

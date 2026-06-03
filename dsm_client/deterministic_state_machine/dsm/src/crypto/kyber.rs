@@ -287,7 +287,7 @@ pub fn generate_kyber_keypair_from_entropy(
         ));
     }
 
-    let mut h = dsm_domain_hasher("DSM/ml-kem-seed");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_SEED);
     h.update(context.as_bytes());
     h.update(entropy);
     let digest = h.finalize();
@@ -296,13 +296,13 @@ pub fn generate_kyber_keypair_from_entropy(
     seed.copy_from_slice(digest.as_bytes());
 
     let d: B32 = {
-        let mut h = dsm_domain_hasher("DSM/ml-kem-keygen-d");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_D);
         h.update(&seed);
         h.update(&0u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()
     };
     let z: B32 = {
-        let mut h = dsm_domain_hasher("DSM/ml-kem-keygen-z");
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_Z);
         h.update(&seed);
         h.update(&1u64.to_le_bytes());
         (*h.finalize().as_bytes()).into()

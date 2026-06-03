@@ -208,7 +208,8 @@ impl WalletTransaction {
         let now = dt::tick();
 
         // hash for id + body
-        let mut tx_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/tx-hash");
+        let mut tx_hasher =
+            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_TX_HASH);
         tx_hasher.update(from_device_id.as_bytes());
         tx_hasher.update(to_device_id.as_bytes());
         tx_hasher.update(&amount.to_le_bytes());
@@ -534,7 +535,8 @@ impl WalletSDK {
         };
 
         let self_id = self.device_id_string();
-        let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/chain-tip-id");
+        let mut h =
+            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_CHAIN_TIP_ID);
         h.update(self_id.as_bytes());
         h.update(&counterparty_device_id_bytes);
         h.update(&normalized_initial_state_hash);
@@ -1383,7 +1385,9 @@ impl WalletSDK {
             // (state_number is monotonically increasing, tick provides additional entropy)
             let tx_id = format!("faucet_{}_{}", new_state.hash[0] as u64, dt::tick());
             let tx_hash_txt = {
-                let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/faucet-claim");
+                let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_FAUCET_CLAIM,
+                );
                 h.update(tx_id.as_bytes());
                 h.update(&new_state.hash);
                 crate::util::text_id::encode_base32_crockford(h.finalize().as_bytes())

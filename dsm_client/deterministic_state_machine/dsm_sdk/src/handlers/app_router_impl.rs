@@ -958,7 +958,8 @@ impl AppRouterImpl {
         // b0x envelope, so both sides use identical bytes for compute_precommit. Clockless: no
         // wall-clock, no OS randomness — uniqueness is guaranteed by KDBRW ⊕ h_n ⊕ seq ⊕ payload.
         let nonce: Vec<u8> = {
-            let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/nonce");
+            let mut hasher =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
             // KDBRW: hardware-bound secret — prevents cross-device nonce reuse (§12)
             #[cfg(all(target_os = "android", feature = "jni"))]
             if let Some(kdbrw) = crate::jni::cdbrw::get_cdbrw_binding_key() {
@@ -985,7 +986,8 @@ impl AppRouterImpl {
         // Sign the canonical Operation bytes (signature field cleared) so the
         // state machine and inbox verifier use the same preimage.
         // =====================================================================
-        let balance_anchor = dsm::crypto::blake3::domain_hash("DSM/balance-anchor", &[]);
+        let balance_anchor =
+            dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR, &[]);
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::from_state(
@@ -1005,8 +1007,10 @@ impl AppRouterImpl {
         let signing_bytes = signing_op.to_bytes();
 
         // Diagnostic: log preimage hash for debugging sender/receiver mismatch
-        let preimage_hash =
-            dsm::crypto::blake3::domain_hash("DSM/signing-preimage", &signing_bytes);
+        let preimage_hash = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_SIGNING_PREIMAGE,
+            &signing_bytes,
+        );
         log::info!(
             "🔐 wallet.send: canonical signing preimage hash(first8)={:?} amount={} token={}",
             &preimage_hash.as_bytes()[..8],
@@ -2181,7 +2185,8 @@ fn compute_initial_relationship_chain_tip(
         )
     };
 
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/bilateral-session");
+    let mut hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_BILATERAL_SESSION);
     hasher.update(&genesis_a);
     hasher.update(&device_a);
     hasher.update(&genesis_b);

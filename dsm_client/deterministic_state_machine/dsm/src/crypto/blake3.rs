@@ -122,7 +122,7 @@ fn base64_encode_for_test(input: &[u8]) -> String {
 /// # Returns
 /// * `Hash` - The generated seed
 pub fn create_random_walk_seed(state_hash: &[u8], operation: &[u8], entropy: &[u8]) -> Hash {
-    let mut hasher = dsm_domain_hasher("DSM/random-walk-seed");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RANDOM_WALK_SEED);
 
     hasher.update(state_hash);
     hasher.update(operation);
@@ -185,20 +185,24 @@ pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {
 mod tests_domain_hash {
     use super::*;
 
+    const TAG_DSM_AB_FIXTURE: &str = "DSM/ab";
+    const TAG_DSM_ABC_FIXTURE: &str = "DSM/abC";
+    const TAG_NOT_DSM_FIXTURE: &str = "not-dsm";
+
     #[test]
     fn domain_hash_includes_nul_terminator() {
         // Without a NUL, the two would be ambiguous in naive concatenation:
         // tag="DSM/ab", data="Cxyz"  vs tag="DSM/abC", data="xyz".
         // With NUL included, these MUST produce different digests.
-        let h1 = domain_hash("DSM/ab", b"Cxyz");
-        let h2 = domain_hash("DSM/abC", b"xyz");
+        let h1 = domain_hash(TAG_DSM_AB_FIXTURE, b"Cxyz");
+        let h2 = domain_hash(TAG_DSM_ABC_FIXTURE, b"xyz");
         assert_ne!(h1.as_bytes(), h2.as_bytes());
     }
 
     #[test]
     #[should_panic(expected = "domain tag must start")]
     fn domain_hash_rejects_non_dsm_tag() {
-        let _ = domain_hash("not-dsm", b"payload");
+        let _ = domain_hash(TAG_NOT_DSM_FIXTURE, b"payload");
     }
 }
 
@@ -318,7 +322,7 @@ mod tests_token_domain {
         let pc = test_policy_a();
         let data = b"payload";
         let hierarchical = token_domain_hash(&pc, "transfer", data);
-        let flat = domain_hash("DSM/token-op", data);
+        let flat = domain_hash(crate::common::domain_tags::TAG_DSM_TOKEN_OP, data);
         assert_ne!(hierarchical.as_bytes(), flat.as_bytes());
     }
 
@@ -469,8 +473,8 @@ mod tests {
     #[test]
     fn domain_separation_different_tags_produce_different_hashes() {
         let data = b"same-data";
-        let h1 = domain_hash("DSM/tag1", data);
-        let h2 = domain_hash("DSM/tag2", data);
+        let h1 = domain_hash(crate::common::domain_tags::TAG_DSM_TAG1, data);
+        let h2 = domain_hash(crate::common::domain_tags::TAG_DSM_TAG2, data);
         assert_ne!(h1.as_bytes(), h2.as_bytes());
     }
 

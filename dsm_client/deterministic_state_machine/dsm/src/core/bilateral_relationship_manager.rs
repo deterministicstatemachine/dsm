@@ -171,7 +171,9 @@ impl ContactEstablishmentResponse {
 
     /// Hash the original request for reference
     fn hash_request(request: &ContactEstablishmentRequest) -> Result<[u8; 32], DsmError> {
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/request-hash");
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_REQUEST_HASH,
+        );
         hasher.update(b"DSM_REQUEST_HASH");
         hasher.update(&request.local_device_id);
         hasher.update(&request.local_genesis_hash);

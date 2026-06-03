@@ -64,25 +64,25 @@ Location: `dsm_client/deterministic_state_machine/dsm/src/`
 
 The core crate contains all protocol logic with zero I/O dependencies:
 
-| Module | Purpose |
-|--------|---------|
-| `core/state_machine.rs` | State transitions, hash chain evolution |
-| `core/bilateral/` | Bilateral transaction manager (3-phase commit) |
-| `core/token/` | Token types, conservation checks, policy validation |
-| `crypto/blake3.rs`, `crypto/hash.rs` | Domain-separated BLAKE3 hashing |
-| `crypto/sphincs.rs` | SPHINCS+ post-quantum signatures |
-| `crypto/kyber.rs` | ML-KEM-768 key encapsulation |
-| `crypto/dbrw.rs` | DBRW anti-cloning |
-| `crypto/blake3.rs` (commitments) | Salted-BLAKE3 commitments via `dsm_domain_hasher`; replaces the removed Pedersen module (Issue #184 F2) — see `vault::limbo_vault::dlv_content_commitment` |
-| `merkle/sparse_merkle_tree.rs` | Per-device Sparse Merkle Tree |
-| `vault/dlv_manager.rs` | Deterministic Limbo Vault management |
-| `vault/limbo_vault.rs` | Vault lifecycle states |
-| `vault/fulfillment.rs` | DLV fulfillment mechanisms |
-| `cpta/mod.rs` | Content-Addressed Token Policy Anchors |
-| `emissions.rs` | DJTE (Deterministic Join-Triggered Emissions) |
-| `bitcoin_tap_sdk.rs` | dBTC bridge (HTLC, deep-anchor) |
-| `recovery/` | Capsule, tombstone, rollup recovery |
-| `common/domain_tags.rs` | BLAKE3 domain tag constants |
+| Module                               | Purpose                                                                                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core/state_machine.rs`              | State transitions, hash chain evolution                                                                                                                    |
+| `core/bilateral/`                    | Bilateral transaction manager (3-phase commit)                                                                                                             |
+| `core/token/`                        | Token types, conservation checks, policy validation                                                                                                        |
+| `crypto/blake3.rs`, `crypto/hash.rs` | Domain-separated BLAKE3 hashing                                                                                                                            |
+| `crypto/sphincs.rs`                  | SPHINCS+ post-quantum signatures                                                                                                                           |
+| `crypto/kyber.rs`                    | ML-KEM-768 key encapsulation                                                                                                                               |
+| `crypto/dbrw.rs`                     | DBRW anti-cloning                                                                                                                                          |
+| `crypto/blake3.rs` (commitments)     | Salted-BLAKE3 commitments via `dsm_domain_hasher`; replaces the removed Pedersen module (Issue #184 F2) — see `vault::limbo_vault::dlv_content_commitment` |
+| `merkle/sparse_merkle_tree.rs`       | Per-device Sparse Merkle Tree                                                                                                                              |
+| `vault/dlv_manager.rs`               | Deterministic Limbo Vault management                                                                                                                       |
+| `vault/limbo_vault.rs`               | Vault lifecycle states                                                                                                                                     |
+| `vault/fulfillment.rs`               | DLV fulfillment mechanisms                                                                                                                                 |
+| `cpta/mod.rs`                        | Content-Addressed Token Policy Anchors                                                                                                                     |
+| `emissions.rs`                       | DJTE (Deterministic Join-Triggered Emissions)                                                                                                              |
+| `bitcoin_tap_sdk.rs`                 | dBTC bridge (HTLC, deep-anchor)                                                                                                                            |
+| `recovery/`                          | Capsule, tombstone, rollup recovery                                                                                                                        |
+| `common/domain_tags/mod.rs`          | BLAKE3 domain tag constants (centralized module tree under `common/domain_tags/`)                                                                          |
 
 ### `dsm_sdk` — Platform ABI Shims + Shared Ingress
 
@@ -90,23 +90,23 @@ Location: `dsm_client/deterministic_state_machine/dsm_sdk/src/`
 
 Wraps the core crate with thin ABI shims plus a shared semantic ingress:
 
-| Module | Purpose |
-|--------|---------|
-| `ingress.rs` | Canonical `IngressRequest` / `IngressResponse` dispatch |
-| `jni/mod.rs` | JNI module root, `JNI_OnLoad` |
-| `jni/unified_protobuf_bridge.rs` | Android JNI ABI shim |
-| `platform/ios/transport.rs` | iOS envelope FFI shim |
-| `jni/bootstrap.rs` | PBI bootstrap (device_id + genesis_hash + DBRW entropy) |
-| `jni/create_genesis.rs` | MPC genesis creation |
-| `bluetooth/bilateral_ble_handler.rs` | BLE bilateral session handler |
-| `bluetooth/ble_frame_coordinator.rs` | MTU-aware chunking/reassembly |
-| `bluetooth/pairing_orchestrator.rs` | Rust-driven BLE pairing flow |
-| `sdk/bilateral_sdk.rs` | Bilateral transfer API |
-| `sdk/token_sdk.rs` | Token/balance queries |
-| `sdk/dlv_sdk.rs` | DLV vault operations |
-| `sdk/bitcoin_tap_sdk.rs` | dBTC Bitcoin bridge |
-| `sdk/storage_node_sdk.rs` | Storage node HTTP client |
-| `security/dbrw_validation.rs` | DBRW clone detection |
+| Module                               | Purpose                                                 |
+| ------------------------------------ | ------------------------------------------------------- |
+| `ingress.rs`                         | Canonical `IngressRequest` / `IngressResponse` dispatch |
+| `jni/mod.rs`                         | JNI module root, `JNI_OnLoad`                           |
+| `jni/unified_protobuf_bridge.rs`     | Android JNI ABI shim                                    |
+| `platform/ios/transport.rs`          | iOS envelope FFI shim                                   |
+| `jni/bootstrap.rs`                   | PBI bootstrap (device_id + genesis_hash + DBRW entropy) |
+| `jni/create_genesis.rs`              | MPC genesis creation                                    |
+| `bluetooth/bilateral_ble_handler.rs` | BLE bilateral session handler                           |
+| `bluetooth/ble_frame_coordinator.rs` | MTU-aware chunking/reassembly                           |
+| `bluetooth/pairing_orchestrator.rs`  | Rust-driven BLE pairing flow                            |
+| `sdk/bilateral_sdk.rs`               | Bilateral transfer API                                  |
+| `sdk/token_sdk.rs`                   | Token/balance queries                                   |
+| `sdk/dlv_sdk.rs`                     | DLV vault operations                                    |
+| `sdk/bitcoin_tap_sdk.rs`             | dBTC Bitcoin bridge                                     |
+| `sdk/storage_node_sdk.rs`            | Storage node HTTP client                                |
+| `security/dbrw_validation.rs`        | DBRW clone detection                                    |
 
 Compiled by `cargo ndk` for three ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`.
 
@@ -116,18 +116,18 @@ Location: `dsm_storage_node/src/`
 
 Index-only, clockless, signature-free HTTP server built on Axum:
 
-| Module | Purpose |
-|--------|---------|
-| `main.rs` | Axum server, TLS, CLI args |
-| `api/genesis.rs` | Genesis entropy endpoints |
-| `api/bytecommit.rs` | ByteCommit mirroring |
-| `api/dlv_slot.rs` | DLV vault slot management |
-| `api/gossip.rs` | Inter-node state sync |
-| `api/unilateral_api.rs` | b0x unilateral transport |
-| `api/recovery_capsule.rs` | Recovery capsule CRUD |
-| `replication.rs` | Replica placement (keyed Fisher-Yates) |
-| `partitioning.rs` | Deterministic shard assignment |
-| `db/` | PostgreSQL schema, migrations, queries |
+| Module                    | Purpose                                |
+| ------------------------- | -------------------------------------- |
+| `main.rs`                 | Axum server, TLS, CLI args             |
+| `api/genesis.rs`          | Genesis entropy endpoints              |
+| `api/bytecommit.rs`       | ByteCommit mirroring                   |
+| `api/dlv_slot.rs`         | DLV vault slot management              |
+| `api/gossip.rs`           | Inter-node state sync                  |
+| `api/unilateral_api.rs`   | b0x unilateral transport               |
+| `api/recovery_capsule.rs` | Recovery capsule CRUD                  |
+| `replication.rs`          | Replica placement (keyed Fisher-Yates) |
+| `partitioning.rs`         | Deterministic shard assignment         |
+| `db/`                     | PostgreSQL schema, migrations, queries |
 
 ---
 
@@ -210,6 +210,7 @@ node_set = keyed_fisher_yates_shuffle(
 ```
 
 This produces the same assignment on every client without coordination. Parameters:
+
 - N = 6 (total replicas)
 - K = 3 (minimum for durability)
 
@@ -232,6 +233,7 @@ INIT → BOOTSTRAPPING → GENESIS_PENDING → READY → [screens]
 ```
 
 Bootstrap flow:
+
 1. `useAppBootstrap.ts` initializes the bridge
 2. SDK checks for existing device identity (DBRW-bound)
 3. If no identity: `useGenesisFlow.ts` calls MPC genesis endpoint
@@ -305,15 +307,15 @@ Detailed order-of-operations for key flows across all four layers. All paths are
 
 ## Protocol Guarantees
 
-| Property | Mechanism |
-|----------|-----------|
-| No double-spend | Tripwire Fork-Exclusion: SPHINCS+ EUF-CMA + BLAKE3 collision resistance |
-| No replay | Nonces and sequence counters in every message |
-| Identity binding | SPHINCS+ keypair + DBRW anti-cloning (silicon + environment) |
-| Offline capability | BLE transport requires no network; storage sync is eventual |
-| Server blindness | Storage nodes are index-only; never sign, validate, or gate |
-| Token conservation | `B_{n+1} = B_n + Delta, B >= 0` enforced at every transition |
-| Determinism | Same inputs → same outputs; no randomness in state transitions |
+| Property           | Mechanism                                                               |
+| ------------------ | ----------------------------------------------------------------------- |
+| No double-spend    | Tripwire Fork-Exclusion: SPHINCS+ EUF-CMA + BLAKE3 collision resistance |
+| No replay          | Nonces and sequence counters in every message                           |
+| Identity binding   | SPHINCS+ keypair + DBRW anti-cloning (silicon + environment)            |
+| Offline capability | BLE transport requires no network; storage sync is eventual             |
+| Server blindness   | Storage nodes are index-only; never sign, validate, or gate             |
+| Token conservation | `B_{n+1} = B_n + Delta, B >= 0` enforced at every transition            |
+| Determinism        | Same inputs → same outputs; no randomness in state transitions          |
 
 ---
 

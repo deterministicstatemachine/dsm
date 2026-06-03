@@ -333,7 +333,10 @@ impl NodeRegistry {
         let n_len = nodes.len();
         let start_idx = match (seed, n_len) {
             (Some(s), n) if n > 0 => {
-                let hash = dsm::crypto::blake3::domain_hash("DSM/network-hash", s.as_bytes());
+                let hash = dsm::crypto::blake3::domain_hash(
+                    dsm::common::domain_tags::TAG_DSM_NETWORK_HASH,
+                    s.as_bytes(),
+                );
                 let mut le8 = [0u8; 8];
                 le8.copy_from_slice(&hash.as_bytes()[0..8]);
                 (u64::from_le_bytes(le8) as usize) % n
@@ -597,7 +600,8 @@ pub fn auto_assign_storage_node(device_id_bytes: &[u8]) -> Result<String, DsmErr
         let mut input = Vec::with_capacity(10 + device_id_bytes.len());
         input.extend_from_slice(b"DSM/place\0");
         input.extend_from_slice(device_id_bytes);
-        *dsm::crypto::blake3::domain_hash("DSM/network-hash", &input).as_bytes()
+        *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_NETWORK_HASH, &input)
+            .as_bytes()
     };
 
     // Unbiased sample one index from [0, candidates.len()).
@@ -643,7 +647,7 @@ fn fisher_yates_prf_u64(seed: [u8; 32], ctr: u64) -> u64 {
     buf.extend_from_slice(domain);
     buf.extend_from_slice(&seed);
     buf.extend_from_slice(&ctr.to_le_bytes());
-    let h = dsm::crypto::blake3::domain_hash("DSM/network-hash", &buf);
+    let h = dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_NETWORK_HASH, &buf);
     let bytes = h.as_bytes();
     let mut le8 = [0u8; 8];
     le8.copy_from_slice(&bytes[..8]);

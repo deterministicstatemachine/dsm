@@ -939,7 +939,9 @@ impl ForwardLinkedCommitment {
         validate_fixed_params(&self.fixed_parameters)?;
         validate_variable_params(&self.variable_parameters)?;
 
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/flc/hash/v2");
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_FLC_HASH_V2,
+        );
         canonical_lp::write_lp(&mut h, &self.next_state_hash);
         canonical_lp::write_lp(&mut h, self.counterparty_id.as_bytes());
 
@@ -1208,7 +1210,9 @@ fn build_invalidation_proof_bytes(
 }
 
 fn derive_event_index(fork_id: &str, fork_hash: &[u8], selected_hash: &[u8]) -> u64 {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/precommit/invalidation-proof/v2");
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_PRECOMMIT_INVALIDATION_PROOF_V2,
+    );
     canonical_lp::write_lp(&mut h, fork_id.as_bytes());
     canonical_lp::write_lp(&mut h, fork_hash);
     canonical_lp::write_lp(&mut h, selected_hash);

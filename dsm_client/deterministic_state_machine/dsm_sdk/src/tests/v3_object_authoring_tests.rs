@@ -16,7 +16,10 @@ fn contact_accept_add_digest_matches_domain_hash() {
     let accept = author_contact_accept(&author, &add, &local_tip);
 
     let add_bytes = add.encode_to_vec();
-    let expected = domain_hash_bytes("DSM/contact/add\0", &add_bytes);
+    let expected = domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_CONTACT_ADD_NUL,
+        &add_bytes,
+    );
     assert_eq!(accept.add_digest, expected.to_vec());
 }
 

@@ -1113,8 +1113,10 @@ impl AppRouterImpl {
                         "Failed to encode OnlineTransferRequest for nonce computation: {e}"
                     ));
                 }
-                let payload_digest =
-                    dsm::crypto::blake3::domain_hash("DSM/payload-digest", &payload_bytes);
+                let payload_digest = dsm::crypto::blake3::domain_hash(
+                    dsm::common::domain_tags::TAG_DSM_PAYLOAD_DIGEST,
+                    &payload_bytes,
+                );
 
                 let sender_id = match <[u8; 32]>::try_from(&self.device_id_bytes[..]) {
                     Ok(v) => v,

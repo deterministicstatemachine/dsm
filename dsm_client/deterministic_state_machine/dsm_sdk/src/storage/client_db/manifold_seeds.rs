@@ -17,7 +17,11 @@ use anyhow::Result;
 ///
 /// Deterministic: same policy commit → same seed on every device.
 pub fn get_or_create_manifold_seed(policy_commit: &[u8]) -> Result<[u8; 32]> {
-    let seed = *dsm::crypto::blake3::domain_hash("DSM/manifold-seed", policy_commit).as_bytes();
+    let seed = *dsm::crypto::blake3::domain_hash(
+        dsm::common::domain_tags::TAG_DSM_MANIFOLD_SEED,
+        policy_commit,
+    )
+    .as_bytes();
     Ok(seed)
 }
 
@@ -66,7 +70,11 @@ mod tests {
     fn matches_raw_blake3_domain_hash() {
         let commit = b"test-policy";
         let seed = get_or_create_manifold_seed(commit).unwrap();
-        let expected = *dsm::crypto::blake3::domain_hash("DSM/manifold-seed", commit).as_bytes();
+        let expected = *dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_MANIFOLD_SEED,
+            commit,
+        )
+        .as_bytes();
         assert_eq!(seed, expected);
     }
 

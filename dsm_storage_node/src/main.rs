@@ -522,22 +522,23 @@ async fn async_main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// Verify that the normative BLAKE3 domain tags used in node-id binding
-    /// (whitepaper §10.1, CLAUDE.md §9) are NUL-terminated ASCII as required.
-    /// BLAKE3 domain separation is: H("DSM/<name>\0" || data).
+    use dsm::common::domain_tags::{TAG_DSM_BYTECOMMIT, TAG_DSM_NODE_ID};
+
+    /// Verify that central storage-related tags remain ASCII DSM tags and that
+    /// hashing preimages append a trailing NUL byte.
     #[test]
     fn node_id_domain_tag_is_nul_terminated_ascii() {
-        const NODE_ID_TAG: &str = "DSM/node-id\0";
-        const BYTECOMMIT_TAG: &str = "DSM/bytecommit\0";
-        for tag in [NODE_ID_TAG, BYTECOMMIT_TAG] {
+        for tag in [TAG_DSM_NODE_ID, TAG_DSM_BYTECOMMIT] {
             assert!(tag.is_ascii(), "domain tag must be ASCII: {tag}");
-            assert!(
-                tag.ends_with('\0'),
-                "domain tag must be NUL-terminated per whitepaper §2.1: {tag}"
-            );
             assert!(
                 tag.starts_with("DSM/"),
                 "domain tag must use DSM/ prefix: {tag}"
+            );
+
+            let nul_terminated = format!("{tag}\0");
+            assert!(
+                nul_terminated.ends_with('\0'),
+                "domain tag must be NUL-terminated per whitepaper §2.1: {nul_terminated}"
             );
         }
     }

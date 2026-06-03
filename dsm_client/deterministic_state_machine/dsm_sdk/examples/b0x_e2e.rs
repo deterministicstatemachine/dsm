@@ -48,7 +48,8 @@ async fn main() {
         B0xSDK::compute_b0x_address(&genesis, &to_device_id, &chain_state.hash).expect("routing");
 
     // Build an Operation::Transfer to ourselves
-    let balance_anchor = dsm::crypto::blake3::domain_hash("DSM/balance-anchor", &[]);
+    let balance_anchor =
+        dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR, &[]);
     let op = dsm::types::operations::Operation::Transfer {
         to_device_id: to_device_id.clone(),
         amount: dsm::types::token_types::Balance::from_state(1u64, *balance_anchor.as_bytes()),

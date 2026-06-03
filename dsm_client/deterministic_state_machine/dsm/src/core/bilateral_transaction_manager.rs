@@ -27,6 +27,7 @@ use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::types::state_types::{PreCommitment, State};
 use crate::core::utility::labeling;
+use crate::common::domain_tags::{TAG_BILATERAL_SESSION, TAG_SMT_KEY, TAG_TIP};
 
 // -------------------- Cryptographic Progress (strictly increasing, clockless) --------------------
 #[inline]
@@ -84,7 +85,7 @@ impl BilateralRelationshipAnchor {
     /// Order-independent mutual anchor = H("DSM_BILATERAL_ANCHOR" || min(genesis) || max(genesis))
     pub fn generate_mutual_anchor_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        let mut h = dsm_domain_hasher("DSM/bilateral-session");
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
         canonical_lp::write_lp(&mut h, lo);
         canonical_lp::write_lp(&mut h, hi);
         let out = h.finalize();
@@ -104,7 +105,7 @@ fn initial_relationship_chain_tip(
     remote_device_id: &[u8; 32],
     remote_genesis_hash: &[u8; 32],
 ) -> [u8; 32] {
-    // h_0 = dsm_domain_hasher("DSM/bilateral-session") || sorted(G_A, DevID_A, G_B, DevID_B)
+    // h_0 = hasher(TAG_BILATERAL_SESSION) || sorted(G_A, DevID_A, G_B, DevID_B)
     // Lexicographic ordering ensures identical output regardless of initiator.
     // compute_initial_chain_tip() in contact_sdk.rs MUST use the same hasher and tag.
     let (genesis_a, device_a, genesis_b, device_b) = if local_device_id < remote_device_id {
@@ -123,7 +124,7 @@ fn initial_relationship_chain_tip(
         )
     };
 
-    let mut h = dsm_domain_hasher("DSM/bilateral-session");
+    let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
     h.update(genesis_a);
     h.update(device_a);
     h.update(genesis_b);
@@ -147,7 +148,7 @@ pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
     } else {
         (dev_id_b, dev_id_a)
     };
-    let mut h = dsm_domain_hasher("DSM/smt-key");
+    let mut h = dsm_domain_hasher(TAG_SMT_KEY);
     h.update(min_id);
     h.update(max_id);
     bytes32(h.finalize().as_bytes())
@@ -168,7 +169,7 @@ pub fn compute_successor_tip(
     entropy: &[u8],
     receipt_digest: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/tip");
+    let mut h = dsm_domain_hasher(TAG_TIP);
     h.update(h_n);
     h.update(op_bytes);
     h.update(entropy);
@@ -222,7 +223,7 @@ impl BilateralPreCommitment {
         remote: &PreCommitment,
         op: &Operation,
     ) -> Result<[u8; 32], DsmError> {
-        let mut h = dsm_domain_hasher("DSM/bilateral-session");
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
         canonical_lp::write_lp(&mut h, &local.hash);
         canonical_lp::write_lp(&mut h, &remote.hash);
         canonical_lp::write_lp(&mut h, &op.to_bytes());
@@ -1144,7 +1145,7 @@ impl BilateralTransactionManager {
     }
 
     fn tx_hash(&self, local_state: &State, remote_state: &State) -> Result<[u8; 32], DsmError> {
-        let mut h = dsm_domain_hasher("DSM/bilateral-session");
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
         h.update(&local_state.hash()?);
         h.update(&remote_state.hash()?);
         let out = h.finalize();

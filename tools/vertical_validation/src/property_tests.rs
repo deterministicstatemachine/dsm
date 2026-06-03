@@ -152,7 +152,8 @@ fn build_signed_token_transfer(
 }
 
 fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
-    let device_id: [u8; 32] = *domain_hash("DSM/test-device", seed_bytes).as_bytes();
+    let device_id: [u8; 32] =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed_bytes).as_bytes();
     let device_info = DeviceInfo::new(device_id, pk.to_vec());
     let mut state = State::new_genesis(*seed_bytes, device_info);
     if let Ok(h) = state.hash() {
@@ -163,7 +164,7 @@ fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
 
 fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
     let op_bytes = operation.to_bytes();
-    let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+    let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_STATE_ENTROPY);
     hasher.update(&current_state.entropy);
     hasher.update(&op_bytes);
     hasher.update(&current_state.hash);
@@ -777,7 +778,8 @@ mod tests {
         let seed_bytes = [9u8; 32];
         let kp = generate_keypair_from_seed(PROPERTY_TEST_VARIANT, &seed_bytes)
             .expect("deterministic SPHINCS+ keygen");
-        let device_id: [u8; 32] = *domain_hash("DSM/test-device", &seed_bytes).as_bytes();
+        let device_id: [u8; 32] =
+            *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, &seed_bytes).as_bytes();
         let device_info = DeviceInfo::new(device_id, kp.public_key.clone());
         let mut state = State::new_genesis(seed_bytes, device_info);
         state.hash = state.hash().expect("genesis hash");

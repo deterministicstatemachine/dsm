@@ -195,7 +195,7 @@ impl BleSecurityContext {
     #[must_use]
     pub fn new(local_device_id: &str, remote_device_id: &str) -> Self {
         // Derive session key from both device IDs (order-independent)
-        let mut hasher = dsm_domain_hasher("DSM/ble-session-key");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BLE_SESSION_KEY);
 
         // Sort device IDs to ensure consistent key derivation
         let (first, second) = if local_device_id <= remote_device_id {

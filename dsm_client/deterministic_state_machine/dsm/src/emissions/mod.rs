@@ -99,7 +99,7 @@ impl EmissionSchedule {
         buf.extend_from_slice(&self.schedule_steps.to_le_bytes());
         buf.extend_from_slice(&self.initial_step_emissions.to_le_bytes());
         buf.extend_from_slice(&self.initial_step_amount.to_le_bytes());
-        domain_hash_bytes("DJTE.POLICY", &buf)
+        domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_POLICY, &buf)
     }
 
     pub fn amount_for_index(
@@ -145,7 +145,7 @@ impl EmissionWitness {
         next_state: &SourceDlvState,
         jap: &JoinActivationProof,
     ) -> Result<Self, DsmError> {
-        let shard_hash = domain_hash_bytes("DJTE.SHARD", &jap.id);
+        let shard_hash = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_SHARD, &jap.id);
         let activation_shard = extract_shard_index(&shard_hash, prev_state.count_smt.shard_depth);
         let jap_hash = jap.digest();
         Ok(Self {
@@ -159,7 +159,7 @@ impl EmissionWitness {
             prev_spent_non_membership_proof: prev_state.spent_smt.proof(&jap_hash)?,
             next_spent_membership_proof: next_state.spent_smt.proof(&jap_hash)?,
             activation_shard,
-            activated_leaf: domain_hash_bytes("DJTE.ACTIVE", &jap.id),
+            activated_leaf: domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_ACTIVE, &jap.id),
         })
     }
 }
@@ -180,7 +180,7 @@ impl JoinActivationProof {
         buf.extend_from_slice(&self.id);
         buf.extend_from_slice(&self.gate_proof);
         buf.extend_from_slice(&self.nonce);
-        domain_hash_bytes("DJTE.JAP", &buf)
+        domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_JAP, &buf)
     }
 }
 
@@ -202,7 +202,7 @@ impl EmissionReceipt {
         buf.extend_from_slice(&self.winner_id);
         buf.extend_from_slice(&self.amount.to_le_bytes());
         buf.extend_from_slice(&self.jap_hash);
-        domain_hash_bytes("DJTE.RCPT", &buf)
+        domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_RCPT, &buf)
     }
 }
 
@@ -248,7 +248,7 @@ impl SourceDlvState {
 
     /// Applies an activation to this state (append + count update).
     pub fn add_activation(&mut self, jap: &JoinActivationProof) -> Result<u64, DsmError> {
-        let shard_hash = domain_hash_bytes("DJTE.SHARD", &jap.id);
+        let shard_hash = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_SHARD, &jap.id);
         let shard_idx = extract_shard_index(&shard_hash, self.count_smt.shard_depth);
 
         if shard_idx as usize >= self.shard_accumulators.len() {
@@ -318,7 +318,7 @@ fn reseed(seed: &[u8; 32], counter: u64) -> [u8; 32] {
     let mut buf = Vec::with_capacity(32 + 8);
     buf.extend_from_slice(seed);
     buf.extend_from_slice(&counter.to_le_bytes());
-    domain_hash_bytes("DJTE.RESEED", &buf)
+    domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_RESEED, &buf)
 }
 
 /// Deterministic exact-uniform sampling over `[0, n)`.
@@ -369,7 +369,7 @@ pub fn select_winner_for_event(
     seed_buf.extend_from_slice(&state.dlv_tip);
     seed_buf.extend_from_slice(&emission_index.to_le_bytes());
     seed_buf.extend_from_slice(jap_hash);
-    let r0 = domain_hash_bytes("DJTE.SEED", &seed_buf);
+    let r0 = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_SEED, &seed_buf);
 
     let n = state.count_smt.total();
     if n == 0 {
@@ -420,7 +420,7 @@ fn compute_next_tip(
     buf.extend_from_slice(count_root);
     buf.extend_from_slice(spent_root);
     buf.extend_from_slice(shard_roots_commitment);
-    domain_hash_bytes("DJTE.DLV.TIP", &buf)
+    domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_DLV_TIP, &buf)
 }
 
 fn shard_roots_commitment(state: &SourceDlvState) -> [u8; 32] {
@@ -428,7 +428,7 @@ fn shard_roots_commitment(state: &SourceDlvState) -> [u8; 32] {
     for acc in &state.shard_accumulators {
         buf.extend_from_slice(&acc.root());
     }
-    domain_hash_bytes("DJTE.SHARDS.ROOT", &buf)
+    domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_SHARDS_ROOT, &buf)
 }
 
 /// Verify an emission transition
@@ -581,7 +581,7 @@ pub fn verify_emission(
         }
     }
 
-    let shard_hash = domain_hash_bytes("DJTE.SHARD", &jap.id);
+    let shard_hash = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_SHARD, &jap.id);
     let shard_idx = extract_shard_index(&shard_hash, prev_state.count_smt.shard_depth);
     if witness.activation_shard != shard_idx {
         return Err(DsmError::Verification(
@@ -593,7 +593,7 @@ pub fn verify_emission(
         return Err(DsmError::Verification("Shard index out of bounds".into()));
     }
 
-    let expected_new_leaf = domain_hash_bytes("DJTE.ACTIVE", &jap.id);
+    let expected_new_leaf = domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_ACTIVE, &jap.id);
     if witness.activated_leaf != expected_new_leaf {
         return Err(DsmError::Verification(
             "Emission witness activated leaf mismatch".into(),
@@ -644,7 +644,10 @@ pub fn verify_emission(
     selection_state.add_activation(jap)?;
     let winner_leaf =
         select_winner_for_event(&selection_state, receipt.emission_index, &receipt.jap_hash)?;
-    let expected_winner_leaf = domain_hash_bytes("DJTE.ACTIVE", &receipt.winner_id);
+    let expected_winner_leaf = domain_hash_bytes(
+        crate::common::domain_tags::TAG_DJTE_ACTIVE,
+        &receipt.winner_id,
+    );
 
     if winner_leaf != expected_winner_leaf {
         return Err(DsmError::Verification(
@@ -746,7 +749,10 @@ mod tests {
 
         let acc = &state.shard_accumulators[shard_idx as usize];
         assert_eq!(acc.len(), 1);
-        assert_eq!(acc.leaves[0], domain_hash_bytes("DJTE.ACTIVE", &id1));
+        assert_eq!(
+            acc.leaves[0],
+            domain_hash_bytes(crate::common::domain_tags::TAG_DJTE_ACTIVE, &id1)
+        );
     }
 
     #[test]
@@ -820,7 +826,10 @@ mod tests {
 
         assert_eq!(
             _winner_leaf,
-            domain_hash_bytes("DJTE.ACTIVE", &receipt.winner_id)
+            domain_hash_bytes(
+                crate::common::domain_tags::TAG_DJTE_ACTIVE,
+                &receipt.winner_id
+            )
         );
         assert!(verify_emission(&prev, &next, &jap, &receipt, &witness).unwrap());
     }

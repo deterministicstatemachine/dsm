@@ -54,9 +54,12 @@ impl TestDevice {
             e
         };
         let keypair = SignatureKeyPair::generate_from_entropy(&entropy).unwrap();
-        let device_id = domain_hash_bytes("DSM/device-id", &keypair.public_key);
-        let genesis_hash =
-            domain_hash_bytes("DSM/genesis", &[&device_id[..], &entropy[..]].concat());
+        let device_id =
+            domain_hash_bytes(dsm::common::domain_tags::TAG_DEVICE_ID, &keypair.public_key);
+        let genesis_hash = domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_GENESIS,
+            &[&device_id[..], &entropy[..]].concat(),
+        );
         let device_tree_root = DeviceTree::single(device_id).root();
         Self {
             device_id,
@@ -79,7 +82,7 @@ fn compute_initial_chain_tip(
     } else {
         (b_gen, b_dev, a_gen, a_dev)
     };
-    let mut h = dsm_domain_hasher("DSM/bilateral-session");
+    let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_BILATERAL_SESSION);
     h.update(ga);
     h.update(da);
     h.update(gb);
@@ -133,13 +136,13 @@ fn theorem2_two_successors_same_parent_rejected() {
 
     // First transfer: Alice sends 100 to Bob.
     let entropy1 = [0xAAu8; 32];
-    let receipt_digest1 = domain_hash_bytes("DSM/receipt", &[0x01; 32]);
+    let receipt_digest1 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0x01; 32]);
     let (_op1, op1_bytes) = make_transfer_op(&bob.device_id, 100);
     let h_1 = compute_successor_tip(&h_0, &op1_bytes, &entropy1, &receipt_digest1);
 
     // Second (forked) transfer from SAME h_0: different amount.
     let entropy2 = [0xBBu8; 32];
-    let receipt_digest2 = domain_hash_bytes("DSM/receipt", &[0x02; 32]);
+    let receipt_digest2 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0x02; 32]);
     let (_op2, op2_bytes) = make_transfer_op(&bob.device_id, 200);
     let h_1_prime = compute_successor_tip(&h_0, &op2_bytes, &entropy2, &receipt_digest2);
 
@@ -170,8 +173,8 @@ fn theorem2_divergent_roots_detected() {
     let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     // Parent tip and child tip.
-    let parent_tip = domain_hash_bytes("DSM/test-tip", &[0x01; 32]);
-    let child_tip = domain_hash_bytes("DSM/test-tip", &[0x02; 32]);
+    let parent_tip = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0x01; 32]);
+    let child_tip = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0x02; 32]);
 
     // Compute leaf hashes.
     let old_leaf = hash_smt_leaf(&parent_tip);
@@ -276,13 +279,13 @@ fn theorem2_transitive_tripwire_web() {
 
     // Alice->Bob transfer.
     let entropy_ab = [0xCA; 32];
-    let receipt_ab = domain_hash_bytes("DSM/receipt", &[0xAB; 32]);
+    let receipt_ab = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0xAB; 32]);
     let (_op_ab, op_ab_bytes) = make_transfer_op(&bob.device_id, 50);
     let h_1_ab = compute_successor_tip(&h_0_ab, &op_ab_bytes, &entropy_ab, &receipt_ab);
 
     // Bob->Charlie transfer.
     let entropy_bc = [0xCB; 32];
-    let receipt_bc = domain_hash_bytes("DSM/receipt", &[0xBC; 32]);
+    let receipt_bc = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0xBC; 32]);
     let (_op_bc, op_bc_bytes) = make_transfer_op(&charlie.device_id, 50);
     let h_1_bc = compute_successor_tip(&h_0_bc, &op_bc_bytes, &entropy_bc, &receipt_bc);
 
@@ -365,7 +368,8 @@ fn theorem1_smt_key_deterministic() {
 #[test]
 fn predicate_1_sphincs_valid_signature() {
     let alice = TestDevice::from_seed(60);
-    let commitment_hash = domain_hash_bytes("DSM/test-commit", &[0xDE; 32]);
+    let commitment_hash =
+        domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_COMMIT, &[0xDE; 32]);
     let msg = [b"DSM/bilateral-sign\0".as_slice(), &commitment_hash].concat();
 
     let sig = alice.keypair.sign(&msg).expect("sign");
@@ -451,8 +455,8 @@ fn predicate_5_smt_replace_recomputation() {
 
     let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
-    let h_n = domain_hash_bytes("DSM/test-tip", &[0xA0; 32]);
-    let h_n1 = domain_hash_bytes("DSM/test-tip", &[0xA1; 32]);
+    let h_n = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0xA0; 32]);
+    let h_n1 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0xA1; 32]);
 
     let old_leaf = hash_smt_leaf(&h_n);
     let new_leaf = hash_smt_leaf(&h_n1);
@@ -479,7 +483,7 @@ fn predicate_5_smt_replace_recomputation() {
 
 #[test]
 fn predicate_4_device_tree_inclusion() {
-    let dev_id = domain_hash_bytes("DSM/device-id", &[0xDD; 32]);
+    let dev_id = domain_hash_bytes(dsm::common::domain_tags::TAG_DEVICE_ID, &[0xDD; 32]);
     let tree = DeviceTree::single(dev_id);
     let root = tree.root();
 
@@ -490,7 +494,7 @@ fn predicate_4_device_tree_inclusion() {
     );
 
     // Wrong device ID must fail.
-    let wrong_id = domain_hash_bytes("DSM/device-id", &[0xEE; 32]);
+    let wrong_id = domain_hash_bytes(dsm::common::domain_tags::TAG_DEVICE_ID, &[0xEE; 32]);
     assert!(
         !proof.verify(&wrong_id, &root),
         "inclusion proof must fail for wrong device"
@@ -514,7 +518,7 @@ fn chain_tip_agreement_both_devices() {
     );
 
     let entropy = [0x42u8; 32];
-    let receipt_digest = domain_hash_bytes("DSM/receipt", &[0xFF; 32]);
+    let receipt_digest = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0xFF; 32]);
     let (_op, op_bytes) = make_transfer_op(&bob.device_id, 500);
 
     // Both devices compute from identical inputs.
@@ -543,8 +547,12 @@ fn chain_10_sequential_tips() {
     seen.insert(tip);
 
     for i in 0u64..10 {
-        let entropy = domain_hash_bytes("DSM/test-entropy", &i.to_le_bytes());
-        let receipt = domain_hash_bytes("DSM/receipt", &i.to_le_bytes());
+        let entropy = domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_TEST_ENTROPY,
+            &i.to_le_bytes(),
+        );
+        let receipt =
+            domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &i.to_le_bytes());
         let (_op, op_bytes) = make_transfer_op(&bob.device_id, (i + 1) * 10);
         let next = compute_successor_tip(&tip, &op_bytes, &entropy, &receipt);
 
@@ -580,7 +588,7 @@ fn chain_first_transaction_from_zero() {
     assert_ne!(h_0, ZERO_LEAF, "initial chain tip must not be ZERO_LEAF");
 
     let entropy = [0x01u8; 32];
-    let receipt = domain_hash_bytes("DSM/receipt", &[0x01; 32]);
+    let receipt = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0x01; 32]);
     let (_op, op_bytes) = make_transfer_op(&bob.device_id, 1);
     let h_1 = compute_successor_tip(&h_0, &op_bytes, &entropy, &receipt);
 
@@ -596,9 +604,9 @@ fn chain_first_transaction_from_zero() {
 fn parent_consumed_exactly_once() {
     let mut tracker = ParentConsumptionTracker::new();
 
-    let parent = domain_hash_bytes("DSM/test-parent", &[0x01; 32]);
-    let child_a = domain_hash_bytes("DSM/test-child", &[0x0A; 32]);
-    let child_b = domain_hash_bytes("DSM/test-child", &[0x0B; 32]);
+    let parent = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_PARENT, &[0x01; 32]);
+    let child_a = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_CHILD, &[0x0A; 32]);
+    let child_b = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_CHILD, &[0x0B; 32]);
 
     // Fresh parent: first consumption succeeds.
     assert!(!tracker.is_consumed(&parent));

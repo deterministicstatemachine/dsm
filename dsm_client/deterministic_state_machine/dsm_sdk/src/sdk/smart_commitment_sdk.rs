@@ -220,7 +220,7 @@ impl SmartCommitmentSDK {
         let current_state = self.core_sdk.get_current_state()?;
 
         // C_cond = H(Sₙ ∥ recipient ∥ amount ∥ "if" ∥ condition ∥ O)
-        let mut hasher = dsm_domain_hasher("DSM/smart-commit-hash");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_HASH);
         hasher.update(&current_state.hash);
         hasher.update(recipient.as_bytes());
         hasher.update(&amount.to_le_bytes());
@@ -282,7 +282,8 @@ impl SmartCommitmentSDK {
                 condition,
                 oracle_id,
             } => {
-                let mut h = dsm_domain_hasher("DSM/smart-commit-condition");
+                let mut h =
+                    dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_CONDITION);
                 h.update(&current_state.hash);
                 h.update(commitment.recipient.as_bytes());
                 h.update(&commitment.amount.to_le_bytes());
@@ -304,7 +305,7 @@ impl SmartCommitmentSDK {
         let current_state = self.core_sdk.get_current_state()?;
 
         // C_fork = H(Sₙ ‖ {path1, path2, ..., pathm})
-        let mut h = dsm_domain_hasher("DSM/smart-commit-predicate");
+        let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_PREDICATE);
         h.update(&current_state.hash);
         for p in &paths {
             let fp = Self::op_fingerprint(p);
@@ -331,7 +332,7 @@ impl SmartCommitmentSDK {
 
         // Recompute fork commitment and compare.
         let current_state = self.core_sdk.get_current_state()?;
-        let mut h = dsm_domain_hasher("DSM/smart-commit-evidence");
+        let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_EVIDENCE);
         h.update(&current_state.hash);
         for p in paths {
             let fp = Self::op_fingerprint(p);
@@ -358,7 +359,7 @@ impl SmartCommitmentSDK {
         let current_state = self.core_sdk.get_current_state()?;
 
         // commitment_hash = H(Sₙ ‖ sender ‖ recipient ‖ amount ‖ "payment")
-        let mut h = dsm_domain_hasher("DSM/smart-commit-eval");
+        let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_EVAL);
         h.update(&current_state.hash);
         h.update(sender.as_bytes());
         h.update(recipient.as_bytes());

@@ -24,7 +24,11 @@ const MIN_ENCRYPTED_LEN: usize = NONCE_LEN + 1 + TAG_LEN;
 
 /// Derive a 32-byte encryption key from the DBRW binding key.
 fn derive_enc_key(dbrw_binding_key: &[u8]) -> [u8; 32] {
-    *dsm::crypto::blake3::domain_hash("DSM/btc-key-enc", dbrw_binding_key).as_bytes()
+    *dsm::crypto::blake3::domain_hash(
+        dsm::common::domain_tags::TAG_DSM_BTC_KEY_ENC,
+        dbrw_binding_key,
+    )
+    .as_bytes()
 }
 
 /// Encrypt `plaintext` with XChaCha20-Poly1305 using a BLAKE3-derived deterministic nonce.
@@ -35,7 +39,7 @@ fn encrypt_secret(enc_key: &[u8; 32], account_id: &str, plaintext: &[u8]) -> Res
 
     // Deterministic nonce: BLAKE3("DSM/btc-nonce\0" || account_id || tick)[0..24]
     // Using tick ensures a new nonce on each re-encryption (e.g., migration).
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/btc-nonce");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BTC_NONCE);
     h.update(account_id.as_bytes());
     h.update(&tick().to_le_bytes());
     let hash = h.finalize();

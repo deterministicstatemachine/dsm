@@ -72,7 +72,7 @@ pub enum RecoveryReceipt {
 impl TombstoneReceipt {
     /// Compute tombstone hash: H(device_id || old_smt_root || old_counter || old_rollup_hash || tick)
     pub fn compute_hash(&self) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/tombstone");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TOMBSTONE);
         hasher.update(self.device_id.as_bytes());
         hasher.update(&self.old_smt_root);
         hasher.update(&self.old_counter.to_le_bytes());
@@ -132,7 +132,8 @@ impl TombstoneReceipt {
 impl SuccessionReceipt {
     /// Compute succession hash: H(device_id || tombstone_hash || new_device_commitment || tick)
     pub fn compute_hash(&self) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher("DSM/tombstone-succession");
+        let mut hasher =
+            dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_TOMBSTONE_SUCCESSION);
         hasher.update(self.device_id.as_bytes());
         hasher.update(&self.tombstone_hash);
         hasher.update(&self.new_device_commitment);

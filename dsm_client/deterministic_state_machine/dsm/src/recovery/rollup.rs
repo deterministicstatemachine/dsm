@@ -117,7 +117,7 @@ pub fn update_rollup(
 
     // Compute new roll accumulator per whitepaper §13:
     //   Roll_{t+1} := H("DSM/recovery-roll\0" || Roll_t || rid_t || H(Rec_t) || ID(8)_Bi || ht'_i)
-    let mut hasher = dsm_domain_hasher("DSM/recovery-roll");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RECOVERY_ROLL);
     hasher.update(&rollup.current_hash);
     hasher.update(&entry.receipt_id);
     hasher.update(&entry.receipt_hash);
@@ -140,7 +140,7 @@ pub fn recompute_rollup_hash(entries: &[RollupEntry]) -> [u8; 32] {
     let mut current_hash = [0u8; 32];
 
     for entry in entries {
-        let mut hasher = dsm_domain_hasher("DSM/recovery-roll");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RECOVERY_ROLL);
         hasher.update(&current_hash);
         hasher.update(&entry.receipt_id);
         hasher.update(&entry.receipt_hash);
@@ -155,7 +155,7 @@ pub fn recompute_rollup_hash(entries: &[RollupEntry]) -> [u8; 32] {
 
 /// Create 8-byte peer digest from peer ID
 fn create_peer_digest(counterparty_id: &str) -> [u8; 8] {
-    let mut hasher = dsm_domain_hasher("DSM/recovery-roll-proof");
+    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RECOVERY_ROLL_PROOF);
     hasher.update(counterparty_id.as_bytes());
     let hash = hasher.finalize();
     let mut digest = [0u8; 8];

@@ -18,6 +18,7 @@ use dsm::core::contact_manager::{ContactError, DsmContactManager};
 use dsm::types::error::DsmError;
 use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{Operation, TransactionMode};
+use dsm::common::domain_tags::TAG_BILATERAL_SESSION;
 
 // Use the SAME proto namespace as the rest of the app to avoid type mismatches.
 use dsm::types::proto as pb;
@@ -62,7 +63,7 @@ impl ContactManager {
         contact_device_id: [u8; 32],
         contact_genesis_hash: [u8; 32],
     ) -> [u8; 32] {
-        // h_0 = dsm_domain_hasher("DSM/bilateral-session") || sorted(G_A, DevID_A, G_B, DevID_B)
+        // h_0 = hasher(TAG_BILATERAL_SESSION) || sorted(G_A, DevID_A, G_B, DevID_B)
         // Lexicographic ordering ensures identical hash regardless of initiator.
         // MUST stay in sync with initial_relationship_chain_tip() in bilateral_transaction_manager.rs.
         let our_device_id = self.device_id;
@@ -85,10 +86,10 @@ impl ContactManager {
         };
 
         // MUST match initial_relationship_chain_tip() in bilateral_transaction_manager.rs exactly.
-        // Using dsm_domain_hasher("DSM/bilateral-session") — not a raw blake3 hasher with a
+        // Using TAG_BILATERAL_SESSION with dsm_domain_hasher — not a raw blake3 hasher with a
         // manually-injected tag — because dsm_domain_hasher derives a keyed context from the
         // tag string, producing a different output than treating the tag as plain data.
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/bilateral-session");
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(TAG_BILATERAL_SESSION);
         hasher.update(&genesis_a);
         hasher.update(&device_a);
         hasher.update(&genesis_b);
@@ -262,7 +263,10 @@ impl ContactManager {
         verifying_nodes: Vec<NodeId>,
     ) -> Result<pb::ContactAddResponse, ContactError> {
         // Compute canonical genesis hash (BLAKE3-256).
-        let h = dsm::crypto::blake3::domain_hash("DSM/contact-genesis", genesis_payload);
+        let h = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_CONTACT_GENESIS,
+            genesis_payload,
+        );
         let mut gh = [0u8; 32];
         gh.copy_from_slice(h.as_bytes());
 
@@ -484,7 +488,10 @@ impl ContactManager {
         signing_public_key: Vec<u8>,
         verifying_nodes: Vec<NodeId>,
     ) -> Result<pb::ContactAddResponse, ContactError> {
-        let computed = dsm::crypto::blake3::domain_hash("DSM/contact-genesis", genesis_payload);
+        let computed = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_CONTACT_GENESIS,
+            genesis_payload,
+        );
         if computed.as_bytes() != &expected_genesis_hash {
             return Err(ContactError::GenesisVerificationFailed(
                 "Genesis hash mismatch".to_string(),

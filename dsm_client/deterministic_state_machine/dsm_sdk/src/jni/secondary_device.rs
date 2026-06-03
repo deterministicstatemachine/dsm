@@ -163,7 +163,9 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_addSecondaryDevice<'a>(
                     };
 
                     // message_id = blake3("DSM/envelope-msgid\0" || device_id || genesis_hash)[0..16]
-                    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/envelope-msgid");
+                    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(
+                        dsm::common::domain_tags::TAG_DSM_ENVELOPE_MSGID,
+                    );
                     hasher.update(device_id.as_slice());
                     hasher.update(genesis_hash.as_slice());
                     let message_id = hasher.finalize().as_bytes()[..16].to_vec();

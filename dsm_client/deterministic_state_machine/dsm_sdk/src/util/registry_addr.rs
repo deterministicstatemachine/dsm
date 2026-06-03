@@ -50,7 +50,7 @@ pub fn build_root_device_tree_evidence(device_id: &[u8], genesis_hash: &[u8]) ->
 /// Mirrors `dsm_storage_node::api::registry::content_addr_b64url` exactly.
 #[inline]
 pub fn registry_content_addr_b64url(body: &[u8]) -> String {
-    let mut hasher = dsm_domain_hasher("DSM/registry");
+    let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_REGISTRY);
     hasher.update(body);
     let out = hasher.finalize();
     b64_url_no_pad(out.as_bytes())

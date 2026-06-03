@@ -286,7 +286,10 @@ impl StorageNodeHealthMonitor {
     fn generate_node_id(endpoint: &str) -> String {
         // Derive a deterministic decimal suffix from a BLAKE3 hash of the endpoint.
         // Avoid hex/base64 encodings internally per policy; this ID is display/log only.
-        let h = dsm::crypto::blake3::domain_hash("DSM/node-endpoint", endpoint.as_bytes());
+        let h = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_NODE_ENDPOINT,
+            endpoint.as_bytes(),
+        );
         let bytes = h.as_bytes();
         let mut four = [0u8; 4];
         four.copy_from_slice(&bytes[..4]);

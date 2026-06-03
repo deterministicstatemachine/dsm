@@ -17,6 +17,7 @@
 //! domain separation as mandated by the protocol specification.
 
 use crate::common::canonical_encoding::CanonicalEncode;
+use crate::common::domain_tags::{TAG_DEVICE_ID, TAG_STATE_HASH};
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
@@ -248,7 +249,7 @@ impl DeviceInfo {
     /// * `device_id_str` - String identifier (will be hashed)
     /// * `public_key` - Public key associated with the device
     pub fn from_hashed_label(device_label: &str, public_key: Vec<u8>) -> Self {
-        let device_id_bytes = domain_hash("DSM/device-id", device_label.as_bytes());
+        let device_id_bytes = domain_hash(TAG_DEVICE_ID, device_label.as_bytes());
         Self {
             device_id: *device_id_bytes.as_bytes(),
             public_key,
@@ -517,7 +518,7 @@ impl State {
     /// (§11 eq. 14) makes state identity unique even when field values
     /// round-trip.
     pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/state-hash");
+        let mut hasher = dsm_domain_hasher(TAG_STATE_HASH);
 
         // Core state properties in deterministic order. No counter.
         hasher.update(&self.prev_state_hash);
@@ -567,7 +568,7 @@ impl State {
     /// Compute the pre-finalization hash that excludes token balances.
     /// Per §4.3, no counter is included.
     pub fn pre_finalization_hash(&self) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/pre-finalization");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_PRE_FINALIZATION);
         hasher.update(&self.entropy);
         hasher.update(&self.prev_state_hash);
         hasher.update(&self.operation.to_bytes());
@@ -600,9 +601,12 @@ impl State {
         }
 
         // Calculate final hash including balance data
-        Ok(domain_hash("DSM/balance-commit", &balance_data)
-            .as_bytes()
-            .to_vec())
+        Ok(domain_hash(
+            crate::common::domain_tags::TAG_DSM_BALANCE_COMMIT,
+            &balance_data,
+        )
+        .as_bytes()
+        .to_vec())
     }
 
     // set_forward_commitment / get_forward_commitment / clear_forward_commitment
@@ -1163,7 +1167,7 @@ mod tests {
         let leaf = b"leaf_data";
         let sibling = vec![0x11; 32];
 
-        let mut hasher = dsm_domain_hasher("DSM/merkle-path");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_MERKLE_PATH);
         hasher.update(leaf);
         hasher.update(&sibling);
         let root = hasher.finalize().as_bytes().to_vec();
@@ -1408,7 +1412,7 @@ impl SparseIndex {
     /// Calculate a deterministic value from the indices
     pub fn value(&self) -> u64 {
         // Hash all indices together to get a deterministic value
-        let mut hasher = dsm_domain_hasher("DSM/sparse-idx");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_SPARSE_IDX);
         let mut sorted_indices = self.indices.clone();
         sorted_indices.sort(); // Sort for deterministic ordering
 
@@ -1463,7 +1467,10 @@ impl SerializableMerkleProof {
     /// * `proof` - Proof elements
     pub fn new(root: Vec<u8>, proof: Vec<Vec<u8>>) -> Self {
         // Create a SerializableHash from the root
-        let root_hash = SerializableHash::new(domain_hash("DSM/proof-root", &root));
+        let root_hash = SerializableHash::new(domain_hash(
+            crate::common::domain_tags::TAG_DSM_PROOF_ROOT,
+            &root,
+        ));
 
         Self {
             root,
@@ -1522,7 +1529,10 @@ impl SerializableMerkleProof {
         for _ in 0..count {
             proof.push(get_bytes(&mut off, data)?.to_vec());
         }
-        let root_hash = SerializableHash::new(domain_hash("DSM/proof-root", &root));
+        let root_hash = SerializableHash::new(domain_hash(
+            crate::common::domain_tags::TAG_DSM_PROOF_ROOT,
+            &root,
+        ));
         Some(Self {
             root,
             proof,
@@ -1544,7 +1554,7 @@ impl SerializableMerkleProof {
         // Apply each proof element to verify path to root
         for proof_element in &self.proof {
             // Hash the current hash with the proof element
-            let mut hasher = dsm_domain_hasher("DSM/merkle-path");
+            let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_MERKLE_PATH);
             hasher.update(&current_hash);
             hasher.update(proof_element);
             current_hash = hasher.finalize().as_bytes().to_vec();
@@ -1927,7 +1937,7 @@ impl PreCommitment {
             fixed_parameters,
             variable_parameters,
             flc.min_state_number,
-            domain_hash("DSM/device-id", flc.counterparty_id.as_bytes()).into(),
+            domain_hash(TAG_DEVICE_ID, flc.counterparty_id.as_bytes()).into(),
         );
 
         // Set additional fields

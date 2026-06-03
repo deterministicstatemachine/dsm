@@ -341,9 +341,12 @@ impl IdentitySDK {
         // Create genesis state
         let participant_inputs = vec![
             device_entropy.as_bytes().to_vec(),
-            dsm::crypto::blake3::domain_hash("DSM/identity-label", label.as_bytes())
-                .as_bytes()
-                .to_vec(),
+            dsm::crypto::blake3::domain_hash(
+                dsm::common::domain_tags::TAG_DSM_IDENTITY_LABEL,
+                label.as_bytes(),
+            )
+            .as_bytes()
+            .to_vec(),
         ];
         let genesis_state = self.create_genesis(
             device_info,
@@ -366,7 +369,10 @@ impl IdentitySDK {
     /// * `Err(DsmError)` - If no device ID is available
     pub fn get_device_id(&self) -> Result<Vec<u8>, DsmError> {
         // Derive 32-byte device id from the UI string deterministically
-        let did = dsm::crypto::blake3::domain_hash("DSM/identity-id", self.identity_id.as_bytes());
+        let did = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_IDENTITY_ID,
+            self.identity_id.as_bytes(),
+        );
         Ok(did.as_bytes().to_vec())
     }
 
@@ -399,15 +405,19 @@ impl IdentitySDK {
         *key_guard = Some(keypair);
 
         // Create device info from seed
-        let did_hash = dsm::crypto::blake3::domain_hash("DSM/identity-did", seed);
+        let did_hash =
+            dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_IDENTITY_DID, seed);
         let mut device_id = [0u8; 32];
         device_id.copy_from_slice(did_hash.as_bytes());
         let device_id_str = crate::util::text_id::encode_base32_crockford(&device_id);
         let device_info = DeviceInfo::new(device_id, seed.to_vec());
 
         // Create genesis state from seed
-        let entropy =
-            *dsm::crypto::blake3::domain_hash("DSM/identity-seed-entropy", seed).as_bytes();
+        let entropy = *dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_IDENTITY_SEED_ENTROPY,
+            seed,
+        )
+        .as_bytes();
         let mut state = State::new_genesis(entropy, device_info);
 
         // Calculate and store hash
@@ -501,7 +511,7 @@ impl IdentitySDK {
 
         // Call core backend genesis creation via MPC to get proper cryptographic genesis
         // Derive a deterministic device id for MPC path from identity id + device id to keep tests stable
-        let mut id_hasher = dsm_domain_hasher("DSM/identity-mpc-id");
+        let mut id_hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_IDENTITY_MPC_ID);
         id_hasher.update(self.identity_id.as_bytes());
         id_hasher.update(&device_info.device_id);
         let id_hash = id_hasher.finalize();
@@ -603,9 +613,11 @@ impl IdentitySDK {
         let mut combined_hash_data = Vec::new();
         combined_hash_data.extend_from_slice(&genesis_state.hash);
         combined_hash_data.extend_from_slice(&state.compute_hash()?);
-        let final_hash =
-            *dsm::crypto::blake3::domain_hash("DSM/identity-combine", &combined_hash_data)
-                .as_bytes();
+        let final_hash = *dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_IDENTITY_COMBINE,
+            &combined_hash_data,
+        )
+        .as_bytes();
         state.hash = final_hash;
 
         // Store in the device genesis states
@@ -670,7 +682,7 @@ impl IdentitySDK {
         let device_id = device_info.device_id;
 
         // Derive entropy from master genesis
-        let mut hasher = dsm_domain_hasher("DSM/identity-hash");
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_IDENTITY_HASH);
         hasher.update(&master_genesis.entropy);
         hasher.update(&device_id);
         let device_entropy = *hasher.finalize().as_bytes();

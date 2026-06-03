@@ -1138,9 +1138,12 @@ fn trace_receipt_verifier_tripwire(
     let keypair_b =
         SignatureKeyPair::generate_from_entropy(b"implementation-trace-receipt-b").expect("kp b");
 
-    let genesis = *domain_hash("DSM/trace-genesis", b"receipt").as_bytes();
-    let devid_a = *domain_hash("DSM/trace-device", b"receipt-a").as_bytes();
-    let devid_b = *domain_hash("DSM/trace-device", b"receipt-b").as_bytes();
+    let genesis =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TRACE_GENESIS, b"receipt").as_bytes();
+    let devid_a =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE, b"receipt-a").as_bytes();
+    let devid_b =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE, b"receipt-b").as_bytes();
 
     let device_tree = DeviceTree::new(vec![devid_a, devid_b]);
     let device_tree_root = device_tree.root();
@@ -1302,9 +1305,21 @@ fn trace_tripwire_first_contact_binding(
         SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-b")
             .expect("first-contact keypair b");
 
-    let genesis = *domain_hash("DSM/trace-genesis", b"first-contact").as_bytes();
-    let devid_a = *domain_hash("DSM/trace-device", b"first-contact-a").as_bytes();
-    let devid_b = *domain_hash("DSM/trace-device", b"first-contact-b").as_bytes();
+    let genesis = *domain_hash(
+        dsm::common::domain_tags::TAG_DSM_TRACE_GENESIS,
+        b"first-contact",
+    )
+    .as_bytes();
+    let devid_a = *domain_hash(
+        dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
+        b"first-contact-a",
+    )
+    .as_bytes();
+    let devid_b = *domain_hash(
+        dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
+        b"first-contact-b",
+    )
+    .as_bytes();
 
     let device_tree = DeviceTree::new(vec![devid_a, devid_b]);
     let device_tree_root = device_tree.root();
@@ -2126,7 +2141,8 @@ fn apply_djte_transition(
     let emission_index = prev.emission_index + 1;
     let winner_leaf =
         select_winner_for_event(&selection_state, emission_index, &jap_hash).expect("DJTE winner");
-    let expected_winner_leaf = domain_hash_bytes("DJTE.ACTIVE", &jap.id);
+    let expected_winner_leaf =
+        domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_ACTIVE, &jap.id);
     assert_eq!(winner_leaf, expected_winner_leaf);
 
     let receipt = EmissionReceipt {
@@ -2230,7 +2246,7 @@ fn djte_shard_roots_commitment(state: &SourceDlvState) -> [u8; 32] {
     for acc in &state.shard_accumulators {
         buf.extend_from_slice(&acc.root());
     }
-    domain_hash_bytes("DJTE.SHARDS.ROOT", &buf)
+    domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_SHARDS_ROOT, &buf)
 }
 
 fn compute_djte_next_tip(
@@ -2246,11 +2262,12 @@ fn compute_djte_next_tip(
     buf.extend_from_slice(count_root);
     buf.extend_from_slice(spent_root);
     buf.extend_from_slice(shard_roots_commitment);
-    domain_hash_bytes("DJTE.DLV.TIP", &buf)
+    domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_DLV_TIP, &buf)
 }
 
 fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
-    let device_id: [u8; 32] = *domain_hash("DSM/test-device", seed_bytes).as_bytes();
+    let device_id: [u8; 32] =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed_bytes).as_bytes();
     let device_info = DeviceInfo::new(device_id, pk.to_vec());
     let mut state = State::new_genesis(*seed_bytes, device_info);
     if let Ok(hash) = state.hash() {
@@ -2317,7 +2334,7 @@ fn build_signed_receipt(
 
 fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
     let op_bytes = operation.to_bytes();
-    let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+    let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_STATE_ENTROPY);
     hasher.update(&current_state.entropy);
     hasher.update(&op_bytes);
     hasher.update(&current_state.hash);

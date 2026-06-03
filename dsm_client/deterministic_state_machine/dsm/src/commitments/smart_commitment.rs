@@ -175,7 +175,9 @@ impl SmartCommitment {
     }
 
     fn make_decimal_id(prefix: &str, commitment_hash: &[u8]) -> String {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/smart-commit/id/v2");
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_SMART_COMMIT_ID_V2,
+        );
         crate::crypto::canonical_lp::write_lp(&mut h, prefix.as_bytes());
         crate::crypto::canonical_lp::write_lp(&mut h, commitment_hash);
         let out = h.finalize();
@@ -197,7 +199,9 @@ impl SmartCommitment {
     ) -> [u8; 32] {
         let opb = operation.to_bytes();
 
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/smart-commit/hash/v2");
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_SMART_COMMIT_HASH_V2,
+        );
 
         crate::crypto::canonical_lp::write_lp(&mut h, origin_state_hash);
         crate::crypto::canonical_lp::write_lp(&mut h, &opb);
@@ -316,7 +320,10 @@ impl SmartCommitment {
         origin_entropy: &[u8],
     ) -> Result<(), DsmError> {
         let seed = generate_seed(
-            &crate::crypto::blake3::domain_hash("DSM/smart-commit", &self.commitment_hash),
+            &crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_SMART_COMMIT,
+                &self.commitment_hash,
+            ),
             origin_entropy,
             None,
         );
@@ -548,7 +555,10 @@ impl SmartCommitment {
         origin_entropy: &[u8],
     ) -> Result<(), DsmError> {
         let seed = generate_seed(
-            &crate::crypto::blake3::domain_hash("DSM/smart-commit", &self.commitment_hash),
+            &crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_SMART_COMMIT,
+                &self.commitment_hash,
+            ),
             origin_entropy,
             None,
         );
@@ -669,7 +679,10 @@ impl SmartCommitment {
     /// Verify commitment seed/positions against the given origin entropy.
     pub fn verify_against_origin(&self, origin_entropy: &[u8]) -> Result<bool, DsmError> {
         let seed = generate_seed(
-            &crate::crypto::blake3::domain_hash("DSM/smart-commit", &self.commitment_hash),
+            &crate::crypto::blake3::domain_hash(
+                crate::common::domain_tags::TAG_DSM_SMART_COMMIT,
+                &self.commitment_hash,
+            ),
             origin_entropy,
             None,
         );
@@ -781,7 +794,9 @@ impl SmartCommitment {
         // Deterministic nonce derived from shared secret + commitment hash.
         // No wall clocks, no external randomness required here.
         let nonce_full = {
-            let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/smart-commit/nonce/v2");
+            let mut h = crate::crypto::blake3::dsm_domain_hasher(
+                crate::common::domain_tags::TAG_DSM_SMART_COMMIT_NONCE_V2,
+            );
             crate::crypto::canonical_lp::write_lp(&mut h, &shared);
             crate::crypto::canonical_lp::write_lp(&mut h, &ccommit);
             h.finalize()
@@ -793,9 +808,12 @@ impl SmartCommitment {
         payload.extend_from_slice(&ccommit);
         payload.extend_from_slice(&body);
 
-        let key = crate::crypto::blake3::domain_hash("DSM/smart-commit", &shared)
-            .as_bytes()
-            .to_vec();
+        let key = crate::crypto::blake3::domain_hash(
+            crate::common::domain_tags::TAG_DSM_SMART_COMMIT,
+            &shared,
+        )
+        .as_bytes()
+        .to_vec();
         let ct = crate::crypto::aead::aes_encrypt(&key, &nonce, &payload)
             .map_err(|e| DsmError::crypto(format!("AEAD encrypt failed: {e}"), Some(e)))?;
 
@@ -820,9 +838,12 @@ impl SmartCommitment {
             ));
         }
         let (nonce, ct) = enc.split_at(12);
-        let key = crate::crypto::blake3::domain_hash("DSM/smart-commit", &shared)
-            .as_bytes()
-            .to_vec();
+        let key = crate::crypto::blake3::domain_hash(
+            crate::common::domain_tags::TAG_DSM_SMART_COMMIT,
+            &shared,
+        )
+        .as_bytes()
+        .to_vec();
         let plain = crate::crypto::aead::aes_decrypt(&key, nonce, ct)
             .map_err(|e| DsmError::crypto(format!("AEAD decrypt failed: {e}"), Some(e)))?;
 

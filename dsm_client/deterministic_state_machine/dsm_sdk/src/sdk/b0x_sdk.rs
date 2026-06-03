@@ -410,7 +410,8 @@ fn anchor_tick_from_tip(tip: &[u8]) -> u64 {
     if tip.len() != 32 {
         return 0;
     }
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/anchor-tick");
+    let mut hasher =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ANCHOR_TICK);
     hasher.update(tip);
     let h = hasher.finalize();
     let mut out = [0u8; 8];
@@ -617,7 +618,8 @@ impl B0xSDK {
         let h_d = Self::hash_b0x_component("DSM/b0x-D", device);
         let h_t = Self::hash_b0x_component("DSM/b0x-T", tip);
 
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x");
+        let mut hasher =
+            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
         hasher.update(&h_g);
         hasher.update(&h_d);
         hasher.update(&h_t);
@@ -731,7 +733,8 @@ impl B0xSDK {
         // §16.4: Domain-separated blinded address components
         // h_G = BLAKE3("DSM/addr-G\0" || genesis || salt_genesis)
         let h_g = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/addr-G");
+            let mut h =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_G);
             h.update(recipient_genesis);
             h.update(salt_genesis);
             h.finalize()
@@ -739,7 +742,8 @@ impl B0xSDK {
 
         // h_D = BLAKE3("DSM/addr-D\0" || device_id || salt_device)
         let h_d = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/addr-D");
+            let mut h =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_D);
             h.update(device_id);
             h.update(salt_device);
             h.finalize()
@@ -747,13 +751,14 @@ impl B0xSDK {
 
         // h_T = BLAKE3("DSM/addr-T\0" || chain_tip || nonce)
         let h_t = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/addr-T");
+            let mut h =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_T);
             h.update(chain_tip);
             h.update(&nonce.to_be_bytes());
             h.finalize()
         };
 
-        let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x");
+        let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
         h.update(h_g.as_bytes());
         h.update(h_d.as_bytes());
         h.update(h_t.as_bytes());
@@ -1241,7 +1246,10 @@ impl B0xSDK {
         let ctr = MSG_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         msgid_buf.extend_from_slice(&ctr.to_le_bytes());
         msgid_buf.extend_from_slice(self.device_id.as_bytes());
-        let full = dsm::crypto::blake3::domain_hash("DSM/b0x-msgid", &msgid_buf);
+        let full = dsm::crypto::blake3::domain_hash(
+            dsm::common::domain_tags::TAG_DSM_B0X_MSGID,
+            &msgid_buf,
+        );
         let mut message_id_bytes = [0u8; 16];
         message_id_bytes.copy_from_slice(&full.as_bytes()[..16]);
         let message_id_b32 = text_id::encode_base32_crockford(&message_id_bytes);
@@ -2458,8 +2466,10 @@ impl B0xSDK {
                                 } else {
                                     0
                                 };
-                                let balance_anchor =
-                                    dsm::crypto::blake3::domain_hash("DSM/balance-anchor", &[]);
+                                let balance_anchor = dsm::crypto::blake3::domain_hash(
+                                    dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR,
+                                    &[],
+                                );
                                 let recipient_id =
                                     text_id::encode_base32_crockford(&transfer_req.to_device_id);
                                 // Prefer an explicit signature embedded in the OnlineTransferRequest
@@ -2915,14 +2925,16 @@ mod tests {
 
         // h_G uses "DSM/addr-G"
         let h_g = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/addr-G");
+            let mut h =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_G);
             h.update(&data);
             h.update(&salt);
             *h.finalize().as_bytes()
         };
         // h_D uses "DSM/addr-D" with SAME input data
         let h_d = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/addr-D");
+            let mut h =
+                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_D);
             h.update(&data);
             h.update(&salt);
             *h.finalize().as_bytes()
@@ -2961,7 +2973,8 @@ mod tests {
         let h_d = B0xSDK::hash_b0x_component("DSM/b0x-D", &device);
         let h_t = B0xSDK::hash_b0x_component("DSM/b0x-T", &tip);
 
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x");
+        let mut hasher =
+            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
         hasher.update(&h_g);
         hasher.update(&h_d);
         hasher.update(&h_t);

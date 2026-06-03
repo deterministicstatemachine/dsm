@@ -33,12 +33,6 @@ pub fn empty_root() -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-/// Canonical padding leaf for odd-count Merkle levels (Issue #182
-/// Finding #4 resolution). Replaces the previous self-duplication
-/// pattern so that `[A, B, C]` and `[A, B, C, C]` produce distinct
-/// roots. The distinct `DSM/dev-tree-pad` domain tag — separate from
-/// `DSM/dev-leaf` — guarantees the pad cannot collide with any
-/// legitimate `hash_leaf(devid)` value.
 pub fn pad_leaf() -> [u8; 32] {
     let hasher = dsm_domain_hasher(TAG_DEV_PAD);
     *hasher.finalize().as_bytes()
@@ -414,15 +408,6 @@ mod tests {
         }
     }
 
-    /// Regression for Issue #182 Finding #4: odd-leaf self-duplication.
-    ///
-    /// Before the fix, `[A, B, C]` and `[A, B, C, C]` produced the same
-    /// root because the odd-promoted leaf was hashed against itself
-    /// (`hash_node(C, C)` at level 0). After the fix, the lone leaf at
-    /// any odd-count level is paired with the canonical padding leaf
-    /// (`pad_leaf()`) instead, which has a distinct domain tag and
-    /// therefore cannot collide with any real `hash_leaf(devid)` value.
-    /// This restores `(R_G, device_count)` uniqueness.
     #[test]
     fn three_device_root_differs_from_padded_four_device_root() {
         let dev_a = [1u8; 32];

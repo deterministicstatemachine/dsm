@@ -10,6 +10,7 @@ use core::fmt;
 use std::collections::{HashMap, HashSet};
 
 use prost::Message;
+use crate::common::domain_tags::TAG_MERKLE_LEAF;
 use crate::crypto::kyber;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
@@ -37,7 +38,7 @@ use crate::types::error::DsmError;
 /// fixed vs. 256+ bytes variable), faster, no big-int math, no
 /// classical-DLP assumption that Shor breaks.
 fn dlv_content_commitment(blinding: &[u8; 32], content: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/dlv-content-commit");
+    let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DLV_CONTENT_COMMIT);
     h.update(blinding);
     h.update(content);
     *h.finalize().as_bytes()
@@ -82,7 +83,7 @@ fn concat_bytes(parts: &[&[u8]]) -> Vec<u8> {
 /// Produce a human-readable decimal label from bytes (not an encoding).
 /// Take first 8 bytes of BLAKE3(hash(material)), interpret LE u64, print in base-10.
 fn decimal_label(prefix: &str, material: &[u8]) -> String {
-    let h = domain_hash("DSM/dlv-label", material);
+    let h = domain_hash(crate::common::domain_tags::TAG_DSM_DLV_LABEL, material);
     let mut w = [0u8; 8];
     w.copy_from_slice(&h.as_bytes()[0..8]);
     let n = u64::from_le_bytes(w);
@@ -1081,10 +1082,18 @@ impl LimboVault {
         let id_material = concat_bytes(&[
             creator_public_key,
             &ref_hash,
-            domain_hash("DSM/dlv-content", content).as_bytes(),
-            domain_hash("DSM/dlv-fulfillment", &fm_bytes).as_bytes(),
+            domain_hash(crate::common::domain_tags::TAG_DSM_DLV_CONTENT, content).as_bytes(),
+            domain_hash(
+                crate::common::domain_tags::TAG_DSM_DLV_FULFILLMENT,
+                &fm_bytes,
+            )
+            .as_bytes(),
         ]);
-        let vault_id: [u8; 32] = *domain_hash("DSM/dlv-vault-id", &id_material).as_bytes();
+        let vault_id: [u8; 32] = *domain_hash(
+            crate::common::domain_tags::TAG_DSM_DLV_VAULT_ID,
+            &id_material,
+        )
+        .as_bytes();
 
         // Recipient KEM — always use the explicit Kyber encryption key
         let (shared_secret, encapsulated_key) = kyber::kyber_encapsulate(encryption_public_key)
@@ -1094,10 +1103,16 @@ impl LimboVault {
         // avoid domain collision.  Still bound to the same id_material so the
         // nonce is pinned to the exact vault identity.
         let nonce_seed = concat_bytes(&[
-            domain_hash("DSM/dlv-nonce-seed", &id_material).as_bytes(),
+            domain_hash(
+                crate::common::domain_tags::TAG_DSM_DLV_NONCE_SEED,
+                &id_material,
+            )
+            .as_bytes(),
             &ref_hash,
         ]);
-        let nonce = domain_hash_bytes("DSM/dlv-nonce", &nonce_seed)[0..12].to_vec();
+        let nonce = domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_NONCE, &nonce_seed)
+            [0..12]
+            .to_vec();
 
         // AAD carries raw 32-byte vault_id (NOT decimal-label string bytes).
         let mut aad = Vec::new();
@@ -1111,7 +1126,7 @@ impl LimboVault {
             &concat_bytes(&[
                 &shared_secret,
                 &aad,
-                domain_hash("DSM/dlv-content", content).as_bytes(),
+                domain_hash(crate::common::domain_tags::TAG_DSM_DLV_CONTENT, content).as_bytes(),
             ]),
         )
         .to_vec();
@@ -1152,10 +1167,15 @@ impl LimboVault {
         // salted-BLAKE3 32 bytes).
         parameters.extend_from_slice(&commitment);
 
-        let parameters_hash = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
+        let parameters_hash =
+            domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters).to_vec();
 
         // Random-walk positions
-        let seed = generate_seed(&domain_hash("DSM/dlv-params", &parameters), &vault_id, None);
+        let seed = generate_seed(
+            &domain_hash(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters),
+            &vault_id,
+            None,
+        );
         let verification_positions = generate_positions(
             &seed,
             None::<crate::core::state_machine::random_walk::algorithms::RandomWalkConfig>,
@@ -1250,7 +1270,8 @@ impl LimboVault {
         // 32-byte raw commitment hash (Issue #184 F2).
         parameters.extend_from_slice(&self.content_commitment);
 
-        let computed = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
+        let computed =
+            domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters).to_vec();
         if !secure_eq(&computed, &self.parameters_hash) {
             return Ok(false);
         }
@@ -1565,7 +1586,7 @@ impl LimboVault {
         if state_transition.len() == 32 {
             leaf_hash.copy_from_slice(state_transition);
         } else {
-            let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/merkle-leaf");
+            let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_MERKLE_LEAF);
             hasher.update(state_transition);
             leaf_hash.copy_from_slice(hasher.finalize().as_bytes());
         }
@@ -1657,8 +1678,10 @@ impl LimboVault {
             )
         })?;
 
-        let computed_sigma =
-            crate::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", receipt_bytes);
+        let computed_sigma = crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_PROTOCOL_TRANSITION,
+            receipt_bytes,
+        );
         if !secure_eq(&computed_sigma, &sigma) {
             return Err(DsmError::invalid_operation(
                 "stitched_receipt_sigma does not match canonical protocol transition commitment",
@@ -1847,7 +1870,7 @@ impl LimboVault {
 
         // Linkage check — hash-adjacency across the proof.
         for i in 0..(hashes.len() - 1) {
-            let mut hasher = dsm_domain_hasher("DSM/dlv-chain-link");
+            let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DLV_CHAIN_LINK);
             hasher.update(&hashes[i]);
             hasher.update(&nums[i + 1].to_le_bytes());
             let expected = hasher.finalize();
@@ -1989,8 +2012,15 @@ impl LimboVault {
         claim_data.extend_from_slice(&self.id);
         claim_data.extend_from_slice(&self.parameters_hash);
         claim_data.extend_from_slice(&reference_state_hash[..8]);
-        claim_data.extend_from_slice(domain_hash("DSM/dlv-claim", &proof.to_bytes()).as_bytes());
-        let claim_proof = domain_hash_bytes("DSM/dlv-claim", &claim_data).to_vec();
+        claim_data.extend_from_slice(
+            domain_hash(
+                crate::common::domain_tags::TAG_DSM_DLV_CLAIM,
+                &proof.to_bytes(),
+            )
+            .as_bytes(),
+        );
+        let claim_proof =
+            domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_CLAIM, &claim_data).to_vec();
 
         // dBTC bearer fungibility (see .github/instructions/dBTCimplement.instructions.md,
         // Definition 17 + Invariant 5): BitcoinHTLC vaults exit through the Bitcoin HTLC
@@ -2031,7 +2061,7 @@ impl LimboVault {
                 "DLV claim requires stitched_receipt_sigma in fulfillment proof (§7.3)",
             )
         })?;
-        let mut hasher = dsm_domain_hasher("DSM/dlv-unlock");
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_DLV_UNLOCK);
         hasher.update(&cond_bytes); // L (serialized condition)
         hasher.update(&self.parameters_hash); // C (condition parameters hash)
         hasher.update(&sigma); // σ (receipt commitment)
@@ -3391,7 +3421,7 @@ impl DeterministicLimboVault {
             concat_bytes(&[
                 creator_id.as_bytes(),
                 recipient_id.as_bytes(),
-                &domain_hash_bytes("DSM/dlv-content", &data)[..],
+                &domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_CONTENT, &data)[..],
             ])
             .as_slice(),
         );

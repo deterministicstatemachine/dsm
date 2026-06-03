@@ -95,7 +95,11 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
         let mut k_dbrw_arr = [0u8; 32];
         k_dbrw_arr.copy_from_slice(&k_dbrw_vec);
         let binding_record = crate::util::text_id::encode_base32_crockford(
-            dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw_arr).as_bytes(),
+            dsm::crypto::blake3::domain_hash(
+                dsm::common::domain_tags::TAG_DSM_CDBRW_BINDING_RECORD,
+                &k_dbrw_arr,
+            )
+            .as_bytes(),
         );
         #[cfg(all(target_os = "android", feature = "jni"))]
         crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw_vec.clone());
@@ -121,7 +125,11 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             publication_hash: genesis_id_b32,
             storage_nodes: res.participating_nodes.clone(),
             entropy_hash: crate::util::text_id::encode_base32_crockford(
-                dsm::crypto::blake3::domain_hash("DSM/genesis-entropy", &entropy).as_bytes(),
+                dsm::crypto::blake3::domain_hash(
+                    dsm::common::domain_tags::TAG_DSM_GENESIS_ENTROPY,
+                    &entropy,
+                )
+                .as_bytes(),
             ),
             protocol_version: "v3".to_string(),
             hash_chain_proof: None,

@@ -13,9 +13,9 @@
 //! - Inclusion proofs for old/new leaves and device binding
 //! - Per-step C-DBRW receipt response through EK derivation and cert chaining
 
+use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 use crate::types::error::DsmError;
 use std::collections::HashMap;
-use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 
 /// Canonical Stitched Receipt V2
 ///

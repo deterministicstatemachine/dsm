@@ -49,7 +49,8 @@ pub struct AdversarialSuiteResult {
 // ---------------------------------------------------------------------------
 
 fn make_genesis(seed: &[u8; 32], pk: &[u8], initial_balance: u64) -> (State, StateMachine) {
-    let device_id: [u8; 32] = *domain_hash("DSM/test-device", seed).as_bytes();
+    let device_id: [u8; 32] =
+        *domain_hash(dsm::common::domain_tags::TAG_DSM_TEST_DEVICE, seed).as_bytes();
     let device_info = DeviceInfo::new(device_id, pk.to_vec());
     let mut state = State::new_genesis(*seed, device_info);
     if let Ok(h) = state.hash() {
