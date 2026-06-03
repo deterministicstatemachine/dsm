@@ -152,34 +152,17 @@ impl TokenPolicyCache {
                         stats.hits += 1;
                     }
 
-                    // Check if we should refresh in the background (close to expiration)
-                    if self.config.auto_refresh {
-                        let ttl_remaining = entry.expires_at.saturating_sub(now);
-                        let total_ttl = entry.expires_at.saturating_sub(entry.cached_at);
-                        let ttl_percentage = ttl_remaining as f32 / total_ttl as f32;
-
-                        if ttl_percentage <= self.config.refresh_threshold {
-                            // Clone what we need for background refresh
-                            let policy_id = policy_id.to_string();
-                            let self_clone = Arc::new(self.clone());
-
-                            // Spawn background refresh
-                            tokio::spawn(async move {
-                                if let Ok(fresh_policy) =
-                                    self_clone.fetch_policy_from_network(&policy_id).await
-                                {
-                                    let _ =
-                                        self_clone.update_cached_policy(&policy_id, fresh_policy);
-
-                                    // Update refresh stats
-                                    {
-                                        let mut stats = self_clone.stats.write();
-                                        stats.refreshes += 1;
-                                    }
-                                }
-                            });
-                        }
-                    }
+                    // NOTE: proactive background refresh-near-expiry is intentionally
+                    // not performed here. The previous implementation spawned a task
+                    // over `Arc::new(self.clone())`, but `Clone` deliberately yields a
+                    // fresh, empty cache (see `cache_clone_has_fresh_cache`), so the
+                    // refreshed policy was written into a throwaway clone and never
+                    // reached this shared cache — a pure no-op that also burned a
+                    // network fetch and (when `default_ttl == 0`) computed a NaN
+                    // refresh ratio. Policies are refreshed lazily on expiry via the
+                    // miss path below. A correct proactive refresh would require
+                    // sharing the cache behind an `Arc` without changing clone
+                    // semantics; that is a separate change.
 
                     // Return cached policy
                     return Ok(PolicyResponse {
