@@ -169,6 +169,13 @@ pub async fn put_object(
         .and_then(|v| v.to_str().ok())
         .and_then(decode_b32)
         .ok_or(StatusCode::BAD_REQUEST)?;
+    // dlv_id is the 32-byte partition key. Enforce the length here as the delete
+    // path already does — otherwise a short/over-long (but valid-base32) id would
+    // be accepted as the partition key on write, so an object written under a
+    // non-32-byte dlv_id could never be addressed by a spec-conforming delete.
+    if dlv_id_b.len() != 32 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let path = headers
         .get(HDR_PATH)
