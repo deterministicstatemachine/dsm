@@ -4989,10 +4989,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapIn
 
             match process_envelope_v3(&env_bytes) {
                 Ok(resp) => {
-                    let mut out = Vec::with_capacity(1 + resp.len());
-                    out.push(0x03);
-                    out.extend_from_slice(&resp);
-                    env.byte_array_from_slice(&out)
+                    // `process_envelope_v3` already returns a 0x03-framed
+                    // FramedEnvelopeV3 (see `processEnvelopeV3`, which returns it
+                    // unmodified). Do not prepend a second framing byte.
+                    env.byte_array_from_slice(&resp)
                         .map(|a| a.into_raw())
                         .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
                 }
@@ -5073,10 +5073,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapCo
 
             match process_envelope_v3(&env_bytes) {
                 Ok(resp) => {
-                    let mut out = Vec::with_capacity(1 + resp.len());
-                    out.push(0x03);
-                    out.extend_from_slice(&resp);
-                    env.byte_array_from_slice(&out)
+                    // `process_envelope_v3` already returns a 0x03-framed
+                    // FramedEnvelopeV3 (see `processEnvelopeV3`, which returns it
+                    // unmodified). Do not prepend a second framing byte.
+                    env.byte_array_from_slice(&resp)
                         .map(|a| a.into_raw())
                         .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
                 }
@@ -5157,10 +5157,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapRe
 
             match process_envelope_v3(&env_bytes) {
                 Ok(resp) => {
-                    let mut out = Vec::with_capacity(1 + resp.len());
-                    out.push(0x03);
-                    out.extend_from_slice(&resp);
-                    env.byte_array_from_slice(&out)
+                    // `process_envelope_v3` already returns a 0x03-framed
+                    // FramedEnvelopeV3 (see `processEnvelopeV3`, which returns it
+                    // unmodified). Do not prepend a second framing byte.
+                    env.byte_array_from_slice(&resp)
                         .map(|a| a.into_raw())
                         .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
                 }
@@ -5241,10 +5241,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinSwapSt
 
             match process_envelope_v3(&env_bytes) {
                 Ok(resp) => {
-                    let mut out = Vec::with_capacity(1 + resp.len());
-                    out.push(0x03);
-                    out.extend_from_slice(&resp);
-                    env.byte_array_from_slice(&out)
+                    // `process_envelope_v3` already returns a 0x03-framed
+                    // FramedEnvelopeV3 (see `processEnvelopeV3`, which returns it
+                    // unmodified). Do not prepend a second framing byte.
+                    env.byte_array_from_slice(&resp)
                         .map(|a| a.into_raw())
                         .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
                 }
