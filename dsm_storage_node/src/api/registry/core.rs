@@ -99,7 +99,7 @@ pub async fn publish_evidence(
 
     // Persist to registry_evidence table. Accept optional headers:
     // - X-DSM-KIND: integer kind code
-    // - X-DSM-DLV-ID: hex-encoded DLV id
+    // - X-DSM-DLV-ID: Base32 Crockford DLV id (no hex; decoded by parse_optional_dlv_id)
     let kind_code: i16 = headers
         .get("X-DSM-KIND")
         .and_then(|v| v.to_str().ok())

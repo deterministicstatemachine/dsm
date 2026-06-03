@@ -44,7 +44,7 @@ impl ExponentialBackoffTiming {
         }
     }
 
-    /// Calculate exponential backoff delay (replaces bitwise shift logic)
+    /// Calculate exponential backoff delay.
     fn calculate_backoff_delay(&self, attempts: i32) -> i64 {
         if attempts <= 0 {
             return 0;
