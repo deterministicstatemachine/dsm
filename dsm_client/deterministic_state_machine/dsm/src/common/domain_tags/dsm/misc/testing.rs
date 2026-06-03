@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! DSM namespace tags: compatibility aliases for test/tooling paths
+//! DSM namespace tags: domain tags reserved for test, benchmark, and trace
+//! tooling. Centralized here so integration tests and the vertical-validation
+//! tooling crate reference the same constants instead of duplicating string
+//! literals. Never used by production protocol paths.
 
 pub const TAG_DSM_TEST: &str = "DSM/test";
 pub const TAG_DSM_TEST_DEVICE: &str = "DSM/test-device";

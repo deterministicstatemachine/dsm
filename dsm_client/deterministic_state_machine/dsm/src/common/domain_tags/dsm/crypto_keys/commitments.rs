@@ -4,7 +4,6 @@
 
 pub const TAG_DSM_BALANCE_COMMIT: &str = "DSM/balance-commit";
 pub const TAG_DSM_CODEC_HASH: &str = "DSM/codec-hash";
-pub const TAG_DSM_COMBINE_HASHES: &str = "DSM/combine-hashes";
 pub const TAG_DSM_EXTERNAL_COMMIT_HASH: &str = "DSM/external-commit-hash";
 pub const TAG_DSM_EXTERNAL_COMMIT_ID: &str = "DSM/external-commit-id";
 pub const TAG_DSM_FLC_HASH_V2: &str = "DSM/flc/hash/v2";
@@ -30,4 +29,3 @@ pub const TAG_DSM_SMART_COMMIT_PREDICATE: &str = "DSM/smart-commit-predicate";
 pub const TAG_DSM_TLS_CERT_HASH: &str = "DSM/tls-cert-hash";
 pub const TAG_DSM_TOKEN_HASH: &str = "DSM/token-hash";
 pub const TAG_DSM_TX_HASH: &str = "DSM/tx-hash";
-pub const TAG_DSM_VERIFICATION_SEED: &str = "DSM/verification-seed";

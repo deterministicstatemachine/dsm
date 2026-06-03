@@ -3,13 +3,13 @@
 //! DSM namespace tags: misc
 
 mod addressing;
-mod compat;
 mod protocol;
+mod testing;
 mod token_ops;
 
 pub use addressing::*;
-pub use compat::*;
 pub use protocol::*;
+pub use testing::*;
 pub use token_ops::*;
 
 #[cfg(test)]
@@ -33,7 +33,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_EXTERNAL_EVIDENCE,
     TAG_DSM_EXTERNAL_SOURCE_ID,
     TAG_DSM_FAUCET_CLAIM,
-    TAG_DSM_HW_FINGERPRINT,
     TAG_DSM_MOMENT,
     TAG_DSM_MOMENT_NODE,
     TAG_DSM_OP_VERIFY,
@@ -46,7 +45,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_SMT_PROOF,
     TAG_DSM_SPARSE_IDX,
     TAG_DSM_STATE_ENTROPY,
-    TAG_DSM_STREAM_CHUNK,
     TAG_DSM_SYSTEM_OWNER,
     TAG_DSM_TOKEN_FACTORY,
     TAG_DSM_TOKEN_ID,

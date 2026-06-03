@@ -10,7 +10,6 @@ pub const TAG_DSM_DETERMINISTIC_ID: &str = "DSM/deterministic-id";
 pub const TAG_DSM_DETERMINISTIC_TIME: &str = "DSM/deterministic-time";
 pub const TAG_DSM_DEV_ENT_V2: &str = "DSM/DEV_ENT/v2";
 pub const TAG_DSM_DJTE_SHARD_MERKLE: &str = "DSM/djte-shard-merkle";
-pub const TAG_DSM_HW_FINGERPRINT: &str = "DSM/hw-fingerprint";
 pub const TAG_DSM_OP_VERIFY: &str = "DSM/op-verify";
 pub const TAG_DSM_PRE_FINALIZATION: &str = "DSM/pre-finalization";
 pub const TAG_DSM_PROOF_ROOT: &str = "DSM/proof-root";
