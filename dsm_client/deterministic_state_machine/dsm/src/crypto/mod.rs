@@ -14,7 +14,6 @@
 //! | AES-256-GCM | [`aead`] | Symmetric authenticated encryption |
 //! | Salted-BLAKE3 commitments | [`blake3`] (`dsm_domain_hasher`) | Hiding + binding via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` (e.g. `dlv_content_commitment` in `vault::limbo_vault`) |
 //! | C-DBRW | [`cdbrw_binding`] | Challenge-seeded DBRW anti-cloning (post-quantum) |
-//! | ChaCha20-Poly1305 / AES-256-GCM | [`aead`] | Authenticated symmetric encryption |
 //!
 //! # Removed: classical group-based commitment module
 //!
