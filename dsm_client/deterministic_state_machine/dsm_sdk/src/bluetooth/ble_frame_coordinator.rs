@@ -276,7 +276,15 @@ impl ReassemblyBuffer {
     /// Reassemble all chunks into the original payload, then verify frame-level
     /// BLAKE3 integrity against `frame_commitment`.
     pub fn reassemble(self) -> Result<Vec<u8>, DsmError> {
-        let mut result = Vec::with_capacity(self.expected_size as usize);
+        // Bound the pre-allocation to what the chunks could actually hold
+        // (`total_chunks * MAX_BLE_CHUNK_SIZE`). `expected_size` is the
+        // peer-supplied `payload_len` (u32, up to ~4 GiB); allocating on it
+        // directly let a single small chunk with a huge declared `payload_len`
+        // trigger a multi-gigabyte allocation before the integrity/size checks
+        // ran. The exact length is still validated below, so capping the
+        // capacity hint cannot affect correctness.
+        let capacity_cap = (self.total_chunks as usize).saturating_mul(MAX_BLE_CHUNK_SIZE);
+        let mut result = Vec::with_capacity((self.expected_size as usize).min(capacity_cap));
         for i in 0..self.total_chunks {
             if let Some(meta) = self.received_chunks.get(&i) {
                 result.extend_from_slice(&meta.data);
