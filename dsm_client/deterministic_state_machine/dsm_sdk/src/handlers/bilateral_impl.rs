@@ -605,6 +605,7 @@ mod tests {
     // ── prepare ──────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn prepare_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
@@ -624,6 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn prepare_rejects_empty_operation_data() {
         let req = pb::BilateralPrepareRequest {
             operation_data: vec![],
@@ -647,6 +649,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn prepare_non_android_computes_commitment() {
         // Initialize global storage dir required by AppState::get_public_key()
         let tmp = std::env::temp_dir().join("dsm_test_bilateral_prepare");
@@ -690,6 +693,7 @@ mod tests {
     // ── accept ───────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn accept_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
@@ -709,6 +713,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn accept_rejects_missing_commitment_hash() {
         let req = pb::BilateralAcceptRequest {
             commitment_hash: None,
@@ -732,6 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn accept_rejects_wrong_size_commitment_hash() {
         let req = pb::BilateralAcceptRequest {
             commitment_hash: Some(make_hash32(&[0xAA; 16])), // 16 bytes, not 32
@@ -755,6 +761,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn accept_returns_disabled_for_valid_input() {
         let req = pb::BilateralAcceptRequest {
             commitment_hash: Some(valid_hash32()),
@@ -780,6 +787,7 @@ mod tests {
     // ── commit ───────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn commit_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
@@ -799,6 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn commit_rejects_bad_counterparty_device_id_length() {
         let req = pb::BilateralCommitRequest {
             counterparty_device_id: vec![0u8; 16],
@@ -825,6 +834,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn commit_rejects_missing_commitment_hash() {
         let req = pb::BilateralCommitRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -851,6 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn commit_rejects_missing_local_signature() {
         let req = pb::BilateralCommitRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -877,6 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn commit_rejects_missing_counterparty_sig() {
         let req = pb::BilateralCommitRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -903,6 +915,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn commit_returns_disabled_for_valid_input() {
         let req = pb::BilateralCommitRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -931,6 +944,7 @@ mod tests {
     // ── transfer ─────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn transfer_rejects_invalid_protobuf() {
         let bi = BiImpl {
             _config: test_config(),
@@ -950,6 +964,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn transfer_rejects_bad_counterparty_device_id() {
         let req = pb::BilateralTransferRequest {
             counterparty_device_id: vec![0u8; 10],
@@ -978,6 +993,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn transfer_rejects_zero_amount() {
         let req = pb::BilateralTransferRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -1006,6 +1022,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn transfer_rejects_missing_genesis_hash() {
         let req = pb::BilateralTransferRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -1034,6 +1051,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn transfer_returns_disabled_for_fully_valid_input() {
         let req = pb::BilateralTransferRequest {
             counterparty_device_id: vec![1u8; 32],
@@ -1064,6 +1082,7 @@ mod tests {
     // ── get_pending_transactions ─────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn get_pending_transactions_returns_empty() {
         let bi = BiImpl {
             _config: test_config(),
