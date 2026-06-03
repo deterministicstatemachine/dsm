@@ -50,16 +50,54 @@ impl BilateralStateManager {
         }
     }
 
-    /// Derive a stable, decimal-only label from a 32-byte id (no hex, no base64).
-    /// Uses first 16 bytes as two little-endian u64 numbers.
+    /// Derive a stable, decimal-only label from a full 32-byte id (no hex, no base64).
+    /// Uses all 32 bytes as four little-endian u64 groups.
     fn id_from_32(id: &[u8; 32]) -> String {
-        let mut lo = [0u8; 8];
-        let mut hi = [0u8; 8];
-        lo.copy_from_slice(&id[0..8]);
-        hi.copy_from_slice(&id[8..16]);
-        let a = u64::from_le_bytes(lo);
-        let b = u64::from_le_bytes(hi);
-        format!("{}-{}", a, b)
+        let mut w0 = [0u8; 8];
+        let mut w1 = [0u8; 8];
+        let mut w2 = [0u8; 8];
+        let mut w3 = [0u8; 8];
+        w0.copy_from_slice(&id[0..8]);
+        w1.copy_from_slice(&id[8..16]);
+        w2.copy_from_slice(&id[16..24]);
+        w3.copy_from_slice(&id[24..32]);
+        let a = u64::from_le_bytes(w0);
+        let b = u64::from_le_bytes(w1);
+        let c = u64::from_le_bytes(w2);
+        let d = u64::from_le_bytes(w3);
+        format!("{}-{}-{}-{}", a, b, c, d)
+    }
+
+    /// Derive deterministic transition entropy from the current relationship state and operation.
+    ///
+    /// Mirrors the canonical `DSM/state-entropy` evolution used by state transitions:
+    /// `H(prev_entropy || op_bytes || prev_hash)`.
+    pub fn derive_transition_entropy_bytes(
+        &self,
+        entity_id: &[u8; 32],
+        counterparty_id: &[u8; 32],
+        operation: &Operation,
+    ) -> Result<[u8; 32], DsmError> {
+        let eid = Self::id_from_32(entity_id);
+        let cid = Self::id_from_32(counterparty_id);
+        let op_bytes = operation.to_bytes();
+
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+        match self.relationship_manager.get_relationship_state(&eid, &cid) {
+            Ok(state) => {
+                hasher.update(&state.entropy);
+                hasher.update(&op_bytes);
+                hasher.update(&state.hash()?);
+            }
+            Err(_) => {
+                // Deterministic fallback for callers before relationship bootstrap.
+                hasher.update(entity_id);
+                hasher.update(counterparty_id);
+                hasher.update(&op_bytes);
+            }
+        }
+
+        Ok(*hasher.finalize().as_bytes())
     }
 
     /// Ensure a relationship exists; if not, initialize with genesis states (bytes-only IDs)
@@ -213,7 +251,7 @@ mod tests {
     fn id_from_32_zero_bytes() {
         let id = [0u8; 32];
         let result = BilateralStateManager::id_from_32(&id);
-        assert_eq!(result, "0-0");
+        assert_eq!(result, "0-0-0-0");
     }
 
     #[test]
@@ -221,7 +259,7 @@ mod tests {
         let mut id = [0u8; 32];
         id[0] = 1; // lo u64 = 1 (little-endian)
         let result = BilateralStateManager::id_from_32(&id);
-        assert_eq!(result, "1-0");
+        assert_eq!(result, "1-0-0-0");
     }
 
     #[test]
@@ -229,7 +267,20 @@ mod tests {
         let mut id = [0u8; 32];
         id[8] = 2; // hi u64 = 2 (little-endian)
         let result = BilateralStateManager::id_from_32(&id);
-        assert_eq!(result, "0-2");
+        assert_eq!(result, "0-2-0-0");
+    }
+
+    #[test]
+    fn id_from_32_includes_upper_16_bytes() {
+        let mut id_a = [0u8; 32];
+        let mut id_b = [0u8; 32];
+        id_a[16] = 1;
+        id_b[16] = 2;
+
+        assert_ne!(
+            BilateralStateManager::id_from_32(&id_a),
+            BilateralStateManager::id_from_32(&id_b)
+        );
     }
 
     #[test]

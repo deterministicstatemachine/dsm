@@ -485,9 +485,14 @@ impl BilateralTransactionManager {
         mono_commit_height()
     }
 
-    /// Generate entropy for state transitions (public wrapper for receiver-side finalize)
-    pub fn generate_entropy(&self) -> Result<[u8; 32], DsmError> {
-        self.bilateral_state_manager.generate_entropy()
+    /// Derive deterministic transition entropy for a bilateral operation.
+    pub fn derive_transition_entropy(
+        &self,
+        remote_device_id: &[u8; 32],
+        operation: &Operation,
+    ) -> Result<[u8; 32], DsmError> {
+        self.bilateral_state_manager
+            .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, operation)
     }
 
     /// Execute a bilateral state transition (public wrapper for receiver-side finalize)
@@ -917,7 +922,9 @@ impl BilateralTransactionManager {
         let _ = self
             .create_bilateral_precommitment(remote_device_id, operation.clone(), 300)
             .await?;
-        let entropy = self.bilateral_state_manager.generate_entropy()?;
+        let entropy = self
+            .bilateral_state_manager
+            .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, &operation)?;
         let sp: StatePair = self.bilateral_state_manager.execute_transition_bytes(
             &self.local_device_id,
             remote_device_id,
@@ -975,7 +982,9 @@ impl BilateralTransactionManager {
             ));
         }
 
-        let entropy = self.bilateral_state_manager.generate_entropy()?;
+        let entropy = self
+            .bilateral_state_manager
+            .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, &operation)?;
         let sp: StatePair = self.bilateral_state_manager.execute_transition_bytes(
             &self.local_device_id,
             remote_device_id,
@@ -1337,7 +1346,13 @@ impl BilateralTransactionManager {
 
         let entropy = match pre_generated_entropy {
             Some(e) => e,
-            None => self.bilateral_state_manager.generate_entropy()?,
+            None => self
+                .bilateral_state_manager
+                .derive_transition_entropy_bytes(
+                    &self.local_device_id,
+                    remote_device_id,
+                    &pre.operation,
+                )?,
         };
         let sp = self.bilateral_state_manager.execute_transition_bytes(
             &self.local_device_id,
@@ -1485,7 +1500,13 @@ impl BilateralTransactionManager {
 
         let entropy = match pre_generated_entropy {
             Some(e) => e,
-            None => self.bilateral_state_manager.generate_entropy()?,
+            None => self
+                .bilateral_state_manager
+                .derive_transition_entropy_bytes(
+                    &self.local_device_id,
+                    remote_device_id,
+                    &pre.operation,
+                )?,
         };
         let rel_key = compute_smt_key(&self.local_device_id, remote_device_id);
 
