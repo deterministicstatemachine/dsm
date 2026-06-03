@@ -165,7 +165,7 @@ mod tests {
 
     #[allow(unused_imports)]
     use super::*;
-    use crate::handlers::faucet_state::{build_testnet_faucet_policy, FaucetState};
+    use crate::handlers::app_router_impl::{build_testnet_faucet_policy, FaucetState};
 
     // ── FaucetState unit tests ────────────────────────────────────────
 

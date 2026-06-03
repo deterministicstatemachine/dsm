@@ -25,7 +25,6 @@ pub mod bitcoin_query_routes;
 pub mod contacts_routes;
 pub mod dlv_routes;
 pub mod faucet_routes;
-pub mod faucet_state;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
