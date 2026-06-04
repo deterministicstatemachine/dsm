@@ -127,7 +127,7 @@ lazy_static = "1.4.0"
 lru = "0.18"
 parking_lot = { version = "0.12.1", features = ["serde"] }
 zerocopy = "0.8.50"
-bitflags = "2.4.2"
+bitflags = "2.12.1"
 arrayref = "0.3.9"
 argon2 = "0.5.3"
 
