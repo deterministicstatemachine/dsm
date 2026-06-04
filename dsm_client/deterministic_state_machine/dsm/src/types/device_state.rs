@@ -860,12 +860,10 @@ mod tests {
         assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)]).is_err());
         assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))]).is_err());
         assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[]).is_err());
-        assert!(validate_conservation(
-            &me,
-            &xfer(me, 5, pcx),
-            &[credit(5, pcx), credit(5, pcx)]
-        )
-        .is_err());
+        assert!(
+            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx), credit(5, pcx)])
+                .is_err()
+        );
         // Mint: one credit==amount; Burn: one debit==amount.
         assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)]).is_ok());
         assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)]).is_err());

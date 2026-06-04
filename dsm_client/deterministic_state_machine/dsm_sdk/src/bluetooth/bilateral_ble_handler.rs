@@ -3210,7 +3210,8 @@ impl BilateralBleHandler {
             } => {
                 // §9.5: independently resolve the sender's installed policy_commit;
                 // unresolved -> empty deltas -> conservation guard rejects (fail closed).
-                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id)) {
+                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                {
                     Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
                         policy_commit: pc,
                         direction: dsm::types::device_state::BalanceDirection::Debit,
@@ -4097,7 +4098,8 @@ impl BilateralBleHandler {
                 // §9.5: independently resolve the receiver's installed policy_commit.
                 // Unresolved/uninstalled -> empty deltas -> the conservation guard
                 // rejects the Transfer (fail closed). Never absorb the peer's commit.
-                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id)) {
+                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                {
                     Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
                         policy_commit: pc,
                         direction: dsm::types::device_state::BalanceDirection::Credit,

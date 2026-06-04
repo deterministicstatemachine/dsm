@@ -738,7 +738,8 @@ mod tests {
         let commitment = SmartCommitmentSdk {
             recipient: "alice".to_string(),
             amount: 250,
-            token_id: "ROOT".to_string(),
+            // builtin token so execute_commitment can resolve its policy_commit
+            token_id: "ERA".to_string(),
             condition: SdkCommitmentCondition::ConditionalOracle {
                 condition: "true".to_string(),
                 oracle_id: "o".to_string(),
@@ -771,7 +772,7 @@ mod tests {
         let commitment = SmartCommitmentSdk {
             recipient: "bob".to_string(),
             amount: 0,
-            token_id: "TOKEN".to_string(),
+            token_id: "ERA".to_string(),
             condition: SdkCommitmentCondition::ConditionalOracle {
                 condition: "".to_string(),
                 oracle_id: "".to_string(),
@@ -786,7 +787,7 @@ mod tests {
                 amount, token_id, ..
             } => {
                 assert_eq!(amount.value(), 0);
-                assert_eq!(token_id, b"TOKEN");
+                assert_eq!(token_id, b"ERA");
             }
             _ => panic!("Expected Transfer"),
         }

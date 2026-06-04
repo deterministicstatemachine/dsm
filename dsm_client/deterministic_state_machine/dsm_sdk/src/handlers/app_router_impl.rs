@@ -991,7 +991,10 @@ impl AppRouterImpl {
         // §9.5: bind the token's canonical policy_commit into the signed transfer.
         // Resolve from the local source-of-truth installed policy; fail closed if
         // the token's policy is not installed (no peer-supplied fallback).
-        let policy_commit = match self.core_sdk.resolve_policy_commit_strict(token_id.as_bytes()) {
+        let policy_commit = match self
+            .core_sdk
+            .resolve_policy_commit_strict(token_id.as_bytes())
+        {
             Ok(pc) => pc,
             Err(e) => return err(format!("wallet.send: policy_commit resolve failed: {e}")),
         };
