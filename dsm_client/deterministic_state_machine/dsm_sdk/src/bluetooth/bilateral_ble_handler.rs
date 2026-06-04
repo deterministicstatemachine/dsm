@@ -5682,6 +5682,7 @@ mod tests {
         }
 
         let stale_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),
@@ -5695,6 +5696,7 @@ mod tests {
             signature: Vec::new(),
         };
         let next_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),
@@ -5800,6 +5802,7 @@ mod tests {
         }
 
         let accepted_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),

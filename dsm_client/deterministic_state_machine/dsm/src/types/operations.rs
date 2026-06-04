@@ -184,6 +184,11 @@ pub enum Operation {
         amount: Balance,
         /// Binary identifier of the token type being transferred.
         token_id: Vec<u8>,
+        /// CPTA policy commitment (32B) binding this transfer to the token's
+        /// canonical policy (§9.5: "All TokenOps MUST include policy_commit;
+        /// verifiers reject if it differs from the token's creation
+        /// policy_commit"). See token-policy-readiness doctrine §4.
+        policy_commit: [u8; 32],
         /// Bilateral (3-phase commit) or unilateral execution mode.
         mode: TransactionMode,
         /// Unique nonce preventing replay of this transfer.
@@ -624,6 +629,7 @@ impl Operation {
                 to_device_id,
                 amount,
                 token_id,
+                policy_commit,
                 mode,
                 nonce,
                 verification,
@@ -639,6 +645,8 @@ impl Operation {
                 let bal = amount.to_le_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
+                // CPTA policy commitment (§9.5) — bound into the signed bytes.
+                put_bytes(&mut out, policy_commit);
                 put_mode(&mut out, mode);
                 put_bytes(&mut out, nonce);
                 put_verification(&mut out, verification);
@@ -1212,6 +1220,11 @@ impl Operation {
                 let to_device_id = get_bytes(&mut input)?;
                 let amount = dec_balance(&mut input)?;
                 let token_id = get_bytes(&mut input)?;
+                // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("transfer policy_commit must be 32 bytes")
+                    })?;
                 let mode = dec_mode(&mut input)?;
                 let nonce = get_bytes(&mut input)?;
                 let verification = dec_verification(&mut input)?;
@@ -1233,6 +1246,7 @@ impl Operation {
                     to_device_id,
                     amount,
                     token_id,
+                    policy_commit,
                     mode,
                     nonce,
                     verification,
@@ -2122,6 +2136,7 @@ mod tests {
         #[test]
         fn transfer_no_precommit() {
             roundtrip(&Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(500),
                 token_id: b"ERA".to_vec(),
@@ -2147,6 +2162,7 @@ mod tests {
                 security_params: SecurityParameters::default(),
             };
             roundtrip(&Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(1000),
                 token_id: b"TKN".to_vec(),
@@ -2164,6 +2180,7 @@ mod tests {
         #[test]
         fn transfer_custom_verification() {
             roundtrip(&Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(42),
                 token_id: b"ERA".to_vec(),
@@ -2481,6 +2498,7 @@ mod tests {
             ];
             for vt in types {
                 roundtrip(&Operation::Transfer {
+                    policy_commit: [0u8; 32],
                     to_device_id: vec![0x01; 32],
                     amount: test_balance(1),
                     token_id: b"ERA".to_vec(),
@@ -2506,6 +2524,7 @@ mod tests {
         #[test]
         fn validate_transfer_zero_amount() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(0),
                 token_id: b"ERA".to_vec(),
@@ -2524,6 +2543,7 @@ mod tests {
         #[test]
         fn validate_transfer_positive_amount() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
@@ -2642,6 +2662,7 @@ mod tests {
             assert_eq!(Operation::Noop.get_operation_type(), "noop");
 
             let transfer = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![],
                 amount: test_balance(1),
                 token_id: vec![],
@@ -2744,6 +2765,7 @@ mod tests {
         #[test]
         fn clears_transfer_signature() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
@@ -2875,6 +2897,7 @@ mod tests {
         #[test]
         fn is_valid_transfer_positive() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
@@ -2893,6 +2916,7 @@ mod tests {
         #[test]
         fn is_valid_transfer_zero() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(0),
                 token_id: b"ERA".to_vec(),
@@ -2947,6 +2971,7 @@ mod tests {
         fn has_expired_returns_false() {
             assert!(!TokenOps::has_expired(&Operation::Genesis));
             let transfer = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![],
                 amount: test_balance(1),
                 token_id: vec![],
@@ -3089,6 +3114,7 @@ mod tests {
         #[test]
         fn encoding_is_deterministic() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(42),
                 token_id: b"ERA".to_vec(),
@@ -3114,6 +3140,7 @@ mod tests {
                     fixed.insert(k.to_string(), v.clone());
                 }
                 Operation::Transfer {
+                    policy_commit: [0u8; 32],
                     to_device_id: vec![],
                     amount: test_balance(1),
                     token_id: vec![],

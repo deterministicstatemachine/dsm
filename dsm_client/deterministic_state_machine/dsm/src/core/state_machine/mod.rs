@@ -405,6 +405,7 @@ mod state_machine_tests {
         message: &str,
     ) -> Operation {
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
             amount: Balance::from_state(10, current_state.hash),
