@@ -2571,6 +2571,13 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.device_head()
     }
 
+    fn resolve_policy_commit_strict(
+        &self,
+        token_id: &[u8],
+    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
+        self.core_sdk.resolve_policy_commit_strict(token_id)
+    }
+
     fn execute_on_relationship_for_bilateral(
         &self,
         rel_key: [u8; 32],
