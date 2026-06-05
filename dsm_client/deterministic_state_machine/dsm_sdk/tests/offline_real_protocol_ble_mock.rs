@@ -379,6 +379,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     // Transfer operation (real protocol op)
     let amount = Balance::from_state(10, [1u8; 32]);
     let transfer_op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: bob_dev_id.to_vec(),
         amount,
         token_id: b"ERA".to_vec(),
@@ -763,6 +764,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     }
 
     let op_ab_1 = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: bob_dev_id.to_vec(),
         amount: Balance::from_state(10, [1u8; 32]),
         token_id: b"ERA".to_vec(),
@@ -776,6 +778,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         signature: Vec::new(),
     };
     let op_ab_2 = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: bob_dev_id.to_vec(),
         amount: Balance::from_state(20, [2u8; 32]),
         token_id: b"ERA".to_vec(),
@@ -789,6 +792,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         signature: Vec::new(),
     };
     let op_ac_1 = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: carol_dev_id.to_vec(),
         amount: Balance::from_state(30, [3u8; 32]),
         token_id: b"ERA".to_vec(),
@@ -802,6 +806,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         signature: Vec::new(),
     };
     let op_ac_2 = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: carol_dev_id.to_vec(),
         amount: Balance::from_state(40, [4u8; 32]),
         token_id: b"ERA".to_vec(),

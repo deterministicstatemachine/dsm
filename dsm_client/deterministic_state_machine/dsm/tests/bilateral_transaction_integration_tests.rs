@@ -149,6 +149,7 @@ async fn test_complete_bilateral_transaction_flow() {
     // 3) Pre-commitment creation
     let to_label = label_for(&bob_device_id);
     let mut transfer_operation = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: to_label.clone().into_bytes(),
         amount: {
             let mut b = Balance::zero();
@@ -350,6 +351,7 @@ async fn test_bilateral_relationship_anchor_generation() {
 #[test]
 fn test_operation_serialization() {
     let op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: b"recipient_123".to_vec(),
         amount: {
             let mut b = Balance::zero();

@@ -89,6 +89,7 @@ async fn test_b0x_integration_full_flow() {
     let amount = Balance::from_state(100, dummy_hash);
 
     let op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: recipient_id_bytes.clone(),
         amount,
         token_id: b"native".to_vec(),
@@ -289,6 +290,7 @@ async fn test_b0x_live_recipient_roundtrip() {
 
     let amount = Balance::from_state(7, [0u8; 32]);
     let op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: receiver_device.to_vec(),
         amount,
         token_id: b"ERA".to_vec(),

@@ -98,6 +98,20 @@ pub trait AppRouter: Send + Sync {
         None
     }
 
+    /// §9.5: resolve a token's canonical `policy_commit` from the local
+    /// source-of-truth installed policy (builtins -> canonical constants;
+    /// custom -> the device's own registration history). Returns `Err` when the
+    /// policy is not locally installed — callers MUST fail closed and never
+    /// absorb a peer-supplied commit. Default impl fails closed.
+    fn resolve_policy_commit_strict(
+        &self,
+        _token_id: &[u8],
+    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "resolve_policy_commit_strict: unsupported by this router",
+        ))
+    }
+
     /// Pure-prepare view of the canonical AdvanceOutcome — used by the BLE
     /// sender to build a stitched receipt with the real post-advance SMT
     /// roots/proofs before the canonical commit lands (canonical commit

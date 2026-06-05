@@ -240,6 +240,7 @@ impl BilateralTransactionExample {
         amount.update_add(100);
 
         let transfer = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: to_id.clone().into_bytes(),
             amount,
             token_id: b"DSM_TOKEN".to_vec(),
@@ -292,6 +293,7 @@ impl BilateralTransactionExample {
         amount.update_add(100);
 
         let op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: to_id.clone().into_bytes(),
             amount,
             token_id: b"DSM_TOKEN".to_vec(),

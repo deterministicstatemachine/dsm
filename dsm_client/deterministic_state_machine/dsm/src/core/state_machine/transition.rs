@@ -1512,6 +1512,7 @@ mod tests {
         amount: u64,
     ) -> Operation {
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: Balance::from_state(amount, state_hash),
             token_id: token_id.as_bytes().to_vec(),
             to_device_id: b"recipient".to_vec(),
@@ -1924,6 +1925,7 @@ mod tests {
         });
 
         let transfer_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: Balance::from_state(50, prev_state.hash),
             token_id: b"token1".to_vec(),
             to_device_id: TEST_DEVICE_ID.to_vec(),
@@ -1985,6 +1987,7 @@ mod tests {
         let current_state = create_test_state(1);
 
         let operation = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: Balance::from_state(10, current_state.hash),
             token_id: b"ERA".to_vec(),
             to_device_id: TEST_DEVICE_ID.to_vec(),
@@ -2036,6 +2039,7 @@ mod tests {
         );
 
         let operation = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: Balance::from_state(10, current_state.hash),
             token_id: b"ERA".to_vec(),
             to_device_id: recipient_device_id.to_vec(),
@@ -2048,6 +2052,7 @@ mod tests {
             to: b"recipient".to_vec(),
             signature: {
                 let unsigned = Operation::Transfer {
+                    policy_commit: [0u8; 32],
                     amount: Balance::from_state(10, current_state.hash),
                     token_id: b"ERA".to_vec(),
                     to_device_id: recipient_device_id.to_vec(),
@@ -2295,6 +2300,7 @@ mod tests {
 
         // Build a Transfer with a deliberately invalid UTF-8 token_id.
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: Balance::from_state(5, state.hash),
             token_id: vec![0xFF, 0xFE],
             to_device_id: b"recipient".to_vec(),
@@ -2335,6 +2341,7 @@ mod tests {
         let entropy = vec![1, 2, 3, 4];
 
         let mut transfer_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: {
                 let mut balance = Balance::zero();
                 balance.update_add(25);
@@ -2388,6 +2395,7 @@ mod tests {
         let entropy = vec![4, 5, 6, 7];
 
         let mut transfer_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             amount: {
                 let mut balance = Balance::zero();
                 balance.update_add(10);
@@ -2442,6 +2450,7 @@ mod tests {
             .insert(sender_key, Balance::from_state(100, current_state.hash));
 
         let mut op_unsigned = Operation::Transfer {
+            policy_commit: [0u8; 32],
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
             amount: Balance::from_state(10, current_state.hash),
@@ -2486,6 +2495,7 @@ mod tests {
             .insert(sender_key, Balance::from_state(100, current_state.hash));
 
         let op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
             amount: Balance::from_state(10, current_state.hash),

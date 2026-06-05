@@ -69,6 +69,7 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8], initial_balance: u64) -> (State, Sta
 
 fn signed_transfer(sk: &[u8], state: &State, nonce: Vec<u8>, amount: u64) -> Operation {
     let mut op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         token_id: "ERA".into(),
         to_device_id: vec![0xCC; 32],
         amount: Balance::from_state(amount, state.hash),

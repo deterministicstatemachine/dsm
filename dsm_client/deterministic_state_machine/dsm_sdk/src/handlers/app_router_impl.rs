@@ -988,6 +988,16 @@ impl AppRouterImpl {
         // =====================================================================
         let balance_anchor =
             dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR, &[]);
+        // §9.5: bind the token's canonical policy_commit into the signed transfer.
+        // Resolve from the local source-of-truth installed policy; fail closed if
+        // the token's policy is not installed (no peer-supplied fallback).
+        let policy_commit = match self
+            .core_sdk
+            .resolve_policy_commit_strict(token_id.as_bytes())
+        {
+            Ok(pc) => pc,
+            Err(e) => return err(format!("wallet.send: policy_commit resolve failed: {e}")),
+        };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::from_state(
@@ -995,6 +1005,7 @@ impl AppRouterImpl {
                 *balance_anchor.as_bytes(),
             ),
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit,
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
@@ -1174,6 +1185,7 @@ impl AppRouterImpl {
                 *balance_anchor.as_bytes(),
             ),
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit,
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
@@ -1580,6 +1592,7 @@ impl AppRouterImpl {
                     *balance_anchor.as_bytes(),
                 ),
                 token_id: token_id.as_bytes().to_vec(),
+                policy_commit,
                 mode: dsm::types::operations::TransactionMode::Unilateral,
                 nonce: nonce.to_vec(),
                 verification: dsm::types::operations::VerificationType::Standard,
@@ -2559,6 +2572,13 @@ impl AppRouter for AppRouterImpl {
 
     fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         self.core_sdk.device_head()
+    }
+
+    fn resolve_policy_commit_strict(
+        &self,
+        token_id: &[u8],
+    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
+        self.core_sdk.resolve_policy_commit_strict(token_id)
     }
 
     fn execute_on_relationship_for_bilateral(

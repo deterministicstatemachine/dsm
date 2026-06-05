@@ -246,6 +246,96 @@ pub enum BalanceDirection {
     Debit,
 }
 
+/// By-construction balance-conservation guard for [`DeviceState::advance`].
+///
+/// Validates that `deltas` exactly realize `operation` for the device identified
+/// by `local_devid`, so a caller cannot apply a balance mutation that diverges
+/// from the (authenticated) signed operation. Mirrors the reference semantics of
+/// `core::state_machine::transition::verify_token_balance_consistency`, lifted to
+/// operate on `&[BalanceDelta]` (code correspondence: lean4
+/// `DSMOfflineFinality.lean` `commitTransfer` / `commit_conservation`).
+///
+/// - `Transfer`: exactly one delta, `amount == op.amount`, direction is `Credit`
+///   iff this device is the recipient (`op.to_device_id == local_devid`) else
+///   `Debit`, and `policy_commit == op.policy_commit` (§9.5 token binding).
+/// - `Mint`: exactly one `Credit` delta of `amount`.
+/// - `Burn`: exactly one `Debit` delta of `amount`.
+/// - Every other operation: no balance deltas.
+fn validate_conservation(
+    local_devid: &[u8; 32],
+    operation: &Operation,
+    deltas: &[BalanceDelta],
+) -> Result<(), DsmError> {
+    match operation {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            ..
+        } => {
+            if deltas.len() != 1 {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer must apply exactly one balance delta",
+                ));
+            }
+            let d = &deltas[0];
+            if d.amount != amount.value() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer delta amount != operation amount",
+                ));
+            }
+            let is_recipient =
+                to_device_id.len() == 32 && to_device_id.as_slice() == local_devid.as_slice();
+            let expected = if is_recipient {
+                BalanceDirection::Credit
+            } else {
+                BalanceDirection::Debit
+            };
+            if d.direction != expected {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer delta direction does not match sender/recipient role",
+                ));
+            }
+            if &d.policy_commit != policy_commit {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer delta policy_commit != operation policy_commit",
+                ));
+            }
+            Ok(())
+        }
+        Operation::Mint { amount, .. } => {
+            if deltas.len() != 1
+                || deltas[0].direction != BalanceDirection::Credit
+                || deltas[0].amount != amount.value()
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: mint must apply exactly one credit delta of the mint amount",
+                ));
+            }
+            Ok(())
+        }
+        Operation::Burn { amount, .. } => {
+            if deltas.len() != 1
+                || deltas[0].direction != BalanceDirection::Debit
+                || deltas[0].amount != amount.value()
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: burn must apply exactly one debit delta of the burn amount",
+                ));
+            }
+            Ok(())
+        }
+        _ => {
+            if !deltas.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: non-balance operation must not apply balance deltas",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Result of a successful [`DeviceState::advance`] build.
 ///
 /// The caller must CAS-swap the device head from `parent_r_a` to
@@ -485,6 +575,15 @@ impl DeviceState {
             }
         };
 
+        // §9.5 + balance conservation (token-policy doctrine §4; code
+        // correspondence: lean4 DSMOfflineFinality.lean commit_conservation /
+        // commitTransfer): the supplied deltas MUST exactly realize the signed
+        // operation — one delta of op.amount, role-correct direction, bound to the
+        // op's policy_commit. This is the by-construction guard at the sole
+        // balance-mutation chokepoint; it rejects value creation/substitution
+        // regardless of caller.
+        validate_conservation(&self.devid, &operation, deltas)?;
+
         // Apply deltas to a working copy. Failures leave self untouched.
         let mut new_balances = self.balances.clone();
         for d in deltas {
@@ -687,6 +786,95 @@ mod tests {
         }
     }
 
+    fn bal(amount: u64) -> crate::types::token_types::Balance {
+        crate::types::token_types::Balance::from_state(amount, [0u8; 32])
+    }
+
+    /// A Mint op carrying one credit of `amount` — satisfies the conservation
+    /// guard for a single Credit `BalanceDelta` of the same amount.
+    fn mint_op(amount: u64) -> Operation {
+        Operation::Mint {
+            amount: bal(amount),
+            token_id: b"ERA".to_vec(),
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        }
+    }
+
+    /// A Burn op carrying one debit of `amount` — satisfies the conservation
+    /// guard for a single Debit `BalanceDelta` of the same amount.
+    fn burn_op(amount: u64) -> Operation {
+        Operation::Burn {
+            amount: bal(amount),
+            token_id: b"ERA".to_vec(),
+            proof_of_ownership: vec![],
+            message: String::new(),
+        }
+    }
+
+    /// Value op matching a delta's direction/amount for conservation-guard tests.
+    fn value_op(dir: BalanceDirection, amount: u64) -> Operation {
+        match dir {
+            BalanceDirection::Credit => mint_op(amount),
+            BalanceDirection::Debit => burn_op(amount),
+        }
+    }
+
+    #[test]
+    fn conservation_guard_rules() {
+        let me = devid(0xAA);
+        let other = devid(0xBB);
+        let pcx = pc(0xCC);
+        let xfer = |to: [u8; 32], amt: u64, pcv: [u8; 32]| Operation::Transfer {
+            to_device_id: to.to_vec(),
+            amount: bal(amt),
+            token_id: b"ERA".to_vec(),
+            policy_commit: pcv,
+            mode: crate::types::operations::TransactionMode::Unilateral,
+            nonce: vec![],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![],
+            to: vec![],
+            message: String::new(),
+            signature: vec![],
+        };
+        let credit = |amt: u64, pcv: [u8; 32]| BalanceDelta {
+            policy_commit: pcv,
+            direction: BalanceDirection::Credit,
+            amount: amt,
+        };
+        let debit = |amt: u64, pcv: [u8; 32]| BalanceDelta {
+            policy_commit: pcv,
+            direction: BalanceDirection::Debit,
+            amount: amt,
+        };
+
+        // Transfer: recipient credits, sender debits — accepted.
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx)]).is_ok());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[debit(5, pcx)]).is_ok());
+        // Wrong amount / direction / token / count — rejected.
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(6, pcx)]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[debit(5, pcx)]).is_err());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[]).is_err());
+        assert!(
+            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx), credit(5, pcx)])
+                .is_err()
+        );
+        // Mint: one credit==amount; Burn: one debit==amount.
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)]).is_ok());
+        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)]).is_err());
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)]).is_err());
+        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)]).is_ok());
+        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)]).is_err());
+        // Non-balance op must carry no deltas.
+        assert!(validate_conservation(&me, &op(), &[]).is_ok());
+        assert!(validate_conservation(&me, &op(), &[credit(1, pcx)]).is_err());
+    }
+
     fn entropy(seed: u8) -> Vec<u8> {
         let mut h = crate::crypto::blake3::dsm_domain_hasher(
             crate::common::domain_tags::TAG_DSM_TEST_ENTROPY,
@@ -725,7 +913,7 @@ mod tests {
             .advance(
                 rk_self,
                 bob.devid,
-                op(),
+                mint_op(50),
                 entropy(42),
                 None,
                 &[BalanceDelta {
@@ -784,7 +972,7 @@ mod tests {
             .advance(
                 rk_bob,
                 bob,
-                op(),
+                burn_op(30),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -808,7 +996,7 @@ mod tests {
             .advance(
                 rk_chrl,
                 charlie,
-                op(),
+                burn_op(50),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -866,7 +1054,7 @@ mod tests {
             .advance(
                 rk_bob,
                 bob,
-                op(),
+                burn_op(10),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -882,7 +1070,7 @@ mod tests {
             .advance(
                 rk_chrl,
                 charlie,
-                op(),
+                burn_op(20),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -933,7 +1121,7 @@ mod tests {
             .advance(
                 rk,
                 bob,
-                op(),
+                burn_op(10),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -949,7 +1137,7 @@ mod tests {
             .advance(
                 rk,
                 bob,
-                op(),
+                burn_op(20),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -994,7 +1182,7 @@ mod tests {
         let r = dev.advance(
             rk,
             bob,
-            op(),
+            burn_op(10),
             entropy(1),
             None,
             &[BalanceDelta {
@@ -1027,7 +1215,7 @@ mod tests {
         let r = dev.advance(
             rk,
             bob,
-            op(),
+            mint_op(1),
             entropy(1),
             None,
             &[BalanceDelta {
@@ -1076,7 +1264,7 @@ mod tests {
                 .advance(
                     rk,
                     *party,
-                    op(),
+                    value_op(dir, amt),
                     entropy(i as u8),
                     None,
                     &[BalanceDelta {

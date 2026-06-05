@@ -613,6 +613,7 @@ mod tests {
         let mut balance = Balance::zero();
         balance.update_add(100);
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             mode: TransactionMode::Bilateral,
             nonce: vec![1, 2, 3],
             verification: VerificationType::Standard,

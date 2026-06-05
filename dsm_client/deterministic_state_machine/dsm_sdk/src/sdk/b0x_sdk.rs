@@ -2495,6 +2495,17 @@ impl B0xSDK {
                                     crate::sdk::app_state::AppState::get_public_key()
                                         .unwrap_or_else(|| transfer_req.to_device_id.clone());
 
+                                // §9.5: take the sender's signed policy_commit from the
+                                // canonical preimage so the reconstructed op matches what
+                                // was signed. The receiver independently re-resolves and
+                                // rejects on mismatch at apply (no peer-policy absorption).
+                                let policy_commit: [u8; 32] = match Operation::from_bytes(
+                                    &transfer_req.canonical_operation_bytes,
+                                ) {
+                                    Ok(Operation::Transfer { policy_commit, .. }) => policy_commit,
+                                    _ => [0u8; 32],
+                                };
+
                                 let transfer_op = Operation::Transfer {
                                     to_device_id: transfer_req.to_device_id.clone(),
                                     amount: dsm::types::token_types::Balance::from_state(
@@ -2506,6 +2517,7 @@ impl B0xSDK {
                                     } else {
                                         transfer_req.token_id.clone().into_bytes()
                                     },
+                                    policy_commit,
                                     mode: dsm::types::operations::TransactionMode::Unilateral,
                                     nonce: transfer_req.nonce.clone(),
                                     verification:

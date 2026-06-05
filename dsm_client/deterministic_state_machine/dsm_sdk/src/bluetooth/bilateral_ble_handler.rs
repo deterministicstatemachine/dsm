@@ -3208,22 +3208,21 @@ impl BilateralBleHandler {
             dsm::types::operations::Operation::Transfer {
                 amount, token_id, ..
             } => {
-                let tid = std::str::from_utf8(token_id).unwrap_or("");
-                if tid.is_empty() {
-                    Vec::new()
-                } else {
-                    match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
-                        Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
-                            policy_commit: pc,
-                            direction: dsm::types::device_state::BalanceDirection::Debit,
-                            amount: amount.value(),
-                        }],
-                        Err(e) => {
-                            log::warn!(
-                                "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
-                            );
-                            Vec::new()
-                        }
+                // §9.5: independently resolve the sender's installed policy_commit;
+                // unresolved -> empty deltas -> conservation guard rejects (fail closed).
+                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                {
+                    Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Debit,
+                        amount: amount.value(),
+                    }],
+                    _ => {
+                        log::warn!(
+                            "[bilateral_ble] sender delta: policy_commit unresolved (fail closed) token={}",
+                            String::from_utf8_lossy(token_id)
+                        );
+                        Vec::new()
                     }
                 }
             }
@@ -4096,22 +4095,22 @@ impl BilateralBleHandler {
             Operation::Transfer {
                 amount, token_id, ..
             } => {
-                let tid = std::str::from_utf8(token_id).unwrap_or("");
-                if tid.is_empty() {
-                    Vec::new()
-                } else {
-                    match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
-                        Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
-                            policy_commit: pc,
-                            direction: dsm::types::device_state::BalanceDirection::Credit,
-                            amount: amount.value(),
-                        }],
-                        Err(e) => {
-                            log::warn!(
-                                "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
-                            );
-                            Vec::new()
-                        }
+                // §9.5: independently resolve the receiver's installed policy_commit.
+                // Unresolved/uninstalled -> empty deltas -> the conservation guard
+                // rejects the Transfer (fail closed). Never absorb the peer's commit.
+                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                {
+                    Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: amount.value(),
+                    }],
+                    _ => {
+                        log::warn!(
+                            "[bilateral_ble] receiver delta: policy_commit unresolved (fail closed) token={}",
+                            String::from_utf8_lossy(token_id)
+                        );
+                        Vec::new()
                     }
                 }
             }
@@ -4667,23 +4666,23 @@ impl BilateralBleHandler {
                     Operation::Transfer {
                         amount, token_id, ..
                     } => {
-                        let tid = std::str::from_utf8(token_id).unwrap_or("");
-                        if tid.is_empty() {
-                            Vec::new()
-                        } else {
-                            match dsm::core::token::token_state_manager::resolve_policy_commit(tid)
-                            {
-                                Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
-                                    policy_commit: pc,
-                                    direction: dsm::types::device_state::BalanceDirection::Debit,
-                                    amount: amount.value(),
-                                }],
-                                Err(e) => {
-                                    log::warn!(
-                                        "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
-                                    );
-                                    Vec::new()
-                                }
+                        // §9.5: independently resolve the sender's installed
+                        // policy_commit; unresolved -> empty deltas -> conservation
+                        // guard rejects (fail closed).
+                        match crate::bridge::app_router()
+                            .map(|r| r.resolve_policy_commit_strict(token_id))
+                        {
+                            Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
+                                policy_commit: pc,
+                                direction: dsm::types::device_state::BalanceDirection::Debit,
+                                amount: amount.value(),
+                            }],
+                            _ => {
+                                log::warn!(
+                                    "[bilateral_ble] sender delta: policy_commit unresolved (fail closed) token={}",
+                                    String::from_utf8_lossy(token_id)
+                                );
+                                Vec::new()
                             }
                         }
                     }
@@ -5682,6 +5681,7 @@ mod tests {
         }
 
         let stale_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),
@@ -5695,6 +5695,7 @@ mod tests {
             signature: Vec::new(),
         };
         let next_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),
@@ -5800,6 +5801,7 @@ mod tests {
         }
 
         let accepted_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),

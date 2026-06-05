@@ -209,6 +209,7 @@ fn encode_offline_transfer_operation_canonical(
     amount: u64,
     token_id: &str,
     memo: &str,
+    policy_commit: &[u8; 32],
 ) -> Vec<u8> {
     let mut out = Vec::new();
 
@@ -233,6 +234,8 @@ fn encode_offline_transfer_operation_canonical(
 
     let canonical_token_id = canonicalize_token_id(token_id);
     push_str(&mut out, &canonical_token_id);
+    // §9.5 policy_commit — length-prefixed 32 bytes, matching Operation::to_bytes.
+    push_bytes(&mut out, policy_commit);
     push_u8(&mut out, 0); // TransactionMode::Bilateral
     push_bytes(&mut out, &[]);
     push_u8(&mut out, 2); // VerificationType::Bilateral
@@ -727,11 +730,23 @@ impl AppRouterImpl {
                             }
                         }
                     };
+                    let policy_commit = match self
+                        .core_sdk
+                        .resolve_policy_commit_strict(token_id.as_bytes())
+                    {
+                        Ok(pc) => pc,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: policy_commit resolve failed: {e}"
+                            ))
+                        }
+                    };
                     encode_offline_transfer_operation_canonical(
                         &counterparty_device_id,
                         transfer_amount,
                         &token_id,
                         req.memo_hint.trim(),
+                        &policy_commit,
                     )
                 } else {
                     req.operation_data.clone()
@@ -1192,7 +1207,13 @@ mod tests {
     #[test]
     fn offline_transfer_operation_encodes_canonical_dbtc_token_id() {
         let to_device_id = [0xabu8; 32];
-        let bytes = encode_offline_transfer_operation_canonical(&to_device_id, 42, "DBTC", "memo");
+        let bytes = encode_offline_transfer_operation_canonical(
+            &to_device_id,
+            42,
+            "DBTC",
+            "memo",
+            &[0u8; 32],
+        );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
         match op {

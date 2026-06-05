@@ -1607,7 +1607,10 @@ impl CoreSDK {
         }
     }
 
-    fn resolve_policy_commit_strict(&self, token_id: &[u8]) -> Result<[u8; 32], DsmError> {
+    pub(crate) fn resolve_policy_commit_strict(
+        &self,
+        token_id: &[u8],
+    ) -> Result<[u8; 32], DsmError> {
         let token_id = std::str::from_utf8(token_id)
             .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
 

@@ -405,6 +405,7 @@ mod state_machine_tests {
         message: &str,
     ) -> Operation {
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
             amount: Balance::from_state(10, current_state.hash),
@@ -494,14 +495,17 @@ mod state_machine_tests {
 
     #[test]
     fn test_first_post_genesis_transition_is_allowed() -> Result<(), DsmError> {
-        let (genesis_state, _pk, sk) = create_test_genesis_state_with_keypair();
+        let (genesis_state, _pk, _sk) = create_test_genesis_state_with_keypair();
         let device_id = genesis_state.device_info.device_id;
-        let op = signed_transfer(
-            &sk,
-            &genesis_state,
-            vec![0u8; 8],
-            "first post-genesis transfer",
-        );
+        // SMT-advance mechanics test: a non-balance op carries no deltas. The
+        // conservation guard requires Transfer/Mint/Burn deltas to match the op;
+        // balance-bearing advances are covered by the device_state guard tests.
+        let op = Operation::Generic {
+            operation_type: b"test.post-genesis".to_vec(),
+            data: vec![],
+            message: "first post-genesis transition".to_string(),
+            signature: vec![],
+        };
 
         let mut state_machine = StateMachine::new();
         state_machine.set_state(genesis_state);
@@ -522,14 +526,17 @@ mod state_machine_tests {
     #[test]
     fn test_state_machine_advance_relationship() -> Result<(), DsmError> {
         let mut machine = StateMachine::new();
-        let (initial_state, _pk, sk) = create_test_genesis_state_with_keypair();
+        let (initial_state, _pk, _sk) = create_test_genesis_state_with_keypair();
         let dev_id = initial_state.device_info.device_id;
         machine.set_state(initial_state);
 
-        let cur = machine
-            .current_state()
-            .ok_or_else(|| DsmError::state_machine("no state"))?;
-        let op = signed_transfer(&sk, &cur, vec![1u8; 8], "Test transfer");
+        // SMT-advance mechanics test: non-balance op, no deltas (see conservation guard).
+        let op = Operation::Generic {
+            operation_type: b"test.advance".to_vec(),
+            data: vec![],
+            message: "Test transfer".to_string(),
+            signature: vec![],
+        };
 
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
         let init_tip =

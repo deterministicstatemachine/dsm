@@ -279,6 +279,7 @@ mod tests {
         let (_pk, sk) = generate_sphincs_keypair().expect("keypair");
 
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: b"recipient123".to_vec(),
             verification: crate::types::operations::VerificationType::Standard,
             token_id: b"token123".to_vec(),

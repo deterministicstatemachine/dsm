@@ -40,6 +40,7 @@ pub fn serialize_operation(op: &Operation) -> Vec<u8> {
             to_device_id,
             amount,
             token_id,
+            policy_commit,
             mode,
             nonce,
             verification,
@@ -61,6 +62,9 @@ pub fn serialize_operation(op: &Operation) -> Vec<u8> {
             let token_bytes = token_id.as_slice();
             bytes.extend_from_slice(&(token_bytes.len() as u32).to_le_bytes());
             bytes.extend_from_slice(token_bytes);
+
+            // CPTA policy commitment (§9.5) — fixed 32 bytes.
+            bytes.extend_from_slice(policy_commit);
 
             let mode_byte = match mode {
                 dsm::types::operations::TransactionMode::Unilateral => 0u8,
@@ -164,6 +168,14 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
             let amount = read_u64(&mut cursor)?;
             let token_id = read_bytes(&mut cursor)?;
 
+            // CPTA policy commitment (§9.5) — fixed 32 bytes.
+            if cursor.len() < 32 {
+                return Err(anyhow!("Incomplete Transfer policy_commit"));
+            }
+            let mut policy_commit = [0u8; 32];
+            policy_commit.copy_from_slice(&cursor[..32]);
+            cursor = &cursor[32..];
+
             if cursor.is_empty() {
                 return Err(anyhow!("Incomplete Transfer data"));
             }
@@ -215,6 +227,7 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
                 to_device_id,
                 amount: balance,
                 token_id,
+                policy_commit,
                 mode,
                 nonce,
                 verification,
@@ -481,6 +494,7 @@ mod tests {
     fn serialize_deserialize_transfer_round_trip() {
         let balance = dsm::types::token_types::Balance::from_state(1000, [0u8; 32]);
         let op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: vec![0xAAu8; 32],
             amount: balance,
             token_id: b"dBTC".to_vec(),

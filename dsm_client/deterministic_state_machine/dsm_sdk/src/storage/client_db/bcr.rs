@@ -606,9 +606,12 @@ mod tests {
         crate::storage::client_db::init_database().expect("init db");
     }
 
+    // Recipient-credit transfer on device [0xA1] bound to policy_commit [0xD4],
+    // consistent with the conservation guard (to_device_id == device => Credit).
     fn sample_operation(tag: &[u8], amount: u64) -> Operation {
         Operation::Transfer {
-            to_device_id: vec![0xBB; 32],
+            policy_commit: [0xD4; 32],
+            to_device_id: vec![0xA1; 32],
             amount: TokenBalance::from_state(amount, [0u8; 32]),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
@@ -796,7 +799,7 @@ mod tests {
                 &[BalanceDelta {
                     policy_commit: [0xD4; 32],
                     direction: BalanceDirection::Credit,
-                    amount: 2,
+                    amount: 9,
                 }],
                 None,
                 None,
@@ -842,7 +845,7 @@ mod tests {
                 &[BalanceDelta {
                     policy_commit: [0xD4; 32],
                     direction: BalanceDirection::Credit,
-                    amount: 4,
+                    amount: 11,
                 }],
                 None,
                 Some([0xAA; 32]),

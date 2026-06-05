@@ -1671,6 +1671,7 @@ mod tests {
 
     fn signed_transfer_op(kp: &SignatureKeyPair, message: &str, nonce: u8) -> Operation {
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
             amount: Balance::from_state(1, [0u8; 32]),
