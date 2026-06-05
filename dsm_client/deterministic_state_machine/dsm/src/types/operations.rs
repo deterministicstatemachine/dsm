@@ -1648,6 +1648,16 @@ impl Operation {
             }
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
+        // Canonical decode requires full byte exhaustion: a valid operation must
+        // consume its entire input. Trailing bytes are non-canonical — a distinct
+        // wire string that decodes to the same operation — and are rejected so a
+        // signed operation has exactly one byte encoding. (issue #450)
+        if !input.is_empty() {
+            return Err(DsmError::invalid_operation(format!(
+                "trailing bytes after operation: {} leftover",
+                input.len()
+            )));
+        }
         Ok(op)
     }
 
@@ -2934,6 +2944,45 @@ mod tests {
             }
             .to_bytes();
             *bytes.last_mut().unwrap() = 99;
+            assert!(Operation::from_bytes(&bytes).is_err());
+        }
+
+        #[test]
+        fn trailing_bytes_after_transfer_rejected() {
+            let mut bytes = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(100),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Unilateral,
+                nonce: vec![0xFF; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x02; 32],
+                to: vec![0x03; 32],
+                message: "x".into(),
+                signature: vec![0xAA; 32],
+            }
+            .to_bytes();
+            // Exact bytes decode fine; one trailing byte is non-canonical.
+            assert!(Operation::from_bytes(&bytes).is_ok());
+            bytes.push(0x00);
+            assert!(Operation::from_bytes(&bytes).is_err());
+        }
+
+        #[test]
+        fn trailing_bytes_after_create_rejected() {
+            let mut bytes = Operation::Create {
+                message: "hello".into(),
+                identity_data: vec![1, 2, 3],
+                public_key: vec![4, 5],
+                metadata: vec![],
+                commitment: vec![],
+                proof: vec![],
+                mode: TransactionMode::Bilateral,
+            }
+            .to_bytes();
+            assert!(Operation::from_bytes(&bytes).is_ok());
+            bytes.extend_from_slice(&[0xFF, 0xFF]);
             assert!(Operation::from_bytes(&bytes).is_err());
         }
     }
