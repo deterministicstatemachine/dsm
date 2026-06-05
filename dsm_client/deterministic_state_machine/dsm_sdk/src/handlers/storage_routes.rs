@@ -473,25 +473,75 @@ impl AppRouterImpl {
                                         }
                                     }
 
-                                    if let dsm::types::operations::Operation::Transfer {
-                                        amount,
-                                        token_id: _token_id,
-                                        nonce: _nonce,
-                                        ..
-                                    } = &entry.transaction
+                                    // §4.2.1 (issue #446): `entry.transaction` is a field-by-field
+                                    // reconstruction from UNTRUSTED protobuf and is used here ONLY as
+                                    // a routing hint. Every value-bearing read below derives from the
+                                    // signed canonical operation — decoded from `canonical_operation_bytes`
+                                    // and bound to the verified signature — never from the structured
+                                    // fields a relay could tamper while leaving the signature intact.
+                                    if let dsm::types::operations::Operation::Transfer { .. } =
+                                        &entry.transaction
                                     {
-                                        let amount_val = amount.value();
-                                        if amount_val == 0 {
-                                            log::warn!(
-                                                "[storage.sync] Skipping zero-amount transfer"
+                                        // The signed canonical preimage is mandatory (strict-fail).
+                                        if entry.canonical_operation_bytes.is_empty() {
+                                            log::error!(
+                                                "[storage.sync] ❌ REJECTING tx {}: missing canonical_operation_bytes (§4.2.1 strict-fail)",
+                                                entry.transaction_id
                                             );
+                                            let mut state_guard = batch_state.lock().await;
+                                            state_guard.errors.push(format!(
+                                                "missing canonical_operation_bytes for tx {}",
+                                                entry.transaction_id
+                                            ));
                                             continue;
                                         }
+                                        let signing_bytes = entry.canonical_operation_bytes.clone();
 
-                                        // ============= AF-2 FIX: Canonical Transfer Signature Verification =============
-                                        // Extract transfer details from the Operation
+                                        // Resolve signer key: embedded evidence first, contacts second.
+                                        let (pk, pk_source) = if !entry.sender_signing_public_key.is_empty() {
+                                                    (entry.sender_signing_public_key.clone(), "embedded_evidence")
+                                                } else if let Some(k) = crate::storage::client_db::get_contact_public_key_by_device_id(&entry.sender_device_id) {
+                                                    (k, "contact_book")
+                                                } else {
+                                                    log::warn!("[storage.sync] ❌ No public key for sender {} (tx {}) - REJECTING", entry.sender_device_id, entry.transaction_id);
+                                                    let mut state_guard = batch_state.lock().await;
+                                                    state_guard.errors.push(format!("unknown sender public key for tx {}", entry.transaction_id));
+                                                    continue;
+                                                };
+                                        let pk_hash = dsm::crypto::blake3::domain_hash(
+                                            dsm::common::domain_tags::TAG_DSM_PK_HASH,
+                                            &pk,
+                                        );
+                                        log::info!("[storage.sync] 🔑 signer pk hash(first8)={:?} source={} tx={}", &pk_hash.as_bytes()[..8], pk_source, entry.transaction_id);
+
+                                        // §4.2.1 authoritative binding: verify SPHINCS+ over the
+                                        // canonical bytes, decode the SIGNED operation, enforce
+                                        // canonical re-serialization equality, and re-attach the
+                                        // verified signature. `signed_op` is the ONLY trusted
+                                        // operation for this entry.
+                                        let signed_op = match dsm::types::operations::Operation::decode_and_bind_signed(
+                                            &signing_bytes,
+                                            &entry.signature,
+                                            &pk,
+                                        ) {
+                                            Ok(op) => op,
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "[storage.sync] inbox.pull: signed-operation binding failed for tx {} ({}) — skipping poisoned entry, continuing batch",
+                                                    entry.transaction_id, e
+                                                );
+                                                let mut state_guard = batch_state.lock().await;
+                                                state_guard.errors.push(format!(
+                                                    "inbox.pull: signed-operation binding failed for tx {}: {}",
+                                                    entry.transaction_id, e
+                                                ));
+                                                continue;
+                                            }
+                                        };
+
+                                        // Authoritative transfer fields come ONLY from signed_op.
                                         let (to_device_id, amount_val, token_id, nonce, memo) =
-                                            match &entry.transaction {
+                                            match &signed_op {
                                                 dsm::types::operations::Operation::Transfer {
                                                     to_device_id,
                                                     amount,
@@ -507,10 +557,22 @@ impl AppRouterImpl {
                                                     message.clone(),
                                                 ),
                                                 _ => {
-                                                    log::warn!("[storage.sync] Skipping non-transfer operation");
+                                                    log::warn!("[storage.sync] Skipping tx {}: signed operation is not a Transfer", entry.transaction_id);
+                                                    let mut state_guard = batch_state.lock().await;
+                                                    state_guard.errors.push(format!(
+                                                        "signed op not a Transfer for tx {}",
+                                                        entry.transaction_id
+                                                    ));
                                                     continue;
                                                 }
                                             };
+
+                                        if amount_val == 0 {
+                                            log::warn!(
+                                                "[storage.sync] Skipping zero-amount transfer"
+                                            );
+                                            continue;
+                                        }
 
                                         // Guardrail: ensure this inbox item is actually targeted to the local device.
                                         if let Err(msg) = ensure_inbox_recipient_targets_local(
@@ -613,70 +675,10 @@ impl AppRouterImpl {
                                             continue;
                                         }
 
-                                        // §4.2.1: Use the sender's canonical unsigned Operation bytes
-                                        // directly.  No field-by-field reconstruction — the sender
-                                        // embedded the exact signing preimage in the envelope.
-                                        if entry.canonical_operation_bytes.is_empty() {
-                                            log::error!(
-                                                "[storage.sync] ❌ REJECTING tx {}: missing canonical_operation_bytes (§4.2.1 strict-fail)",
-                                                entry.transaction_id
-                                            );
-                                            let mut state_guard = batch_state.lock().await;
-                                            state_guard.errors.push(format!(
-                                                "missing canonical_operation_bytes for tx {}",
-                                                entry.transaction_id
-                                            ));
-                                            continue;
-                                        }
-                                        let signing_bytes = entry.canonical_operation_bytes.clone();
-
-                                        // Verify SPHINCS+ signature (fail-closed)
-                                        // Prefer embedded sender signing key; fall back to contact book.
-                                        let (pk, pk_source) = if !entry.sender_signing_public_key.is_empty() {
-                                                    (entry.sender_signing_public_key.clone(), "embedded_evidence")
-                                                } else if let Some(k) = crate::storage::client_db::get_contact_public_key_by_device_id(&entry.sender_device_id) {
-                                                    (k, "contact_book")
-                                                } else {
-                                                    log::warn!("[storage.sync] ❌ No public key for sender {} (tx {}) - REJECTING", entry.sender_device_id, entry.transaction_id);
-                                                    let mut state_guard = batch_state.lock().await;
-                                                    state_guard.errors.push(format!("unknown sender public key for tx {}", entry.transaction_id));
-                                                    continue;
-                                                };
-
-                                        // Diagnostic: hash public key for cross-device comparison
-                                        let pk_hash = dsm::crypto::blake3::domain_hash(
-                                            dsm::common::domain_tags::TAG_DSM_PK_HASH,
-                                            &pk,
-                                        );
-                                        log::info!("[storage.sync] 🔑 signer pk hash(first8)={:?} source={} tx={}", &pk_hash.as_bytes()[..8], pk_source, entry.transaction_id);
-
-                                        let valid = match dsm::crypto::sphincs::sphincs_verify(
-                                            &pk,
-                                            &signing_bytes,
-                                            &entry.signature,
-                                        ) {
-                                            Ok(true) => true,
-                                            Ok(false) => false,
-                                            Err(e) => {
-                                                log::warn!("[storage.sync] ❌ Signature verification error for tx {}: {} - REJECTING", entry.transaction_id, e);
-                                                false
-                                            }
-                                        };
-                                        if !valid {
-                                            log::warn!(
-                                                "[storage.sync] inbox.pull: signature verification failed for tx {} — skipping poisoned entry, continuing batch",
-                                                entry.transaction_id
-                                            );
-                                            let mut state_guard = batch_state.lock().await;
-                                            state_guard.errors.push(format!(
-                                                "inbox.pull: signature verification failed for tx {}",
-                                                entry.transaction_id
-                                            ));
-                                            continue;
-                                        }
-
-                                        // Rehydrate and apply the transfer operation (we already hold Operation in the entry)
-                                        let op = entry.transaction.clone();
+                                        // Apply the authoritative signed operation (decoded and bound
+                                        // above from the canonical signed bytes — never the untrusted
+                                        // reconstructed `entry.transaction`).
+                                        let op = signed_op;
                                         let tx_id: TransactionId =
                                             TransactionId::new(entry.transaction_id.clone());
                                         // §S1: receipt_commit is mandatory — §4.3 items 2/3/4 all depend on it.
@@ -718,20 +720,11 @@ impl AppRouterImpl {
                                         // the entry for retry.
                                         // ═══════════════════════════════════════════════════════
                                         {
-                                            let nonce_bytes: Option<&[u8]> = match &entry
-                                                .transaction
-                                            {
-                                                dsm::types::operations::Operation::Transfer {
-                                                    nonce,
-                                                    ..
-                                                } => {
-                                                    if nonce.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(nonce.as_slice())
-                                                    }
-                                                }
-                                                _ => None,
+                                            // Authoritative nonce from the signed op (issue #446).
+                                            let nonce_bytes: Option<&[u8]> = if nonce.is_empty() {
+                                                None
+                                            } else {
+                                                Some(nonce.as_slice())
                                             };
                                             if let Some(nb) = nonce_bytes {
                                                 if let Ok(true) =

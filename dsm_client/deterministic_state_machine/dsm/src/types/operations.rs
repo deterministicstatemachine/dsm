@@ -1774,6 +1774,78 @@ impl Operation {
         }
         clone
     }
+
+    /// Return a clone of this operation with the signature field set to `sig`
+    /// for variants that carry a signature. Mirror of [`with_cleared_signature`].
+    ///
+    /// [`with_cleared_signature`]: Operation::with_cleared_signature
+    pub fn with_signature(&self, sig: Vec<u8>) -> Self {
+        let mut clone = self.clone();
+        match &mut clone {
+            Operation::Transfer { signature, .. }
+            | Operation::CreateToken { signature, .. }
+            | Operation::Lock { signature, .. }
+            | Operation::Unlock { signature, .. }
+            | Operation::LockToken { signature, .. }
+            | Operation::UnlockToken { signature, .. }
+            | Operation::Generic { signature, .. }
+            | Operation::DlvCreate { signature, .. }
+            | Operation::DlvUnlock { signature, .. }
+            | Operation::DlvClaim { signature, .. }
+            | Operation::DlvInvalidate { signature, .. } => {
+                *signature = sig;
+            }
+            _ => {}
+        }
+        clone
+    }
+
+    /// §4.2.1 Authoritative binding: decode the sender's signed canonical
+    /// preimage and bind it to the verified signature. This is the SINGLE
+    /// trusted source for an inbound signed operation — callers MUST route
+    /// every value read (amount/token_id/recipient/nonce/message) off the
+    /// returned [`Operation`], never off any parallel structured field that
+    /// traveled alongside the signed bytes.
+    ///
+    /// Steps:
+    /// 1. SPHINCS+ verify `signature` over `canonical_operation_bytes` under
+    ///    `signer_pubkey` (fail fast — never decode unauthenticated bytes).
+    /// 2. [`Operation::from_bytes`] the canonical preimage.
+    /// 3. Enforce canonical re-serialization equality
+    ///    `op.with_cleared_signature().to_bytes() == canonical_operation_bytes`.
+    ///    This rejects trailing garbage and any non-canonical encoding for this
+    ///    path (independent of the global decoder exhaustion guard, issue #450).
+    /// 4. Return the operation with the verified signature re-attached, so the
+    ///    result is byte-identical to the operation the sender signed.
+    pub fn decode_and_bind_signed(
+        canonical_operation_bytes: &[u8],
+        signature: &[u8],
+        signer_pubkey: &[u8],
+    ) -> Result<Operation, DsmError> {
+        match crate::crypto::sphincs::sphincs_verify(
+            signer_pubkey,
+            canonical_operation_bytes,
+            signature,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Err(DsmError::verification("signed operation signature invalid")),
+            Err(e) => {
+                return Err(DsmError::verification(format!(
+                    "signed operation signature verification error: {e}"
+                )))
+            }
+        }
+
+        let op = Operation::from_bytes(canonical_operation_bytes)?;
+
+        if op.with_cleared_signature().to_bytes() != canonical_operation_bytes {
+            return Err(DsmError::invalid_operation(
+                "non-canonical signed operation bytes (re-serialization mismatch)",
+            ));
+        }
+
+        Ok(op.with_signature(signature.to_vec()))
+    }
 }
 
 impl Ops for Operation {
@@ -2863,6 +2935,95 @@ mod tests {
             .to_bytes();
             *bytes.last_mut().unwrap() = 99;
             assert!(Operation::from_bytes(&bytes).is_err());
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  decode_and_bind_signed — authoritative inbound binding (issue #446)
+    // ------------------------------------------------------------------ //
+    mod decode_and_bind {
+        use super::*;
+        use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+
+        /// Build a legitimately signed Transfer the way the sender does:
+        /// sign over `signing_op.to_bytes()` with an EMPTY signature field, and
+        /// that exact buffer is the `canonical_operation_bytes` preimage.
+        /// Returns `(canonical_bytes, signature, signer_public_key)`.
+        fn signed_transfer() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+            let kp =
+                generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
+            let signing_op = Operation::Transfer {
+                to_device_id: vec![0x11; 32],
+                amount: test_balance(42),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Unilateral,
+                nonce: vec![0xAB; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x22; 32],
+                to: vec![0x33; 32],
+                message: "unit".into(),
+                signature: Vec::new(),
+            };
+            let canonical = signing_op.to_bytes();
+            let sig = sphincs_sign(&kp.secret_key, &canonical).expect("sign");
+            (canonical, sig, kp.public_key.clone())
+        }
+
+        #[test]
+        fn clean_accept_binds_canonical_values() {
+            let (canonical, sig, pk) = signed_transfer();
+            let bound = Operation::decode_and_bind_signed(&canonical, &sig, &pk)
+                .expect("bind should accept a clean signed op");
+
+            // The bound op derives SOLELY from the signed canonical bytes — there is
+            // no structured field input to the helper, so a tampered sibling field
+            // (the issue #446 attack) cannot influence these values.
+            assert!(
+                matches!(bound, Operation::Transfer { .. }),
+                "expected Transfer"
+            );
+            if let Operation::Transfer {
+                to_device_id,
+                amount,
+                token_id,
+                nonce,
+                ..
+            } = &bound
+            {
+                assert_eq!(to_device_id, &vec![0x11; 32]);
+                assert_eq!(amount.value(), 42);
+                assert_eq!(token_id, &b"ERA".to_vec());
+                assert_eq!(nonce, &vec![0xAB; 16]);
+            }
+
+            // Signature re-attached, and re-clearing reproduces the exact preimage.
+            assert_eq!(bound.get_signature(), Some(sig));
+            assert_eq!(bound.with_cleared_signature().to_bytes(), canonical);
+        }
+
+        #[test]
+        fn trailing_garbage_rejected() {
+            let kp =
+                generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
+            let (canonical, _sig, pk) = signed_transfer();
+            let mut tampered = canonical;
+            tampered.push(0xFF);
+            // Sign the trailing-garbage bytes so the SIGNATURE itself verifies; the
+            // re-serialization equality check must still reject the non-canonical input.
+            let sig = sphincs_sign(&kp.secret_key, &tampered).expect("sign");
+            assert!(Operation::decode_and_bind_signed(&tampered, &sig, &pk).is_err());
+        }
+
+        #[test]
+        fn wrong_signature_rejected() {
+            let (canonical, _sig, pk) = signed_transfer();
+            let other =
+                generate_keypair_from_seed(SphincsVariant::SPX256f, &[9u8; 32]).expect("keypair2");
+            let bad_sig = sphincs_sign(&other.secret_key, &canonical).expect("sign");
+            // Verify under the ORIGINAL signer's key -> signature mismatch -> reject,
+            // before any decoded value is trusted.
+            assert!(Operation::decode_and_bind_signed(&canonical, &bad_sig, &pk).is_err());
         }
     }
 
