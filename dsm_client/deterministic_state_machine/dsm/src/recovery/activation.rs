@@ -2,6 +2,21 @@
 
 //! Recovery activation seal (P4) — all-contact identity succession.
 //!
+//! > **EVIDENCE MODEL PARTIALLY SUPERSEDED** (see spec `recovery-and-dlv` §0.5).
+//! > Recovery authority is the set of counterparties whose own *online-posted,
+//! > genesis-authenticated* state proves they processed the tombstone and bound the
+//! > successor — NOT a standalone signed `ContactTombstoneAck`, and NOT a public key
+//! > looked up in the mutable local contacts DB. The per-ack `signature` +
+//! > `latest_accepted_height` floor in this module are the interim model and are
+//! > being replaced by: (a) verifying the counterparty's posted per-device
+//! > tree/root against its genesis, and (b) a **hash forward-ancestry** floor check
+//! > (DSM acceptance uses hash adjacency / parent consumption — never numeric
+//! > heights/counters). The pieces that SURVIVE the redesign are kept here:
+//! > all-contact **set-equality** over the gate-set and the gate-set commitment.
+//! > `RecoverySDK::verify_and_record_activation` is fail-closed until the posted-tree
+//! > authority + forward-ancestry are wired; do NOT wire a live unlock on this
+//! > interim model.
+//!
 //! Pure, transport-independent validation of the recovery activation seal. The
 //! successor device becomes spend-authoritative ONLY after every gate-set member
 //! has emitted a valid Contact Tombstone Acknowledgement (set-equality), each ack

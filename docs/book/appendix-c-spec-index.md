@@ -145,12 +145,11 @@ Every feature maps to an authoritative spec and code modules across all layers.
 ### Recovery
 
 - **Source:** `docs/book/15-security-model.md`, `.github/instructions/recovery-and-dlv.instructions.md` (§1–§6, reconciled spec ↔ code with Layer A/B/Divergent tags + gap register)
-- **Core:** `recovery/` (`capsule.rs`, `tombstone.rs`, `rollup.rs`)
-- **SDK:** `sdk/recovery_sdk.rs`, `handlers/recovery_routes.rs`, `handlers/recovery_impl.rs`
+- **Core:** `recovery/` (`capsule.rs`, `tombstone.rs`, `rollup.rs`, `activation.rs`)
+- **SDK:** `sdk/recovery_sdk.rs`, `handlers/recovery_routes.rs`, `handlers/recovery_impl.rs`, `storage/client_db/recovery.rs`
 - **Android:** `MainActivity.kt` (inline NFC handling)
-- **Gaps:** capsule currency on every accepted transition, `contact_set_commit`/gate-set,
-  anti-rollback-floor enforcement, typed `RecoveryState`, intent/proposal/ack/activation-seal
-  messages — tracked in §0.2 of the source spec (Layer B)
+- **Implemented (double-spend safety logic):** fail-closed egress gate (`core_sdk::execute_on_relationship` + exhaustive `Operation::is_value_egress`); capsule currency + dirty tracking + R2′ (atomic bump in commit tx); v6 `contact_set_commit`; anti-rollback floor (seal acks + resume path); typed `RecoveryState`; activation-seal validation (`recovery/activation.rs::validate_activation_seal`); recovered-successor freeze + sole unlock chokepoint (`RecoverySDK::verify_and_record_activation`); 24-word mnemonic floor.
+- **Remaining (flow/plumbing):** proto wire messages + ack-collection-over-sync + succession marker wiring + per-contact bind-once; non-shrinkable gate-set union (public anchors); durable-write confirmation. Tracked in §0.2 of the source spec.
 
 ### PBI Bootstrap
 

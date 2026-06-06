@@ -61,20 +61,23 @@ Proto anchors are in `proto/dsm_app.proto`.
 | Area | Status | Anchor |
 | --- | --- | --- |
 | Recovery mnemonic — 256-bit / 24-word generation | **A** | `dsm_sdk/src/sdk/recovery_sdk.rs:259` (`generate_mnemonic`, `bip39::from_entropy`, 32-byte entropy) |
-| Recovery mnemonic — reject 12-word as primary mainnet authority | **B** | no length gate in `derive_recovery_key` (`dsm/src/recovery/capsule.rs:244`) |
+| Recovery mnemonic — reject 12-word as primary mainnet authority | **A** | 24-word (256-bit) floor at `recovery.enable` + `recovery.cacheMnemonic` (`recovery_routes.rs`) |
 | Recovery key derivation (Argon2id → BLAKE3) | **Divergent** | `capsule.rs:244` uses salt `DSM/recovery-ring\0` + BLAKE3 `derive_key("DSM/recovery-aead\0")`, not Argon2id+HKDF over `DSM/recovery-mnemonic\0` |
 | Recovery authority seed (SPHINCS+) | **A** | `capsule.rs:265` (`derive_recovery_authority_seed`, ctx `DSM/recovery-authority\0`) |
 | Device Continuity Capsule — owner's own sealed frontier | **A** | `RecoveryCapsule` (`capsule.rs:55`): `smt_root`, `counterparty_tips`, `rollup_hash`, `cert_chain_heads`, `last_certs` |
 | Capsule wire framing (hand-rolled `RCV3`, not protobuf) | **Divergent** | `capsule.rs:22` magic `RCV3`; spec's `DeviceContinuityCapsulePlaintextV3` is a protobuf shape |
-| Capsule fields `contact_set_commit`, `*_root_hint` | **B** | absent from `RecoveryCapsule` |
+| Capsule `contact_set_commit` (v6) | **A** | v6 trailing field, domain-separated, validated on open (`capsule.rs`); unified with seal via `contact_set_commit_from_device_ids` |
+| Capsule `*_root_hint` discovery hints | **B** | absent from `RecoveryCapsule` |
 | Capsule encryption AAD / nonce / challenge | **Divergent** | `capsule.rs:117/496/505` (see §4.3); shipped binds `smt_root`+`counter`, not `G‖X‖R‖c` |
-| Capsule currency — re-seal on every accepted transition | **B** | only manual `recovery.enable` / `recovery.createCapsule` (`recovery_routes.rs:194`) |
-| Capsule dirty/current tracking | **B** | no `capsule_dirty` / `capsule_current` in tree |
-| Mandatory contact sealing (Invariant 1) | **B** | not enforced |
+| Capsule currency — re-seal on every accepted transition | **A** | atomic `accepted_state_index` bump in the commit tx (`core_sdk::dual_write_advance_outcome`); re-seal + self-heal on egress |
+| Capsule dirty/current tracking | **A** | `accepted_state_index` / `capsule_state_index` / `is_capsule_dirty`; surfaced on `recovery.status` |
+| Mandatory contact sealing (Invariant 1) | **A** (as currency) / **B** (per-contact establishment seal) | R2′ blocks egress while dirty; establishment-seal + non-shrinkable set pending (P2 T2.2/T2.3) |
 | Tombstone + succession receipts (SPHINCS+) | **A** | `dsm/src/recovery/tombstone.rs:31/50`; proto `RecoveryTombstoneRequest/Response`, `RecoverySuccessionRequest/Response`, `TombstoneReceiptProto` |
-| Recovery lifecycle | **Divergent** | string phases `tombstoning→succession→propagating→polling→resuming→complete` (`recovery_impl.rs:480+`), not a typed `RecoveryState` enum |
-| `RecoveryIntentV3`, `RecoveryTombstoneProposalV3`, `ContactTombstoneAckV3`, `RecoveryActivationSealV3` | **B** | absent from proto/code |
-| All-contact gate-set + relationship-freshness enforcement | **B** | string-phase polling exists; gate-set + forward-chain check not enforced |
+| Recovery lifecycle (typed `RecoveryState`) | **A** | `RecoveryState` enum in `client_db/recovery.rs` (drop-in for the prior string phases) |
+| `ContactTombstoneAck` / `RecoveryActivationSeal` validation | **A** (logic) / **B** (proto wire + flow) | `recovery/activation.rs` `validate_activation_seal` + types (11 tests); proto/transport not wired |
+| All-contact gate-set + relationship-freshness enforcement | **A** (seal logic) / **B** (flow) | seal enforces set-equality + anti-rollback floor; ack-collection + non-shrinkable union not wired |
+| Recovered-successor spend-freeze + unlock chokepoint | **A** | freeze in `value_egress_block_reason`; sole unlock `RecoverySDK::verify_and_record_activation` (T4.4) |
+| Fail-closed value-egress gate (exhaustive `Operation::is_value_egress`) | **A** | `core_sdk::execute_on_relationship` + `validate_transfer_request`; under-lock, fail-closed on DB error |
 | DLV object, "not a smart contract", storage=availability | **A** | `vault/limbo_vault.rs`, `vault/dlv_manager.rs` |
 | DLV references **existing** token policies (CPTA) | **A (concept) / Divergent (shape)** | `LimboVaultProto.policy_digest` (field 15) anchors a CPTA; spec's `DLVCreateV3.token_policies` / `TokenPolicyRefV3` is a different shape |
 | Token policies independent (DLV never creates/modifies) | **A** | CPTA: `TokenPolicyV3`, `PolicyAnchorV3`; `token-policy-readiness.instructions.md` |
@@ -83,68 +86,81 @@ Proto anchors are in `proto/dsm_app.proto`.
 | DLV controller rotation (`DLVControllerRotationV3`, rotation capsule) | **B** | absent |
 | No public fanout into owner recovery gate-set | **A (design) / B (formal link)** | holds once the gate-set (§6) is enforced |
 
-### 0.2 Implementation Gap Register
+### 0.2 Implementation Gap Register (status)
 
-Each entry: **want** (spec) → **have** (code today) → **gap** → **where it would land**.
-No code is written in this pass; this register is the hand-off for a future
-implementation task.
+Status as of the recovery double-spend hardening work. The entire double-spend
+*safety logic* (P0–P4 + P3) is implemented and unit-tested; what remains is
+transport/flow plumbing and the DLV subsystem. Legend: **✅ implemented +
+unit-tested** · **◑ partial (safety logic done; flow/plumbing remains)** · **☐ open**.
 
-1. **Capsule currency on every accepted transition.**
-   - Want: every accepted state transition re-seals the capsule (§5).
-   - Have: capsule sealed only on `recovery.enable` and the manual `recovery.createCapsule`
-     route; no per-transition hook.
-   - Gap: an accept-time hook that re-seals + bumps `capsule_index`, plus a
-     `capsule_dirty` flag surfaced to the wallet.
-   - Lands: core state-accept path → `dsm_sdk` recovery glue → `recovery.status`/UI.
+1. ✅ **Capsule currency on every accepted transition.** The `accepted_state_index`
+   bump is folded ATOMICALLY into the state-commit transaction
+   (`core_sdk::dual_write_advance_outcome`, `recovery::bump_accepted_state_index_with_conn`),
+   so a frontier-changing transition can never persist without the capsule being
+   marked dirty; best-effort re-seal + self-heal on egress. Refinement ☐:
+   durable-write confirmation (NFC tag / storage-node publish ack → `durable_capsule_index`).
 
-2. **Capsule dirty/current state surfacing.**
-   - Want: `CapsuleCurrent ⟺ capsule_index == accepted_state_index`; wallet warns on dirty (§5.2).
-   - Have: nothing.
-   - Lands: `client_db/recovery.rs` (track accepted index vs capsule index) + `recovery.status`.
+2. ✅ **Capsule dirty/current surfacing.** `accepted_state_index` / `capsule_state_index`
+   / `is_capsule_dirty` (`client_db/recovery.rs`); surfaced on `recovery.status`.
 
-3. **Mandatory contact sealing invariant (Invariant 1).**
-   - Want: a relationship cannot carry a value-bearing transition until the
-     contact-establishing transition is sealed into the capsule (§5.3).
-   - Have: not enforced; capsule sealing is decoupled from contact establishment.
-   - Lands: bilateral contact-establish path + value-transition guard.
+3. ◑ **Mandatory contact sealing (Invariant 1).** Enforced as *currency*: R2′
+   blocks value egress while the capsule is dirty (`value_egress_block_reason`,
+   fail-closed). The per-contact establishment-seal + the non-shrinkable gate-set
+   (public anchors) is ☐ (P2 T2.2/T2.3).
 
-4. **`contact_set_commit` / gate-set commitment.**
-   - Want: a capsule field committing the exact contact set; the recovery gate is
-     computed over it (§2, §4.1, §6).
-   - Have: capsule has `counterparty_tips` (per-relationship tips) but no single
-     contact-set commitment; gate-set is an implicit contact list.
-   - Lands: capsule plaintext field + commitment derivation + recovery seal check.
+4. ◑ **`contact_set_commit` / gate-set.** ✅ capsule v6 `contact_set_commit`
+   (domain-separated, validated on open), unified with the seal's byte-id commit
+   (`capsule::contact_set_commit_from_device_ids`). ☐ the non-shrinkable union
+   (public anchors + storage enumeration).
 
-5. **Anti-rollback floor enforcement (confirm-or-extend-forward).**
-   - Want: a counterparty ack may only confirm the capsule floor or prove a valid
-     forward receipt-adjacent chain above it; reports below the floor are rejected (§5.5, §6.7).
-   - Have: floor *material* is stored (`counterparty_tips`), but no recovery-time check
-     enforces "≥ floor with valid forward chain".
-   - Lands: recovery sync verifier in `recovery_impl.rs`.
+5. ✅ **Anti-rollback floor enforcement.** Seal acks: confirm-floor-or-forward,
+   below-floor rejected (`activation::validate_activation_seal`). Resume path:
+   `resume_tip_diverges_from_floor` (fail-closed) + `restore_finalized_bilateral_chain_tip`
+   refuse-to-overwrite. ◑ full co-signed forward-chain proof for tips above the floor.
 
-6. **Typed `RecoveryState` enum.**
-   - Want: `NONE … CAPSULE_DECRYPTED … ACTIVATED / FAILED` (§6.3).
-   - Have: untyped string phases.
-   - Gap: cosmetic + safety; same lifecycle, no compile-time states.
-   - Lands: `recovery_impl.rs` / proto enum.
+6. ✅ **Typed `RecoveryState` enum.** `client_db/recovery.rs` — drop-in for the
+   string phases (same on-disk representation).
 
-7. **Recovery intent / tombstone proposal / contact ack / activation seal messages.**
-   - Want: `RecoveryIntentV3`, `RecoveryTombstoneProposalV3`, `ContactTombstoneAckV3`,
-     `RecoveryActivationSealV3` (§6.5–§6.9).
-   - Have: tombstone + succession receipts only.
-   - Lands: `proto/dsm_app.proto` + `recovery/` + `recovery_routes.rs`.
+7. ◑ **Intent / proposal / ack / activation seal.** ✅ pure validation logic +
+   types: `ContactTombstoneAck`, `RecoveryActivationSeal`, `compute_ack_root`,
+   `validate_activation_seal` — set-equality over the gate-set (no
+   omission/substitution/duplicate) + anti-rollback floor + SPHINCS+ signature
+   (`recovery/activation.rs`, 11 tests). ◑ unlock chokepoint
+   `RecoverySDK::verify_and_record_activation` exists but is **fail-closed
+   (disabled)** pending its trust inputs; the recovered-successor freeze
+   (`is_recovered_successor`/`is_recovery_activated`) is wired into the gate but
+   intentionally inert. ☐ **CRITICAL prerequisites before this unlock may go live**
+   (review finding): the gate-set must be the non-shrinkable union (R4, gap #4) and
+   the counterparty pubkeys must be **trust-anchored** (bound to genesis / a prior
+   sealed device-tree commitment) rather than read from the local mutable contacts
+   DB — otherwise a device+mnemonic holder can inject contact pubkeys and forge
+   acks. Also ☐: proto wire messages, ack-collection-over-sync, capsule-index
+   freshness check, `set_recovered_successor(true)` at succession, per-contact
+   bind-once (R1). **Do NOT wire the freeze/unlock live until the trust-anchoring
+   lands.**
 
-8. **DLV value/controller state split + controller rotation.**
-   - Want: `DLVStateV3` (value_state_commit ∥ controller_devid), `DLVControllerRotationV3`,
-     `DLVControllerRotationCapsule` (§8).
-   - Have: no controller field on the DLV state; no rotation transition.
-   - Lands: `vault/` + `proto/dsm_app.proto` + `dlv_sdk.rs`.
+8. ☐ **DLV value/controller split + controller rotation.** ✅ pure validator
+   `dlv::controller_rotation::validate_controller_rotation` — parent==current tip,
+   value_state_commit preserved, controller change, recovery-authority signature
+   (9 tests). ☐ wiring: `controller_devid` on the actual vault state, proto
+   `DLVStateV3`/`DLVControllerRotationV3`, rotation capsule, `dlv_sdk` apply against
+   the latest verified DLV-chain state (P6). NOTE: rotation-nonce replay is bounded
+   by the parent==current-tip check (a verifier holding the newer tip rejects a
+   replay); an explicit nonce set would harden against storage-rewind.
 
-9. **Reject-12-word enforcement for mainnet.**
-   - Want: 12-word mnemonic MUST NOT be primary mainnet recovery authority (§3.1).
-   - Have: generation is 24-word, but `derive_recovery_key` hashes any string with no
-     length gate.
-   - Lands: a validation gate in the recovery enable/derive path.
+9. ✅ **Reject-12-word for mainnet.** 24-word (256-bit) floor at `recovery.enable`
+   and `recovery.cacheMnemonic` (`recovery_routes.rs`).
+
+Added during hardening (beyond the original register):
+
+10. ✅ **Fail-closed value-egress gate** at the canonical chokepoint via the
+    exhaustive `Operation::is_value_egress` classifier (`core_sdk::execute_on_relationship`)
+    + `validate_transfer_request`. The gate fails CLOSED on a DB read error and
+    decides UNDER the state-machine lock (no check-before-lock TOCTOU), atomic with
+    the commit + bump.
+
+11. ☐ **Bearer-asset `LOCKED_RECOVERY` + dBTC reconciliation** (P5) and **per-asset
+    spend-open chokepoint** — the capsule is a continuity hint, never a balance oracle.
 
 ### 0.3 Sibling-spec overlap (cross-reference, not rewritten here)
 
@@ -155,6 +171,121 @@ implementation task.
 
 Contradictions found during reconciliation are recorded as gap-register entries above;
 sibling specs are **not** rewritten in this pass.
+
+### 0.4 Hardened double-spend doctrine (authoritative)
+
+The recovery design rests on a **two-gate model**. Conflating these two gates is
+the historical source of double-spend risk:
+
+1. **Identity recovery** answers "is `A_new` the valid successor to `A_old`?" —
+   the mnemonic-authorized tombstone + all-contact activation seal (§6).
+2. **Bearer-asset reconciliation** answers, per asset, "what value is still
+   spendable under the latest verified asset frontier?" (§5 LOCKED_RECOVERY).
+
+> **A recovery capsule is NOT a balance oracle.** It is a continuity object that
+> helps the successor *locate* relationships, contacts, policy commitments, and
+> asset-frontier hints. Spend authority is restored only by (1) identity
+> succession succeeding AND (2) the specific asset frontier reconciling. There is
+> no path from "capsule says balance X" to "X is spendable" — which is what kills
+> the stale-capsule attack.
+
+**Mandatory hardening conditions (all required):**
+
+- **R1 — per-contact bind-once.** Each contact binds to the first valid tombstone
+  proposal for an `old_device_id` and rejects later competing proposals; combined
+  with all-contact set-equality, competing recoveries can only deadlock, never
+  both activate.
+- **R2′ — durable-persist-before-value (on the spending device).** A value-bearing
+  transition is refused until the capsule committing the relevant contact is
+  durably persisted; fail-closed on persistence failure. (Enforced today as
+  capsule-seal currency; durable-write confirmation is the remaining strengthening.)
+- **R3 — total value-egress coverage.** Every egress path (bilateral, token,
+  DLV, dBTC transfer/withdraw/burn/refund/finalize, token-MPC, emissions) routes
+  through the fail-closed gate; proven by the exhaustive `Operation::is_value_egress`
+  classifier at the canonical chokepoint.
+- **R4 — non-shrinkable gate-set.** `gate_set = capsule.contact_set_commit ∪
+  publicly-discoverable contact anchors ∪ externally-relevant value frontiers`.
+  The spender cannot unilaterally shrink the set by omitting a contact.
+- **STRICT-GATE — never weaken for liveness.** The all-contact gate MUST NOT be
+  relaxed by timeout, quorum, majority, set-reduction, or "best-effort". Liveness
+  is handled only by liquidity placement (value in DLVs, thin hot balances). A
+  malicious mnemonic holder may deadlock recovery but MUST NOT create two
+  spend-authoritative successors.
+
+**Lean acknowledgement.** A `ContactTombstoneAck` is a latest-frontier ack
+(anti-rollback floor) — `(old_device_id, successor, relationship_key,
+latest_accepted_tip, latest_accepted_height, signature)` — not a receipt dump.
+The successor must restore at or above the acknowledged frontier.
+
+**dBTC crucial rule (bearer-asset instance).** Recovered dBTC is never restored
+as spendable from capsule balance. It is restored as a pending bearer-asset claim
+under policy `P`, then resolved by replaying and verifying the latest dBTC
+bearer-state frontier — transfers, in-flight withdrawals, burns, refunds, and
+bridge finalization — keeping the capsule from becoming a private ledger. (Bearer
+asset states: `LOCKED_RECOVERY → reconciled{Spendable | Reduced | InFlight |
+Finalized | RefundPending}`; egress refused while locked or below frontier. P5.)
+
+### 0.5 Recovery authority = counterparties' posted, genesis-authenticated state (CONFIRMED — supersedes the signed-ack model)
+
+Recovery authority is **NOT** the stolen device, **NOT** the capsule, and **NOT**
+the local contacts DB. Recovery authority is the set of counterparties whose own
+**online-posted, genesis-authenticated state** proves they recognized the tombstone
+and advanced to the successor binding. This fits DSM: storage nodes are dumb mirrors
+(store / mirror / enforce object invariants, never attest); verification is
+**client-side** via BLAKE3 over deterministic protobuf + device-side signatures and
+inclusion proofs.
+
+**Safety argument:**
+1. **No invisible value contact.** A value-capable relationship must have an
+   online-posted contact/anchor path. Never anchored ⇒ cannot be in the gate;
+   anchored ⇒ recovery discovers it from the posted record.
+2. **The ack is not a standalone signed object.** It is the counterparty's own
+   posted tree/root showing the tombstone + successor binding, verified against the
+   counterparty's genesis/device authority — not trusted because storage served it.
+3. **Offline spends can't be hidden from a counterparty that counts.** If C accepted
+   an offline spend from A_old before processing the tombstone, then when C comes
+   online to process the tombstone it posts its current tree — which includes BOTH
+   the spend AND the successor binding. A_new cannot observe the binding without also
+   observing C's full current relationship state.
+4. **If C never comes online, C does not count.** The relationship stalls (liveness),
+   but there is no double-spend (safety). This is the only failure mode.
+
+**Per-counterparty validity (build rule).** For each value-capable counterparty C in
+A's online-posted, genesis-authenticated relationship set, C's recovery evidence is
+valid iff:
+1. C's posted object is fetched from storage by content/address;
+2. it verifies under DSM canonical bytes + domain-separated hash rules;
+3. C's device identity verifies under C's genesis / device tree;
+4. C's posted per-device tree/root contains the relationship edge to A;
+5. that edge shows C processed A_old's tombstone and bound A_new as successor;
+6. C's relationship tip is a valid **forward descendant (hash ancestry)** of the
+   floor known from A_new's capsule / recovery seed;
+7. any transition C accepted **before** the tombstone is already reflected in the
+   same posted tree/root;
+8. missing / stale / unverifiable / non-posting C produces **no** authority.
+
+**Drop:** signed recovery acks as separate authority objects; contacts-DB pubkey
+lookup as authority; the local capsule as the contact-set source; shrinkable local
+gate-set logic from A_old's local records.
+**Keep:** capsule as hint/floor/recovery seed; storage as availability; counterparty
+posted trees as authority; genesis/device-tree verification as the trust root;
+forward-tip comparison against the capsule floor.
+
+**Forward-ancestry nuance (MANDATORY).** "tip ≥ floor" means **cryptographic forward
+ancestry** (hash adjacency / parent consumption), **NOT numeric greater-than**. DSM
+acceptance uses hash adjacency, inclusion proofs, and signatures — **no timestamps,
+heights, or counters** in acceptance predicates. (This corrects the interim
+`recovery/activation.rs` floor check, which used a numeric `height`; that is
+superseded by hash forward-ancestry.)
+
+**Doctrine.** A recovery contact counts only when its own genesis-authenticated,
+online-posted tree proves both (1) it bound the tombstone/successor transition and
+(2) its current relationship tip includes every transition it accepted before that
+binding. Therefore recovery cannot skip a thief's prior spend to that counterparty:
+either the spend is in the posted state, or the counterparty has not posted and
+cannot count. **The complete gate-set IS the online-posted, value-capable
+relationship set; the authority for each gate is the counterparty's own posted,
+genesis-authenticated state.**
 
 ---
 

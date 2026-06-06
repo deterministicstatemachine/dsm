@@ -515,15 +515,31 @@ impl RecoverySDK {
             }
         }
 
+        // Structural validation still runs (it is unit-tested and useful), but...
         dsm::recovery::validate_activation_seal(seal, acks, &gate_set, &floor, &pubkeys)?;
 
-        crate::storage::client_db::recovery::set_recovery_activated(true)
-            .map_err(|e| DsmError::InvalidState(format!("record activation failed: {e}")))?;
-        log::info!(
-            "[RECOVERY_SDK] activation seal verified; recovered successor unlocked over {} gate-set members",
-            gate_set.len()
-        );
-        Ok(())
+        // FAIL-CLOSED (review finding, double-spend lens): recording activation is
+        // DISABLED until its trust inputs are anchored. Today the counterparty
+        // public keys come from the local, mutable contacts DB and the gate-set is
+        // the bare capsule set — neither is trust-anchored, so a holder of the
+        // device + mnemonic could inject attacker-controlled contact pubkeys and
+        // forge acks that pass `validate_activation_seal`. Recording activation
+        // (the sole spend-unlock for a recovered successor) MUST wait for:
+        //   (R4) the non-shrinkable gate-set union (capsule ∪ publicly-discoverable
+        //        contact anchors), and
+        //   (pubkey anchoring) counterparty keys bound to genesis / a prior sealed
+        //        device-tree commitment rather than the local contacts table,
+        //   (freshness) a capsule-index recency check.
+        // Until then this function refuses to flip `recovery_activated`. The
+        // recovered-successor freeze (`set_recovered_successor`) MUST likewise stay
+        // unwired until this lands, so no live spend path depends on this unlock.
+        let _ = gate_set;
+        Err(DsmError::InvalidState(
+            "recovery activation recording disabled: gate-set and counterparty \
+             pubkeys are not yet trust-anchored (R4 + pubkey anchoring + capsule \
+             freshness pending); refusing to unlock a recovered successor"
+                .into(),
+        ))
     }
 
     /// Refresh the pending NFC capsule if backup is enabled and a key is available.
