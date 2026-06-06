@@ -469,6 +469,63 @@ impl RecoverySDK {
         decrypt_capsule_with_key(&encrypted, &key)
     }
 
+    /// Verify a recovery activation seal and, on success, RECORD activation so a
+    /// recovered successor may egress value. This is the SOLE unlock chokepoint
+    /// (T4.4): `set_recovery_activated(true)` is reached only after the core
+    /// `validate_activation_seal` passes.
+    ///
+    /// The gate-set and anti-rollback floor are taken from the decrypted capsule's
+    /// committed contact set; counterparty public keys come from local contacts.
+    ///
+    /// NOTE: the gate-set here is the capsule's committed contact set. The
+    /// non-shrinkable union with publicly-discoverable contact anchors
+    /// (P2 T2.2/T2.3) widens this set; until that lands, the seal is validated
+    /// against the capsule set.
+    pub fn verify_and_record_activation(
+        capsule: &RecoveryCapsule,
+        seal: &dsm::recovery::RecoveryActivationSeal,
+        acks: &[dsm::recovery::ContactTombstoneAck],
+    ) -> Result<(), DsmError> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut gate_set: BTreeSet<[u8; 32]> = BTreeSet::new();
+        let mut floor: BTreeMap<[u8; 32], dsm::recovery::FloorTip> = BTreeMap::new();
+        for (id_str, (height, tip)) in &capsule.counterparty_tips {
+            let id_bytes = crate::util::text_id::decode_base32_crockford(id_str).ok_or_else(|| {
+                DsmError::InvalidState("capsule counterparty id is not valid base32".into())
+            })?;
+            let id: [u8; 32] = id_bytes.as_slice().try_into().map_err(|_| {
+                DsmError::InvalidState("capsule counterparty id is not 32 bytes".into())
+            })?;
+            let tip32: [u8; 32] = tip.as_slice().try_into().map_err(|_| {
+                DsmError::InvalidState("capsule counterparty tip is not 32 bytes".into())
+            })?;
+            gate_set.insert(id);
+            floor.insert(id, dsm::recovery::FloorTip { height: *height, tip: tip32 });
+        }
+
+        let mut pubkeys: BTreeMap<[u8; 32], Vec<u8>> = BTreeMap::new();
+        for c in crate::storage::client_db::get_all_contacts()
+            .map_err(|e| DsmError::InvalidState(format!("read contacts failed: {e}")))?
+        {
+            if c.device_id.len() == 32 && !c.public_key.is_empty() {
+                if let Ok(id) = <[u8; 32]>::try_from(c.device_id.as_slice()) {
+                    pubkeys.insert(id, c.public_key);
+                }
+            }
+        }
+
+        dsm::recovery::validate_activation_seal(seal, acks, &gate_set, &floor, &pubkeys)?;
+
+        crate::storage::client_db::recovery::set_recovery_activated(true)
+            .map_err(|e| DsmError::InvalidState(format!("record activation failed: {e}")))?;
+        log::info!(
+            "[RECOVERY_SDK] activation seal verified; recovered successor unlocked over {} gate-set members",
+            gate_set.len()
+        );
+        Ok(())
+    }
+
     /// Refresh the pending NFC capsule if backup is enabled and a key is available.
     ///
     /// Called by the transport layer (Kotlin) after every state-mutating operation.

@@ -439,6 +439,28 @@ pub fn value_egress_block_reason() -> Option<&'static str> {
         Err(_) => return Some(UNREADABLE),
     }
 
+    // T4.4 (spec §6.9, vector V1): a device produced by a recovery succession
+    // (a successor) MUST NOT egress value until a VALID recovery activation seal
+    // has been verified and recorded — the sole place that flips
+    // `recovery_activated` is the audited verify-and-record chokepoint. Until
+    // then the successor is frozen: safe (cannot create a split-acceptance
+    // double-spend), incomplete for usability. Fail-closed on read error.
+    let recovered_successor = match get_recovery_pref(RECOVERED_SUCCESSOR_KEY) {
+        Ok(v) => v.as_deref() == Some(&[1u8][..]),
+        Err(_) => return Some(UNREADABLE),
+    };
+    if recovered_successor {
+        let activated = match get_recovery_pref(RECOVERY_ACTIVATED_KEY) {
+            Ok(v) => v.as_deref() == Some(&[1u8][..]),
+            Err(_) => return Some(UNREADABLE),
+        };
+        if !activated {
+            return Some(
+                "recovered device not yet activated: value egress blocked until a valid recovery activation seal is recorded",
+            );
+        }
+    }
+
     // R2′ (spec §5 — durable-persist-before-value): when recovery is enabled, the
     // recovery capsule MUST capture the latest accepted state before value
     // egress, so a lost/destroyed device is always recoverable to a frontier at
@@ -480,6 +502,8 @@ pub fn precheck_value_egress() -> Result<()> {
 
 const ACCEPTED_STATE_INDEX_KEY: &str = "accepted_state_index";
 const CAPSULE_STATE_INDEX_KEY: &str = "capsule_state_index";
+const RECOVERED_SUCCESSOR_KEY: &str = "recovered_successor";
+const RECOVERY_ACTIVATED_KEY: &str = "recovery_activated";
 
 /// Read an 8-byte u64 pref, propagating DB read errors. A missing/short row is
 /// `Ok(0)` (legitimately unset); only a genuine DB error is `Err`. The gate uses
@@ -567,6 +591,30 @@ pub fn set_capsule_state_index(index: u64) -> Result<()> {
 /// (R2′, Phase 1 follow-up) value egress is refused until it is current.
 pub fn is_capsule_dirty() -> bool {
     capsule_state_index() < accepted_state_index()
+}
+
+/// True if this device was produced by a recovery succession (it replaced an old
+/// device). Such a device is spend-frozen until a valid recovery activation seal
+/// is recorded (T4.4). Defaults to false (swallow read errors here; the gate
+/// re-reads fail-closed).
+pub fn is_recovered_successor() -> bool {
+    matches!(get_recovery_pref(RECOVERED_SUCCESSOR_KEY), Ok(Some(v)) if v == [1u8])
+}
+
+/// Mark (or clear) this device as a recovery successor.
+pub fn set_recovered_successor(value: bool) -> Result<()> {
+    set_recovery_pref(RECOVERED_SUCCESSOR_KEY, &[u8::from(value)])
+}
+
+/// True once a valid `RecoveryActivationSeal` has been verified and recorded.
+pub fn is_recovery_activated() -> bool {
+    matches!(get_recovery_pref(RECOVERY_ACTIVATED_KEY), Ok(Some(v)) if v == [1u8])
+}
+
+/// Record recovery activation. The ONLY caller is the audited verify-and-record
+/// chokepoint, after `validate_activation_seal` succeeds (T4.4).
+pub fn set_recovery_activated(value: bool) -> Result<()> {
+    set_recovery_pref(RECOVERY_ACTIVATED_KEY, &[u8::from(value)])
 }
 
 /// Store an encrypted recovery key blob (device-bound encryption).
@@ -1296,6 +1344,30 @@ mod tests {
             assert_eq!(bump_accepted_state_index_with_conn(&conn).expect("bump2"), 2);
         } // release the connection lock before reading via a fresh connection
         assert_eq!(accepted_state_index(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn test_recovered_successor_frozen_until_activated() {
+        setup_test_db();
+        set_recovery_state(RecoveryState::None).expect("state");
+
+        // Normal (non-recovered) device: the successor-freeze branch does not apply.
+        assert!(!is_recovered_successor());
+        assert!(value_egress_block_reason().is_none());
+
+        // A recovery successor that has not been activated is spend-frozen (T4.4).
+        set_recovered_successor(true).expect("mark successor");
+        assert!(is_recovered_successor());
+        assert!(!is_recovery_activated());
+        assert!(value_egress_block_reason().is_some());
+        assert!(precheck_value_egress().is_err());
+
+        // Only after a valid activation seal is recorded is egress permitted.
+        set_recovery_activated(true).expect("activate");
+        assert!(is_recovery_activated());
+        assert!(value_egress_block_reason().is_none());
+        assert!(precheck_value_egress().is_ok());
     }
 
     #[test]
