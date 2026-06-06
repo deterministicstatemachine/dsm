@@ -6,10 +6,15 @@
 //! Uses AEAD-encrypted NFC capsules containing SMT roots, per-counterparty bilateral tips,
 //! and receipt rollups for immediate recovery without history replay.
 
+pub mod activation;
 pub mod capsule;
 pub mod rollup;
 pub mod tombstone;
 
+pub use activation::{
+    compute_ack_root, validate_activation_seal, ContactTombstoneAck, FloorTip,
+    RecoveryActivationSeal,
+};
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};

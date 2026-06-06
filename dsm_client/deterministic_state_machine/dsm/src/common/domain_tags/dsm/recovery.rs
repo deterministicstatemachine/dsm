@@ -8,6 +8,12 @@ pub const TAG_DSM_RECOVERY_NONCE: &str = "DSM/recovery-nonce";
 pub const TAG_DSM_RECOVERY_CHALLENGE: &str = "DSM/recovery-challenge";
 /// Domain tag for the capsule contact-set commitment (gate-set anchor, R4).
 pub const TAG_DSM_RECOVERY_CONTACT_SET: &str = "DSM/recovery-contact-set";
+/// Domain tag for a Contact Tombstone Acknowledgement's signing bytes (P4).
+pub const TAG_DSM_RECOVERY_ACK: &str = "DSM/recovery-ack";
+/// Domain tag for the activation seal's ack-set Merkle/root commitment (P4).
+pub const TAG_DSM_RECOVERY_ACK_ROOT: &str = "DSM/recovery-ack-root";
+/// Domain tag for the recovery activation digest (P4).
+pub const TAG_DSM_RECOVERY_ACTIVATION: &str = "DSM/recovery-activation";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";
@@ -19,6 +25,9 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_RECOVERY_NONCE,
     TAG_DSM_RECOVERY_CHALLENGE,
     TAG_DSM_RECOVERY_CONTACT_SET,
+    TAG_DSM_RECOVERY_ACK,
+    TAG_DSM_RECOVERY_ACK_ROOT,
+    TAG_DSM_RECOVERY_ACTIVATION,
     TAG_DSM_TOMBSTONE,
     TAG_DSM_TOMBSTONE_NOTIFY,
     TAG_DSM_TOMBSTONE_SUCCESSION,

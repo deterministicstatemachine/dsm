@@ -103,19 +103,39 @@ pub struct RecoveryCapsule {
 ///
 /// Deterministic in the sorted counterparty-id set, so it is stable across
 /// encode/decode and independent of map iteration order.
-pub fn compute_contact_set_commit(
-    counterparty_tips: &HashMap<String, (u64, Vec<u8>)>,
-) -> [u8; 32] {
-    let mut ids: Vec<&str> = counterparty_tips.keys().map(|s| s.as_str()).collect();
-    ids.sort_unstable();
+fn hash_sorted_contact_ids(sorted: &[String]) -> [u8; 32] {
     let mut hasher = dsm_domain_hasher(RECOVERY_CONTACT_SET_DOMAIN);
-    hasher.update(&(ids.len() as u32).to_le_bytes());
-    for id in ids {
+    hasher.update(&(sorted.len() as u32).to_le_bytes());
+    for id in sorted {
         let b = id.as_bytes();
         hasher.update(&(b.len() as u32).to_le_bytes());
         hasher.update(b);
     }
     *hasher.finalize().as_bytes()
+}
+
+pub fn compute_contact_set_commit(
+    counterparty_tips: &HashMap<String, (u64, Vec<u8>)>,
+) -> [u8; 32] {
+    let mut ids: Vec<String> = counterparty_tips.keys().cloned().collect();
+    ids.sort_unstable();
+    hash_sorted_contact_ids(&ids)
+}
+
+/// Same commitment as [`compute_contact_set_commit`] but over raw 32-byte device
+/// ids — the form the activation seal (P4) works in. Each id is encoded to the
+/// canonical Crockford string used as the capsule's `counterparty_tips` keys, so
+/// the capsule and seal contact-set commitments are byte-identical for the same
+/// contact set (gate-set anchor consistency, R4).
+pub fn contact_set_commit_from_device_ids(
+    ids: &std::collections::BTreeSet<[u8; 32]>,
+) -> [u8; 32] {
+    let mut strs: Vec<String> = ids
+        .iter()
+        .map(|id| crate::types::identifiers::encode_crockford(id))
+        .collect();
+    strs.sort_unstable();
+    hash_sorted_contact_ids(&strs)
 }
 
 /// Encrypted capsule for NFC storage.
