@@ -384,6 +384,32 @@ impl RecoveryHandler for RecoveryImpl {
                 ));
             };
 
+            // Anti-rollback floor (P3/T3.2): the resume tip MUST match the owner's
+            // own sealed floor staged from the capsule. A request cannot set a
+            // relationship tip that diverges from the capsule floor — this closes
+            // the resume-time rollback where a counterparty-supplied tip would be
+            // applied before the capsule floor is restored. Fail-closed if the
+            // floor cannot be read. (Forward extension above the floor is handled
+            // by the activation-seal flow with a co-signed chain proof.)
+            match crate::storage::client_db::recovery::resume_tip_diverges_from_floor(
+                counterparty_device_id,
+                &head_hash_32,
+            ) {
+                Ok(true) => {
+                    return Err(format!(
+                        "[RECOVERY] resume tip diverges from capsule floor for {}: refusing rollback",
+                        &device_id_b32[..device_id_b32.len().min(16)]
+                    ));
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "[RECOVERY] cannot read capsule floor for resume of {}: {e}",
+                        &device_id_b32[..device_id_b32.len().min(16)]
+                    ));
+                }
+            }
+
             // Update contact chain tips to recovered values (both shared + local tip)
             if let Err(e) = crate::storage::client_db::restore_finalized_bilateral_chain_tip(
                 counterparty_device_id,

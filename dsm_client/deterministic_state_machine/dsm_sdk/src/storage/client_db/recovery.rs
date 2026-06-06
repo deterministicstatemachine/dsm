@@ -617,6 +617,26 @@ pub fn set_recovery_activated(value: bool) -> Result<()> {
     set_recovery_pref(RECOVERY_ACTIVATED_KEY, &[u8::from(value)])
 }
 
+/// Anti-rollback floor check for the recovery resume path (P3/T3.2).
+///
+/// Returns `Ok(true)` if a capsule floor is staged for `counterparty_device_id`
+/// and `proposed_tip` DIVERGES from it — a resume-time rollback/divergence that
+/// MUST be refused (a request must not set a relationship tip different from the
+/// owner's own sealed floor). Returns `Ok(false)` when no floor is staged for
+/// that counterparty or the tip confirms the floor. Forward extension above the
+/// floor is handled by the seal flow with a co-signed chain proof, not here.
+pub fn resume_tip_diverges_from_floor(
+    counterparty_device_id: &[u8],
+    proposed_tip: &[u8; 32],
+) -> Result<bool> {
+    for t in get_recovered_chain_tips()? {
+        if t.device_id.as_slice() == counterparty_device_id {
+            return Ok(&t.head_hash != proposed_tip);
+        }
+    }
+    Ok(false)
+}
+
 /// Store an encrypted recovery key blob (device-bound encryption).
 pub fn store_encrypted_recovery_key(blob: &[u8]) -> Result<()> {
     set_recovery_pref("encrypted_recovery_key", blob)
@@ -1368,6 +1388,31 @@ mod tests {
         assert!(is_recovery_activated());
         assert!(value_egress_block_reason().is_none());
         assert!(precheck_value_egress().is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_resume_tip_diverges_from_floor() {
+        setup_test_db();
+        let cp = [0xC1u8; 32];
+        let floor_tip = [0xF0u8; 32];
+
+        // No floor staged for this counterparty → never reported as divergent.
+        assert!(!resume_tip_diverges_from_floor(&cp, &floor_tip).expect("no floor"));
+
+        store_recovered_chain_tips(&[RecoveredChainTip {
+            device_id: cp,
+            height: 7,
+            head_hash: floor_tip,
+        }])
+        .expect("stage floor");
+
+        // Tip confirming the floor is accepted.
+        assert!(!resume_tip_diverges_from_floor(&cp, &floor_tip).expect("confirm"));
+        // A different tip for a staged counterparty is a rollback/divergence.
+        assert!(resume_tip_diverges_from_floor(&cp, &[0x11u8; 32]).expect("diverge"));
+        // A counterparty without a staged floor is not gated here.
+        assert!(!resume_tip_diverges_from_floor(&[0xC2u8; 32], &[0x11u8; 32]).expect("other cp"));
     }
 
     #[test]
