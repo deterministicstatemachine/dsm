@@ -420,25 +420,52 @@ pub fn set_recovery_state(state: RecoveryState) -> Result<()> {
 /// (Phase 5); at that point the only paths that re-open spend are the audited
 /// chokepoints. Every value-egress path MUST route through this gate.
 pub fn value_egress_block_reason() -> Option<&'static str> {
-    if recovery_state().is_identity_recovery_in_progress() {
-        return Some(
-            "device recovery in progress: value egress is blocked until recovery resolves",
-        );
+    const UNREADABLE: &str =
+        "recovery state unreadable: value egress blocked (fail-closed)";
+
+    // Fail-closed read policy: a genuine DB read error means we CANNOT prove the
+    // spend is safe, so we block. A legitimately-unset pref (`Ok(None)`) means
+    // "no recovery configured" and does NOT block — that distinction avoids
+    // bricking devices that never enabled recovery on a transient glitch.
+    match get_recovery_pref("recovery_phase") {
+        Ok(Some(bytes)) => {
+            if RecoveryState::from_bytes(&bytes).is_identity_recovery_in_progress() {
+                return Some(
+                    "device recovery in progress: value egress is blocked until recovery resolves",
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(_) => return Some(UNREADABLE),
     }
+
     // R2′ (spec §5 — durable-persist-before-value): when recovery is enabled, the
     // recovery capsule MUST capture the latest accepted state before value
     // egress, so a lost/destroyed device is always recoverable to a frontier at
-    // or beyond any spend. A dirty capsule means the latest accepted state is not
-    // yet sealed. The egress chokepoint attempts a best-effort re-seal first; if
-    // it still cannot seal (e.g. no cached key), egress is refused fail-closed.
+    // or beyond any spend. The egress chokepoint attempts a best-effort re-seal
+    // first; if it still cannot seal (e.g. no cached key), egress is refused.
     //
     // NOTE: this enforces capsule *seal* currency. Confirmation of durable write
     // to the external recovery medium (NFC tag / storage-node publish) is the
     // stronger form tracked separately as the durable-capsule index.
-    if is_nfc_backup_enabled() && is_capsule_dirty() {
-        return Some(
-            "recovery capsule is stale (latest accepted state not yet sealed): refresh recovery before value egress",
-        );
+    let enabled = match get_recovery_pref("nfc_backup_enabled") {
+        Ok(v) => v.as_deref() == Some(&[1u8][..]),
+        Err(_) => return Some(UNREADABLE),
+    };
+    if enabled {
+        let accepted = match read_u64_pref_checked(ACCEPTED_STATE_INDEX_KEY) {
+            Ok(v) => v,
+            Err(_) => return Some(UNREADABLE),
+        };
+        let sealed = match read_u64_pref_checked(CAPSULE_STATE_INDEX_KEY) {
+            Ok(v) => v,
+            Err(_) => return Some(UNREADABLE),
+        };
+        if sealed < accepted {
+            return Some(
+                "recovery capsule is stale (latest accepted state not yet sealed): refresh recovery before value egress",
+            );
+        }
     }
     None
 }
@@ -454,15 +481,23 @@ pub fn precheck_value_egress() -> Result<()> {
 const ACCEPTED_STATE_INDEX_KEY: &str = "accepted_state_index";
 const CAPSULE_STATE_INDEX_KEY: &str = "capsule_state_index";
 
-fn read_u64_pref(key: &str) -> u64 {
-    match get_recovery_pref(key) {
-        Ok(Some(bytes)) if bytes.len() == 8 => {
+/// Read an 8-byte u64 pref, propagating DB read errors. A missing/short row is
+/// `Ok(0)` (legitimately unset); only a genuine DB error is `Err`. The gate uses
+/// this so it can fail CLOSED on an unreadable DB while still treating "never
+/// set" as allow.
+fn read_u64_pref_checked(key: &str) -> Result<u64> {
+    match get_recovery_pref(key)? {
+        Some(bytes) if bytes.len() == 8 => {
             let mut a = [0u8; 8];
             a.copy_from_slice(&bytes);
-            u64::from_le_bytes(a)
+            Ok(u64::from_le_bytes(a))
         }
-        _ => 0,
+        _ => Ok(0),
     }
+}
+
+fn read_u64_pref(key: &str) -> u64 {
+    read_u64_pref_checked(key).unwrap_or(0)
 }
 
 /// Device-level monotone count of accepted frontier-changing transitions
@@ -477,6 +512,38 @@ pub fn accepted_state_index() -> u64 {
 pub fn bump_accepted_state_index() -> Result<u64> {
     let next = accepted_state_index().saturating_add(1);
     set_recovery_pref(ACCEPTED_STATE_INDEX_KEY, &next.to_le_bytes())?;
+    Ok(next)
+}
+
+/// Increment `accepted_state_index` using an EXISTING connection/transaction so
+/// the bump is ATOMIC with the caller's state-commit transaction: if the
+/// surrounding tx rolls back the bump rolls back too, and if the bump fails the
+/// whole advance fails closed. This removes the post-commit fail-OPEN window
+/// where a missed bump leaves the capsule un-dirtied on already-committed state.
+///
+/// MUST be passed the connection that owns the open transaction — do NOT open a
+/// new connection here (it would deadlock on the connection mutex).
+pub fn bump_accepted_state_index_with_conn(conn: &rusqlite::Connection) -> Result<u64> {
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM recovery_prefs WHERE key = ?1",
+            params![ACCEPTED_STATE_INDEX_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let cur = match current {
+        Some(b) if b.len() == 8 => {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&b);
+            u64::from_le_bytes(a)
+        }
+        _ => 0,
+    };
+    let next = cur.saturating_add(1);
+    conn.execute(
+        "INSERT OR REPLACE INTO recovery_prefs(key, value) VALUES (?1, ?2)",
+        params![ACCEPTED_STATE_INDEX_KEY, &next.to_le_bytes()[..]],
+    )?;
     Ok(next)
 }
 
@@ -1213,6 +1280,22 @@ mod tests {
         assert!(!is_capsule_dirty());
         assert!(value_egress_block_reason().is_none());
         assert!(precheck_value_egress().is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_bump_accepted_state_index_with_conn_increments_atomically() {
+        setup_test_db();
+        assert_eq!(accepted_state_index(), 0);
+        {
+            // Mirrors the dual-write path: bump using the same connection that
+            // owns the transaction (never opening a new one).
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            assert_eq!(bump_accepted_state_index_with_conn(&conn).expect("bump1"), 1);
+            assert_eq!(bump_accepted_state_index_with_conn(&conn).expect("bump2"), 2);
+        } // release the connection lock before reading via a fresh connection
+        assert_eq!(accepted_state_index(), 2);
     }
 
     #[test]

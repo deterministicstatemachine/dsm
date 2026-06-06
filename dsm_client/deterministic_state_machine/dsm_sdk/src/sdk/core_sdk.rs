@@ -184,6 +184,7 @@ impl CoreSDK {
     /// makes BCR persistence durable before the head is installed.
     fn dual_write_advance_outcome(
         outcome: &dsm::types::device_state::AdvanceOutcome,
+        bump_capsule: bool,
     ) -> Result<(), DsmError> {
         use crate::storage::client_db::{
             get_connection, store_bcr_chain_state_with_conn, update_bcr_device_head_with_conn,
@@ -224,6 +225,21 @@ impl CoreSDK {
                 None::<std::io::Error>,
             )
         })?;
+        // Capsule currency (spec §5.1): advance the accepted-state index ATOMICALLY
+        // with the state commit so a frontier-changing transition can never be
+        // persisted without the recovery capsule being marked dirty. Closes the
+        // post-commit fail-OPEN (a missed bump on already-committed state). Uses
+        // the transaction's own connection — never opens a new one (deadlock).
+        if bump_capsule {
+            crate::storage::client_db::recovery::bump_accepted_state_index_with_conn(&tx).map_err(
+                |e| {
+                    DsmError::storage(
+                        format!("dual-write: bump accepted_state_index failed: {e}"),
+                        None::<std::io::Error>,
+                    )
+                },
+            )?;
+        }
         tx.commit().map_err(|e| {
             DsmError::storage(
                 format!("dual-write: commit failed: {e}"),
@@ -844,26 +860,32 @@ impl CoreSDK {
         // and any new Operation variant must be consciously classified. This is
         // the canonical state-advance chokepoint, so it covers bilateral
         // transfers, token ops, and DLV ops in one place.
-        if operation.is_value_egress() {
-            // R2′ (spec §5): the recovery capsule must capture the latest accepted
-            // state before value egress. Attempt a best-effort self-heal (re-seal
-            // if recovery is enabled and a key is available), then enforce the
-            // gate fail-closed. Runs before the state-machine lock is taken.
-            crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule();
-            if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
-                return Err(DsmError::invalid_operation(reason));
-            }
-        }
-
-        // Capsule currency (spec §5.1): capture whether this transition changes
-        // the recovery-relevant frontier before `operation` is moved into the
-        // advance. Genesis/Noop do not change the frontier.
+        // Recovery egress gate (spec R3) + capsule currency (spec §5.1). Classify
+        // before `operation` is moved into the advance.
+        let is_egress = operation.is_value_egress();
         let frontier_changed = !matches!(
             operation,
             dsm::types::operations::Operation::Noop | dsm::types::operations::Operation::Genesis
         );
 
+        // R2′ optimistic self-heal (BEFORE the lock, only when the capsule is
+        // stale): re-seal so a current device is not needlessly blocked, while
+        // keeping the heavy capsule rebuild off the hot path when already current.
+        if is_egress && crate::storage::client_db::recovery::is_capsule_dirty() {
+            crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule();
+        }
+
         let mut sm = self.state_machine.lock();
+
+        // Authoritative fail-closed egress gate UNDER the state-machine lock, so
+        // the decision is atomic with the commit + capsule-currency bump below.
+        // This closes the check-before-lock TOCTOU where two concurrent egress
+        // ops could both pass before either marked the capsule dirty.
+        if is_egress {
+            if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
+                return Err(DsmError::invalid_operation(reason));
+            }
+        }
 
         // Enforce token policy constraints on the operation that will advance
         // state. This closes the previous gap where registration existed but
@@ -886,19 +908,11 @@ impl CoreSDK {
             deltas,
             initial_chain_tip,
         )?;
-        Self::dual_write_advance_outcome(&outcome)?;
+        // The accepted-state index is bumped ATOMICALLY inside this transaction
+        // (spec §5.1) — a frontier-changing transition can never persist without
+        // the capsule being marked dirty.
+        Self::dual_write_advance_outcome(&outcome, frontier_changed)?;
         sm.commit_advance(&outcome);
-
-        // Capsule currency (spec §5.1): advance the accepted-state index so the
-        // recovery capsule is marked dirty until re-sealed. Cheap pref write;
-        // re-seal happens via the recovery refresh path, and the R2′ gate refuses
-        // value egress while dirty, so recovery can never restore from stale
-        // relationship state.
-        if frontier_changed {
-            if let Err(e) = crate::storage::client_db::recovery::bump_accepted_state_index() {
-                log::warn!("[RECOVERY] failed to advance accepted-state index: {e}");
-            }
-        }
 
         // Build a compatibility State view from the outcome for callers that
         // still read State fields. This is a derived view, not the source of
@@ -1268,7 +1282,8 @@ impl CoreSDK {
         // archival so reader paths see the seeded balance.
         let outcome =
             sm.prepare_advance_relationship(rel_key, dev_id, mint, &deltas, Some(init_tip))?;
-        Self::dual_write_advance_outcome(&outcome)?;
+        // Dev-seed Mint is ingress (no capsule bump needed): bump_capsule = false.
+        Self::dual_write_advance_outcome(&outcome, false)?;
         sm.commit_advance(&outcome);
         let new_hash = outcome.new_chain_state.compute_chain_tip();
         log::info!("Dev seeding applied; new chain tip {:02x?}", &new_hash[..4]);
