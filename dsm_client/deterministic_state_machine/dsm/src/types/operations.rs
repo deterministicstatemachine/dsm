@@ -512,6 +512,61 @@ pub enum Operation {
 }
 
 impl Operation {
+    /// Classify whether this operation is owner-initiated **value egress** for
+    /// the recovery spend-gate (spec condition R3).
+    ///
+    /// "Value egress" = an operation that moves the owner's existing value out of
+    /// spendable balance or between value states (spend, burn, lock, unlock,
+    /// vault create/unlock/claim/invalidate). While identity recovery is in
+    /// progress these MUST be refused; otherwise the old and successor devices
+    /// could both move the same pre-recovery value — the split-acceptance
+    /// recovery double-spend (spec vector V1).
+    ///
+    /// Pure value *ingress* (receiving, minting, token creation) and
+    /// identity / relationship / recovery / link / neutral operations are NOT
+    /// egress and proceed normally — recovery itself must be able to advance, and
+    /// receiving value can never create a double-spend of the owner's funds.
+    ///
+    /// The match is exhaustive (no wildcard): a new `Operation` variant will fail
+    /// to compile until it is consciously classified here. This compile-time
+    /// enumeration is the discipline behind spec condition R3 (no value-egress
+    /// path may silently bypass the gate).
+    pub fn is_value_egress(&self) -> bool {
+        use Operation::*;
+        match self {
+            // Owner value egress / value-state movement of the owner's funds.
+            Transfer { .. }
+            | Burn { .. }
+            | Lock { .. }
+            | LockToken { .. }
+            | Unlock { .. }
+            | UnlockToken { .. }
+            | DlvCreate { .. }
+            | DlvUnlock { .. }
+            | DlvClaim { .. }
+            | DlvInvalidate { .. } => true,
+
+            // Not value egress: ingress (Receive / Mint / CreateToken), identity,
+            // relationship, recovery, links, invalidation, generic, and no-op.
+            Genesis
+            | Create { .. }
+            | Update { .. }
+            | Mint { .. }
+            | AddRelationship { .. }
+            | CreateRelationship { .. }
+            | RemoveRelationship { .. }
+            | Recovery { .. }
+            | Delete { .. }
+            | Link { .. }
+            | Unlink { .. }
+            | Invalidate { .. }
+            | Generic { .. }
+            | Receive { .. }
+            | CreateToken { .. }
+            | Noop => false,
+        }
+    }
+
     /// Canonical, deterministic encoding for cryptographic use.
     /// Encoding rules:
     /// - Variant tag: u8 fixed per variant below
@@ -2164,6 +2219,39 @@ mod tests {
         decoded
     }
 
+    #[test]
+    fn is_value_egress_classifies_owner_value_movement() {
+        // Egress: owner value movement must be gated during identity recovery.
+        assert!(Operation::Burn {
+            amount: test_balance(1),
+            token_id: vec![1],
+            proof_of_ownership: vec![],
+            message: String::new(),
+        }
+        .is_value_egress());
+        assert!(Operation::LockToken {
+            token_id: vec![1],
+            amount: 1,
+            purpose: b"dlv_collateral".to_vec(),
+            mode: TransactionMode::Unilateral,
+            signature: vec![],
+        }
+        .is_value_egress());
+
+        // Not egress: ingress + identity/neutral operations proceed during recovery.
+        assert!(!Operation::Genesis.is_value_egress());
+        assert!(!Operation::Noop.is_value_egress());
+        assert!(!Operation::default().is_value_egress());
+        assert!(!Operation::Mint {
+            amount: test_balance(1),
+            token_id: vec![1],
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        }
+        .is_value_egress());
+    }
+
     // ------------------------------------------------------------------ //
     //  Round-trip tests for every variant
     // ------------------------------------------------------------------ //
@@ -2975,6 +3063,7 @@ mod tests {
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
+                policy_commit: [0u8; 32],
                 mode: TransactionMode::Unilateral,
                 nonce: vec![0xFF; 16],
                 verification: VerificationType::Standard,
@@ -3027,6 +3116,7 @@ mod tests {
                 to_device_id: vec![0x11; 32],
                 amount: test_balance(42),
                 token_id: b"ERA".to_vec(),
+                policy_commit: [0u8; 32],
                 mode: TransactionMode::Unilateral,
                 nonce: vec![0xAB; 16],
                 verification: VerificationType::Standard,

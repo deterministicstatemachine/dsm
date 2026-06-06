@@ -5,6 +5,7 @@
 //! Implements the [`RecoveryHandler`] trait
 //! for capsule decryption and recovery session management at the SDK layer.
 
+use crate::storage::client_db::recovery::RecoveryState;
 use dsm::core::bridge::RecoveryHandler;
 use dsm::recovery::capsule::{decrypt_capsule_with_key, EncryptedCapsule};
 use dsm::recovery::tombstone::{create_succession, create_tombstone};
@@ -476,8 +477,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 5. Store recovery phase
-    let _ =
-        crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"tombstoning");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Tombstoning);
 
     // 6. Create tombstone receipt
     let old_device_id_str = crate::util::text_id::encode_base32_crockford(&old_device_id);
@@ -512,7 +512,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     );
 
     // 7. Create succession receipt
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"succession");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Succession);
 
     let new_device_id_str = crate::util::text_id::encode_base32_crockford(&new_device_id);
     let succession = create_succession(
@@ -560,8 +560,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 9. Propagate tombstone to storage nodes
-    let _ =
-        crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"propagating");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Propagating);
 
     let mut pushed = 0u64;
     let mut failed = 0u64;
@@ -591,7 +590,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 10. Set phase to polling
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"polling");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Polling);
 
     Ok(format!(
         "phase=polling,tombstone_hash={},pushed={},failed={},total={}",
@@ -614,7 +613,7 @@ pub fn resume_all_contacts() -> Result<String, String> {
         ));
     }
 
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"resuming");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Resuming);
 
     // Get recovered chain tips and resume each
     let tips = crate::storage::client_db::recovery::get_recovered_chain_tips()
@@ -647,7 +646,7 @@ pub fn resume_all_contacts() -> Result<String, String> {
     // Cleanup
     let _ = crate::storage::client_db::recovery::clear_recovery_sync_status();
     let _ = crate::storage::client_db::recovery::clear_recovered_chain_tips();
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"complete");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Complete);
 
     Ok(format!("success=true,resumed={}", resumed))
 }

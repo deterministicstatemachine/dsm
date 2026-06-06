@@ -6,6 +6,8 @@ pub const TAG_DSM_RECOVERY_ROLL: &str = "DSM/recovery-roll";
 pub const TAG_DSM_RECOVERY_ROLL_PROOF: &str = "DSM/recovery-roll-proof";
 pub const TAG_DSM_RECOVERY_NONCE: &str = "DSM/recovery-nonce";
 pub const TAG_DSM_RECOVERY_CHALLENGE: &str = "DSM/recovery-challenge";
+/// Domain tag for the capsule contact-set commitment (gate-set anchor, R4).
+pub const TAG_DSM_RECOVERY_CONTACT_SET: &str = "DSM/recovery-contact-set";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";
@@ -16,6 +18,7 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_RECOVERY_ROLL_PROOF,
     TAG_DSM_RECOVERY_NONCE,
     TAG_DSM_RECOVERY_CHALLENGE,
+    TAG_DSM_RECOVERY_CONTACT_SET,
     TAG_DSM_TOMBSTONE,
     TAG_DSM_TOMBSTONE_NOTIFY,
     TAG_DSM_TOMBSTONE_SUCCESSION,

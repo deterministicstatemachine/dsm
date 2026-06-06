@@ -24,13 +24,16 @@ impl AppRouterImpl {
                 let resp = generated::AppStateResponse {
                     key: "recovery.status".to_string(),
                     value: Some(format!(
-                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={},auto_write={}",
+                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={},auto_write={},capsule_dirty={},accepted_state_index={},capsule_state_index={}",
                         status.enabled,
                         status.configured,
                         status.pending_capsule,
                         status.capsule_count,
                         status.last_capsule_index,
                         auto_write,
+                        status.capsule_dirty,
+                        status.accepted_state_index,
+                        status.capsule_state_index,
                     )),
                 };
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
@@ -108,8 +111,13 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("recovery.enable: {e}")),
                 };
 
-                if mnemonic.split_whitespace().count() < 12 {
-                    return err("recovery.enable: mnemonic must be at least 12 words".into());
+                // Mainnet recovery authority MUST encode >=256 bits of entropy
+                // (24-word BIP39). 12-word phrases must NOT be the primary mainnet
+                // recovery authority (spec §3.1, condition T0.2).
+                if mnemonic.split_whitespace().count() < 24 {
+                    return err(
+                        "recovery.enable: mnemonic must be a 24-word (256-bit) phrase".into(),
+                    );
                 }
 
                 // Derive and cache the recovery key in memory
@@ -172,8 +180,12 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("recovery.cacheMnemonic: {e}")),
                 };
 
-                if mnemonic.split_whitespace().count() < 12 {
-                    return err("recovery.cacheMnemonic: mnemonic must be at least 12 words".into());
+                // Mainnet recovery authority MUST be a 24-word (256-bit) phrase
+                // (spec §3.1, condition T0.2).
+                if mnemonic.split_whitespace().count() < 24 {
+                    return err(
+                        "recovery.cacheMnemonic: mnemonic must be a 24-word (256-bit) phrase".into(),
+                    );
                 }
 
                 if let Err(e) =

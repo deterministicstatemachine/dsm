@@ -324,6 +324,184 @@ pub fn get_recovery_pref(key: &str) -> Result<Option<Vec<u8>>> {
     Ok(result)
 }
 
+/// Typed recovery lifecycle state.
+///
+/// Persisted in `recovery_prefs["recovery_phase"]` as the canonical lowercase
+/// ASCII strings used since the string-phase implementation, so this is a
+/// drop-in typed replacement with no on-disk migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryState {
+    /// No recovery in progress and device was not recovered.
+    None,
+    /// Tombstone being created.
+    Tombstoning,
+    /// Succession receipt being created / new device being bound.
+    Succession,
+    /// Tombstone being propagated to counterparties.
+    Propagating,
+    /// Awaiting all-contact tombstone acknowledgement.
+    Polling,
+    /// Resuming bilateral relationships from recovered tips.
+    Resuming,
+    /// Identity recovery finished (current lifecycle terminal).
+    Complete,
+    /// Recovery aborted.
+    Failed,
+}
+
+impl RecoveryState {
+    /// Canonical on-disk string (stable wire/storage representation).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryState::None => "none",
+            RecoveryState::Tombstoning => "tombstoning",
+            RecoveryState::Succession => "succession",
+            RecoveryState::Propagating => "propagating",
+            RecoveryState::Polling => "polling",
+            RecoveryState::Resuming => "resuming",
+            RecoveryState::Complete => "complete",
+            RecoveryState::Failed => "failed",
+        }
+    }
+
+    /// Parse from on-disk bytes. Unknown/empty parses to `None` (fail-safe to
+    /// "no recovery in progress").
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        match bytes {
+            b"tombstoning" => RecoveryState::Tombstoning,
+            b"succession" => RecoveryState::Succession,
+            b"propagating" => RecoveryState::Propagating,
+            b"polling" => RecoveryState::Polling,
+            b"resuming" => RecoveryState::Resuming,
+            b"complete" => RecoveryState::Complete,
+            b"failed" => RecoveryState::Failed,
+            _ => RecoveryState::None,
+        }
+    }
+
+    /// Recovery is actively running through its identity-succession lifecycle.
+    /// During these states there is no spend-authoritative device, so any value
+    /// egress could open a split-acceptance double-spend window (spec vector V1).
+    pub fn is_identity_recovery_in_progress(self) -> bool {
+        matches!(
+            self,
+            RecoveryState::Tombstoning
+                | RecoveryState::Succession
+                | RecoveryState::Propagating
+                | RecoveryState::Polling
+                | RecoveryState::Resuming
+        )
+    }
+}
+
+/// Read the current typed recovery state.
+pub fn recovery_state() -> RecoveryState {
+    match get_recovery_pref("recovery_phase") {
+        Ok(Some(bytes)) => RecoveryState::from_bytes(&bytes),
+        _ => RecoveryState::None,
+    }
+}
+
+/// Persist the typed recovery state.
+pub fn set_recovery_state(state: RecoveryState) -> Result<()> {
+    set_recovery_pref("recovery_phase", state.as_str().as_bytes())
+}
+
+/// Fail-closed value-egress gate (Phase 0 / spec condition R3).
+///
+/// Returns `Some(reason)` when a value-bearing transition MUST be refused
+/// because identity recovery is in progress. While recovery is running there is
+/// no single spend-authoritative device, so any egress could create the
+/// split-acceptance recovery double-spend window (spec vector V1).
+///
+/// This is the in-progress portion of the Phase 0 gate. The post-completion
+/// successor freeze and per-asset `LOCKED_RECOVERY` checks land with the
+/// identity activation seal (Phase 4) and bearer-asset reconciliation
+/// (Phase 5); at that point the only paths that re-open spend are the audited
+/// chokepoints. Every value-egress path MUST route through this gate.
+pub fn value_egress_block_reason() -> Option<&'static str> {
+    if recovery_state().is_identity_recovery_in_progress() {
+        return Some(
+            "device recovery in progress: value egress is blocked until recovery resolves",
+        );
+    }
+    // R2′ (spec §5 — durable-persist-before-value): when recovery is enabled, the
+    // recovery capsule MUST capture the latest accepted state before value
+    // egress, so a lost/destroyed device is always recoverable to a frontier at
+    // or beyond any spend. A dirty capsule means the latest accepted state is not
+    // yet sealed. The egress chokepoint attempts a best-effort re-seal first; if
+    // it still cannot seal (e.g. no cached key), egress is refused fail-closed.
+    //
+    // NOTE: this enforces capsule *seal* currency. Confirmation of durable write
+    // to the external recovery medium (NFC tag / storage-node publish) is the
+    // stronger form tracked separately as the durable-capsule index.
+    if is_nfc_backup_enabled() && is_capsule_dirty() {
+        return Some(
+            "recovery capsule is stale (latest accepted state not yet sealed): refresh recovery before value egress",
+        );
+    }
+    None
+}
+
+/// Convenience guard: errors when value egress is currently blocked.
+pub fn precheck_value_egress() -> Result<()> {
+    if let Some(reason) = value_egress_block_reason() {
+        return Err(anyhow!(reason));
+    }
+    Ok(())
+}
+
+const ACCEPTED_STATE_INDEX_KEY: &str = "accepted_state_index";
+const CAPSULE_STATE_INDEX_KEY: &str = "capsule_state_index";
+
+fn read_u64_pref(key: &str) -> u64 {
+    match get_recovery_pref(key) {
+        Ok(Some(bytes)) if bytes.len() == 8 => {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(&bytes);
+            u64::from_le_bytes(a)
+        }
+        _ => 0,
+    }
+}
+
+/// Device-level monotone count of accepted frontier-changing transitions
+/// (capsule currency anchor, spec §5.1). 0 if unset.
+pub fn accepted_state_index() -> u64 {
+    read_u64_pref(ACCEPTED_STATE_INDEX_KEY)
+}
+
+/// Increment and return the accepted-state index. Called on every accepted
+/// frontier-changing transition. A bump marks the recovery capsule dirty until
+/// the next successful seal records the new index via `set_capsule_state_index`.
+pub fn bump_accepted_state_index() -> Result<u64> {
+    let next = accepted_state_index().saturating_add(1);
+    set_recovery_pref(ACCEPTED_STATE_INDEX_KEY, &next.to_le_bytes())?;
+    Ok(next)
+}
+
+/// The accepted-state index captured by the latest successful capsule seal.
+pub fn capsule_state_index() -> u64 {
+    read_u64_pref(CAPSULE_STATE_INDEX_KEY)
+}
+
+/// Record that a capsule has sealed the given accepted-state index. Clears the
+/// dirty condition up to that point (spec §5.2).
+pub fn set_capsule_state_index(index: u64) -> Result<()> {
+    set_recovery_pref(CAPSULE_STATE_INDEX_KEY, &index.to_le_bytes())
+}
+
+/// Capsule currency check (spec §5.2):
+/// `CapsuleCurrent ⟺ capsule_state_index == accepted_state_index`.
+///
+/// The capsule is dirty when the latest sealed capsule does not capture the
+/// latest accepted state. While dirty, the exported recovery artifact does not
+/// represent the latest accepted device frontier; the wallet surfaces this, and
+/// (R2′, Phase 1 follow-up) value egress is refused until it is current.
+pub fn is_capsule_dirty() -> bool {
+    capsule_state_index() < accepted_state_index()
+}
+
 /// Store an encrypted recovery key blob (device-bound encryption).
 pub fn store_encrypted_recovery_key(blob: &[u8]) -> Result<()> {
     set_recovery_pref("encrypted_recovery_key", blob)
@@ -896,6 +1074,145 @@ mod tests {
         set_nfc_backup_enabled(false).expect("set disabled");
         assert!(!is_nfc_backup_enabled());
         assert!(is_nfc_backup_configured()); // configured stays true
+    }
+
+    #[test]
+    fn test_recovery_state_string_roundtrip() {
+        // Every state round-trips through its on-disk string.
+        let all = [
+            RecoveryState::None,
+            RecoveryState::Tombstoning,
+            RecoveryState::Succession,
+            RecoveryState::Propagating,
+            RecoveryState::Polling,
+            RecoveryState::Resuming,
+            RecoveryState::Complete,
+            RecoveryState::Failed,
+        ];
+        for s in all {
+            assert_eq!(RecoveryState::from_bytes(s.as_str().as_bytes()), s);
+        }
+        // Unknown / empty parse to None (fail-safe to "no recovery").
+        assert_eq!(RecoveryState::from_bytes(b""), RecoveryState::None);
+        assert_eq!(RecoveryState::from_bytes(b"garbage"), RecoveryState::None);
+
+        // Only the in-progress lifecycle states gate value egress.
+        for s in [
+            RecoveryState::Tombstoning,
+            RecoveryState::Succession,
+            RecoveryState::Propagating,
+            RecoveryState::Polling,
+            RecoveryState::Resuming,
+        ] {
+            assert!(s.is_identity_recovery_in_progress(), "{s:?} must block egress");
+        }
+        for s in [
+            RecoveryState::None,
+            RecoveryState::Complete,
+            RecoveryState::Failed,
+        ] {
+            assert!(
+                !s.is_identity_recovery_in_progress(),
+                "{s:?} must not block egress via the in-progress gate"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_value_egress_gate_blocks_during_recovery() {
+        setup_test_db();
+
+        // No recovery in progress: egress is allowed.
+        assert_eq!(recovery_state(), RecoveryState::None);
+        assert!(value_egress_block_reason().is_none());
+        assert!(precheck_value_egress().is_ok());
+
+        // Each in-progress phase blocks value egress (fail-closed).
+        for s in [
+            RecoveryState::Tombstoning,
+            RecoveryState::Succession,
+            RecoveryState::Propagating,
+            RecoveryState::Polling,
+            RecoveryState::Resuming,
+        ] {
+            set_recovery_state(s).expect("set state");
+            assert_eq!(recovery_state(), s);
+            assert!(value_egress_block_reason().is_some(), "{s:?} must block");
+            assert!(precheck_value_egress().is_err(), "{s:?} must block");
+        }
+
+        // Terminal states do not block via this in-progress gate; the
+        // post-completion successor freeze + per-asset LOCKED_RECOVERY checks
+        // land with the identity activation seal (Phase 4) and bearer-asset
+        // reconciliation (Phase 5).
+        for s in [
+            RecoveryState::Complete,
+            RecoveryState::Failed,
+            RecoveryState::None,
+        ] {
+            set_recovery_state(s).expect("set state");
+            assert!(
+                value_egress_block_reason().is_none(),
+                "{s:?} must not block via the in-progress gate"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_capsule_currency_dirty_tracking() {
+        setup_test_db();
+
+        // Fresh: no transitions, no seals → current (not dirty).
+        assert_eq!(accepted_state_index(), 0);
+        assert_eq!(capsule_state_index(), 0);
+        assert!(!is_capsule_dirty());
+
+        // Accepted transitions advance the accepted-state index → dirty.
+        assert_eq!(bump_accepted_state_index().expect("bump"), 1);
+        assert_eq!(bump_accepted_state_index().expect("bump"), 2);
+        assert_eq!(accepted_state_index(), 2);
+        assert!(is_capsule_dirty());
+
+        // Sealing a capsule that captured index 2 clears dirty.
+        set_capsule_state_index(2).expect("seal");
+        assert!(!is_capsule_dirty());
+
+        // A further accepted transition re-dirties.
+        assert_eq!(bump_accepted_state_index().expect("bump"), 3);
+        assert!(is_capsule_dirty());
+
+        // A seal that only captured an older index does NOT clear dirty.
+        set_capsule_state_index(2).expect("stale seal");
+        assert!(is_capsule_dirty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_r2prime_dirty_capsule_blocks_egress_only_when_recovery_enabled() {
+        setup_test_db();
+        set_recovery_state(RecoveryState::None).expect("state");
+
+        // Make the capsule dirty (an accepted transition occurred, not yet sealed).
+        bump_accepted_state_index().expect("bump");
+        assert!(is_capsule_dirty());
+
+        // Recovery NOT enabled: a dirty capsule does not gate egress — there is no
+        // recovery contract for this device.
+        assert!(!is_nfc_backup_enabled());
+        assert!(value_egress_block_reason().is_none());
+
+        // Recovery enabled + dirty capsule: egress is refused (R2′).
+        set_nfc_backup_enabled(true).expect("enable");
+        assert!(value_egress_block_reason().is_some());
+        assert!(precheck_value_egress().is_err());
+
+        // Sealing the latest accepted state clears the block.
+        set_capsule_state_index(accepted_state_index()).expect("seal");
+        assert!(!is_capsule_dirty());
+        assert!(value_egress_block_reason().is_none());
+        assert!(precheck_value_egress().is_ok());
     }
 
     #[test]

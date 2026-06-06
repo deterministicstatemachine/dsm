@@ -110,10 +110,19 @@ Every feature maps to an authoritative spec and code modules across all layers.
 
 ### DLV (Limbo Vaults)
 
-- **Source:** `docs/book/11-integration-guide.md`, `docs/book/16-code-generation.md`, `docs/book/18-in-app-developer-walkthroughs.md`
+- **Source:** `docs/book/11-integration-guide.md`, `docs/book/16-code-generation.md`, `docs/book/18-in-app-developer-walkthroughs.md`, `.github/instructions/recovery-and-dlv.instructions.md` (§7–§10, reconciled)
 - **Core:** `vault/dlv_manager.rs`, `vault/limbo_vault.rs`, `vault/fulfillment.rs`
 - **SDK:** `sdk/dlv_sdk.rs`
 - **Frontend:** `DevDlvScreen.tsx`
+- **Related:** DLV controller recovery — see **DLV Recovery / Controller Rotation** below
+
+### DLV Recovery / Controller Rotation
+
+- **Source:** `.github/instructions/recovery-and-dlv.instructions.md` (§9, reconciled spec ↔ code)
+- **Status:** Layer B (planned) — value/controller state split and controller-rotation
+  transition are not yet in code; the gap register lives in §0.2 of the source spec.
+- **Related (shipped):** DLV value state via `dlv/vault_state_anchor.rs`, `VaultStateProto`,
+  `VaultStateAnchorV1`; token-policy references via CPTA (see **CPTA Token Policies**)
 
 ### Smart / External Commitments
 
@@ -135,10 +144,13 @@ Every feature maps to an authoritative spec and code modules across all layers.
 
 ### Recovery
 
-- **Source:** `docs/book/15-security-model.md`
-- **Core:** `recovery/`
-- **SDK:** `sdk/recovery_sdk.rs`
+- **Source:** `docs/book/15-security-model.md`, `.github/instructions/recovery-and-dlv.instructions.md` (§1–§6, reconciled spec ↔ code with Layer A/B/Divergent tags + gap register)
+- **Core:** `recovery/` (`capsule.rs`, `tombstone.rs`, `rollup.rs`)
+- **SDK:** `sdk/recovery_sdk.rs`, `handlers/recovery_routes.rs`, `handlers/recovery_impl.rs`
 - **Android:** `MainActivity.kt` (inline NFC handling)
+- **Gaps:** capsule currency on every accepted transition, `contact_set_commit`/gate-set,
+  anti-rollback-floor enforcement, typed `RecoveryState`, intent/proposal/ack/activation-seal
+  messages — tracked in §0.2 of the source spec (Layer B)
 
 ### PBI Bootstrap
 

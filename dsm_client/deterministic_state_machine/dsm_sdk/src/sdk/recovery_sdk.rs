@@ -537,6 +537,11 @@ impl RecoverySDK {
         let capsule_count = crate::storage::client_db::recovery::get_capsule_count().unwrap_or(0);
         let last_capsule_index =
             crate::storage::client_db::recovery::get_max_capsule_index().unwrap_or(0);
+        let accepted_state_index =
+            crate::storage::client_db::recovery::accepted_state_index();
+        let capsule_state_index =
+            crate::storage::client_db::recovery::capsule_state_index();
+        let capsule_dirty = crate::storage::client_db::recovery::is_capsule_dirty();
 
         RecoveryStatus {
             enabled,
@@ -544,12 +549,20 @@ impl RecoverySDK {
             pending_capsule,
             capsule_count,
             last_capsule_index,
+            capsule_dirty,
+            accepted_state_index,
+            capsule_state_index,
         }
     }
 
     fn create_capsule_from_current_state_with_key(
         key: &[u8; 32],
     ) -> Result<(u64, Vec<u8>), DsmError> {
+        // Capsule currency (spec §5.2): capture the accepted-state index this
+        // seal represents *before* gathering state, so a transition that races
+        // the seal leaves the capsule observably dirty (fail-safe) rather than
+        // falsely current.
+        let captured_index = crate::storage::client_db::recovery::accepted_state_index();
         let RecoveryCapsuleState {
             smt_root,
             counterparty_tips,
@@ -570,11 +583,19 @@ impl RecoverySDK {
         )?;
         let capsule_bytes = encrypted.to_bytes();
         Self::persist_capsule(next_index, &smt_root, &capsule_bytes, tip_count)?;
+        // Capsule currency (spec §5.2): record the accepted-state index this seal
+        // captured so `is_capsule_dirty()` clears.
+        if let Err(e) =
+            crate::storage::client_db::recovery::set_capsule_state_index(captured_index)
+        {
+            log::warn!("[RECOVERY_SDK] failed to record capsule_state_index: {e}");
+        }
         log::info!(
-            "[RECOVERY_SDK] Created recovery capsule index={} size={} counterparties={}",
+            "[RECOVERY_SDK] Created recovery capsule index={} size={} counterparties={} captured_state_index={}",
             next_index,
             capsule_bytes.len(),
             tip_count,
+            captured_index,
         );
         Ok((next_index, capsule_bytes))
     }
@@ -748,6 +769,13 @@ pub struct RecoveryStatus {
     pub pending_capsule: bool,
     pub capsule_count: u64,
     pub last_capsule_index: u64,
+    /// Capsule currency (spec §5.2): true when the latest sealed capsule does
+    /// not capture the latest accepted state.
+    pub capsule_dirty: bool,
+    /// Device-level monotone count of accepted frontier-changing transitions.
+    pub accepted_state_index: u64,
+    /// Accepted-state index captured by the latest successful capsule seal.
+    pub capsule_state_index: u64,
 }
 
 impl Default for RecoverySDK {

@@ -837,6 +837,32 @@ impl CoreSDK {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        // Phase 0 fail-closed recovery gate (spec condition R3): block
+        // owner-initiated value egress while identity recovery is in progress.
+        // `is_value_egress` is an exhaustive classifier (dsm core), so value
+        // ingress (Receive/Mint) and identity/recovery operations still advance,
+        // and any new Operation variant must be consciously classified. This is
+        // the canonical state-advance chokepoint, so it covers bilateral
+        // transfers, token ops, and DLV ops in one place.
+        if operation.is_value_egress() {
+            // R2′ (spec §5): the recovery capsule must capture the latest accepted
+            // state before value egress. Attempt a best-effort self-heal (re-seal
+            // if recovery is enabled and a key is available), then enforce the
+            // gate fail-closed. Runs before the state-machine lock is taken.
+            crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule();
+            if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
+                return Err(DsmError::invalid_operation(reason));
+            }
+        }
+
+        // Capsule currency (spec §5.1): capture whether this transition changes
+        // the recovery-relevant frontier before `operation` is moved into the
+        // advance. Genesis/Noop do not change the frontier.
+        let frontier_changed = !matches!(
+            operation,
+            dsm::types::operations::Operation::Noop | dsm::types::operations::Operation::Genesis
+        );
+
         let mut sm = self.state_machine.lock();
 
         // Enforce token policy constraints on the operation that will advance
@@ -862,6 +888,17 @@ impl CoreSDK {
         )?;
         Self::dual_write_advance_outcome(&outcome)?;
         sm.commit_advance(&outcome);
+
+        // Capsule currency (spec §5.1): advance the accepted-state index so the
+        // recovery capsule is marked dirty until re-sealed. Cheap pref write;
+        // re-seal happens via the recovery refresh path, and the R2′ gate refuses
+        // value egress while dirty, so recovery can never restore from stale
+        // relationship state.
+        if frontier_changed {
+            if let Err(e) = crate::storage::client_db::recovery::bump_accepted_state_index() {
+                log::warn!("[RECOVERY] failed to advance accepted-state index: {e}");
+            }
+        }
 
         // Build a compatibility State view from the outcome for callers that
         // still read State fields. This is a derived view, not the source of
@@ -1489,6 +1526,12 @@ impl CoreSDK {
         nonce: &[u8],
         sender_signature: &[u8],
     ) -> Result<(), DsmError> {
+        // Phase 0 fail-closed recovery gate (spec condition R3): no value egress
+        // while identity recovery is in progress — prevents the split-acceptance
+        // recovery double-spend window (spec vector V1).
+        if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
+            return Err(DsmError::invalid_operation(reason));
+        }
         if token_id.is_empty() {
             return Err(DsmError::invalid_operation("Empty token ID"));
         }
