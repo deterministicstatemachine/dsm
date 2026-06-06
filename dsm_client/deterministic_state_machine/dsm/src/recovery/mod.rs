@@ -9,6 +9,7 @@
 pub mod activation;
 pub mod capsule;
 pub mod rollup;
+pub mod succession_binding;
 pub mod tombstone;
 
 pub use activation::{
@@ -16,6 +17,9 @@ pub use activation::{
     RecoveryActivationSeal,
 };
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
+pub use succession_binding::{
+    verify_endpoint_migration_chain, verify_succession_binding, RelationshipFloor,
+};
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
