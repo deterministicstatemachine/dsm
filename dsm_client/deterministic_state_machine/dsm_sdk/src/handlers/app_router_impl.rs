@@ -88,10 +88,10 @@ pub(crate) struct CachedWithdrawalPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QuorumDeviceIdentity {
-    device_id: [u8; 32],
-    genesis_hash: [u8; 32],
-    public_key: Vec<u8>,
+pub(crate) struct QuorumDeviceIdentity {
+    pub(crate) device_id: [u8; 32],
+    pub(crate) genesis_hash: [u8; 32],
+    pub(crate) public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -2456,7 +2456,7 @@ fn select_quorum_device_identity(
     None
 }
 
-async fn fetch_quorum_device_identity(
+pub(crate) async fn fetch_quorum_device_identity(
     storage_endpoints: &[String],
     device_id: [u8; 32],
 ) -> Result<QuorumDeviceIdentity, String> {

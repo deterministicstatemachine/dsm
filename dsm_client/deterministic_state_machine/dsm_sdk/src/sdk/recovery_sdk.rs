@@ -464,6 +464,52 @@ impl RecoverySDK {
         dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&bytes)
     }
 
+    /// Fetch a device's recovery-authority anchor AND authenticate it end-to-end:
+    /// its genesis-binding signature is verified against the device's
+    /// genesis-authenticated signing pubkey (device-tree quorum), and
+    /// `candidate_authority_pubkey` is bound to the anchored commitment. On success the
+    /// caller may treat `candidate_authority_pubkey` as the genesis-anchored recovery
+    /// authority for `(genesis_id, device_id)` and use it to verify tombstone/succession.
+    ///
+    /// `candidate_authority_pubkey` comes from the recovery bundle (which carries
+    /// `K_A_pub` alongside the tombstone/succession); this checks `H(it)` equals the
+    /// anchored commitment, the device signing key signed the anchor, and `K_A` proved
+    /// possession. Fail-closed: any fetch, quorum, genesis-mismatch, or verify failure
+    /// returns an error and yields NO authority.
+    pub async fn fetch_and_verify_authority_anchor(
+        genesis_id: &[u8; 32],
+        device_id: &[u8; 32],
+        candidate_authority_pubkey: &[u8],
+    ) -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
+        let anchor = Self::fetch_authority_anchor(genesis_id).await?;
+
+        // Genesis-authenticated device signing pubkey via the device-tree quorum.
+        let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
+            .await
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("load storage node config: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        let qid = crate::handlers::app_router_impl::fetch_quorum_device_identity(
+            &config.node_urls,
+            *device_id,
+        )
+        .await
+        .map_err(|e| {
+            DsmError::verification(format!("authority anchor: device identity quorum failed: {e}"))
+        })?;
+        if &qid.genesis_hash != genesis_id {
+            return Err(DsmError::verification(
+                "authority anchor: quorum device identity genesis_hash != genesis under recovery",
+            ));
+        }
+
+        anchor.verify(genesis_id, device_id, &qid.public_key, candidate_authority_pubkey)?;
+        Ok(anchor)
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
