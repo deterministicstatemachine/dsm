@@ -2622,6 +2622,18 @@ message TombstoneReceiptProto {
   bytes  tombstone_hash  = 7 [(dsm_fixed_len)=32];
 }
 
+// Wire codec for `dsm::recovery::authority_anchor::RecoveryAuthorityAnchor`
+// (spec §0.5 step 5) — the genesis-chained declaration anchoring a device's
+// recovery-authority SPHINCS+ pubkey. `device_signature` is by the genesis
+// signing key (genesis binding); `authority_signature` is by K_A (possession).
+message RecoveryAuthorityAnchorProto {
+  bytes genesis_id              = 1 [(dsm_fixed_len)=32];
+  bytes device_id               = 2 [(dsm_fixed_len)=32];
+  bytes authority_pubkey_commit = 3 [(dsm_fixed_len)=32]; // H(K_A_pub)
+  bytes device_signature        = 4 [(dsm_max_len)=65535]; // SPX256f genesis-key sig
+  bytes authority_signature     = 5 [(dsm_max_len)=65535]; // SPX256f K_A sig
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

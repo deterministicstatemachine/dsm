@@ -42,6 +42,7 @@
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
+use crate::types::proto::{Message as _, RecoveryAuthorityAnchorProto};
 
 const AUTHORITY_COMMIT_DOMAIN: &str =
     crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_COMMIT;
@@ -144,6 +145,48 @@ impl RecoveryAuthorityAnchor {
         }
         Ok(())
     }
+
+    /// Serialize to canonical protobuf bytes (protobuf-only wire; no JSON, no hex).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        RecoveryAuthorityAnchorProto {
+            genesis_id: self.genesis_id.to_vec(),
+            device_id: self.device_id.to_vec(),
+            authority_pubkey_commit: self.authority_pubkey_commit.to_vec(),
+            device_signature: self.device_signature.clone(),
+            authority_signature: self.authority_signature.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    /// Deserialize from protobuf bytes (fail-closed on length / decode errors).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        let p = RecoveryAuthorityAnchorProto::decode(bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("RecoveryAuthorityAnchor::from_bytes: {e}"),
+                "RecoveryAuthorityAnchor",
+                None::<String>,
+                Some(e),
+            )
+        })?;
+        Ok(Self {
+            genesis_id: fixed32(&p.genesis_id, "genesis_id")?,
+            device_id: fixed32(&p.device_id, "device_id")?,
+            authority_pubkey_commit: fixed32(&p.authority_pubkey_commit, "authority_pubkey_commit")?,
+            device_signature: p.device_signature,
+            authority_signature: p.authority_signature,
+        })
+    }
+}
+
+/// Fail-closed `Vec<u8>` → `[u8; 32]` (proto `dsm_fixed_len` is a hint, not enforced
+/// by prost, so the length is validated here).
+fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
+    <[u8; 32]>::try_from(b).map_err(|_| {
+        DsmError::verification(format!(
+            "authority-anchor: field `{field}` is {} bytes, expected 32",
+            b.len()
+        ))
+    })
 }
 
 /// Create a recovery-authority anchor declaration.
@@ -275,6 +318,32 @@ mod tests {
         assert_ne!(legit.authority_pubkey_commit, forged.authority_pubkey_commit);
         // The legit authority pubkey does not validate against the forged anchor.
         assert!(forged.verify(&GENESIS, &DEVICE, &gpk, &legit_apk).is_err());
+    }
+
+    #[test]
+    fn proto_round_trip_preserves_and_verifies() {
+        let (anchor, gpk, apk) = fixture();
+        let bytes = anchor.to_bytes();
+        let decoded = RecoveryAuthorityAnchor::from_bytes(&bytes).expect("decode");
+        assert_eq!(anchor, decoded);
+        // The decoded anchor still verifies end-to-end.
+        decoded.verify(&GENESIS, &DEVICE, &gpk, &apk).expect("verify after round-trip");
+        // Re-encode is byte-identical (canonical).
+        assert_eq!(bytes, decoded.to_bytes());
+    }
+
+    #[test]
+    fn from_bytes_rejects_wrong_length_hash() {
+        let (anchor, _gpk, _apk) = fixture();
+        let mut p = RecoveryAuthorityAnchorProto {
+            genesis_id: anchor.genesis_id.to_vec(),
+            device_id: anchor.device_id.to_vec(),
+            authority_pubkey_commit: anchor.authority_pubkey_commit.to_vec(),
+            device_signature: anchor.device_signature.clone(),
+            authority_signature: anchor.authority_signature.clone(),
+        };
+        p.genesis_id.truncate(31); // not 32 bytes
+        assert!(RecoveryAuthorityAnchor::from_bytes(&p.encode_to_vec()).is_err());
     }
 
     #[test]
