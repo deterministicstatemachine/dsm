@@ -311,6 +311,19 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
                     ON device_tree_states(genesis_b32, version_number);
+
+                -- Single-assignment store for recovery-authority anchors
+                -- (spec §0.5 bind-once). Keyed by genesis: the FIRST valid
+                -- anchor for a genesis wins and is immutable thereafter; a
+                -- different anchor for the same genesis is rejected (409).
+                -- Storage enforces single-assignment ONLY — it does not attest
+                -- recovery validity; clients verify the anchor cryptographically.
+                CREATE TABLE IF NOT EXISTS recovery_authority_anchors (
+                    genesis_b32        TEXT PRIMARY KEY,
+                    anchor_hash        BLOB NOT NULL,
+                    payload            BLOB NOT NULL,
+                    first_written_tick INTEGER NOT NULL
+                );
             "#,
         )?;
         Ok(())
@@ -655,6 +668,88 @@ pub async fn get_device_tree_state_version(
             )
             .optional()?;
         Ok(version_i64.map(|v| u64::try_from(v).unwrap_or(0)))
+    })
+    .await
+}
+
+/// Outcome of [`insert_recovery_authority_anchor_if_absent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAnchorUpsertOutcome {
+    /// No prior anchor existed for this genesis; the row was newly inserted.
+    Inserted,
+    /// An identical anchor (same `anchor_hash`) already exists — idempotent replay.
+    AlreadyExistsIdentical,
+    /// A DIFFERENT anchor already exists for this genesis — rejected (bind-once).
+    Conflict,
+}
+
+/// Single-assignment insert of a recovery-authority anchor, keyed by genesis
+/// (spec §0.5 bind-once). First write wins; an identical replay (same
+/// `anchor_hash`) is idempotent; any DIFFERENT anchor for the same genesis is
+/// rejected. The read-then-write is wrapped in one transaction so concurrent
+/// writers serialise. Storage enforces single-assignment ONLY — it does NOT
+/// attest recovery validity; clients verify the anchor cryptographically.
+pub async fn insert_recovery_authority_anchor_if_absent(
+    pool: &DBPool,
+    genesis_b32: &str,
+    anchor_hash: &[u8],
+    payload: &[u8],
+    first_written_tick: u64,
+) -> Result<RecoveryAnchorUpsertOutcome> {
+    let genesis_b32 = genesis_b32.to_string();
+    let anchor_hash = anchor_hash.to_vec();
+    let payload = payload.to_vec();
+    let tick_i64 = i64::try_from(first_written_tick)
+        .map_err(|_| anyhow!("first_written_tick {first_written_tick} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        let prior_hash: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT anchor_hash FROM recovery_authority_anchors WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let outcome = match prior_hash {
+            Some(existing) if existing == anchor_hash => {
+                RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical
+            }
+            Some(_) => RecoveryAnchorUpsertOutcome::Conflict,
+            None => {
+                tx.execute(
+                    "INSERT INTO recovery_authority_anchors
+                       (genesis_b32, anchor_hash, payload, first_written_tick)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![genesis_b32, anchor_hash, payload, tick_i64],
+                )?;
+                RecoveryAnchorUpsertOutcome::Inserted
+            }
+        };
+
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Return the persisted recovery-authority anchor payload bytes for a genesis,
+/// or `None` if none has been written.
+pub async fn get_recovery_authority_anchor_payload(
+    pool: &DBPool,
+    genesis_b32: &str,
+) -> Result<Option<Vec<u8>>> {
+    let genesis_b32 = genesis_b32.to_string();
+    with_conn(pool, move |conn| {
+        let payload: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM recovery_authority_anchors WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload)
     })
     .await
 }
@@ -1645,6 +1740,94 @@ mod tests {
             .await
             .expect("read payload");
         assert_eq!(p.as_deref(), Some(b"payload1".as_ref()));
+    }
+
+    // -----------------------------------------------------------------
+    // Recovery-authority anchor — single-assignment / bind-once (§0.5).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn recovery_anchor_first_write_inserts() {
+        let pool = make_inmem_pool().await;
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xAB; 32],
+            b"anchor-bytes-1",
+            7,
+        )
+        .await
+        .expect("insert");
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::Inserted);
+        let p = get_recovery_authority_anchor_payload(&pool, "GENESISA")
+            .await
+            .expect("read");
+        assert_eq!(p.as_deref(), Some(b"anchor-bytes-1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn recovery_anchor_identical_replay_is_idempotent() {
+        let pool = make_inmem_pool().await;
+        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-bytes-1", 7)
+            .await
+            .unwrap();
+        // Same genesis, same anchor_hash (even with a different tick) → idempotent.
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xAB; 32],
+            b"anchor-bytes-1",
+            99,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical);
+        let p = get_recovery_authority_anchor_payload(&pool, "GENESISA")
+            .await
+            .unwrap();
+        assert_eq!(p.as_deref(), Some(b"anchor-bytes-1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn recovery_anchor_different_same_genesis_conflicts() {
+        let pool = make_inmem_pool().await;
+        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-bytes-1", 7)
+            .await
+            .unwrap();
+        // Same genesis, DIFFERENT anchor_hash → bind-once rejects (no overwrite).
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xCD; 32],
+            b"anchor-bytes-2",
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::Conflict);
+        // The first anchor is preserved unchanged.
+        let p = get_recovery_authority_anchor_payload(&pool, "GENESISA")
+            .await
+            .unwrap();
+        assert_eq!(p.as_deref(), Some(b"anchor-bytes-1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn recovery_anchor_different_genesis_succeeds() {
+        let pool = make_inmem_pool().await;
+        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-a", 7)
+            .await
+            .unwrap();
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISB",
+            &[0xCD; 32],
+            b"anchor-b",
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::Inserted);
     }
 
     #[tokio::test]

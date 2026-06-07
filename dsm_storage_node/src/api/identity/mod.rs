@@ -7,4 +7,5 @@ pub mod authenticate;
 pub mod device_api;
 pub mod devtree;
 pub mod genesis;
+pub mod recovery_anchor;
 pub mod tips;
