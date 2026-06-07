@@ -470,17 +470,17 @@ impl RecoverySDK {
     }
 
     /// Verify a recovery activation seal and, on success, RECORD activation so a
-    /// recovered successor may egress value. This is the SOLE unlock chokepoint
-    /// (T4.4): `set_recovery_activated(true)` is reached only after the core
-    /// `validate_activation_seal` passes.
+    /// recovered successor may egress value. This is the SOLE unlock chokepoint:
+    /// `set_recovery_activated(true)` is reached only after the genesis-anchored
+    /// authority binding AND the core `validate_recovery_activation` pass (spec §0.5).
     ///
-    /// The gate-set and anti-rollback floor are taken from the decrypted capsule's
-    /// committed contact set; counterparty public keys come from local contacts.
-    ///
-    /// NOTE: the gate-set here is the capsule's committed contact set. The
-    /// non-shrinkable union with publicly-discoverable contact anchors
-    /// (P2 T2.2/T2.3) widens this set; until that lands, the seal is validated
-    /// against the capsule set.
+    /// Recovery authority is the counterparties' OWN online-posted, genesis-authenticated
+    /// state — NOT the stolen device, the capsule, or the local contacts DB. The
+    /// authority pubkey that authenticates each counterparty's tombstone/succession is
+    /// itself bound to the genesis via `authority_anchor` (§0.5 step 5); `gate_set`,
+    /// `evidence`, and `genesis_signing_pubkey` are produced by the caller from the
+    /// online-posted, quorum-verified records (storage = availability; verification =
+    /// client-side).
     pub fn verify_and_record_activation(
         seal: &dsm::recovery::RecoveryActivationSeal,
         gate_set: &std::collections::BTreeSet<[u8; 32]>,
@@ -488,8 +488,23 @@ impl RecoverySDK {
             [u8; 32],
             dsm::recovery::CrossRelationshipSuccessionEvidence,
         >,
-        recovery_authority_pubkey: &[u8],
+        authority_anchor: &dsm::recovery::RecoveryAuthorityAnchor,
+        genesis_signing_pubkey: &[u8],
+        candidate_authority_pubkey: &[u8],
     ) -> Result<(), DsmError> {
+        // §0.5 step 5 — genesis-anchored recovery authority (HARD fail-closed): the
+        // pubkey used to verify every counterparty's tombstone/succession is NOT taken
+        // raw. It must match the genesis-chained authority anchor, whose genesis-binding
+        // signature is verified against the OLD device's genesis-authenticated signing
+        // pubkey (caller supplies it from the device-tree quorum path). There is no
+        // runtime "provided pubkey" path — an unanchored or mismatched pubkey fails here.
+        authority_anchor.verify(
+            &seal.genesis_id,
+            &seal.old_device_id,
+            genesis_signing_pubkey,
+            candidate_authority_pubkey,
+        )?;
+
         // §0.5 evidence model: validate that every gate-set counterparty's posted
         // state proves the cross-relationship succession — retire (A_old,C), establish
         // a new bilateral (A_new,C) carrying forward the old frontier (structural
@@ -499,7 +514,7 @@ impl RecoverySDK {
             seal,
             gate_set,
             evidence,
-            recovery_authority_pubkey,
+            candidate_authority_pubkey,
         )?;
 
         // FAIL-CLOSED: recording activation (the SOLE spend-unlock for a recovered

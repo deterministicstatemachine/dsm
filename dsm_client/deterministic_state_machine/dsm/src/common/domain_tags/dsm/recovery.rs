@@ -16,6 +16,10 @@ pub const TAG_DSM_RECOVERY_ACK_ROOT: &str = "DSM/recovery-ack-root";
 pub const TAG_DSM_RECOVERY_ACTIVATION: &str = "DSM/recovery-activation";
 /// Domain tag for the cross-relationship succession carry-forward commitment (§0.5).
 pub const TAG_DSM_RECOVERY_CARRY_FORWARD: &str = "DSM/recovery/carry-forward/v1";
+/// Domain tag for the commitment to the recovery-authority public key (§0.5 step 5).
+pub const TAG_DSM_RECOVERY_AUTHORITY_COMMIT: &str = "DSM/recovery/authority-commit/v1";
+/// Domain tag for the recovery-authority anchor declaration's signing bytes (§0.5 step 5).
+pub const TAG_DSM_RECOVERY_AUTHORITY_ANCHOR: &str = "DSM/recovery/authority-anchor/v1";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";
@@ -31,6 +35,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_RECOVERY_ACK_ROOT,
     TAG_DSM_RECOVERY_ACTIVATION,
     TAG_DSM_RECOVERY_CARRY_FORWARD,
+    TAG_DSM_RECOVERY_AUTHORITY_COMMIT,
+    TAG_DSM_RECOVERY_AUTHORITY_ANCHOR,
     TAG_DSM_TOMBSTONE,
     TAG_DSM_TOMBSTONE_NOTIFY,
     TAG_DSM_TOMBSTONE_SUCCESSION,

@@ -7,6 +7,7 @@
 //! and receipt rollups for immediate recovery without history replay.
 
 pub mod activation;
+pub mod authority_anchor;
 pub mod capsule;
 pub mod rollup;
 pub mod succession_binding;
@@ -14,6 +15,9 @@ pub mod tombstone;
 
 pub use activation::{
     compute_evidence_root, validate_recovery_activation, RecoveryActivationSeal,
+};
+pub use authority_anchor::{
+    compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
