@@ -567,6 +567,32 @@ impl Operation {
         }
     }
 
+    /// Classify whether this operation is **value-bearing** — value moving in ANY
+    /// direction (egress OR ingress) — for the recovery gate-set criterion (spec
+    /// §0.5 step 6).
+    ///
+    /// A relationship is **value-capable** (and thus a recovery gate-set member) iff
+    /// its posted state has accepted ≥1 value-bearing operation, OR its relationship
+    /// policy independently marks it value-bearing (the policy branch is applied by
+    /// the discovery layer, where policy is in scope). Pure contact/social
+    /// relationships that never carried value are excluded from the gate-set.
+    ///
+    /// This is strictly broader than [`Self::is_value_egress`]: it ALSO counts value
+    /// *ingress* (`Mint` / `Receive` / `CreateToken`), because a relationship that
+    /// only ever received value still holds reconcilable value at recovery time and
+    /// must be in the gate-set. Egress and ingress are kept in one classifier (egress
+    /// via `is_value_egress`, plus the ingress arm here) so the two cannot drift.
+    pub fn is_value_bearing(&self) -> bool {
+        use Operation::*;
+        if self.is_value_egress() {
+            return true;
+        }
+        // Value ingress: receiving, minting, and token creation bring value INTO the
+        // relationship without being egress. Everything else (identity, relationship,
+        // recovery, links, invalidation, generic, no-op) is non-value.
+        matches!(self, Mint { .. } | Receive { .. } | CreateToken { .. })
+    }
+
     /// Canonical, deterministic encoding for cryptographic use.
     /// Encoding rules:
     /// - Variant tag: u8 fixed per variant below
@@ -2250,6 +2276,56 @@ mod tests {
             message: String::new(),
         }
         .is_value_egress());
+    }
+
+    #[test]
+    fn is_value_bearing_classifies_value_capable_relationships() {
+        // Egress ops are value-bearing (superset of is_value_egress).
+        let burn = Operation::Burn {
+            amount: test_balance(1),
+            token_id: vec![1],
+            proof_of_ownership: vec![],
+            message: String::new(),
+        };
+        assert!(burn.is_value_egress() && burn.is_value_bearing());
+
+        // Ingress ops are value-bearing but NOT egress — a relationship that only
+        // received value is still value-capable (must be in the recovery gate-set).
+        let mint = Operation::Mint {
+            amount: test_balance(1),
+            token_id: vec![1],
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        };
+        assert!(!mint.is_value_egress() && mint.is_value_bearing());
+        let receive = Operation::Receive {
+            token_id: b"TKN".to_vec(),
+            from_device_id: vec![0xAA; 32],
+            amount: test_balance(1),
+            recipient: vec![],
+            message: String::new(),
+            mode: TransactionMode::Unilateral,
+            nonce: vec![],
+            verification: VerificationType::Standard,
+            sender_state_hash: None,
+        };
+        assert!(!receive.is_value_egress() && receive.is_value_bearing());
+
+        // Pure contact/social/neutral relationships are NOT value-capable.
+        assert!(!Operation::Genesis.is_value_bearing());
+        assert!(!Operation::Noop.is_value_bearing());
+        assert!(!Operation::default().is_value_bearing());
+        assert!(!Operation::AddRelationship {
+            from_id: [1; 32],
+            to_id: [2; 32],
+            relationship_type: b"bilateral_transfer".to_vec(),
+            metadata: vec![],
+            proof: vec![],
+            mode: TransactionMode::Bilateral,
+            message: String::new(),
+        }
+        .is_value_bearing());
     }
 
     // ------------------------------------------------------------------ //
