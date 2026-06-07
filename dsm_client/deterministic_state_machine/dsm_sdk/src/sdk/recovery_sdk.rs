@@ -349,6 +349,63 @@ impl RecoverySDK {
             .and_then(|g| g.clone())
     }
 
+    /// Build the genesis-anchored recovery-authority anchor (spec §0.5 step 5) for THIS
+    /// device, ready to publish. Re-derives the device's genesis signing keypair
+    /// deterministically (it is never persisted — `init::derive_device_signing_keypair`
+    /// is the SOLE canonical derivation), uses the cached mnemonic-derived authority
+    /// keypair, and produces the doubly-signed declaration committing `H(K_A_pub)`.
+    ///
+    /// Fail-closed: requires AppState identity (device_id + genesis_hash), K_DBRW, and a
+    /// cached authority keypair — i.e. the mnemonic must already be cached (call
+    /// `derive_and_cache_key` first, as `recovery.enable` does).
+    pub fn build_authority_anchor() -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
+        let device_id =
+            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let genesis_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis_hash",
+        )?;
+
+        let dbrw = crate::fetch_dbrw_binding_key().map_err(|e| {
+            DsmError::InvalidState(format!("recovery anchor: K_DBRW unavailable: {e}"))
+        })?;
+        let k_dbrw = <[u8; 32]>::try_from(dbrw.as_slice()).map_err(|_| {
+            DsmError::InvalidState(format!(
+                "recovery anchor: K_DBRW must be 32 bytes, got {}",
+                dbrw.len()
+            ))
+        })?;
+
+        // Re-derive the device signing keypair — byte-identical to the one in the
+        // device tree (the genesis-binding signer for the anchor).
+        let device_kp = crate::init::derive_device_signing_keypair(&genesis_id, &device_id, &k_dbrw)?;
+
+        let (authority_pk, authority_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
+            DsmError::InvalidState(
+                "recovery anchor: no cached recovery-authority keypair (cache the mnemonic first)"
+                    .into(),
+            )
+        })?;
+
+        dsm::recovery::create_recovery_authority_anchor(
+            &genesis_id,
+            &device_id,
+            &authority_pk,
+            &device_kp.secret_key,
+            &authority_sk,
+        )
+    }
+
+    /// Fail-closed `Option<Vec<u8>>` → `[u8; 32]` for this device's own identity fields.
+    fn require_self_id32(v: Option<Vec<u8>>, what: &str) -> Result<[u8; 32], DsmError> {
+        let bytes = v.ok_or_else(|| {
+            DsmError::InvalidState(format!("recovery anchor: {what} not set (no identity)"))
+        })?;
+        <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+            DsmError::InvalidState(format!("recovery anchor: {what} must be 32 bytes"))
+        })
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
