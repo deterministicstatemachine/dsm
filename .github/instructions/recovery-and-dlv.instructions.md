@@ -74,8 +74,9 @@ Proto anchors are in `proto/dsm_app.proto`.
 | Mandatory contact sealing (Invariant 1) | **A** (as currency) / **B** (per-contact establishment seal) | R2′ blocks egress while dirty; establishment-seal + non-shrinkable set pending (P2 T2.2/T2.3) |
 | Tombstone + succession receipts (SPHINCS+) | **A** | `dsm/src/recovery/tombstone.rs:31/50`; proto `RecoveryTombstoneRequest/Response`, `RecoverySuccessionRequest/Response`, `TombstoneReceiptProto` |
 | Recovery lifecycle (typed `RecoveryState`) | **A** | `RecoveryState` enum in `client_db/recovery.rs` (drop-in for the prior string phases) |
-| `ContactTombstoneAck` / `RecoveryActivationSeal` validation | **A** (logic) / **B** (proto wire + flow) | `recovery/activation.rs` `validate_activation_seal` + types (11 tests); proto/transport not wired |
-| All-contact gate-set + relationship-freshness enforcement | **A** (seal logic) / **B** (flow) | seal enforces set-equality + anti-rollback floor; ack-collection + non-shrinkable union not wired |
+| Cross-relationship succession + `RecoveryActivationSeal` validation | **A** (logic) / **B** (proto wire + flow) | `recovery/succession_binding.rs` (`CrossRelationshipSuccessionEvidence`), `recovery/activation.rs` (`validate_recovery_activation`, `compute_evidence_root`); proto/transport not wired |
+| Genesis-anchored recovery authority | **A** (logic) / **B** (bind-once + transport) | `recovery/authority_anchor.rs` (`RecoveryAuthorityAnchor`); chokepoint binds candidate pubkey before verify; storage bind-once not wired |
+| All-contact gate-set + relationship-freshness enforcement | **A** (seal logic) / **B** (flow) | seal enforces set-equality + forward-ancestry floor; online-posted evidence collection + non-shrinkable union not wired |
 | Recovered-successor spend-freeze + unlock chokepoint | **A** | freeze in `value_egress_block_reason`; sole unlock `RecoverySDK::verify_and_record_activation` (T4.4) |
 | Fail-closed value-egress gate (exhaustive `Operation::is_value_egress`) | **A** | `core_sdk::execute_on_relationship` + `validate_transfer_request`; under-lock, fail-closed on DB error |
 | DLV object, "not a smart contract", storage=availability | **A** | `vault/limbo_vault.rs`, `vault/dlv_manager.rs` |
@@ -114,30 +115,36 @@ unit-tested** · **◑ partial (safety logic done; flow/plumbing remains)** · *
    (public anchors + storage enumeration).
 
 5. ✅ **Anti-rollback floor enforcement.** Seal acks: confirm-floor-or-forward,
-   below-floor rejected (`activation::validate_activation_seal`). Resume path:
+   below-floor rejected (`activation::validate_recovery_activation`). Resume path:
    `resume_tip_diverges_from_floor` (fail-closed) + `restore_finalized_bilateral_chain_tip`
    refuse-to-overwrite. ◑ full co-signed forward-chain proof for tips above the floor.
 
 6. ✅ **Typed `RecoveryState` enum.** `client_db/recovery.rs` — drop-in for the
    string phases (same on-disk representation).
 
-7. ◑ **Intent / proposal / ack / activation seal.** ✅ pure validation logic +
-   types: `ContactTombstoneAck`, `RecoveryActivationSeal`, `compute_ack_root`,
-   `validate_activation_seal` — set-equality over the gate-set (no
-   omission/substitution/duplicate) + anti-rollback floor + SPHINCS+ signature
-   (`recovery/activation.rs`, 11 tests). ◑ unlock chokepoint
-   `RecoverySDK::verify_and_record_activation` exists but is **fail-closed
-   (disabled)** pending its trust inputs; the recovered-successor freeze
-   (`is_recovered_successor`/`is_recovery_activated`) is wired into the gate but
-   intentionally inert. ☐ **CRITICAL prerequisites before this unlock may go live**
-   (review finding): the gate-set must be the non-shrinkable union (R4, gap #4) and
-   the counterparty pubkeys must be **trust-anchored** (bound to genesis / a prior
-   sealed device-tree commitment) rather than read from the local mutable contacts
-   DB — otherwise a device+mnemonic holder can inject contact pubkeys and forge
-   acks. Also ☐: proto wire messages, ack-collection-over-sync, capsule-index
-   freshness check, `set_recovered_successor(true)` at succession, per-contact
-   bind-once (R1). **Do NOT wire the freeze/unlock live until the trust-anchoring
-   lands.**
+7. ◑ **Cross-relationship succession + activation seal (§0.5 model, supersedes
+   the signed-ack model).** ✅ pure validation logic + types:
+   `CrossRelationshipSuccessionEvidence` (`recovery/succession_binding.rs`),
+   `RecoveryActivationSeal` + `validate_recovery_activation` + `compute_evidence_root`
+   (`recovery/activation.rs`) — set-equality over the gate-set (no
+   omission/substitution/duplicate) + per-C device-binding + carry-forward + old-chain
+   hash forward-ancestry + both-tip inclusion. ✅ **recovery-authority trust-anchoring**
+   via the genesis-chained declaration `RecoveryAuthorityAnchor`
+   (`recovery/authority_anchor.rs`) — the activation chokepoint binds the candidate
+   authority pubkey to the anchor (genesis-key + possession signatures) before any
+   verification; no contacts-DB pubkey path remains. ✅ **value-capable** gate-set
+   criterion (`Operation::is_value_bearing`). ◑ unlock chokepoint
+   `RecoverySDK::verify_and_record_activation` exists, performs the anchor binding +
+   seal validation, but is **fail-closed (disabled)** pending live trust inputs; the
+   recovered-successor freeze (`is_recovered_successor`/`is_recovery_activated`) is
+   wired into the gate but intentionally inert. ☐ **remaining before go-live:**
+   gate-set must be the online-posted, non-shrinkable, value-capable set (R4, gap #4)
+   fetched via the device-tree quorum path (storage = availability); proto wire
+   messages; posted-evidence collection over sync; **bind-once enforcement** for the
+   authority anchor at the storage/device-tree layer; capsule-index freshness check;
+   `set_recovered_successor(true)` at succession; per-contact bind-once (R1). **Do NOT
+   wire the freeze/unlock live until the online-posted gate-set + anchor bind-once
+   enforcement land.**
 
 8. ☐ **DLV value/controller split + controller rotation.** ✅ pure validator
    `dlv::controller_rotation::validate_controller_rotation` — parent==current tip,
@@ -212,10 +219,13 @@ the historical source of double-spend risk:
   malicious mnemonic holder may deadlock recovery but MUST NOT create two
   spend-authoritative successors.
 
-**Lean acknowledgement.** A `ContactTombstoneAck` is a latest-frontier ack
-(anti-rollback floor) — `(old_device_id, successor, relationship_key,
-latest_accepted_tip, latest_accepted_height, signature)` — not a receipt dump.
-The successor must restore at or above the acknowledged frontier.
+**Acknowledgement = posted state, not a signed ack object (§0.5).** A counterparty's
+recognition of the tombstone/successor binding is its own online-posted,
+genesis-authenticated relationship state — not a standalone `ContactTombstoneAck`
+object (that model is superseded). The anti-rollback floor is enforced as
+**cryptographic forward ancestry** (`h^cap ⟶* T_old_current`, hash adjacency /
+parent consumption) — there is **no numeric height** in the predicate. The successor
+must restore at or above the floor in the forward-ancestry sense.
 
 **dBTC crucial rule (bearer-asset instance).** Recovered dBTC is never restored
 as spendable from capsule balance. It is restored as a pending bearer-asset claim
@@ -286,6 +296,55 @@ either the spend is in the posted state, or the counterparty has not posted and
 cannot count. **The complete gate-set IS the online-posted, value-capable
 relationship set; the authority for each gate is the counterparty's own posted,
 genesis-authenticated state.**
+
+### 0.5.1 Implemented building blocks (pure cores; transport/go-live pending)
+
+The §0.5 doctrine is realized by these unit-tested pure cores. Wiring to live
+posted data, storage, and the go-live unlock remains (see gap register #7).
+
+1. ✅ **Cross-relationship succession, not in-place migration.** `rel_key` is
+   device-pair-derived (`compute_smt_key`, §18.1), so `(A_old,C)` and `(A_new,C)`
+   are distinct SMT leaves — in-place same-`rel_key` migration is impossible by
+   construction. Recovery **retires** `(A_old,C)` and **establishes** a new
+   bilateral `(A_new,C)` whose first accepted state carries forward the old
+   relationship's verified frontier. `succession_binding.rs`
+   (`CrossRelationshipSuccessionEvidence`) verifies, per C: device-pair `rel_key`
+   derivation; the tombstone/succession successor proof under the genesis-anchored
+   authority; old-chain forward-ancestry `h^cap ⟶* T_old_current` (hash adjacency,
+   no heights); the carry-forward commitment binding `(rel_keys, h_cap,
+   T_old_current, tombstone, succession, A_old, A_new, C)`; the first-state
+   constraint (the successor channel must be *born* as such); and inclusion of BOTH
+   old and new tips in C's posted, genesis-authenticated root. The new `(A_new,C)`
+   relationship is a normal bilateral stitched receipt, so `verify_stitched_receipt`
+   authenticates it at the integration layer.
+
+2. ✅ **Genesis-anchored recovery-authority declaration — NOT a genesis field.**
+   The recovery-authority SPHINCS+ pubkey `K_A_pub` (derived from the mnemonic via
+   `derive_recovery_authority_seed`) authenticates each C's tombstone/succession.
+   It **cannot** be a genesis field: the recovery mnemonic is generated only when
+   the user enables NFC backup (`recovery_sdk::derive_and_cache_key`, via the
+   `recovery.enable` route), which runs AFTER genesis creation — the mnemonic is not
+   in scope when `create_genesis_via_blind_mpc*` runs. So the authority is anchored
+   by a **declaration chained off genesis** (`authority_anchor.rs`,
+   `RecoveryAuthorityAnchor`): it commits `H(K_A_pub)` and is signed twice — by the
+   device's **genesis signing key** (genesis binding; verified against the
+   genesis-authenticated device pubkey fetched via the device-tree quorum path) and
+   by `K_A` itself (possession proof). Forgery resistance is **bind-once per
+   genesis** (first declaration wins, immutable thereafter — mirrors R1): a
+   device-holding thief cannot override a legitimately-enrolled authority; a
+   never-enrolled user has no recovery path regardless, and bearer assets stay
+   `LOCKED_RECOVERY` (P5). The activation chokepoint binds the candidate authority
+   pubkey to this anchor BEFORE any verification — there is **no** raw
+   runtime-pubkey path. (Bind-once *enforcement* is a storage/device-tree property,
+   step 7.)
+
+3. ✅ **Value-capable = `Operation::is_value_bearing`.** Gate-set membership is
+   protocol-defined: a relationship is value-capable iff its posted state accepted
+   ≥1 value-bearing operation (value in ANY direction — egress ∪ ingress
+   `Mint`/`Receive`/`CreateToken`), OR its policy marks it value-bearing (policy
+   branch applied at the discovery layer). Pure contact/social relationships are
+   excluded. The freeze/snapshot of this set is the seal's `contact_set_commit`
+   (R4 anti-shrink + anti-drift); the discovery scan (`list_objects`) is step 7.
 
 ---
 
@@ -667,34 +726,37 @@ proto `RecoveryTombstoneRequest/Response`, `TombstoneReceiptProto`), and so is s
 (`tombstone.rs:50` `SuccessionReceipt`, proto `RecoverySuccession*`). The **proposal
 wrapper with intent + `contact_set_commit`** is **[B]**.
 
-### 6.7 Automatic Contact Tombstone Processing & Acknowledgement — **[B]**
+### 6.7 Automatic Contact Tombstone Processing & Posted Evidence — **[A logic / B flow]**
 
 During sync each contact checks for recovery tombstone proposals for known contacts,
-verifies them, marks the old device tombstoned for the relationship, binds the
-relationship to the successor, and emits a `ContactTombstoneAckV3 { genesis_id,
-old_device_id, new_device_id, counterparty_device_id, relationship_key,
-counterparty_latest_tip, latest_receipt_digest, missing_receipts_bundle,
-pending_state_bundle, tombstone_proposal_digest, old_device_rejected_from_now_on,
-new_device_bound_from_now_on, counterparty_signature }`. Automatic; no user approval.
-**Ack message + automatic processing are [B];** the string-phase `propagating`/`polling`
-flow (`recovery_impl.rs`) is the current partial stand-in.
+verifies the tombstone/succession pair under the **genesis-anchored** recovery
+authority (§0.5.1.2), marks the old device tombstoned for the relationship, and
+**establishes a new bilateral `(A_new,C)` relationship** whose first accepted state
+carries forward the old frontier (§0.5.1.1). There is **no standalone signed-ack
+object** (the `ContactTombstoneAckV3` model is superseded): C's recognition IS its own
+online-posted, genesis-authenticated relationship state, which a verifier fetches and
+checks client-side. Automatic; no user approval. The cross-relationship evidence
+verifier (`CrossRelationshipSuccessionEvidence`) is **[A]**; the posting/sync flow and
+the string-phase `propagating`/`polling` stand-in (`recovery_impl.rs`) are **[B]**.
 
-**Relationship freshness.** An ack from `B` is valid only if `h^B = h^cap` or there is a
-valid forward receipt-adjacent chain `h^cap → h_1 → … → h^B`, each step co-signed by both
-endpoints. Any reported tip below the floor, or lacking a valid forward chain, is rejected.
-**[B] (enforcement).**
+**Relationship freshness.** C's evidence is valid only if its current `(A_old,C)` tip is
+a valid **forward descendant** of the capsule floor — `h^cap ⟶* T_old_current` (hash
+adjacency / parent consumption, **no numeric height**); the new `(A_new,C)` receipt is a
+normal bilateral stitched receipt co-signed by both endpoints. Any tip not a forward
+descendant of the floor is rejected. **[A] (`verify_forward_ancestry`).**
 
-### 6.8 Recovery Activation Seal — **[B]**
+### 6.8 Recovery Activation Seal — **[A logic / B flow]**
 
-`RecoveryActivationSealV3 { genesis_id, old_device_id, new_device_id,
-recovery_intent_digest, tombstone_proposal_digest, synced_contact_count,
-contact_set_commit, ack_root, final_per_device_smt_root, final_receipt_roll,
-final_pending_state_commit, activation_digest }`, valid iff: capsule decrypts under the
-24-word key; intent valid; proposal valid; seal `contact_set_commit` equals the latest
-sealed capsule's; every committed counterparty emitted a valid ack; each ack is
-counterparty-signed; each ack confirms the floor or supplies a valid forward chain; final
-Per-Device SMT root recomputed from synchronized tips; ack root commits all acks; no
-gate-set member omitted and none substituted. **Not present in code.**
+`RecoveryActivationSeal { genesis_id, old_device_id, new_device_id,
+recovery_intent_digest, tombstone_proposal_digest, contact_set_commit, evidence_root,
+synced_contact_count, final_per_device_smt_root, final_receipt_roll }`
+(`recovery/activation.rs`), valid iff: `synced_contact_count` equals the gate-set size;
+`contact_set_commit` equals the gate-set commitment; the per-counterparty evidence set
+equals the gate-set EXACTLY (no omission/substitution/duplicate); each evidence binds
+the old→new device under recovery and verifies the cross-relationship succession
+(§0.5.1.1) under the genesis-anchored authority (§0.5.1.2); and `evidence_root` commits
+exactly the verified outcomes. **Seal validation logic is [A] (`validate_recovery_activation`,
+unit-tested); the online-posted gate-set, evidence collection, and proto wire are [B].**
 
 ### 6.9 Activation Rule — **[A intent / B mechanism]**
 
@@ -715,9 +777,12 @@ preventing split acceptance.
 > **Theorem (All-Contact Tombstone Sync Prevents Recovery Double Spend).** Assuming
 > BLAKE3-256 collision resistance and SPHINCS+ unforgeability, **and** Invariant 1 +
 > capsule currency: if the successor cannot perform value-bearing transitions until every
-> gate-set member emitted a valid ack, recovery cannot create a double-spend window
-> between old and new devices. *Status: conditional — rests on §5.1, §5.3, §6.7, §6.8,
-> all Layer B. The cryptographic premises (BLAKE3, SPHINCS+) are [A].*
+> gate-set member's own posted, genesis-authenticated state proves the cross-relationship
+> succession (§0.5.1.1) under the genesis-anchored authority (§0.5.1.2), recovery cannot
+> create a double-spend window between old and new devices. *Status: conditional — the
+> seal/evidence/authority verifiers are [A] (§0.5.1); the online-posted gate-set and
+> evidence-collection flow it rests on (§5.1, §5.3, §6.7, §6.8) are Layer B. The
+> cryptographic premises (BLAKE3, SPHINCS+) are [A].*
 
 ---
 
@@ -937,8 +1002,10 @@ the gate's liveness cost (a stranded gate-set member can only hold up the thin h
 | `DLVControllerRotationCapsulePlaintextV3` | — | B |
 | `RecoveryIntentV3` | — | B |
 | `RecoveryTombstoneProposalV3` | `RecoveryTombstoneRequest/Response`, `TombstoneReceiptProto`, `tombstone.rs:31` | B (proposal) / A (receipt) |
-| `ContactTombstoneAckV3` | — (string-phase polling stand-in) | B |
-| `RecoveryActivationSealV3` | — | B |
+| `ContactTombstoneAckV3` | superseded by §0.5 posted-state model — `CrossRelationshipSuccessionEvidence` (`succession_binding.rs`) | A (logic) / B (flow) |
+| Cross-relationship succession evidence | `CrossRelationshipSuccessionEvidence` (`succession_binding.rs`) | A (logic) / B (transport) |
+| Genesis-anchored recovery authority | `RecoveryAuthorityAnchor` (`authority_anchor.rs`) | A (logic) / B (bind-once + transport) |
+| `RecoveryActivationSealV3` | `RecoveryActivationSeal` (`activation.rs`, `evidence_root`) | A (logic) / B (proto wire) |
 | `RecoveryState` enum | string phases (`recovery_impl.rs`) | Divergent |
 | Succession | `RecoverySuccession*`, `SuccessionReceipt` (`tombstone.rs:50`) | A |
 | `DLVCreateV3` / `TokenPolicyRefV3` | `DlvCreate`, `DlvSpecV1`, `DlvInstantiateV1`, `LimboVaultProto.policy_digest`, `TokenPolicyV3`, `PolicyAnchorV3` | A (concept) / Divergent (shape) |

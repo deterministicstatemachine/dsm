@@ -145,11 +145,11 @@ Every feature maps to an authoritative spec and code modules across all layers.
 ### Recovery
 
 - **Source:** `docs/book/15-security-model.md`, `.github/instructions/recovery-and-dlv.instructions.md` (§1–§6, reconciled spec ↔ code with Layer A/B/Divergent tags + gap register)
-- **Core:** `recovery/` (`capsule.rs`, `tombstone.rs`, `rollup.rs`, `activation.rs`)
+- **Core:** `recovery/` (`capsule.rs`, `tombstone.rs`, `rollup.rs`, `activation.rs`, `succession_binding.rs`, `authority_anchor.rs`)
 - **SDK:** `sdk/recovery_sdk.rs`, `handlers/recovery_routes.rs`, `handlers/recovery_impl.rs`, `storage/client_db/recovery.rs`
 - **Android:** `MainActivity.kt` (inline NFC handling)
-- **Implemented (double-spend safety logic):** fail-closed egress gate (`core_sdk::execute_on_relationship` + exhaustive `Operation::is_value_egress`); capsule currency + dirty tracking + R2′ (atomic bump in commit tx); v6 `contact_set_commit`; anti-rollback floor (seal acks + resume path); typed `RecoveryState`; activation-seal validation (`recovery/activation.rs::validate_activation_seal`); recovered-successor freeze + sole unlock chokepoint (`RecoverySDK::verify_and_record_activation`); 24-word mnemonic floor.
-- **Remaining (flow/plumbing):** proto wire messages + ack-collection-over-sync + succession marker wiring + per-contact bind-once; non-shrinkable gate-set union (public anchors); durable-write confirmation. Tracked in §0.2 of the source spec.
+- **Implemented (double-spend safety logic):** fail-closed egress gate (`core_sdk::execute_on_relationship` + exhaustive `Operation::is_value_egress`); capsule currency + dirty tracking + R2′ (atomic bump in commit tx); v6 `contact_set_commit`; anti-rollback floor (forward-ancestry + resume path); typed `RecoveryState`; cross-relationship succession evidence (`recovery/succession_binding.rs::CrossRelationshipSuccessionEvidence`); genesis-anchored recovery authority (`recovery/authority_anchor.rs::RecoveryAuthorityAnchor`); activation-seal validation (`recovery/activation.rs::validate_recovery_activation`); value-capable gate-set criterion (`Operation::is_value_bearing`); recovered-successor freeze + sole unlock chokepoint (`RecoverySDK::verify_and_record_activation`, fail-closed pending go-live); 24-word mnemonic floor.
+- **Remaining (flow/plumbing):** proto wire messages + online-posted evidence collection over sync + succession marker wiring + per-contact bind-once + authority-anchor bind-once enforcement (storage layer); non-shrinkable online-posted value-capable gate-set (device-tree quorum); durable-write confirmation; go-live unlock. Tracked in §0.2 of the source spec.
 
 ### PBI Bootstrap
 
