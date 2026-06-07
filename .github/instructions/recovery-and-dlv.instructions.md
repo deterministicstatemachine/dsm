@@ -169,6 +169,73 @@ Added during hardening (beyond the original register):
 11. ☐ **Bearer-asset `LOCKED_RECOVERY` + dBTC reconciliation** (P5) and **per-asset
     spend-open chokepoint** — the capsule is a continuity hint, never a balance oracle.
 
+12. ✅/☐ **Recovery-authority anchor lifecycle (§0.5 step 7).** ✅ create
+    (`RecoverySDK::build_authority_anchor`, device key re-derived via
+    `init::derive_device_signing_keypair`) → publish to the dedicated bind-once
+    endpoint (`storage_io::put_to_all_nodes_path`, offline-first trigger on
+    `recovery.enable`) → **server bind-once per genesis** (`dsm_storage_node`
+    `recovery_authority_anchors` table + `/api/v2/recovery/authority-anchor/{genesis}`,
+    first-write-wins / idempotent-identical / 409-on-conflict, both sqlite+pg) →
+    **quorum-authenticated fetch+verify** (`RecoverySDK::fetch_and_verify_authority_anchor`
+    composing the device-tree quorum signing pubkey + `anchor.verify`). All
+    fail-closed; consuming side still inert. ☐ go-live wiring.
+
+13. ☐ **Gate-set discovery — BLOCKED on a PDSMT posting prerequisite (R4-critical).**
+    The R4 rule (CONFIRMED): the recovery gate-set is **A_old's online-posted,
+    genesis-authenticated, enumerable, value-capable Per-Device SMT leaf set at the
+    recovery snapshot** — NOT the capsule hints, NOT the contacts DB, NOT the
+    responder set, NOT a per-counterparty scan (those are *evidence* authority per
+    member, never *enumeration* authority), and NOT a separate relationship-set
+    object. The posted PDSMT today (`dsm_storage_node/.../identity/tips.rs`) cannot
+    satisfy this: the head is an unsigned root, leaves are individually hash-keyed +
+    encrypted (**not enumerable**), a leaf carries only a tip hash (**not
+    classifiable** — `operation` lives in unposted `RelationshipChainState`), and the
+    root is **not genesis-authenticated**. **Prerequisite (next-session design/build) —
+    Authenticated Enumerable PDSMT Posting** (extend the existing tips/PDSMT layer,
+    do NOT add a parallel object).
+
+    **Dual keying (MANDATORY) — device for state location, genesis for authority.**
+    The Per-Device SMT belongs to a specific device and `rel_key` is device-pair-derived
+    (`H("DSM/smt-key\0" || min(DevID_A,DevID_C) || max(DevID_A,DevID_C))`), so the
+    endpoint and records are **addressed/enumerated by `owner_device_id = A_old`** —
+    NOT by genesis alone (genesis-only blurs multiple devices under one user and breaks
+    the SMT-key model). But every signed head/leaf record MUST ALSO carry
+    `genesis_id = G_A`, because recovery authority and anti-shrink trust are
+    genesis-scoped: a device/PDSMT is only trusted once proven to belong to the
+    recovering identity domain. Rule: **device ID selects the PDSMT; genesis ID
+    authenticates that the device/PDSMT belongs to G_A; the signature authority must
+    chain back to `genesis_id`.** Do NOT replace `device_id` with `genesis_id`, and do
+    NOT omit `genesis_id`.
+
+    - **Posted head** (`PostedPDSMTHead`): `{ genesis_id: G_A, device_id: A_old,
+      pd_smt_root: r_A_old, leaf_index_root: R_index, snapshot_id,
+      authority_pubkey_commit_or_id, signature }`. The signature is valid iff it
+      verifies under a recovery/genesis authority that is itself anchored to G_A
+      (§0.5 step 5 anchor) **AND** `A_old` is proven included under G_A's Device Tree
+      (device-tree quorum / inclusion).
+    - **Posted leaf/index records** (`PostedPDSMTLeafRecord`): `{ genesis_id: G_A,
+      owner_device_id: A_old, rel_key, counterparty_device_id: C,
+      counterparty_genesis_id (optional but recommended if known/proven), current_tip,
+      value_capable, value_capable_reason, inclusion_proof_to_pd_smt_root,
+      inclusion_proof_to_leaf_index_root }`. The `value_capable` flag MUST be part of
+      the signed/committed record — server metadata is NOT authoritative. Minimum
+      identity fields: `genesis_id = G_A`, `owner_device_id = A_old`,
+      `counterparty_device_id = C`. (Counterparty genesis alone cannot compute `rel_key`
+      — it is device-pair based — but is useful authenticated context once C's device
+      membership under its own genesis is verified.)
+    - **Enumeration endpoint**: `GET /tips/{owner_device_id}/leaves` returns all posted
+      leaf/index records for the snapshot (availability only; client verifies every
+      record against the signed head: inclusion to `pd_smt_root`/`leaf_index_root`,
+      and head signature chaining to G_A).
+    - **Gate-set construction**: fetch the signed head for `owner_device_id = A_old` →
+      verify head signature chains to G_A AND A_old ∈ G_A Device Tree → enumerate
+      leaves → verify each leaf's inclusion/root consistency → filter
+      `value_capable=true` → freeze into `gate_set_commit`/`contact_set_commit` →
+      require `CrossRelationshipSuccessionEvidence` for every member (extra responders
+      not in the frozen leaf set do not expand the gate). Also still needed: the
+      **recovery bundle** format (carries `K_A_pub` + tombstone + succession + per-C
+      evidence) the activation flow consumes.
+
 ### 0.3 Sibling-spec overlap (cross-reference, not rewritten here)
 
 - `whitepaper.instructions.md` — recovery ring, capsule AAD (§13/§16.10), cert chains (§11.1).
