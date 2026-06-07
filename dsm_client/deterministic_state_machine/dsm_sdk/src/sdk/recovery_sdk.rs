@@ -482,62 +482,41 @@ impl RecoverySDK {
     /// (P2 T2.2/T2.3) widens this set; until that lands, the seal is validated
     /// against the capsule set.
     pub fn verify_and_record_activation(
-        capsule: &RecoveryCapsule,
         seal: &dsm::recovery::RecoveryActivationSeal,
-        acks: &[dsm::recovery::ContactTombstoneAck],
+        gate_set: &std::collections::BTreeSet<[u8; 32]>,
+        evidence: &std::collections::BTreeMap<
+            [u8; 32],
+            dsm::recovery::CrossRelationshipSuccessionEvidence,
+        >,
+        recovery_authority_pubkey: &[u8],
     ) -> Result<(), DsmError> {
-        use std::collections::{BTreeMap, BTreeSet};
+        // §0.5 evidence model: validate that every gate-set counterparty's posted
+        // state proves the cross-relationship succession — retire (A_old,C), establish
+        // a new bilateral (A_new,C) carrying forward the old frontier (structural
+        // validation; unit-tested). Recovery authority is the counterparties' posted
+        // state, not a signed ack and not the local contacts DB.
+        dsm::recovery::validate_recovery_activation(
+            seal,
+            gate_set,
+            evidence,
+            recovery_authority_pubkey,
+        )?;
 
-        let mut gate_set: BTreeSet<[u8; 32]> = BTreeSet::new();
-        let mut floor: BTreeMap<[u8; 32], dsm::recovery::FloorTip> = BTreeMap::new();
-        for (id_str, (height, tip)) in &capsule.counterparty_tips {
-            let id_bytes = crate::util::text_id::decode_base32_crockford(id_str).ok_or_else(|| {
-                DsmError::InvalidState("capsule counterparty id is not valid base32".into())
-            })?;
-            let id: [u8; 32] = id_bytes.as_slice().try_into().map_err(|_| {
-                DsmError::InvalidState("capsule counterparty id is not 32 bytes".into())
-            })?;
-            let tip32: [u8; 32] = tip.as_slice().try_into().map_err(|_| {
-                DsmError::InvalidState("capsule counterparty tip is not 32 bytes".into())
-            })?;
-            gate_set.insert(id);
-            floor.insert(id, dsm::recovery::FloorTip { height: *height, tip: tip32 });
-        }
-
-        let mut pubkeys: BTreeMap<[u8; 32], Vec<u8>> = BTreeMap::new();
-        for c in crate::storage::client_db::get_all_contacts()
-            .map_err(|e| DsmError::InvalidState(format!("read contacts failed: {e}")))?
-        {
-            if c.device_id.len() == 32 && !c.public_key.is_empty() {
-                if let Ok(id) = <[u8; 32]>::try_from(c.device_id.as_slice()) {
-                    pubkeys.insert(id, c.public_key);
-                }
-            }
-        }
-
-        // Structural validation still runs (it is unit-tested and useful), but...
-        dsm::recovery::validate_activation_seal(seal, acks, &gate_set, &floor, &pubkeys)?;
-
-        // FAIL-CLOSED (review finding, double-spend lens): recording activation is
-        // DISABLED until its trust inputs are anchored. Today the counterparty
-        // public keys come from the local, mutable contacts DB and the gate-set is
-        // the bare capsule set — neither is trust-anchored, so a holder of the
-        // device + mnemonic could inject attacker-controlled contact pubkeys and
-        // forge acks that pass `validate_activation_seal`. Recording activation
-        // (the sole spend-unlock for a recovered successor) MUST wait for:
-        //   (R4) the non-shrinkable gate-set union (capsule ∪ publicly-discoverable
-        //        contact anchors), and
-        //   (pubkey anchoring) counterparty keys bound to genesis / a prior sealed
-        //        device-tree commitment rather than the local contacts table,
-        //   (freshness) a capsule-index recency check.
-        // Until then this function refuses to flip `recovery_activated`. The
-        // recovered-successor freeze (`set_recovered_successor`) MUST likewise stay
-        // unwired until this lands, so no live spend path depends on this unlock.
-        let _ = gate_set;
+        // FAIL-CLOSED: recording activation (the SOLE spend-unlock for a recovered
+        // successor) stays disabled until the inputs are produced by a trusted path:
+        //   - each `counterparty_root` must be GENESIS-AUTHENTICATED (DevTreeProof /
+        //     signature on the posted root), not taken on faith;
+        //   - `gate_set` must be the ONLINE-POSTED value-capable relationship set
+        //     under the genesis (fetched + verified), not the local capsule;
+        //   - the migration op must reference the specific mnemonic-authorized
+        //     tombstone for `A_old`.
+        // Until those land, `recovery_activated` is not flipped and
+        // `set_recovered_successor(true)` must stay unwired — so no live spend path
+        // depends on this unlock (spec §0.5).
         Err(DsmError::InvalidState(
-            "recovery activation recording disabled: gate-set and counterparty \
-             pubkeys are not yet trust-anchored (R4 + pubkey anchoring + capsule \
-             freshness pending); refusing to unlock a recovered successor"
+            "recovery activation recording disabled: per-counterparty posted state is \
+             not yet genesis-authenticated and the online-posted gate-set is not yet \
+             wired (spec §0.5); refusing to unlock a recovered successor"
                 .into(),
         ))
     }

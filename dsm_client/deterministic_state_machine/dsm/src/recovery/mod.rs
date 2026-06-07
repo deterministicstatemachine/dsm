@@ -13,12 +13,12 @@ pub mod succession_binding;
 pub mod tombstone;
 
 pub use activation::{
-    compute_ack_root, validate_activation_seal, ContactTombstoneAck, FloorTip,
-    RecoveryActivationSeal,
+    compute_evidence_root, validate_recovery_activation, RecoveryActivationSeal,
 };
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
-    verify_endpoint_migration_chain, verify_succession_binding, RelationshipFloor,
+    compute_carry_forward_commitment, verify_forward_ancestry,
+    CrossRelationshipSuccessionEvidence,
 };
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
