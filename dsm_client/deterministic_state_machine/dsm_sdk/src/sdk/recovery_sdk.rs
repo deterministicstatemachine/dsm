@@ -406,6 +406,47 @@ impl RecoverySDK {
         })
     }
 
+    /// Deterministic storage key for a device's recovery-authority anchor, keyed by
+    /// (genesis, device) so any peer can fetch it by identity. Base32 Crockford (no hex).
+    pub fn authority_anchor_storage_key(genesis_id: &[u8; 32], device_id: &[u8; 32]) -> String {
+        format!(
+            "recovery/authority-anchor/v1/{}/{}",
+            crate::util::text_id::encode_base32_crockford(genesis_id),
+            crate::util::text_id::encode_base32_crockford(device_id),
+        )
+    }
+
+    /// Build THIS device's recovery-authority anchor and publish it to the storage
+    /// fleet (availability-only) under its deterministic (genesis, device) key. Returns
+    /// the object address. Idempotent in content: the same device + mnemonic always
+    /// produces the same anchor bytes.
+    ///
+    /// NOTE: bind-once (first-anchor-wins per genesis) is enforced at the storage-node
+    /// server layer (§0.5 step 7, separate crate); this publish does not by itself
+    /// prevent a later overwrite. The consuming side (`verify_and_record_activation`)
+    /// stays fail-closed until that enforcement lands.
+    pub async fn publish_authority_anchor() -> Result<String, DsmError> {
+        let anchor = Self::build_authority_anchor()?;
+        let key = Self::authority_anchor_storage_key(&anchor.genesis_id, &anchor.device_id);
+        crate::sdk::storage_io::put_bytes(&key, &anchor.to_bytes()).await
+    }
+
+    /// Fetch a device's recovery-authority anchor from storage by (genesis, device).
+    ///
+    /// Availability-only fetch + protobuf decode; it does NOT authenticate the anchor.
+    /// The caller MUST verify it client-side via [`dsm::recovery::RecoveryAuthorityAnchor::verify`]
+    /// using the device's genesis-authenticated signing pubkey (device-tree quorum) and
+    /// the candidate authority pubkey carried by the recovery bundle (storage = availability;
+    /// verification = client-side).
+    pub async fn fetch_authority_anchor(
+        genesis_id: &[u8; 32],
+        device_id: &[u8; 32],
+    ) -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
+        let key = Self::authority_anchor_storage_key(genesis_id, device_id);
+        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&bytes)
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
@@ -924,6 +965,25 @@ mod tests {
     fn test_recovery_sdk_creation() {
         let _sdk = RecoverySDK::new();
         // SDK instance created successfully
+    }
+
+    #[test]
+    fn authority_anchor_storage_key_is_deterministic_identity_keyed_crockford() {
+        let g = [0x6E; 32];
+        let d = [0xD0; 32];
+        let k = RecoverySDK::authority_anchor_storage_key(&g, &d);
+        // Deterministic + stable prefix.
+        assert_eq!(k, RecoverySDK::authority_anchor_storage_key(&g, &d));
+        assert!(k.starts_with("recovery/authority-anchor/v1/"));
+        // Distinct identities → distinct keys.
+        assert_ne!(k, RecoverySDK::authority_anchor_storage_key(&[0x6F; 32], &d));
+        assert_ne!(k, RecoverySDK::authority_anchor_storage_key(&g, &[0xD1; 32]));
+        // Base32 Crockford only — no '0x' prefix (repo invariant: no hex encoding).
+        let suffix = k.trim_start_matches("recovery/authority-anchor/v1/");
+        assert!(!suffix.contains("0x"));
+        assert!(suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '/'));
     }
 
     #[test]
