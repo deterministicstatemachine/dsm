@@ -406,32 +406,50 @@ impl RecoverySDK {
         })
     }
 
-    /// Deterministic storage key for a device's recovery-authority anchor, keyed by
-    /// (genesis, device) so any peer can fetch it by identity. Base32 Crockford (no hex).
-    pub fn authority_anchor_storage_key(genesis_id: &[u8; 32], device_id: &[u8; 32]) -> String {
+    /// The dedicated, genesis-keyed bind-once endpoint path for a recovery-authority
+    /// anchor (matches the storage-node route `/api/v2/recovery/authority-anchor/{genesis}`).
+    /// Keyed by genesis ONLY — the device is carried inside the anchor — so the
+    /// storage-node single-assignment store binds one authority per genesis. Base32
+    /// Crockford (no hex). Returned without a leading slash for the fan-out helpers.
+    pub fn authority_anchor_endpoint_path(genesis_id: &[u8; 32]) -> String {
         format!(
-            "recovery/authority-anchor/v1/{}/{}",
+            "api/v2/recovery/authority-anchor/{}",
             crate::util::text_id::encode_base32_crockford(genesis_id),
-            crate::util::text_id::encode_base32_crockford(device_id),
         )
     }
 
-    /// Build THIS device's recovery-authority anchor and publish it to the storage
-    /// fleet (availability-only) under its deterministic (genesis, device) key. Returns
-    /// the object address. Idempotent in content: the same device + mnemonic always
-    /// produces the same anchor bytes.
+    /// Build THIS device's recovery-authority anchor and publish it to the dedicated
+    /// bind-once endpoint on every storage node. Returns the number of nodes that
+    /// accepted the write (2xx).
     ///
-    /// NOTE: bind-once (first-anchor-wins per genesis) is enforced at the storage-node
-    /// server layer (§0.5 step 7, separate crate); this publish does not by itself
-    /// prevent a later overwrite. The consuming side (`verify_and_record_activation`)
-    /// stays fail-closed until that enforcement lands.
-    pub async fn publish_authority_anchor() -> Result<String, DsmError> {
+    /// Bind-once is enforced server-side per genesis: the FIRST anchor wins; an
+    /// identical replay is idempotent (2xx); a DIFFERENT anchor for the same genesis
+    /// is rejected 409. A 409 here therefore means a conflicting authority is already
+    /// bound for this genesis — this call returns an error rather than masking it.
+    pub async fn publish_authority_anchor() -> Result<usize, DsmError> {
         let anchor = Self::build_authority_anchor()?;
-        let key = Self::authority_anchor_storage_key(&anchor.genesis_id, &anchor.device_id);
-        crate::sdk::storage_io::put_bytes(&key, &anchor.to_bytes()).await
+        let path = Self::authority_anchor_endpoint_path(&anchor.genesis_id);
+        let r = crate::sdk::storage_io::put_to_all_nodes_path(&path, &anchor.to_bytes()).await?;
+        if r.conflict > 0 {
+            return Err(DsmError::InvalidState(format!(
+                "recovery anchor publish: {}/{} nodes report a DIFFERENT authority anchor already \
+                 bound for this genesis (bind-once conflict); refusing to treat as published",
+                r.conflict, r.total
+            )));
+        }
+        if r.ok == 0 {
+            return Err(DsmError::storage(
+                format!(
+                    "recovery anchor publish: no node accepted the write ({} failed of {})",
+                    r.failed, r.total
+                ),
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(r.ok)
     }
 
-    /// Fetch a device's recovery-authority anchor from storage by (genesis, device).
+    /// Fetch a device's recovery-authority anchor from the dedicated endpoint by genesis.
     ///
     /// Availability-only fetch + protobuf decode; it does NOT authenticate the anchor.
     /// The caller MUST verify it client-side via [`dsm::recovery::RecoveryAuthorityAnchor::verify`]
@@ -440,10 +458,9 @@ impl RecoverySDK {
     /// verification = client-side).
     pub async fn fetch_authority_anchor(
         genesis_id: &[u8; 32],
-        device_id: &[u8; 32],
     ) -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
-        let key = Self::authority_anchor_storage_key(genesis_id, device_id);
-        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        let path = Self::authority_anchor_endpoint_path(genesis_id);
+        let bytes = crate::sdk::storage_io::get_from_any_node_path(&path).await?;
         dsm::recovery::RecoveryAuthorityAnchor::from_bytes(&bytes)
     }
 
@@ -968,22 +985,19 @@ mod tests {
     }
 
     #[test]
-    fn authority_anchor_storage_key_is_deterministic_identity_keyed_crockford() {
+    fn authority_anchor_endpoint_path_is_deterministic_genesis_keyed_crockford() {
         let g = [0x6E; 32];
-        let d = [0xD0; 32];
-        let k = RecoverySDK::authority_anchor_storage_key(&g, &d);
-        // Deterministic + stable prefix.
-        assert_eq!(k, RecoverySDK::authority_anchor_storage_key(&g, &d));
-        assert!(k.starts_with("recovery/authority-anchor/v1/"));
-        // Distinct identities → distinct keys.
-        assert_ne!(k, RecoverySDK::authority_anchor_storage_key(&[0x6F; 32], &d));
-        assert_ne!(k, RecoverySDK::authority_anchor_storage_key(&g, &[0xD1; 32]));
+        let p = RecoverySDK::authority_anchor_endpoint_path(&g);
+        // Deterministic + stable route prefix, NO leading slash (fan-out helpers join it).
+        assert_eq!(p, RecoverySDK::authority_anchor_endpoint_path(&g));
+        assert!(p.starts_with("api/v2/recovery/authority-anchor/"));
+        assert!(!p.starts_with('/'));
+        // Keyed by genesis only (one authority per genesis — matches server bind-once).
+        assert_ne!(p, RecoverySDK::authority_anchor_endpoint_path(&[0x6F; 32]));
         // Base32 Crockford only — no '0x' prefix (repo invariant: no hex encoding).
-        let suffix = k.trim_start_matches("recovery/authority-anchor/v1/");
+        let suffix = p.trim_start_matches("api/v2/recovery/authority-anchor/");
         assert!(!suffix.contains("0x"));
-        assert!(suffix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '/'));
+        assert!(suffix.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]

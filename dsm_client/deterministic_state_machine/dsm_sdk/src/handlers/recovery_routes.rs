@@ -132,6 +132,33 @@ impl AppRouterImpl {
                     return err(format!("recovery.enable failed: {e}"));
                 }
 
+                // Best-effort: publish the genesis-anchored recovery-authority anchor
+                // (§0.5) so counterparties can later authenticate this device's
+                // tombstone/succession. OFFLINE-FIRST — spawned detached so it NEVER
+                // blocks enable; if the device is offline (or a conflicting anchor is
+                // already bound) it is logged and left for a later online retry.
+                // Bind-once is enforced server-side per genesis, so a re-publish of the
+                // same anchor is idempotent.
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async {
+                        match crate::sdk::recovery_sdk::RecoverySDK::publish_authority_anchor().await
+                        {
+                            Ok(n) => log::info!(
+                                "[RECOVERY] published recovery-authority anchor to {n} node(s)"
+                            ),
+                            Err(e) => log::warn!(
+                                "[RECOVERY] recovery-authority anchor publish deferred \
+                                 (best-effort, will retry when online): {e}"
+                            ),
+                        }
+                    });
+                } else {
+                    log::warn!(
+                        "[RECOVERY] no async runtime to publish recovery-authority anchor; \
+                         deferring to a later online sync"
+                    );
+                }
+
                 // Create first capsule immediately
                 match crate::sdk::recovery_sdk::RecoverySDK::create_capsule_from_current_state(
                     &mnemonic,

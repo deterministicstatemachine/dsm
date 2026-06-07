@@ -18,7 +18,9 @@
 //! return raw bytes; authentication of the CONTENT (signatures, genesis/device-tree
 //! proofs) is the caller's responsibility.
 
-use crate::sdk::storage_node_sdk::{StorageAuthContext, StorageNodeConfig, StorageNodeSDK};
+use crate::sdk::storage_node_sdk::{
+    build_ca_aware_client, StorageAuthContext, StorageNodeConfig, StorageNodeSDK,
+};
 use dsm::types::error::DsmError;
 use dsm::types::proto as generated;
 
@@ -177,4 +179,105 @@ pub(crate) async fn list_objects(
             .collect(),
         next_cursor: response.next_cursor,
     })
+}
+
+/// Outcome of a fan-out PUT to a custom (non-object-store) endpoint path across
+/// every configured node. DSM storage nodes are independent mirrors, so a write
+/// must reach each one; `conflict` counts HTTP 409 (single-assignment rejection)
+/// separately from `failed` (network / other non-2xx) so the caller can tell
+/// "a different value is already bound" apart from "the node was unreachable".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PathPutFanout {
+    pub ok: usize,
+    pub conflict: usize,
+    pub failed: usize,
+    pub total: usize,
+}
+
+/// PUT `payload` to `{node}/{path}` on every configured node (no per-node auth —
+/// these endpoints are public/rate-limited, like the device-tree root). `path`
+/// is the endpoint path WITHOUT a leading slash, e.g.
+/// `api/v2/recovery/authority-anchor/{genesis_b32}`.
+pub(crate) async fn put_to_all_nodes_path(
+    path: &str,
+    payload: &[u8],
+) -> Result<PathPutFanout, DsmError> {
+    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
+        DsmError::storage(
+            format!("load storage node config: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let client = build_ca_aware_client();
+    let path = path.trim_start_matches('/');
+    let mut r = PathPutFanout::default();
+    for node_url in &config.node_urls {
+        let trimmed = node_url.trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        r.total += 1;
+        let url = format!("{trimmed}/{path}");
+        match client
+            .put(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(payload.to_vec())
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    r.ok += 1;
+                } else if status == reqwest::StatusCode::CONFLICT {
+                    r.conflict += 1;
+                    log::warn!("put_to_all_nodes_path: {trimmed} returned 409 Conflict for {path}");
+                } else {
+                    r.failed += 1;
+                    log::warn!(
+                        "put_to_all_nodes_path: {trimmed} returned HTTP {} for {path}",
+                        status.as_u16()
+                    );
+                }
+            }
+            Err(e) => {
+                r.failed += 1;
+                log::warn!("put_to_all_nodes_path: network error against {trimmed}: {e}");
+            }
+        }
+    }
+    Ok(r)
+}
+
+/// GET `{node}/{path}` from the configured nodes, returning the first 2xx body
+/// (failover). `path` is the endpoint path WITHOUT a leading slash.
+pub(crate) async fn get_from_any_node_path(path: &str) -> Result<Vec<u8>, DsmError> {
+    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
+        DsmError::storage(
+            format!("load storage node config: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let client = build_ca_aware_client();
+    let path = path.trim_start_matches('/');
+    let mut last_err = String::from("no nodes configured");
+    for node_url in &config.node_urls {
+        let trimmed = node_url.trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let url = format!("{trimmed}/{path}");
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(b) => return Ok(b.to_vec()),
+                Err(e) => last_err = format!("read body from {trimmed}: {e}"),
+            },
+            Ok(resp) => last_err = format!("{trimmed} returned HTTP {}", resp.status().as_u16()),
+            Err(e) => last_err = format!("network error against {trimmed}: {e}"),
+        }
+    }
+    Err(DsmError::storage(
+        format!("get_from_any_node_path({path}) failed on all nodes: {last_err}"),
+        None::<std::io::Error>,
+    ))
 }
