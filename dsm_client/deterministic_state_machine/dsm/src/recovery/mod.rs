@@ -9,6 +9,7 @@
 pub mod activation;
 pub mod authority_anchor;
 pub mod capsule;
+pub mod gate_set;
 pub mod pdsmt_posting;
 pub mod rollup;
 pub mod succession_binding;
@@ -20,6 +21,7 @@ pub use activation::{
 pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
+pub use gate_set::{build_gate_set, CounterpartyValueWitness, FrozenGateSet};
 pub use pdsmt_posting::{verify_head_with_leaves, PostedPdsmtHead, PostedPdsmtLeafRecord};
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
