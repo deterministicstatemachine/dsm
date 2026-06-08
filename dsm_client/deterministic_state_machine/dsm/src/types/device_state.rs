@@ -507,6 +507,19 @@ impl DeviceState {
         *self.smt.root()
     }
 
+    /// Per-Device SMT inclusion proof for a relationship leaf (`rel_key → current chain
+    /// tip`) against [`Self::root`]. Used by the recovery PDSMT head builder to attest
+    /// each posted leaf. Generated from the live SMT (which may also hold vault leaves),
+    /// so the proof recomputes the true `root()`.
+    pub fn rel_inclusion_proof(
+        &self,
+        rel_key: &[u8; 32],
+    ) -> Result<crate::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
+        self.smt.get_inclusion_proof(rel_key, 256).map_err(|e| {
+            DsmError::invalid_operation(format!("rel_inclusion_proof: {e}"))
+        })
+    }
+
     /// Stash a legacy `State.hash` as a verification anchor. Callers that
     /// hold a legacy State and want `legacy_anchor()` to return its hash
     /// (for hash-adjacency verification) use this. Strictly compat path —

@@ -24,6 +24,8 @@ pub const TAG_DSM_RECOVERY_AUTHORITY_ANCHOR: &str = "DSM/recovery/authority-anch
 pub const TAG_DSM_PDSMT_HEAD: &str = "DSM/recovery/pdsmt-head/v1";
 /// Domain tag for a posted PDSMT leaf record's committed digest (leaf-index leaf value, §0.5 gap 13).
 pub const TAG_DSM_PDSMT_LEAF: &str = "DSM/recovery/pdsmt-leaf/v1";
+/// Domain tag for the posted PDSMT head snapshot_id (§0.5 gap 13).
+pub const TAG_DSM_PDSMT_SNAPSHOT: &str = "DSM/recovery/pdsmt-snapshot/v1";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";

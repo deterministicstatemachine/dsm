@@ -2685,6 +2685,12 @@ message PostedPdsmtLeafRecordV1 {
   bytes            inclusion_proof_to_leaf_index_root = 10 [(dsm_max_len)=65535];
 }
 
+// The enumerable leaf set posted alongside a PDSMT head (availability-only; the head's
+// signed `leaf_index_root` is the authority — a verifier checks every leaf against it).
+message PostedPdsmtLeafSetV1 {
+  repeated PostedPdsmtLeafRecordV1 leaves = 1;
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

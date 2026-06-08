@@ -573,6 +573,94 @@ impl RecoverySDK {
         dsm::recovery::PostedPdsmtHead::from_bytes(&bytes)
     }
 
+    /// Storage key for a device's posted PDSMT leaf set at a given head number (generic
+    /// content-addressed object store; availability-only — the head's signed
+    /// `leaf_index_root` is the authority). Base32 Crockford (no hex).
+    pub fn pdsmt_leaves_storage_key(
+        genesis_id: &[u8; 32],
+        device_id: &[u8; 32],
+        head_number: u64,
+    ) -> String {
+        format!(
+            "recovery/pdsmt-leaves/v1/{}/{}/{}",
+            crate::util::text_id::encode_base32_crockford(genesis_id),
+            crate::util::text_id::encode_base32_crockford(device_id),
+            head_number,
+        )
+    }
+
+    /// Build THIS device's PDSMT snapshot (head + enumerable leaf set) from the live
+    /// device head, chain it onto the append-only head chain, and publish both: the leaf
+    /// set to the generic object store (availability) and the signed head to the
+    /// head-chain endpoint (append-only, R4 layer 1). Returns the accepted-node count for
+    /// the head. Fail-closed: requires identity, a cached `K_A`, and a live device head;
+    /// a head-chain conflict errors (re-fetch the tip and re-chain).
+    pub async fn build_and_publish_pdsmt_head() -> Result<usize, DsmError> {
+        let device_id =
+            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let device_state = crate::storage::client_db::load_bcr_device_head(&device_id)
+            .map_err(|e| {
+                DsmError::storage(format!("load device head: {e}"), None::<std::io::Error>)
+            })?
+            .ok_or_else(|| {
+                DsmError::InvalidState(
+                    "build_and_publish_pdsmt_head: no device head to publish".into(),
+                )
+            })?;
+
+        let (authority_pk, authority_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
+            DsmError::InvalidState(
+                "build_and_publish_pdsmt_head: no cached recovery-authority keypair (cache the \
+                 mnemonic first)"
+                    .into(),
+            )
+        })?;
+
+        // Chain position: extend the latest valid head, or start the genesis head.
+        let (parent_head_hash, head_number) = match Self::fetch_pdsmt_head_latest(&device_id).await {
+            Ok(prev) => (prev.head_hash(), prev.head_number.saturating_add(1)),
+            Err(_) => (dsm::recovery::GENESIS_PARENT_HEAD_HASH, 0),
+        };
+
+        let cp_genesis = |cp: &[u8; 32]| -> Option<[u8; 32]> {
+            crate::storage::client_db::get_contact_by_device_id(cp)
+                .ok()
+                .flatten()
+                .and_then(|c| <[u8; 32]>::try_from(c.genesis_hash.as_slice()).ok())
+        };
+
+        let (head, leaves) = dsm::recovery::build_pdsmt_snapshot(
+            &device_state,
+            &authority_pk,
+            &authority_sk,
+            parent_head_hash,
+            head_number,
+            cp_genesis,
+        )?;
+
+        // Publish the enumerable leaf set FIRST (availability), so the head's committed
+        // leaf_index_root is backed by fetchable leaves once the head is accepted.
+        let leaves_key = Self::pdsmt_leaves_storage_key(&head.genesis_id, &device_id, head_number);
+        crate::sdk::storage_io::put_bytes(&leaves_key, &dsm::recovery::encode_leaf_set(&leaves))
+            .await?;
+
+        // Publish the signed head onto the append-only chain (errors on chain conflict).
+        Self::publish_pdsmt_head(&head).await
+    }
+
+    /// Fetch a device's posted PDSMT leaf set at a head number (availability-only fetch +
+    /// decode). The caller MUST verify each leaf against the head's signed
+    /// `leaf_index_root` via `verify_head_with_leaves` (storage = availability).
+    pub async fn fetch_pdsmt_leaves(
+        genesis_id: &[u8; 32],
+        device_id: &[u8; 32],
+        head_number: u64,
+    ) -> Result<Vec<dsm::recovery::PostedPdsmtLeafRecord>, DsmError> {
+        let key = Self::pdsmt_leaves_storage_key(genesis_id, device_id, head_number);
+        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        dsm::recovery::decode_leaf_set(&bytes)
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {

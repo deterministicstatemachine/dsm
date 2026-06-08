@@ -22,7 +22,10 @@ pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
 pub use gate_set::{build_gate_set, CounterpartyValueWitness, FrozenGateSet};
-pub use pdsmt_posting::{verify_head_with_leaves, PostedPdsmtHead, PostedPdsmtLeafRecord};
+pub use pdsmt_posting::{
+    build_pdsmt_snapshot, decode_leaf_set, encode_leaf_set, verify_head_with_leaves,
+    PostedPdsmtHead, PostedPdsmtLeafRecord, GENESIS_PARENT_HEAD_HASH,
+};
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
     compute_carry_forward_commitment, verify_forward_ancestry,

@@ -37,12 +37,14 @@
 //! design point recorded in §0.2 gap 13 and is NOT resolved by this module.
 
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::crypto::sphincs::sphincs_verify;
+use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
 use crate::recovery::authority_anchor::compute_authority_pubkey_commit;
 use crate::types::device_state::ValueCapability;
 use crate::types::error::DsmError;
-use crate::types::proto::{Message as _, PostedPdsmtHeadV1, PostedPdsmtLeafRecordV1};
+use crate::types::proto::{
+    Message as _, PostedPdsmtHeadV1, PostedPdsmtLeafRecordV1, PostedPdsmtLeafSetV1,
+};
 
 const PDSMT_HEAD_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_PDSMT_HEAD;
 const PDSMT_LEAF_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_PDSMT_LEAF;
@@ -277,7 +279,7 @@ impl PostedPdsmtLeafRecord {
         Ok(())
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(crate) fn to_proto(&self) -> PostedPdsmtLeafRecordV1 {
         PostedPdsmtLeafRecordV1 {
             genesis_id: self.genesis_id.to_vec(),
             owner_device_id: self.owner_device_id.to_vec(),
@@ -293,18 +295,9 @@ impl PostedPdsmtLeafRecord {
             inclusion_proof_to_pd_smt_root: self.inclusion_proof_to_pd_smt_root.clone(),
             inclusion_proof_to_leaf_index_root: self.inclusion_proof_to_leaf_index_root.clone(),
         }
-        .encode_to_vec()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
-        let p = PostedPdsmtLeafRecordV1::decode(bytes).map_err(|e| {
-            DsmError::serialization_error(
-                format!("PostedPdsmtLeafRecord::from_bytes: {e}"),
-                "PostedPdsmtLeafRecord",
-                None::<String>,
-                Some(e),
-            )
-        })?;
+    pub(crate) fn from_proto(p: PostedPdsmtLeafRecordV1) -> Result<Self, DsmError> {
         let counterparty_genesis_id = if p.counterparty_genesis_id.is_empty() {
             None
         } else {
@@ -328,6 +321,22 @@ impl PostedPdsmtLeafRecord {
             inclusion_proof_to_pd_smt_root: p.inclusion_proof_to_pd_smt_root,
             inclusion_proof_to_leaf_index_root: p.inclusion_proof_to_leaf_index_root,
         })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_proto().encode_to_vec()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        let p = PostedPdsmtLeafRecordV1::decode(bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("PostedPdsmtLeafRecord::from_bytes: {e}"),
+                "PostedPdsmtLeafRecord",
+                None::<String>,
+                Some(e),
+            )
+        })?;
+        Self::from_proto(p)
     }
 }
 
@@ -365,6 +374,125 @@ pub fn verify_head_with_leaves(
         leaf.verify_inclusion(&head.pd_smt_root, &head.leaf_index_root)?;
     }
     Ok(())
+}
+
+/// Build a posted PDSMT snapshot (signed head + leaf records) for `device_state`,
+/// signed by the genesis-anchored recovery authority `K_A` (publish-side, R4).
+///
+/// Pure + deterministic: enumerates the device's relationship leaves, carries each
+/// leaf's canonical `value_capability` STRAIGHT from `RelChainTip` (no re-derivation —
+/// the sticky flag is the source of truth), builds the `leaf_index` SMT over
+/// `rel_key → committed_digest`, and attests each leaf with inclusion proofs against
+/// both `pd_smt_root` (the live device SMT, which may also hold vault leaves) and
+/// `leaf_index_root`. The result passes [`verify_head_with_leaves`] under
+/// `authority_pubkey` and feeds `gate_set::build_gate_set`.
+///
+/// `parent_head_hash`/`head_number` chain this head onto the device's append-only head
+/// chain (`GENESIS_PARENT_HEAD_HASH`/`0` for the first). `counterparty_genesis` supplies
+/// `C`'s genesis when locally known (else `None`).
+pub fn build_pdsmt_snapshot(
+    device_state: &crate::types::device_state::DeviceState,
+    authority_pubkey: &[u8],
+    authority_sk: &[u8],
+    parent_head_hash: [u8; 32],
+    head_number: u64,
+    counterparty_genesis: impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+) -> Result<(PostedPdsmtHead, Vec<PostedPdsmtLeafRecord>), DsmError> {
+    let genesis_id = device_state.genesis_digest();
+    let owner_device_id = device_state.devid();
+    let pd_smt_root = device_state.root();
+
+    // 1. Build leaf records (proofs filled once both roots exist) + the leaf index.
+    let rel_keys = device_state.relationship_keys();
+    let mut index = SparseMerkleTree::new(rel_keys.len().max(1));
+    let mut leaves: Vec<PostedPdsmtLeafRecord> = Vec::with_capacity(rel_keys.len());
+    for rel_key in &rel_keys {
+        let tip = device_state.rel_chain_tip(rel_key).ok_or_else(|| {
+            DsmError::verification("pdsmt snapshot: enumerated rel_key has no tip")
+        })?;
+        let value_capability = tip.value_capability;
+        let value_capability_reason = match value_capability {
+            ValueCapability::Yes => "value-bearing".to_string(),
+            ValueCapability::No => String::new(),
+            ValueCapability::Unknown => "unknown-unbackfilled".to_string(),
+        };
+        let leaf = PostedPdsmtLeafRecord {
+            genesis_id,
+            owner_device_id,
+            rel_key: *rel_key,
+            counterparty_device_id: tip.counterparty_devid,
+            counterparty_genesis_id: counterparty_genesis(&tip.counterparty_devid),
+            current_tip: tip.chain_tip,
+            value_capability,
+            value_capability_reason,
+            inclusion_proof_to_pd_smt_root: Vec::new(),
+            inclusion_proof_to_leaf_index_root: Vec::new(),
+        };
+        index.update_leaf(rel_key, &leaf.committed_digest()).map_err(|e| {
+            DsmError::invalid_operation(format!("pdsmt snapshot: leaf index update: {e}"))
+        })?;
+        leaves.push(leaf);
+    }
+    let leaf_index_root = *index.root();
+
+    // 2. Attach inclusion proofs: rel_key→current_tip against the LIVE device SMT, and
+    //    rel_key→committed_digest against the leaf index.
+    for leaf in &mut leaves {
+        leaf.inclusion_proof_to_pd_smt_root =
+            device_state.rel_inclusion_proof(&leaf.rel_key)?.to_bytes();
+        leaf.inclusion_proof_to_leaf_index_root = index
+            .get_inclusion_proof(&leaf.rel_key, 256)
+            .map_err(|e| {
+                DsmError::invalid_operation(format!("pdsmt snapshot: leaf index proof: {e}"))
+            })?
+            .to_bytes();
+    }
+
+    // 3. Build + sign the head.
+    let snapshot_id = {
+        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_PDSMT_SNAPSHOT);
+        h.update(&pd_smt_root);
+        h.update(&head_number.to_le_bytes());
+        *h.finalize().as_bytes()
+    };
+    let mut head = PostedPdsmtHead {
+        genesis_id,
+        device_id: owner_device_id,
+        pd_smt_root,
+        leaf_index_root,
+        snapshot_id,
+        authority_pubkey_commit: compute_authority_pubkey_commit(authority_pubkey),
+        parent_head_hash,
+        head_number,
+        signature: Vec::new(),
+    };
+    head.signature = sphincs_sign(authority_sk, &head.digest())?;
+    Ok((head, leaves))
+}
+
+/// Serialize an enumerable leaf set to canonical protobuf bytes (availability-only blob;
+/// authority is the head's signed `leaf_index_root`).
+pub fn encode_leaf_set(leaves: &[PostedPdsmtLeafRecord]) -> Vec<u8> {
+    PostedPdsmtLeafSetV1 {
+        leaves: leaves.iter().map(|l| l.to_proto()).collect(),
+    }
+    .encode_to_vec()
+}
+
+/// Deserialize an enumerable leaf set (fail-closed per leaf via `from_proto`).
+pub fn decode_leaf_set(bytes: &[u8]) -> Result<Vec<PostedPdsmtLeafRecord>, DsmError> {
+    let set = PostedPdsmtLeafSetV1::decode(bytes).map_err(|e| {
+        DsmError::serialization_error(
+            format!("PostedPdsmtLeafSet::decode: {e}"),
+            "PostedPdsmtLeafSet",
+            None::<String>,
+            Some(e),
+        )
+    })?;
+    set.leaves
+        .into_iter()
+        .map(PostedPdsmtLeafRecord::from_proto)
+        .collect()
 }
 
 #[cfg(test)]
@@ -563,5 +691,118 @@ mod tests {
         let mut diff_proof = leaf(ValueCapability::Yes);
         diff_proof.inclusion_proof_to_pd_smt_root = vec![9, 9, 9];
         assert_eq!(yes.committed_digest(), diff_proof.committed_digest());
+    }
+
+    #[test]
+    fn leaf_set_codec_round_trips() {
+        let set = vec![
+            leaf(ValueCapability::Yes),
+            {
+                let mut l = leaf(ValueCapability::No);
+                l.rel_key = [0x56; 32];
+                l.counterparty_genesis_id = None;
+                l
+            },
+            {
+                let mut l = leaf(ValueCapability::Unknown);
+                l.rel_key = [0x57; 32];
+                l
+            },
+        ];
+        let decoded = decode_leaf_set(&encode_leaf_set(&set)).expect("decode leaf set");
+        assert_eq!(decoded, set);
+        // Empty set round-trips too.
+        assert!(decode_leaf_set(&encode_leaf_set(&[])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_pdsmt_snapshot_from_real_device_state_end_to_end() {
+        use crate::core::bilateral_transaction_manager::{
+            compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        use crate::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+        use crate::types::operations::Operation;
+        use crate::types::token_types::Balance;
+
+        let genesis = [0x6E; 32];
+        let owner = [0xA0; 32];
+        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024);
+
+        // A value relationship (Mint → Yes).
+        let c_yes = [0xC1; 32];
+        let rk_yes = compute_smt_key(&owner, &c_yes);
+        let dev = dev
+            .advance(
+                rk_yes,
+                c_yes,
+                Operation::Mint {
+                    amount: Balance::from_state(10, [0u8; 32]),
+                    token_id: b"ERA".to_vec(),
+                    authorized_by: vec![],
+                    proof_of_authorization: vec![],
+                    message: String::new(),
+                },
+                vec![1; 32],
+                None,
+                &[BalanceDelta {
+                    policy_commit: [0xF1; 32],
+                    direction: BalanceDirection::Credit,
+                    amount: 10,
+                }],
+                Some(initial_chain_tip_from_device_ids(&owner, &c_yes)),
+                None,
+            )
+            .expect("value advance")
+            .new_device_state;
+
+        // A non-value relationship (Generic → No).
+        let c_no = [0xC2; 32];
+        let rk_no = compute_smt_key(&owner, &c_no);
+        let dev = dev
+            .advance(
+                rk_no,
+                c_no,
+                Operation::Generic {
+                    operation_type: b"t".to_vec(),
+                    data: vec![],
+                    message: "t".into(),
+                    signature: vec![],
+                },
+                vec![2; 32],
+                None,
+                &[],
+                Some(initial_chain_tip_from_device_ids(&owner, &c_no)),
+                None,
+            )
+            .expect("non-value advance")
+            .new_device_state;
+
+        let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).unwrap();
+        let (head, leaves) = build_pdsmt_snapshot(
+            &dev,
+            &kp.public_key,
+            &kp.secret_key,
+            GENESIS_PARENT_HEAD_HASH,
+            0,
+            |_| None,
+        )
+        .expect("build snapshot");
+
+        // The produced snapshot is self-consistent + signed.
+        verify_head_with_leaves(&head, &kp.public_key, &leaves).expect("verify snapshot");
+        assert_eq!(head.device_id, owner);
+        assert_eq!(head.genesis_id, genesis);
+        assert_eq!(head.pd_smt_root, dev.root());
+        assert!(head.is_genesis_head());
+        assert_eq!(leaves.len(), 2);
+
+        // Gate-set: the value relationship is included, the proven-No one excluded.
+        let gs = crate::recovery::gate_set::build_gate_set(&owner, &head, &kp.public_key, &leaves, &[])
+            .expect("gate set");
+        assert!(gs.members.contains(&c_yes));
+        assert!(!gs.members.contains(&c_no));
+        // The included leaf's rel_key matches the symmetric derivation.
+        assert_eq!(gs.rel_keys.get(&c_yes), Some(&rk_yes));
+        let _ = rk_no;
     }
 }
