@@ -185,10 +185,16 @@ Added during hardening (beyond the original register):
     each posted ad, aggregate, `set_asset_lock("dBTC", …, is_dbtc=true)`; any missing/malformed/
     unverifiable/unknown ad keeps dBTC `LockedRecovery`) + `recovery.reconcileDbtc` route. The
     generic path still REFUSES dBTC (`MissingDbtcFrontierReplay`); dBTC unlocks only through
-    this dedicated path, only for vaults whose posted frontier proves it, never from capsule
-    data. ☐ Fresh-device **authenticated vault enumeration** (empty candidates →
-    `MissingDbtcVaultEnumeration`, dBTC stays `LockedRecovery`) + Bitcoin **SPV/UTXO**
-    re-verification of entry/exit anchors. Go-live for dBTC egress is hard-gated on those.
+    this dedicated path, only for vaults whose Bitcoin backing proves it, never from capsule
+    data. ✅ **Bitcoin SPV/UTXO gate** (`dsm::recovery::dbtc_backing` + `BitcoinTapSdk::
+    gather_dbtc_backing_facts`/`dbtc_preimage_matches`): the unsigned ad is trusted only to
+    BLOCK; a vault becomes `Spendable` ONLY when live Bitcoin confirms the HTLC UTXO is unspent
+    + confirmed AND the bearer can re-derive the claim preimage (`SHA256(preimage)==hash_lock`).
+    Bitcoin unreachable → fail-closed (no unlock). ✅ **Authenticated vault enumeration**
+    (`dsm::recovery::PostedDbtcVaultIndex`, K_A-signed; `RecoverySDK::publish_dbtc_vault_index`/
+    `fetch_dbtc_vault_index`/`auto_dbtc_vault_candidates`; `recovery.reconcileDbtc` auto-sources
+    it; empty → `MissingDbtcVaultEnumeration`, dBTC stays `LockedRecovery`). Unit-tested;
+    live Bitcoin UTXO/confirmation is integration-tested on Bitcoin infra.
 
 12. ✅/☐ **Recovery-authority anchor lifecycle (§0.5 step 7).** ✅ create
     (`RecoverySDK::build_authority_anchor`, device key re-derived via

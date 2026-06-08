@@ -859,6 +859,102 @@ impl RecoverySDK {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // dBTC vault index (spec §0.4 P5 — dBTC enumeration). The healthy device posts a
+    // K_A-signed list of its dBTC vault ids; a recovering device fetches it as the candidate
+    // set for reconcile_dbtc_asset. Availability-only; verified client-side. Enumeration
+    // completeness is not a safety property (per-vault Bitcoin backing is the unlock gate).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Storage key for a device's posted dBTC vault index (Base32 Crockford; no hex).
+    pub fn dbtc_vault_index_storage_key(genesis_id: &[u8; 32], device_id: &[u8; 32]) -> String {
+        format!(
+            "recovery/dbtc-vault-index/v1/{}/{}",
+            crate::util::text_id::encode_base32_crockford(genesis_id),
+            crate::util::text_id::encode_base32_crockford(device_id),
+        )
+    }
+
+    /// Build (from THIS device's local vault store) + sign + publish the dBTC vault index.
+    /// Fail-closed: requires identity + a cached `K_A`. Returns the vault-id count posted.
+    pub async fn publish_dbtc_vault_index() -> Result<usize, DsmError> {
+        let device_id =
+            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let genesis_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis_hash",
+        )?;
+        let (authority_pk, authority_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
+            DsmError::InvalidState(
+                "publish_dbtc_vault_index: no cached recovery-authority keypair".into(),
+            )
+        })?;
+        let vault_ids = crate::storage::client_db::list_all_vault_ids().map_err(|e| {
+            DsmError::storage(format!("list vault ids: {e}"), None::<std::io::Error>)
+        })?;
+        let n = vault_ids.len();
+        let index = dsm::recovery::build_dbtc_vault_index(
+            genesis_id,
+            device_id,
+            vault_ids,
+            &authority_pk,
+            &authority_sk,
+        )?;
+        let key = Self::dbtc_vault_index_storage_key(&genesis_id, &device_id);
+        crate::sdk::storage_io::put_bytes(&key, &index.to_bytes()).await?;
+        Ok(n)
+    }
+
+    /// Fetch + VERIFY a device's dBTC vault index against the genesis-anchored authority
+    /// commit. Fail-closed: missing/undecodable/unverifiable → error (dBTC stays locked).
+    pub async fn fetch_dbtc_vault_index(
+        genesis_id: &[u8; 32],
+        device_id: &[u8; 32],
+        anchored_authority_commit: &[u8; 32],
+    ) -> Result<dsm::recovery::PostedDbtcVaultIndex, DsmError> {
+        let key = Self::dbtc_vault_index_storage_key(genesis_id, device_id);
+        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        let index = dsm::recovery::PostedDbtcVaultIndex::from_bytes(&bytes)?;
+        if &index.genesis_id != genesis_id || &index.device_id != device_id {
+            return Err(DsmError::verification(
+                "fetch_dbtc_vault_index: fetched index genesis/device != requested",
+            ));
+        }
+        index.verify(anchored_authority_commit)?;
+        Ok(index)
+    }
+
+    /// Auto-source candidate dBTC vault ids for recovery: fetch + verify the posted vault
+    /// index for A_old (the recovered identity's lost device, from the staged capsule), using
+    /// this identity's genesis-anchored `K_A`. Fail-closed: any missing/unverifiable piece
+    /// errors (the caller then leaves dBTC LockedRecovery / reports awaiting-enumeration).
+    pub async fn auto_dbtc_vault_candidates() -> Result<Vec<String>, DsmError> {
+        let a_old_v = crate::storage::client_db::recovery::get_recovery_pref(
+            "capsule_source_device_id",
+        )
+        .map_err(|e| {
+            DsmError::storage(format!("read capsule source: {e}"), None::<std::io::Error>)
+        })?
+        .ok_or_else(|| {
+            DsmError::InvalidState("auto_dbtc_vault_candidates: no staged capsule source".into())
+        })?;
+        let a_old = <[u8; 32]>::try_from(a_old_v.as_slice()).map_err(|_| {
+            DsmError::verification("auto_dbtc_vault_candidates: capsule source not 32 bytes")
+        })?;
+        let genesis = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis_hash",
+        )?;
+        let (ka_pub, _) = Self::get_cached_authority_keypair().ok_or_else(|| {
+            DsmError::InvalidState("auto_dbtc_vault_candidates: no cached K_A".into())
+        })?;
+        // Genesis-anchor A_old's authority (this identity's K_A) before trusting its index.
+        Self::fetch_and_verify_authority_anchor(&genesis, &a_old, &ka_pub).await?;
+        let anchored = dsm::recovery::compute_authority_pubkey_commit(&ka_pub);
+        let index = Self::fetch_dbtc_vault_index(&genesis, &a_old, &anchored).await?;
+        Ok(index.vault_ids)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Producer endpoints (spec §0.5 Phase D step 2 — the bilateral re-establish side).
     //
     // These are the deterministic posting endpoints the interactive bilateral re-establish
@@ -1729,6 +1825,21 @@ mod tests {
     fn test_recovery_sdk_creation() {
         let _sdk = RecoverySDK::new();
         // SDK instance created successfully
+    }
+
+    #[test]
+    fn dbtc_vault_index_storage_key_is_deterministic_genesis_device_keyed_crockford() {
+        let g = [0x6E; 32];
+        let d = [0xA0; 32];
+        let k = RecoverySDK::dbtc_vault_index_storage_key(&g, &d);
+        assert_eq!(k, RecoverySDK::dbtc_vault_index_storage_key(&g, &d));
+        assert!(k.starts_with("recovery/dbtc-vault-index/v1/"));
+        assert!(!k.starts_with('/'));
+        // Keyed by BOTH genesis and device.
+        assert_ne!(k, RecoverySDK::dbtc_vault_index_storage_key(&[0x6F; 32], &d));
+        assert_ne!(k, RecoverySDK::dbtc_vault_index_storage_key(&g, &[0xA1; 32]));
+        // Base32 Crockford only — no hex (repo invariant).
+        assert!(!k.contains("0x"));
     }
 
     #[test]

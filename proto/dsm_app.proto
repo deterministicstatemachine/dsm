@@ -2794,6 +2794,22 @@ message RecoveryEstablishmentReceiptV1 {
   RelationshipChainStateProto state = 2;
 }
 
+// A device's K_A-signed dBTC vault index (P5 dBTC enumeration). The healthy device posts the
+// list of its dBTC vault ids; a recovering device fetches it as the CANDIDATE set to
+// reconcile. Authenticated like PostedPdsmtHeadV1 (carries authority_pubkey; H(it) ==
+// authority_pubkey_commit == the genesis-anchored commit; signature over the digest).
+// Enumeration completeness is NOT a safety property — per-vault Bitcoin backing verification
+// is the gate — so a forged/partial index only yields Bitcoin-verify-out or a locked deadlock,
+// never a double-spend. Availability-only storage; clients verify.
+message PostedDbtcVaultIndexV1 {
+  bytes  genesis_id              = 1 [(dsm_fixed_len)=32];
+  bytes  device_id               = 2 [(dsm_fixed_len)=32];
+  repeated string vault_ids      = 3; // Base32 Crockford vault ids
+  bytes  authority_pubkey_commit = 4 [(dsm_fixed_len)=32]; // H(K_A_pub)
+  bytes  authority_pubkey        = 5 [(dsm_max_len)=4096]; // SPX256f pk (carried; checked vs commit)
+  bytes  signature               = 6 [(dsm_max_len)=65535]; // SPX256f K_A sig over the digest
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

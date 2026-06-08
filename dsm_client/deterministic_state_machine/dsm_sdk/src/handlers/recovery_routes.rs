@@ -151,6 +151,14 @@ impl AppRouterImpl {
                                  (best-effort, will retry when online): {e}"
                             ),
                         }
+                        // P5 dBTC enumeration: publish the signed dBTC vault index so a future
+                        // recovered device can discover this identity's vaults (best-effort).
+                        match crate::sdk::recovery_sdk::RecoverySDK::publish_dbtc_vault_index().await {
+                            Ok(n) => log::info!("[RECOVERY] published dBTC vault index ({n} vaults)"),
+                            Err(e) => log::warn!(
+                                "[RECOVERY] dBTC vault index publish deferred (best-effort): {e}"
+                            ),
+                        }
                     });
                 } else {
                     log::warn!(
@@ -942,7 +950,7 @@ impl AppRouterImpl {
             // hard error). dBTC is unlocked only for vaults whose posted frontier proves it;
             // any incomplete/unverifiable evidence keeps it LockedRecovery (fail-closed).
             "recovery.reconcileDbtc" => {
-                let candidates: Vec<String> = match Self::decode_recovery_string_param(&i.args) {
+                let mut candidates: Vec<String> = match Self::decode_recovery_string_param(&i.args) {
                     Ok(s) => s
                         .split(',')
                         .map(|v| v.trim().to_string())
@@ -950,6 +958,15 @@ impl AppRouterImpl {
                         .collect(),
                     Err(_) => Vec::new(),
                 };
+                // No explicit candidates → auto-source from the posted, K_A-verified dBTC vault
+                // index for A_old. If that's unavailable, candidates stay empty and the
+                // reconcile returns the awaiting-enumeration status (dBTC stays locked).
+                if candidates.is_empty() {
+                    match crate::sdk::recovery_sdk::RecoverySDK::auto_dbtc_vault_candidates().await {
+                        Ok(ids) => candidates = ids,
+                        Err(e) => log::debug!("[recovery.reconcileDbtc] no vault index: {e}"),
+                    }
+                }
                 match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reconcile_dbtc_asset(&candidates)
                     .await
                 {

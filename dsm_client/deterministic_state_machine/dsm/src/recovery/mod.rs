@@ -13,6 +13,7 @@ pub mod bearer_lock;
 pub mod bundle;
 pub mod dbtc_backing;
 pub mod dbtc_reconcile;
+pub mod dbtc_vault_index;
 pub mod capsule;
 pub mod chain_segment;
 pub mod gate_set;
@@ -34,6 +35,7 @@ pub use authority_anchor::{
 pub use bearer_lock::{reconcile_token_frontier, BearerAssetLockState};
 pub use dbtc_backing::{classify_dbtc_backing, DbtcBitcoinFacts};
 pub use dbtc_reconcile::{aggregate_dbtc_frontier, DbtcVaultCondition, DbtcVaultOutcome};
+pub use dbtc_vault_index::{build_dbtc_vault_index, PostedDbtcVaultIndex};
 pub use bundle::RecoveryBundle;
 pub use chain_segment::{
     rel_chain_state_from_proto, rel_chain_state_to_proto, RecoveryEstablishmentReceipt,

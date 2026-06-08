@@ -32,6 +32,9 @@ pub const TAG_DSM_RECOVERY_REL_SEGMENT: &str = "DSM/recovery/rel-chain-segment/v
 /// Domain tag for the content-id of a posted new-relationship establishment receipt (§0.5
 /// Phase D prerequisite) — the (A_new,C) first state binding the carry-forward commitment.
 pub const TAG_DSM_RECOVERY_ESTABLISH_RECEIPT: &str = "DSM/recovery/establish-receipt/v1";
+/// Domain tag for the signing digest of a posted dBTC vault index (P5 dBTC enumeration) —
+/// the K_A-signed list of a device's dBTC vault ids a recovering device fetches as candidates.
+pub const TAG_DSM_RECOVERY_DBTC_VAULT_INDEX: &str = "DSM/recovery/dbtc-vault-index/v1";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";
@@ -54,6 +57,7 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_PDSMT_SNAPSHOT,
     TAG_DSM_RECOVERY_REL_SEGMENT,
     TAG_DSM_RECOVERY_ESTABLISH_RECEIPT,
+    TAG_DSM_RECOVERY_DBTC_VAULT_INDEX,
     TAG_DSM_TOMBSTONE,
     TAG_DSM_TOMBSTONE_NOTIFY,
     TAG_DSM_TOMBSTONE_SUCCESSION,
