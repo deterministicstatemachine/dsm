@@ -1983,14 +1983,16 @@ impl BilateralBleHandler {
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
 
-        // §0.5 recovery re-establish accept-guard. If this prepare is a recovery-establish
-        // proposal (canonical marker), C MUST verify — before co-signing — that A_new is the
-        // genesis-anchored successor of an A_old it actually had a relationship with, and that
-        // the carry-forward commitment bridges C's REAL (A_old,C) frontier. Without this, a
-        // mnemonic thief could re-establish C's channels onto a device the owner never
-        // authorized. Fail-closed: any failure aborts the prepare (C does not co-sign).
-        // `sender_device_id` is A_new (the device that sent this prepare). Ordinary establishes
-        // are untouched (the guard only runs for the recovery-establish marker).
+        // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
+        // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
+        // co-signing — that A_new holds the genesis-anchored recovery authority and that the
+        // carry-forward commitment bridges C's REAL CURRENT (A_old,C) frontier. This blocks a
+        // non-authority forger (MITM / malicious node / C itself) and blocks ANYONE from
+        // re-establishing onto a fabricated or stale frontier; it does NOT (and cannot)
+        // distinguish the owner from a mnemonic thief — double-spend safety vs a recovering
+        // party comes from gate 2 (P5 LOCKED_RECOVERY + frontier reconciliation). Fail-closed:
+        // any failure aborts the prepare (C does not co-sign). `sender_device_id` is A_new.
+        // Ordinary establishes are untouched (guard runs only for the recovery-establish marker).
         if dsm::recovery::is_recovery_establish_op(&operation) {
             crate::sdk::RecoverySDK::verify_incoming_recovery_reestablish(
                 &operation,

@@ -1402,8 +1402,11 @@ impl RecoverySDK {
     }
 
     /// C side: the accept-guard the bilateral handler MUST call before co-signing an incoming
-    /// recovery-establish proposal from `a_new`. Returns `Ok(())` only if C may co-sign;
-    /// otherwise errors (fail-closed — a thief must not be able to re-establish C's channels).
+    /// recovery-establish proposal from `a_new` (gate 1 of the two-gate model). Returns `Ok(())`
+    /// only if C may co-sign; otherwise errors (fail-closed). It blocks a non-authority forger
+    /// and blocks re-establishing onto a fabricated/stale frontier; it does NOT distinguish the
+    /// owner from a mnemonic thief (gate 2 / P5 handles double-spend safety). See
+    /// [`dsm::recovery::verify_recovery_reestablish_request`] for the exact security property.
     ///
     /// Gathers everything from authenticated sources: A_new's genesis + recovery authority from
     /// its posted, genesis-anchored PDSMT head; the [`dsm::recovery::RecoverySuccessionProof`]

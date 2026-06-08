@@ -157,11 +157,11 @@ pub fn verify_forward_ancestry(
     Ok(last)
 }
 
-/// C-SIDE accept-guard for a recovery re-establish (spec §0.5). When counterparty `C`
-/// receives a bilateral `CreateRelationship` "recovery-establish" proposal from `A_new`, it
-/// MUST run this BEFORE co-signing — otherwise a thief could re-establish C's relationships
-/// onto a device the legitimate owner never authorized. It proves, from C's OWN local
-/// `(A_old,C)` chain plus A's genesis-anchored tombstone/succession, that:
+/// C-SIDE accept-guard for a recovery re-establish (spec §0.5) — **gate 1 (identity
+/// succession) of the two-gate model; NOT a standalone anti-theft control.** When counterparty
+/// `C` receives a bilateral `CreateRelationship` "recovery-establish" proposal from `A_new`, it
+/// MUST run this BEFORE co-signing. It proves, from C's OWN local `(A_old,C)` chain plus A's
+/// genesis-anchored tombstone/succession, that:
 ///   1. the op is a `recovery-establish` `CreateRelationship` toward C carrying a commitment;
 ///   2. `A_new` is the mnemonic-authorized successor of `A_old`
 ///      ([`verify_recovery_pair`] under the genesis-anchored recovery authority);
@@ -169,7 +169,20 @@ pub fn verify_forward_ancestry(
 ///   4. the claimed capsule floor `h_cap` is a genuine ancestor of C's current `(A_old,C)`
 ///      tip (forward-ancestry walk over C's own states → `t_old_current`);
 ///   5. the op's commitment EQUALS the carry-forward C recomputes from those — i.e. the
-///      successor channel is being born bridging C's REAL frontier, not a fabricated one.
+///      successor channel is being born bridging C's REAL CURRENT frontier, not a fabricated
+///      or stale one.
+///
+/// **What this guard does and does not stop.** It blocks (a) any party WITHOUT the genesis
+/// recovery authority (a non-mnemonic forger — a MITM, a malicious storage node, C itself)
+/// from producing a re-establish, and (b) ANYONE — including a mnemonic holder — from
+/// re-establishing onto a fabricated or stale `(A_old,C)` frontier (the carry-forward is pinned
+/// to C's real current tip, so no value-inflating / channel-forking frontier can be born).
+/// It does **NOT** distinguish the legitimate owner from a mnemonic thief: the mnemonic IS the
+/// recovery authority, so a thief who holds it passes gate 1 by construction — that is the
+/// unavoidable stolen-seed problem, not a defect of this guard. Double-spend safety against a
+/// recovering party (owner-with-stale-ring OR thief) replaying spent value comes from gate 2
+/// (P5 `LOCKED_RECOVERY` + per-asset frontier reconciliation against external truth), which is
+/// independent of this guard. See §0.4 (two-gate doctrine).
 ///
 /// `recovery_authority_pubkey` MUST be genesis-anchored to A's genesis by the caller (via the
 /// `RecoveryAuthorityAnchor` + device-tree quorum) before this is trusted. Fail-closed: any
