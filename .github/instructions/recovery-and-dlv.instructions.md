@@ -243,25 +243,79 @@ Added during hardening (beyond the original register):
     `value_capable` flag/reason; 6 tests). The head is signed by the genesis-anchored
     recovery authority `K_A` (commit reused from the §0.5 step-5 anchor).
 
-    **☐ OPEN — R4 anti-shrink (double-spend-critical; needs a design decision before
-    gate-set construction).** A head signed by `K_A` proves authenticity but does NOT
-    prevent the `K_A` holder from posting a SHRUNK value-capable leaf set — and the R4
-    adversary IS the spender (an owner who shrinks their own gate-set so a counterparty
-    `C` keeps accepting `A_old` while `A_new` also spends = the recovery double-spend).
-    The SMT root is sparse, so "the index includes ALL value-capable leaves" cannot be
-    proven from `pd_smt_root` alone. Candidate resolutions (undecided):
-    (a) **counterparty-union** — cross-check `C`'s independently-posted `(C,A_old)`
-        relationship; if `C` shows value with `A_old` but `A_old`'s index omits it, the
-        union still gates `C` (tension with "per-counterparty scan is evidence-only" —
-        here it is an anti-shrink enumeration *contributor*, not the primary authority);
-    (b) **pre-tombstone freeze** — bind the gate-set to the last head posted BEFORE the
-        recovery intent, so a shrink would have had to be posted during normal operation
-        (detectable / no incentive); requires a monotonic/append-once head history;
-    (c) **completeness commitment** — require the head to commit that the index covers
-        every leaf of `pd_smt_root` (needs an enumerable/closed SMT commitment).
-    Until this is decided, gate-set CONSTRUCTION is NOT built and the unlock stays
-    fail-closed; the wire foundation above is safe to land because it changes no
-    acceptance predicate.
+    **R4 anti-shrink (CONFIRMED design — double-spend-critical).** A `K_A`-signed head
+    proves *authenticity* but NOT *completeness*: the R4 adversary IS the spender (holds
+    `A_old`/`K_A`), so it can sign a head whose value-capable leaf set OMITS a
+    counterparty `C` — then `C` keeps accepting `A_old` while `A_new` activates without
+    `C` (the recovery double-spend window). The SMT root is sparse, so "the index covers
+    ALL value-capable leaves" is unprovable from `pd_smt_root` alone, and completeness
+    only proves the index matches the *signed head*, not that the *signer* was honest.
+    Therefore R4 is enforced by a COMBINATION of three layers, with the counterparty-union
+    as the adversarial backstop:
+
+    > **R4 INVARIANT.** *A recovery activation MUST NOT exclude any counterparty that can
+    > prove, from its OWN genesis-authenticated posted state, that it had a value-capable
+    > relationship with `A_old` at or before the recovery snapshot.*
+
+    - **Authority split (unchanged):** `A_old`'s posted PDSMT = primary enumeration source;
+      `C`'s posted state = anti-shrink witness; capsule = floor/hint only; contacts DB =
+      no authority; responder set = no authority.
+    - **Layer 1 — pre-tombstone freeze / append-once head chain.** `PostedPdsmtHead` is
+      part of a monotonic append-only chain: each head commits `parent_head_hash`; storage
+      enforces append-only (a new head's parent MUST equal the current head's hash) — no
+      overwrite, no fork. The recovery snapshot uses the latest valid head **at or before**
+      the tombstone/recovery-intent; a recovery head cannot silently replace the prior head.
+    - **Layer 2 — completeness commitment.** The head commits BOTH `pd_smt_root` AND
+      `leaf_index_root`; `leaf_index_root` commits the enumerable set of leaf records; each
+      record commits `{rel_key, counterparty_device_id, current_tip, value_capable,
+      value_capable_reason}` (via `committed_digest`). The verifier REJECTS if the
+      enumerable index does not verify against the signed head. `value_capable` is
+      committed/signed — NEVER server metadata.
+    - **Layer 3 — counterparty-union cross-check (backstop).** Any independently
+      genesis-authenticated counterparty state proving an active value-capable `(C,A_old)`
+      relationship forces `C` into the gate-set even if `A_old`'s head omitted it. Concrete
+      witness: `C`'s OWN `PostedPdsmtLeafRecord` for the SAME (symmetric, device-pair)
+      `rel_key` with `owner=C, counterparty=A_old, value_capable=true`, included under
+      `C`'s OWN signed PDSMT head (authenticated via `C`'s `RecoveryAuthorityAnchor` +
+      `C ∈ G_C`'s Device Tree). `value_capable` is symmetric — bilateral states are
+      co-signed, so both endpoints attest it truthfully.
+
+    **Final gate-set rule.** `GateSet =` value-capable leaves from `A_old`'s latest valid
+    append-only PDSMT head `∪` independently genesis-authenticated counterparty claims
+    proving a value-capable relationship with `A_old` (at/before the snapshot). Activation
+    **fails closed** if any member of that union lacks valid
+    `CrossRelationshipSuccessionEvidence`.
+
+    **Proof-system caveat (implementation).** `pd_smt_root` is a `SparseMerkleTree`
+    (`device_state.rs`); local inclusion uses `SparseMerkleTree::get_inclusion_proof` /
+    `verify_proof_against_root`. A SECOND, non-interchangeable proof format exists —
+    `verify_smt_inclusion_proof_bytes` (protobuf `SmtProof`, used by `succession_binding`
+    against `counterparty_root`). Before building leaf-inclusion, confirm which format the
+    *posted* `pd_smt_root` proofs use and use it consistently; build the NEW
+    `leaf_index_root` as a `SparseMerkleTree`.
+
+    **Test plan (each layer, pass + fail):**
+    - *Append-only chain (storage, local-dev):* first head inserts; valid child
+      (parent==current) appends + increments `head_number`; fork/overwrite (wrong parent) →
+      409; replay of current head idempotent-or-409 per convention; distinct device
+      independent.
+    - *Completeness (unit):* `verify_inclusion` passes against a real
+      `SparseMerkleTree`-built `leaf_index_root` + `pd_smt_root`; fails on tampered tip,
+      tampered `committed_digest`, wrong root, or a leaf omitted from the index.
+    - *Head auth (unit, extend existing 6):* signature/authority binding holds with
+      `parent_head_hash`/`head_number` folded into the digest.
+    - *Union (unit):* an `A_old` head OMITTING `C` + a valid `C`-witness (C's own
+      value-capable leaf, shared symmetric `rel_key`, under C's genesis-auth head) ⇒ `C` is
+      FORCED into the gate-set; a forged / non-genesis-authenticated `C`-witness is
+      rejected; a `value_capable=false` witness does not add `C`.
+    - *Gate-set construction (unit):* union freeze → `gate_set_commit`; activation fails
+      closed if any union member lacks valid `CrossRelationshipSuccessionEvidence`.
+
+    **✅ Built:** the wire foundation (above). **☐ Remaining (this plan):** Layer-1
+    append-once chain (proto `parent_head_hash`/`head_number` + storage table + endpoint +
+    SDK), Layer-2 `verify_inclusion`/completeness, Layer-3 union + `build_gate_set`,
+    recovery bundle. Gate-set CONSTRUCTION + the unlock stay fail-closed until all land
+    + adversarial review (go-live is a separate audited step).
 
 ### 0.3 Sibling-spec overlap (cross-reference, not rewritten here)
 
@@ -439,6 +493,22 @@ posted data, storage, and the go-live unlock remains (see gap register #7).
    branch applied at the discovery layer). Pure contact/social relationships are
    excluded. The freeze/snapshot of this set is the seal's `contact_set_commit`
    (R4 anti-shrink + anti-drift); the discovery scan (`list_objects`) is step 7.
+
+### 0.5.2 R4 anti-shrink — gate-set completeness (see §0.2 gap 13 for the full rule)
+
+A `K_A`-signed PDSMT head proves authenticity, not completeness; the R4 adversary IS
+the spender. The gate-set is therefore made non-shrinkable by THREE combined layers
+(detailed, with the invariant + final gate-set rule + test plan, in §0.2 gap 13):
+**(1)** an append-once PDSMT head chain (`parent_head_hash`, pre-tombstone freeze),
+**(2)** a completeness commitment (head commits `pd_smt_root` + `leaf_index_root`;
+`value_capable` is committed, never server metadata), and **(3)** a counterparty-union
+backstop — `C`'s OWN genesis-authenticated value-capable leaf for the shared symmetric
+`rel_key` forces `C` into the gate-set even if `A_old`'s head omitted it.
+
+> **R4 invariant.** A recovery activation MUST NOT exclude any counterparty that can
+> prove, from its OWN genesis-authenticated posted state, a value-capable relationship
+> with `A_old` at/before the recovery snapshot. Activation fails closed if any union
+> member lacks valid `CrossRelationshipSuccessionEvidence`.
 
 ---
 
