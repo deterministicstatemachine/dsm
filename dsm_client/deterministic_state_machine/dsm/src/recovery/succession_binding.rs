@@ -30,7 +30,6 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::recovery::tombstone::{verify_recovery_pair, SuccessionReceipt, TombstoneReceipt};
 use crate::types::device_state::RelationshipChainState;
 use crate::types::error::DsmError;
-use crate::verification::proof_primitives::verify_smt_inclusion_proof_bytes;
 
 const CARRY_FORWARD_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_CARRY_FORWARD;
 
@@ -294,28 +293,27 @@ impl CrossRelationshipSuccessionEvidence {
     pub fn verify(&self, recovery_authority_pubkey: &[u8]) -> Result<[u8; 32], DsmError> {
         self.verify_succession_semantics(recovery_authority_pubkey)?;
 
-        let old_ok = verify_smt_inclusion_proof_bytes(
+        // Inclusion of BOTH tips under C's `counterparty_root`. `counterparty_root` IS C's
+        // posted PDSMT `pd_smt_root` — a `SparseMerkleTree` root — and the proofs are C's
+        // posted leaf proofs (`inclusion_proof_to_pd_smt_root`, `SmtInclusionProof` bytes).
+        // The verifier MUST therefore be the SparseMerkleTree verifier (the SAME one
+        // `pdsmt_posting` uses for `verify_inclusion`); the protobuf-`SmtProof` verifier
+        // (`proof_primitives`) reconstructs a DIFFERENT tree and cannot validate these
+        // proofs against a SparseMerkleTree root.
+        crate::recovery::pdsmt_posting::verify_smt_leaf(
             &self.counterparty_root,
             &self.old_rel_key,
             &self.t_old_current,
             &self.old_inclusion_proof,
+            "succession old-tip",
         )?;
-        if !old_ok {
-            return Err(DsmError::verification(
-                "succession: old-tip inclusion failed against counterparty root",
-            ));
-        }
-        let new_ok = verify_smt_inclusion_proof_bytes(
+        crate::recovery::pdsmt_posting::verify_smt_leaf(
             &self.counterparty_root,
             &self.new_rel_key,
             &self.t_new_established,
             &self.new_inclusion_proof,
+            "succession new-tip",
         )?;
-        if !new_ok {
-            return Err(DsmError::verification(
-                "succession: new-tip inclusion failed against counterparty root",
-            ));
-        }
         Ok(self.t_new_established)
     }
 }
@@ -572,5 +570,62 @@ mod tests {
         let (mut ev, pk) = fixture();
         ev.t_new_established[0] ^= 0x01;
         assert!(ev.verify_succession_semantics(&pk).is_err());
+    }
+
+    /// Populate `counterparty_root` + the two inclusion proofs with REAL SparseMerkleTree
+    /// proofs for `old_rel_key → t_old_current` and `new_rel_key → t_new_established` —
+    /// exactly how C's posted PDSMT carries them. This exercises the FULL `ev.verify`
+    /// inclusion path (the part `verify_succession_semantics` skips), against a genuine
+    /// SparseMerkleTree root.
+    fn with_real_inclusion(ev: &mut CrossRelationshipSuccessionEvidence) {
+        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
+        let mut pd = SparseMerkleTree::new(256);
+        pd.update_leaf(&ev.old_rel_key, &ev.t_old_current).unwrap();
+        pd.update_leaf(&ev.new_rel_key, &ev.t_new_established).unwrap();
+        ev.counterparty_root = *pd.root();
+        ev.old_inclusion_proof = pd.get_inclusion_proof(&ev.old_rel_key, 256).unwrap().to_bytes();
+        ev.new_inclusion_proof = pd.get_inclusion_proof(&ev.new_rel_key, 256).unwrap().to_bytes();
+    }
+
+    #[test]
+    fn full_verify_with_real_pdsmt_inclusion_proofs_passes() {
+        // Regression: ev.verify must validate REAL SparseMerkleTree PDSMT proofs against a
+        // SparseMerkleTree counterparty_root. (Previously it used the protobuf SmtProof
+        // verifier, which cannot decode/validate these — a latent liveness-fatal mismatch.)
+        let (mut ev, pk) = fixture();
+        with_real_inclusion(&mut ev);
+        let tip = ev.verify(&pk).expect("full evidence with real PDSMT proofs verifies");
+        assert_eq!(tip, ev.t_new_established);
+    }
+
+    #[test]
+    fn full_verify_rejects_tampered_old_inclusion_proof() {
+        let (mut ev, pk) = fixture();
+        with_real_inclusion(&mut ev);
+        // Flip a byte in the proof → recomputed root != counterparty_root → fail closed.
+        let last = ev.old_inclusion_proof.len() - 1;
+        ev.old_inclusion_proof[last] ^= 0x01;
+        assert!(ev.verify(&pk).is_err());
+    }
+
+    #[test]
+    fn full_verify_rejects_wrong_counterparty_root() {
+        let (mut ev, pk) = fixture();
+        with_real_inclusion(&mut ev);
+        ev.counterparty_root[0] ^= 0x01; // proofs no longer recompute this root
+        assert!(ev.verify(&pk).is_err());
+    }
+
+    #[test]
+    fn full_verify_rejects_tip_not_in_root() {
+        // A new tip that isn't the one committed under counterparty_root must fail inclusion
+        // (the semantics check passes for a matching establishment, but inclusion does not).
+        let (mut ev, pk) = fixture();
+        with_real_inclusion(&mut ev);
+        // Rebuild establishment so semantics still pass but the committed new tip differs.
+        ev.new_establishment_state.entropy = vec![0xAB; 5];
+        ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
+        // counterparty_root/proofs still commit the OLD t_new_established → inclusion fails.
+        assert!(ev.verify(&pk).is_err());
     }
 }

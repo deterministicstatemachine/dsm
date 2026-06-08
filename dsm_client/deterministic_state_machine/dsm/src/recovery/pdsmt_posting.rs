@@ -67,7 +67,13 @@ fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
 /// (protobuf `SmtProof`, used for cross-device receipt proofs); the two are not
 /// interchangeable. We pin to `SparseMerkleTree` here because `pd_smt_root` IS a
 /// `SparseMerkleTree` root (`device_state.rs`).
-fn verify_smt_leaf(
+///
+/// `pub(crate)` so the recovery-evidence path
+/// ([`crate::recovery::succession_binding::CrossRelationshipSuccessionEvidence::verify`])
+/// checks `(old|new)_rel_key → tip` against C's `counterparty_root` (== C's `pd_smt_root`)
+/// with the SAME verifier — the proofs it consumes are C's posted PDSMT leaf proofs, so the
+/// verifier MUST match the SparseMerkleTree root they were produced against.
+pub(crate) fn verify_smt_leaf(
     root: &[u8; 32],
     key: &[u8; 32],
     value: &[u8; 32],
