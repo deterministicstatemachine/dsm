@@ -68,21 +68,30 @@ pub fn compute_carry_forward_commitment(
 /// Walk a relationship chain forward from `floor_tip` by `embedded_parent` adjacency
 /// (recomputing each tip via `compute_chain_tip`), returning the final tip. Pure hash
 /// adjacency / parent consumption — no heights.
+///
+/// An **empty `chain` is valid**: it means no post-floor activity, so the floor IS the
+/// current tip — this returns `floor_tip` and the caller's `walked == t_old_current`
+/// check then enforces `t_old_current == h_cap`. This is the COMMON, no-divergence
+/// recovery case (A_new's capsule tip already equals C's tip); a non-empty walk is the
+/// exception (a thief spend in the post-floor, pre-tombstone window).
+///
+/// Walk integrity needs NO per-state signatures: both endpoints are pinned — `floor_tip`
+/// from A_new's capsule and `t_old_current` (the caller's check target) in C's
+/// genesis-authenticated PDSMT head — and DSM is deterministic + collision-resistant, so
+/// the hash-adjacency walk between two fixed, authenticated tips is UNIQUE. A fabricated
+/// or rolled-back step cannot reach the authenticated endpoint without a BLAKE3 collision.
 pub fn verify_forward_ancestry(
     rel_key: &[u8; 32],
     floor_tip: &[u8; 32],
     chain: &[RelationshipChainState],
 ) -> Result<[u8; 32], DsmError> {
-    if chain.is_empty() {
-        return Err(DsmError::verification("ancestry: empty chain"));
-    }
     let mut parent = *floor_tip;
     let mut last = *floor_tip;
     for s in chain {
         if &s.rel_key != rel_key {
             return Err(DsmError::verification("ancestry: rel_key mismatch in chain"));
         }
-        if &s.embedded_parent != &parent {
+        if s.embedded_parent != parent {
             return Err(DsmError::verification(
                 "ancestry: broken parent adjacency (not a forward descendant of the floor)",
             ));
@@ -324,6 +333,44 @@ mod tests {
     fn valid_semantics_pass() {
         let (ev, pk) = fixture();
         ev.verify_succession_semantics(&pk).expect("valid semantics");
+    }
+
+    #[test]
+    fn empty_old_chain_valid_only_at_floor() {
+        // Common case: NO post-floor activity → empty old_chain, floor IS the current tip.
+        let (mut ev, pk) = fixture();
+        ev.old_chain = Vec::new();
+        ev.t_old_current = ev.h_cap;
+        ev.carry_forward_commitment = compute_carry_forward_commitment(
+            &ev.old_rel_key,
+            &ev.new_rel_key,
+            &ev.h_cap,
+            &ev.t_old_current,
+            &ev.tombstone.tombstone_hash,
+            &ev.succession.succession_hash,
+            &ev.a_old,
+            &ev.a_new,
+            &ev.c,
+        );
+        ev.verify_succession_semantics(&pk)
+            .expect("empty old_chain at the floor (no divergence) is valid");
+
+        // Empty old_chain but a t_old_current that ISN'T the floor cannot be reached by
+        // the (empty) walk → rejected.
+        let mut bad = ev.clone();
+        bad.t_old_current[0] ^= 0x01;
+        bad.carry_forward_commitment = compute_carry_forward_commitment(
+            &bad.old_rel_key,
+            &bad.new_rel_key,
+            &bad.h_cap,
+            &bad.t_old_current,
+            &bad.tombstone.tombstone_hash,
+            &bad.succession.succession_hash,
+            &bad.a_old,
+            &bad.a_new,
+            &bad.c,
+        );
+        assert!(bad.verify_succession_semantics(&pk).is_err());
     }
 
     #[test]
