@@ -166,8 +166,20 @@ Added during hardening (beyond the original register):
     decides UNDER the state-machine lock (no check-before-lock TOCTOU), atomic with
     the commit + bump.
 
-11. ☐ **Bearer-asset `LOCKED_RECOVERY` + dBTC reconciliation** (P5) and **per-asset
-    spend-open chokepoint** — the capsule is a continuity hint, never a balance oracle.
+11. ✅/☐ **Bearer-asset `LOCKED_RECOVERY` + per-asset spend-open chokepoint** (P5) —
+    the capsule is a continuity hint, never a balance oracle.
+    ✅ Generic safety layer: `BearerAssetLockState{LockedRecovery, Spendable, Reduced,
+    InFlight, Finalized, RefundPending}` (`dsm::recovery::bearer_lock`, fail-closed wire
+    codec) + `Operation::egress_asset` (exhaustive asset-id companion to `is_value_egress`)
+    + the `recovery_locked_assets` registry + `asset_egress_block_reason` wired into the
+    `execute_on_relationship` chokepoint (checked AFTER the identity gate, persists per-asset
+    past activation) + recovery-time locking in `execute_recovery_pipeline`
+    (`lock_all_restored_bearer_assets`, fail-closed) + generic token reconciliation
+    (`reconcile_token_asset`: `verified≥hint→Spendable`, `verified<hint→Reduced` capped).
+    ☐ **dBTC bearer-state frontier replay** (transfers / in-flight withdrawals / burns /
+    refunds / bridge finalization → `{InFlight|Finalized|RefundPending}`): dBTC is REFUSED by
+    the generic path (`MissingDbtcFrontierReplay`) and stays `LockedRecovery` until the
+    dedicated dBTC pass. Go-live for dBTC egress is hard-gated on it.
 
 12. ✅/☐ **Recovery-authority anchor lifecycle (§0.5 step 7).** ✅ create
     (`RecoverySDK::build_authority_anchor`, device key re-derived via

@@ -1224,16 +1224,42 @@ pub fn get_asset_lock(token_id: &[u8]) -> Result<Option<BearerAssetLock>> {
     }
 }
 
-/// Mark a capsule-restored bearer asset `LockedRecovery` (idempotent on `token_id`). dBTC is
+/// Mark a capsule-restored bearer asset `LockedRecovery` — INSERT-IF-ABSENT, so it NEVER
+/// clobbers an entry already reconciled this cycle (Spendable/Reduced/…). dBTC is
 /// auto-flagged. The capsule is a continuity hint, NEVER a balance oracle — a restored asset
-/// is not spendable until reconciled.
+/// is not spendable until reconciled. Idempotent; safe to re-run as balances materialize.
+/// (A NEW recovery cycle starts with [`clear_asset_locks`] so stale reconciliations don't
+/// carry over.)
 pub fn lock_restored_bearer_asset(token_id: &[u8]) -> Result<()> {
-    set_asset_lock(
-        token_id,
-        BearerAssetLockState::LockedRecovery,
-        0,
-        is_dbtc_token_id(token_id),
-    )
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute(
+        "INSERT INTO recovery_locked_assets(token_id, state, frontier_cap, is_dbtc)
+         VALUES (?1, ?2, 0, ?3)
+         ON CONFLICT(token_id) DO NOTHING",
+        params![
+            token_id,
+            BearerAssetLockState::LockedRecovery.to_wire() as i64,
+            is_dbtc_token_id(token_id) as i64
+        ],
+    )?;
+    Ok(())
+}
+
+/// Clear the entire bearer-asset lock registry. Called at the START of a recovery cycle so a
+/// fresh recovery re-locks everything and stale reconciliations from a prior cycle don't
+/// leave an asset spendable.
+pub fn clear_asset_locks() -> Result<()> {
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute("DELETE FROM recovery_locked_assets", [])?;
+    Ok(())
 }
 
 /// Whether any bearer asset is still recovery-locked (state != `Spendable`). Used by the gate
@@ -1756,6 +1782,29 @@ mod tests {
         assert!(
             asset_egress_block_reason(&transfer_of(tok, 1)).is_some(),
             "corrupt lock state must fail closed (block egress)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn relock_does_not_clobber_reconciled_and_clear_resets() {
+        setup_test_db();
+        let tok = b"ERA";
+        lock_restored_bearer_asset(tok).expect("lock");
+        reconcile_token_asset(tok, 100, 100).expect("reconcile"); // → Spendable
+        // Re-locking (e.g. resume re-run) must NOT clobber the reconciled Spendable state.
+        lock_restored_bearer_asset(tok).expect("re-lock");
+        assert_eq!(
+            get_asset_lock(tok).expect("read").expect("present").state,
+            BearerAssetLockState::Spendable
+        );
+        // A new cycle clears the registry → the asset is no longer reconciled (re-locks fresh).
+        clear_asset_locks().expect("clear");
+        assert!(get_asset_lock(tok).expect("read").is_none());
+        lock_restored_bearer_asset(tok).expect("re-lock fresh");
+        assert_eq!(
+            get_asset_lock(tok).expect("read").expect("present").state,
+            BearerAssetLockState::LockedRecovery
         );
     }
 

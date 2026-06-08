@@ -505,6 +505,12 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     // 5. Store recovery phase
     let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Tombstoning);
 
+    // 5a. P5: start this recovery cycle with a clean bearer-asset lock registry so stale
+    // reconciliations from a prior cycle cannot leave an asset spendable (fail-closed).
+    if let Err(e) = crate::storage::client_db::recovery::clear_asset_locks() {
+        return Err(format!("[RECOVERY] Failed to clear stale bearer-asset locks: {e}"));
+    }
+
     // 6. Create tombstone receipt
     let old_device_id_str = crate::util::text_id::encode_base32_crockford(&old_device_id);
     let tombstone = create_tombstone(
@@ -686,6 +692,23 @@ pub fn resume_all_contacts() -> Result<String, String> {
                     "[RECOVERY] Failed to resume chain tip for {}: {e}",
                     &device_id_b32[..device_id_b32.len().min(16)]
                 );
+            }
+        }
+    }
+
+    // P5: (re)lock any restored bearer-asset projections materialized during resume
+    // (INSERT-IF-ABSENT — never clobbers assets already reconciled this cycle). The capsule
+    // is a continuity hint, never a balance oracle; these stay LockedRecovery until each
+    // asset's frontier reconciles. Fail-closed: a locking failure aborts before cleanup.
+    if let Some(dev) = crate::sdk::app_state::AppState::get_device_id() {
+        let dev_str = crate::util::text_id::encode_base32_crockford(&dev);
+        match crate::storage::client_db::recovery::lock_all_restored_bearer_assets(&dev_str) {
+            Ok(n) => log::info!("[RECOVERY] {n} restored bearer-asset projection(s) locked at resume"),
+            Err(e) => {
+                return Err(format!(
+                    "[RECOVERY] Failed to lock restored bearer assets at resume (refusing to \
+                     complete with spendable recovered assets): {e}"
+                ));
             }
         }
     }
