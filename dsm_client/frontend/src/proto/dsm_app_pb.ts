@@ -20002,6 +20002,69 @@ export class PostedDbtcVaultIndexV1 extends Message<PostedDbtcVaultIndexV1> {
 }
 
 /**
+ * Lightweight recovery succession proof (spec §0.5 — bilateral re-establish). A_new posts the
+ * minimal artifacts a counterparty C needs to run its re-establish accept-guard BEFORE
+ * co-signing: the genesis-anchored recovery authority pubkey (K_A_pub) plus the
+ * tombstone/succession pair proving A_new succeeds A_old. Distinct from RecoveryBundleV1 (which
+ * also carries the activation seal — produced only AFTER all re-establishes, so unavailable at
+ * re-establish time). Sub-objects are nested canonical bytes via their own codecs. Availability
+ * -only; C genesis-anchors authority_pubkey via A_new's RecoveryAuthorityAnchor before trusting.
+ *
+ * @generated from message dsm.RecoverySuccessionProofV1
+ */
+export class RecoverySuccessionProofV1 extends Message<RecoverySuccessionProofV1> {
+  /**
+   * K_A_pub (SPHINCS+ pk)
+   *
+   * @generated from field: bytes authority_pubkey = 1;
+   */
+  authorityPubkey = new Uint8Array(0);
+
+  /**
+   * TombstoneReceipt.to_bytes
+   *
+   * @generated from field: bytes tombstone = 2;
+   */
+  tombstone = new Uint8Array(0);
+
+  /**
+   * SuccessionReceipt.to_bytes
+   *
+   * @generated from field: bytes succession = 3;
+   */
+  succession = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecoverySuccessionProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecoverySuccessionProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "authority_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "tombstone", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "succession", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoverySuccessionProofV1 {
+    return new RecoverySuccessionProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoverySuccessionProofV1 {
+    return new RecoverySuccessionProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoverySuccessionProofV1 {
+    return new RecoverySuccessionProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecoverySuccessionProofV1 | PlainMessage<RecoverySuccessionProofV1> | undefined, b: RecoverySuccessionProofV1 | PlainMessage<RecoverySuccessionProofV1> | undefined): boolean {
+    return proto3.util.equals(RecoverySuccessionProofV1, a, b);
+  }
+}
+
+/**
  * ==================== Minimal deterministic identity =================
  *
  * @generated from message dsm.ContactQrV3
