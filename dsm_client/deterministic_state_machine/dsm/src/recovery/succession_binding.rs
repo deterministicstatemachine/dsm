@@ -121,6 +121,111 @@ pub fn verify_forward_ancestry(
     Ok(last)
 }
 
+/// C-SIDE accept-guard for a recovery re-establish (spec §0.5). When counterparty `C`
+/// receives a bilateral `CreateRelationship` "recovery-establish" proposal from `A_new`, it
+/// MUST run this BEFORE co-signing — otherwise a thief could re-establish C's relationships
+/// onto a device the legitimate owner never authorized. It proves, from C's OWN local
+/// `(A_old,C)` chain plus A's genesis-anchored tombstone/succession, that:
+///   1. the op is a `recovery-establish` `CreateRelationship` toward C carrying a commitment;
+///   2. `A_new` is the mnemonic-authorized successor of `A_old`
+///      ([`verify_recovery_pair`] under the genesis-anchored recovery authority);
+///   3. the device-pair keys derive correctly and C's old-chain endpoint is `A_old`;
+///   4. the claimed capsule floor `h_cap` is a genuine ancestor of C's current `(A_old,C)`
+///      tip (forward-ancestry walk over C's own states → `t_old_current`);
+///   5. the op's commitment EQUALS the carry-forward C recomputes from those — i.e. the
+///      successor channel is being born bridging C's REAL frontier, not a fabricated one.
+///
+/// `recovery_authority_pubkey` MUST be genesis-anchored to A's genesis by the caller (via the
+/// `RecoveryAuthorityAnchor` + device-tree quorum) before this is trusted. Fail-closed: any
+/// check failing means C MUST NOT co-sign.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_recovery_reestablish_request(
+    op: &crate::types::operations::Operation,
+    a_old: &[u8; 32],
+    a_new: &[u8; 32],
+    c_self: &[u8; 32],
+    tombstone: &TombstoneReceipt,
+    succession: &SuccessionReceipt,
+    recovery_authority_pubkey: &[u8],
+    h_cap: &[u8; 32],
+    c_old_chain: &[RelationshipChainState],
+) -> Result<(), DsmError> {
+    // 1. The op is a recovery-establish CreateRelationship toward C; extract the commitment.
+    let commitment = match op {
+        crate::types::operations::Operation::CreateRelationship {
+            counterparty_id,
+            commitment,
+            ..
+        } => {
+            if counterparty_id.as_slice() != c_self {
+                return Err(DsmError::verification(
+                    "reestablish: op counterparty_id != C (self)",
+                ));
+            }
+            commitment.clone()
+        }
+        _ => {
+            return Err(DsmError::verification(
+                "reestablish: op is not CreateRelationship",
+            ))
+        }
+    };
+
+    if a_old == a_new {
+        return Err(DsmError::verification("reestablish: A_old == A_new"));
+    }
+
+    // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored authority).
+    let a_old_str = crate::types::identifiers::encode_crockford(a_old);
+    if tombstone.device_id != a_old_str {
+        return Err(DsmError::verification("reestablish: tombstone is not for A_old"));
+    }
+    if succession.new_device_commitment.as_slice() != a_new {
+        return Err(DsmError::verification(
+            "reestablish: succession does not bind A_new",
+        ));
+    }
+    if !verify_recovery_pair(tombstone, succession, recovery_authority_pubkey)? {
+        return Err(DsmError::verification(
+            "reestablish: tombstone/succession pair invalid under the genesis recovery authority",
+        ));
+    }
+
+    // 3. Device-pair keys + C's old-chain endpoint is A_old.
+    let old_rel_key = compute_smt_key(a_old, c_self);
+    let new_rel_key = compute_smt_key(a_new, c_self);
+    for s in c_old_chain {
+        if &s.counterparty_devid != a_old {
+            return Err(DsmError::verification(
+                "reestablish: C old-chain state endpoint is not A_old",
+            ));
+        }
+    }
+
+    // 4. h_cap is a genuine ancestor of C's current (A_old,C) tip (binds the claimed floor to
+    //    C's real chain) → C's current tip.
+    let t_old_current = verify_forward_ancestry(&old_rel_key, h_cap, c_old_chain)?;
+
+    // 5. The op's commitment is exactly the carry-forward C recomputes from its own frontier.
+    let expected = compute_carry_forward_commitment(
+        &old_rel_key,
+        &new_rel_key,
+        h_cap,
+        &t_old_current,
+        &tombstone.tombstone_hash,
+        &succession.succession_hash,
+        a_old,
+        a_new,
+        c_self,
+    );
+    if commitment.as_slice() != expected {
+        return Err(DsmError::verification(
+            "reestablish: op commitment != carry-forward over C's real (A_old,C) frontier",
+        ));
+    }
+    Ok(())
+}
+
 /// One counterparty's complete cross-relationship recovery evidence (spec §0.5).
 /// `counterparty_root` MUST be genesis-authenticated by the caller before use.
 #[derive(Clone, Debug)]
@@ -627,5 +732,78 @@ mod tests {
         ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
         // counterparty_root/proofs still commit the OLD t_new_established → inclusion fails.
         assert!(ev.verify(&pk).is_err());
+    }
+
+    // ── C-side recovery re-establish accept-guard ──────────────────────────
+
+    /// Build a valid C-side re-establish request from the fixture (the op carries the
+    /// carry-forward C will recompute over its own (A_old,C) chain).
+    fn reestablish_request() -> (Operation, CrossRelationshipSuccessionEvidence, Vec<u8>) {
+        let (ev, pk) = fixture();
+        let op = build_recovery_establishment_op(&C, &ev.carry_forward_commitment);
+        (op, ev, pk)
+    }
+
+    #[test]
+    fn reestablish_accept_guard_passes_for_valid_request() {
+        let (op, ev, pk) = reestablish_request();
+        verify_recovery_reestablish_request(
+            &op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
+        )
+        .expect("valid recovery re-establish request must be accepted");
+    }
+
+    #[test]
+    fn reestablish_rejects_wrong_carry_forward_in_op() {
+        let (_op, ev, pk) = reestablish_request();
+        let bad_op = build_recovery_establishment_op(&C, &[0xBE; 32]); // not the real carry-forward
+        assert!(verify_recovery_reestablish_request(
+            &bad_op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reestablish_rejects_wrong_recovery_authority() {
+        let (op, ev, _pk) = reestablish_request();
+        let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x01; 32]).unwrap();
+        // A thief without A's genesis-anchored authority can't pass verify_recovery_pair.
+        assert!(verify_recovery_reestablish_request(
+            &op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &other.public_key, &ev.h_cap,
+            &ev.old_chain,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reestablish_rejects_non_create_relationship_op() {
+        let (_op, ev, pk) = reestablish_request();
+        assert!(verify_recovery_reestablish_request(
+            &Operation::Noop, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap,
+            &ev.old_chain,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reestablish_rejects_op_for_wrong_counterparty() {
+        let (op, ev, pk) = reestablish_request();
+        // Same op but verified as if C were a DIFFERENT device → counterparty_id != C(self).
+        assert!(verify_recovery_reestablish_request(
+            &op, &A_OLD, &A_NEW, &[0xDD; 32], &ev.tombstone, &ev.succession, &pk, &ev.h_cap,
+            &ev.old_chain,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reestablish_rejects_broken_old_chain_ancestry() {
+        let (op, mut ev, pk) = reestablish_request();
+        // Tamper C's old chain so h_cap no longer walks to the committed t_old_current.
+        ev.old_chain[0].embedded_parent = [0xDE; 32];
+        assert!(verify_recovery_reestablish_request(
+            &op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
+        )
+        .is_err());
     }
 }
