@@ -38,6 +38,7 @@
 
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::sphincs_verify;
+use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
 use crate::recovery::authority_anchor::compute_authority_pubkey_commit;
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, PostedPdsmtHeadV1, PostedPdsmtLeafRecordV1};
@@ -53,6 +54,41 @@ fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
             b.len()
         ))
     })
+}
+
+/// Verify a single `SparseMerkleTree` inclusion: the `proof_bytes` must decode, be for
+/// exactly `key`, carry exactly `Some(value)`, and recompute `root`. Both the PDSMT
+/// (`pd_smt_root`) and the leaf index (`leaf_index_root`) are `SparseMerkleTree`s, so
+/// both use this verifier (format: `SmtInclusionProof::to_bytes`). NOTE: this is a
+/// distinct proof system from `verification::proof_primitives::verify_smt_inclusion_proof_bytes`
+/// (protobuf `SmtProof`, used for cross-device receipt proofs); the two are not
+/// interchangeable. We pin to `SparseMerkleTree` here because `pd_smt_root` IS a
+/// `SparseMerkleTree` root (`device_state.rs`).
+fn verify_smt_leaf(
+    root: &[u8; 32],
+    key: &[u8; 32],
+    value: &[u8; 32],
+    proof_bytes: &[u8],
+    what: &str,
+) -> Result<(), DsmError> {
+    let proof = SmtInclusionProof::from_bytes(proof_bytes)
+        .ok_or_else(|| DsmError::verification(format!("pdsmt leaf: malformed {what} proof")))?;
+    if &proof.key != key {
+        return Err(DsmError::verification(format!(
+            "pdsmt leaf: {what} proof key != rel_key"
+        )));
+    }
+    if proof.value != Some(*value) {
+        return Err(DsmError::verification(format!(
+            "pdsmt leaf: {what} proof value mismatch"
+        )));
+    }
+    if !SparseMerkleTree::verify_proof_against_root(&proof, root) {
+        return Err(DsmError::verification(format!(
+            "pdsmt leaf: {what} inclusion does not recompute the committed root"
+        )));
+    }
+    Ok(())
 }
 
 /// The genesis-head parent sentinel: the first head in a chain links to all-zeros.
@@ -210,6 +246,34 @@ impl PostedPdsmtLeafRecord {
         *h.finalize().as_bytes()
     }
 
+    /// Verify this leaf is genuinely part of a posted PDSMT snapshot (R4 layer 2,
+    /// completeness): `rel_key → current_tip` is included under `pd_smt_root` AND
+    /// `rel_key → committed_digest()` is included under `leaf_index_root`. The second
+    /// inclusion is what makes the committed `value_capable` flag authoritative — it is
+    /// committed in the head's `leaf_index_root`, never trusted as server metadata.
+    /// Fail-closed on any malformed proof, key/value mismatch, or root mismatch.
+    pub fn verify_inclusion(
+        &self,
+        pd_smt_root: &[u8; 32],
+        leaf_index_root: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        verify_smt_leaf(
+            pd_smt_root,
+            &self.rel_key,
+            &self.current_tip,
+            &self.inclusion_proof_to_pd_smt_root,
+            "pd_smt_root",
+        )?;
+        verify_smt_leaf(
+            leaf_index_root,
+            &self.rel_key,
+            &self.committed_digest(),
+            &self.inclusion_proof_to_leaf_index_root,
+            "leaf_index_root",
+        )?;
+        Ok(())
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         PostedPdsmtLeafRecordV1 {
             genesis_id: self.genesis_id.to_vec(),
@@ -258,10 +322,47 @@ impl PostedPdsmtLeafRecord {
     }
 }
 
+/// Verify a posted PDSMT snapshot head together with its enumerated leaf records
+/// (R4 layers 1+2, the completeness check). Accepts iff:
+/// - the head signature is valid under `candidate_authority_pubkey`, which must equal
+///   the head's committed authority (`PostedPdsmtHead::verify`); AND
+/// - every leaf record is bound to this head (`genesis_id`/`owner_device_id` match) and
+///   is included under both `pd_smt_root` and `leaf_index_root` (`verify_inclusion`).
+///
+/// The caller MUST independently establish that `candidate_authority_pubkey` is the
+/// genesis-anchored authority for `(head.genesis_id, head.device_id)` (via the
+/// `RecoveryAuthorityAnchor`) and that `head.device_id ∈ head.genesis_id`'s Device Tree,
+/// and that this head is the latest valid head at/before the recovery snapshot (the
+/// append-only chain, R4 layer 1). This function does NOT prove the head enumerates
+/// EVERY value-capable leaf — that residual completeness gap is closed by the
+/// counterparty-union backstop (R4 layer 3, gate-set construction).
+pub fn verify_head_with_leaves(
+    head: &PostedPdsmtHead,
+    candidate_authority_pubkey: &[u8],
+    leaves: &[PostedPdsmtLeafRecord],
+) -> Result<(), DsmError> {
+    head.verify(candidate_authority_pubkey)?;
+    for leaf in leaves {
+        if leaf.genesis_id != head.genesis_id {
+            return Err(DsmError::verification(
+                "pdsmt snapshot: leaf genesis_id != head genesis_id",
+            ));
+        }
+        if leaf.owner_device_id != head.device_id {
+            return Err(DsmError::verification(
+                "pdsmt snapshot: leaf owner_device_id != head device_id",
+            ));
+        }
+        leaf.verify_inclusion(&head.pd_smt_root, &head.leaf_index_root)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+    use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 
     const G: [u8; 32] = [0x6E; 32];
     const A: [u8; 32] = [0xA0; 32];
@@ -352,6 +453,89 @@ mod tests {
         let decoded = PostedPdsmtLeafRecord::from_bytes(&l.to_bytes()).unwrap();
         assert_eq!(l, decoded);
         assert_eq!(decoded.counterparty_genesis_id, None);
+    }
+
+    fn signed_head_with_roots(
+        pd_smt_root: [u8; 32],
+        leaf_index_root: [u8; 32],
+    ) -> (PostedPdsmtHead, Vec<u8>) {
+        let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x42; 32]).expect("kp");
+        let mut head = PostedPdsmtHead {
+            genesis_id: G,
+            device_id: A,
+            pd_smt_root,
+            leaf_index_root,
+            snapshot_id: [0x33; 32],
+            authority_pubkey_commit: compute_authority_pubkey_commit(&kp.public_key),
+            parent_head_hash: GENESIS_PARENT_HEAD_HASH,
+            head_number: 0,
+            signature: Vec::new(),
+        };
+        head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
+        (head, kp.public_key.clone())
+    }
+
+    /// Build a leaf record with REAL inclusion proofs against freshly-built SMTs:
+    /// `pd_smt` holds `rel_key → current_tip`, `leaf_index` holds
+    /// `rel_key → committed_digest`. Returns (leaf, pd_smt_root, leaf_index_root).
+    fn leaf_with_real_proofs() -> (PostedPdsmtLeafRecord, [u8; 32], [u8; 32]) {
+        let mut l = leaf(true);
+        let mut pd = SparseMerkleTree::new(256);
+        pd.update_leaf(&l.rel_key, &l.current_tip).unwrap();
+        let pd_root = *pd.root();
+        let tip_proof = pd.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
+
+        let cd = l.committed_digest();
+        let mut idx = SparseMerkleTree::new(256);
+        idx.update_leaf(&l.rel_key, &cd).unwrap();
+        let idx_root = *idx.root();
+        let idx_proof = idx.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
+
+        l.inclusion_proof_to_pd_smt_root = tip_proof;
+        l.inclusion_proof_to_leaf_index_root = idx_proof;
+        (l, pd_root, idx_root)
+    }
+
+    #[test]
+    fn leaf_verify_inclusion_passes_and_rejects_tamper() {
+        let (l, pd_root, idx_root) = leaf_with_real_proofs();
+        l.verify_inclusion(&pd_root, &idx_root).expect("valid inclusion");
+        // Wrong roots fail.
+        assert!(l.verify_inclusion(&[0u8; 32], &idx_root).is_err());
+        assert!(l.verify_inclusion(&pd_root, &[0u8; 32]).is_err());
+        // Tampered tip: proof value no longer matches the record's current_tip.
+        let mut t = l.clone();
+        t.current_tip[0] ^= 0x01;
+        assert!(t.verify_inclusion(&pd_root, &idx_root).is_err());
+        // Tampered value_capable: committed_digest changes → leaf-index inclusion fails.
+        let mut v = l.clone();
+        v.value_capable = false;
+        assert!(v.verify_inclusion(&pd_root, &idx_root).is_err());
+    }
+
+    #[test]
+    fn verify_head_with_leaves_passes_end_to_end() {
+        let (l, pd_root, idx_root) = leaf_with_real_proofs();
+        let (head, pk) = signed_head_with_roots(pd_root, idx_root);
+        verify_head_with_leaves(&head, &pk, &[l]).expect("valid snapshot");
+    }
+
+    #[test]
+    fn verify_head_with_leaves_rejects_leaf_binding_and_injection() {
+        let (l, pd_root, idx_root) = leaf_with_real_proofs();
+        let (head, pk) = signed_head_with_roots(pd_root, idx_root);
+        // Leaf bound to a different genesis is rejected.
+        let mut wrong_genesis = l.clone();
+        wrong_genesis.genesis_id = [0xAA; 32];
+        assert!(verify_head_with_leaves(&head, &pk, &[wrong_genesis]).is_err());
+        // Leaf not committed under the head's leaf_index_root (different rel_key, stale
+        // proofs) is rejected — cannot inject an extra leaf.
+        let mut rogue = l.clone();
+        rogue.rel_key = [0x66; 32];
+        assert!(verify_head_with_leaves(&head, &pk, &[rogue]).is_err());
+        // Wrong authority pubkey is rejected at the head.
+        let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x99; 32]).unwrap();
+        assert!(verify_head_with_leaves(&head, &other.public_key, &[l]).is_err());
     }
 
     #[test]
