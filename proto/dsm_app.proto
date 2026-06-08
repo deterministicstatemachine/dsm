@@ -2717,6 +2717,19 @@ message RecoveryActivationSealProto {
   bytes  final_receipt_roll        = 10 [(dsm_fixed_len)=32];
 }
 
+// The recovery bundle (§0.5 Phase C) — the transmitted succession artifacts. It carries
+// the genesis-anchored recovery authority pubkey, the tombstone/succession pair, and the
+// activation seal. It deliberately does NOT inline per-counterparty evidence: that is
+// re-derived + re-verified from each counterparty's OWN posted, genesis-authenticated
+// state (its PDSMT head + relationship state history) — the §0.5 posted-state authority,
+// fetched not bundled. Sub-objects are nested canonical bytes (each via its own codec).
+message RecoveryBundleV1 {
+  bytes authority_pubkey = 1 [(dsm_max_len)=4096];  // K_A_pub (SPHINCS+ pk)
+  bytes tombstone        = 2 [(dsm_max_len)=65535]; // TombstoneReceipt.to_bytes
+  bytes succession       = 3 [(dsm_max_len)=65535]; // SuccessionReceipt.to_bytes
+  bytes activation_seal  = 4 [(dsm_max_len)=4096];  // RecoveryActivationSeal.to_bytes
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

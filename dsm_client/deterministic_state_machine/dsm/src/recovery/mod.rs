@@ -8,6 +8,7 @@
 
 pub mod activation;
 pub mod authority_anchor;
+pub mod bundle;
 pub mod capsule;
 pub mod gate_set;
 pub mod pdsmt_posting;
@@ -21,6 +22,7 @@ pub use activation::{
 pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
+pub use bundle::RecoveryBundle;
 pub use gate_set::{build_gate_set, CounterpartyValueWitness, FrozenGateSet};
 pub use pdsmt_posting::{
     build_pdsmt_snapshot, decode_leaf_set, encode_leaf_set, verify_head_with_leaves,
