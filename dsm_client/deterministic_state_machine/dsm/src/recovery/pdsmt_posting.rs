@@ -40,6 +40,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::sphincs_verify;
 use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
 use crate::recovery::authority_anchor::compute_authority_pubkey_commit;
+use crate::types::device_state::ValueCapability;
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, PostedPdsmtHeadV1, PostedPdsmtLeafRecordV1};
 
@@ -211,8 +212,10 @@ pub struct PostedPdsmtLeafRecord {
     /// but useful once C's device membership under its own genesis is verified.
     pub counterparty_genesis_id: Option<[u8; 32]>,
     pub current_tip: [u8; 32],
-    pub value_capable: bool,
-    pub value_capable_reason: String,
+    /// Canonical value-capability (R4). `Yes`/`Unknown` include in the gate; only `No`
+    /// excludes. Committed into `leaf_index_root` (authoritative, not server metadata).
+    pub value_capability: ValueCapability,
+    pub value_capability_reason: String,
     pub inclusion_proof_to_pd_smt_root: Vec<u8>,
     pub inclusion_proof_to_leaf_index_root: Vec<u8>,
 }
@@ -239,8 +242,8 @@ impl PostedPdsmtLeafRecord {
             }
         }
         h.update(&self.current_tip);
-        h.update(&[self.value_capable as u8]);
-        let reason = self.value_capable_reason.as_bytes();
+        h.update(&[self.value_capability.commit_tag()]);
+        let reason = self.value_capability_reason.as_bytes();
         h.update(&(reason.len() as u32).to_le_bytes());
         h.update(reason);
         *h.finalize().as_bytes()
@@ -285,8 +288,8 @@ impl PostedPdsmtLeafRecord {
                 .map(|g| g.to_vec())
                 .unwrap_or_default(),
             current_tip: self.current_tip.to_vec(),
-            value_capable: self.value_capable,
-            value_capable_reason: self.value_capable_reason.clone(),
+            value_capability: self.value_capability.to_wire(),
+            value_capability_reason: self.value_capability_reason.clone(),
             inclusion_proof_to_pd_smt_root: self.inclusion_proof_to_pd_smt_root.clone(),
             inclusion_proof_to_leaf_index_root: self.inclusion_proof_to_leaf_index_root.clone(),
         }
@@ -314,8 +317,14 @@ impl PostedPdsmtLeafRecord {
             counterparty_device_id: fixed32(&p.counterparty_device_id, "counterparty_device_id")?,
             counterparty_genesis_id,
             current_tip: fixed32(&p.current_tip, "current_tip")?,
-            value_capable: p.value_capable,
-            value_capable_reason: p.value_capable_reason,
+            value_capability: ValueCapability::from_wire(p.value_capability).ok_or_else(|| {
+                DsmError::verification(format!(
+                    "pdsmt leaf: value_capability invalid wire value {} (UNSPECIFIED/unknown is \
+                     rejected, never read as No)",
+                    p.value_capability
+                ))
+            })?,
+            value_capability_reason: p.value_capability_reason,
             inclusion_proof_to_pd_smt_root: p.inclusion_proof_to_pd_smt_root,
             inclusion_proof_to_leaf_index_root: p.inclusion_proof_to_leaf_index_root,
         })
@@ -384,7 +393,7 @@ mod tests {
         (head, kp.public_key.clone())
     }
 
-    fn leaf(value_capable: bool) -> PostedPdsmtLeafRecord {
+    fn leaf(vc: ValueCapability) -> PostedPdsmtLeafRecord {
         PostedPdsmtLeafRecord {
             genesis_id: G,
             owner_device_id: A,
@@ -392,8 +401,8 @@ mod tests {
             counterparty_device_id: [0xC0; 32],
             counterparty_genesis_id: Some([0xC9; 32]),
             current_tip: [0x77; 32],
-            value_capable,
-            value_capable_reason: "accepted token transfer".into(),
+            value_capability: vc,
+            value_capability_reason: "accepted token transfer".into(),
             inclusion_proof_to_pd_smt_root: vec![1, 2, 3],
             inclusion_proof_to_leaf_index_root: vec![4, 5, 6],
         }
@@ -447,7 +456,7 @@ mod tests {
 
     #[test]
     fn leaf_round_trip_with_and_without_counterparty_genesis() {
-        let mut l = leaf(true);
+        let mut l = leaf(ValueCapability::Yes);
         assert_eq!(l, PostedPdsmtLeafRecord::from_bytes(&l.to_bytes()).unwrap());
         l.counterparty_genesis_id = None;
         let decoded = PostedPdsmtLeafRecord::from_bytes(&l.to_bytes()).unwrap();
@@ -479,7 +488,7 @@ mod tests {
     /// `pd_smt` holds `rel_key → current_tip`, `leaf_index` holds
     /// `rel_key → committed_digest`. Returns (leaf, pd_smt_root, leaf_index_root).
     fn leaf_with_real_proofs() -> (PostedPdsmtLeafRecord, [u8; 32], [u8; 32]) {
-        let mut l = leaf(true);
+        let mut l = leaf(ValueCapability::Yes);
         let mut pd = SparseMerkleTree::new(256);
         pd.update_leaf(&l.rel_key, &l.current_tip).unwrap();
         let pd_root = *pd.root();
@@ -507,9 +516,9 @@ mod tests {
         let mut t = l.clone();
         t.current_tip[0] ^= 0x01;
         assert!(t.verify_inclusion(&pd_root, &idx_root).is_err());
-        // Tampered value_capable: committed_digest changes → leaf-index inclusion fails.
+        // Tampered value_capability: committed_digest changes → leaf-index inclusion fails.
         let mut v = l.clone();
-        v.value_capable = false;
+        v.value_capability = ValueCapability::No;
         assert!(v.verify_inclusion(&pd_root, &idx_root).is_err());
     }
 
@@ -540,18 +549,18 @@ mod tests {
 
     #[test]
     fn leaf_committed_digest_binds_value_capable_flag_and_reason() {
-        let yes = leaf(true);
-        let no = leaf(false);
-        // Flipping the authoritative value_capable flag changes the committed digest.
+        let yes = leaf(ValueCapability::Yes);
+        let no = leaf(ValueCapability::No);
+        // Flipping the authoritative value_capability changes the committed digest.
         assert_ne!(yes.committed_digest(), no.committed_digest());
         // Changing the reason also changes the digest.
-        let mut other_reason = leaf(true);
-        other_reason.value_capable_reason = "dlv collateral lock".into();
+        let mut other_reason = leaf(ValueCapability::Yes);
+        other_reason.value_capability_reason = "dlv collateral lock".into();
         assert_ne!(yes.committed_digest(), other_reason.committed_digest());
         // Deterministic.
-        assert_eq!(yes.committed_digest(), leaf(true).committed_digest());
+        assert_eq!(yes.committed_digest(), leaf(ValueCapability::Yes).committed_digest());
         // Inclusion proofs are NOT part of the committed value.
-        let mut diff_proof = leaf(true);
+        let mut diff_proof = leaf(ValueCapability::Yes);
         diff_proof.inclusion_proof_to_pd_smt_root = vec![9, 9, 9];
         assert_eq!(yes.committed_digest(), diff_proof.committed_digest());
     }

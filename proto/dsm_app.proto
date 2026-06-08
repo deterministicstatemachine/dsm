@@ -2657,22 +2657,32 @@ message PostedPdsmtHeadV1 {
   bytes  signature               = 9 [(dsm_max_len)=65535]; // SPX256f K_A sig over the head digest
 }
 
+// Canonical value-capability (R4 anti-shrink) — the ONLY representation; there is no
+// legacy bool. UNSPECIFIED(0) is invalid and MUST be rejected on decode (never read as
+// NO). YES/UNKNOWN include in the recovery gate; only proven NO excludes.
+enum ValueCapabilityV1 {
+  VALUE_CAPABILITY_V1_UNSPECIFIED = 0; // invalid sentinel — decode rejects
+  VALUE_CAPABILITY_V1_YES         = 1;
+  VALUE_CAPABILITY_V1_NO          = 2;
+  VALUE_CAPABILITY_V1_UNKNOWN     = 3;
+}
+
 // One enumerable, committed leaf/index record of a posted PDSMT snapshot.
-// `value_capable` is part of the SIGNED/COMMITTED record (committed under
+// `value_capability` is part of the SIGNED/COMMITTED record (committed under
 // `leaf_index_root`) — NOT server metadata. `counterparty_genesis_id` is optional
 // context (empty if unknown): it cannot compute `rel_key` (device-pair derived) but
 // is useful once C's device membership under its own genesis is verified.
 message PostedPdsmtLeafRecordV1 {
-  bytes  genesis_id                       = 1 [(dsm_fixed_len)=32];
-  bytes  owner_device_id                  = 2 [(dsm_fixed_len)=32];
-  bytes  rel_key                          = 3 [(dsm_fixed_len)=32];
-  bytes  counterparty_device_id           = 4 [(dsm_fixed_len)=32];
-  bytes  counterparty_genesis_id          = 5 [(dsm_max_len)=32]; // optional (empty if unknown)
-  bytes  current_tip                      = 6 [(dsm_fixed_len)=32];
-  bool   value_capable                    = 7;
-  string value_capable_reason             = 8;
-  bytes  inclusion_proof_to_pd_smt_root   = 9  [(dsm_max_len)=65535];
-  bytes  inclusion_proof_to_leaf_index_root = 10 [(dsm_max_len)=65535];
+  bytes            genesis_id                         = 1 [(dsm_fixed_len)=32];
+  bytes            owner_device_id                    = 2 [(dsm_fixed_len)=32];
+  bytes            rel_key                            = 3 [(dsm_fixed_len)=32];
+  bytes            counterparty_device_id             = 4 [(dsm_fixed_len)=32];
+  bytes            counterparty_genesis_id            = 5 [(dsm_max_len)=32]; // optional (empty if unknown)
+  bytes            current_tip                        = 6 [(dsm_fixed_len)=32];
+  ValueCapabilityV1 value_capability                  = 7;
+  string           value_capability_reason            = 8;
+  bytes            inclusion_proof_to_pd_smt_root     = 9  [(dsm_max_len)=65535];
+  bytes            inclusion_proof_to_leaf_index_root = 10 [(dsm_max_len)=65535];
 }
 
 // ==================== Minimal deterministic identity =================

@@ -34,6 +34,7 @@
 use crate::core::bilateral_transaction_manager::compute_smt_key;
 use crate::recovery::capsule::contact_set_commit_from_device_ids;
 use crate::recovery::pdsmt_posting::{verify_head_with_leaves, PostedPdsmtHead, PostedPdsmtLeafRecord};
+use crate::types::device_state::ValueCapability;
 use crate::types::error::DsmError;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,9 +86,10 @@ pub fn build_gate_set(
     let mut members: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut rel_keys: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
 
-    // Primary set: A_old's value-capable leaves.
+    // Primary set: A_old's leaves that are NOT proven `No` (R4: `Yes` and `Unknown` both
+    // include; only positively-proven `No` is excluded).
     for leaf in a_old_leaves {
-        if !leaf.value_capable {
+        if !leaf.value_capability.includes_in_gate() {
             continue;
         }
         let expected = compute_smt_key(a_old, &leaf.counterparty_device_id);
@@ -113,9 +115,11 @@ pub fn build_gate_set(
                 "gate-set: witness leaf is not about A_old",
             ));
         }
-        if !w.leaf.value_capable {
+        // A witness must NOT positively assert `No` (that would contradict its purpose).
+        // `Yes` and `Unknown` both contribute to the anti-shrink union (include direction).
+        if w.leaf.value_capability == ValueCapability::No {
             return Err(DsmError::verification(
-                "gate-set: witness leaf is not value-capable",
+                "gate-set: witness leaf positively asserts No (contradictory anti-shrink witness)",
             ));
         }
         // Symmetric rel_key ties C's leaf to the SAME relationship as A_old's view.
@@ -157,7 +161,7 @@ mod tests {
         owner: [u8; 32],
         genesis: [u8; 32],
         seed: u8,
-        entries: &[([u8; 32], bool)],
+        entries: &[([u8; 32], ValueCapability)],
     ) -> (PostedPdsmtHead, Vec<u8>, Vec<PostedPdsmtLeafRecord>) {
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp");
 
@@ -172,8 +176,12 @@ mod tests {
                 counterparty_device_id: *cp,
                 counterparty_genesis_id: None,
                 current_tip: [0x70 ^ i as u8; 32],
-                value_capable: *vc,
-                value_capable_reason: if *vc { "token transfer".into() } else { String::new() },
+                value_capability: *vc,
+                value_capability_reason: match vc {
+                    ValueCapability::Yes => "token transfer".into(),
+                    ValueCapability::No => String::new(),
+                    ValueCapability::Unknown => "unknown-unbackfilled".into(),
+                },
                 inclusion_proof_to_pd_smt_root: Vec::new(),
                 inclusion_proof_to_leaf_index_root: Vec::new(),
             })
@@ -211,8 +219,8 @@ mod tests {
     }
 
     /// A counterparty `c` posts its OWN snapshot containing a value-capable leaf about A_old.
-    fn witness_for(c: [u8; 32], c_genesis: [u8; 32], seed: u8, value_capable: bool) -> CounterpartyValueWitness {
-        let (head, pk, leaves) = posted_snapshot(c, c_genesis, seed, &[(A_OLD, value_capable)]);
+    fn witness_for(c: [u8; 32], c_genesis: [u8; 32], seed: u8, vc: ValueCapability) -> CounterpartyValueWitness {
+        let (head, pk, leaves) = posted_snapshot(c, c_genesis, seed, &[(A_OLD, vc)]);
         CounterpartyValueWitness {
             head,
             authority_pubkey: pk,
@@ -228,7 +236,16 @@ mod tests {
         let c3 = [0xC3; 32];
         // C1, C2 value-capable; C3 a pure contact relationship.
         let (head, pk, leaves) =
-            posted_snapshot(A_OLD, g_a, 0x42, &[(c1, true), (c2, true), (c3, false)]);
+            posted_snapshot(
+                A_OLD,
+                g_a,
+                0x42,
+                &[
+                    (c1, ValueCapability::Yes),
+                    (c2, ValueCapability::Yes),
+                    (c3, ValueCapability::No),
+                ],
+            );
         let gs = build_gate_set(&A_OLD, &head, &pk, &leaves, &[]).expect("gate set");
         assert_eq!(gs.members, BTreeSet::from([c1, c2]));
         assert_eq!(
@@ -238,26 +255,59 @@ mod tests {
     }
 
     #[test]
+    fn unknown_leaves_included_only_proven_no_excluded() {
+        let g_a = [0x6E; 32];
+        let yes = [0xC1; 32];
+        let unknown = [0xC2; 32];
+        let no = [0xC3; 32];
+        let (head, pk, leaves) = posted_snapshot(
+            A_OLD,
+            g_a,
+            0x42,
+            &[
+                (yes, ValueCapability::Yes),
+                (unknown, ValueCapability::Unknown),
+                (no, ValueCapability::No),
+            ],
+        );
+        let gs = build_gate_set(&A_OLD, &head, &pk, &leaves, &[]).expect("gate set");
+        // R4: Yes AND Unknown are INCLUDED; only positively-proven No is excluded.
+        assert_eq!(gs.members, BTreeSet::from([yes, unknown]));
+    }
+
+    #[test]
+    fn unknown_witness_is_included() {
+        let g_a = [0x6E; 32];
+        let c1 = [0xC1; 32];
+        let omitted = [0xC9; 32];
+        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
+        // An `Unknown` witness still forces its device in (Unknown includes, fail-closed).
+        let w = witness_for(omitted, [0xD9; 32], 0x55, ValueCapability::Unknown);
+        let gs = build_gate_set(&A_OLD, &head, &pk, &leaves, &[w]).expect("gate set");
+        assert_eq!(gs.members, BTreeSet::from([c1, omitted]));
+    }
+
+    #[test]
     fn union_forces_in_an_omitted_counterparty() {
         let g_a = [0x6E; 32];
         let c1 = [0xC1; 32];
         let omitted = [0xC9; 32];
         // A_old's head lists only C1 (a shrink that OMITS `omitted`).
-        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, true)]);
+        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
         // `omitted` posts its OWN value-capable claim about A_old.
-        let w = witness_for(omitted, [0xD9; 32], 0x55, true);
+        let w = witness_for(omitted, [0xD9; 32], 0x55, ValueCapability::Yes);
         let gs = build_gate_set(&A_OLD, &head, &pk, &leaves, &[w]).expect("gate set");
         // The omitted counterparty is forced into the gate-set despite A_old's shrink.
         assert_eq!(gs.members, BTreeSet::from([c1, omitted]));
     }
 
     #[test]
-    fn union_witness_must_be_value_capable() {
+    fn union_witness_proven_no_is_rejected() {
         let g_a = [0x6E; 32];
         let c1 = [0xC1; 32];
-        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, true)]);
-        // A non-value-capable witness does not add its device.
-        let w = witness_for([0xC9; 32], [0xD9; 32], 0x55, false);
+        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
+        // A witness that positively asserts `No` is contradictory and rejected.
+        let w = witness_for([0xC9; 32], [0xD9; 32], 0x55, ValueCapability::No);
         assert!(build_gate_set(&A_OLD, &head, &pk, &leaves, &[w]).is_err());
     }
 
@@ -265,10 +315,10 @@ mod tests {
     fn union_witness_must_be_about_a_old() {
         let g_a = [0x6E; 32];
         let c1 = [0xC1; 32];
-        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, true)]);
+        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
         // Witness whose leaf is about a DIFFERENT device, not A_old.
         let (w_head, w_pk, w_leaves) =
-            posted_snapshot([0xC9; 32], [0xD9; 32], 0x55, &[([0xBB; 32], true)]);
+            posted_snapshot([0xC9; 32], [0xD9; 32], 0x55, &[([0xBB; 32], ValueCapability::Yes)]);
         let w = CounterpartyValueWitness {
             head: w_head,
             authority_pubkey: w_pk,
@@ -281,8 +331,8 @@ mod tests {
     fn forged_witness_authority_rejected() {
         let g_a = [0x6E; 32];
         let c1 = [0xC1; 32];
-        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, true)]);
-        let mut w = witness_for([0xC9; 32], [0xD9; 32], 0x55, true);
+        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
+        let mut w = witness_for([0xC9; 32], [0xD9; 32], 0x55, ValueCapability::Yes);
         // Wrong authority pubkey for the witness head → head verify fails.
         let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x01; 32]).unwrap();
         w.authority_pubkey = other.public_key.clone();
@@ -292,7 +342,8 @@ mod tests {
     #[test]
     fn wrong_a_old_head_device_rejected() {
         let g_a = [0x6E; 32];
-        let (head, pk, leaves) = posted_snapshot([0xBE; 32], g_a, 0x42, &[([0xC1; 32], true)]);
+        let (head, pk, leaves) =
+            posted_snapshot([0xBE; 32], g_a, 0x42, &[([0xC1; 32], ValueCapability::Yes)]);
         // Head is for a different device than the A_old under recovery.
         assert!(build_gate_set(&A_OLD, &head, &pk, &leaves, &[]).is_err());
     }
@@ -302,8 +353,8 @@ mod tests {
         let g_a = [0x6E; 32];
         let c1 = [0xC1; 32];
         // A_old lists C1; C1 ALSO posts its own value-capable claim → no duplication.
-        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, true)]);
-        let w = witness_for(c1, [0xD1; 32], 0x55, true);
+        let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
+        let w = witness_for(c1, [0xD1; 32], 0x55, ValueCapability::Yes);
         let gs = build_gate_set(&A_OLD, &head, &pk, &leaves, &[w]).expect("gate set");
         assert_eq!(gs.members, BTreeSet::from([c1]));
     }
