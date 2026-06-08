@@ -43,6 +43,30 @@ struct RecoveryCapsuleState {
     genesis_hash: Vec<u8>,
 }
 
+/// Session inputs for [`RecoverySDK::build_and_activate_recovery`] — the decrypted capsule's
+/// floor/frontier plus the recovery intent and the recovered device's final state. The route
+/// handler decodes the capsule + AppState identity into this; the orchestrator fetches all
+/// online-posted state from storage itself.
+#[derive(Clone, Debug)]
+pub struct RecoveryActivationContext {
+    pub genesis_id: [u8; 32],
+    /// The device being recovered (capsule `source_device_id`).
+    pub a_old: [u8; 32],
+    /// The recovering successor device (this device).
+    pub a_new: [u8; 32],
+    /// Per-counterparty capsule floor `h_cap` (the sealed `(A_old,C)` tip), keyed by C.
+    pub capsule_floor: std::collections::BTreeMap<[u8; 32], [u8; 32]>,
+    /// A_old's frontier for the tombstone (from the capsule).
+    pub old_smt_root: [u8; 32],
+    pub old_counter: u64,
+    pub old_rollup_hash: [u8; 32],
+    /// Recovery-session seal context (bound into the activation seal, not derived here).
+    pub recovery_intent_digest: [u8; 32],
+    pub tombstone_proposal_digest: [u8; 32],
+    pub final_per_device_smt_root: [u8; 32],
+    pub final_receipt_roll: [u8; 32],
+}
+
 impl RecoverySDK {
     /// Initialize the recovery subsystem
     pub fn init() {
@@ -952,6 +976,183 @@ impl RecoverySDK {
 
         let encrypted = EncryptedCapsule::from_bytes(capsule_bytes)?;
         decrypt_capsule_with_key(&encrypted, &key)
+    }
+
+    /// End-to-end recovery activation orchestration (spec §0.5 Phase D step 2).
+    ///
+    /// Fetches A_old's and every candidate counterparty's online-posted, genesis-authenticated
+    /// state, assembles + verifies the per-counterparty cross-relationship succession evidence
+    /// (via the pure [`dsm::recovery::assemble_recovery_activation`] core), and feeds the
+    /// fail-closed [`Self::verify_and_record_activation`] chokepoint. It does NOT unlock
+    /// anything — `verify_and_record_activation` still returns the disabled error until go-live.
+    ///
+    /// Session-specific inputs (the decrypted capsule's floor/frontier + the recovery intent
+    /// and the recovered device's final state) are supplied via [`RecoveryActivationContext`];
+    /// the route handler decodes the capsule and AppState identity into it. `K_A` must be cached.
+    ///
+    /// Fail-closed: a missing/unanchored counterparty, a gate member without posted evidence,
+    /// or any verification failure aborts. Storage is availability-only; every authority is
+    /// genesis-anchored client-side (A's via the chokepoint's anchor check; each C's via
+    /// [`Self::fetch_and_verify_authority_anchor`]).
+    pub async fn build_and_activate_recovery(
+        ctx: &RecoveryActivationContext,
+    ) -> Result<(), DsmError> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let (ka_pub, ka_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
+            DsmError::InvalidState(
+                "build_and_activate_recovery: no cached recovery-authority keypair (cache the \
+                 mnemonic first)"
+                    .into(),
+            )
+        })?;
+
+        // Identity-level tombstone/succession (A's K_A) proving A_new succeeds A_old. The
+        // device-id string MUST match dsm's `encode_crockford` (verify_succession_semantics
+        // compares `tombstone.device_id == encode_crockford(a_old)`); the SDK encoder is the
+        // documented byte-identical twin.
+        let a_old_str = crate::util::text_id::encode_base32_crockford(&ctx.a_old);
+        let tombstone = create_tombstone_receipt(
+            &ctx.old_smt_root,
+            ctx.old_counter,
+            &ctx.old_rollup_hash,
+            &a_old_str,
+            &ka_sk,
+        )?;
+        let succession = create_succession_receipt(
+            &tombstone.tombstone_hash,
+            ctx.a_new.as_ref(),
+            &a_old_str,
+            &ka_sk,
+        )?;
+
+        // A_old's posted head + leaves. A_old's recovery authority IS this identity's K_A
+        // (per-identity, re-derived from the mnemonic) — the posted head must be signed by it.
+        let a_old_head = Self::fetch_pdsmt_head_latest(&ctx.a_old).await?;
+        if a_old_head.authority_pubkey != ka_pub {
+            return Err(DsmError::verification(
+                "build_and_activate_recovery: A_old head authority_pubkey != this identity's K_A",
+            ));
+        }
+        let a_old_authority_commit = dsm::recovery::compute_authority_pubkey_commit(&ka_pub);
+        let a_old_leaves =
+            Self::fetch_pdsmt_leaves(&ctx.genesis_id, &ctx.a_old, a_old_head.head_number).await?;
+
+        // Candidate counterparties: A_old's posted leaves ∪ the capsule's floor set.
+        let mut candidates: BTreeSet<[u8; 32]> =
+            a_old_leaves.iter().map(|l| l.counterparty_device_id).collect();
+        candidates.extend(ctx.capsule_floor.keys().copied());
+
+        // Per-C: fetch posted state, GENESIS-ANCHOR C's authority (pubkey carried in the head),
+        // and bind the floor/segment/receipt. Skip a candidate missing any piece — the
+        // assembler then FAILS CLOSED if that candidate is a gate member.
+        let mut counterparties: BTreeMap<[u8; 32], dsm::recovery::CounterpartyRecoveryInput> =
+            BTreeMap::new();
+        for c in &candidates {
+            let Some(h_cap) = ctx.capsule_floor.get(c).copied() else {
+                log::debug!("[RECOVERY] candidate {} has no capsule floor; skipping", a_old_str);
+                continue;
+            };
+            let head = match Self::fetch_pdsmt_head_latest(c).await {
+                Ok(h) => h,
+                Err(e) => {
+                    log::debug!("[RECOVERY] no posted head for a candidate: {e}; skipping");
+                    continue;
+                }
+            };
+            let c_genesis = head.genesis_id;
+            // Genesis-anchor C's authority: binds H(head.authority_pubkey) to C's anchored
+            // commit, quorum-verifies C ∈ c_genesis device tree, and checks c_genesis is real.
+            if let Err(e) =
+                Self::fetch_and_verify_authority_anchor(&c_genesis, c, &head.authority_pubkey).await
+            {
+                log::debug!("[RECOVERY] counterparty authority not genesis-anchored: {e}; skipping");
+                continue;
+            }
+            let authority_commit =
+                dsm::recovery::compute_authority_pubkey_commit(&head.authority_pubkey);
+            let leaves = match Self::fetch_pdsmt_leaves(&c_genesis, c, head.head_number).await {
+                Ok(l) => l,
+                Err(e) => {
+                    log::debug!("[RECOVERY] no posted leaves for a counterparty: {e}; skipping");
+                    continue;
+                }
+            };
+            let old_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
+            let new_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
+            let old_segment = match Self::fetch_rel_chain_segment(&old_rel_key).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::debug!("[RECOVERY] no ancestry segment for a counterparty: {e}; skipping");
+                    continue;
+                }
+            };
+            let establishment =
+                match Self::fetch_establishment_receipt(&new_rel_key, &ctx.a_new, c).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::debug!(
+                            "[RECOVERY] no establishment receipt for a counterparty: {e}; skipping"
+                        );
+                        continue;
+                    }
+                };
+            counterparties.insert(
+                *c,
+                dsm::recovery::CounterpartyRecoveryInput {
+                    head,
+                    authority_commit,
+                    leaves,
+                    old_segment,
+                    establishment,
+                    h_cap,
+                },
+            );
+        }
+
+        // Assemble + verify the (seal, gate_set, evidence) triple (pure core; fail-closed).
+        let inputs = dsm::recovery::RecoveryAssemblyInputs {
+            genesis_id: ctx.genesis_id,
+            a_old: ctx.a_old,
+            a_new: ctx.a_new,
+            a_old_head,
+            a_old_authority_commit,
+            a_old_leaves,
+            counterparties,
+            tombstone,
+            succession,
+            recovery_intent_digest: ctx.recovery_intent_digest,
+            tombstone_proposal_digest: ctx.tombstone_proposal_digest,
+            final_per_device_smt_root: ctx.final_per_device_smt_root,
+            final_receipt_roll: ctx.final_receipt_roll,
+        };
+        let assembled = dsm::recovery::assemble_recovery_activation(&inputs, &ka_pub)?;
+
+        // Fail-closed chokepoint. Needs A's authority anchor + A_old's genesis-authenticated
+        // device signing pubkey (device-tree quorum) to bind K_A to the genesis.
+        let a_old_anchor = Self::fetch_authority_anchor(&ctx.genesis_id).await?;
+        let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
+            .await
+            .map_err(|e| {
+                DsmError::storage(format!("load storage node config: {e}"), None::<std::io::Error>)
+            })?;
+        let qid = crate::handlers::app_router_impl::fetch_quorum_device_identity(
+            &config.node_urls,
+            ctx.a_old,
+        )
+        .await
+        .map_err(|e| {
+            DsmError::verification(format!("recovery: A_old device identity quorum failed: {e}"))
+        })?;
+
+        Self::verify_and_record_activation(
+            &assembled.seal,
+            &assembled.gate_set,
+            &assembled.evidence,
+            &a_old_anchor,
+            &qid.public_key,
+            &ka_pub,
+        )
     }
 
     /// Verify a recovery activation seal and, on success, RECORD activation so a
