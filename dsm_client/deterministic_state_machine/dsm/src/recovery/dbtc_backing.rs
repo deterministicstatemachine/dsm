@@ -53,11 +53,12 @@ pub struct DbtcBitcoinFacts {
 pub fn classify_dbtc_backing(facts: &DbtcBitcoinFacts) -> DbtcVaultCondition {
     if facts.htlc_utxo_unspent && facts.funding_confirmed && facts.preimage_derivable {
         DbtcVaultCondition::Spendable
-    } else if !facts.preimage_derivable {
-        DbtcVaultCondition::Finalized
-    } else if !facts.htlc_utxo_unspent {
+    } else if !facts.preimage_derivable || !facts.htlc_utxo_unspent {
+        // Not claimable by this bearer (hash_lock mismatch → not our vault), OR the HTLC
+        // output is already spent on Bitcoin (withdrawn/swept). Either way: value gone.
         DbtcVaultCondition::Finalized
     } else {
+        // Claimable + unspent, but funding not yet confirmed to depth → deposit still settling.
         DbtcVaultCondition::InFlight
     }
 }
