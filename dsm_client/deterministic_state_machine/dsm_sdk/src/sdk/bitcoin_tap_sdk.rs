@@ -2439,6 +2439,126 @@ impl BitcoinTapSdk {
         format!("{}{}", Self::vault_advertisement_prefix(), vault_id)
     }
 
+    // ── P5 dBTC bearer-state reconciliation (spec §0.4 — dBTC pass) ────────────────────
+    // dBTC is excluded from the generic recovery token path; it stays LockedRecovery until
+    // its OWN posted vault-advertisement frontier reconciles it. The pure aggregation lives
+    // in dsm::recovery::dbtc_reconcile; this layer classifies posted ads + writes the lock.
+
+    /// Classify a posted dBTC vault advertisement's lifecycle into a verified per-vault
+    /// recovery condition. Only `active` + routeable yields `Spendable`; every other KNOWN
+    /// vault state blocks (`InFlight`/`Finalized`/`RefundPending`); unknown/empty → `None`
+    /// → the caller keeps dBTC `LockedRecovery` (fail-closed). Storage is availability-only;
+    /// this is NOT Bitcoin SPV/UTXO verification (deferred) — it classifies the posted state.
+    pub(crate) fn classify_dbtc_lifecycle(
+        lifecycle_state: &str,
+        routeable: bool,
+    ) -> Option<dsm::recovery::DbtcVaultCondition> {
+        use dsm::recovery::DbtcVaultCondition as C;
+        match lifecycle_state.trim() {
+            // Active + routeable = holds spendable dBTC backing. Active-but-busy is in-flight.
+            "active" => Some(if routeable { C::Spendable } else { C::InFlight }),
+            // Deposit not yet confirmed/available → value entering, not spendable.
+            "limbo" | "initiated" | "awaiting_confirmation" | "claimable" => Some(C::InFlight),
+            // Exited / claimed / swept / fulfilled / invalidated → value gone.
+            "unlocked" | "claimed" | "spent" | "completed" | "invalidated" => Some(C::Finalized),
+            // Refund path open.
+            "expired" | "refunded" => Some(C::RefundPending),
+            // Unknown/empty lifecycle → fail closed (caller keeps LockedRecovery).
+            _ => None,
+        }
+    }
+
+    /// Reconcile the recovered device's dBTC bearer asset from posted vault advertisements
+    /// (spec §0.4 P5 — dBTC pass). FAIL-CLOSED throughout:
+    /// - empty `candidate_vault_ids` → `MissingDbtcVaultEnumeration` (dBTC stays
+    ///   `LockedRecovery`; authenticated fresh-device enumeration is the deferred prerequisite);
+    /// - any unfetchable / malformed / structurally-invalid / unknown-lifecycle ad → dBTC is
+    ///   (re-)set `LockedRecovery` and `Ok(LockedRecovery)` returned (NEVER unlocks).
+    ///
+    /// On full coverage, aggregates via [`dsm::recovery::aggregate_dbtc_frontier`] (hint = the
+    /// device's restored dBTC balance projection — a hint only, never authority) and writes the
+    /// resulting lock state for token `dBTC`. The capsule is never a balance oracle; a vault
+    /// becomes spendable only because its posted frontier proves it. (Bitcoin SPV/UTXO
+    /// re-verification of entry/exit anchors is the deferred hardening.)
+    pub async fn reconcile_dbtc_asset(
+        candidate_vault_ids: &[String],
+    ) -> Result<dsm::recovery::BearerAssetLockState, DsmError> {
+        if candidate_vault_ids.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "MissingDbtcVaultEnumeration: no candidate dBTC vault ids to reconcile; dBTC \
+                 stays LockedRecovery until authenticated vault enumeration exists",
+            ));
+        }
+
+        // Capsule hint: the device's restored dBTC balance projection (hint ONLY, never authority).
+        let device_id = crate::sdk::app_state::AppState::get_device_id().ok_or_else(|| {
+            DsmError::InvalidState("reconcile_dbtc_asset: no device identity".into())
+        })?;
+        let device_str = crate::util::text_id::encode_base32_crockford(&device_id);
+        let hint_sats = crate::storage::client_db::get_balance_projection(&device_str, DBTC_TOKEN_ID)
+            .ok()
+            .flatten()
+            .map(|p| p.available)
+            .unwrap_or(0);
+
+        let expected_policy = Self::dbtc_policy_commit();
+        let mut outcomes = Vec::with_capacity(candidate_vault_ids.len());
+        for vault_id in candidate_vault_ids {
+            let key = Self::vault_advertisement_key(vault_id);
+            let bytes = match Self::storage_get_bytes(&key).await {
+                Ok(b) => b,
+                Err(_) => return Self::keep_dbtc_locked_closed("missing advertisement"),
+            };
+            let ad = match generated::DbtcVaultAdvertisementV1::decode(bytes.as_slice()) {
+                Ok(a) => a,
+                Err(_) => return Self::keep_dbtc_locked_closed("malformed advertisement"),
+            };
+            // Structural verification: dBTC policy, matching vault_id, present controller.
+            if ad.policy_commit.as_slice() != expected_policy
+                || ad.vault_id != *vault_id
+                || ad.controller_device_id.len() != 32
+            {
+                return Self::keep_dbtc_locked_closed(
+                    "advertisement failed structural verification",
+                );
+            }
+            match Self::classify_dbtc_lifecycle(&ad.lifecycle_state, ad.routeable) {
+                Some(condition) => outcomes.push(dsm::recovery::DbtcVaultOutcome {
+                    amount_sats: ad.amount_sats,
+                    condition,
+                }),
+                None => return Self::keep_dbtc_locked_closed("unknown vault lifecycle state"),
+            }
+        }
+
+        let (state, cap) = dsm::recovery::aggregate_dbtc_frontier(hint_sats, &outcomes);
+        crate::storage::client_db::recovery::set_asset_lock(
+            DBTC_TOKEN_ID.as_bytes(),
+            state,
+            cap,
+            true,
+        )
+        .map_err(|e| DsmError::storage(format!("set dBTC lock: {e}"), None::<std::io::Error>))?;
+        Ok(state)
+    }
+
+    /// Ensure dBTC is (and stays) `LockedRecovery` on a reconciliation completeness failure,
+    /// log the reason, and return `Ok(LockedRecovery)` (the device IS deterministically still
+    /// locked — this is the safe outcome, not an error).
+    fn keep_dbtc_locked_closed(
+        reason: &str,
+    ) -> Result<dsm::recovery::BearerAssetLockState, DsmError> {
+        use dsm::recovery::BearerAssetLockState;
+        log::warn!("[dbtc-reconcile] {reason}: dBTC stays LockedRecovery (fail-closed)");
+        let _ = crate::storage::client_db::recovery::set_asset_lock(
+            DBTC_TOKEN_ID.as_bytes(),
+            BearerAssetLockState::LockedRecovery,
+            0,
+            true,
+        );
+        Ok(BearerAssetLockState::LockedRecovery)
+    }
+
     /// Mark a vault as spent on storage nodes after a successful sweep.
     ///
     /// Updates the existing advertisement's lifecycle_state to "spent" and
@@ -5244,5 +5364,126 @@ mod tests {
             plan.legs.iter().all(|leg| leg.vault_id != stale_b32),
             "stale in-memory vaults absent from SQLite must not be considered"
         );
+    }
+
+    // ── P5 dBTC reconciliation (spec §0.4 — dBTC pass) ────────────────────────────────
+
+    #[test]
+    fn classify_dbtc_lifecycle_maps_states_and_fails_closed_on_unknown() {
+        use dsm::recovery::DbtcVaultCondition as C;
+        assert_eq!(
+            BitcoinTapSdk::classify_dbtc_lifecycle("active", true),
+            Some(C::Spendable)
+        );
+        // Active-but-busy is NOT spendable.
+        assert_eq!(
+            BitcoinTapSdk::classify_dbtc_lifecycle("active", false),
+            Some(C::InFlight)
+        );
+        for s in ["limbo", "initiated", "awaiting_confirmation", "claimable"] {
+            assert_eq!(BitcoinTapSdk::classify_dbtc_lifecycle(s, true), Some(C::InFlight));
+        }
+        for s in ["unlocked", "claimed", "spent", "completed", "invalidated"] {
+            assert_eq!(BitcoinTapSdk::classify_dbtc_lifecycle(s, true), Some(C::Finalized));
+        }
+        for s in ["expired", "refunded"] {
+            assert_eq!(
+                BitcoinTapSdk::classify_dbtc_lifecycle(s, true),
+                Some(C::RefundPending)
+            );
+        }
+        // Unknown / empty → fail closed.
+        assert_eq!(BitcoinTapSdk::classify_dbtc_lifecycle("weird", true), None);
+        assert_eq!(BitcoinTapSdk::classify_dbtc_lifecycle("", true), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_dbtc_empty_candidates_is_missing_enumeration() {
+        init_withdrawal_test_db();
+        let err = BitcoinTapSdk::reconcile_dbtc_asset(&[]).await.unwrap_err();
+        assert!(
+            err.to_string().contains("MissingDbtcVaultEnumeration"),
+            "got: {err}"
+        );
+    }
+
+    /// Set up identity + an existing dBTC LockedRecovery lock for the reconcile tests.
+    fn dbtc_reconcile_test_identity() {
+        let _ = crate::storage_utils::set_storage_base_dir(
+            std::env::temp_dir().join("dsm_dbtc_reconcile_test"),
+        );
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::app_state::AppState::set_identity_info(
+            vec![0xAB; 32],
+            vec![0x01; 32],
+            vec![0x6E; 32],
+            vec![0x02; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        // dBTC starts LockedRecovery (as generic recovery-time locking would leave it).
+        crate::storage::client_db::recovery::lock_restored_bearer_asset(DBTC_TOKEN_ID.as_bytes())
+            .expect("lock dBTC");
+    }
+
+    async fn put_ad(vault_id: [u8; 32], amount_sats: u64, routeable: bool, lifecycle: &str) -> String {
+        let ad = test_advertisement(vault_id, amount_sats, routeable, 1, lifecycle);
+        let key = BitcoinTapSdk::vault_advertisement_key(&ad.vault_id);
+        BitcoinTapSdk::storage_put_bytes(&key, &ad.encode_to_vec())
+            .await
+            .expect("put ad");
+        ad.vault_id
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_dbtc_active_ad_unlocks_spendable() {
+        init_withdrawal_test_db();
+        dbtc_reconcile_test_identity();
+        let vid = put_ad(vid_from_label("dbtc-active"), 500, true, "active").await;
+
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        assert_eq!(state, dsm::recovery::BearerAssetLockState::Spendable);
+        assert_eq!(
+            crate::storage::client_db::recovery::get_asset_lock(DBTC_TOKEN_ID.as_bytes())
+                .expect("read")
+                .expect("present")
+                .state,
+            dsm::recovery::BearerAssetLockState::Spendable
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_dbtc_inflight_ad_stays_blocked() {
+        init_withdrawal_test_db();
+        dbtc_reconcile_test_identity();
+        // A limbo (deposit-in-progress) vault → InFlight → no spendable value → blocked.
+        let vid = put_ad(vid_from_label("dbtc-limbo"), 500, true, "limbo").await;
+
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        assert_eq!(state, dsm::recovery::BearerAssetLockState::InFlight);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_dbtc_missing_ad_stays_locked() {
+        init_withdrawal_test_db();
+        dbtc_reconcile_test_identity();
+        // Candidate with NO posted ad → completeness failure → stays LockedRecovery.
+        let vid = crate::util::text_id::encode_base32_crockford(&vid_from_label("dbtc-absent"));
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        assert_eq!(state, dsm::recovery::BearerAssetLockState::LockedRecovery);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_dbtc_unknown_lifecycle_stays_locked() {
+        init_withdrawal_test_db();
+        dbtc_reconcile_test_identity();
+        let vid = put_ad(vid_from_label("dbtc-weird"), 500, true, "weird_state").await;
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        assert_eq!(state, dsm::recovery::BearerAssetLockState::LockedRecovery);
     }
 }

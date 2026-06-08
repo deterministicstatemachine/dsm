@@ -934,6 +934,44 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- recovery.reconcileDbtc (spec §0.4 P5 — dBTC pass) --------
+            // Reconcile the recovered dBTC bearer asset from posted vault advertisements.
+            // Candidate vault ids are caller-supplied (comma-separated) until authenticated
+            // fresh-device vault ENUMERATION exists (deferred); with none, dBTC stays
+            // LockedRecovery and a "dbtc-locked;awaiting-enumeration" status is returned (not a
+            // hard error). dBTC is unlocked only for vaults whose posted frontier proves it;
+            // any incomplete/unverifiable evidence keeps it LockedRecovery (fail-closed).
+            "recovery.reconcileDbtc" => {
+                let candidates: Vec<String> = match Self::decode_recovery_string_param(&i.args) {
+                    Ok(s) => s
+                        .split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reconcile_dbtc_asset(&candidates)
+                    .await
+                {
+                    Ok(state) => {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.reconcileDbtc".to_string(),
+                            value: Some(format!("dbtc-state={}", state.label())),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    // Deferred enumeration: report as a status, not a failure (dBTC stays locked).
+                    Err(e) if e.to_string().contains("MissingDbtcVaultEnumeration") => {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.reconcileDbtc".to_string(),
+                            value: Some(format!("dbtc-locked;awaiting-enumeration:{e}")),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    Err(e) => err(format!("recovery.reconcileDbtc failed: {e}")),
+                }
+            }
+
             _ => err(format!("unknown recovery invoke method: {}", i.method)),
         }
     }

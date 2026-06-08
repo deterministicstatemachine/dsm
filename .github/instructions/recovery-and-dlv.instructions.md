@@ -176,10 +176,19 @@ Added during hardening (beyond the original register):
     past activation) + recovery-time locking in `execute_recovery_pipeline`
     (`lock_all_restored_bearer_assets`, fail-closed) + generic token reconciliation
     (`reconcile_token_asset`: `verified≥hint→Spendable`, `verified<hint→Reduced` capped).
-    ☐ **dBTC bearer-state frontier replay** (transfers / in-flight withdrawals / burns /
-    refunds / bridge finalization → `{InFlight|Finalized|RefundPending}`): dBTC is REFUSED by
-    the generic path (`MissingDbtcFrontierReplay`) and stays `LockedRecovery` until the
-    dedicated dBTC pass. Go-live for dBTC egress is hard-gated on it.
+    ✅/☐ **dBTC bearer-state reconciliation.** ✅ Posted-advertisement classifier +
+    deterministic aggregator + fail-closed reconcile: `dsm::recovery::dbtc_reconcile`
+    (`DbtcVaultCondition`, `DbtcVaultOutcome`, `aggregate_dbtc_frontier` — checked arithmetic,
+    `{Spendable|Reduced|InFlight|Finalized|RefundPending|LockedRecovery}`) +
+    `BitcoinTapSdk::classify_dbtc_lifecycle` (posted `DbtcVaultAdvertisementV1.lifecycle_state`
+    → condition; unknown → fail-closed) + `BitcoinTapSdk::reconcile_dbtc_asset` (fetch+verify
+    each posted ad, aggregate, `set_asset_lock("dBTC", …, is_dbtc=true)`; any missing/malformed/
+    unverifiable/unknown ad keeps dBTC `LockedRecovery`) + `recovery.reconcileDbtc` route. The
+    generic path still REFUSES dBTC (`MissingDbtcFrontierReplay`); dBTC unlocks only through
+    this dedicated path, only for vaults whose posted frontier proves it, never from capsule
+    data. ☐ Fresh-device **authenticated vault enumeration** (empty candidates →
+    `MissingDbtcVaultEnumeration`, dBTC stays `LockedRecovery`) + Bitcoin **SPV/UTXO**
+    re-verification of entry/exit anchors. Go-live for dBTC egress is hard-gated on those.
 
 12. ✅/☐ **Recovery-authority anchor lifecycle (§0.5 step 7).** ✅ create
     (`RecoverySDK::build_authority_anchor`, device key re-derived via
