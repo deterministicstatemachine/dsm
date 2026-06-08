@@ -55,7 +55,10 @@ fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
     })
 }
 
-/// The signed head of a posted PDSMT snapshot (dual-keyed).
+/// The genesis-head parent sentinel: the first head in a chain links to all-zeros.
+pub const GENESIS_PARENT_HEAD_HASH: [u8; 32] = [0u8; 32];
+
+/// The signed head of a posted PDSMT snapshot (dual-keyed, append-only chained).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostedPdsmtHead {
     pub genesis_id: [u8; 32],
@@ -65,12 +68,17 @@ pub struct PostedPdsmtHead {
     pub snapshot_id: [u8; 32],
     /// `H(K_A_pub)` of the genesis-anchored recovery authority.
     pub authority_pubkey_commit: [u8; 32],
+    /// Hash of the predecessor head (`GENESIS_PARENT_HEAD_HASH` for the first), R4 layer 1.
+    pub parent_head_hash: [u8; 32],
+    /// Monotone chain position (0 for the genesis head).
+    pub head_number: u64,
     /// SPHINCS+ signature by `K_A` over [`PostedPdsmtHead::digest`].
     pub signature: Vec<u8>,
 }
 
 impl PostedPdsmtHead {
-    /// The digest the head signature covers: every field except the signature.
+    /// The digest the head signature covers: every field except the signature. This is
+    /// also the head's identity in the append-only chain (see [`PostedPdsmtHead::head_hash`]).
     pub fn digest(&self) -> [u8; 32] {
         let mut h = dsm_domain_hasher(PDSMT_HEAD_DOMAIN);
         h.update(&self.genesis_id);
@@ -79,7 +87,21 @@ impl PostedPdsmtHead {
         h.update(&self.leaf_index_root);
         h.update(&self.snapshot_id);
         h.update(&self.authority_pubkey_commit);
+        h.update(&self.parent_head_hash);
+        h.update(&self.head_number.to_le_bytes());
         *h.finalize().as_bytes()
+    }
+
+    /// The head's hash for chain linking — a child head's `parent_head_hash` must equal
+    /// this. Equals [`PostedPdsmtHead::digest`] (the signed identity), so a child cannot
+    /// link to an unsigned/forged predecessor.
+    pub fn head_hash(&self) -> [u8; 32] {
+        self.digest()
+    }
+
+    /// True iff this is the first head of a chain (links to the genesis sentinel at 0).
+    pub fn is_genesis_head(&self) -> bool {
+        self.head_number == 0 && self.parent_head_hash == GENESIS_PARENT_HEAD_HASH
     }
 
     /// Verify the head is signed by `candidate_authority_pubkey` AND that pubkey is the
@@ -112,6 +134,8 @@ impl PostedPdsmtHead {
             leaf_index_root: self.leaf_index_root.to_vec(),
             snapshot_id: self.snapshot_id.to_vec(),
             authority_pubkey_commit: self.authority_pubkey_commit.to_vec(),
+            parent_head_hash: self.parent_head_hash.to_vec(),
+            head_number: self.head_number,
             signature: self.signature.clone(),
         }
         .encode_to_vec()
@@ -133,6 +157,8 @@ impl PostedPdsmtHead {
             leaf_index_root: fixed32(&p.leaf_index_root, "leaf_index_root")?,
             snapshot_id: fixed32(&p.snapshot_id, "snapshot_id")?,
             authority_pubkey_commit: fixed32(&p.authority_pubkey_commit, "authority_pubkey_commit")?,
+            parent_head_hash: fixed32(&p.parent_head_hash, "parent_head_hash")?,
+            head_number: p.head_number,
             signature: p.signature,
         })
     }
@@ -249,6 +275,8 @@ mod tests {
             leaf_index_root: [0x22; 32],
             snapshot_id: [0x33; 32],
             authority_pubkey_commit: compute_authority_pubkey_commit(&kp.public_key),
+            parent_head_hash: GENESIS_PARENT_HEAD_HASH,
+            head_number: 0,
             signature: Vec::new(),
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
@@ -277,6 +305,21 @@ mod tests {
         assert_eq!(head, decoded);
         decoded.verify(&pk).expect("verify after round-trip");
         assert_eq!(head.to_bytes(), decoded.to_bytes());
+    }
+
+    #[test]
+    fn head_chain_fields_are_signed_and_genesis_detected() {
+        let (head, pk) = signed_head();
+        assert!(head.is_genesis_head());
+        // head_hash == digest (the signed identity a child links to).
+        assert_eq!(head.head_hash(), head.digest());
+        // parent_head_hash and head_number are covered by the signature.
+        let mut tampered_parent = head.clone();
+        tampered_parent.parent_head_hash[0] ^= 0x01;
+        assert!(tampered_parent.verify(&pk).is_err());
+        let mut tampered_number = head.clone();
+        tampered_number.head_number = 1;
+        assert!(tampered_number.verify(&pk).is_err());
     }
 
     #[test]

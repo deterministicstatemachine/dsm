@@ -510,6 +510,69 @@ impl RecoverySDK {
         Ok(anchor)
     }
 
+    /// Endpoint path for a device's append-only PDSMT head chain (R4 layer 1).
+    /// Device-keyed (the PDSMT is device-scoped). Base32 Crockford; no leading slash.
+    pub fn pdsmt_head_chain_endpoint_path(device_id: &[u8; 32]) -> String {
+        format!(
+            "api/v2/tips/{}/head-chain",
+            crate::util::text_id::encode_base32_crockford(device_id),
+        )
+    }
+
+    /// Publish a PDSMT head to the append-only chain on every node. Returns the
+    /// accepted-node count. A 409 from any node means the head does not link the current
+    /// chain tip (fork/gap/stale) — this errors so the caller re-fetches the tip and
+    /// re-chains rather than treating it as published.
+    pub async fn publish_pdsmt_head(
+        head: &dsm::recovery::PostedPdsmtHead,
+    ) -> Result<usize, DsmError> {
+        let path = Self::pdsmt_head_chain_endpoint_path(&head.device_id);
+        let r = crate::sdk::storage_io::put_to_all_nodes_path(&path, &head.to_bytes()).await?;
+        if r.conflict > 0 {
+            return Err(DsmError::InvalidState(format!(
+                "pdsmt head publish: {}/{} nodes report a chain conflict (head does not link the \
+                 current tip); re-fetch the tip and re-chain",
+                r.conflict, r.total
+            )));
+        }
+        if r.ok == 0 {
+            return Err(DsmError::storage(
+                format!(
+                    "pdsmt head publish: no node accepted the write ({} failed of {})",
+                    r.failed, r.total
+                ),
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(r.ok)
+    }
+
+    /// Fetch the latest PDSMT head for a device (availability-only fetch + decode).
+    /// The caller MUST verify it client-side (`PostedPdsmtHead::verify` + authority
+    /// chained to G via the anchor + device ∈ genesis device tree).
+    pub async fn fetch_pdsmt_head_latest(
+        device_id: &[u8; 32],
+    ) -> Result<dsm::recovery::PostedPdsmtHead, DsmError> {
+        let path = Self::pdsmt_head_chain_endpoint_path(device_id);
+        let bytes = crate::sdk::storage_io::get_from_any_node_path(&path).await?;
+        dsm::recovery::PostedPdsmtHead::from_bytes(&bytes)
+    }
+
+    /// Fetch a specific PDSMT head by chain position (e.g. the head at/before the
+    /// recovery snapshot). Availability-only fetch + decode; caller verifies.
+    pub async fn fetch_pdsmt_head_at(
+        device_id: &[u8; 32],
+        head_number: u64,
+    ) -> Result<dsm::recovery::PostedPdsmtHead, DsmError> {
+        let path = format!(
+            "{}/{}",
+            Self::pdsmt_head_chain_endpoint_path(device_id),
+            head_number
+        );
+        let bytes = crate::sdk::storage_io::get_from_any_node_path(&path).await?;
+        dsm::recovery::PostedPdsmtHead::from_bytes(&bytes)
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
@@ -1044,6 +1107,22 @@ mod tests {
         let suffix = p.trim_start_matches("api/v2/recovery/authority-anchor/");
         assert!(!suffix.contains("0x"));
         assert!(suffix.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn pdsmt_head_chain_endpoint_path_is_device_keyed_crockford() {
+        let d = [0xD0; 32];
+        let p = RecoverySDK::pdsmt_head_chain_endpoint_path(&d);
+        assert_eq!(p, RecoverySDK::pdsmt_head_chain_endpoint_path(&d));
+        assert!(p.starts_with("api/v2/tips/"));
+        assert!(p.ends_with("/head-chain"));
+        assert!(!p.starts_with('/'));
+        assert_ne!(p, RecoverySDK::pdsmt_head_chain_endpoint_path(&[0xD1; 32]));
+        let mid = p
+            .trim_start_matches("api/v2/tips/")
+            .trim_end_matches("/head-chain");
+        assert!(!mid.contains("0x"));
+        assert!(mid.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
