@@ -1764,6 +1764,32 @@ impl BilateralBleHandler {
             .await
     }
 
+    /// A_NEW side initiate (spec §0.5 bilateral re-establish). After identity recovery, call this
+    /// — with an active BLE session to `counterparty_device_id` (a recovered contact) — to build
+    /// the recovery-establish operation over C's REAL `(A_old,C)` frontier and start the ordinary
+    /// bilateral prepare carrying it. The returned `(envelope_bytes, commitment_hash)` is sent
+    /// over BLE exactly like any other prepare; C automatically gates co-signing on the
+    /// re-establish accept-guard (see [`Self::handle_prepare_request`]).
+    ///
+    /// This is the symmetric counterpart to the wired accept-guard. The only device-dependent
+    /// step is having a live session to C; the op construction + carry-forward are deterministic.
+    /// Fail-closed: A had no sealed relationship with the counterparty, or C has no posted
+    /// `(A_old,C)` leaf to source its current tip, aborts before any prepare is sent.
+    pub async fn initiate_recovery_reestablish(
+        &self,
+        counterparty_device_id: [u8; 32],
+        validity_iterations: u64,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        let op = crate::sdk::RecoverySDK::begin_recovery_reestablish(&counterparty_device_id)
+            .await?;
+        self.prepare_bilateral_transaction_with_commitment(
+            counterparty_device_id,
+            op,
+            validity_iterations,
+        )
+        .await
+    }
+
     /// Cancel / fail the in-flight Prepared session for `counterparty_device_id`, if any.
     ///
     /// Called when the BLE send of the prepare message fails so that the next
