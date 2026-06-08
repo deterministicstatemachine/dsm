@@ -2691,6 +2691,32 @@ message PostedPdsmtLeafSetV1 {
   repeated PostedPdsmtLeafRecordV1 leaves = 1;
 }
 
+// Wire codec for `dsm::recovery::tombstone::SuccessionReceipt` (mirrors
+// TombstoneReceiptProto) — the SPHINCS+-signed new-device succession receipt.
+message SuccessionReceiptProto {
+  string device_id             = 1;
+  bytes  tombstone_hash        = 2 [(dsm_fixed_len)=32];
+  bytes  new_device_commitment = 3 [(dsm_max_len)=512];
+  uint64 tick                  = 4;
+  bytes  signature             = 5 [(dsm_max_len)=65535]; // SPX256f
+  bytes  succession_hash       = 6 [(dsm_fixed_len)=32];
+}
+
+// Wire codec for `dsm::recovery::activation::RecoveryActivationSeal` (§0.5) — the
+// gate-set seal validated by validate_recovery_activation.
+message RecoveryActivationSealProto {
+  bytes  genesis_id                = 1 [(dsm_fixed_len)=32];
+  bytes  old_device_id             = 2 [(dsm_fixed_len)=32];
+  bytes  new_device_id             = 3 [(dsm_fixed_len)=32];
+  bytes  recovery_intent_digest    = 4 [(dsm_fixed_len)=32];
+  bytes  tombstone_proposal_digest = 5 [(dsm_fixed_len)=32];
+  bytes  contact_set_commit        = 6 [(dsm_fixed_len)=32];
+  bytes  evidence_root             = 7 [(dsm_fixed_len)=32];
+  uint64 synced_contact_count      = 8;
+  bytes  final_per_device_smt_root = 9 [(dsm_fixed_len)=32];
+  bytes  final_receipt_roll        = 10 [(dsm_fixed_len)=32];
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

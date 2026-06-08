@@ -27,7 +27,18 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::recovery::capsule::contact_set_commit_from_device_ids;
 use crate::recovery::succession_binding::CrossRelationshipSuccessionEvidence;
 use crate::types::error::DsmError;
+use crate::types::proto::{Message as _, RecoveryActivationSealProto};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Fail-closed `Vec<u8>` → `[u8; 32]` for seal codec fields.
+fn seal_fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
+    <[u8; 32]>::try_from(b).map_err(|_| {
+        DsmError::verification(format!(
+            "RecoveryActivationSeal: field `{field}` is {} bytes, expected 32",
+            b.len()
+        ))
+    })
+}
 
 const EVIDENCE_ROOT_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_ACK_ROOT;
 const ACTIVATION_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_ACTIVATION;
@@ -84,6 +95,53 @@ impl RecoveryActivationSeal {
         }
         h.update(&self.synced_contact_count.to_le_bytes());
         *h.finalize().as_bytes()
+    }
+
+    /// Serialize to canonical protobuf bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        RecoveryActivationSealProto {
+            genesis_id: self.genesis_id.to_vec(),
+            old_device_id: self.old_device_id.to_vec(),
+            new_device_id: self.new_device_id.to_vec(),
+            recovery_intent_digest: self.recovery_intent_digest.to_vec(),
+            tombstone_proposal_digest: self.tombstone_proposal_digest.to_vec(),
+            contact_set_commit: self.contact_set_commit.to_vec(),
+            evidence_root: self.evidence_root.to_vec(),
+            synced_contact_count: self.synced_contact_count,
+            final_per_device_smt_root: self.final_per_device_smt_root.to_vec(),
+            final_receipt_roll: self.final_receipt_roll.to_vec(),
+        }
+        .encode_to_vec()
+    }
+
+    /// Deserialize from protobuf bytes (fail-closed on any non-32-byte field).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        let p = RecoveryActivationSealProto::decode(bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("RecoveryActivationSeal::from_bytes: {e}"),
+                "RecoveryActivationSeal",
+                None::<String>,
+                Some(e),
+            )
+        })?;
+        Ok(Self {
+            genesis_id: seal_fixed32(&p.genesis_id, "genesis_id")?,
+            old_device_id: seal_fixed32(&p.old_device_id, "old_device_id")?,
+            new_device_id: seal_fixed32(&p.new_device_id, "new_device_id")?,
+            recovery_intent_digest: seal_fixed32(&p.recovery_intent_digest, "recovery_intent_digest")?,
+            tombstone_proposal_digest: seal_fixed32(
+                &p.tombstone_proposal_digest,
+                "tombstone_proposal_digest",
+            )?,
+            contact_set_commit: seal_fixed32(&p.contact_set_commit, "contact_set_commit")?,
+            evidence_root: seal_fixed32(&p.evidence_root, "evidence_root")?,
+            synced_contact_count: p.synced_contact_count,
+            final_per_device_smt_root: seal_fixed32(
+                &p.final_per_device_smt_root,
+                "final_per_device_smt_root",
+            )?,
+            final_receipt_roll: seal_fixed32(&p.final_receipt_roll, "final_receipt_roll")?,
+        })
     }
 }
 
@@ -212,6 +270,16 @@ mod tests {
             final_per_device_smt_root: [0x05; 32],
             final_receipt_roll: [0x06; 32],
         }
+    }
+
+    #[test]
+    fn seal_codec_round_trips() {
+        let g = gate(&[[1; 32], [2; 32], [3; 32]]);
+        let mut seal = seal_for(&g);
+        seal.evidence_root = [0xEE; 32];
+        let decoded = RecoveryActivationSeal::from_bytes(&seal.to_bytes()).expect("decode seal");
+        assert_eq!(seal, decoded);
+        assert_eq!(seal.to_bytes(), decoded.to_bytes());
     }
 
     #[test]
