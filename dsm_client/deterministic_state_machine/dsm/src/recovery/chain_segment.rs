@@ -452,7 +452,7 @@ mod tests {
             rel_key: rk,
             embedded_parent: initial_chain_tip_from_device_ids(&A_NEW, &C),
             counterparty_devid: C,
-            operation: build_recovery_establishment_op(&C, &carry),
+            operation: build_recovery_establishment_op(&C, &carry, &[0x33; 32]),
             entropy: vec![0x01],
             encapsulated_entropy: None,
             balance_witness: BTreeMap::new(),

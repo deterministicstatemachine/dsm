@@ -74,13 +74,32 @@ pub fn compute_carry_forward_commitment(
 pub fn build_recovery_establishment_op(
     c: &[u8; 32],
     carry_forward_commitment: &[u8; 32],
+    h_cap: &[u8; 32],
 ) -> crate::types::operations::Operation {
+    // `proof` carries the capsule floor `h_cap`. It is ALREADY committed (an input to
+    // `carry_forward_commitment`); revealing the 32-byte preimage here lets C recompute the
+    // carry-forward over its own `(A_old,C)` chain in the accept-guard
+    // (`verify_recovery_reestablish_request`). Because it rides in the co-signed op, h_cap is
+    // tamper-evident. (verify_succession_semantics / the assembler check the op's
+    // counterparty_id + commitment, not proof, so this is compatible.)
     crate::types::operations::Operation::CreateRelationship {
         message: "recovery-establish".to_string(),
         counterparty_id: c.to_vec(),
         commitment: carry_forward_commitment.to_vec(),
-        proof: Vec::new(),
+        proof: h_cap.to_vec(),
         mode: crate::types::operations::TransactionMode::Bilateral,
+    }
+}
+
+/// Extract the capsule floor `h_cap` a recovery-establish op carries in its `proof` field.
+/// Returns `None` if the op is not a `CreateRelationship` or `proof` is not exactly 32 bytes
+/// (fail-closed — the accept-guard then has no floor to verify and rejects).
+pub fn recovery_establishment_floor(op: &crate::types::operations::Operation) -> Option<[u8; 32]> {
+    match op {
+        crate::types::operations::Operation::CreateRelationship { proof, .. } => {
+            <[u8; 32]>::try_from(proof.as_slice()).ok()
+        }
+        _ => None,
     }
 }
 
@@ -484,7 +503,7 @@ mod tests {
             rel_key: new_rel_key,
             embedded_parent: initial_chain_tip_from_device_ids(&A_NEW, &C),
             counterparty_devid: C,
-            operation: build_recovery_establishment_op(&C, &carry),
+            operation: build_recovery_establishment_op(&C, &carry, &h_cap),
             entropy: vec![9],
             encapsulated_entropy: None,
             balance_witness: BTreeMap::new(),
@@ -540,7 +559,7 @@ mod tests {
         // The new (A_new,C) establishment must be BORN binding this recomputed carry-forward:
         // rebuild its op + re-derive the included tip so the "born as successor" check holds.
         ev.new_establishment_state.operation =
-            build_recovery_establishment_op(&ev.c, &ev.carry_forward_commitment);
+            build_recovery_establishment_op(&ev.c, &ev.carry_forward_commitment, &ev.h_cap);
         ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
         ev.verify_succession_semantics(&pk)
             .expect("empty old_chain at the floor (no divergence) is valid");
@@ -563,7 +582,7 @@ mod tests {
         // Keep the carry-forward binding internally consistent so the rejection comes from
         // the (empty) ancestry walk failing to reach t_old_current, not the binding check.
         bad.new_establishment_state.operation =
-            build_recovery_establishment_op(&bad.c, &bad.carry_forward_commitment);
+            build_recovery_establishment_op(&bad.c, &bad.carry_forward_commitment, &bad.h_cap);
         bad.t_new_established = bad.new_establishment_state.compute_chain_tip();
         assert!(bad.verify_succession_semantics(&pk).is_err());
     }
@@ -655,7 +674,7 @@ mod tests {
         // → the "born as successor" binding fails (can't bolt recovery onto an ordinary rel).
         let (mut ev, pk) = fixture();
         ev.new_establishment_state.operation =
-            build_recovery_establishment_op(&C, &[0xBE; 32]); // wrong commitment
+            build_recovery_establishment_op(&C, &[0xBE; 32], &ev.h_cap); // wrong commitment
         ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
         assert!(ev.verify_succession_semantics(&pk).is_err());
     }
@@ -740,7 +759,7 @@ mod tests {
     /// carry-forward C will recompute over its own (A_old,C) chain).
     fn reestablish_request() -> (Operation, CrossRelationshipSuccessionEvidence, Vec<u8>) {
         let (ev, pk) = fixture();
-        let op = build_recovery_establishment_op(&C, &ev.carry_forward_commitment);
+        let op = build_recovery_establishment_op(&C, &ev.carry_forward_commitment, &ev.h_cap);
         (op, ev, pk)
     }
 
@@ -756,7 +775,7 @@ mod tests {
     #[test]
     fn reestablish_rejects_wrong_carry_forward_in_op() {
         let (_op, ev, pk) = reestablish_request();
-        let bad_op = build_recovery_establishment_op(&C, &[0xBE; 32]); // not the real carry-forward
+        let bad_op = build_recovery_establishment_op(&C, &[0xBE; 32], &ev.h_cap); // not the real carry-forward
         assert!(verify_recovery_reestablish_request(
             &bad_op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
         )

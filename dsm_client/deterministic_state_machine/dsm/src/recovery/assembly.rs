@@ -441,7 +441,7 @@ mod tests {
             rel_key: new_rel_key,
             embedded_parent: initial_chain_tip_from_device_ids(&A_NEW, &c),
             counterparty_devid: c,
-            operation: build_recovery_establishment_op(&c, &carry),
+            operation: build_recovery_establishment_op(&c, &carry, &h_cap),
             entropy: vec![9],
             encapsulated_entropy: None,
             balance_witness: BTreeMap::new(),
