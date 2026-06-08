@@ -10,6 +10,7 @@ pub mod activation;
 pub mod authority_anchor;
 pub mod bundle;
 pub mod capsule;
+pub mod chain_segment;
 pub mod gate_set;
 pub mod pdsmt_posting;
 pub mod rollup;
@@ -23,6 +24,10 @@ pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
 pub use bundle::RecoveryBundle;
+pub use chain_segment::{
+    rel_chain_state_from_proto, rel_chain_state_to_proto, RecoveryEstablishmentReceipt,
+    RelationshipChainSegment,
+};
 pub use gate_set::{build_gate_set, CounterpartyValueWitness, FrozenGateSet};
 pub use pdsmt_posting::{
     build_pdsmt_snapshot, decode_leaf_set, encode_leaf_set, verify_head_with_leaves,

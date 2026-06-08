@@ -26,6 +26,12 @@ pub const TAG_DSM_PDSMT_HEAD: &str = "DSM/recovery/pdsmt-head/v1";
 pub const TAG_DSM_PDSMT_LEAF: &str = "DSM/recovery/pdsmt-leaf/v1";
 /// Domain tag for the posted PDSMT head snapshot_id (§0.5 gap 13).
 pub const TAG_DSM_PDSMT_SNAPSHOT: &str = "DSM/recovery/pdsmt-snapshot/v1";
+/// Domain tag for the content-id of a posted relationship-chain ancestry segment (§0.5
+/// Phase D prerequisite) — proves how a relationship reached its tip (h_cap ->* T_old_current).
+pub const TAG_DSM_RECOVERY_REL_SEGMENT: &str = "DSM/recovery/rel-chain-segment/v1";
+/// Domain tag for the content-id of a posted new-relationship establishment receipt (§0.5
+/// Phase D prerequisite) — the (A_new,C) first state binding the carry-forward commitment.
+pub const TAG_DSM_RECOVERY_ESTABLISH_RECEIPT: &str = "DSM/recovery/establish-receipt/v1";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";
@@ -45,6 +51,9 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_RECOVERY_AUTHORITY_ANCHOR,
     TAG_DSM_PDSMT_HEAD,
     TAG_DSM_PDSMT_LEAF,
+    TAG_DSM_PDSMT_SNAPSHOT,
+    TAG_DSM_RECOVERY_REL_SEGMENT,
+    TAG_DSM_RECOVERY_ESTABLISH_RECEIPT,
     TAG_DSM_TOMBSTONE,
     TAG_DSM_TOMBSTONE_NOTIFY,
     TAG_DSM_TOMBSTONE_SUCCESSION,

@@ -48,7 +48,7 @@ const ACTIVATION_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_ACT
 /// Any omission, substitution, or change of a verified tip changes this root.
 pub fn compute_evidence_root(entries: &[([u8; 32], [u8; 32])]) -> [u8; 32] {
     let mut sorted: Vec<&([u8; 32], [u8; 32])> = entries.iter().collect();
-    sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    sorted.sort_unstable_by_key(|e| e.0);
     let mut hasher = dsm_domain_hasher(EVIDENCE_ROOT_DOMAIN);
     hasher.update(&(sorted.len() as u32).to_le_bytes());
     for (cp, tip) in sorted {

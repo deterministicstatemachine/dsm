@@ -661,6 +661,179 @@ impl RecoverySDK {
         dsm::recovery::decode_leaf_set(&bytes)
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Relationship-state evidence postings (spec §0.5 Phase D prerequisite).
+    //
+    // PDSMT heads/leaves prove "what the current tip IS" + value-capability. These objects
+    // prove HOW a relationship reached its tip (old-chain ancestry h_cap ->* T_old_current)
+    // and that the successor relationship was BORN binding the carry-forward commitment.
+    // Availability-only + content-addressed + SELF-VERIFIED on fetch. Storage attests
+    // NOTHING; a missing/invalid/wrong-key object FAILS CLOSED at the verifier — it can only
+    // BLOCK recovery, never advance it. The orchestrator (Phase D step 2) additionally binds
+    // current_tip to C's genesis-authenticated PDSMT head and floor_tip to the capsule.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Storage key for a posted ancestry segment, keyed by the device-pair `rel_key`
+    /// (symmetric — both parties derive the same key). Base32 Crockford; no hex.
+    pub fn rel_chain_segment_storage_key(rel_key: &[u8; 32]) -> String {
+        format!(
+            "recovery/rel-segment/v1/{}",
+            crate::util::text_id::encode_base32_crockford(rel_key),
+        )
+    }
+
+    /// Storage key for the new `(A_new,C)` establishment receipt, keyed by `new_rel_key`.
+    pub fn establishment_receipt_storage_key(new_rel_key: &[u8; 32]) -> String {
+        format!(
+            "recovery/establish-receipt/v1/{}",
+            crate::util::text_id::encode_base32_crockford(new_rel_key),
+        )
+    }
+
+    /// Assemble the forward-ancestry segment for `rel_key` from this device's BCR chain-state
+    /// archive, covering `floor_tip` (EXCLUSIVE) -> `current_tip` (INCLUSIVE). Walks by
+    /// `embedded_parent` adjacency — NOT archive insertion order — and FAILS CLOSED on a gap
+    /// (no archived child toward the target) or a fork (multiple distinct children at one
+    /// parent → ambiguous path). The returned segment is self-verified before return.
+    pub fn build_rel_chain_segment(
+        owner_device_id: &[u8; 32],
+        rel_key: &[u8; 32],
+        floor_tip: &[u8; 32],
+        current_tip: &[u8; 32],
+    ) -> Result<dsm::recovery::RelationshipChainSegment, DsmError> {
+        // No-divergence common case: the floor IS the current tip → empty segment.
+        if floor_tip == current_tip {
+            let seg = dsm::recovery::RelationshipChainSegment {
+                rel_key: *rel_key,
+                floor_tip: *floor_tip,
+                current_tip: *current_tip,
+                states: Vec::new(),
+            };
+            seg.verify()?;
+            return Ok(seg);
+        }
+
+        let all = crate::storage::client_db::get_bcr_chain_states_for_rel(owner_device_id, rel_key)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("build_rel_chain_segment: load archive: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+
+        // Index by embedded_parent so the walk follows hash adjacency, not insertion order.
+        let mut by_parent: HashMap<[u8; 32], Vec<dsm::types::device_state::RelationshipChainState>> =
+            HashMap::new();
+        for s in all {
+            by_parent.entry(s.embedded_parent).or_default().push(s);
+        }
+        let archive_len: usize = by_parent.values().map(|v| v.len()).sum();
+
+        let mut states = Vec::new();
+        let mut cursor = *floor_tip;
+        loop {
+            let children = by_parent.get(&cursor).ok_or_else(|| {
+                DsmError::verification(
+                    "build_rel_chain_segment: gap — no archived child of the current tip toward \
+                     current_tip (incomplete history; fail closed)",
+                )
+            })?;
+            // A unique forward path is required; distinct child tips at one parent = fork.
+            let mut distinct: Vec<[u8; 32]> =
+                children.iter().map(|s| s.compute_chain_tip()).collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            if distinct.len() != 1 {
+                return Err(DsmError::verification(
+                    "build_rel_chain_segment: fork in archive — ambiguous ancestry path (fail \
+                     closed)",
+                ));
+            }
+            let s = children[0].clone();
+            let tip = s.compute_chain_tip();
+            states.push(s);
+            if &tip == current_tip {
+                break;
+            }
+            cursor = tip;
+            // Runaway guard: a valid acyclic path cannot exceed the archive size.
+            if states.len() > archive_len {
+                return Err(DsmError::verification(
+                    "build_rel_chain_segment: path exceeds archive size (cycle?) — fail closed",
+                ));
+            }
+        }
+
+        let seg = dsm::recovery::RelationshipChainSegment {
+            rel_key: *rel_key,
+            floor_tip: *floor_tip,
+            current_tip: *current_tip,
+            states,
+        };
+        seg.verify()?; // canonical re-check (rel_key uniform + adjacency + reaches current_tip)
+        Ok(seg)
+    }
+
+    /// Publish a relationship-chain ancestry segment (availability-only). Self-verifies
+    /// FIRST — an object that won't verify is never posted.
+    pub async fn publish_rel_chain_segment(
+        seg: &dsm::recovery::RelationshipChainSegment,
+    ) -> Result<(), DsmError> {
+        seg.verify()?;
+        let key = Self::rel_chain_segment_storage_key(&seg.rel_key);
+        crate::sdk::storage_io::put_bytes(&key, &seg.to_bytes()).await?;
+        Ok(())
+    }
+
+    /// Fetch + VERIFY a counterparty's ancestry segment for `rel_key`. Fail-closed: a
+    /// missing, undecodable, wrong-key, or non-self-consistent segment errors.
+    pub async fn fetch_rel_chain_segment(
+        rel_key: &[u8; 32],
+    ) -> Result<dsm::recovery::RelationshipChainSegment, DsmError> {
+        let key = Self::rel_chain_segment_storage_key(rel_key);
+        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        let seg = dsm::recovery::RelationshipChainSegment::from_bytes(&bytes)?;
+        if &seg.rel_key != rel_key {
+            return Err(DsmError::verification(
+                "fetch_rel_chain_segment: fetched rel_key != requested",
+            ));
+        }
+        seg.verify()?;
+        Ok(seg)
+    }
+
+    /// Publish the new `(A_new,C)` establishment receipt (availability-only). Self-verifies
+    /// FIRST against `(A_new, C)` — never posts an object that won't verify.
+    pub async fn publish_establishment_receipt(
+        receipt: &dsm::recovery::RecoveryEstablishmentReceipt,
+        a_new: &[u8; 32],
+        c: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        receipt.verify(a_new, c)?;
+        let key = Self::establishment_receipt_storage_key(&receipt.rel_key);
+        crate::sdk::storage_io::put_bytes(&key, &receipt.to_bytes()).await?;
+        Ok(())
+    }
+
+    /// Fetch + VERIFY the new `(A_new,C)` establishment receipt for `new_rel_key`.
+    /// Fail-closed: a missing, undecodable, wrong-key, or non-first-state receipt errors.
+    pub async fn fetch_establishment_receipt(
+        new_rel_key: &[u8; 32],
+        a_new: &[u8; 32],
+        c: &[u8; 32],
+    ) -> Result<dsm::recovery::RecoveryEstablishmentReceipt, DsmError> {
+        let key = Self::establishment_receipt_storage_key(new_rel_key);
+        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        let receipt = dsm::recovery::RecoveryEstablishmentReceipt::from_bytes(&bytes)?;
+        if &receipt.rel_key != new_rel_key {
+            return Err(DsmError::verification(
+                "fetch_establishment_receipt: fetched rel_key != requested",
+            ));
+        }
+        receipt.verify(a_new, c)?;
+        Ok(receipt)
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
