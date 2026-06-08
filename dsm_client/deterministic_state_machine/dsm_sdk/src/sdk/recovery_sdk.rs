@@ -858,6 +858,76 @@ impl RecoverySDK {
         Ok(receipt)
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Producer endpoints (spec §0.5 Phase D step 2 — the bilateral re-establish side).
+    //
+    // These are the deterministic posting endpoints the interactive bilateral re-establish
+    // transport calls; the transport (exchanging h_cap + co-signing the new (A_new,C) first
+    // state) is the separate bilateral machinery. Both endpoints self-verify before posting.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// COUNTERPARTY side: build (from THIS device's own BCR archive) and publish the
+    /// `(recovering_device, self)` ancestry segment from the recovering device's capsule floor
+    /// `h_cap` to this device's current tip. Called by a counterparty C once it learns the
+    /// recovering device's per-relationship floor (conveyed by the re-establish handshake).
+    /// Returns the segment content id. Fail-closed: no such relationship, or a gap/fork in the
+    /// archive between `h_cap` and the current tip, aborts (see [`Self::build_rel_chain_segment`]).
+    pub async fn publish_recovery_ancestry_segment(
+        recovering_device_id: &[u8; 32],
+        h_cap: &[u8; 32],
+    ) -> Result<[u8; 32], DsmError> {
+        let self_id =
+            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let old_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            recovering_device_id,
+            &self_id,
+        );
+        let head = crate::storage::client_db::load_bcr_device_head(&self_id)
+            .map_err(|e| {
+                DsmError::storage(format!("load device head: {e}"), None::<std::io::Error>)
+            })?
+            .ok_or_else(|| {
+                DsmError::InvalidState(
+                    "publish_recovery_ancestry_segment: no device head for this device".into(),
+                )
+            })?;
+        let current_tip = head
+            .rel_chain_tip(&old_rel_key)
+            .map(|t| t.chain_tip)
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "publish_recovery_ancestry_segment: no relationship with the recovering device",
+                )
+            })?;
+        let seg = Self::build_rel_chain_segment(&self_id, &old_rel_key, h_cap, &current_tip)?;
+        Self::publish_rel_chain_segment(&seg).await?;
+        Ok(seg.content_id())
+    }
+
+    /// RECOVERING (A_new) side: wrap a built `(A_new,C)` first establishment state (its
+    /// `CreateRelationship` op binding the carry-forward commitment — produced by the
+    /// bilateral establish flow) as a [`dsm::recovery::RecoveryEstablishmentReceipt`] and
+    /// publish it. Returns the receipt content id. Self-verifies first (first-state, rel_key,
+    /// op shape); the binding to C is enforced downstream by C's own posted leaf, so a
+    /// structurally-valid receipt cannot bypass C's agreement.
+    pub async fn publish_recovery_establishment(
+        establishment_state: dsm::types::device_state::RelationshipChainState,
+        counterparty_device_id: &[u8; 32],
+    ) -> Result<[u8; 32], DsmError> {
+        let a_new =
+            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let new_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &a_new,
+            counterparty_device_id,
+        );
+        let receipt = dsm::recovery::RecoveryEstablishmentReceipt {
+            rel_key: new_rel_key,
+            state: establishment_state,
+        };
+        Self::publish_establishment_receipt(&receipt, &a_new, counterparty_device_id).await?;
+        Ok(receipt.content_id())
+    }
+
     /// Derive a device-bound wrapping key from device_id + genesis_hash.
     /// Used to encrypt the recovery key before persisting to SQLite.
     fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
@@ -976,6 +1046,112 @@ impl RecoverySDK {
 
         let encrypted = EncryptedCapsule::from_bytes(capsule_bytes)?;
         decrypt_capsule_with_key(&encrypted, &key)
+    }
+
+    /// Decode this device's persisted recovery state into a [`RecoveryActivationContext`]
+    /// (the integration seam between the recovery pipeline and the activation orchestration).
+    ///
+    /// Reads the staged capsule prefs (A_old `source_device_id`, SMT root, rollup hash), the
+    /// per-counterparty capsule floor (`get_recovered_chain_tips`), the propagated tombstone
+    /// hash, and AppState identity (genesis + this device = A_new). The seal-context fields
+    /// are derived deterministically: `tombstone_proposal_digest` = the propagated tombstone
+    /// hash; `recovery_intent_digest` = a domain-separated commit over
+    /// `(A_old, A_new, genesis, tombstone_hash)`; `final_*` from A_new's resumed device head.
+    ///
+    /// `old_counter` is fixed at 0 to match [`execute_recovery_pipeline`]'s tombstone (so the
+    /// tombstone re-created in [`Self::build_and_activate_recovery`] is byte-identical to the
+    /// one counterparties already bound their carry-forward against — `create_tombstone` is
+    /// deterministic). Fail-closed: missing capsule/identity state errors.
+    pub fn build_activation_context_from_persisted() -> Result<RecoveryActivationContext, DsmError>
+    {
+        use std::collections::BTreeMap;
+
+        fn pref32(key: &str) -> Result<[u8; 32], DsmError> {
+            let v = crate::storage::client_db::recovery::get_recovery_pref(key)
+                .map_err(|e| DsmError::storage(format!("read {key}: {e}"), None::<std::io::Error>))?
+                .ok_or_else(|| {
+                    DsmError::InvalidState(format!(
+                        "build_activation_context: missing persisted `{key}` (stage a capsule + \
+                         run the recovery pipeline first)"
+                    ))
+                })?;
+            <[u8; 32]>::try_from(v.as_slice()).map_err(|_| {
+                DsmError::verification(format!("build_activation_context: `{key}` is not 32 bytes"))
+            })
+        }
+
+        let a_old = pref32("capsule_source_device_id")?;
+        let old_smt_root = pref32("capsule_smt_root")?;
+        let old_rollup_hash = pref32("capsule_rollup_hash")?;
+
+        let genesis_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis_hash",
+        )?;
+        let a_new =
+            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+
+        let tombstone_hash = {
+            let v = crate::storage::client_db::recovery::get_tombstone_hash()
+                .map_err(|e| {
+                    DsmError::storage(format!("read tombstone_hash: {e}"), None::<std::io::Error>)
+                })?
+                .ok_or_else(|| {
+                    DsmError::InvalidState(
+                        "build_activation_context: no propagated tombstone (run the recovery \
+                         pipeline first)"
+                            .into(),
+                    )
+                })?;
+            <[u8; 32]>::try_from(v.as_slice()).map_err(|_| {
+                DsmError::verification("build_activation_context: tombstone_hash is not 32 bytes")
+            })?
+        };
+
+        // Per-counterparty capsule floor: device_id -> sealed (A_old,C) tip (h_cap).
+        let capsule_floor: BTreeMap<[u8; 32], [u8; 32]> =
+            crate::storage::client_db::recovery::get_recovered_chain_tips()
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("read recovered chain tips: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?
+                .into_iter()
+                .map(|t| (t.device_id, t.head_hash))
+                .collect();
+
+        // A_new's resumed device head fixes the final per-device SMT root; the recovered
+        // rollup is the capsule rollup. (These are seal bindings, not validated invariants.)
+        let final_per_device_smt_root = crate::storage::client_db::load_bcr_device_head(&a_new)
+            .ok()
+            .flatten()
+            .map(|ds| ds.root())
+            .unwrap_or(old_smt_root);
+
+        // Deterministic recovery-intent commitment over the recovery's fixed endpoints.
+        let recovery_intent_digest = {
+            let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-intent\0");
+            h.update(&a_old);
+            h.update(&a_new);
+            h.update(&genesis_id);
+            h.update(&tombstone_hash);
+            *h.finalize().as_bytes()
+        };
+
+        Ok(RecoveryActivationContext {
+            genesis_id,
+            a_old,
+            a_new,
+            capsule_floor,
+            old_smt_root,
+            old_counter: 0,
+            old_rollup_hash,
+            recovery_intent_digest,
+            tombstone_proposal_digest: tombstone_hash,
+            final_per_device_smt_root,
+            final_receipt_roll: old_rollup_hash,
+        })
     }
 
     /// End-to-end recovery activation orchestration (spec §0.5 Phase D step 2).

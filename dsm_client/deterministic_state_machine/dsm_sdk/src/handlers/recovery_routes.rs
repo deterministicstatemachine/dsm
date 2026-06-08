@@ -898,6 +898,42 @@ impl AppRouterImpl {
                 Err(e) => err(format!("recovery.resumeAll failed: {e}")),
             },
 
+            // -------- recovery.activate (spec §0.5 Phase D step 2) --------
+            // Decode the persisted recovery state into a RecoveryActivationContext, then run
+            // the activation orchestration: fetch A_old's + every counterparty's online-posted
+            // genesis-authenticated state, assemble + verify per-counterparty cross-relationship
+            // succession evidence, and feed the SOLE unlock chokepoint. The chokepoint stays
+            // FAIL-CLOSED (recording disabled until the audited go-live + P5); a clean assembly
+            // that hits that gate is reported as a status, not a failure, so the end-to-end path
+            // is observably reachable. Genuine evidence/gate failures are surfaced as errors.
+            "recovery.activate" => {
+                let ctx = match crate::sdk::recovery_sdk::RecoverySDK::build_activation_context_from_persisted() {
+                    Ok(c) => c,
+                    Err(e) => return err(format!("recovery.activate: context: {e}")),
+                };
+                match crate::sdk::recovery_sdk::RecoverySDK::build_and_activate_recovery(&ctx).await {
+                    Ok(()) => {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.activate".to_string(),
+                            value: Some("activated".to_string()),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    // The designed fail-closed gate (no spend unlock pre-go-live): report the
+                    // assembled-but-disabled state as a status so the pipeline is observably wired.
+                    Err(dsm::types::error::DsmError::InvalidState(msg))
+                        if msg.contains("recovery activation recording disabled") =>
+                    {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.activate".to_string(),
+                            value: Some(format!("assembled;awaiting-go-live:{msg}")),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    Err(e) => err(format!("recovery.activate failed: {e}")),
+                }
+            }
+
             _ => err(format!("unknown recovery invoke method: {}", i.method)),
         }
     }
