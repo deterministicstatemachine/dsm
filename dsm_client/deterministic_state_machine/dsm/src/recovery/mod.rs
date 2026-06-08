@@ -7,6 +7,7 @@
 //! and receipt rollups for immediate recovery without history replay.
 
 pub mod activation;
+pub mod assembly;
 pub mod authority_anchor;
 pub mod bundle;
 pub mod capsule;
@@ -19,6 +20,10 @@ pub mod tombstone;
 
 pub use activation::{
     compute_evidence_root, validate_recovery_activation, RecoveryActivationSeal,
+};
+pub use assembly::{
+    assemble_recovery_activation, AssembledActivation, CounterpartyRecoveryInput,
+    RecoveryAssemblyInputs,
 };
 pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
