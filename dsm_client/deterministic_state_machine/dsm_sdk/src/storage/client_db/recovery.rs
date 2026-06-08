@@ -11,6 +11,8 @@ use rusqlite::params;
 
 use super::get_connection;
 use crate::util::deterministic_time::tick;
+use dsm::recovery::BearerAssetLockState;
+use dsm::types::operations::{EgressAsset, Operation};
 
 const PENDING_CAPSULE_INDEX_KEY: &str = "pending_capsule_index";
 
@@ -45,6 +47,17 @@ pub fn ensure_recovery_tables() -> Result<()> {
             device_id   BLOB NOT NULL PRIMARY KEY,
             height      INTEGER NOT NULL,
             head_hash   BLOB NOT NULL
+        );
+
+        -- P5 bearer-asset reconciliation registry (spec §0.4). Keyed by token_id.
+        -- state: BearerAssetLockState wire tag (1..=6). frontier_cap: reconciled spendable
+        -- cap (used for Reduced). is_dbtc: 1 marks an asset that MUST NOT be reconciled via
+        -- the generic token path (stays LockedRecovery until the dedicated dBTC replay pass).
+        CREATE TABLE IF NOT EXISTS recovery_locked_assets(
+            token_id     BLOB NOT NULL PRIMARY KEY,
+            state        INTEGER NOT NULL,
+            frontier_cap INTEGER NOT NULL DEFAULT 0,
+            is_dbtc      INTEGER NOT NULL DEFAULT 0
         );
         "#,
     )?;
@@ -1120,6 +1133,208 @@ pub fn is_device_tombstoned(device_id: &[u8; 32]) -> bool {
     result.unwrap_or(false)
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// P5 — Bearer-asset reconciliation registry + per-asset egress gate (spec §0.4).
+//
+// The two-gate model: identity succession does NOT make recovered bearer assets
+// spendable. Every capsule-restored bearer asset enters LockedRecovery and stays
+// there until its OWN verified frontier reconciles it. This per-asset gate is in
+// ADDITION to the identity-level `value_egress_block_reason` and persists AFTER
+// recovery activation. dBTC is excluded from the generic reconcile path — it stays
+// LockedRecovery until the dedicated dBTC frontier-replay pass.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// True iff `token_id` names the dBTC bearer asset (canonical `DBTC_TOKEN_ID = "dBTC"`).
+/// dBTC MUST NOT be reconciled via the generic token path (spec §0.4 P5 cut). Matched
+/// case-insensitively so spelling variants stay conservatively locked.
+pub fn is_dbtc_token_id(token_id: &[u8]) -> bool {
+    token_id.eq_ignore_ascii_case(b"dbtc")
+}
+
+/// One bearer-asset lock registry entry.
+#[derive(Debug, Clone, Copy)]
+pub struct BearerAssetLock {
+    pub state: BearerAssetLockState,
+    pub frontier_cap: u64,
+    pub is_dbtc: bool,
+}
+
+/// Upsert a bearer-asset lock entry (keyed by `token_id`).
+pub fn set_asset_lock(
+    token_id: &[u8],
+    state: BearerAssetLockState,
+    frontier_cap: u64,
+    is_dbtc: bool,
+) -> Result<()> {
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute(
+        "INSERT INTO recovery_locked_assets(token_id, state, frontier_cap, is_dbtc)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(token_id) DO UPDATE SET
+            state = excluded.state,
+            frontier_cap = excluded.frontier_cap,
+            is_dbtc = excluded.is_dbtc",
+        params![
+            token_id,
+            state.to_wire() as i64,
+            frontier_cap as i64,
+            is_dbtc as i64
+        ],
+    )?;
+    Ok(())
+}
+
+/// Read a bearer-asset lock entry. `Ok(None)` = not under recovery lock. Fail-CLOSED on a
+/// corrupt/invalid state tag (returns `Err`; the gate treats `Err` as "locked").
+pub fn get_asset_lock(token_id: &[u8]) -> Result<Option<BearerAssetLock>> {
+    use rusqlite::OptionalExtension;
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let row = conn
+        .query_row(
+            "SELECT state, frontier_cap, is_dbtc FROM recovery_locked_assets WHERE token_id = ?1",
+            params![token_id],
+            |r| {
+                let state: i64 = r.get(0)?;
+                let cap: i64 = r.get(1)?;
+                let is_dbtc: i64 = r.get(2)?;
+                Ok((state, cap, is_dbtc))
+            },
+        )
+        .optional()?;
+    match row {
+        None => Ok(None),
+        Some((state, cap, is_dbtc)) => {
+            let tag = u8::try_from(state).map_err(|_| anyhow!("lock state tag out of range"))?;
+            let state = BearerAssetLockState::from_wire(tag)
+                .map_err(|e| anyhow!("invalid bearer-asset lock state: {e}"))?;
+            Ok(Some(BearerAssetLock {
+                state,
+                frontier_cap: cap.max(0) as u64,
+                is_dbtc: is_dbtc != 0,
+            }))
+        }
+    }
+}
+
+/// Mark a capsule-restored bearer asset `LockedRecovery` (idempotent on `token_id`). dBTC is
+/// auto-flagged. The capsule is a continuity hint, NEVER a balance oracle — a restored asset
+/// is not spendable until reconciled.
+pub fn lock_restored_bearer_asset(token_id: &[u8]) -> Result<()> {
+    set_asset_lock(
+        token_id,
+        BearerAssetLockState::LockedRecovery,
+        0,
+        is_dbtc_token_id(token_id),
+    )
+}
+
+/// Whether any bearer asset is still recovery-locked (state != `Spendable`). Used by the gate
+/// for egress ops whose asset can't be identified — fail closed while anything is locked.
+pub fn any_recovery_locked_assets() -> Result<bool> {
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recovery_locked_assets WHERE state != ?1",
+        params![BearerAssetLockState::Spendable.to_wire() as i64],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Per-asset egress gate (spec §0.4 P5). Returns a block reason for the egress `op`, or
+/// `None` if it may proceed. Fail-CLOSED: any DB read error blocks. This is checked IN
+/// ADDITION to the identity-level [`value_egress_block_reason`] and persists per-asset after
+/// recovery activation.
+pub fn asset_egress_block_reason(op: &Operation) -> Option<String> {
+    const UNREADABLE: &str = "bearer-asset lock state unreadable: egress blocked (fail-closed)";
+    match op.egress_asset() {
+        EgressAsset::NotEgress => None,
+        EgressAsset::Unidentified => match any_recovery_locked_assets() {
+            Ok(true) => Some(
+                "egress operation's bearer asset cannot be identified while recovery locks are \
+                 active: blocked (fail-closed)"
+                    .to_string(),
+            ),
+            Ok(false) => None,
+            Err(_) => Some(UNREADABLE.to_string()),
+        },
+        EgressAsset::Asset { token_id, amount } => match get_asset_lock(&token_id) {
+            Ok(None) => None,
+            Ok(Some(lock)) => {
+                if !lock.state.permits_egress() {
+                    return Some(format!(
+                        "bearer asset is {} (recovery): egress refused until reconciled",
+                        lock.state.label()
+                    ));
+                }
+                if lock.state.is_frontier_capped() && amount > lock.frontier_cap {
+                    return Some(format!(
+                        "bearer-asset egress {amount} exceeds reconciled frontier {} (Reduced): \
+                         refused",
+                        lock.frontier_cap
+                    ));
+                }
+                None
+            }
+            Err(_) => Some(UNREADABLE.to_string()),
+        },
+    }
+}
+
+/// Reconcile an ORDINARY token asset against its independently-VERIFIED frontier (spec §0.4
+/// P5 generic path): `verified >= hint` → `Spendable`; `verified < hint` → `Reduced` capped
+/// at `verified`. Returns the new state. Fail-CLOSED for dBTC: it stays `LockedRecovery`
+/// until the dedicated dBTC frontier-replay pass (a `MissingDbtcFrontierReplay` error).
+pub fn reconcile_token_asset(
+    token_id: &[u8],
+    hint: u64,
+    verified: u64,
+) -> Result<BearerAssetLockState> {
+    if is_dbtc_token_id(token_id) {
+        return Err(anyhow!(
+            "MissingDbtcFrontierReplay: dBTC must not be reconciled via the generic token path; \
+             it stays LockedRecovery until the dedicated dBTC frontier-replay pass"
+        ));
+    }
+    // Defense-in-depth: honor a stored is_dbtc flag even if the token_id check ever misses.
+    if let Some(lock) = get_asset_lock(token_id)? {
+        if lock.is_dbtc {
+            return Err(anyhow!(
+                "MissingDbtcFrontierReplay: asset flagged dBTC; generic reconciliation refused"
+            ));
+        }
+    }
+    let (state, cap) = dsm::recovery::reconcile_token_frontier(hint, verified);
+    set_asset_lock(token_id, state, cap, false)?;
+    Ok(state)
+}
+
+/// Recovery-time locking: mark every bearer asset in `device_id_str`'s balance projections
+/// `LockedRecovery` (spec §0.4 — the capsule is a continuity hint, not a balance oracle).
+/// Returns the count locked. Call for BOTH the old and new device ids on recovery so the
+/// token-keyed registry covers whichever device the restored projections landed under.
+/// Idempotent on token_id. (Post-recovery ingress creates fresh, unlocked projections.)
+pub fn lock_all_restored_bearer_assets(device_id_str: &str) -> Result<usize> {
+    let projections = crate::storage::client_db::list_balance_projections(device_id_str)?;
+    let mut n = 0usize;
+    for p in &projections {
+        lock_restored_bearer_asset(p.token_id.as_bytes())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,5 +1654,127 @@ mod tests {
 
         clear_recovered_chain_tips().expect("clear tips");
         assert!(get_recovered_chain_tips().expect("read cleared").is_empty());
+    }
+
+    // ── P5 bearer-asset reconciliation ─────────────────────────────────────
+
+    use dsm::types::operations::{Operation, TransactionMode};
+    use dsm::types::token_types::Balance;
+
+    fn transfer_of(token_id: &[u8], amount: u64) -> Operation {
+        Operation::Transfer {
+            to_device_id: vec![0xCC; 32],
+            amount: Balance::from_state(amount, [0u8; 32]),
+            token_id: token_id.to_vec(),
+            policy_commit: [0u8; 32],
+            mode: TransactionMode::Unilateral,
+            nonce: vec![],
+            verification: dsm::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![],
+            to: vec![],
+            message: String::new(),
+            signature: vec![],
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn restored_asset_is_locked_and_blocks_egress() {
+        setup_test_db();
+        let tok = b"ERA";
+        lock_restored_bearer_asset(tok).expect("lock");
+        let lock = get_asset_lock(tok).expect("read").expect("present");
+        assert_eq!(lock.state, BearerAssetLockState::LockedRecovery);
+        // Egress of a LockedRecovery asset is refused.
+        assert!(asset_egress_block_reason(&transfer_of(tok, 5)).is_some());
+        // An UNTOUCHED asset (no lock entry) is not gated.
+        assert!(asset_egress_block_reason(&transfer_of(b"OTHER", 5)).is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn token_reconciliation_unlocks_or_reduces() {
+        setup_test_db();
+        let tok = b"ERA";
+        lock_restored_bearer_asset(tok).expect("lock");
+
+        // Verified frontier >= hint → Spendable → egress allowed.
+        assert_eq!(
+            reconcile_token_asset(tok, 100, 100).expect("reconcile"),
+            BearerAssetLockState::Spendable
+        );
+        assert!(asset_egress_block_reason(&transfer_of(tok, 100)).is_none());
+
+        // Verified frontier < hint → Reduced, capped at the verified amount.
+        assert_eq!(
+            reconcile_token_asset(tok, 100, 40).expect("reconcile"),
+            BearerAssetLockState::Reduced
+        );
+        assert!(asset_egress_block_reason(&transfer_of(tok, 40)).is_none()); // within cap
+        assert!(asset_egress_block_reason(&transfer_of(tok, 41)).is_some()); // exceeds cap
+    }
+
+    #[test]
+    #[serial]
+    fn dbtc_cannot_be_reconciled_via_generic_path() {
+        setup_test_db();
+        let dbtc = b"dBTC";
+        lock_restored_bearer_asset(dbtc).expect("lock");
+        let lock = get_asset_lock(dbtc).expect("read").expect("present");
+        assert!(lock.is_dbtc, "dBTC must be auto-flagged");
+        // Generic reconciliation is refused with MissingDbtcFrontierReplay.
+        let err = reconcile_token_asset(dbtc, 100, 100).unwrap_err().to_string();
+        assert!(err.contains("MissingDbtcFrontierReplay"), "got: {err}");
+        // dBTC stays LockedRecovery → egress still blocked.
+        assert_eq!(
+            get_asset_lock(dbtc).expect("read").expect("present").state,
+            BearerAssetLockState::LockedRecovery
+        );
+        assert!(asset_egress_block_reason(&transfer_of(dbtc, 1)).is_some());
+        // Lowercase / mixed-case variants are also treated as dBTC (conservative).
+        assert!(is_dbtc_token_id(b"dbtc") && is_dbtc_token_id(b"DBTC"));
+    }
+
+    #[test]
+    #[serial]
+    fn corrupt_lock_state_fails_closed() {
+        setup_test_db();
+        let tok = b"ERA";
+        // Write an invalid state tag (0) directly; the gate must fail closed (block).
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            conn.execute(
+                "INSERT INTO recovery_locked_assets(token_id, state, frontier_cap, is_dbtc)
+                 VALUES (?1, 0, 0, 0)",
+                params![tok.as_slice()],
+            )
+            .expect("insert corrupt");
+        }
+        assert!(get_asset_lock(tok).is_err(), "invalid tag must error");
+        assert!(
+            asset_egress_block_reason(&transfer_of(tok, 1)).is_some(),
+            "corrupt lock state must fail closed (block egress)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn unidentified_egress_blocked_only_while_locks_present() {
+        setup_test_db();
+        // A vault-keyed DLV claim cannot name its asset.
+        let claim = Operation::DlvClaim {
+            vault_id: vec![1, 2, 3],
+            claim_proof: vec![],
+            claimant_public_key: vec![],
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        };
+        // No locks present → allowed.
+        assert!(asset_egress_block_reason(&claim).is_none());
+        // A locked asset present → unidentified egress is blocked (fail-closed).
+        lock_restored_bearer_asset(b"ERA").expect("lock");
+        assert!(asset_egress_block_reason(&claim).is_some());
     }
 }

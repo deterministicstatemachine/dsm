@@ -885,6 +885,15 @@ impl CoreSDK {
             if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
                 return Err(DsmError::invalid_operation(reason));
             }
+            // P5 per-asset bearer gate (spec §0.4): in ADDITION to the identity-level gate
+            // above, a recovered bearer asset stays LockedRecovery until its OWN verified
+            // frontier reconciles — this persists AFTER recovery activation and is keyed by
+            // the operation's egress asset. Fail-closed (unreadable/locked → refuse).
+            if let Some(reason) =
+                crate::storage::client_db::recovery::asset_egress_block_reason(&operation)
+            {
+                return Err(DsmError::invalid_operation(reason));
+            }
         }
 
         // Enforce token policy constraints on the operation that will advance

@@ -576,6 +576,27 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
         &new_device_id_str[..new_device_id_str.len().min(16)]
     );
 
+    // 7b. P5 bearer-asset LOCKED_RECOVERY (spec §0.4): the capsule is a continuity hint,
+    // NOT a balance oracle. Identity succession does NOT make recovered bearer assets
+    // spendable — every restored bearer asset enters LockedRecovery and stays there until
+    // its OWN verified frontier reconciles (generic tokens via reconcile_token_asset; dBTC
+    // only via the dedicated frontier-replay pass). Lock under BOTH device ids so the
+    // token-keyed registry covers whichever device the restored projections landed under.
+    // Fail-closed: if we cannot lock, abort rather than leave bearer assets spendable.
+    let mut locked_assets = 0usize;
+    for dev_str in [&old_device_id_str, &new_device_id_str] {
+        match crate::storage::client_db::recovery::lock_all_restored_bearer_assets(dev_str) {
+            Ok(n) => locked_assets += n,
+            Err(e) => {
+                return Err(format!(
+                    "[RECOVERY] Failed to lock restored bearer assets (refusing to proceed with \
+                     spendable recovered assets): {e}"
+                ));
+            }
+        }
+    }
+    log::info!("[RECOVERY] {locked_assets} restored bearer-asset projection(s) set LockedRecovery");
+
     // 8. Initialize sync gate from capsule counterparty IDs
     let counterparty_ids = crate::storage::client_db::recovery::get_capsule_counterparty_ids()
         .map_err(|e| format!("Failed to read counterparty IDs: {e}"))?;
