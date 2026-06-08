@@ -2810,6 +2810,19 @@ message PostedDbtcVaultIndexV1 {
   bytes  signature               = 6 [(dsm_max_len)=65535]; // SPX256f K_A sig over the digest
 }
 
+// Lightweight recovery succession proof (spec §0.5 — bilateral re-establish). A_new posts the
+// minimal artifacts a counterparty C needs to run its re-establish accept-guard BEFORE
+// co-signing: the genesis-anchored recovery authority pubkey (K_A_pub) plus the
+// tombstone/succession pair proving A_new succeeds A_old. Distinct from RecoveryBundleV1 (which
+// also carries the activation seal — produced only AFTER all re-establishes, so unavailable at
+// re-establish time). Sub-objects are nested canonical bytes via their own codecs. Availability
+// -only; C genesis-anchors authority_pubkey via A_new's RecoveryAuthorityAnchor before trusting.
+message RecoverySuccessionProofV1 {
+  bytes authority_pubkey = 1 [(dsm_max_len)=4096];  // K_A_pub (SPHINCS+ pk)
+  bytes tombstone        = 2 [(dsm_max_len)=65535]; // TombstoneReceipt.to_bytes
+  bytes succession       = 3 [(dsm_max_len)=65535]; // SuccessionReceipt.to_bytes
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

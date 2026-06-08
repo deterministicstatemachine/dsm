@@ -20,6 +20,7 @@ pub mod gate_set;
 pub mod pdsmt_posting;
 pub mod rollup;
 pub mod succession_binding;
+pub mod succession_proof;
 pub mod tombstone;
 
 pub use activation::{
@@ -52,6 +53,7 @@ pub use succession_binding::{
     recovery_establishment_floor, verify_forward_ancestry, verify_recovery_reestablish_request,
     CrossRelationshipSuccessionEvidence,
 };
+pub use succession_proof::RecoverySuccessionProof;
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
