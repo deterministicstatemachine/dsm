@@ -311,11 +311,30 @@ Added during hardening (beyond the original register):
     - *Gate-set construction (unit):* union freeze → `gate_set_commit`; activation fails
       closed if any union member lacks valid `CrossRelationshipSuccessionEvidence`.
 
-    **✅ Built:** the wire foundation (above). **☐ Remaining (this plan):** Layer-1
-    append-once chain (proto `parent_head_hash`/`head_number` + storage table + endpoint +
-    SDK), Layer-2 `verify_inclusion`/completeness, Layer-3 union + `build_gate_set`,
-    recovery bundle. Gate-set CONSTRUCTION + the unlock stay fail-closed until all land
-    + adversarial review (go-live is a separate audited step).
+    **✅ Built (all three layers, pure cores + storage + transport, tested):**
+    - Wire foundation: `PostedPdsmtHeadV1`/`PostedPdsmtLeafRecordV1` + `recovery::pdsmt_posting`.
+    - Layer 1 (append-once chain): head `parent_head_hash`/`head_number` (signed);
+      `dsm_storage_node` `pdsmt_head_chain` table (sqlite+pg) + `insert_pdsmt_head_if_chained`
+      (genesis/child append, idempotent replay, 409 on fork/gap/stale); endpoint
+      `PUT/GET /api/v2/tips/{device}/head-chain[/{n}]`; SDK `publish_pdsmt_head` /
+      `fetch_pdsmt_head_latest` / `fetch_pdsmt_head_at`.
+    - Layer 2 (completeness): `PostedPdsmtLeafRecord::verify_inclusion` (rel_key→tip under
+      `pd_smt_root`, rel_key→`committed_digest` under `leaf_index_root`, both via
+      `SparseMerkleTree::verify_proof_against_root`) + `verify_head_with_leaves`.
+    - Layer 3 (union + final rule): `recovery::gate_set::build_gate_set` —
+      `A_old` value-capable leaves ∪ `CounterpartyValueWitness` (C's own value-capable leaf
+      for the shared symmetric rel_key) → frozen `gate_set_commit`; the omitted-counterparty
+      anti-shrink path is unit-proven.
+
+    **☐ Remaining (this plan):** SDK orchestration (fetch A_old's latest valid head ≤
+    snapshot + leaves, fetch candidate counterparty witnesses, verify each via
+    `fetch_and_verify_authority_anchor` + device-tree quorum, call `build_gate_set`, freeze
+    into the activation seal); the **publish-side head builder** (enumerate THIS device's
+    PDSMT leaves, classify `value_capable` by walking each relationship's history with
+    `is_value_bearing`, build the `leaf_index` SparseMerkleTree, generate proofs, sign +
+    `publish_pdsmt_head`); the **recovery bundle** format. Gate-set CONSTRUCTION + the
+    unlock stay fail-closed until all land + adversarial review (go-live is a separate
+    audited step).
 
 ### 0.3 Sibling-spec overlap (cross-reference, not rewritten here)
 
