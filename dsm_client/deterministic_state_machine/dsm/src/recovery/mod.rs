@@ -49,9 +49,9 @@ pub use pdsmt_posting::{
 };
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
-    build_recovery_establishment_op, compute_carry_forward_commitment,
+    build_recovery_establishment_op, compute_carry_forward_commitment, is_recovery_establish_op,
     recovery_establishment_floor, verify_forward_ancestry, verify_recovery_reestablish_request,
-    CrossRelationshipSuccessionEvidence,
+    CrossRelationshipSuccessionEvidence, RECOVERY_ESTABLISH_MESSAGE,
 };
 pub use succession_proof::RecoverySuccessionProof;
 pub use rollup::{ReceiptRollup, RollupEntry};

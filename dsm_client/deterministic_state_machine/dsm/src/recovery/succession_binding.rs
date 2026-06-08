@@ -83,12 +83,29 @@ pub fn build_recovery_establishment_op(
     // tamper-evident. (verify_succession_semantics / the assembler check the op's
     // counterparty_id + commitment, not proof, so this is compatible.)
     crate::types::operations::Operation::CreateRelationship {
-        message: "recovery-establish".to_string(),
+        message: RECOVERY_ESTABLISH_MESSAGE.to_string(),
         counterparty_id: c.to_vec(),
         commitment: carry_forward_commitment.to_vec(),
         proof: h_cap.to_vec(),
         mode: crate::types::operations::TransactionMode::Bilateral,
     }
+}
+
+/// The canonical operation marker for a recovery re-establish `CreateRelationship`
+/// (set by [`build_recovery_establishment_op`]).
+pub const RECOVERY_ESTABLISH_MESSAGE: &str = "recovery-establish";
+
+/// Whether `op` is a recovery re-establish proposal — a `CreateRelationship` carrying the
+/// canonical [`RECOVERY_ESTABLISH_MESSAGE`] marker. The bilateral handler uses this to decide
+/// whether an incoming prepare must pass [`verify_recovery_reestablish_request`] before C
+/// co-signs (ordinary establishes are untouched). The marker only SELECTS the guard; the guard
+/// itself re-derives and checks every binding, so a forged marker cannot bypass verification.
+pub fn is_recovery_establish_op(op: &crate::types::operations::Operation) -> bool {
+    matches!(
+        op,
+        crate::types::operations::Operation::CreateRelationship { message, .. }
+            if message == RECOVERY_ESTABLISH_MESSAGE
+    )
 }
 
 /// Extract the capsule floor `h_cap` a recovery-establish op carries in its `proof` field.
@@ -677,6 +694,26 @@ mod tests {
             build_recovery_establishment_op(&C, &[0xBE; 32], &ev.h_cap); // wrong commitment
         ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
         assert!(ev.verify_succession_semantics(&pk).is_err());
+    }
+
+    #[test]
+    fn is_recovery_establish_op_selects_only_the_marker() {
+        // The real recovery-establish op carries the canonical marker → selected.
+        let op = build_recovery_establishment_op(&C, &[0x11; 32], &[0x22; 32]);
+        assert!(is_recovery_establish_op(&op));
+        assert_eq!(recovery_establishment_floor(&op), Some([0x22; 32]));
+        // An ordinary CreateRelationship (different message) is NOT selected — the BLE guard
+        // must leave normal establishes alone.
+        let ordinary = Operation::CreateRelationship {
+            message: "create rel".to_string(),
+            counterparty_id: C.to_vec(),
+            commitment: [0x11; 32].to_vec(),
+            proof: [0x22; 32].to_vec(),
+            mode: crate::types::operations::TransactionMode::Bilateral,
+        };
+        assert!(!is_recovery_establish_op(&ordinary));
+        // A non-CreateRelationship op is never selected.
+        assert!(!is_recovery_establish_op(&Operation::Noop));
     }
 
     #[test]

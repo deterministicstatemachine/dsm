@@ -1957,6 +1957,26 @@ impl BilateralBleHandler {
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
 
+        // §0.5 recovery re-establish accept-guard. If this prepare is a recovery-establish
+        // proposal (canonical marker), C MUST verify — before co-signing — that A_new is the
+        // genesis-anchored successor of an A_old it actually had a relationship with, and that
+        // the carry-forward commitment bridges C's REAL (A_old,C) frontier. Without this, a
+        // mnemonic thief could re-establish C's channels onto a device the owner never
+        // authorized. Fail-closed: any failure aborts the prepare (C does not co-sign).
+        // `sender_device_id` is A_new (the device that sent this prepare). Ordinary establishes
+        // are untouched (the guard only runs for the recovery-establish marker).
+        if dsm::recovery::is_recovery_establish_op(&operation) {
+            crate::sdk::RecoverySDK::verify_incoming_recovery_reestablish(
+                &operation,
+                &sender_device_id,
+            )
+            .await?;
+            info!(
+                "Recovery re-establish accept-guard PASSED for sender={}",
+                bytes_to_base32(&sender_device_id[..8])
+            );
+        }
+
         // Capture transfer metadata for the orchestration layer to run hooks.
         // Delegate to the application layer so the transport stays coin-agnostic.
         let operation_bytes = operation.to_bytes();
