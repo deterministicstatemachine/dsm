@@ -1250,6 +1250,242 @@ impl RecoverySDK {
         })
     }
 
+    /// Re-derive A_new's identity-level tombstone/succession (A's `K_A`) proving A_new
+    /// succeeds A_old, from the persisted recovery context. SPHINCS+ signing is deterministic,
+    /// so the re-derived receipts are byte-identical to the ones the recovery pipeline
+    /// propagated (their hashes match the persisted `tombstone_proposal_digest`); reconstructing
+    /// avoids depending on partial receipt persistence. The device-id string MUST match dsm's
+    /// `encode_crockford` (the verifiers compare `tombstone.device_id == encode_crockford(a_old)`);
+    /// the SDK encoder is the documented byte-identical twin. Returns `(K_A_pub, tombstone,
+    /// succession)`. Fail-closed: requires a cached recovery-authority keypair.
+    fn recreate_identity_succession(
+        ctx: &RecoveryActivationContext,
+    ) -> Result<
+        (
+            Vec<u8>,
+            dsm::recovery::TombstoneReceipt,
+            dsm::recovery::SuccessionReceipt,
+        ),
+        DsmError,
+    > {
+        let (ka_pub, ka_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
+            DsmError::InvalidState(
+                "recovery: no cached recovery-authority keypair (cache the mnemonic first)".into(),
+            )
+        })?;
+        let a_old_str = crate::util::text_id::encode_base32_crockford(&ctx.a_old);
+        let tombstone = create_tombstone_receipt(
+            &ctx.old_smt_root,
+            ctx.old_counter,
+            &ctx.old_rollup_hash,
+            &a_old_str,
+            &ka_sk,
+        )?;
+        let succession = create_succession_receipt(
+            &tombstone.tombstone_hash,
+            ctx.a_new.as_ref(),
+            &a_old_str,
+            &ka_sk,
+        )?;
+        Ok((ka_pub, tombstone, succession))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bilateral re-establish (spec §0.5 — the interactive successor-channel transport).
+    //
+    // After identity recovery, A_new must re-establish each prior `(A_old,C)` relationship as a
+    // NEW `(A_new,C)` channel "born as a successor": its first state binds the carry-forward
+    // commitment over C's REAL `(A_old,C)` frontier. The transport reuses the ordinary bilateral
+    // 3-phase commit (no new BLE message types): the recovery-establish `CreateRelationship` op
+    // rides the prepare, its `commitment` is the carry-forward, and `proof` conveys the capsule
+    // floor `h_cap`. A_new builds the op (`begin_recovery_reestablish`); C MUST gate co-signing
+    // on `verify_incoming_recovery_reestablish`. The pre-co-sign authorization (authority pubkey
+    // + tombstone/succession) is posted as a `RecoverySuccessionProof` and fetched by C.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Storage key for A_new's posted recovery succession proof (Base32 Crockford; no hex).
+    /// Keyed by `(genesis_under_recovery, a_new)` — the recovering identity's genesis (shared
+    /// with A_old) and the successor device.
+    pub fn recovery_succession_proof_storage_key(genesis_id: &[u8; 32], a_new: &[u8; 32]) -> String {
+        format!(
+            "recovery/succession-proof/v1/{}/{}",
+            crate::util::text_id::encode_base32_crockford(genesis_id),
+            crate::util::text_id::encode_base32_crockford(a_new),
+        )
+    }
+
+    /// A_new posts its [`dsm::recovery::RecoverySuccessionProof`] (authority pubkey +
+    /// tombstone/succession) so a counterparty can run its accept-guard before co-signing.
+    /// Availability-only; the receiver genesis-anchors the authority + verifies the receipts.
+    pub async fn publish_recovery_succession_proof() -> Result<(), DsmError> {
+        let ctx = Self::build_activation_context_from_persisted()?;
+        let (ka_pub, tombstone, succession) = Self::recreate_identity_succession(&ctx)?;
+        let proof = dsm::recovery::RecoverySuccessionProof {
+            authority_pubkey: ka_pub,
+            tombstone,
+            succession,
+        };
+        let key = Self::recovery_succession_proof_storage_key(&ctx.genesis_id, &ctx.a_new);
+        crate::sdk::storage_io::put_bytes(&key, &proof.to_bytes()).await?;
+        Ok(())
+    }
+
+    /// Fetch + decode A_new's posted recovery succession proof. Fail-closed decode only; the
+    /// CALLER MUST genesis-anchor `authority_pubkey` and run the accept-guard before trusting it.
+    pub async fn fetch_recovery_succession_proof(
+        genesis_id: &[u8; 32],
+        a_new: &[u8; 32],
+    ) -> Result<dsm::recovery::RecoverySuccessionProof, DsmError> {
+        let key = Self::recovery_succession_proof_storage_key(genesis_id, a_new);
+        let bytes = crate::sdk::storage_io::get_bytes(&key).await?;
+        dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes)
+    }
+
+    /// A_new side: build the recovery-establish `CreateRelationship` operation for counterparty
+    /// `c`, to be carried by the ordinary bilateral prepare. Computes the carry-forward
+    /// commitment over C's REAL `(A_old,C)` frontier and conveys the capsule floor `h_cap` in
+    /// the op's `proof`; also posts the [`dsm::recovery::RecoverySuccessionProof`] C needs.
+    ///
+    /// `t_old_current` is sourced from C's posted PDSMT leaf for the `(A_old,C)` relationship.
+    /// If C has advanced that relationship since it last posted, the leaf is stale and C's
+    /// accept-guard will reject the (mismatched) carry-forward — fail-closed; retry once C
+    /// re-posts. Fail-closed: A had no sealed relationship with `c` (no capsule floor), or C
+    /// has no posted `(A_old,C)` leaf, aborts.
+    pub async fn begin_recovery_reestablish(
+        c: &[u8; 32],
+    ) -> Result<dsm::types::operations::Operation, DsmError> {
+        let ctx = Self::build_activation_context_from_persisted()?;
+        let h_cap = ctx.capsule_floor.get(c).copied().ok_or_else(|| {
+            DsmError::InvalidState(
+                "begin_recovery_reestablish: no capsule floor for this counterparty (A had no \
+                 sealed (A_old,C) relationship)"
+                    .into(),
+            )
+        })?;
+
+        // Post the pre-co-sign succession proof so C can run its accept-guard.
+        Self::publish_recovery_succession_proof().await?;
+
+        let old_rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
+        let new_rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
+
+        // C's current (A_old,C) tip from its posted PDSMT leaf.
+        let c_head = Self::fetch_pdsmt_head_latest(c).await?;
+        let c_leaves =
+            Self::fetch_pdsmt_leaves(&c_head.genesis_id, c, c_head.head_number).await?;
+        let t_old_current = c_leaves
+            .iter()
+            .find(|l| l.rel_key == old_rel_key && l.counterparty_device_id == ctx.a_old)
+            .map(|l| l.current_tip)
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "begin_recovery_reestablish: counterparty has no posted (A_old,C) leaf \
+                     (cannot determine its current tip; ensure C has posted its PDSMT)",
+                )
+            })?;
+
+        let (_ka_pub, tombstone, succession) = Self::recreate_identity_succession(&ctx)?;
+        let carry = dsm::recovery::compute_carry_forward_commitment(
+            &old_rel_key,
+            &new_rel_key,
+            &h_cap,
+            &t_old_current,
+            &tombstone.tombstone_hash,
+            &succession.succession_hash,
+            &ctx.a_old,
+            &ctx.a_new,
+            c,
+        );
+        Ok(dsm::recovery::build_recovery_establishment_op(c, &carry, &h_cap))
+    }
+
+    /// C side: the accept-guard the bilateral handler MUST call before co-signing an incoming
+    /// recovery-establish proposal from `a_new`. Returns `Ok(())` only if C may co-sign;
+    /// otherwise errors (fail-closed — a thief must not be able to re-establish C's channels).
+    ///
+    /// Gathers everything from authenticated sources: A_new's genesis + recovery authority from
+    /// its posted, genesis-anchored PDSMT head; the [`dsm::recovery::RecoverySuccessionProof`]
+    /// (bound to that same anchored authority); A_old from the tombstone; and C's own
+    /// `(A_old,C)` frontier (ordered post-floor segment from its BCR archive). Then runs the
+    /// pure [`dsm::recovery::verify_recovery_reestablish_request`].
+    pub async fn verify_incoming_recovery_reestablish(
+        op: &dsm::types::operations::Operation,
+        a_new: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        let h_cap = dsm::recovery::recovery_establishment_floor(op).ok_or_else(|| {
+            DsmError::verification(
+                "recovery reestablish: op carries no 32-byte capsule floor in its proof",
+            )
+        })?;
+        let c_self = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
+
+        // A_new's genesis + recovery authority, from A_new's posted head (genesis-anchored).
+        let a_new_head = Self::fetch_pdsmt_head_latest(a_new).await?;
+        let a_new_genesis = a_new_head.genesis_id;
+        Self::fetch_and_verify_authority_anchor(&a_new_genesis, a_new, &a_new_head.authority_pubkey)
+            .await?;
+
+        // The pre-co-sign succession proof, bound to the SAME anchored authority.
+        let proof = Self::fetch_recovery_succession_proof(&a_new_genesis, a_new).await?;
+        if proof.authority_pubkey != a_new_head.authority_pubkey {
+            return Err(DsmError::verification(
+                "recovery reestablish: succession-proof authority != A_new's genesis-anchored \
+                 head authority",
+            ));
+        }
+
+        // A_old is the tombstoned predecessor (authenticated by the receipts under K_A).
+        let a_old_v = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "recovery reestablish: tombstone device_id is not Base32 Crockford",
+                )
+            })?;
+        let a_old = <[u8; 32]>::try_from(a_old_v.as_slice()).map_err(|_| {
+            DsmError::verification("recovery reestablish: tombstone device_id is not 32 bytes")
+        })?;
+        let old_rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&a_old, &c_self);
+
+        // C's current (A_old,C) tip from its OWN device head; reject if no such relationship.
+        let head = crate::storage::client_db::load_bcr_device_head(&c_self)
+            .map_err(|e| {
+                DsmError::storage(format!("load device head: {e}"), None::<std::io::Error>)
+            })?
+            .ok_or_else(|| {
+                DsmError::InvalidState("recovery reestablish: no local device head".into())
+            })?;
+        let current_tip = head
+            .rel_chain_tip(&old_rel_key)
+            .map(|t| t.chain_tip)
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "recovery reestablish: C has no relationship with A_old (nothing to \
+                     re-establish)",
+                )
+            })?;
+
+        // Ordered post-floor (A_old,C) states from h_cap → current tip (fail-closed on gap/fork).
+        let seg = Self::build_rel_chain_segment(&c_self, &old_rel_key, &h_cap, &current_tip)?;
+
+        dsm::recovery::verify_recovery_reestablish_request(
+            op,
+            &a_old,
+            a_new,
+            &c_self,
+            &proof.tombstone,
+            &proof.succession,
+            &proof.authority_pubkey,
+            &h_cap,
+            &seg.states,
+        )
+    }
+
     /// End-to-end recovery activation orchestration (spec §0.5 Phase D step 2).
     ///
     /// Fetches A_old's and every candidate counterparty's online-posted, genesis-authenticated
@@ -1271,32 +1507,8 @@ impl RecoverySDK {
     ) -> Result<(), DsmError> {
         use std::collections::{BTreeMap, BTreeSet};
 
-        let (ka_pub, ka_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
-            DsmError::InvalidState(
-                "build_and_activate_recovery: no cached recovery-authority keypair (cache the \
-                 mnemonic first)"
-                    .into(),
-            )
-        })?;
-
-        // Identity-level tombstone/succession (A's K_A) proving A_new succeeds A_old. The
-        // device-id string MUST match dsm's `encode_crockford` (verify_succession_semantics
-        // compares `tombstone.device_id == encode_crockford(a_old)`); the SDK encoder is the
-        // documented byte-identical twin.
-        let a_old_str = crate::util::text_id::encode_base32_crockford(&ctx.a_old);
-        let tombstone = create_tombstone_receipt(
-            &ctx.old_smt_root,
-            ctx.old_counter,
-            &ctx.old_rollup_hash,
-            &a_old_str,
-            &ka_sk,
-        )?;
-        let succession = create_succession_receipt(
-            &tombstone.tombstone_hash,
-            ctx.a_new.as_ref(),
-            &a_old_str,
-            &ka_sk,
-        )?;
+        // Identity-level tombstone/succession (A's K_A) proving A_new succeeds A_old.
+        let (ka_pub, tombstone, succession) = Self::recreate_identity_succession(ctx)?;
 
         // A_old's posted head + leaves. A_old's recovery authority IS this identity's K_A
         // (per-identity, re-derived from the mnemonic) — the posted head must be signed by it.
@@ -1322,7 +1534,10 @@ impl RecoverySDK {
             BTreeMap::new();
         for c in &candidates {
             let Some(h_cap) = ctx.capsule_floor.get(c).copied() else {
-                log::debug!("[RECOVERY] candidate {} has no capsule floor; skipping", a_old_str);
+                log::debug!(
+                    "[RECOVERY] candidate {} has no capsule floor; skipping",
+                    crate::util::text_id::encode_base32_crockford(c)
+                );
                 continue;
             };
             let head = match Self::fetch_pdsmt_head_latest(c).await {
@@ -1838,6 +2053,21 @@ mod tests {
         // Keyed by BOTH genesis and device.
         assert_ne!(k, RecoverySDK::dbtc_vault_index_storage_key(&[0x6F; 32], &d));
         assert_ne!(k, RecoverySDK::dbtc_vault_index_storage_key(&g, &[0xA1; 32]));
+        // Base32 Crockford only — no hex (repo invariant).
+        assert!(!k.contains("0x"));
+    }
+
+    #[test]
+    fn recovery_succession_proof_storage_key_is_deterministic_genesis_anew_keyed_crockford() {
+        let g = [0x6E; 32];
+        let a_new = [0xA1; 32];
+        let k = RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new);
+        assert_eq!(k, RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new));
+        assert!(k.starts_with("recovery/succession-proof/v1/"));
+        assert!(!k.starts_with('/'));
+        // Keyed by BOTH genesis and the successor device.
+        assert_ne!(k, RecoverySDK::recovery_succession_proof_storage_key(&[0x6F; 32], &a_new));
+        assert_ne!(k, RecoverySDK::recovery_succession_proof_storage_key(&g, &[0xA2; 32]));
         // Base32 Crockford only — no hex (repo invariant).
         assert!(!k.contains("0x"));
     }
