@@ -11,6 +11,7 @@ pub mod assembly;
 pub mod authority_anchor;
 pub mod bearer_lock;
 pub mod bundle;
+pub mod dbtc_backing;
 pub mod dbtc_reconcile;
 pub mod capsule;
 pub mod chain_segment;
@@ -31,6 +32,7 @@ pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
 pub use bearer_lock::{reconcile_token_frontier, BearerAssetLockState};
+pub use dbtc_backing::{classify_dbtc_backing, DbtcBitcoinFacts};
 pub use dbtc_reconcile::{aggregate_dbtc_frontier, DbtcVaultCondition, DbtcVaultOutcome};
 pub use bundle::RecoveryBundle;
 pub use chain_segment::{
