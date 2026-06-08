@@ -2634,6 +2634,42 @@ message RecoveryAuthorityAnchorProto {
   bytes authority_signature     = 5 [(dsm_max_len)=65535]; // SPX256f K_A sig
 }
 
+// Authenticated Enumerable Per-Device SMT posting (spec §0.5, gap 13) — the
+// signed HEAD of a device's posted PDSMT snapshot used for recovery gate-set
+// enumeration. DUAL-KEYED: addressed by `device_id` (the PDSMT and rel_key are
+// device-scoped) but carries `genesis_id` and is signed by the genesis-anchored
+// recovery authority (`authority_pubkey_commit` == H(K_A_pub), bound via the
+// RecoveryAuthorityAnchor). `signature` covers all other fields (BLAKE3
+// domain-separated digest). Device selects the PDSMT; genesis authenticates the
+// authority. Storage is availability-only; clients verify.
+message PostedPdsmtHeadV1 {
+  bytes genesis_id              = 1 [(dsm_fixed_len)=32];
+  bytes device_id               = 2 [(dsm_fixed_len)=32];
+  bytes pd_smt_root             = 3 [(dsm_fixed_len)=32];
+  bytes leaf_index_root         = 4 [(dsm_fixed_len)=32];
+  bytes snapshot_id             = 5 [(dsm_fixed_len)=32];
+  bytes authority_pubkey_commit = 6 [(dsm_fixed_len)=32]; // H(K_A_pub)
+  bytes signature               = 7 [(dsm_max_len)=65535]; // SPX256f K_A sig over the head digest
+}
+
+// One enumerable, committed leaf/index record of a posted PDSMT snapshot.
+// `value_capable` is part of the SIGNED/COMMITTED record (committed under
+// `leaf_index_root`) — NOT server metadata. `counterparty_genesis_id` is optional
+// context (empty if unknown): it cannot compute `rel_key` (device-pair derived) but
+// is useful once C's device membership under its own genesis is verified.
+message PostedPdsmtLeafRecordV1 {
+  bytes  genesis_id                       = 1 [(dsm_fixed_len)=32];
+  bytes  owner_device_id                  = 2 [(dsm_fixed_len)=32];
+  bytes  rel_key                          = 3 [(dsm_fixed_len)=32];
+  bytes  counterparty_device_id           = 4 [(dsm_fixed_len)=32];
+  bytes  counterparty_genesis_id          = 5 [(dsm_max_len)=32]; // optional (empty if unknown)
+  bytes  current_tip                      = 6 [(dsm_fixed_len)=32];
+  bool   value_capable                    = 7;
+  string value_capable_reason             = 8;
+  bytes  inclusion_proof_to_pd_smt_root   = 9  [(dsm_max_len)=65535];
+  bytes  inclusion_proof_to_leaf_index_root = 10 [(dsm_max_len)=65535];
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier

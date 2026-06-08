@@ -20,6 +20,10 @@ pub const TAG_DSM_RECOVERY_CARRY_FORWARD: &str = "DSM/recovery/carry-forward/v1"
 pub const TAG_DSM_RECOVERY_AUTHORITY_COMMIT: &str = "DSM/recovery/authority-commit/v1";
 /// Domain tag for the recovery-authority anchor declaration's signing bytes (§0.5 step 5).
 pub const TAG_DSM_RECOVERY_AUTHORITY_ANCHOR: &str = "DSM/recovery/authority-anchor/v1";
+/// Domain tag for the posted PDSMT head signing digest (§0.5 gap 13).
+pub const TAG_DSM_PDSMT_HEAD: &str = "DSM/recovery/pdsmt-head/v1";
+/// Domain tag for a posted PDSMT leaf record's committed digest (leaf-index leaf value, §0.5 gap 13).
+pub const TAG_DSM_PDSMT_LEAF: &str = "DSM/recovery/pdsmt-leaf/v1";
 pub const TAG_DSM_TOMBSTONE: &str = "DSM/tombstone";
 pub const TAG_DSM_TOMBSTONE_NOTIFY: &str = "DSM/tombstone-notify";
 pub const TAG_DSM_TOMBSTONE_SUCCESSION: &str = "DSM/tombstone-succession";
@@ -37,6 +41,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_RECOVERY_CARRY_FORWARD,
     TAG_DSM_RECOVERY_AUTHORITY_COMMIT,
     TAG_DSM_RECOVERY_AUTHORITY_ANCHOR,
+    TAG_DSM_PDSMT_HEAD,
+    TAG_DSM_PDSMT_LEAF,
     TAG_DSM_TOMBSTONE,
     TAG_DSM_TOMBSTONE_NOTIFY,
     TAG_DSM_TOMBSTONE_SUCCESSION,

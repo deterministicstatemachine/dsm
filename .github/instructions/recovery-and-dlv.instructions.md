@@ -236,6 +236,33 @@ Added during hardening (beyond the original register):
       **recovery bundle** format (carries `K_A_pub` + tombstone + succession + per-C
       evidence) the activation flow consumes.
 
+    **✅ Built (wire foundation):** `PostedPdsmtHeadV1` / `PostedPdsmtLeafRecordV1`
+    protos + `recovery::pdsmt_posting` (`PostedPdsmtHead` / `PostedPdsmtLeafRecord`
+    codec, head signing digest + `PostedPdsmtHead::verify` binding the signature to the
+    committed authority pubkey, per-leaf `committed_digest` binding the authoritative
+    `value_capable` flag/reason; 6 tests). The head is signed by the genesis-anchored
+    recovery authority `K_A` (commit reused from the §0.5 step-5 anchor).
+
+    **☐ OPEN — R4 anti-shrink (double-spend-critical; needs a design decision before
+    gate-set construction).** A head signed by `K_A` proves authenticity but does NOT
+    prevent the `K_A` holder from posting a SHRUNK value-capable leaf set — and the R4
+    adversary IS the spender (an owner who shrinks their own gate-set so a counterparty
+    `C` keeps accepting `A_old` while `A_new` also spends = the recovery double-spend).
+    The SMT root is sparse, so "the index includes ALL value-capable leaves" cannot be
+    proven from `pd_smt_root` alone. Candidate resolutions (undecided):
+    (a) **counterparty-union** — cross-check `C`'s independently-posted `(C,A_old)`
+        relationship; if `C` shows value with `A_old` but `A_old`'s index omits it, the
+        union still gates `C` (tension with "per-counterparty scan is evidence-only" —
+        here it is an anti-shrink enumeration *contributor*, not the primary authority);
+    (b) **pre-tombstone freeze** — bind the gate-set to the last head posted BEFORE the
+        recovery intent, so a shrink would have had to be posted during normal operation
+        (detectable / no incentive); requires a monotonic/append-once head history;
+    (c) **completeness commitment** — require the head to commit that the index covers
+        every leaf of `pd_smt_root` (needs an enumerable/closed SMT commitment).
+    Until this is decided, gate-set CONSTRUCTION is NOT built and the unlock stays
+    fail-closed; the wire foundation above is safe to land because it changes no
+    acceptance predicate.
+
 ### 0.3 Sibling-spec overlap (cross-reference, not rewritten here)
 
 - `whitepaper.instructions.md` — recovery ring, capsule AAD (§13/§16.10), cert chains (§11.1).

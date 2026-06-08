@@ -9,6 +9,7 @@
 pub mod activation;
 pub mod authority_anchor;
 pub mod capsule;
+pub mod pdsmt_posting;
 pub mod rollup;
 pub mod succession_binding;
 pub mod tombstone;
@@ -19,6 +20,7 @@ pub use activation::{
 pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
+pub use pdsmt_posting::{PostedPdsmtHead, PostedPdsmtLeafRecord};
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
     compute_carry_forward_commitment, verify_forward_ancestry,
