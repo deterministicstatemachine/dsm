@@ -133,7 +133,19 @@ unit-tested** · **◑ partial (safety logic done; flow/plumbing remains)** · *
    (`recovery/authority_anchor.rs`) — the activation chokepoint binds the candidate
    authority pubkey to the anchor (genesis-key + possession signatures) before any
    verification; no contacts-DB pubkey path remains. ✅ **value-capable** gate-set
-   criterion (`Operation::is_value_bearing`). ◑ unlock chokepoint
+   criterion (`Operation::is_value_bearing`). ✅ **bilateral re-establish transport**
+   (the interactive successor-channel side): A_new conveys the capsule floor `h_cap` in the
+   recovery-establish op's `proof` (`build_recovery_establishment_op` /
+   `recovery_establishment_floor`); the pre-co-sign authorization is posted as a
+   `RecoverySuccessionProof` (`recovery/succession_proof.rs`) and fetched by C; A_new initiates
+   via `RecoverySDK::begin_recovery_reestablish` (carry-forward over C's REAL `(A_old,C)`
+   frontier, `t_old_current` from C's posted leaf) and C gates co-signing on
+   `verify_incoming_recovery_reestablish` → the pure `verify_recovery_reestablish_request`.
+   Both sides are wired into the bilateral BLE handler — `initiate_recovery_reestablish`
+   (A_new) and an automatic accept-guard in `handle_prepare_request` (C), selected by the
+   canonical `is_recovery_establish_op` marker — reusing the ordinary 3-phase commit (**no new
+   BLE message types**). ☐ on-device two-device prepare→confirm integration test (requires a
+   live BLE link). ◑ unlock chokepoint
    `RecoverySDK::verify_and_record_activation` exists, performs the anchor binding +
    seal validation, but is **fail-closed (disabled)** pending live trust inputs; the
    recovered-successor freeze (`is_recovered_successor`/`is_recovery_activated`) is
