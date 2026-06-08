@@ -511,6 +511,24 @@ pub enum Operation {
     },
 }
 
+/// The bearer asset an egress operation moves, for the per-asset recovery spend-gate
+/// (spec §0.4 P5). Produced by [`Operation::egress_asset`] — the canonical, exhaustive
+/// companion to [`Operation::is_value_egress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressAsset {
+    /// Not a value-egress operation — no per-asset gate applies.
+    NotEgress,
+    /// Egress of a specific bearer asset (`token_id`) of `amount` units. `amount` is the
+    /// egress quantity used for the `Reduced`-frontier cap; `u64::MAX` when an egress op
+    /// cannot be sized (treated as exceeding any reduced frontier — fail-closed).
+    Asset { token_id: Vec<u8>, amount: u64 },
+    /// A value-egress operation whose canonical bearer-asset id cannot be determined
+    /// (e.g. a vault-keyed DLV unlock/claim, or a tokenless DLV). The gate FAILS CLOSED on
+    /// this whenever any recovery lock is present — it cannot prove the op avoids a locked
+    /// asset. Per-vault resolution is a deferred refinement.
+    Unidentified,
+}
+
 impl Operation {
     /// Classify whether this operation is owner-initiated **value egress** for
     /// the recovery spend-gate (spec condition R3).
@@ -591,6 +609,68 @@ impl Operation {
         // relationship without being egress. Everything else (identity, relationship,
         // recovery, links, invalidation, generic, no-op) is non-value.
         matches!(self, Mint { .. } | Receive { .. } | CreateToken { .. })
+    }
+
+    /// The bearer asset this operation egresses (spec §0.4 P5 per-asset spend-gate).
+    ///
+    /// EXHAUSTIVE companion to [`Self::is_value_egress`]: every egress variant yields either
+    /// [`EgressAsset::Asset`] (a canonical `token_id` + egress amount) or
+    /// [`EgressAsset::Unidentified`] (egress whose asset can't be named yet — vault-keyed
+    /// DLV ops, tokenless DLV); every non-egress variant yields [`EgressAsset::NotEgress`].
+    /// The invariant `is_value_egress() == !matches!(egress_asset(), NotEgress)` is tested.
+    pub fn egress_asset(&self) -> EgressAsset {
+        use Operation::*;
+        match self {
+            Transfer { token_id, amount, .. } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: amount.value(),
+            },
+            Burn { token_id, amount, .. } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: amount.value(),
+            },
+            Lock { token_id, amount, .. } | Unlock { token_id, amount, .. } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: amount.value(),
+            },
+            LockToken { token_id, amount, .. } | UnlockToken { token_id, amount, .. } => {
+                EgressAsset::Asset {
+                    token_id: token_id.clone(),
+                    // i64 lock/unlock quantity; clamp negatives to 0 (no canonical egress size).
+                    amount: (*amount).max(0) as u64,
+                }
+            }
+            // A token-bound DLV names its asset; a tokenless DLV cannot be sized → Unidentified.
+            DlvCreate {
+                token_id: Some(token_id),
+                locked_amount,
+                ..
+            } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: locked_amount.as_ref().map(|b| b.value()).unwrap_or(u64::MAX),
+            },
+            DlvCreate { token_id: None, .. } => EgressAsset::Unidentified,
+            // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
+            DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
+
+            // Non-egress: ingress, identity, relationship, recovery, links, generic, no-op.
+            Genesis
+            | Create { .. }
+            | Update { .. }
+            | Mint { .. }
+            | AddRelationship { .. }
+            | CreateRelationship { .. }
+            | RemoveRelationship { .. }
+            | Recovery { .. }
+            | Delete { .. }
+            | Link { .. }
+            | Unlink { .. }
+            | Invalidate { .. }
+            | Generic { .. }
+            | Receive { .. }
+            | CreateToken { .. }
+            | Noop => EgressAsset::NotEgress,
+        }
     }
 
     /// Canonical, deterministic encoding for cryptographic use.
@@ -2326,6 +2406,66 @@ mod tests {
             message: String::new(),
         }
         .is_value_bearing());
+    }
+
+    #[test]
+    fn egress_asset_matches_is_value_egress_and_extracts_token() {
+        // P5: egress_asset is the canonical asset-id companion to is_value_egress. The
+        // invariant `is_value_egress() == (egress_asset() != NotEgress)` must hold for every
+        // variant — a representative sample across egress / ingress / neutral.
+        let burn = Operation::Burn {
+            amount: test_balance(7),
+            token_id: b"ERA".to_vec(),
+            proof_of_ownership: vec![],
+            message: String::new(),
+        };
+        assert_eq!(
+            burn.egress_asset(),
+            EgressAsset::Asset { token_id: b"ERA".to_vec(), amount: 7 }
+        );
+
+        let lt = Operation::LockToken {
+            token_id: b"ERA".to_vec(),
+            amount: -5, // negative i64 clamps to 0 (no canonical egress size)
+            purpose: b"dlv".to_vec(),
+            mode: TransactionMode::Unilateral,
+            signature: vec![],
+        };
+        assert_eq!(
+            lt.egress_asset(),
+            EgressAsset::Asset { token_id: b"ERA".to_vec(), amount: 0 }
+        );
+
+        // Vault-keyed DLV claim → asset can't be named here → Unidentified (fail-closed gate).
+        let claim = Operation::DlvClaim {
+            vault_id: vec![1, 2, 3],
+            claim_proof: vec![],
+            claimant_public_key: vec![],
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        };
+        assert_eq!(claim.egress_asset(), EgressAsset::Unidentified);
+        assert!(claim.is_value_egress());
+
+        // Non-egress → NotEgress.
+        assert_eq!(Operation::Noop.egress_asset(), EgressAsset::NotEgress);
+        assert_eq!(Operation::Genesis.egress_asset(), EgressAsset::NotEgress);
+
+        // The invariant, across a representative set.
+        let mint = Operation::Mint {
+            amount: test_balance(1),
+            token_id: b"ERA".to_vec(),
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        };
+        for op in [&burn, &lt, &claim, &mint, &Operation::Noop, &Operation::Genesis] {
+            assert_eq!(
+                op.is_value_egress(),
+                !matches!(op.egress_asset(), EgressAsset::NotEgress),
+                "egress_asset must agree with is_value_egress for {op:?}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------ //

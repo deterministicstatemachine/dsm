@@ -9,6 +9,7 @@
 pub mod activation;
 pub mod assembly;
 pub mod authority_anchor;
+pub mod bearer_lock;
 pub mod bundle;
 pub mod capsule;
 pub mod chain_segment;
@@ -28,6 +29,7 @@ pub use assembly::{
 pub use authority_anchor::{
     compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
 };
+pub use bearer_lock::{reconcile_token_frontier, BearerAssetLockState};
 pub use bundle::RecoveryBundle;
 pub use chain_segment::{
     rel_chain_state_from_proto, rel_chain_state_to_proto, RecoveryEstablishmentReceipt,
