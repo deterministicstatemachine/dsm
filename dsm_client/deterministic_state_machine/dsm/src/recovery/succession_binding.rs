@@ -65,6 +65,26 @@ pub fn compute_carry_forward_commitment(
     *h.finalize().as_bytes()
 }
 
+/// Build the `CreateRelationship` operation for a recovery establishment state — the
+/// FIRST state of the new `(A_new,C)` relationship. The carry-forward commitment is
+/// placed in the op's `commitment` field so it is bound INTO the state hash when the
+/// state is co-signed; this is what `verify_succession_semantics` checks to prove the
+/// channel was born as the recovery successor. The bilateral re-establish flow puts this
+/// op in the first `(A_new,C)` state (parent = `initial_chain_tip_from_device_ids(A_new,C)`)
+/// and both parties co-sign it.
+pub fn build_recovery_establishment_op(
+    c: &[u8; 32],
+    carry_forward_commitment: &[u8; 32],
+) -> crate::types::operations::Operation {
+    crate::types::operations::Operation::CreateRelationship {
+        message: "recovery-establish".to_string(),
+        counterparty_id: c.to_vec(),
+        commitment: carry_forward_commitment.to_vec(),
+        proof: Vec::new(),
+        mode: crate::types::operations::TransactionMode::Bilateral,
+    }
+}
+
 /// Walk a relationship chain forward from `floor_tip` by `embedded_parent` adjacency
 /// (recomputing each tip via `compute_chain_tip`), returning the final tip. Pure hash
 /// adjacency / parent consumption — no heights.
@@ -117,12 +137,17 @@ pub struct CrossRelationshipSuccessionEvidence {
     pub t_old_current: [u8; 32],
     /// C's `(A_old,C)` states from `h_cap` (exclusive) up to `t_old_current`.
     pub old_chain: Vec<RelationshipChainState>,
-    /// The new `(A_new,C)` relationship's first established tip.
+    /// The new `(A_new,C)` relationship's first established tip (== `compute_chain_tip`
+    /// of `new_establishment_state`; included in `counterparty_root`).
     pub t_new_established: [u8; 32],
-    /// The new establishment receipt's parent tip (must be the canonical first-ever
-    /// parent for `(A_new,C)` — the first-state constraint).
-    pub new_first_parent_tip: [u8; 32],
-    /// The carry-forward commitment bound into the new first state.
+    /// The new `(A_new,C)` relationship's FIRST state — must be a first-state
+    /// establishment (canonical first-ever parent) whose `CreateRelationship` operation
+    /// binds the carry-forward commitment INTO the state hash. This is what makes the
+    /// successor channel provably "born as such" (no bolting recovery onto an ordinary
+    /// `(A_new,C)` relationship).
+    pub new_establishment_state: RelationshipChainState,
+    /// The carry-forward commitment (recomputed + checked == the commitment bound in
+    /// `new_establishment_state`'s operation).
     pub carry_forward_commitment: [u8; 32],
     /// C's posted per-device SMT root (genesis-authenticated by the caller).
     pub counterparty_root: [u8; 32],
@@ -203,13 +228,55 @@ impl CrossRelationshipSuccessionEvidence {
             ));
         }
 
-        // 5. First-state constraint: the new relationship's establishment receipt must
-        //    have the canonical first-ever parent tip for (A_new,C) — the successor
-        //    channel must be BORN as such (no bolting recovery onto a later update).
-        let expected_first_parent = initial_chain_tip_from_device_ids(&self.a_new, &self.c);
-        if self.new_first_parent_tip != expected_first_parent {
+        // 5. First-state + carry-forward BINDING. The new (A_new,C) establishment state
+        //    must (a) be on new_rel_key toward C, (b) be a first-state (canonical
+        //    first-ever parent), (c) bind the carry-forward commitment INTO its
+        //    `CreateRelationship` operation, and (d) hash to t_new_established. Together
+        //    this proves the successor channel was BORN as such — the carry-forward is in
+        //    the signed state hash, not a free-floating field — so recovery semantics
+        //    cannot be bolted onto an ordinary or later (A_new,C) relationship.
+        let est = &self.new_establishment_state;
+        if est.rel_key != self.new_rel_key {
+            return Err(DsmError::verification(
+                "succession: establishment state rel_key != new_rel_key",
+            ));
+        }
+        if est.counterparty_devid != self.c {
+            return Err(DsmError::verification(
+                "succession: establishment state counterparty != C",
+            ));
+        }
+        if est.embedded_parent != initial_chain_tip_from_device_ids(&self.a_new, &self.c) {
             return Err(DsmError::verification(
                 "succession: new relationship is not a first-state establishment",
+            ));
+        }
+        match &est.operation {
+            crate::types::operations::Operation::CreateRelationship {
+                counterparty_id,
+                commitment,
+                ..
+            } => {
+                if counterparty_id.as_slice() != self.c {
+                    return Err(DsmError::verification(
+                        "succession: establishment op counterparty_id != C",
+                    ));
+                }
+                if commitment.as_slice() != self.carry_forward_commitment {
+                    return Err(DsmError::verification(
+                        "succession: establishment op does not bind the carry-forward commitment",
+                    ));
+                }
+            }
+            _ => {
+                return Err(DsmError::verification(
+                    "succession: establishment state op is not CreateRelationship",
+                ))
+            }
+        }
+        if est.compute_chain_tip() != self.t_new_established {
+            return Err(DsmError::verification(
+                "succession: establishment state does not hash to T_new_established",
             ));
         }
 
@@ -308,6 +375,21 @@ mod tests {
             &A_NEW,
             &C,
         );
+        // The new (A_new,C) establishment FIRST state: canonical first parent, carry-forward
+        // bound into its CreateRelationship op.
+        let est = RelationshipChainState {
+            rel_key: new_rel_key,
+            embedded_parent: initial_chain_tip_from_device_ids(&A_NEW, &C),
+            counterparty_devid: C,
+            operation: build_recovery_establishment_op(&C, &carry),
+            entropy: vec![9],
+            encapsulated_entropy: None,
+            balance_witness: BTreeMap::new(),
+            entity_sig: None,
+            counterparty_sig: None,
+            dbrw_summary_hash: None,
+        };
+        let t_new_established = est.compute_chain_tip();
         let ev = CrossRelationshipSuccessionEvidence {
             a_old: A_OLD,
             a_new: A_NEW,
@@ -317,8 +399,8 @@ mod tests {
             h_cap,
             t_old_current,
             old_chain: vec![s],
-            t_new_established: [0x77; 32],
-            new_first_parent_tip: initial_chain_tip_from_device_ids(&A_NEW, &C),
+            t_new_established,
+            new_establishment_state: est,
             carry_forward_commitment: carry,
             counterparty_root: [0x44; 32],
             old_inclusion_proof: Vec::new(),
@@ -352,6 +434,11 @@ mod tests {
             &ev.a_new,
             &ev.c,
         );
+        // The new (A_new,C) establishment must be BORN binding this recomputed carry-forward:
+        // rebuild its op + re-derive the included tip so the "born as successor" check holds.
+        ev.new_establishment_state.operation =
+            build_recovery_establishment_op(&ev.c, &ev.carry_forward_commitment);
+        ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
         ev.verify_succession_semantics(&pk)
             .expect("empty old_chain at the floor (no divergence) is valid");
 
@@ -370,6 +457,11 @@ mod tests {
             &bad.a_new,
             &bad.c,
         );
+        // Keep the carry-forward binding internally consistent so the rejection comes from
+        // the (empty) ancestry walk failing to reach t_old_current, not the binding check.
+        bad.new_establishment_state.operation =
+            build_recovery_establishment_op(&bad.c, &bad.carry_forward_commitment);
+        bad.t_new_established = bad.new_establishment_state.compute_chain_tip();
         assert!(bad.verify_succession_semantics(&pk).is_err());
     }
 
@@ -446,7 +538,39 @@ mod tests {
     #[test]
     fn not_first_state_fails() {
         let (mut ev, pk) = fixture();
-        ev.new_first_parent_tip = [0x12; 32]; // not the canonical genesis tip
+        // Non-canonical first parent → not a first-state establishment (also breaks the
+        // tip-hash binding). Recompute t_new_established so the FIRST-STATE check is what
+        // fires (otherwise the hash-binding check would mask it).
+        ev.new_establishment_state.embedded_parent = [0x12; 32];
+        ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
+        assert!(ev.verify_succession_semantics(&pk).is_err());
+    }
+
+    #[test]
+    fn carry_forward_not_bound_in_establishment_op_fails() {
+        // The establishment op carries a DIFFERENT commitment than carry_forward_commitment
+        // → the "born as successor" binding fails (can't bolt recovery onto an ordinary rel).
+        let (mut ev, pk) = fixture();
+        ev.new_establishment_state.operation =
+            build_recovery_establishment_op(&C, &[0xBE; 32]); // wrong commitment
+        ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
+        assert!(ev.verify_succession_semantics(&pk).is_err());
+    }
+
+    #[test]
+    fn establishment_op_not_create_relationship_fails() {
+        let (mut ev, pk) = fixture();
+        ev.new_establishment_state.operation = Operation::Noop; // not CreateRelationship
+        ev.t_new_established = ev.new_establishment_state.compute_chain_tip();
+        assert!(ev.verify_succession_semantics(&pk).is_err());
+    }
+
+    #[test]
+    fn establishment_tip_mismatch_fails() {
+        // t_new_established doesn't match the establishment state's hash → rejected
+        // (the included tip must BE the established state).
+        let (mut ev, pk) = fixture();
+        ev.t_new_established[0] ^= 0x01;
         assert!(ev.verify_succession_semantics(&pk).is_err());
     }
 }
