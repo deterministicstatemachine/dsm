@@ -19919,6 +19919,89 @@ export class RecoveryEstablishmentReceiptV1 extends Message<RecoveryEstablishmen
 }
 
 /**
+ * A device's K_A-signed dBTC vault index (P5 dBTC enumeration). The healthy device posts the
+ * list of its dBTC vault ids; a recovering device fetches it as the CANDIDATE set to
+ * reconcile. Authenticated like PostedPdsmtHeadV1 (carries authority_pubkey; H(it) ==
+ * authority_pubkey_commit == the genesis-anchored commit; signature over the digest).
+ * Enumeration completeness is NOT a safety property — per-vault Bitcoin backing verification
+ * is the gate — so a forged/partial index only yields Bitcoin-verify-out or a locked deadlock,
+ * never a double-spend. Availability-only storage; clients verify.
+ *
+ * @generated from message dsm.PostedDbtcVaultIndexV1
+ */
+export class PostedDbtcVaultIndexV1 extends Message<PostedDbtcVaultIndexV1> {
+  /**
+   * @generated from field: bytes genesis_id = 1;
+   */
+  genesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * Base32 Crockford vault ids
+   *
+   * @generated from field: repeated string vault_ids = 3;
+   */
+  vaultIds: string[] = [];
+
+  /**
+   * H(K_A_pub)
+   *
+   * @generated from field: bytes authority_pubkey_commit = 4;
+   */
+  authorityPubkeyCommit = new Uint8Array(0);
+
+  /**
+   * SPX256f pk (carried; checked vs commit)
+   *
+   * @generated from field: bytes authority_pubkey = 5;
+   */
+  authorityPubkey = new Uint8Array(0);
+
+  /**
+   * SPX256f K_A sig over the digest
+   *
+   * @generated from field: bytes signature = 6;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PostedDbtcVaultIndexV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PostedDbtcVaultIndexV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "vault_ids", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 4, name: "authority_pubkey_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "authority_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PostedDbtcVaultIndexV1 {
+    return new PostedDbtcVaultIndexV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PostedDbtcVaultIndexV1 {
+    return new PostedDbtcVaultIndexV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PostedDbtcVaultIndexV1 {
+    return new PostedDbtcVaultIndexV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PostedDbtcVaultIndexV1 | PlainMessage<PostedDbtcVaultIndexV1> | undefined, b: PostedDbtcVaultIndexV1 | PlainMessage<PostedDbtcVaultIndexV1> | undefined): boolean {
+    return proto3.util.equals(PostedDbtcVaultIndexV1, a, b);
+  }
+}
+
+/**
  * ==================== Minimal deterministic identity =================
  *
  * @generated from message dsm.ContactQrV3
