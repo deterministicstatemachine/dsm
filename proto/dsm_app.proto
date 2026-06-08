@@ -2655,6 +2655,12 @@ message PostedPdsmtHeadV1 {
   bytes  parent_head_hash        = 7 [(dsm_fixed_len)=32];
   uint64 head_number             = 8;
   bytes  signature               = 9 [(dsm_max_len)=65535]; // SPX256f K_A sig over the head digest
+  // Raw recovery-authority pubkey (K_A_pub) that produced `signature`. A third party can
+  // verify the head WITHOUT a separate pubkey source: require H(authority_pubkey) ==
+  // authority_pubkey_commit AND that commit == the genesis-anchored commit (from the
+  // RecoveryAuthorityAnchor), then verify the signature under authority_pubkey. Presence
+  // alone is NOT authority — trust still flows from the bind-once anchored commit.
+  bytes  authority_pubkey        = 10 [(dsm_max_len)=4096]; // SPX256f pk
 }
 
 // Canonical value-capability (R4 anti-shrink) — the ONLY representation; there is no

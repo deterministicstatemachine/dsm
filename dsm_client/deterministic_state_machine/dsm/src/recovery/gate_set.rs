@@ -39,13 +39,15 @@ use crate::types::error::DsmError;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A counterparty's own genesis-authenticated value-capable claim about its relationship
-/// with `A_old` — the anti-shrink union witness. `authority_pubkey` is `C`'s
-/// genesis-anchored recovery authority (verified by the caller); `leaf` is `C`'s own
+/// with `A_old` — the anti-shrink union witness. `authority_commit` is `C`'s
+/// genesis-anchored recovery-authority commitment (`H(K_C_pub)`, established by the caller
+/// from C's [`crate::recovery::RecoveryAuthorityAnchor`]); the head carries the raw pubkey,
+/// so [`PostedPdsmtHead::verify`] checks it against this anchored commit. `leaf` is `C`'s own
 /// PDSMT leaf for the shared `rel_key`, included under `head`.
 #[derive(Clone, Debug)]
 pub struct CounterpartyValueWitness {
     pub head: PostedPdsmtHead,
-    pub authority_pubkey: Vec<u8>,
+    pub authority_commit: [u8; 32],
     pub leaf: PostedPdsmtLeafRecord,
 }
 
@@ -71,7 +73,7 @@ pub struct FrozenGateSet {
 pub fn build_gate_set(
     a_old: &[u8; 32],
     a_old_head: &PostedPdsmtHead,
-    a_old_authority_pubkey: &[u8],
+    a_old_authority_commit: &[u8; 32],
     a_old_leaves: &[PostedPdsmtLeafRecord],
     counterparty_witnesses: &[CounterpartyValueWitness],
 ) -> Result<FrozenGateSet, DsmError> {
@@ -80,8 +82,9 @@ pub fn build_gate_set(
             "gate-set: A_old head device_id != A_old under recovery",
         ));
     }
-    // Layer 2: A_old's head signature + every leaf included under both roots.
-    verify_head_with_leaves(a_old_head, a_old_authority_pubkey, a_old_leaves)?;
+    // Layer 2: A_old's head signature (under its genesis-anchored authority) + every leaf
+    // included under both roots.
+    verify_head_with_leaves(a_old_head, a_old_authority_commit, a_old_leaves)?;
 
     let mut members: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut rel_keys: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
@@ -129,8 +132,9 @@ pub fn build_gate_set(
                 "gate-set: witness leaf rel_key != H(C, A_old)",
             ));
         }
-        // C's own head signature + the witness leaf's inclusion under C's posted roots.
-        verify_head_with_leaves(&w.head, &w.authority_pubkey, std::slice::from_ref(&w.leaf))?;
+        // C's own head signature (under C's genesis-anchored authority) + the witness leaf's
+        // inclusion under C's posted roots.
+        verify_head_with_leaves(&w.head, &w.authority_commit, std::slice::from_ref(&w.leaf))?;
 
         members.insert(c);
         rel_keys.insert(c, w.leaf.rel_key);
@@ -156,13 +160,13 @@ mod tests {
 
     /// Build a signed PDSMT head + its leaf records (with real SMT inclusion proofs) for
     /// `owner` under `genesis`, one leaf per `(counterparty, value_capable)`. Returns
-    /// (head, authority_pubkey, leaves).
+    /// (head, anchored_authority_commit, leaves) — the head carries its own pubkey.
     fn posted_snapshot(
         owner: [u8; 32],
         genesis: [u8; 32],
         seed: u8,
         entries: &[([u8; 32], ValueCapability)],
-    ) -> (PostedPdsmtHead, Vec<u8>, Vec<PostedPdsmtLeafRecord>) {
+    ) -> (PostedPdsmtHead, [u8; 32], Vec<PostedPdsmtLeafRecord>) {
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp");
 
         // Build leaf records (proofs filled after the trees exist).
@@ -213,17 +217,19 @@ mod tests {
             parent_head_hash: GENESIS_PARENT_HEAD_HASH,
             head_number: 0,
             signature: Vec::new(),
+            authority_pubkey: kp.public_key.clone(),
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
-        (head, kp.public_key.clone(), leaves)
+        // Return the genesis-anchored authority commit (what build_gate_set/verify take).
+        (head, compute_authority_pubkey_commit(&kp.public_key), leaves)
     }
 
     /// A counterparty `c` posts its OWN snapshot containing a value-capable leaf about A_old.
     fn witness_for(c: [u8; 32], c_genesis: [u8; 32], seed: u8, vc: ValueCapability) -> CounterpartyValueWitness {
-        let (head, pk, leaves) = posted_snapshot(c, c_genesis, seed, &[(A_OLD, vc)]);
+        let (head, commit, leaves) = posted_snapshot(c, c_genesis, seed, &[(A_OLD, vc)]);
         CounterpartyValueWitness {
             head,
-            authority_pubkey: pk,
+            authority_commit: commit,
             leaf: leaves.into_iter().next().unwrap(),
         }
     }
@@ -317,11 +323,11 @@ mod tests {
         let c1 = [0xC1; 32];
         let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
         // Witness whose leaf is about a DIFFERENT device, not A_old.
-        let (w_head, w_pk, w_leaves) =
+        let (w_head, w_commit, w_leaves) =
             posted_snapshot([0xC9; 32], [0xD9; 32], 0x55, &[([0xBB; 32], ValueCapability::Yes)]);
         let w = CounterpartyValueWitness {
             head: w_head,
-            authority_pubkey: w_pk,
+            authority_commit: w_commit,
             leaf: w_leaves.into_iter().next().unwrap(),
         };
         assert!(build_gate_set(&A_OLD, &head, &pk, &leaves, &[w]).is_err());
@@ -333,9 +339,9 @@ mod tests {
         let c1 = [0xC1; 32];
         let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
         let mut w = witness_for([0xC9; 32], [0xD9; 32], 0x55, ValueCapability::Yes);
-        // Wrong authority pubkey for the witness head → head verify fails.
+        // A wrong anchored commit (not the head's committed authority) → head verify fails.
         let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x01; 32]).unwrap();
-        w.authority_pubkey = other.public_key.clone();
+        w.authority_commit = compute_authority_pubkey_commit(&other.public_key);
         assert!(build_gate_set(&A_OLD, &head, &pk, &leaves, &[w]).is_err());
     }
 

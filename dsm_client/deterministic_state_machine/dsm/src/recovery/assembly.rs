@@ -24,8 +24,10 @@
 //! verifies signatures/inclusion against them; the SDK genesis-anchors each one first):
 //! - `recovery_authority_pubkey` (A's `K_A`): authenticates the tombstone/succession
 //!   proving A_new succeeds A_old. Genesis-anchored via A's `RecoveryAuthorityAnchor`.
-//! - each counterparty C's `authority_pubkey`: authenticates C's posted head/leaves (and
-//!   thus `counterparty_root`). Genesis-anchored via C's own anchor + device-tree quorum.
+//! - each counterparty C's `authority_commit`: the genesis-anchored commitment that
+//!   authenticates C's posted head/leaves (and thus `counterparty_root`). The head carries
+//!   the raw pubkey; verification checks `H(pubkey) == authority_commit`. Established by the
+//!   SDK via C's own anchor + device-tree quorum.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,10 +51,12 @@ use crate::types::error::DsmError;
 #[derive(Clone, Debug)]
 pub struct CounterpartyRecoveryInput {
     /// C's signed PDSMT head. `head.device_id == C`; `head.pd_smt_root` is the
-    /// `counterparty_root` the per-C evidence inclusion is checked against.
+    /// `counterparty_root` the per-C evidence inclusion is checked against. The head carries
+    /// its own `authority_pubkey`, checked against `authority_commit` below.
     pub head: PostedPdsmtHead,
-    /// C's genesis-anchored recovery authority pubkey (caller-verified).
-    pub authority_pubkey: Vec<u8>,
+    /// C's genesis-anchored recovery-authority commitment (`H(K_C_pub)`, established by the
+    /// SDK from C's [`crate::recovery::RecoveryAuthorityAnchor`] + device-tree quorum).
+    pub authority_commit: [u8; 32],
     /// C's enumerated leaves — MUST include the leaf about A_old (`old_rel_key`) and, once C
     /// has co-established, the leaf about A_new (`new_rel_key`).
     pub leaves: Vec<PostedPdsmtLeafRecord>,
@@ -70,9 +74,9 @@ pub struct RecoveryAssemblyInputs {
     pub genesis_id: [u8; 32],
     pub a_old: [u8; 32],
     pub a_new: [u8; 32],
-    /// A_old's latest valid posted PDSMT head + genesis-anchored authority + leaves.
+    /// A_old's latest valid posted PDSMT head + genesis-anchored authority commit + leaves.
     pub a_old_head: PostedPdsmtHead,
-    pub a_old_authority_pubkey: Vec<u8>,
+    pub a_old_authority_commit: [u8; 32],
     pub a_old_leaves: Vec<PostedPdsmtLeafRecord>,
     /// Per-counterparty fetched posted state, keyed by C device id.
     pub counterparties: BTreeMap<[u8; 32], CounterpartyRecoveryInput>,
@@ -121,7 +125,7 @@ pub fn assemble_recovery_activation(
             if leaf.value_capability != ValueCapability::No {
                 witnesses.push(CounterpartyValueWitness {
                     head: cin.head.clone(),
-                    authority_pubkey: cin.authority_pubkey.clone(),
+                    authority_commit: cin.authority_commit,
                     leaf: leaf.clone(),
                 });
             }
@@ -132,7 +136,7 @@ pub fn assemble_recovery_activation(
     let frozen: FrozenGateSet = build_gate_set(
         &inputs.a_old,
         &inputs.a_old_head,
-        &inputs.a_old_authority_pubkey,
+        &inputs.a_old_authority_commit,
         &inputs.a_old_leaves,
         &witnesses,
     )?;
@@ -217,12 +221,12 @@ fn assemble_one_evidence(
     // counterparty_root (= pd_smt_root) and both inclusion proofs trusted.
     verify_head_with_leaves(
         &cin.head,
-        &cin.authority_pubkey,
+        &cin.authority_commit,
         std::slice::from_ref(old_leaf),
     )?;
     verify_head_with_leaves(
         &cin.head,
-        &cin.authority_pubkey,
+        &cin.authority_commit,
         std::slice::from_ref(new_leaf),
     )?;
 
@@ -316,13 +320,13 @@ mod tests {
     type LeafSpec = ([u8; 32], [u8; 32], [u8; 32], ValueCapability);
 
     /// Build a signed PDSMT head + leaves (with real SparseMerkleTree inclusion proofs) for
-    /// `owner` under `genesis`. Returns (head, authority_pubkey, leaves).
+    /// `owner` under `genesis`. Returns (head, anchored_authority_commit, leaves).
     fn signed_pdsmt(
         owner: [u8; 32],
         genesis: [u8; 32],
         seed: u8,
         specs: &[LeafSpec],
-    ) -> (PostedPdsmtHead, Vec<u8>, Vec<PostedPdsmtLeafRecord>) {
+    ) -> (PostedPdsmtHead, [u8; 32], Vec<PostedPdsmtLeafRecord>) {
         let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &[seed; 32]).expect("kp");
         let mut leaves: Vec<PostedPdsmtLeafRecord> = specs
             .iter()
@@ -369,9 +373,10 @@ mod tests {
             parent_head_hash: GENESIS_PARENT_HEAD_HASH,
             head_number: 0,
             signature: Vec::new(),
+            authority_pubkey: kp.public_key.clone(),
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
-        (head, kp.public_key.clone(), leaves)
+        (head, compute_authority_pubkey_commit(&kp.public_key), leaves)
     }
 
     fn old_chain_state(rel_key: [u8; 32], parent: [u8; 32], tag: u8) -> RelationshipChainState {
@@ -451,7 +456,7 @@ mod tests {
         };
 
         // A_old's head: lists c as value-capable.
-        let (a_old_head, a_old_pk, a_old_leaves) = signed_pdsmt(
+        let (a_old_head, a_old_commit, a_old_leaves) = signed_pdsmt(
             A_OLD,
             G_A,
             0x42,
@@ -459,7 +464,7 @@ mod tests {
         );
 
         // C's head: commits BOTH old_rel_key->T_old_current and new_rel_key->T_new_established.
-        let (c_head, c_pk, c_leaves) = signed_pdsmt(
+        let (c_head, c_commit, c_leaves) = signed_pdsmt(
             c,
             [0xD0 ^ c_seed; 32],
             c_seed,
@@ -474,7 +479,7 @@ mod tests {
             c,
             CounterpartyRecoveryInput {
                 head: c_head,
-                authority_pubkey: c_pk,
+                authority_commit: c_commit,
                 leaves: c_leaves,
                 old_segment: segment,
                 establishment,
@@ -487,7 +492,7 @@ mod tests {
             a_old: A_OLD,
             a_new: A_NEW,
             a_old_head,
-            a_old_authority_pubkey: a_old_pk,
+            a_old_authority_commit: a_old_commit,
             a_old_leaves,
             counterparties,
             tombstone,

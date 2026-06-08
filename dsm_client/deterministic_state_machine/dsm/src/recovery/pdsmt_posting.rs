@@ -119,6 +119,14 @@ pub struct PostedPdsmtHead {
     pub head_number: u64,
     /// SPHINCS+ signature by `K_A` over [`PostedPdsmtHead::digest`].
     pub signature: Vec<u8>,
+    /// The raw recovery-authority pubkey (`K_A_pub`) that produced `signature`. Carried so a
+    /// third party (a recovering device fetching a counterparty's head) can verify the head
+    /// WITHOUT a separate pubkey source. It is NOT trusted by mere presence: [`Self::verify`]
+    /// requires `H(authority_pubkey) == authority_pubkey_commit` AND that commit equals the
+    /// genesis-anchored commit — trust flows from the bind-once anchor, the head only reveals
+    /// the preimage needed to check the signature. Pinned by the signed `authority_pubkey_commit`
+    /// (preimage resistance), so it is NOT separately included in [`Self::digest`].
+    pub authority_pubkey: Vec<u8>,
 }
 
 impl PostedPdsmtHead {
@@ -149,23 +157,41 @@ impl PostedPdsmtHead {
         self.head_number == 0 && self.parent_head_hash == GENESIS_PARENT_HEAD_HASH
     }
 
-    /// Verify the head is signed by `candidate_authority_pubkey` AND that pubkey is the
-    /// one committed in the head (`H(candidate) == authority_pubkey_commit`).
+    /// Verify the head end-to-end against a GENESIS-ANCHORED authority commitment, using the
+    /// `authority_pubkey` the head itself carries:
     ///
-    /// The caller MUST independently establish that `candidate_authority_pubkey` is the
-    /// genesis-anchored authority for `(genesis_id, device_id)` (via the
-    /// [`RecoveryAuthorityAnchor`]) and that `device_id ∈ genesis_id`'s Device Tree.
-    /// This method only proves head authenticity under that authority, fail-closed.
-    pub fn verify(&self, candidate_authority_pubkey: &[u8]) -> Result<(), DsmError> {
-        if self.authority_pubkey_commit != compute_authority_pubkey_commit(candidate_authority_pubkey)
-        {
+    /// 1. `H(self.authority_pubkey) == self.authority_pubkey_commit` — the carried pubkey is
+    ///    the one the head commits to (pinned by preimage resistance);
+    /// 2. `self.authority_pubkey_commit == anchored_authority_commit` — that commit is the
+    ///    one bound to the genesis via the [`RecoveryAuthorityAnchor`] (caller supplies it
+    ///    from the anchor + device-tree quorum) — trust flows from the bind-once anchor, NOT
+    ///    from the pubkey merely appearing in the head;
+    /// 3. the signature verifies under `self.authority_pubkey` over [`Self::digest`].
+    ///
+    /// The caller MUST still independently establish `device_id ∈ genesis_id`'s Device Tree.
+    /// Fail-closed at every step.
+    pub fn verify(&self, anchored_authority_commit: &[u8; 32]) -> Result<(), DsmError> {
+        if self.authority_pubkey.is_empty() {
             return Err(DsmError::verification(
-                "pdsmt-posting: candidate authority pubkey does not match the head's committed authority",
+                "pdsmt-posting: head carries no authority_pubkey",
             ));
         }
-        if !sphincs_verify(candidate_authority_pubkey, &self.digest(), &self.signature)? {
+        // 1. carried pubkey ↔ head's own commit.
+        if compute_authority_pubkey_commit(&self.authority_pubkey) != self.authority_pubkey_commit {
             return Err(DsmError::verification(
-                "pdsmt-posting: head signature invalid under the candidate authority",
+                "pdsmt-posting: head authority_pubkey does not hash to its authority_pubkey_commit",
+            ));
+        }
+        // 2. head's commit ↔ the genesis-anchored commit (the actual trust root).
+        if &self.authority_pubkey_commit != anchored_authority_commit {
+            return Err(DsmError::verification(
+                "pdsmt-posting: head authority_pubkey_commit != genesis-anchored authority commit",
+            ));
+        }
+        // 3. signature under the (now anchored) authority pubkey.
+        if !sphincs_verify(&self.authority_pubkey, &self.digest(), &self.signature)? {
+            return Err(DsmError::verification(
+                "pdsmt-posting: head signature invalid under the anchored authority",
             ));
         }
         Ok(())
@@ -182,6 +208,7 @@ impl PostedPdsmtHead {
             parent_head_hash: self.parent_head_hash.to_vec(),
             head_number: self.head_number,
             signature: self.signature.clone(),
+            authority_pubkey: self.authority_pubkey.clone(),
         }
         .encode_to_vec()
     }
@@ -205,6 +232,7 @@ impl PostedPdsmtHead {
             parent_head_hash: fixed32(&p.parent_head_hash, "parent_head_hash")?,
             head_number: p.head_number,
             signature: p.signature,
+            authority_pubkey: p.authority_pubkey,
         })
     }
 }
@@ -362,10 +390,10 @@ impl PostedPdsmtLeafRecord {
 /// counterparty-union backstop (R4 layer 3, gate-set construction).
 pub fn verify_head_with_leaves(
     head: &PostedPdsmtHead,
-    candidate_authority_pubkey: &[u8],
+    anchored_authority_commit: &[u8; 32],
     leaves: &[PostedPdsmtLeafRecord],
 ) -> Result<(), DsmError> {
-    head.verify(candidate_authority_pubkey)?;
+    head.verify(anchored_authority_commit)?;
     for leaf in leaves {
         if leaf.genesis_id != head.genesis_id {
             return Err(DsmError::verification(
@@ -471,6 +499,7 @@ pub fn build_pdsmt_snapshot(
         parent_head_hash,
         head_number,
         signature: Vec::new(),
+        authority_pubkey: authority_pubkey.to_vec(),
     };
     head.signature = sphincs_sign(authority_sk, &head.digest())?;
     Ok((head, leaves))
@@ -522,9 +551,15 @@ mod tests {
             parent_head_hash: GENESIS_PARENT_HEAD_HASH,
             head_number: 0,
             signature: Vec::new(),
+            authority_pubkey: kp.public_key.clone(),
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
         (head, kp.public_key.clone())
+    }
+
+    /// The genesis-anchored authority commit for a pubkey (what `verify` now takes).
+    fn anchored(pk: &[u8]) -> [u8; 32] {
+        compute_authority_pubkey_commit(pk)
     }
 
     fn leaf(vc: ValueCapability) -> PostedPdsmtLeafRecord {
@@ -547,7 +582,7 @@ mod tests {
         let (head, pk) = signed_head();
         let decoded = PostedPdsmtHead::from_bytes(&head.to_bytes()).expect("decode");
         assert_eq!(head, decoded);
-        decoded.verify(&pk).expect("verify after round-trip");
+        decoded.verify(&anchored(&pk)).expect("verify after round-trip");
         assert_eq!(head.to_bytes(), decoded.to_bytes());
     }
 
@@ -560,24 +595,34 @@ mod tests {
         // parent_head_hash and head_number are covered by the signature.
         let mut tampered_parent = head.clone();
         tampered_parent.parent_head_hash[0] ^= 0x01;
-        assert!(tampered_parent.verify(&pk).is_err());
+        assert!(tampered_parent.verify(&anchored(&pk)).is_err());
         let mut tampered_number = head.clone();
         tampered_number.head_number = 1;
-        assert!(tampered_number.verify(&pk).is_err());
+        assert!(tampered_number.verify(&anchored(&pk)).is_err());
     }
 
     #[test]
     fn head_verify_rejects_wrong_authority() {
         let (head, _pk) = signed_head();
         let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x99; 32]).expect("kp");
-        assert!(head.verify(&other.public_key).is_err());
+        // A different anchored commit than the head's own commit → rejected at step 2.
+        assert!(head.verify(&anchored(&other.public_key)).is_err());
+    }
+
+    #[test]
+    fn head_verify_rejects_carried_pubkey_not_matching_commit() {
+        // Swap the carried pubkey to one whose hash != the (signed) commit → step 1 fails.
+        let (mut head, pk) = signed_head();
+        let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x99; 32]).expect("kp");
+        head.authority_pubkey = other.public_key.clone();
+        assert!(head.verify(&anchored(&pk)).is_err());
     }
 
     #[test]
     fn head_verify_rejects_tampered_root() {
         let (mut head, pk) = signed_head();
         head.pd_smt_root[0] ^= 0x01; // digest changes → signature no longer valid
-        assert!(head.verify(&pk).is_err());
+        assert!(head.verify(&anchored(&pk)).is_err());
     }
 
     #[test]
@@ -613,6 +658,7 @@ mod tests {
             parent_head_hash: GENESIS_PARENT_HEAD_HASH,
             head_number: 0,
             signature: Vec::new(),
+            authority_pubkey: kp.public_key.clone(),
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
         (head, kp.public_key.clone())
@@ -660,7 +706,7 @@ mod tests {
     fn verify_head_with_leaves_passes_end_to_end() {
         let (l, pd_root, idx_root) = leaf_with_real_proofs();
         let (head, pk) = signed_head_with_roots(pd_root, idx_root);
-        verify_head_with_leaves(&head, &pk, &[l]).expect("valid snapshot");
+        verify_head_with_leaves(&head, &anchored(&pk), &[l]).expect("valid snapshot");
     }
 
     #[test]
@@ -670,15 +716,15 @@ mod tests {
         // Leaf bound to a different genesis is rejected.
         let mut wrong_genesis = l.clone();
         wrong_genesis.genesis_id = [0xAA; 32];
-        assert!(verify_head_with_leaves(&head, &pk, &[wrong_genesis]).is_err());
+        assert!(verify_head_with_leaves(&head, &anchored(&pk), &[wrong_genesis]).is_err());
         // Leaf not committed under the head's leaf_index_root (different rel_key, stale
         // proofs) is rejected — cannot inject an extra leaf.
         let mut rogue = l.clone();
         rogue.rel_key = [0x66; 32];
-        assert!(verify_head_with_leaves(&head, &pk, &[rogue]).is_err());
-        // Wrong authority pubkey is rejected at the head.
+        assert!(verify_head_with_leaves(&head, &anchored(&pk), &[rogue]).is_err());
+        // Wrong anchored commit (different authority) is rejected at the head.
         let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x99; 32]).unwrap();
-        assert!(verify_head_with_leaves(&head, &other.public_key, &[l]).is_err());
+        assert!(verify_head_with_leaves(&head, &anchored(&other.public_key), &[l]).is_err());
     }
 
     #[test]
@@ -794,8 +840,11 @@ mod tests {
         )
         .expect("build snapshot");
 
-        // The produced snapshot is self-consistent + signed.
-        verify_head_with_leaves(&head, &kp.public_key, &leaves).expect("verify snapshot");
+        // The produced snapshot is self-consistent + signed. The head now carries its own
+        // authority pubkey; verify against the genesis-anchored commit H(K_A_pub).
+        let anchored = compute_authority_pubkey_commit(&kp.public_key);
+        verify_head_with_leaves(&head, &anchored, &leaves).expect("verify snapshot");
+        assert_eq!(head.authority_pubkey, kp.public_key);
         assert_eq!(head.device_id, owner);
         assert_eq!(head.genesis_id, genesis);
         assert_eq!(head.pd_smt_root, dev.root());
@@ -803,7 +852,7 @@ mod tests {
         assert_eq!(leaves.len(), 2);
 
         // Gate-set: the value relationship is included, the proven-No one excluded.
-        let gs = crate::recovery::gate_set::build_gate_set(&owner, &head, &kp.public_key, &leaves, &[])
+        let gs = crate::recovery::gate_set::build_gate_set(&owner, &head, &anchored, &leaves, &[])
             .expect("gate set");
         assert!(gs.members.contains(&c_yes));
         assert!(!gs.members.contains(&c_no));
