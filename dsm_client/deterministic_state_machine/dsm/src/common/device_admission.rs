@@ -55,7 +55,9 @@ pub fn sign_self_attestation(
     )
 }
 
-fn self_attest_digest(
+/// The new-device self-attestation digest — `H(domain || genesis || new_device_id ||
+/// new_signing_pubkey)`. Exposed so the SDK can sign it via the device key facility.
+pub fn self_attest_digest(
     genesis_hash: &[u8; 32],
     new_device_id: &[u8; 32],
     new_signing_pubkey: &[u8],
@@ -65,6 +67,21 @@ fn self_attest_digest(
     h.update(new_device_id);
     h.update(new_signing_pubkey);
     *h.finalize().as_bytes()
+}
+
+/// Verify a new-device self-attestation signature from its parts (used by the admitting device to
+/// check the incoming request before gate-signing).
+pub fn verify_self_attestation_sig(
+    genesis_hash: &[u8; 32],
+    new_device_id: &[u8; 32],
+    new_signing_pubkey: &[u8],
+    signature: &[u8],
+) -> Result<bool, DsmError> {
+    sphincs_verify(
+        new_signing_pubkey,
+        &self_attest_digest(genesis_hash, new_device_id, new_signing_pubkey),
+        signature,
+    )
 }
 
 /// An admission authorizing the insertion of `new_device_id` into `genesis_hash`'s Device Tree.

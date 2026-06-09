@@ -1669,6 +1669,17 @@ message AddDeviceAdmissionV1 {
   bytes  signature_by_new_device    = 8 [(dsm_max_len)=65535]; // new device — DBRW-bound possession
 }
 
+// The new (joining) device's half of an admission, sent to the existing authorized device over the
+// co-present BLE link. The existing device verifies the self-attestation, then gate-signs an
+// AddDeviceAdmissionV1 and inserts. (genesis_hash comes from the existing device's QR the new
+// device scanned.)
+message AddDeviceAdmissionRequestV1 {
+  bytes genesis_hash              = 1 [(dsm_fixed_len)=32];
+  bytes new_device_id             = 2 [(dsm_fixed_len)=32];
+  bytes new_device_signing_pubkey = 3 [(dsm_max_len)=4096];
+  bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // DBRW-bound self-attestation
+}
+
 // ============================ AUTH / REGISTRATION ==========================
 // Device registration request/response for storage node authentication.
 // Binary-only: raw 32-byte identifiers, no text encoding on the wire.
