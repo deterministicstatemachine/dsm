@@ -67,6 +67,57 @@ pub fn mark_nonce_spent(nonce: &[u8], tx_id: &str, sender_id: &[u8], amount: u64
     }
 }
 
+/// Whether an additional-device `admission_nonce` has already been consumed by this device
+/// (check 7 of the `AddDeviceAdmission` verifier). Empty nonce → treated as not consumable.
+pub fn is_admission_nonce_consumed(nonce: &[u8]) -> Result<bool> {
+    if nonce.is_empty() {
+        return Ok(false);
+    }
+    let nonce_hash = hash_blake3_bytes(nonce);
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in is_admission_nonce_consumed, recovering");
+        poisoned.into_inner()
+    });
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM consumed_admission_nonces WHERE nonce_hash = ?1",
+        params![&nonce_hash[..]],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Atomically consume an additional-device `admission_nonce`. Fails (ConstraintViolation) if it
+/// was already consumed — the caller MUST treat that as a rejected admission (replay).
+pub fn consume_admission_nonce(nonce: &[u8]) -> Result<()> {
+    if nonce.is_empty() {
+        return Err(anyhow!("Cannot consume empty admission nonce"));
+    }
+    let nonce_hash = hash_blake3_bytes(nonce);
+    let now = tick();
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in consume_admission_nonce, recovering");
+        poisoned.into_inner()
+    });
+    match conn.execute(
+        "INSERT INTO consumed_admission_nonces(nonce_hash, consumed_at) VALUES(?1, ?2)",
+        params![&nonce_hash[..], now as i64],
+    ) {
+        Ok(_) => {
+            info!("[admission] consumed admission nonce");
+            Ok(())
+        }
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            warn!("[admission] admission nonce already consumed (replay) — rejecting");
+            Err(anyhow!("admission nonce already consumed"))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Atomic receive delivery metadata update: validates nonce and advances replay state.
 /// This function implements AF-1 remediation by ensuring atomicity.
 /// Returns the new chain_tip hash on success.
