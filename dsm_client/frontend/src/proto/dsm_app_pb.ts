@@ -11901,6 +11901,98 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
 }
 
 /**
+ * Additional-device admission (§16.3). An already-authorized device admits a new device into the
+ * genesis Device Tree by signing this object with its NORMAL device signing key (the SPHINCS+
+ * identity key already a member of the tree) — NOT the recovery-authority key, NOT storage, NOT
+ * the QR, NOT DBRW alone (DBRW/K_DBRW may gate the signer locally, but the proof is a device
+ * signature). The verifier (Rust) checks: (1) genesis_hash is the target root; (2) signer_device_id
+ * is in the CURRENT tree (root case: signer_device_id == genesis_hash); (3) the signer's registered
+ * device signing pubkey is the one used; (4) signature verifies over the canonical bytes; (5)
+ * new_device_id == H("DSM/device\0" || client_entropy || genesis_hash || DBRW); (6)
+ * parent_device_tree_root/version match the current accepted frontier; (7) admission_nonce not
+ * consumed; (8) applying the insert yields the next root. Transport: BLE/local co-presence only.
+ *
+ * @generated from message dsm.AddDeviceAdmissionV1
+ */
+export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signer_device_id = 2;
+   */
+  signerDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_id = 3;
+   */
+  newDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_dbrw_commitment = 4;
+   */
+  newDeviceDbrwCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes parent_device_tree_root = 5;
+   */
+  parentDeviceTreeRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 parent_device_tree_version = 6;
+   */
+  parentDeviceTreeVersion = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes admission_nonce = 7;
+   */
+  admissionNonce = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ over canonical bytes (fields 1-7)
+   *
+   * @generated from field: bytes signature_by_signer_device = 8;
+   */
+  signatureBySignerDevice = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AddDeviceAdmissionV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdmissionV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "new_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "new_device_dbrw_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "parent_device_tree_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "parent_device_tree_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "admission_nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "signature_by_signer_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionV1 {
+    return new AddDeviceAdmissionV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdmissionV1 {
+    return new AddDeviceAdmissionV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdmissionV1 {
+    return new AddDeviceAdmissionV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdmissionV1 | PlainMessage<AddDeviceAdmissionV1> | undefined, b: AddDeviceAdmissionV1 | PlainMessage<AddDeviceAdmissionV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdmissionV1, a, b);
+  }
+}
+
+/**
  * ============================ AUTH / REGISTRATION ==========================
  * Device registration request/response for storage node authentication.
  * Binary-only: raw 32-byte identifiers, no text encoding on the wire.
