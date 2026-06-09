@@ -2279,6 +2279,67 @@ impl StorageNodeSDK {
         Ok(response)
     }
 
+    /// Read the current authoritative Device Tree frontier for `genesis_hash`:
+    /// `(sorted device_ids, version_number, root)`. Used by the admitting (existing) device to fill
+    /// an `AddDeviceAdmission`'s parent frontier and by the gated insert to verify it. An empty
+    /// store (pre-publish edge) returns the canonical root-only tree.
+    pub async fn read_device_tree_state(
+        &self,
+        genesis_hash: &[u8; 32],
+    ) -> Result<(Vec<[u8; 32]>, u64, [u8; 32]), DsmError> {
+        let key = Self::device_tree_state_key(genesis_hash);
+        let bytes = self.inner.get(&key).await.map_err(|e| {
+            DsmError::network(
+                format!("read_device_tree_state: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        if bytes.is_empty() {
+            let tree = dsm::common::device_tree::DeviceTree::single(*genesis_hash);
+            return Ok((tree.leaves().to_vec(), 1, tree.root()));
+        }
+        let st = decode_device_tree_state(&bytes)?;
+        let tree = dsm::common::device_tree::DeviceTree::new(st.device_ids);
+        Ok((tree.leaves().to_vec(), st.version_number, tree.root()))
+    }
+
+    /// ADMITTING (existing) device: verify a gate-signed `AddDeviceAdmission` against the current
+    /// authoritative tree, then insert the new device. `signer_signing_pubkey` is the existing
+    /// device's signing key (from the QR the new device scanned — no quorum). The gate signature in
+    /// the admission IS the authorization (only a key already in the tree can produce a verifying
+    /// admission); this replaces the old ungated self-insert. Returns the new tree snapshot.
+    pub async fn apply_admitted_device(
+        &self,
+        admission: &dsm::common::device_admission::AddDeviceAdmission,
+        signer_signing_pubkey: &[u8],
+    ) -> Result<DeviceTreeSnapshot, DsmError> {
+        let genesis = admission.genesis_hash;
+        let (device_ids, version, _root) = self.read_device_tree_state(&genesis).await?;
+        // Fail-closed: full gate-signature + self-attestation + frontier verification.
+        let expected_next = dsm::common::device_admission::verify_add_device_admission(
+            admission,
+            &genesis,
+            &device_ids,
+            version,
+            signer_signing_pubkey,
+        )?;
+        let new_id = admission.new_device_id;
+        let snapshot = self
+            .mutate_device_tree_state(genesis, move |ids| {
+                if !ids.contains(&new_id) {
+                    ids.push(new_id);
+                }
+            })
+            .await?;
+        if snapshot.root_hash != expected_next {
+            return Err(DsmError::verification(
+                "apply_admitted_device: post-insert root != verified next root (concurrent tree \
+                 change); refusing",
+            ));
+        }
+        Ok(snapshot)
+    }
+
     /// Remove a secondary device from an existing Device Tree.
     ///
     /// Symmetric to [`Self::add_secondary_device`]: loads the persisted
