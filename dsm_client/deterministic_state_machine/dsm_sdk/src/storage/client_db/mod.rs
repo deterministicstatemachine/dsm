@@ -379,13 +379,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             spent_at    INTEGER NOT NULL
         );
 
-        -- Additional-device admission nonces consumed by this device (check 7 of the
-        -- AddDeviceAdmission verifier). One admission_nonce may be applied at most once.
-        CREATE TABLE IF NOT EXISTS consumed_admission_nonces(
-            nonce_hash   BLOB PRIMARY KEY,
-            consumed_at  INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS settings(
             key         TEXT PRIMARY KEY,
             value       TEXT NOT NULL

@@ -11901,16 +11901,17 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
 }
 
 /**
- * Additional-device admission (§16.3). An already-authorized device admits a new device into the
- * genesis Device Tree by signing this object with its NORMAL device signing key (the SPHINCS+
- * identity key already a member of the tree) — NOT the recovery-authority key, NOT storage, NOT
- * the QR, NOT DBRW alone (DBRW/K_DBRW may gate the signer locally, but the proof is a device
- * signature). The verifier (Rust) checks: (1) genesis_hash is the target root; (2) signer_device_id
- * is in the CURRENT tree (root case: signer_device_id == genesis_hash); (3) the signer's registered
- * device signing pubkey is the one used; (4) signature verifies over the canonical bytes; (5)
- * new_device_id == H("DSM/device\0" || client_entropy || genesis_hash || DBRW); (6)
- * parent_device_tree_root/version match the current accepted frontier; (7) admission_nonce not
- * consumed; (8) applying the insert yields the next root. Transport: BLE/local co-presence only.
+ * Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
+ * device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
+ * device signing key (the gate — only a key already in the tree can authorize the insert). The new
+ * device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
+ * bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+ * the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
+ * Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
+ * (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
+ * signature_by_new_device verifies under new_device_signing_pubkey; (d) parent root/version match
+ * the current accepted frontier; (e) inserting new_device_id yields the next root. Replay is
+ * prevented by the monotonic version (an admission only applies at the frontier it was signed for).
  *
  * @generated from message dsm.AddDeviceAdmissionV1
  */
@@ -11931,9 +11932,11 @@ export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
   newDeviceId = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes new_device_dbrw_commitment = 4;
+   * new device SPHINCS+ signing pubkey
+   *
+   * @generated from field: bytes new_device_signing_pubkey = 4;
    */
-  newDeviceDbrwCommitment = new Uint8Array(0);
+  newDeviceSigningPubkey = new Uint8Array(0);
 
   /**
    * @generated from field: bytes parent_device_tree_root = 5;
@@ -11946,16 +11949,18 @@ export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
   parentDeviceTreeVersion = protoInt64.zero;
 
   /**
-   * @generated from field: bytes admission_nonce = 7;
-   */
-  admissionNonce = new Uint8Array(0);
-
-  /**
-   * SPHINCS+ over canonical bytes (fields 1-7)
+   * existing device — the gate
    *
-   * @generated from field: bytes signature_by_signer_device = 8;
+   * @generated from field: bytes signature_by_signer_device = 7;
    */
   signatureBySignerDevice = new Uint8Array(0);
+
+  /**
+   * new device — DBRW-bound possession
+   *
+   * @generated from field: bytes signature_by_new_device = 8;
+   */
+  signatureByNewDevice = new Uint8Array(0);
 
   constructor(data?: PartialMessage<AddDeviceAdmissionV1>) {
     super();
@@ -11968,11 +11973,11 @@ export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
     { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "signer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "new_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "new_device_dbrw_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "new_device_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "parent_device_tree_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "parent_device_tree_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 7, name: "admission_nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "signature_by_signer_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "signature_by_signer_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "signature_by_new_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionV1 {
