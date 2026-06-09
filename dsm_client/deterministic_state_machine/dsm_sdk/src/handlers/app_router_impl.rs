@@ -2653,7 +2653,7 @@ impl AppRouter for AppRouterImpl {
             // State/sys routes
             "state.export" | "state.info" | "sys.tick" => self.handle_state_query(q).await,
             // System routes
-            "system.genesis" | "system.secondary_device" => self.handle_system_query(q).await,
+            "system.genesis" => self.handle_system_query(q).await,
             // Faucet query
             "faucet.check_nearby" => self.handle_faucet_query(q).await,
             // Identity routes

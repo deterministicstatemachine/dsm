@@ -135,14 +135,20 @@ impl DeviceAdmissionSDK {
     }
 
     /// NEW device: adopt a gate-signed admission received from the existing device. Verifies the
-    /// gate signature under the signer pubkey the new device obtained from the scanned QR, the
-    /// new-device self-attestation, and that the published tree now contains the new device.
-    /// Returns `(genesis_hash, new_device_id)` on success. (Local identity persistence is handled
-    /// by the platform setup that already runs for a secondary device.)
+    /// gate signature under the signer pubkey obtained from the scanned QR, the new-device
+    /// self-attestation, and that the published tree now contains the new device — then
+    /// establishes THIS device's identity as a member of the genesis tree (the gated replacement
+    /// for the old self-insert's identity setup). `entropy` is the same 32 bytes used in
+    /// `build_admission_request` (so the DevID and SDK context are consistent). Returns
+    /// `(genesis_hash, new_device_id)`.
     pub async fn adopt_admission(
         admission_bytes: &[u8],
         signer_pubkey_from_qr: &[u8],
+        entropy: &[u8],
     ) -> Result<([u8; 32], [u8; 32]), DsmError> {
+        if entropy.len() != 32 {
+            return Err(DsmError::verification("adopt: entropy must be 32 bytes"));
+        }
         let admission = AddDeviceAdmission::from_bytes(admission_bytes)?;
         if !admission.verify_gate(signer_pubkey_from_qr)? {
             return Err(DsmError::verification(
@@ -155,13 +161,29 @@ impl DeviceAdmissionSDK {
             ));
         }
         let storage = Self::storage().await?;
-        let (device_ids, _version, _root) =
+        let (device_ids, _version, root) =
             storage.read_device_tree_state(&admission.genesis_hash).await?;
         if !device_ids.contains(&admission.new_device_id) {
             return Err(DsmError::verification(
                 "adopt: new device not present in the published Device Tree",
             ));
         }
+
+        // Establish this device's identity as a member of the genesis tree.
+        let device_id = admission.new_device_id.to_vec();
+        let genesis = admission.genesis_hash.to_vec();
+        let public_key = AppState::get_public_key().unwrap_or_default();
+        let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+            dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+        )
+        .to_vec();
+        AppState::set_identity_info(device_id.clone(), public_key, genesis.clone(), smt_root);
+        AppState::set_has_identity(true);
+        // Override the single-device root that set_identity_info auto-computes with the real
+        // multi-device R_G from the published tree.
+        AppState::set_device_tree_root(root);
+        crate::initialize_sdk_context(device_id, genesis, entropy.to_vec())?;
+
         Ok((admission.genesis_hash, admission.new_device_id))
     }
 }

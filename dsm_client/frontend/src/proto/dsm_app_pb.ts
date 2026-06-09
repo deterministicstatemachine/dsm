@@ -12060,6 +12060,61 @@ export class AddDeviceAdmissionRequestV1 extends Message<AddDeviceAdmissionReque
 }
 
 /**
+ * NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
+ * existing device, the existing device's signing pubkey (from the QR the new device scanned), and
+ * the same 32-byte entropy used to build the request (for identity setup).
+ *
+ * @generated from message dsm.AddDeviceAdoptRequestV1
+ */
+export class AddDeviceAdoptRequestV1 extends Message<AddDeviceAdoptRequestV1> {
+  /**
+   * AddDeviceAdmissionV1 bytes
+   *
+   * @generated from field: bytes admission = 1;
+   */
+  admission = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signer_signing_pubkey = 2;
+   */
+  signerSigningPubkey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes entropy = 3;
+   */
+  entropy = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AddDeviceAdoptRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdoptRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "admission", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signer_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdoptRequestV1 {
+    return new AddDeviceAdoptRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdoptRequestV1 {
+    return new AddDeviceAdoptRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdoptRequestV1 {
+    return new AddDeviceAdoptRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdoptRequestV1 | PlainMessage<AddDeviceAdoptRequestV1> | undefined, b: AddDeviceAdoptRequestV1 | PlainMessage<AddDeviceAdoptRequestV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdoptRequestV1, a, b);
+  }
+}
+
+/**
  * ============================ AUTH / REGISTRATION ==========================
  * Device registration request/response for storage node authentication.
  * Binary-only: raw 32-byte identifiers, no text encoding on the wire.

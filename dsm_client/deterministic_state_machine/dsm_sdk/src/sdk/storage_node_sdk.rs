@@ -313,7 +313,7 @@ pub struct GenesisCreationResponse {
     /// Deterministic tick
     pub tick: u64,
     /// Post-update Device Tree snapshot — populated by
-    /// [`StorageNodeSDK::add_secondary_device`] and
+    /// [`StorageNodeSDK::apply_admitted_device`] and
     /// [`StorageNodeSDK::remove_secondary_device`] so that the JNI / Kotlin
     /// layer can persist the new R_G locally without rebuilding the tree.
     /// `None` for primary-genesis responses (which do not modify a tree).
@@ -2181,104 +2181,6 @@ impl StorageNodeSDK {
         acks
     }
 
-    /// Add a secondary device to an existing genesis.
-    ///
-    /// This requires scanning a QR code from the root device to get the
-    /// genesis hash. The new device_id is derived as
-    /// `H(DSM/device\0 || client_entropy || genesis_hash || DBRW)`.
-    ///
-    /// After deriving the new DevID, the SDK updates the Device Tree
-    /// (§16.3) by:
-    ///
-    /// 1. Loading the persisted [`DeviceTreeStateV1`] for this genesis.
-    ///    If no state exists yet (i.e. this is the first secondary
-    ///    device and the initial root-device-only tree has not been
-    ///    written), the tree is seeded with `genesis_hash` as the root
-    ///    device leaf — the protocol invariant is
-    ///    `device_id_root == genesis_hash`.
-    /// 2. Inserting the new DevID. [`dsm::common::device_tree::DeviceTree::new`]
-    ///    enforces lexicographic sort + deduplication, so adding the
-    ///    same device twice is idempotent and produces the same root.
-    /// 3. Bumping `version_number` (strictly increases on every
-    ///    accepted add or remove — the storage-node validator landing
-    ///    in Phase B.4 (issue #275) rejects non-monotonic writes).
-    /// 4. Persisting the new [`DeviceTreeStateV1`] proto under the local
-    ///    KV key `device_tree:{genesis_b32}` so future add / remove /
-    ///    proof derivations can rebuild the tree byte-exactly.
-    ///
-    /// On return the response carries the new
-    /// [`DeviceTreeSnapshot`] (R_G, device_count, version_number) so
-    /// the calling JNI/Kotlin layer can persist it as the bilateral-
-    /// settlement device tree root without redoing the Merkle work.
-    pub async fn add_secondary_device(
-        &self,
-        genesis_hash: Vec<u8>,
-        client_entropy: Vec<u8>,
-    ) -> Result<GenesisCreationResponse, DsmError> {
-        log::info!("Adding secondary device to existing genesis");
-
-        if genesis_hash.len() != 32 {
-            return Err(DsmError::invalid_operation("Genesis hash must be 32 bytes"));
-        }
-
-        if client_entropy.len() != 32 {
-            return Err(DsmError::invalid_operation(
-                "Client entropy must be 32 bytes",
-            ));
-        }
-
-        // Derive new device ID bound to the existing genesis
-        // DevID_N = H(DSM/device\0 || client_entropy || genesis_hash || DBRW)
-        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DEVICE);
-        hasher.update(&client_entropy);
-        hasher.update(&genesis_hash);
-
-        // C-DBRW binding (required)
-        let cdbrw_binding = crate::fetch_dbrw_binding_key()?;
-        hasher.update(&cdbrw_binding);
-
-        let new_device_id = hasher.finalize().as_bytes().to_vec();
-        let new_device_id_array: [u8; 32] = new_device_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| DsmError::invalid_operation("derived device_id is not 32 bytes"))?;
-
-        log::info!(
-            "Derived secondary device ID: {}",
-            crate::util::text_id::encode_base32_crockford(&new_device_id)
-        );
-        log::info!(
-            "Bound to genesis: {}",
-            crate::util::text_id::encode_base32_crockford(&genesis_hash)
-        );
-
-        // Load + mutate the persisted DeviceTreeStateV1.
-        let mut genesis_hash_array = [0u8; 32];
-        genesis_hash_array.copy_from_slice(&genesis_hash);
-
-        let snapshot = self
-            .mutate_device_tree_state(genesis_hash_array, |device_ids| {
-                if !device_ids.contains(&new_device_id_array) {
-                    device_ids.push(new_device_id_array);
-                }
-            })
-            .await?;
-
-        let response = GenesisCreationResponse {
-            session_id: crate::util::text_id::encode_base32_crockford(&new_device_id[0..16]),
-            genesis_device_id: new_device_id,
-            state: "complete".to_string(),
-            contributions_received: 0, // No MPC for secondary devices
-            complete: true,
-            genesis_hash: Some(genesis_hash),
-            participating_nodes: vec![],
-            tick: dt::tick(),
-            device_tree: Some(snapshot),
-        };
-
-        Ok(response)
-    }
-
     /// Read the current authoritative Device Tree frontier for `genesis_hash`:
     /// `(sorted device_ids, version_number, root)`. Used by the admitting (existing) device to fill
     /// an `AddDeviceAdmission`'s parent frontier and by the gated insert to verify it. An empty
@@ -2342,7 +2244,7 @@ impl StorageNodeSDK {
 
     /// Remove a secondary device from an existing Device Tree.
     ///
-    /// Symmetric to [`Self::add_secondary_device`]: loads the persisted
+    /// Loads the persisted
     /// [`DeviceTreeStateV1`], drops `device_id_to_remove`, bumps
     /// `version_number`, and writes the new state back.
     ///

@@ -1680,6 +1680,15 @@ message AddDeviceAdmissionRequestV1 {
   bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // DBRW-bound self-attestation
 }
 
+// NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
+// existing device, the existing device's signing pubkey (from the QR the new device scanned), and
+// the same 32-byte entropy used to build the request (for identity setup).
+message AddDeviceAdoptRequestV1 {
+  bytes admission             = 1 [(dsm_max_len)=131072]; // AddDeviceAdmissionV1 bytes
+  bytes signer_signing_pubkey = 2 [(dsm_max_len)=4096];
+  bytes entropy               = 3 [(dsm_fixed_len)=32];
+}
+
 // ============================ AUTH / REGISTRATION ==========================
 // Device registration request/response for storage node authentication.
 // Binary-only: raw 32-byte identifiers, no text encoding on the wire.
