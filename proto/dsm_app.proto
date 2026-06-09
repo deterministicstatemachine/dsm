@@ -1647,6 +1647,27 @@ message SecondaryDeviceResponse {
   DeviceTreeV1 device_tree = 4;
 }
 
+// Additional-device admission (§16.3). An already-authorized device admits a new device into the
+// genesis Device Tree by signing this object with its NORMAL device signing key (the SPHINCS+
+// identity key already a member of the tree) — NOT the recovery-authority key, NOT storage, NOT
+// the QR, NOT DBRW alone (DBRW/K_DBRW may gate the signer locally, but the proof is a device
+// signature). The verifier (Rust) checks: (1) genesis_hash is the target root; (2) signer_device_id
+// is in the CURRENT tree (root case: signer_device_id == genesis_hash); (3) the signer's registered
+// device signing pubkey is the one used; (4) signature verifies over the canonical bytes; (5)
+// new_device_id == H("DSM/device\0" || client_entropy || genesis_hash || DBRW); (6)
+// parent_device_tree_root/version match the current accepted frontier; (7) admission_nonce not
+// consumed; (8) applying the insert yields the next root. Transport: BLE/local co-presence only.
+message AddDeviceAdmissionV1 {
+  bytes  genesis_hash               = 1 [(dsm_fixed_len)=32];
+  bytes  signer_device_id           = 2 [(dsm_fixed_len)=32];
+  bytes  new_device_id              = 3 [(dsm_fixed_len)=32];
+  bytes  new_device_dbrw_commitment = 4 [(dsm_fixed_len)=32];
+  bytes  parent_device_tree_root    = 5 [(dsm_fixed_len)=32];
+  uint64 parent_device_tree_version = 6;
+  bytes  admission_nonce            = 7 [(dsm_fixed_len)=32];
+  bytes  signature_by_signer_device = 8 [(dsm_max_len)=65535]; // SPHINCS+ over canonical bytes (fields 1-7)
+}
+
 // ============================ AUTH / REGISTRATION ==========================
 // Device registration request/response for storage node authentication.
 // Binary-only: raw 32-byte identifiers, no text encoding on the wire.
