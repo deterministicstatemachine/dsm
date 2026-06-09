@@ -57,7 +57,7 @@ rustls-native-certs = "0.8"      # use system roots (optional)
 webpki-roots = "1.0.7"
 
 # Database (SQLite — local-dev only)
-rusqlite = { version = "0.40.0", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40.1", features = ["bundled"], optional = true }
 
 # Async traits for health checks
 async-trait = "0.1"
