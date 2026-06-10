@@ -226,12 +226,19 @@ export default function AppContent({
             WALLET SETUP REQUIRED
           </div>
           <MenuRenderer
-            items={['INITIALIZE']}
+            items={['INITIALIZE', 'ADDITIONAL DEVICE', 'DEVICE RECOVERY']}
             currentMenuIndex={currentMenuIndex}
             setCurrentMenuIndex={setCurrentMenuIndex}
             options={{
               itemClassName: 'home-brick',
-              actions: { INITIALIZE: () => void handleGenerateGenesis() },
+              actions: {
+                // New genesis (unchanged): creates a brand-new identity/device tree root.
+                INITIALIZE: () => void handleGenerateGenesis(),
+                // Join an existing genesis tree as a secondary/Nth device (admission-gated).
+                'ADDITIONAL DEVICE': () => navigate('additional_device'),
+                // Recover a lost identity onto this device from the NFC-ring backup.
+                'DEVICE RECOVERY': () => navigate('recovery'),
+              },
             }}
           />
           <StatusText lines={buildHomeStatusLines({ appState, soundEnabled, error })} />
