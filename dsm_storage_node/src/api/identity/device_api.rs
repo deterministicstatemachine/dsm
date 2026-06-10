@@ -35,6 +35,7 @@ pub enum RegisterError {
     InvalidPubkey,
     InvalidGenesisHash,
     DeviceAlreadyExists,
+    DeviceNotFound,
     DatabaseError(String),
 }
 
@@ -49,6 +50,7 @@ impl IntoResponse for RegisterError {
             RegisterError::DeviceAlreadyExists => {
                 (StatusCode::CONFLICT, "Device already registered")
             }
+            RegisterError::DeviceNotFound => (StatusCode::NOT_FOUND, "Device not found"),
             RegisterError::DatabaseError(e) => {
                 log::error!("Database error during device registration: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
@@ -201,7 +203,7 @@ pub async fn reissue_token(
     let (stored_genesis, stored_pubkey) = crate::db::get_device(&state.db_pool, &device_id_b32)
         .await
         .map_err(|e| RegisterError::DatabaseError(e.to_string()))?
-        .ok_or(RegisterError::DeviceAlreadyExists)?;
+        .ok_or(RegisterError::DeviceNotFound)?;
 
     if stored_genesis != req.genesis_hash || stored_pubkey != req.pubkey {
         // Provided identity doesn't match stored device
