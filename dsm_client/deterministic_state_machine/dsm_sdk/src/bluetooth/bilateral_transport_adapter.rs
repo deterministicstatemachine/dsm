@@ -78,7 +78,12 @@ impl BilateralTransportAdapter {
         peer_address: &str,
         envelope: &[u8],
     ) -> Result<(), DsmError> {
-        queue_follow_up_chunks(peer_address, BleFrameType::DeviceAdmissionResponse, envelope).await
+        queue_follow_up_chunks(
+            peer_address,
+            BleFrameType::DeviceAdmissionResponse,
+            envelope,
+        )
+        .await
     }
 
     pub async fn cancel_prepared_session_for_counterparty(&self, counterparty_device_id: [u8; 32]) {
@@ -450,8 +455,10 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     }
                 }
                 BleFrameType::DeviceAdmissionResponse => {
-                    match crate::sdk::DeviceAdmissionSDK::handle_admission_response(&message.payload)
-                        .await
+                    match crate::sdk::DeviceAdmissionSDK::handle_admission_response(
+                        &message.payload,
+                    )
+                    .await
                     {
                         Ok((_genesis, _new_id)) => {
                             info!("[ADMISSION] adopted into the device tree");

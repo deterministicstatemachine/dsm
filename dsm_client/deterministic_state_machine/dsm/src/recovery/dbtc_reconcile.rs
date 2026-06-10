@@ -125,7 +125,10 @@ mod tests {
         assert_eq!(
             aggregate_dbtc_frontier(
                 100,
-                &[o(80, DbtcVaultCondition::Spendable), o(40, DbtcVaultCondition::Spendable)]
+                &[
+                    o(80, DbtcVaultCondition::Spendable),
+                    o(40, DbtcVaultCondition::Spendable)
+                ]
             ),
             (BearerAssetLockState::Spendable, 120)
         );

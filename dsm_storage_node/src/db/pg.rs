@@ -759,8 +759,9 @@ pub async fn insert_recovery_authority_anchor_if_absent(
 ) -> Result<RecoveryAnchorUpsertOutcome> {
     use tokio_postgres::IsolationLevel;
 
-    let tick_i64 = i64::try_from(first_written_tick)
-        .map_err(|_| anyhow::anyhow!("first_written_tick {first_written_tick} does not fit in i64"))?;
+    let tick_i64 = i64::try_from(first_written_tick).map_err(|_| {
+        anyhow::anyhow!("first_written_tick {first_written_tick} does not fit in i64")
+    })?;
 
     let mut client = pool.get().await?;
     let tx = client

@@ -88,7 +88,7 @@ mod tests {
             create_tombstone(&[0x01; 32], 0, &[0x02; 32], device_id, &kp.secret_key).expect("t");
         let succession = create_succession(
             &tombstone.tombstone_hash,
-            &[0xAA; 32].to_vec(),
+            [0xAA; 32].as_ref(),
             device_id,
             &kp.secret_key,
         )

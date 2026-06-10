@@ -128,7 +128,10 @@ impl RecoveryActivationSeal {
             genesis_id: seal_fixed32(&p.genesis_id, "genesis_id")?,
             old_device_id: seal_fixed32(&p.old_device_id, "old_device_id")?,
             new_device_id: seal_fixed32(&p.new_device_id, "new_device_id")?,
-            recovery_intent_digest: seal_fixed32(&p.recovery_intent_digest, "recovery_intent_digest")?,
+            recovery_intent_digest: seal_fixed32(
+                &p.recovery_intent_digest,
+                "recovery_intent_digest",
+            )?,
             tombstone_proposal_digest: seal_fixed32(
                 &p.tombstone_proposal_digest,
                 "tombstone_proposal_digest",
@@ -230,9 +233,13 @@ mod tests {
         let a_old_str = crate::types::identifiers::encode_crockford(&OLD);
         let tombstone =
             create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &kp.secret_key).expect("t");
-        let succession =
-            create_succession(&tombstone.tombstone_hash, &NEW.to_vec(), &a_old_str, &kp.secret_key)
-                .expect("s");
+        let succession = create_succession(
+            &tombstone.tombstone_hash,
+            NEW.as_ref(),
+            &a_old_str,
+            &kp.secret_key,
+        )
+        .expect("s");
         CrossRelationshipSuccessionEvidence {
             a_old: OLD,
             a_new: NEW,
@@ -361,8 +368,14 @@ mod tests {
     fn evidence_root_is_order_independent() {
         let a = ([1u8; 32], [0xAA; 32]);
         let b = ([2u8; 32], [0xBB; 32]);
-        assert_eq!(compute_evidence_root(&[a, b]), compute_evidence_root(&[b, a]));
+        assert_eq!(
+            compute_evidence_root(&[a, b]),
+            compute_evidence_root(&[b, a])
+        );
         let b2 = ([2u8; 32], [0xCC; 32]);
-        assert_ne!(compute_evidence_root(&[a, b]), compute_evidence_root(&[a, b2]));
+        assert_ne!(
+            compute_evidence_root(&[a, b]),
+            compute_evidence_root(&[a, b2])
+        );
     }
 }

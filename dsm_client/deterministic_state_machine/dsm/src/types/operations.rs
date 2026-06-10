@@ -621,19 +621,33 @@ impl Operation {
     pub fn egress_asset(&self) -> EgressAsset {
         use Operation::*;
         match self {
-            Transfer { token_id, amount, .. } => EgressAsset::Asset {
+            Transfer {
+                token_id, amount, ..
+            } => EgressAsset::Asset {
                 token_id: token_id.clone(),
                 amount: amount.value(),
             },
-            Burn { token_id, amount, .. } => EgressAsset::Asset {
+            Burn {
+                token_id, amount, ..
+            } => EgressAsset::Asset {
                 token_id: token_id.clone(),
                 amount: amount.value(),
             },
-            Lock { token_id, amount, .. } | Unlock { token_id, amount, .. } => EgressAsset::Asset {
+            Lock {
+                token_id, amount, ..
+            }
+            | Unlock {
+                token_id, amount, ..
+            } => EgressAsset::Asset {
                 token_id: token_id.clone(),
                 amount: amount.value(),
             },
-            LockToken { token_id, amount, .. } | UnlockToken { token_id, amount, .. } => {
+            LockToken {
+                token_id, amount, ..
+            }
+            | UnlockToken {
+                token_id, amount, ..
+            } => {
                 EgressAsset::Asset {
                     token_id: token_id.clone(),
                     // i64 lock/unlock quantity; clamp negatives to 0 (no canonical egress size).
@@ -647,7 +661,10 @@ impl Operation {
                 ..
             } => EgressAsset::Asset {
                 token_id: token_id.clone(),
-                amount: locked_amount.as_ref().map(|b| b.value()).unwrap_or(u64::MAX),
+                amount: locked_amount
+                    .as_ref()
+                    .map(|b| b.value())
+                    .unwrap_or(u64::MAX),
             },
             DlvCreate { token_id: None, .. } => EgressAsset::Unidentified,
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
@@ -2421,7 +2438,10 @@ mod tests {
         };
         assert_eq!(
             burn.egress_asset(),
-            EgressAsset::Asset { token_id: b"ERA".to_vec(), amount: 7 }
+            EgressAsset::Asset {
+                token_id: b"ERA".to_vec(),
+                amount: 7
+            }
         );
 
         let lt = Operation::LockToken {
@@ -2433,7 +2453,10 @@ mod tests {
         };
         assert_eq!(
             lt.egress_asset(),
-            EgressAsset::Asset { token_id: b"ERA".to_vec(), amount: 0 }
+            EgressAsset::Asset {
+                token_id: b"ERA".to_vec(),
+                amount: 0
+            }
         );
 
         // Vault-keyed DLV claim → asset can't be named here → Unidentified (fail-closed gate).
@@ -2459,7 +2482,14 @@ mod tests {
             proof_of_authorization: vec![],
             message: String::new(),
         };
-        for op in [&burn, &lt, &claim, &mint, &Operation::Noop, &Operation::Genesis] {
+        for op in [
+            &burn,
+            &lt,
+            &claim,
+            &mint,
+            &Operation::Noop,
+            &Operation::Genesis,
+        ] {
             assert_eq!(
                 op.is_value_egress(),
                 !matches!(op.egress_asset(), EgressAsset::NotEgress),

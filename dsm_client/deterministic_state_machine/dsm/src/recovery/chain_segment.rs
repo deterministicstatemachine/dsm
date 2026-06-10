@@ -27,9 +27,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::bilateral_transaction_manager::{
-    compute_smt_key, initial_chain_tip_from_device_ids,
-};
+use crate::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::recovery::succession_binding::verify_forward_ancestry;
 use crate::types::device_state::RelationshipChainState;
@@ -241,9 +239,10 @@ impl RecoveryEstablishmentReceipt {
                 Some(e),
             )
         })?;
-        let state = p.state.as_ref().ok_or_else(|| {
-            DsmError::verification("establish-receipt: missing state")
-        })?;
+        let state = p
+            .state
+            .as_ref()
+            .ok_or_else(|| DsmError::verification("establish-receipt: missing state"))?;
         Ok(Self {
             rel_key: fixed32("rel_key", &p.rel_key)?,
             state: rel_chain_state_from_proto(state)?,
@@ -267,7 +266,9 @@ impl RecoveryEstablishmentReceipt {
     /// caller treats `None` as a fail-closed mismatch.
     pub fn bound_commitment(&self) -> Option<[u8; 32]> {
         match &self.state.operation {
-            Operation::CreateRelationship { commitment, .. } => commitment.as_slice().try_into().ok(),
+            Operation::CreateRelationship { commitment, .. } => {
+                commitment.as_slice().try_into().ok()
+            }
             _ => None,
         }
     }
@@ -301,7 +302,9 @@ impl RecoveryEstablishmentReceipt {
             ));
         }
         match &self.state.operation {
-            Operation::CreateRelationship { counterparty_id, .. } => {
+            Operation::CreateRelationship {
+                counterparty_id, ..
+            } => {
                 if counterparty_id.as_slice() != c {
                     return Err(DsmError::verification(
                         "establish-receipt: op counterparty_id != C",
@@ -327,7 +330,12 @@ mod tests {
     const A_NEW: [u8; 32] = [0xA1; 32];
     const C: [u8; 32] = [0xCC; 32];
 
-    fn mk_state(rel_key: [u8; 32], parent: [u8; 32], c: [u8; 32], tag: u8) -> RelationshipChainState {
+    fn mk_state(
+        rel_key: [u8; 32],
+        parent: [u8; 32],
+        c: [u8; 32],
+        tag: u8,
+    ) -> RelationshipChainState {
         let mut bw = BTreeMap::new();
         bw.insert([tag; 32], tag as u64);
         RelationshipChainState {
@@ -342,7 +350,11 @@ mod tests {
                 mode: TransactionMode::Bilateral,
             },
             entropy: vec![tag, tag, tag],
-            encapsulated_entropy: if tag % 2 == 0 { Some(vec![tag; 4]) } else { None },
+            encapsulated_entropy: if tag.is_multiple_of(2) {
+                Some(vec![tag; 4])
+            } else {
+                None
+            },
             balance_witness: bw,
             entity_sig: Some(vec![0x11; 8]),
             counterparty_sig: None,
@@ -404,7 +416,8 @@ mod tests {
             current_tip: floor,
             states: Vec::new(),
         };
-        ok.verify().expect("empty == floor is valid (no divergence)");
+        ok.verify()
+            .expect("empty == floor is valid (no divergence)");
 
         let bad = RelationshipChainSegment {
             rel_key: rk,

@@ -669,15 +669,21 @@ mod tests {
         // Sensitive: changing ANY of the three inputs changes the keypair.
         assert_ne!(
             a.public_key,
-            derive_device_signing_keypair(&[0x99; 32], &d, &k).unwrap().public_key
+            derive_device_signing_keypair(&[0x99; 32], &d, &k)
+                .unwrap()
+                .public_key
         );
         assert_ne!(
             a.public_key,
-            derive_device_signing_keypair(&g, &[0x99; 32], &k).unwrap().public_key
+            derive_device_signing_keypair(&g, &[0x99; 32], &k)
+                .unwrap()
+                .public_key
         );
         assert_ne!(
             a.public_key,
-            derive_device_signing_keypair(&g, &d, &[0x99; 32]).unwrap().public_key
+            derive_device_signing_keypair(&g, &d, &[0x99; 32])
+                .unwrap()
+                .public_key
         );
     }
 }

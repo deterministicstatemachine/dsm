@@ -11,11 +11,11 @@ pub mod assembly;
 pub mod authority_anchor;
 pub mod bearer_lock;
 pub mod bundle;
+pub mod capsule;
+pub mod chain_segment;
 pub mod dbtc_backing;
 pub mod dbtc_reconcile;
 pub mod dbtc_vault_index;
-pub mod capsule;
-pub mod chain_segment;
 pub mod gate_set;
 pub mod pdsmt_posting;
 pub mod rollup;
@@ -23,9 +23,7 @@ pub mod succession_binding;
 pub mod succession_proof;
 pub mod tombstone;
 
-pub use activation::{
-    compute_evidence_root, validate_recovery_activation, RecoveryActivationSeal,
-};
+pub use activation::{compute_evidence_root, validate_recovery_activation, RecoveryActivationSeal};
 pub use assembly::{
     assemble_recovery_activation, AssembledActivation, CounterpartyRecoveryInput,
     RecoveryAssemblyInputs,

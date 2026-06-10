@@ -283,8 +283,8 @@ impl AppRouterImpl {
         match i.method.as_str() {
             // EXISTING device: which device (if any) is awaiting the owner's approval (poll).
             "device.pendingAdmission" => {
-                let v =
-                    crate::sdk::DeviceAdmissionSDK::pending_admission_device_id().unwrap_or_default();
+                let v = crate::sdk::DeviceAdmissionSDK::pending_admission_device_id()
+                    .unwrap_or_default();
                 device_ok("device.pendingAdmission", &v)
             }
             // NEW device: start the handshake (build request + send over BLE to the existing device).

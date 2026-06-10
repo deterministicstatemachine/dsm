@@ -515,9 +515,9 @@ impl DeviceState {
         &self,
         rel_key: &[u8; 32],
     ) -> Result<crate::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
-        self.smt.get_inclusion_proof(rel_key, 256).map_err(|e| {
-            DsmError::invalid_operation(format!("rel_inclusion_proof: {e}"))
-        })
+        self.smt
+            .get_inclusion_proof(rel_key, 256)
+            .map_err(|e| DsmError::invalid_operation(format!("rel_inclusion_proof: {e}")))
     }
 
     /// Stash a legacy `State.hash` as a verification anchor. Callers that
@@ -1090,7 +1090,10 @@ mod tests {
             )
             .expect("value advance");
         assert_eq!(
-            o1.new_device_state.rel_chain_tip(&rk).unwrap().value_capability,
+            o1.new_device_state
+                .rel_chain_tip(&rk)
+                .unwrap()
+                .value_capability,
             ValueCapability::Yes
         );
 
@@ -1101,7 +1104,10 @@ mod tests {
             .advance(rk, cp, op(), entropy(2), None, &[], None, None)
             .expect("non-value advance");
         assert_eq!(
-            o2.new_device_state.rel_chain_tip(&rk).unwrap().value_capability,
+            o2.new_device_state
+                .rel_chain_tip(&rk)
+                .unwrap()
+                .value_capability,
             ValueCapability::Yes
         );
 
@@ -1113,7 +1119,10 @@ mod tests {
             .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
             .expect("first non-value advance");
         assert_eq!(
-            o3.new_device_state.rel_chain_tip(&rk2).unwrap().value_capability,
+            o3.new_device_state
+                .rel_chain_tip(&rk2)
+                .unwrap()
+                .value_capability,
             ValueCapability::No
         );
     }

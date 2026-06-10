@@ -383,8 +383,10 @@ impl RecoverySDK {
     /// cached authority keypair — i.e. the mnemonic must already be cached (call
     /// `derive_and_cache_key` first, as `recovery.enable` does).
     pub fn build_authority_anchor() -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
-        let device_id =
-            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let device_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
         let genesis_id = Self::require_self_id32(
             crate::sdk::app_state::AppState::get_genesis_hash(),
             "genesis_hash",
@@ -402,14 +404,16 @@ impl RecoverySDK {
 
         // Re-derive the device signing keypair — byte-identical to the one in the
         // device tree (the genesis-binding signer for the anchor).
-        let device_kp = crate::init::derive_device_signing_keypair(&genesis_id, &device_id, &k_dbrw)?;
+        let device_kp =
+            crate::init::derive_device_signing_keypair(&genesis_id, &device_id, &k_dbrw)?;
 
-        let (authority_pk, authority_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
-            DsmError::InvalidState(
+        let (authority_pk, authority_sk) =
+            Self::get_cached_authority_keypair().ok_or_else(|| {
+                DsmError::InvalidState(
                 "recovery anchor: no cached recovery-authority keypair (cache the mnemonic first)"
                     .into(),
             )
-        })?;
+            })?;
 
         dsm::recovery::create_recovery_authority_anchor(
             &genesis_id,
@@ -522,7 +526,9 @@ impl RecoverySDK {
         )
         .await
         .map_err(|e| {
-            DsmError::verification(format!("authority anchor: device identity quorum failed: {e}"))
+            DsmError::verification(format!(
+                "authority anchor: device identity quorum failed: {e}"
+            ))
         })?;
         if &qid.genesis_hash != genesis_id {
             return Err(DsmError::verification(
@@ -530,7 +536,12 @@ impl RecoverySDK {
             ));
         }
 
-        anchor.verify(genesis_id, device_id, &qid.public_key, candidate_authority_pubkey)?;
+        anchor.verify(
+            genesis_id,
+            device_id,
+            &qid.public_key,
+            candidate_authority_pubkey,
+        )?;
         Ok(anchor)
     }
 
@@ -620,8 +631,10 @@ impl RecoverySDK {
     /// the head. Fail-closed: requires identity, a cached `K_A`, and a live device head;
     /// a head-chain conflict errors (re-fetch the tip and re-chain).
     pub async fn build_and_publish_pdsmt_head() -> Result<usize, DsmError> {
-        let device_id =
-            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let device_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
         let device_state = crate::storage::client_db::load_bcr_device_head(&device_id)
             .map_err(|e| {
                 DsmError::storage(format!("load device head: {e}"), None::<std::io::Error>)
@@ -632,16 +645,18 @@ impl RecoverySDK {
                 )
             })?;
 
-        let (authority_pk, authority_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
-            DsmError::InvalidState(
+        let (authority_pk, authority_sk) =
+            Self::get_cached_authority_keypair().ok_or_else(|| {
+                DsmError::InvalidState(
                 "build_and_publish_pdsmt_head: no cached recovery-authority keypair (cache the \
                  mnemonic first)"
                     .into(),
             )
-        })?;
+            })?;
 
         // Chain position: extend the latest valid head, or start the genesis head.
-        let (parent_head_hash, head_number) = match Self::fetch_pdsmt_head_latest(&device_id).await {
+        let (parent_head_hash, head_number) = match Self::fetch_pdsmt_head_latest(&device_id).await
+        {
             Ok(prev) => (prev.head_hash(), prev.head_number.saturating_add(1)),
             Err(_) => (dsm::recovery::GENESIS_PARENT_HEAD_HASH, 0),
         };
@@ -746,8 +761,10 @@ impl RecoverySDK {
             })?;
 
         // Index by embedded_parent so the walk follows hash adjacency, not insertion order.
-        let mut by_parent: HashMap<[u8; 32], Vec<dsm::types::device_state::RelationshipChainState>> =
-            HashMap::new();
+        let mut by_parent: HashMap<
+            [u8; 32],
+            Vec<dsm::types::device_state::RelationshipChainState>,
+        > = HashMap::new();
         for s in all {
             by_parent.entry(s.embedded_parent).or_default().push(s);
         }
@@ -877,17 +894,20 @@ impl RecoverySDK {
     /// Build (from THIS device's local vault store) + sign + publish the dBTC vault index.
     /// Fail-closed: requires identity + a cached `K_A`. Returns the vault-id count posted.
     pub async fn publish_dbtc_vault_index() -> Result<usize, DsmError> {
-        let device_id =
-            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let device_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
         let genesis_id = Self::require_self_id32(
             crate::sdk::app_state::AppState::get_genesis_hash(),
             "genesis_hash",
         )?;
-        let (authority_pk, authority_sk) = Self::get_cached_authority_keypair().ok_or_else(|| {
-            DsmError::InvalidState(
-                "publish_dbtc_vault_index: no cached recovery-authority keypair".into(),
-            )
-        })?;
+        let (authority_pk, authority_sk) =
+            Self::get_cached_authority_keypair().ok_or_else(|| {
+                DsmError::InvalidState(
+                    "publish_dbtc_vault_index: no cached recovery-authority keypair".into(),
+                )
+            })?;
         let vault_ids = crate::storage::client_db::list_all_vault_ids().map_err(|e| {
             DsmError::storage(format!("list vault ids: {e}"), None::<std::io::Error>)
         })?;
@@ -928,15 +948,16 @@ impl RecoverySDK {
     /// this identity's genesis-anchored `K_A`. Fail-closed: any missing/unverifiable piece
     /// errors (the caller then leaves dBTC LockedRecovery / reports awaiting-enumeration).
     pub async fn auto_dbtc_vault_candidates() -> Result<Vec<String>, DsmError> {
-        let a_old_v = crate::storage::client_db::recovery::get_recovery_pref(
-            "capsule_source_device_id",
-        )
-        .map_err(|e| {
-            DsmError::storage(format!("read capsule source: {e}"), None::<std::io::Error>)
-        })?
-        .ok_or_else(|| {
-            DsmError::InvalidState("auto_dbtc_vault_candidates: no staged capsule source".into())
-        })?;
+        let a_old_v =
+            crate::storage::client_db::recovery::get_recovery_pref("capsule_source_device_id")
+                .map_err(|e| {
+                    DsmError::storage(format!("read capsule source: {e}"), None::<std::io::Error>)
+                })?
+                .ok_or_else(|| {
+                    DsmError::InvalidState(
+                        "auto_dbtc_vault_candidates: no staged capsule source".into(),
+                    )
+                })?;
         let a_old = <[u8; 32]>::try_from(a_old_v.as_slice()).map_err(|_| {
             DsmError::verification("auto_dbtc_vault_candidates: capsule source not 32 bytes")
         })?;
@@ -972,8 +993,10 @@ impl RecoverySDK {
         recovering_device_id: &[u8; 32],
         h_cap: &[u8; 32],
     ) -> Result<[u8; 32], DsmError> {
-        let self_id =
-            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let self_id = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
         let old_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             recovering_device_id,
             &self_id,
@@ -1010,8 +1033,10 @@ impl RecoverySDK {
         establishment_state: dsm::types::device_state::RelationshipChainState,
         counterparty_device_id: &[u8; 32],
     ) -> Result<[u8; 32], DsmError> {
-        let a_new =
-            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let a_new = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
         let new_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &a_new,
             counterparty_device_id,
@@ -1184,8 +1209,10 @@ impl RecoverySDK {
             crate::sdk::app_state::AppState::get_genesis_hash(),
             "genesis_hash",
         )?;
-        let a_new =
-            Self::require_self_id32(crate::sdk::app_state::AppState::get_device_id(), "device_id")?;
+        let a_new = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_device_id(),
+            "device_id",
+        )?;
 
         let tombstone_hash = {
             let v = crate::storage::client_db::recovery::get_tombstone_hash()
@@ -1306,7 +1333,10 @@ impl RecoverySDK {
     /// Storage key for A_new's posted recovery succession proof (Base32 Crockford; no hex).
     /// Keyed by `(genesis_under_recovery, a_new)` — the recovering identity's genesis (shared
     /// with A_old) and the successor device.
-    pub fn recovery_succession_proof_storage_key(genesis_id: &[u8; 32], a_new: &[u8; 32]) -> String {
+    pub fn recovery_succession_proof_storage_key(
+        genesis_id: &[u8; 32],
+        a_new: &[u8; 32],
+    ) -> String {
         format!(
             "recovery/succession-proof/v1/{}/{}",
             crate::util::text_id::encode_base32_crockford(genesis_id),
@@ -1366,15 +1396,12 @@ impl RecoverySDK {
         // Post the pre-co-sign succession proof so C can run its accept-guard.
         Self::publish_recovery_succession_proof().await?;
 
-        let old_rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
-        let new_rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
+        let old_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
+        let new_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
 
         // C's current (A_old,C) tip from its posted PDSMT leaf.
         let c_head = Self::fetch_pdsmt_head_latest(c).await?;
-        let c_leaves =
-            Self::fetch_pdsmt_leaves(&c_head.genesis_id, c, c_head.head_number).await?;
+        let c_leaves = Self::fetch_pdsmt_leaves(&c_head.genesis_id, c, c_head.head_number).await?;
         let t_old_current = c_leaves
             .iter()
             .find(|l| l.rel_key == old_rel_key && l.counterparty_device_id == ctx.a_old)
@@ -1398,7 +1425,9 @@ impl RecoverySDK {
             &ctx.a_new,
             c,
         );
-        Ok(dsm::recovery::build_recovery_establishment_op(c, &carry, &h_cap))
+        Ok(dsm::recovery::build_recovery_establishment_op(
+            c, &carry, &h_cap,
+        ))
     }
 
     /// C side: the accept-guard the bilateral handler MUST call before co-signing an incoming
@@ -1430,8 +1459,12 @@ impl RecoverySDK {
         // A_new's genesis + recovery authority, from A_new's posted head (genesis-anchored).
         let a_new_head = Self::fetch_pdsmt_head_latest(a_new).await?;
         let a_new_genesis = a_new_head.genesis_id;
-        Self::fetch_and_verify_authority_anchor(&a_new_genesis, a_new, &a_new_head.authority_pubkey)
-            .await?;
+        Self::fetch_and_verify_authority_anchor(
+            &a_new_genesis,
+            a_new,
+            &a_new_head.authority_pubkey,
+        )
+        .await?;
 
         // The pre-co-sign succession proof, bound to the SAME anchored authority.
         let proof = Self::fetch_recovery_succession_proof(&a_new_genesis, a_new).await?;
@@ -1526,8 +1559,10 @@ impl RecoverySDK {
             Self::fetch_pdsmt_leaves(&ctx.genesis_id, &ctx.a_old, a_old_head.head_number).await?;
 
         // Candidate counterparties: A_old's posted leaves ∪ the capsule's floor set.
-        let mut candidates: BTreeSet<[u8; 32]> =
-            a_old_leaves.iter().map(|l| l.counterparty_device_id).collect();
+        let mut candidates: BTreeSet<[u8; 32]> = a_old_leaves
+            .iter()
+            .map(|l| l.counterparty_device_id)
+            .collect();
         candidates.extend(ctx.capsule_floor.keys().copied());
 
         // Per-C: fetch posted state, GENESIS-ANCHOR C's authority (pubkey carried in the head),
@@ -1556,7 +1591,9 @@ impl RecoverySDK {
             if let Err(e) =
                 Self::fetch_and_verify_authority_anchor(&c_genesis, c, &head.authority_pubkey).await
             {
-                log::debug!("[RECOVERY] counterparty authority not genesis-anchored: {e}; skipping");
+                log::debug!(
+                    "[RECOVERY] counterparty authority not genesis-anchored: {e}; skipping"
+                );
                 continue;
             }
             let authority_commit =
@@ -1568,8 +1605,10 @@ impl RecoverySDK {
                     continue;
                 }
             };
-            let old_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
-            let new_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
+            let old_rel_key =
+                dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_old, c);
+            let new_rel_key =
+                dsm::core::bilateral_transaction_manager::compute_smt_key(&ctx.a_new, c);
             let old_segment = match Self::fetch_rel_chain_segment(&old_rel_key).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1624,7 +1663,10 @@ impl RecoverySDK {
         let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
             .await
             .map_err(|e| {
-                DsmError::storage(format!("load storage node config: {e}"), None::<std::io::Error>)
+                DsmError::storage(
+                    format!("load storage node config: {e}"),
+                    None::<std::io::Error>,
+                )
             })?;
         let qid = crate::handlers::app_router_impl::fetch_quorum_device_identity(
             &config.node_urls,
@@ -1632,7 +1674,9 @@ impl RecoverySDK {
         )
         .await
         .map_err(|e| {
-            DsmError::verification(format!("recovery: A_old device identity quorum failed: {e}"))
+            DsmError::verification(format!(
+                "recovery: A_old device identity quorum failed: {e}"
+            ))
         })?;
 
         Self::verify_and_record_activation(
@@ -1780,10 +1824,8 @@ impl RecoverySDK {
         let capsule_count = crate::storage::client_db::recovery::get_capsule_count().unwrap_or(0);
         let last_capsule_index =
             crate::storage::client_db::recovery::get_max_capsule_index().unwrap_or(0);
-        let accepted_state_index =
-            crate::storage::client_db::recovery::accepted_state_index();
-        let capsule_state_index =
-            crate::storage::client_db::recovery::capsule_state_index();
+        let accepted_state_index = crate::storage::client_db::recovery::accepted_state_index();
+        let capsule_state_index = crate::storage::client_db::recovery::capsule_state_index();
         let capsule_dirty = crate::storage::client_db::recovery::is_capsule_dirty();
 
         RecoveryStatus {
@@ -1828,8 +1870,7 @@ impl RecoverySDK {
         Self::persist_capsule(next_index, &smt_root, &capsule_bytes, tip_count)?;
         // Capsule currency (spec §5.2): record the accepted-state index this seal
         // captured so `is_capsule_dirty()` clears.
-        if let Err(e) =
-            crate::storage::client_db::recovery::set_capsule_state_index(captured_index)
+        if let Err(e) = crate::storage::client_db::recovery::set_capsule_state_index(captured_index)
         {
             log::warn!("[RECOVERY_SDK] failed to record capsule_state_index: {e}");
         }
@@ -2054,8 +2095,14 @@ mod tests {
         assert!(k.starts_with("recovery/dbtc-vault-index/v1/"));
         assert!(!k.starts_with('/'));
         // Keyed by BOTH genesis and device.
-        assert_ne!(k, RecoverySDK::dbtc_vault_index_storage_key(&[0x6F; 32], &d));
-        assert_ne!(k, RecoverySDK::dbtc_vault_index_storage_key(&g, &[0xA1; 32]));
+        assert_ne!(
+            k,
+            RecoverySDK::dbtc_vault_index_storage_key(&[0x6F; 32], &d)
+        );
+        assert_ne!(
+            k,
+            RecoverySDK::dbtc_vault_index_storage_key(&g, &[0xA1; 32])
+        );
         // Base32 Crockford only — no hex (repo invariant).
         assert!(!k.contains("0x"));
     }
@@ -2065,12 +2112,21 @@ mod tests {
         let g = [0x6E; 32];
         let a_new = [0xA1; 32];
         let k = RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new);
-        assert_eq!(k, RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new));
+        assert_eq!(
+            k,
+            RecoverySDK::recovery_succession_proof_storage_key(&g, &a_new)
+        );
         assert!(k.starts_with("recovery/succession-proof/v1/"));
         assert!(!k.starts_with('/'));
         // Keyed by BOTH genesis and the successor device.
-        assert_ne!(k, RecoverySDK::recovery_succession_proof_storage_key(&[0x6F; 32], &a_new));
-        assert_ne!(k, RecoverySDK::recovery_succession_proof_storage_key(&g, &[0xA2; 32]));
+        assert_ne!(
+            k,
+            RecoverySDK::recovery_succession_proof_storage_key(&[0x6F; 32], &a_new)
+        );
+        assert_ne!(
+            k,
+            RecoverySDK::recovery_succession_proof_storage_key(&g, &[0xA2; 32])
+        );
         // Base32 Crockford only — no hex (repo invariant).
         assert!(!k.contains("0x"));
     }
