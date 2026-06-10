@@ -1647,6 +1647,59 @@ message SecondaryDeviceResponse {
   DeviceTreeV1 device_tree = 4;
 }
 
+// Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
+// device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
+// device signing key (the gate — only a key already in the tree can authorize the insert). The new
+// device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
+// bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+// the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
+// Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
+// (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
+// signature_by_new_device verifies under new_device_signing_pubkey; (d) parent root/version match
+// the current accepted frontier; (e) inserting new_device_id yields the next root. Replay is
+// prevented by the monotonic version (an admission only applies at the frontier it was signed for).
+message AddDeviceAdmissionV1 {
+  bytes  genesis_hash               = 1 [(dsm_fixed_len)=32];
+  bytes  signer_device_id           = 2 [(dsm_fixed_len)=32];
+  bytes  new_device_id              = 3 [(dsm_fixed_len)=32];
+  bytes  new_device_signing_pubkey  = 4 [(dsm_max_len)=4096];  // new device SPHINCS+ signing pubkey
+  bytes  parent_device_tree_root    = 5 [(dsm_fixed_len)=32];
+  uint64 parent_device_tree_version = 6;
+  bytes  signature_by_signer_device = 7 [(dsm_max_len)=65535]; // existing device — the gate
+  bytes  signature_by_new_device    = 8 [(dsm_max_len)=65535]; // new device — DBRW-bound possession
+}
+
+// The new (joining) device's half of an admission, sent to the existing authorized device over the
+// co-present BLE link. The existing device verifies the self-attestation, then gate-signs an
+// AddDeviceAdmissionV1 and inserts. (genesis_hash comes from the existing device's QR the new
+// device scanned.)
+message AddDeviceAdmissionRequestV1 {
+  bytes genesis_hash              = 1 [(dsm_fixed_len)=32];
+  bytes new_device_id             = 2 [(dsm_fixed_len)=32];
+  bytes new_device_signing_pubkey = 3 [(dsm_max_len)=4096];
+  bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // DBRW-bound self-attestation
+}
+
+// NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
+// existing device, the existing device's signing pubkey (from the QR the new device scanned), and
+// the same 32-byte entropy used to build the request (for identity setup).
+message AddDeviceAdoptRequestV1 {
+  bytes admission             = 1 [(dsm_max_len)=131072]; // AddDeviceAdmissionV1 bytes
+  bytes signer_signing_pubkey = 2 [(dsm_max_len)=4096];
+  bytes entropy               = 3 [(dsm_fixed_len)=32];
+}
+
+// NEW-device initiate input (device.requestAdmission): everything the new device needs to start the
+// admission handshake with the existing device over BLE. genesis_hash + signer_signing_pubkey come
+// from the existing device's scanned QR; entropy is platform-generated; ble_address is the existing
+// device's BLE address (from discovery).
+message AddDeviceAdmissionInitiateV1 {
+  bytes  genesis_hash         = 1 [(dsm_fixed_len)=32];
+  bytes  entropy              = 2 [(dsm_fixed_len)=32];
+  bytes  signer_signing_pubkey = 3 [(dsm_max_len)=4096];
+  string ble_address          = 4;
+}
+
 // ============================ AUTH / REGISTRATION ==========================
 // Device registration request/response for storage node authentication.
 // Binary-only: raw 32-byte identifiers, no text encoding on the wire.
@@ -2285,6 +2338,8 @@ enum BleFrameType {
   BLE_FRAME_TYPE_RECONCILIATION_REQUEST    = 10; // BilateralReconciliationRequest (Task 2: reconciliation)
   BLE_FRAME_TYPE_RECONCILIATION_RESPONSE   = 11; // BilateralReconciliationResponse (Task 2: reconciliation)
   BLE_FRAME_TYPE_BILATERAL_CONFIRM         = 12; // Step 3: Sender confirms (BilateralConfirmRequest)
+  BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST  = 13; // Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
+  BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14; // Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
 }
 
 message BleFrameHeader {
@@ -2555,6 +2610,11 @@ message Envelope {
 
     // Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
     DeviceTreeSnapshotResponse        device_tree_snapshot_response    = 107;
+
+    // Secondary-device admission (§16.3) — co-present BLE handshake (request → gate-signed
+    // admission). New device → existing device, then existing → new device.
+    AddDeviceAdmissionRequestV1       device_admission_request         = 108;
+    AddDeviceAdmissionV1              device_admission                 = 109;
   }
 }
 
@@ -2620,6 +2680,207 @@ message TombstoneReceiptProto {
   uint64 tick            = 5;
   bytes  signature       = 6 [(dsm_max_len)=65535]; // SPX256f = 49_856 bytes
   bytes  tombstone_hash  = 7 [(dsm_fixed_len)=32];
+}
+
+// Wire codec for `dsm::recovery::authority_anchor::RecoveryAuthorityAnchor`
+// (spec §0.5 step 5) — the genesis-chained declaration anchoring a device's
+// recovery-authority SPHINCS+ pubkey. `device_signature` is by the genesis
+// signing key (genesis binding); `authority_signature` is by K_A (possession).
+message RecoveryAuthorityAnchorProto {
+  bytes genesis_id              = 1 [(dsm_fixed_len)=32];
+  bytes device_id               = 2 [(dsm_fixed_len)=32];
+  bytes authority_pubkey_commit = 3 [(dsm_fixed_len)=32]; // H(K_A_pub)
+  bytes device_signature        = 4 [(dsm_max_len)=65535]; // SPX256f genesis-key sig
+  bytes authority_signature     = 5 [(dsm_max_len)=65535]; // SPX256f K_A sig
+}
+
+// Authenticated Enumerable Per-Device SMT posting (spec §0.5, gap 13) — the
+// signed HEAD of a device's posted PDSMT snapshot used for recovery gate-set
+// enumeration. DUAL-KEYED: addressed by `device_id` (the PDSMT and rel_key are
+// device-scoped) but carries `genesis_id` and is signed by the genesis-anchored
+// recovery authority (`authority_pubkey_commit` == H(K_A_pub), bound via the
+// RecoveryAuthorityAnchor). `signature` covers all other fields (BLAKE3
+// domain-separated digest). Device selects the PDSMT; genesis authenticates the
+// authority. Storage is availability-only; clients verify.
+message PostedPdsmtHeadV1 {
+  bytes  genesis_id              = 1 [(dsm_fixed_len)=32];
+  bytes  device_id               = 2 [(dsm_fixed_len)=32];
+  bytes  pd_smt_root             = 3 [(dsm_fixed_len)=32];
+  bytes  leaf_index_root         = 4 [(dsm_fixed_len)=32];
+  bytes  snapshot_id             = 5 [(dsm_fixed_len)=32];
+  bytes  authority_pubkey_commit = 6 [(dsm_fixed_len)=32]; // H(K_A_pub)
+  // Append-only head chain (R4 layer 1): each head links its predecessor and
+  // carries a monotone position. The genesis head uses parent_head_hash = 32 zero
+  // bytes and head_number = 0. head_hash (not stored) = the signing digest().
+  bytes  parent_head_hash        = 7 [(dsm_fixed_len)=32];
+  uint64 head_number             = 8;
+  bytes  signature               = 9 [(dsm_max_len)=65535]; // SPX256f K_A sig over the head digest
+  // Raw recovery-authority pubkey (K_A_pub) that produced `signature`. A third party can
+  // verify the head WITHOUT a separate pubkey source: require H(authority_pubkey) ==
+  // authority_pubkey_commit AND that commit == the genesis-anchored commit (from the
+  // RecoveryAuthorityAnchor), then verify the signature under authority_pubkey. Presence
+  // alone is NOT authority — trust still flows from the bind-once anchored commit.
+  bytes  authority_pubkey        = 10 [(dsm_max_len)=4096]; // SPX256f pk
+}
+
+// Canonical value-capability (R4 anti-shrink) — the ONLY representation; there is no
+// legacy bool. UNSPECIFIED(0) is invalid and MUST be rejected on decode (never read as
+// NO). YES/UNKNOWN include in the recovery gate; only proven NO excludes.
+enum ValueCapabilityV1 {
+  VALUE_CAPABILITY_V1_UNSPECIFIED = 0; // invalid sentinel — decode rejects
+  VALUE_CAPABILITY_V1_YES         = 1;
+  VALUE_CAPABILITY_V1_NO          = 2;
+  VALUE_CAPABILITY_V1_UNKNOWN     = 3;
+}
+
+// One enumerable, committed leaf/index record of a posted PDSMT snapshot.
+// `value_capability` is part of the SIGNED/COMMITTED record (committed under
+// `leaf_index_root`) — NOT server metadata. `counterparty_genesis_id` is optional
+// context (empty if unknown): it cannot compute `rel_key` (device-pair derived) but
+// is useful once C's device membership under its own genesis is verified.
+message PostedPdsmtLeafRecordV1 {
+  bytes            genesis_id                         = 1 [(dsm_fixed_len)=32];
+  bytes            owner_device_id                    = 2 [(dsm_fixed_len)=32];
+  bytes            rel_key                            = 3 [(dsm_fixed_len)=32];
+  bytes            counterparty_device_id             = 4 [(dsm_fixed_len)=32];
+  bytes            counterparty_genesis_id            = 5 [(dsm_max_len)=32]; // optional (empty if unknown)
+  bytes            current_tip                        = 6 [(dsm_fixed_len)=32];
+  ValueCapabilityV1 value_capability                  = 7;
+  string           value_capability_reason            = 8;
+  bytes            inclusion_proof_to_pd_smt_root     = 9  [(dsm_max_len)=65535];
+  bytes            inclusion_proof_to_leaf_index_root = 10 [(dsm_max_len)=65535];
+}
+
+// The enumerable leaf set posted alongside a PDSMT head (availability-only; the head's
+// signed `leaf_index_root` is the authority — a verifier checks every leaf against it).
+message PostedPdsmtLeafSetV1 {
+  repeated PostedPdsmtLeafRecordV1 leaves = 1;
+}
+
+// Wire codec for `dsm::recovery::tombstone::SuccessionReceipt` (mirrors
+// TombstoneReceiptProto) — the SPHINCS+-signed new-device succession receipt.
+message SuccessionReceiptProto {
+  string device_id             = 1;
+  bytes  tombstone_hash        = 2 [(dsm_fixed_len)=32];
+  bytes  new_device_commitment = 3 [(dsm_max_len)=512];
+  uint64 tick                  = 4;
+  bytes  signature             = 5 [(dsm_max_len)=65535]; // SPX256f
+  bytes  succession_hash       = 6 [(dsm_fixed_len)=32];
+}
+
+// Wire codec for `dsm::recovery::activation::RecoveryActivationSeal` (§0.5) — the
+// gate-set seal validated by validate_recovery_activation.
+message RecoveryActivationSealProto {
+  bytes  genesis_id                = 1 [(dsm_fixed_len)=32];
+  bytes  old_device_id             = 2 [(dsm_fixed_len)=32];
+  bytes  new_device_id             = 3 [(dsm_fixed_len)=32];
+  bytes  recovery_intent_digest    = 4 [(dsm_fixed_len)=32];
+  bytes  tombstone_proposal_digest = 5 [(dsm_fixed_len)=32];
+  bytes  contact_set_commit        = 6 [(dsm_fixed_len)=32];
+  bytes  evidence_root             = 7 [(dsm_fixed_len)=32];
+  uint64 synced_contact_count      = 8;
+  bytes  final_per_device_smt_root = 9 [(dsm_fixed_len)=32];
+  bytes  final_receipt_roll        = 10 [(dsm_fixed_len)=32];
+}
+
+// The recovery bundle (§0.5 Phase C) — the transmitted succession artifacts. It carries
+// the genesis-anchored recovery authority pubkey, the tombstone/succession pair, and the
+// activation seal. It deliberately does NOT inline per-counterparty evidence: that is
+// re-derived + re-verified from each counterparty's OWN posted, genesis-authenticated
+// state (its PDSMT head + relationship state history) — the §0.5 posted-state authority,
+// fetched not bundled. Sub-objects are nested canonical bytes (each via its own codec).
+message RecoveryBundleV1 {
+  bytes authority_pubkey = 1 [(dsm_max_len)=4096];  // K_A_pub (SPHINCS+ pk)
+  bytes tombstone        = 2 [(dsm_max_len)=65535]; // TombstoneReceipt.to_bytes
+  bytes succession       = 3 [(dsm_max_len)=65535]; // SuccessionReceipt.to_bytes
+  bytes activation_seal  = 4 [(dsm_max_len)=4096];  // RecoveryActivationSeal.to_bytes
+}
+
+// ── Relationship-state evidence postings (spec §0.5 Phase D prerequisite) ──────────────
+// PDSMT heads/leaves prove "what the current tip IS" plus value-capability; they do NOT
+// prove HOW a relationship reached that tip. Recovery succession needs each counterparty's
+// actual relationship-state material so the verifier can prove ancestry (h_cap ->* current)
+// and successor establishment (the (A_new,C) first state binding the carry-forward
+// commitment). These objects are AVAILABILITY-ONLY and CONTENT-ADDRESSED; the client
+// recomputes every state's chain tip and the ancestry walk locally. Storage never attests.
+
+// One device-level balance-witness entry (CPTA policy_commit -> u64 balance). Encoded
+// sorted by policy_commit to match the canonical chain-tip hash (BTreeMap order).
+message BalanceWitnessEntryProto {
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  uint64 value         = 2;
+}
+
+// Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
+// EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
+// canonical operation bytes, entropy, optional encapsulated_entropy, optional
+// dbrw_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
+// they sign the digest). proto3 `optional` distinguishes None from an empty Some, which the
+// chain-tip hash treats differently; a faithful round-trip is REQUIRED so a decoder can
+// recompute the tip and assert equality.
+message RelationshipChainStateProto {
+  bytes  rel_key             = 1 [(dsm_fixed_len)=32];
+  bytes  embedded_parent     = 2 [(dsm_fixed_len)=32];
+  bytes  counterparty_devid  = 3 [(dsm_fixed_len)=32];
+  bytes  operation           = 4 [(dsm_max_len)=1048576]; // Operation::to_bytes (canonical)
+  bytes  entropy             = 5 [(dsm_max_len)=65535];
+  optional bytes encapsulated_entropy = 6 [(dsm_max_len)=65535]; // None vs Some(empty) preserved
+  optional bytes dbrw_summary_hash    = 7 [(dsm_fixed_len)=32];
+  repeated BalanceWitnessEntryProto balance_witness = 8;
+  optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
+  optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
+}
+
+// A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a
+// counterparty's states from the capsule floor `floor_tip` (h_cap, EXCLUSIVE) up to
+// `current_tip` (T_old_current). Content-id = BLAKE3("DSM/recovery/rel-chain-segment/v1" ||
+// canonical-bytes). The verifier recomputes each state's chain tip, checks adjacency
+// floor ->* current via embedded_parent, and that rel_key is uniform. An EMPTY `states` is
+// valid iff floor_tip == current_tip (the no-divergence common case).
+message RelationshipChainSegmentV1 {
+  bytes rel_key     = 1 [(dsm_fixed_len)=32];
+  bytes floor_tip   = 2 [(dsm_fixed_len)=32]; // h_cap (segment starts AFTER this)
+  bytes current_tip = 3 [(dsm_fixed_len)=32]; // T_old_current (segment ends here)
+  repeated RelationshipChainStateProto states = 4;
+}
+
+// The new (A_new,C) bilateral establishment receipt (rel_key = new_rel_key) — the FIRST
+// state of the successor relationship whose CreateRelationship op binds the carry-forward
+// commitment. Content-id = BLAKE3("DSM/recovery/establish-receipt/v1" || canonical-bytes).
+// The verifier checks it is a first-state establishment and that the carry-forward
+// commitment is bound INTO the signed state hash (see verify_succession_semantics).
+message RecoveryEstablishmentReceiptV1 {
+  bytes rel_key                     = 1 [(dsm_fixed_len)=32]; // new_rel_key
+  RelationshipChainStateProto state = 2;
+}
+
+// A device's K_A-signed dBTC vault index (P5 dBTC enumeration). The healthy device posts the
+// list of its dBTC vault ids; a recovering device fetches it as the CANDIDATE set to
+// reconcile. Authenticated like PostedPdsmtHeadV1 (carries authority_pubkey; H(it) ==
+// authority_pubkey_commit == the genesis-anchored commit; signature over the digest).
+// Enumeration completeness is NOT a safety property — per-vault Bitcoin backing verification
+// is the gate — so a forged/partial index only yields Bitcoin-verify-out or a locked deadlock,
+// never a double-spend. Availability-only storage; clients verify.
+message PostedDbtcVaultIndexV1 {
+  bytes  genesis_id              = 1 [(dsm_fixed_len)=32];
+  bytes  device_id               = 2 [(dsm_fixed_len)=32];
+  repeated string vault_ids      = 3; // Base32 Crockford vault ids
+  bytes  authority_pubkey_commit = 4 [(dsm_fixed_len)=32]; // H(K_A_pub)
+  bytes  authority_pubkey        = 5 [(dsm_max_len)=4096]; // SPX256f pk (carried; checked vs commit)
+  bytes  signature               = 6 [(dsm_max_len)=65535]; // SPX256f K_A sig over the digest
+}
+
+// Lightweight recovery succession proof (spec §0.5 — bilateral re-establish). A_new posts the
+// minimal artifacts a counterparty C needs to run its re-establish accept-guard BEFORE
+// co-signing: the genesis-anchored recovery authority pubkey (K_A_pub) plus the
+// tombstone/succession pair proving A_new succeeds A_old. Distinct from RecoveryBundleV1 (which
+// also carries the activation seal — produced only AFTER all re-establishes, so unavailable at
+// re-establish time). Sub-objects are nested canonical bytes via their own codecs. Availability
+// -only; C genesis-anchors authority_pubkey via A_new's RecoveryAuthorityAnchor before trusting.
+message RecoverySuccessionProofV1 {
+  bytes authority_pubkey = 1 [(dsm_max_len)=4096];  // K_A_pub (SPHINCS+ pk)
+  bytes tombstone        = 2 [(dsm_max_len)=65535]; // TombstoneReceipt.to_bytes
+  bytes succession       = 3 [(dsm_max_len)=65535]; // SuccessionReceipt.to_bytes
 }
 
 // ==================== Minimal deterministic identity =================
