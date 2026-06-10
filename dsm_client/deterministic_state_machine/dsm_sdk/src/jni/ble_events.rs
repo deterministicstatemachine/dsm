@@ -715,39 +715,48 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_finalizeScann
     _clazz: jni::sys::jclass,
     ble_address_jstr: jni::sys::jstring,
 ) -> jni::sys::jboolean {
-    let mut env = match unsafe { jni::JNIEnv::from_raw(env as *mut _) } {
-        Ok(e) => e,
-        Err(err) => {
-            log::error!("finalizeScannerPairing: JNIEnv::from_raw failed: {err}");
-            return 0u8;
-        }
-    };
-    let ble_address_ref =
-        unsafe { jni::objects::JString::from(jni::objects::JObject::from_raw(ble_address_jstr)) };
-    let ble_address: String = match env.get_string(&ble_address_ref) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            log::error!("finalizeScannerPairing: failed to read ble_address JString: {e}");
-            return 0u8;
-        }
-    };
+    // Wrap in catch_unwind: a panic must never unwind across the `extern "system"`
+    // FFI boundary (UB / JVM abort). Every other JNI export does this; this one
+    // previously did not.
+    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
+        "finalizeScannerPairing",
+        std::panic::AssertUnwindSafe(move || {
+            let mut env = match unsafe { jni::JNIEnv::from_raw(env as *mut _) } {
+                Ok(e) => e,
+                Err(err) => {
+                    log::error!("finalizeScannerPairing: JNIEnv::from_raw failed: {err}");
+                    return 0u8;
+                }
+            };
+            let ble_address_ref = unsafe {
+                jni::objects::JString::from(jni::objects::JObject::from_raw(ble_address_jstr))
+            };
+            let ble_address: String = match env.get_string(&ble_address_ref) {
+                Ok(s) => s.into(),
+                Err(e) => {
+                    log::error!("finalizeScannerPairing: failed to read ble_address JString: {e}");
+                    return 0u8;
+                }
+            };
 
-    let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-    let rt = crate::runtime::get_runtime();
-    match rt.block_on(orchestrator.finalize_scanner_pairing_by_address(&ble_address)) {
-        Ok(()) => {
-            log::info!(
-                "finalizeScannerPairing: pairing finalized for {}",
-                ble_address
-            );
-            1u8
-        }
-        Err(e) => {
-            // Warn-level: "already finalized" is the expected benign case on retry.
-            log::warn!("finalizeScannerPairing: {}", e);
-            0u8
-        }
-    }
+            let orchestrator = crate::bluetooth::get_pairing_orchestrator();
+            let rt = crate::runtime::get_runtime();
+            match rt.block_on(orchestrator.finalize_scanner_pairing_by_address(&ble_address)) {
+                Ok(()) => {
+                    log::info!(
+                        "finalizeScannerPairing: pairing finalized for {}",
+                        ble_address
+                    );
+                    1u8
+                }
+                Err(e) => {
+                    // Warn-level: "already finalized" is the expected benign case on retry.
+                    log::warn!("finalizeScannerPairing: {}", e);
+                    0u8
+                }
+            }
+        }),
+    )
 }
 
 /// Build a framed Envelope with BleEvent as the direct payload.
