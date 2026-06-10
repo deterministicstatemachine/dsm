@@ -23,6 +23,10 @@ use crate::AppState;
 
 const ADMIN_TOKEN_HEADER: &str = "x-dsm-admin-token";
 const ADMIN_TOKEN_ENV: &str = "DSM_ADMIN_TOKEN";
+/// Explicit, opt-in escape hatch for local development only. When the admin
+/// token is unset, auth stays fail-closed unless this is set to `1` in a debug
+/// build.
+const ADMIN_INSECURE_ENV: &str = "DSM_INSECURE_ALLOW_NO_ADMIN_TOKEN";
 
 fn token_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
@@ -31,17 +35,19 @@ fn token_matches(provided: &str, expected: &str) -> bool {
 async fn require_admin_token(headers: HeaderMap) -> Result<(), StatusCode> {
     let expected = env::var(ADMIN_TOKEN_ENV).unwrap_or_default();
     if expected.trim().is_empty() {
-        if cfg!(debug_assertions) {
+        // Fail closed by default — a missing admin token must never silently
+        // authorize destructive endpoints (cleanup deletes objects/spool;
+        // maintenance mutates current_tick and runs replication). Local dev can
+        // explicitly opt out of admin auth by setting ADMIN_INSECURE_ENV=1; a
+        // plain debug build no longer disables auth on its own.
+        if cfg!(debug_assertions) && env::var(ADMIN_INSECURE_ENV).as_deref() == Ok("1") {
             log::warn!(
-                "admin auth disabled: {} not set (debug build)",
-                ADMIN_TOKEN_ENV
+                "admin auth explicitly disabled via {}=1 (debug build)",
+                ADMIN_INSECURE_ENV
             );
             return Ok(());
         }
-        log::error!(
-            "admin auth disabled in release: {} not set",
-            ADMIN_TOKEN_ENV
-        );
+        log::error!("admin auth required but {} not set", ADMIN_TOKEN_ENV);
         return Err(StatusCode::UNAUTHORIZED);
     }
 
