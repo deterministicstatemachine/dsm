@@ -2327,6 +2327,8 @@ enum BleFrameType {
   BLE_FRAME_TYPE_RECONCILIATION_REQUEST    = 10; // BilateralReconciliationRequest (Task 2: reconciliation)
   BLE_FRAME_TYPE_RECONCILIATION_RESPONSE   = 11; // BilateralReconciliationResponse (Task 2: reconciliation)
   BLE_FRAME_TYPE_BILATERAL_CONFIRM         = 12; // Step 3: Sender confirms (BilateralConfirmRequest)
+  BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST  = 13; // Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
+  BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14; // Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
 }
 
 message BleFrameHeader {
@@ -2597,6 +2599,11 @@ message Envelope {
 
     // Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
     DeviceTreeSnapshotResponse        device_tree_snapshot_response    = 107;
+
+    // Secondary-device admission (§16.3) — co-present BLE handshake (request → gate-signed
+    // admission). New device → existing device, then existing → new device.
+    AddDeviceAdmissionRequestV1       device_admission_request         = 108;
+    AddDeviceAdmissionV1              device_admission                 = 109;
   }
 }
 

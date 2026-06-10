@@ -688,6 +688,20 @@ export enum BleFrameType {
    * @generated from enum value: BLE_FRAME_TYPE_BILATERAL_CONFIRM = 12;
    */
   BILATERAL_CONFIRM = 12,
+
+  /**
+   * Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
+   *
+   * @generated from enum value: BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST = 13;
+   */
+  DEVICE_ADMISSION_REQUEST = 13,
+
+  /**
+   * Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
+   *
+   * @generated from enum value: BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14;
+   */
+  DEVICE_ADMISSION_RESPONSE = 14,
 }
 // Retrieve enum metadata with: proto3.getEnumType(BleFrameType)
 proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
@@ -704,6 +718,8 @@ proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
   { no: 10, name: "BLE_FRAME_TYPE_RECONCILIATION_REQUEST" },
   { no: 11, name: "BLE_FRAME_TYPE_RECONCILIATION_RESPONSE" },
   { no: 12, name: "BLE_FRAME_TYPE_BILATERAL_CONFIRM" },
+  { no: 13, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST" },
+  { no: 14, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE" },
 ]);
 
 /**
@@ -18235,6 +18251,21 @@ export class Envelope extends Message<Envelope> {
      */
     value: DeviceTreeSnapshotResponse;
     case: "deviceTreeSnapshotResponse";
+  } | {
+    /**
+     * Secondary-device admission (§16.3) — co-present BLE handshake (request → gate-signed
+     * admission). New device → existing device, then existing → new device.
+     *
+     * @generated from field: dsm.AddDeviceAdmissionRequestV1 device_admission_request = 108;
+     */
+    value: AddDeviceAdmissionRequestV1;
+    case: "deviceAdmissionRequest";
+  } | {
+    /**
+     * @generated from field: dsm.AddDeviceAdmissionV1 device_admission = 109;
+     */
+    value: AddDeviceAdmissionV1;
+    case: "deviceAdmission";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18341,6 +18372,8 @@ export class Envelope extends Message<Envelope> {
     { no: 105, name: "cdbrw_verify_response", kind: "message", T: CdbrwVerifyResponse, oneof: "payload" },
     { no: 106, name: "cdbrw_enroll_response", kind: "message", T: CdbrwEnrollResponse, oneof: "payload" },
     { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
+    { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
+    { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
