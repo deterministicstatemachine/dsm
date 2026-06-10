@@ -5,8 +5,10 @@
 // to run the admission. All crypto/BLE/decisions happen in Rust (device.requestAdmission); the
 // existing authorized device must approve+sign the admission with its device signing key.
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  approveAdmission,
+  pollPendingAdmission,
   readGenesisFromQr,
   requestAdmission,
 } from '../../services/device/additionalDeviceService';
@@ -22,6 +24,41 @@ const AdditionalDeviceScreen: React.FC<Props> = ({ onNavigate }) => {
   const [bleAddr, setBleAddr] = useState('');
   const [step, setStep] = useState<Step>('input');
   const [message, setMessage] = useState<string>('');
+  // Existing-device side: a new device requesting to join (polled), and the approve status.
+  const [pendingDevice, setPendingDevice] = useState('');
+  const [approveStatus, setApproveStatus] = useState('');
+  const mounted = useRef(true);
+
+  // EXISTING device: poll for an inbound admission request awaiting the owner's approval.
+  useEffect(() => {
+    mounted.current = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      try {
+        const d = await pollPendingAdmission();
+        if (mounted.current) setPendingDevice(d);
+      } catch {
+        /* transport not ready / no pending — ignore */
+      }
+      if (mounted.current) timer = setTimeout(() => void tick(), 3000);
+    };
+    void tick();
+    return () => {
+      mounted.current = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  const onApprove = useCallback(async () => {
+    setApproveStatus('Approving…');
+    try {
+      const res = await approveAdmission();
+      setApproveStatus(res.ok ? 'Approved — the new device is now in your tree.' : (res.message ?? 'Approve failed.'));
+      if (res.ok) setPendingDevice('');
+    } catch (e) {
+      setApproveStatus(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
 
   const parsed = useMemo(() => (qrText.trim() ? readGenesisFromQr(qrText.trim()) : null), [qrText]);
 
@@ -65,6 +102,18 @@ const AdditionalDeviceScreen: React.FC<Props> = ({ onNavigate }) => {
         Add this device to an existing identity&apos;s device tree. Scan or paste the QR shown by an
         already-authorized device on that identity. That device must approve the admission.
       </div>
+
+      {pendingDevice && (
+        <div className="dsm-card" style={{ border: '1px solid var(--accent, #888)', padding: '10px', margin: '0 0 16px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 700 }}>A device wants to join your tree</div>
+          <div style={{ fontSize: '10px', margin: '6px 0', wordBreak: 'break-all' }}>DEVICE: {pendingDevice}</div>
+          <div style={{ fontSize: '10px', color: 'var(--text-dark)', marginBottom: '8px' }}>
+            Only approve if you started this from your new device.
+          </div>
+          <button className="home-brick" onClick={() => void onApprove()}>APPROVE</button>
+          {approveStatus && <div style={{ fontSize: '10px', marginTop: '6px' }}>{approveStatus}</div>}
+        </div>
+      )}
 
       {(step === 'input' || step === 'error') && (
         <>
