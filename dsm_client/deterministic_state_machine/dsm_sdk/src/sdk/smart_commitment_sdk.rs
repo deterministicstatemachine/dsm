@@ -288,8 +288,11 @@ impl SmartCommitmentSDK {
                 condition,
                 oracle_id,
             } => {
-                let mut h =
-                    dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_CONDITION);
+                // Must match the domain tag used by `create_conditional_commitment`
+                // (TAG_DSM_SMART_COMMIT_HASH). Recomputing under a different tag
+                // (_CONDITION) made `verify_commitment` always return false for a
+                // commitment this SDK produced.
+                let mut h = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SMART_COMMIT_HASH);
                 h.update(&current_state.hash);
                 h.update(commitment.recipient.as_bytes());
                 h.update(&commitment.amount.to_le_bytes());
