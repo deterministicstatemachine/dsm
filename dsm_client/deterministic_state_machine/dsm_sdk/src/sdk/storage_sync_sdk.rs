@@ -131,10 +131,10 @@ impl StorageSyncSdk {
 
         // Replay guard header required by storage-node middleware
         // Canonical: base32 Crockford (0-9,A-H,J-K,M-N,P-T,V-Z with substitutions)
-        let msg_id_hex = crate::util::text_id::encode_base32_crockford(&env.message_id);
+        let msg_id_b32 = crate::util::text_id::encode_base32_crockford(&env.message_id);
         headers.insert(
             HeaderName::from_static("x-dsm-message-id"),
-            HeaderValue::from_str(&msg_id_hex).context("x-dsm-message-id header")?,
+            HeaderValue::from_str(&msg_id_b32).context("x-dsm-message-id header")?,
         );
 
         // Provide recipient routing key: base32 device_id from envelope headers.

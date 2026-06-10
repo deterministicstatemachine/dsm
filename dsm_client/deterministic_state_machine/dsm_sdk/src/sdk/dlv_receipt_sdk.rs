@@ -6,7 +6,8 @@
 //! content-addressed data). No dedicated `/api/v2/dlv/receipt` endpoint required.
 //!
 //! - CircuitBreaker for node health
-//! - Quorum writes (K healthy nodes)
+//! - Best-effort writes to healthy nodes (any single success is accepted; no
+//!   K-of-N quorum is enforced — `submit_receipt` succeeds on `success_count > 0`)
 //! - Local SQLite persistence as primary + remote storage as redundant copies
 
 use dsm::types::error::DsmError;
