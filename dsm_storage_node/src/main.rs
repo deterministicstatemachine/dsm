@@ -216,6 +216,12 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // Identity mirrors
     let devtree_router =
         api::identity::devtree::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Recovery-authority anchor — single-assignment per genesis (§0.5 bind-once)
+    let recovery_anchor_router =
+        api::identity::recovery_anchor::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Append-only Per-Device SMT head chain (§0.5 gap 13, R4 layer 1)
+    let pdsmt_head_router =
+        api::identity::pdsmt_head::create_router(state.clone()).layer(public_rate_layer.clone());
     let tips_router =
         api::identity::tips::create_router(state.clone()).layer(public_rate_layer.clone());
     // Genesis mirror
@@ -272,6 +278,8 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(registry_router) // exposes /api/v2/registry/* as in your tests
         .merge(policy_router)
         .merge(devtree_router)
+        .merge(recovery_anchor_router)
+        .merge(pdsmt_head_router)
         .merge(tips_router)
         .merge(genesis_router)
         .merge(dlv_slot_router)

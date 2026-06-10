@@ -421,6 +421,13 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
           >
             INSPECT OR RECOVER
           </button>
+          <button
+            className="settings-shell__button"
+            onClick={() => onNavigate?.('additional_device')}
+            style={{ fontSize: '9px' }}
+          >
+            ADD / APPROVE DEVICE
+          </button>
         </div>
         {nfcStatus.enabled && nfcStatus.configured && (
           <button

@@ -113,6 +113,7 @@ impl SmartCommitmentSDK {
                 to_device_id,
                 amount,
                 token_id,
+                policy_commit,
                 mode,
                 nonce,
                 verification: _,
@@ -124,6 +125,7 @@ impl SmartCommitmentSDK {
             } => {
                 buf.extend_from_slice(b"XFER");
                 Self::push_bytes(&mut buf, token_id);
+                Self::push_bytes(&mut buf, policy_commit);
                 Self::push_bytes(&mut buf, to_device_id);
                 Self::push_bytes(&mut buf, recipient);
                 Self::push_bytes(&mut buf, to);
@@ -251,8 +253,12 @@ impl SmartCommitmentSDK {
         &self,
         commitment: &SmartCommitmentSdk,
     ) -> Result<Operation, DsmError> {
+        let policy_commit = self
+            .core_sdk
+            .resolve_policy_commit_strict(commitment.token_id.as_bytes())?;
         Ok(Operation::Transfer {
             token_id: commitment.token_id.as_bytes().to_vec(),
+            policy_commit,
             amount: Balance::from_state(commitment.amount, [0u8; 32]),
             recipient: commitment.recipient.as_bytes().to_vec(),
             to: commitment.recipient.as_bytes().to_vec(),
@@ -507,6 +513,7 @@ mod tests {
 
     fn make_transfer_op() -> Operation {
         Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: b"device_A".to_vec(),
             amount: Balance::from_state(1000, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
@@ -731,7 +738,8 @@ mod tests {
         let commitment = SmartCommitmentSdk {
             recipient: "alice".to_string(),
             amount: 250,
-            token_id: "ROOT".to_string(),
+            // builtin token so execute_commitment can resolve its policy_commit
+            token_id: "ERA".to_string(),
             condition: SdkCommitmentCondition::ConditionalOracle {
                 condition: "true".to_string(),
                 oracle_id: "o".to_string(),
@@ -764,7 +772,7 @@ mod tests {
         let commitment = SmartCommitmentSdk {
             recipient: "bob".to_string(),
             amount: 0,
-            token_id: "TOKEN".to_string(),
+            token_id: "ERA".to_string(),
             condition: SdkCommitmentCondition::ConditionalOracle {
                 condition: "".to_string(),
                 oracle_id: "".to_string(),
@@ -779,7 +787,7 @@ mod tests {
                 amount, token_id, ..
             } => {
                 assert_eq!(amount.value(), 0);
-                assert_eq!(token_id, b"TOKEN");
+                assert_eq!(token_id, b"ERA");
             }
             _ => panic!("Expected Transfer"),
         }

@@ -88,10 +88,10 @@ pub(crate) struct CachedWithdrawalPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QuorumDeviceIdentity {
-    device_id: [u8; 32],
-    genesis_hash: [u8; 32],
-    public_key: Vec<u8>,
+pub(crate) struct QuorumDeviceIdentity {
+    pub(crate) device_id: [u8; 32],
+    pub(crate) genesis_hash: [u8; 32],
+    pub(crate) public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -988,6 +988,16 @@ impl AppRouterImpl {
         // =====================================================================
         let balance_anchor =
             dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR, &[]);
+        // §9.5: bind the token's canonical policy_commit into the signed transfer.
+        // Resolve from the local source-of-truth installed policy; fail closed if
+        // the token's policy is not installed (no peer-supplied fallback).
+        let policy_commit = match self
+            .core_sdk
+            .resolve_policy_commit_strict(token_id.as_bytes())
+        {
+            Ok(pc) => pc,
+            Err(e) => return err(format!("wallet.send: policy_commit resolve failed: {e}")),
+        };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::from_state(
@@ -995,6 +1005,7 @@ impl AppRouterImpl {
                 *balance_anchor.as_bytes(),
             ),
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit,
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
@@ -1174,6 +1185,7 @@ impl AppRouterImpl {
                 *balance_anchor.as_bytes(),
             ),
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit,
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
@@ -1580,6 +1592,7 @@ impl AppRouterImpl {
                     *balance_anchor.as_bytes(),
                 ),
                 token_id: token_id.as_bytes().to_vec(),
+                policy_commit,
                 mode: dsm::types::operations::TransactionMode::Unilateral,
                 nonce: nonce.to_vec(),
                 verification: dsm::types::operations::VerificationType::Standard,
@@ -2443,7 +2456,7 @@ fn select_quorum_device_identity(
     None
 }
 
-async fn fetch_quorum_device_identity(
+pub(crate) async fn fetch_quorum_device_identity(
     storage_endpoints: &[String],
     device_id: [u8; 32],
 ) -> Result<QuorumDeviceIdentity, String> {
@@ -2561,6 +2574,13 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.device_head()
     }
 
+    fn resolve_policy_commit_strict(
+        &self,
+        token_id: &[u8],
+    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
+        self.core_sdk.resolve_policy_commit_strict(token_id)
+    }
+
     fn execute_on_relationship_for_bilateral(
         &self,
         rel_key: [u8; 32],
@@ -2633,7 +2653,7 @@ impl AppRouter for AppRouterImpl {
             // State/sys routes
             "state.export" | "state.info" | "sys.tick" => self.handle_state_query(q).await,
             // System routes
-            "system.genesis" | "system.secondary_device" => self.handle_system_query(q).await,
+            "system.genesis" => self.handle_system_query(q).await,
             // Faucet query
             "faucet.check_nearby" => self.handle_faucet_query(q).await,
             // Identity routes
@@ -2758,6 +2778,8 @@ impl AppRouter for AppRouterImpl {
             m if m.starts_with("recovery.") || m == "nfc.ring.write" || m == "nfc.ring.read" => {
                 self.handle_recovery_invoke(i).await
             }
+            // Secondary-device admission invoke routes (gated additional-device enrollment)
+            m if m.starts_with("device.") => self.handle_device_invoke(i).await,
             // Bitcoin invoke routes
             m if m.starts_with("bitcoin.") => self.handle_bitcoin_invoke(i).await,
             _ => err(format!(
