@@ -508,6 +508,11 @@ impl SmtInclusionProof {
             s.copy_from_slice(&data[offset + i * 32..offset + (i + 1) * 32]);
             siblings.push(s);
         }
+        // Canonical decode requires full byte exhaustion: reject trailing bytes
+        // so a proof has exactly one byte encoding. (issue #450)
+        if offset + count * 32 != data.len() {
+            return None;
+        }
         Some(SmtInclusionProof {
             key,
             value,
@@ -528,6 +533,20 @@ mod tests {
     fn zero_leaf_is_32_zero_bytes() {
         assert_eq!(ZERO_LEAF, [0u8; 32]);
         assert_eq!(empty_leaf(), ZERO_LEAF);
+    }
+
+    #[test]
+    fn inclusion_proof_trailing_bytes_rejected() {
+        let proof = SmtInclusionProof {
+            key: [1u8; 32],
+            value: Some([2u8; 32]),
+            siblings: vec![[3u8; 32], [4u8; 32]],
+        };
+        let mut bytes = proof.to_bytes();
+        // Exact bytes decode fine; trailing bytes are non-canonical (issue #450).
+        assert!(SmtInclusionProof::from_bytes(&bytes).is_some());
+        bytes.push(0x00);
+        assert!(SmtInclusionProof::from_bytes(&bytes).is_none());
     }
 
     #[test]
