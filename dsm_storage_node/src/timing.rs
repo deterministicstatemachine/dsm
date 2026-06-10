@@ -126,25 +126,6 @@ impl TimingStrategy for ImmediateTiming {
     }
 }
 
-/// Timing strategy factory
-pub struct TimingStrategyFactory;
-
-impl TimingStrategyFactory {
-    /// Create production timing strategy with exponential backoff
-    pub fn production() -> Box<dyn TimingStrategy> {
-        Box::new(ExponentialBackoffTiming::new(
-            60,   // 1 minute base delay (in iterations)
-            3600, // 1 hour max delay
-            10,   // max attempts
-        ))
-    }
-
-    /// Create test timing strategy (immediate)
-    pub fn test() -> Box<dyn TimingStrategy> {
-        Box::new(ImmediateTiming)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

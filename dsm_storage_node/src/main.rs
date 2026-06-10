@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{http::HeaderValue, middleware, Extension, Router};
+use axum::{middleware, Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
 
 use clap::Parser;
@@ -310,11 +310,6 @@ fn ensure_rustls_provider_installed() {
             log::error!("failed to install rustls ring CryptoProvider: {:?}", e);
         }
     });
-}
-
-#[allow(dead_code)]
-fn format_hsts_header(max_age: Option<u64>) -> Option<HeaderValue> {
-    max_age.and_then(|age| HeaderValue::from_str(&format!("max-age={age}")).ok())
 }
 
 fn main() -> Result<()> {
