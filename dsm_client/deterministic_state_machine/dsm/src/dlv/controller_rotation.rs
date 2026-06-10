@@ -77,10 +77,20 @@ impl core::fmt::Display for RotationError {
             PolicyMismatch => write!(f, "rotation dlv_policy_digest does not match"),
             StaleParent => write!(f, "rotation parent is not the current tip (stale/rollback)"),
             WrongController => write!(f, "old_controller_devid is not the active controller"),
-            ValueStateDrift => write!(f, "rotation does not preserve the latest value-state commit"),
-            ControllerUnchanged => write!(f, "new controller equals old controller (not a rotation)"),
-            ChildTipMismatch => write!(f, "child tip is not the canonical value-preserving child state"),
-            RecoveryAuthorityMismatch => write!(f, "authority public key does not match recovery_commit"),
+            ValueStateDrift => write!(
+                f,
+                "rotation does not preserve the latest value-state commit"
+            ),
+            ControllerUnchanged => {
+                write!(f, "new controller equals old controller (not a rotation)")
+            }
+            ChildTipMismatch => write!(
+                f,
+                "child tip is not the canonical value-preserving child state"
+            ),
+            RecoveryAuthorityMismatch => {
+                write!(f, "authority public key does not match recovery_commit")
+            }
             SignatureInvalid => write!(f, "recovery authority signature verification failed"),
             SignFailed(m) => write!(f, "sphincs sign failed: {m}"),
         }
@@ -288,7 +298,7 @@ mod tests {
     fn value_drift_rejected() {
         let (latest, mut r, pk) = fixture();
         r.latest_value_state_commit = [0xCD; 32]; // attempt to change the balance
-        // Signature now mismatches too, but the value-drift check fires first.
+                                                  // Signature now mismatches too, but the value-drift check fires first.
         assert_eq!(
             validate_controller_rotation(&r, &latest, &pk),
             Err(RotationError::ValueStateDrift)

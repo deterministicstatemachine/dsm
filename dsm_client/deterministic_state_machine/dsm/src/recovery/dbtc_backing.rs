@@ -121,7 +121,11 @@ mod tests {
                 for derivable in [false, true] {
                     let c = classify_dbtc_backing(&facts(unspent, confirmed, derivable));
                     if !(unspent && confirmed && derivable) {
-                        assert_ne!(c, DbtcVaultCondition::Spendable, "u={unspent} c={confirmed} d={derivable}");
+                        assert_ne!(
+                            c,
+                            DbtcVaultCondition::Spendable,
+                            "u={unspent} c={confirmed} d={derivable}"
+                        );
                     }
                 }
             }

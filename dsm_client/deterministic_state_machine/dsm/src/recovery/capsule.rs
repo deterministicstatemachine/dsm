@@ -26,8 +26,7 @@ const RECOVERY_AEAD_CONTEXT: &str = "DSM/recovery-aead\0";
 const RECOVERY_AUTHORITY_CONTEXT: &str = "DSM/recovery-authority\0";
 const RECOVERY_NONCE_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_NONCE;
 const RECOVERY_CHALLENGE_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_CHALLENGE;
-const RECOVERY_CONTACT_SET_DOMAIN: &str =
-    crate::common::domain_tags::TAG_DSM_RECOVERY_CONTACT_SET;
+const RECOVERY_CONTACT_SET_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_CONTACT_SET;
 
 /// Initialize the capsule encryption/decryption subsystem.
 pub fn init_capsule_subsystem() -> Result<(), DsmError> {
@@ -114,9 +113,7 @@ fn hash_sorted_contact_ids(sorted: &[String]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-pub fn compute_contact_set_commit(
-    counterparty_tips: &HashMap<String, (u64, Vec<u8>)>,
-) -> [u8; 32] {
+pub fn compute_contact_set_commit(counterparty_tips: &HashMap<String, (u64, Vec<u8>)>) -> [u8; 32] {
     let mut ids: Vec<String> = counterparty_tips.keys().cloned().collect();
     ids.sort_unstable();
     hash_sorted_contact_ids(&ids)
@@ -127,9 +124,7 @@ pub fn compute_contact_set_commit(
 /// canonical Crockford string used as the capsule's `counterparty_tips` keys, so
 /// the capsule and seal contact-set commitments are byte-identical for the same
 /// contact set (gate-set anchor consistency, R4).
-pub fn contact_set_commit_from_device_ids(
-    ids: &std::collections::BTreeSet<[u8; 32]>,
-) -> [u8; 32] {
+pub fn contact_set_commit_from_device_ids(ids: &std::collections::BTreeSet<[u8; 32]>) -> [u8; 32] {
     let mut strs: Vec<String> = ids
         .iter()
         .map(|id| crate::types::identifiers::encode_crockford(id))

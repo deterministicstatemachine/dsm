@@ -209,7 +209,10 @@ async fn put_anchor(
 
     match outcome {
         crate::db::RecoveryAnchorUpsertOutcome::Inserted => {
-            log::info!("PUT /recovery/authority-anchor for genesis={}: inserted", genesis);
+            log::info!(
+                "PUT /recovery/authority-anchor for genesis={}: inserted",
+                genesis
+            );
             Ok(StatusCode::CREATED)
         }
         crate::db::RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical => {
@@ -251,6 +254,7 @@ async fn get_anchor(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)] // unwrap/expect/unwrap_err acceptable in deterministic tests
     use super::*;
 
     fn valid_anchor_bytes(genesis: &[u8; 32]) -> Vec<u8> {
@@ -270,7 +274,10 @@ mod tests {
         let body = valid_anchor_bytes(&g);
         let v = validate_anchor(&body, &g).expect("valid");
         // Canonical re-encode round-trips and the hash is over the canonical bytes.
-        assert_eq!(v.anchor_hash, blake3_tagged(ANCHOR_STORE_TAG, &v.canonical_bytes));
+        assert_eq!(
+            v.anchor_hash,
+            blake3_tagged(ANCHOR_STORE_TAG, &v.canonical_bytes)
+        );
         // Re-validating the canonical bytes yields the same hash (idempotency key stable).
         let v2 = validate_anchor(&v.canonical_bytes, &g).expect("valid2");
         assert_eq!(v.anchor_hash, v2.anchor_hash);
@@ -279,7 +286,10 @@ mod tests {
     #[test]
     fn empty_body_rejected() {
         let g = [0x6E; 32];
-        assert_eq!(validate_anchor(&[], &g).unwrap_err(), AnchorValidationError::Empty);
+        assert_eq!(
+            validate_anchor(&[], &g).unwrap_err(),
+            AnchorValidationError::Empty
+        );
     }
 
     #[test]
@@ -303,7 +313,10 @@ mod tests {
         .encode_to_vec();
         assert!(matches!(
             validate_anchor(&body, &g).unwrap_err(),
-            AnchorValidationError::FieldLen { field: "genesis_id", .. }
+            AnchorValidationError::FieldLen {
+                field: "genesis_id",
+                ..
+            }
         ));
     }
 

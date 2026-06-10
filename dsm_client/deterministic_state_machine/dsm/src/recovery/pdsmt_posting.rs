@@ -228,7 +228,10 @@ impl PostedPdsmtHead {
             pd_smt_root: fixed32(&p.pd_smt_root, "pd_smt_root")?,
             leaf_index_root: fixed32(&p.leaf_index_root, "leaf_index_root")?,
             snapshot_id: fixed32(&p.snapshot_id, "snapshot_id")?,
-            authority_pubkey_commit: fixed32(&p.authority_pubkey_commit, "authority_pubkey_commit")?,
+            authority_pubkey_commit: fixed32(
+                &p.authority_pubkey_commit,
+                "authority_pubkey_commit",
+            )?,
             parent_head_hash: fixed32(&p.parent_head_hash, "parent_head_hash")?,
             head_number: p.head_number,
             signature: p.signature,
@@ -335,7 +338,10 @@ impl PostedPdsmtLeafRecord {
         let counterparty_genesis_id = if p.counterparty_genesis_id.is_empty() {
             None
         } else {
-            Some(fixed32(&p.counterparty_genesis_id, "counterparty_genesis_id")?)
+            Some(fixed32(
+                &p.counterparty_genesis_id,
+                "counterparty_genesis_id",
+            )?)
         };
         Ok(Self {
             genesis_id: fixed32(&p.genesis_id, "genesis_id")?,
@@ -462,9 +468,11 @@ pub fn build_pdsmt_snapshot(
             inclusion_proof_to_pd_smt_root: Vec::new(),
             inclusion_proof_to_leaf_index_root: Vec::new(),
         };
-        index.update_leaf(rel_key, &leaf.committed_digest()).map_err(|e| {
-            DsmError::invalid_operation(format!("pdsmt snapshot: leaf index update: {e}"))
-        })?;
+        index
+            .update_leaf(rel_key, &leaf.committed_digest())
+            .map_err(|e| {
+                DsmError::invalid_operation(format!("pdsmt snapshot: leaf index update: {e}"))
+            })?;
         leaves.push(leaf);
     }
     let leaf_index_root = *index.root();
@@ -582,7 +590,9 @@ mod tests {
         let (head, pk) = signed_head();
         let decoded = PostedPdsmtHead::from_bytes(&head.to_bytes()).expect("decode");
         assert_eq!(head, decoded);
-        decoded.verify(&anchored(&pk)).expect("verify after round-trip");
+        decoded
+            .verify(&anchored(&pk))
+            .expect("verify after round-trip");
         assert_eq!(head.to_bytes(), decoded.to_bytes());
     }
 
@@ -688,7 +698,8 @@ mod tests {
     #[test]
     fn leaf_verify_inclusion_passes_and_rejects_tamper() {
         let (l, pd_root, idx_root) = leaf_with_real_proofs();
-        l.verify_inclusion(&pd_root, &idx_root).expect("valid inclusion");
+        l.verify_inclusion(&pd_root, &idx_root)
+            .expect("valid inclusion");
         // Wrong roots fail.
         assert!(l.verify_inclusion(&[0u8; 32], &idx_root).is_err());
         assert!(l.verify_inclusion(&pd_root, &[0u8; 32]).is_err());
@@ -738,7 +749,10 @@ mod tests {
         other_reason.value_capability_reason = "dlv collateral lock".into();
         assert_ne!(yes.committed_digest(), other_reason.committed_digest());
         // Deterministic.
-        assert_eq!(yes.committed_digest(), leaf(ValueCapability::Yes).committed_digest());
+        assert_eq!(
+            yes.committed_digest(),
+            leaf(ValueCapability::Yes).committed_digest()
+        );
         // Inclusion proofs are NOT part of the committed value.
         let mut diff_proof = leaf(ValueCapability::Yes);
         diff_proof.inclusion_proof_to_pd_smt_root = vec![9, 9, 9];

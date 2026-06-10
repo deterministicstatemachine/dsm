@@ -433,8 +433,7 @@ pub fn set_recovery_state(state: RecoveryState) -> Result<()> {
 /// (Phase 5); at that point the only paths that re-open spend are the audited
 /// chokepoints. Every value-egress path MUST route through this gate.
 pub fn value_egress_block_reason() -> Option<&'static str> {
-    const UNREADABLE: &str =
-        "recovery state unreadable: value egress blocked (fail-closed)";
+    const UNREADABLE: &str = "recovery state unreadable: value egress blocked (fail-closed)";
 
     // Fail-closed read policy: a genuine DB read error means we CANNOT prove the
     // spend is safe, so we block. A legitimately-unset pref (`Ok(None)`) means
@@ -1480,7 +1479,10 @@ mod tests {
             RecoveryState::Polling,
             RecoveryState::Resuming,
         ] {
-            assert!(s.is_identity_recovery_in_progress(), "{s:?} must block egress");
+            assert!(
+                s.is_identity_recovery_in_progress(),
+                "{s:?} must block egress"
+            );
         }
         for s in [
             RecoveryState::None,
@@ -1601,8 +1603,14 @@ mod tests {
             // owns the transaction (never opening a new one).
             let binding = get_connection().expect("conn");
             let conn = binding.lock().expect("lock");
-            assert_eq!(bump_accepted_state_index_with_conn(&conn).expect("bump1"), 1);
-            assert_eq!(bump_accepted_state_index_with_conn(&conn).expect("bump2"), 2);
+            assert_eq!(
+                bump_accepted_state_index_with_conn(&conn).expect("bump1"),
+                1
+            );
+            assert_eq!(
+                bump_accepted_state_index_with_conn(&conn).expect("bump2"),
+                2
+            );
         } // release the connection lock before reading via a fresh connection
         assert_eq!(accepted_state_index(), 2);
     }
@@ -1750,7 +1758,9 @@ mod tests {
         let lock = get_asset_lock(dbtc).expect("read").expect("present");
         assert!(lock.is_dbtc, "dBTC must be auto-flagged");
         // Generic reconciliation is refused with MissingDbtcFrontierReplay.
-        let err = reconcile_token_asset(dbtc, 100, 100).unwrap_err().to_string();
+        let err = reconcile_token_asset(dbtc, 100, 100)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("MissingDbtcFrontierReplay"), "got: {err}");
         // dBTC stays LockedRecovery → egress still blocked.
         assert_eq!(
@@ -1792,7 +1802,7 @@ mod tests {
         let tok = b"ERA";
         lock_restored_bearer_asset(tok).expect("lock");
         reconcile_token_asset(tok, 100, 100).expect("reconcile"); // → Spendable
-        // Re-locking (e.g. resume re-run) must NOT clobber the reconciled Spendable state.
+                                                                  // Re-locking (e.g. resume re-run) must NOT clobber the reconciled Spendable state.
         lock_restored_bearer_asset(tok).expect("re-lock");
         assert_eq!(
             get_asset_lock(tok).expect("read").expect("present").state,

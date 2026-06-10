@@ -39,9 +39,11 @@ pub struct DeviceAdmissionSDK;
 
 impl DeviceAdmissionSDK {
     fn id32(v: Option<Vec<u8>>, what: &str) -> Result<[u8; 32], DsmError> {
-        let v = v.ok_or_else(|| DsmError::InvalidState(format!("device admission: missing {what}")))?;
-        <[u8; 32]>::try_from(v.as_slice())
-            .map_err(|_| DsmError::verification(format!("device admission: {what} is not 32 bytes")))
+        let v =
+            v.ok_or_else(|| DsmError::InvalidState(format!("device admission: missing {what}")))?;
+        <[u8; 32]>::try_from(v.as_slice()).map_err(|_| {
+            DsmError::verification(format!("device admission: {what} is not 32 bytes"))
+        })
     }
 
     async fn storage() -> Result<StorageNodeSDK, DsmError> {
@@ -72,8 +74,11 @@ impl DeviceAdmissionSDK {
             DsmError::InvalidState("admission request: no device signing pubkey".into())
         })?;
         let core = CoreSDK::new()?;
-        let sig = core
-            .sign_bytes_sphincs(&self_attest_digest(&genesis_hash, &new_device_id, &new_signing_pubkey))?;
+        let sig = core.sign_bytes_sphincs(&self_attest_digest(
+            &genesis_hash,
+            &new_device_id,
+            &new_signing_pubkey,
+        ))?;
         Ok(AddDeviceAdmissionRequestV1 {
             genesis_hash: genesis_hash.to_vec(),
             new_device_id: new_device_id.to_vec(),
@@ -86,14 +91,15 @@ impl DeviceAdmissionSDK {
     /// EXISTING (authority) device: verify the new device's request, gate-sign, and insert. Returns
     /// the gate-signed `AddDeviceAdmission` bytes to send back over BLE. Fail-closed.
     pub async fn approve_admission(request_bytes: &[u8]) -> Result<Vec<u8>, DsmError> {
-        let req = crate::generated::AddDeviceAdmissionRequestV1::decode(request_bytes).map_err(|e| {
-            DsmError::serialization_error(
-                format!("admission request decode: {e}"),
-                "AddDeviceAdmissionRequestV1",
-                None::<String>,
-                Some(e),
-            )
-        })?;
+        let req =
+            crate::generated::AddDeviceAdmissionRequestV1::decode(request_bytes).map_err(|e| {
+                DsmError::serialization_error(
+                    format!("admission request decode: {e}"),
+                    "AddDeviceAdmissionRequestV1",
+                    None::<String>,
+                    Some(e),
+                )
+            })?;
         let genesis = Self::id32(Some(req.genesis_hash.clone()), "genesis_hash")?;
         let new_device_id = Self::id32(Some(req.new_device_id.clone()), "new_device_id")?;
         if req.new_device_signing_pubkey.is_empty() || req.signature_by_new_device.is_empty() {
@@ -142,7 +148,9 @@ impl DeviceAdmissionSDK {
         let signer_pubkey = AppState::get_public_key().ok_or_else(|| {
             DsmError::InvalidState("approve_admission: no device signing pubkey".into())
         })?;
-        storage.apply_admitted_device(&admission, &signer_pubkey).await?;
+        storage
+            .apply_admitted_device(&admission, &signer_pubkey)
+            .await?;
         Ok(admission.to_bytes())
     }
 
@@ -173,8 +181,9 @@ impl DeviceAdmissionSDK {
             ));
         }
         let storage = Self::storage().await?;
-        let (device_ids, _version, root) =
-            storage.read_device_tree_state(&admission.genesis_hash).await?;
+        let (device_ids, _version, root) = storage
+            .read_device_tree_state(&admission.genesis_hash)
+            .await?;
         if !device_ids.contains(&admission.new_device_id) {
             return Err(DsmError::verification(
                 "adopt: new device not present in the published Device Tree",
@@ -223,15 +232,17 @@ impl DeviceAdmissionSDK {
         signer_pubkey: Vec<u8>,
     ) -> Result<Vec<u8>, DsmError> {
         let req_bytes = Self::build_admission_request(genesis, &entropy).await?;
-        let req = crate::generated::AddDeviceAdmissionRequestV1::decode(&*req_bytes).map_err(|e| {
-            DsmError::serialization_error(
-                format!("begin_admission re-decode: {e}"),
-                "AddDeviceAdmissionRequestV1",
-                None::<String>,
-                Some(e),
-            )
-        })?;
-        *PENDING_OUTBOUND.lock().unwrap_or_else(|p| p.into_inner()) = Some((entropy, signer_pubkey));
+        let req =
+            crate::generated::AddDeviceAdmissionRequestV1::decode(&*req_bytes).map_err(|e| {
+                DsmError::serialization_error(
+                    format!("begin_admission re-decode: {e}"),
+                    "AddDeviceAdmissionRequestV1",
+                    None::<String>,
+                    Some(e),
+                )
+            })?;
+        *PENDING_OUTBOUND.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((entropy, signer_pubkey));
         Self::build_admission_envelope(
             crate::generated::envelope::Payload::DeviceAdmissionRequest(req),
             &genesis,
@@ -280,16 +291,19 @@ impl DeviceAdmissionSDK {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
-            .ok_or_else(|| DsmError::InvalidState("no pending admission request to approve".into()))?;
+            .ok_or_else(|| {
+                DsmError::InvalidState("no pending admission request to approve".into())
+            })?;
         let admission_bytes = Self::approve_admission(&req_bytes).await?;
-        let adm_proto = crate::generated::AddDeviceAdmissionV1::decode(&*admission_bytes).map_err(|e| {
-            DsmError::serialization_error(
-                format!("approve_pending_admission re-decode: {e}"),
-                "AddDeviceAdmissionV1",
-                None::<String>,
-                Some(e),
-            )
-        })?;
+        let adm_proto =
+            crate::generated::AddDeviceAdmissionV1::decode(&*admission_bytes).map_err(|e| {
+                DsmError::serialization_error(
+                    format!("approve_pending_admission re-decode: {e}"),
+                    "AddDeviceAdmissionV1",
+                    None::<String>,
+                    Some(e),
+                )
+            })?;
         let genesis = Self::id32(Some(adm_proto.genesis_hash.clone()), "genesis_hash")?;
         let env = Self::build_admission_envelope(
             crate::generated::envelope::Payload::DeviceAdmission(adm_proto),

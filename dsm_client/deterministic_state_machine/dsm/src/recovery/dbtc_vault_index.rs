@@ -70,7 +70,9 @@ impl PostedDbtcVaultIndex {
     /// from the device's anchor + device-tree quorum). Fail-closed at every step.
     pub fn verify(&self, anchored_authority_commit: &[u8; 32]) -> Result<(), DsmError> {
         if self.authority_pubkey.is_empty() {
-            return Err(DsmError::verification("dbtc-vault-index: no authority_pubkey"));
+            return Err(DsmError::verification(
+                "dbtc-vault-index: no authority_pubkey",
+            ));
         }
         if compute_authority_pubkey_commit(&self.authority_pubkey) != self.authority_pubkey_commit {
             return Err(DsmError::verification(
@@ -115,7 +117,10 @@ impl PostedDbtcVaultIndex {
             genesis_id: fixed32(&p.genesis_id, "genesis_id")?,
             device_id: fixed32(&p.device_id, "device_id")?,
             vault_ids: p.vault_ids,
-            authority_pubkey_commit: fixed32(&p.authority_pubkey_commit, "authority_pubkey_commit")?,
+            authority_pubkey_commit: fixed32(
+                &p.authority_pubkey_commit,
+                "authority_pubkey_commit",
+            )?,
             authority_pubkey: p.authority_pubkey,
             signature: p.signature,
         })
@@ -172,7 +177,10 @@ mod tests {
     #[test]
     fn build_canonicalizes_and_verifies() {
         let (idx, pk) = sample();
-        assert_eq!(idx.vault_ids, vec!["VAULTA".to_string(), "VAULTB".to_string()]);
+        assert_eq!(
+            idx.vault_ids,
+            vec!["VAULTA".to_string(), "VAULTB".to_string()]
+        );
         idx.verify(&anchored(&pk)).expect("verify");
     }
 

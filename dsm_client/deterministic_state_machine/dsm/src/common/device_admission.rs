@@ -296,7 +296,14 @@ mod tests {
         let new_sig = sign_self_attestation(&genesis, &new_id, &new_pk, &new_sk).expect("self-sig");
         // Existing device gate-signs.
         let admission = assemble_and_gate_sign(
-            genesis, genesis, new_id, new_pk, parent_root, version, new_sig, &signer_sk,
+            genesis,
+            genesis,
+            new_id,
+            new_pk,
+            parent_root,
+            version,
+            new_sig,
+            &signer_sk,
         )
         .expect("gate-sign");
         (admission, signer_pk, genesis, current, version)
@@ -339,9 +346,13 @@ mod tests {
         // Attacker keeps a valid gate but swaps in a self-attestation under a different key.
         let (mut a, pk, genesis, current, version) = fixture();
         let (evil_pk, evil_sk) = kp(0x44);
-        a.signature_by_new_device =
-            sign_self_attestation(&genesis, &a.new_device_id, &a.new_device_signing_pubkey, &evil_sk)
-                .unwrap();
+        a.signature_by_new_device = sign_self_attestation(
+            &genesis,
+            &a.new_device_id,
+            &a.new_device_signing_pubkey,
+            &evil_sk,
+        )
+        .unwrap();
         let _ = evil_pk;
         // Self-attestation no longer matches new_device_signing_pubkey → rejected.
         assert!(verify_add_device_admission(&a, &genesis, &current, version, &pk).is_err());
@@ -358,7 +369,14 @@ mod tests {
         let parent_root = DeviceTree::new(current.clone()).root();
         let new_sig = sign_self_attestation(&genesis, &new_id, &new_pk, &new_sk).unwrap();
         let a = assemble_and_gate_sign(
-            genesis, stranger_id, new_id, new_pk, parent_root, 1, new_sig, &stranger_sk,
+            genesis,
+            stranger_id,
+            new_id,
+            new_pk,
+            parent_root,
+            1,
+            new_sig,
+            &stranger_sk,
         )
         .unwrap();
         assert!(verify_add_device_admission(&a, &genesis, &current, 1, &stranger_pk).is_err());

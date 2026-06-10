@@ -423,7 +423,7 @@ mod tests {
         let tombstone = create_tombstone(&[7; 32], 1, &[9; 32], device_id, &sk)?;
         let original = create_succession(
             &tombstone.tombstone_hash,
-            &[0xAB; 32].to_vec(),
+            [0xAB; 32].as_ref(),
             device_id,
             &sk,
         )?;
@@ -431,7 +431,10 @@ mod tests {
         let decoded = SuccessionReceipt::from_bytes(&original.to_bytes())?;
         assert_eq!(decoded.device_id, original.device_id);
         assert_eq!(decoded.tombstone_hash, original.tombstone_hash);
-        assert_eq!(decoded.new_device_commitment, original.new_device_commitment);
+        assert_eq!(
+            decoded.new_device_commitment,
+            original.new_device_commitment
+        );
         assert_eq!(decoded.tick, original.tick);
         assert_eq!(decoded.signature, original.signature);
         assert_eq!(decoded.succession_hash, original.succession_hash);

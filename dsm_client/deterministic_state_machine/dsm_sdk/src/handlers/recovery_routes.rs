@@ -141,7 +141,8 @@ impl AppRouterImpl {
                 // same anchor is idempotent.
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
                     rt.spawn(async {
-                        match crate::sdk::recovery_sdk::RecoverySDK::publish_authority_anchor().await
+                        match crate::sdk::recovery_sdk::RecoverySDK::publish_authority_anchor()
+                            .await
                         {
                             Ok(n) => log::info!(
                                 "[RECOVERY] published recovery-authority anchor to {n} node(s)"
@@ -153,8 +154,12 @@ impl AppRouterImpl {
                         }
                         // P5 dBTC enumeration: publish the signed dBTC vault index so a future
                         // recovered device can discover this identity's vaults (best-effort).
-                        match crate::sdk::recovery_sdk::RecoverySDK::publish_dbtc_vault_index().await {
-                            Ok(n) => log::info!("[RECOVERY] published dBTC vault index ({n} vaults)"),
+                        match crate::sdk::recovery_sdk::RecoverySDK::publish_dbtc_vault_index()
+                            .await
+                        {
+                            Ok(n) => {
+                                log::info!("[RECOVERY] published dBTC vault index ({n} vaults)")
+                            }
                             Err(e) => log::warn!(
                                 "[RECOVERY] dBTC vault index publish deferred (best-effort): {e}"
                             ),
@@ -219,7 +224,8 @@ impl AppRouterImpl {
                 // (spec §3.1, condition T0.2).
                 if mnemonic.split_whitespace().count() < 24 {
                     return err(
-                        "recovery.cacheMnemonic: mnemonic must be a 24-word (256-bit) phrase".into(),
+                        "recovery.cacheMnemonic: mnemonic must be a 24-word (256-bit) phrase"
+                            .into(),
                     );
                 }
 
@@ -944,7 +950,8 @@ impl AppRouterImpl {
                     Ok(c) => c,
                     Err(e) => return err(format!("recovery.activate: context: {e}")),
                 };
-                match crate::sdk::recovery_sdk::RecoverySDK::build_and_activate_recovery(&ctx).await {
+                match crate::sdk::recovery_sdk::RecoverySDK::build_and_activate_recovery(&ctx).await
+                {
                     Ok(()) => {
                         let resp = generated::AppStateResponse {
                             key: "recovery.activate".to_string(),
@@ -975,7 +982,8 @@ impl AppRouterImpl {
             // hard error). dBTC is unlocked only for vaults whose posted frontier proves it;
             // any incomplete/unverifiable evidence keeps it LockedRecovery (fail-closed).
             "recovery.reconcileDbtc" => {
-                let mut candidates: Vec<String> = match Self::decode_recovery_string_param(&i.args) {
+                let mut candidates: Vec<String> = match Self::decode_recovery_string_param(&i.args)
+                {
                     Ok(s) => s
                         .split(',')
                         .map(|v| v.trim().to_string())
@@ -987,7 +995,8 @@ impl AppRouterImpl {
                 // index for A_old. If that's unavailable, candidates stay empty and the
                 // reconcile returns the awaiting-enumeration status (dBTC stays locked).
                 if candidates.is_empty() {
-                    match crate::sdk::recovery_sdk::RecoverySDK::auto_dbtc_vault_candidates().await {
+                    match crate::sdk::recovery_sdk::RecoverySDK::auto_dbtc_vault_candidates().await
+                    {
                         Ok(ids) => candidates = ids,
                         Err(e) => log::debug!("[recovery.reconcileDbtc] no vault index: {e}"),
                     }

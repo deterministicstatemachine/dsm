@@ -876,10 +876,7 @@ pub async fn insert_pdsmt_head_if_chained(
 
 /// Return the payload of the device's latest (highest `head_number`) PDSMT head,
 /// or `None` if the chain is empty.
-pub async fn get_pdsmt_head_latest(
-    pool: &DBPool,
-    device_b32: &str,
-) -> Result<Option<Vec<u8>>> {
+pub async fn get_pdsmt_head_latest(pool: &DBPool, device_b32: &str) -> Result<Option<Vec<u8>>> {
     let device_b32 = device_b32.to_string();
     with_conn(pool, move |conn| {
         let payload: Option<Vec<u8>> = conn
@@ -1932,9 +1929,15 @@ mod tests {
     #[tokio::test]
     async fn recovery_anchor_identical_replay_is_idempotent() {
         let pool = make_inmem_pool().await;
-        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-bytes-1", 7)
-            .await
-            .unwrap();
+        insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xAB; 32],
+            b"anchor-bytes-1",
+            7,
+        )
+        .await
+        .unwrap();
         // Same genesis, same anchor_hash (even with a different tick) → idempotent.
         let outcome = insert_recovery_authority_anchor_if_absent(
             &pool,
@@ -1955,9 +1958,15 @@ mod tests {
     #[tokio::test]
     async fn recovery_anchor_different_same_genesis_conflicts() {
         let pool = make_inmem_pool().await;
-        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-bytes-1", 7)
-            .await
-            .unwrap();
+        insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xAB; 32],
+            b"anchor-bytes-1",
+            7,
+        )
+        .await
+        .unwrap();
         // Same genesis, DIFFERENT anchor_hash → bind-once rejects (no overwrite).
         let outcome = insert_recovery_authority_anchor_if_absent(
             &pool,
@@ -2015,12 +2024,18 @@ mod tests {
         assert_eq!(o1, PdsmtHeadChainOutcome::Appended { head_number: 1 });
 
         assert_eq!(
-            get_pdsmt_head_latest(&pool, "DEVA").await.unwrap().as_deref(),
+            get_pdsmt_head_latest(&pool, "DEVA")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"head1".as_ref())
         );
         // History retained: head at/before snapshot reads the older head.
         assert_eq!(
-            get_pdsmt_head_at(&pool, "DEVA", 0).await.unwrap().as_deref(),
+            get_pdsmt_head_at(&pool, "DEVA", 0)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"head0".as_ref())
         );
     }
@@ -2029,9 +2044,10 @@ mod tests {
     async fn pdsmt_head_non_genesis_first_rejected() {
         let pool = make_inmem_pool().await;
         // First head must be genesis (number 0, zero parent).
-        let bad_num = insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &[0x10; 32], &[0u8; 32], b"x", 1)
-            .await
-            .unwrap();
+        let bad_num =
+            insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &[0x10; 32], &[0u8; 32], b"x", 1)
+                .await
+                .unwrap();
         assert_eq!(bad_num, PdsmtHeadChainOutcome::Conflict);
         let bad_parent =
             insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &[0x10; 32], &[0x99; 32], b"x", 1)
@@ -2048,9 +2064,10 @@ mod tests {
             .await
             .unwrap();
         // Fork: head_number 1 but parent != h0.
-        let fork = insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &[0x11; 32], &[0xEE; 32], b"f", 2)
-            .await
-            .unwrap();
+        let fork =
+            insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &[0x11; 32], &[0xEE; 32], b"f", 2)
+                .await
+                .unwrap();
         assert_eq!(fork, PdsmtHeadChainOutcome::Conflict);
         // Gap: head_number 2 with no head 1 yet.
         let gap = insert_pdsmt_head_if_chained(&pool, "DEVA", 2, &[0x12; 32], &h0, b"g", 3)
@@ -2072,12 +2089,16 @@ mod tests {
             .unwrap();
         assert_eq!(replay, PdsmtHeadChainOutcome::AlreadyExistsIdentical);
         // DIFFERENT head at the same position → conflict (no overwrite).
-        let fork0 = insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &[0xAB; 32], &[0u8; 32], b"evil", 9)
-            .await
-            .unwrap();
+        let fork0 =
+            insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &[0xAB; 32], &[0u8; 32], b"evil", 9)
+                .await
+                .unwrap();
         assert_eq!(fork0, PdsmtHeadChainOutcome::Conflict);
         assert_eq!(
-            get_pdsmt_head_latest(&pool, "DEVA").await.unwrap().as_deref(),
+            get_pdsmt_head_latest(&pool, "DEVA")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(b"head0".as_ref())
         );
     }
