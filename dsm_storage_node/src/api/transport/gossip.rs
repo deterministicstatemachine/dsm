@@ -21,6 +21,10 @@ use subtle::ConstantTimeEq;
 
 const GOSSIP_TOKEN_HEADER: &str = "x-dsm-gossip-token";
 const GOSSIP_TOKEN_ENV: &str = "DSM_GOSSIP_TOKEN";
+/// Explicit, opt-in escape hatch for local development only. When the gossip
+/// token is unset, auth stays fail-closed unless this is set to `1` in a debug
+/// build.
+const GOSSIP_INSECURE_ENV: &str = "DSM_INSECURE_ALLOW_NO_GOSSIP_TOKEN";
 
 fn token_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
@@ -29,17 +33,18 @@ fn token_matches(provided: &str, expected: &str) -> bool {
 async fn require_gossip_token(headers: HeaderMap) -> Result<(), StatusCode> {
     let expected = env::var(GOSSIP_TOKEN_ENV).unwrap_or_default();
     if expected.trim().is_empty() {
-        if cfg!(debug_assertions) {
+        // Fail closed by default — a missing gossip token must never silently
+        // authorize /gossip, which mutates current_tick and feeds node-state /
+        // replication. Local dev can explicitly opt out by setting
+        // GOSSIP_INSECURE_ENV=1 (debug builds only).
+        if cfg!(debug_assertions) && env::var(GOSSIP_INSECURE_ENV).as_deref() == Ok("1") {
             log::warn!(
-                "gossip auth disabled: {} not set (debug build)",
-                GOSSIP_TOKEN_ENV
+                "gossip auth explicitly disabled via {}=1 (debug build)",
+                GOSSIP_INSECURE_ENV
             );
             return Ok(());
         }
-        log::error!(
-            "gossip auth disabled in release: {} not set",
-            GOSSIP_TOKEN_ENV
-        );
+        log::error!("gossip auth required but {} not set", GOSSIP_TOKEN_ENV);
         return Err(StatusCode::UNAUTHORIZED);
     }
 
