@@ -93,6 +93,7 @@ fn compute_initial_chain_tip(
 /// Build a minimal Transfer operation and its canonical bytes.
 fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: recipient.to_vec(),
         amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"ERA".to_vec(),

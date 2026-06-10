@@ -982,10 +982,12 @@ impl<I: Send + Sync> TokenSDK<I> {
             } => {
                 let sender = self.core_sdk.get_current_state()?.device_info.device_id;
 
+                let policy_commit = self.resolve_policy_commit_strict(token_id)?;
                 let mut op = Operation::Transfer {
                     to_device_id: recipient.to_vec(),
                     amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
+                    policy_commit,
                     mode: TransactionMode::Bilateral,
                     nonce: Vec::new(),
                     verification: VerificationType::Standard,
@@ -1491,10 +1493,12 @@ impl<I: Send + Sync> TokenSDK<I> {
         message: String,
         use_bilateral: bool,
     ) -> Result<Operation, DsmError> {
+        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
         let mut op = Operation::Transfer {
             to_device_id: recipient.as_bytes().to_vec(),
             amount,
             token_id: token_id.into_bytes(),
+            policy_commit,
             message,
             mode: if use_bilateral {
                 TransactionMode::Bilateral
@@ -1544,6 +1548,8 @@ impl<I: Send + Sync> TokenSDK<I> {
             to_device_id: to.as_bytes().to_vec(),
             amount: Balance::zero(),
             token_id: vec![],
+            // Legacy placeholder builder (empty token, zero amount).
+            policy_commit: [0u8; 32],
             mode: TransactionMode::Bilateral,
             nonce: self.generate_nonce(),
             verification: VerificationType::Standard,
@@ -1570,10 +1576,12 @@ impl<I: Send + Sync> TokenSDK<I> {
     ) -> Result<Operation, DsmError> {
         let id = commitment.id.clone();
 
+        let policy_commit = self.resolve_policy_commit_strict("ERA")?;
         let mut op = Operation::Transfer {
             to_device_id: id.as_bytes().to_vec(),
             amount: Balance::zero(),
             token_id: b"ERA".to_vec(),
+            policy_commit,
             mode: TransactionMode::Bilateral,
             nonce: self.generate_nonce(),
             verification: VerificationType::Standard,
@@ -1944,8 +1952,10 @@ impl<I: Send + Sync> TokenSDK<I> {
             ));
         }
 
+        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
         let mut bilateral_transfer_op = Operation::Transfer {
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit,
             to_device_id: recipient.to_vec(),
             amount: Balance::from_state(amount, state_hash.clone().try_into().unwrap_or([0u8; 32])),
             recipient: recipient_public_key,
@@ -2377,10 +2387,12 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         let current_state = self.core_sdk.get_current_state()?;
+        let fee_policy_commit = self.resolve_policy_commit_strict("ERA")?;
         let mut fee_transfer_op = Operation::Transfer {
             to_device_id: b"system.fee.device_id".to_vec(),
             amount: Balance::from_state(fee, state_hash.clone().try_into().unwrap_or([0u8; 32])),
             token_id: b"ERA".to_vec(),
+            policy_commit: fee_policy_commit,
             mode: TransactionMode::Bilateral,
             nonce: self.generate_nonce(),
             verification: VerificationType::Standard,
@@ -2557,8 +2569,10 @@ impl<I: Send + Sync> TokenSDK<I> {
             ));
         }
 
+        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
         let mut op = Operation::Transfer {
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit,
             to_device_id: recipient_device_id.clone(),
             amount: Balance::from_state(amount, state_hash),
             mode: TransactionMode::Unilateral,

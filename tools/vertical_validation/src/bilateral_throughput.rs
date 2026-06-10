@@ -184,6 +184,7 @@ fn benchmark_with_signing(
 
         // Sign a transfer
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             token_id: "ERA".into(),
             to_device_id: vec![0xDD; 32],
             amount: Balance::from_state(1, state.hash),

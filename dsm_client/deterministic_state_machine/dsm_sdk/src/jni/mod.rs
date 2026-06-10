@@ -56,7 +56,6 @@ pub mod unified_protobuf_bridge;
 /// Create genesis via MPC (Android only)
 #[cfg(target_os = "android")]
 #[cfg(target_os = "android")]
-pub mod secondary_device;
 
 /// BLE bridge JNI entrypoints (Android + bluetooth only)
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -69,7 +68,6 @@ pub use crate::sdk::session_manager::set_sdk_ready;
 #[allow(unused_imports)]
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
-pub use self::secondary_device::*;
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
 pub use self::cdbrw::*;
