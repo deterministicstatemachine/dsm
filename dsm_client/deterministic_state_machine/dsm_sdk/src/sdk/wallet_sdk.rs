@@ -13,7 +13,6 @@ use super::identity_sdk::IdentitySDK;
 use super::storage_sync_sdk::{StorageSyncSdk, WalletDisplayData};
 use super::token_sdk::TokenSDK;
 
-use dsm::crypto;
 use dsm::types::error::DsmError;
 use dsm::types::state_types::State;
 use dsm::types::token_types::{Balance, TokenOperation};
@@ -1065,11 +1064,14 @@ impl WalletSDK {
             ));
         }
         self.update_activity_sync();
-        let _entropy = crypto::generate_nonce_32();
-        let mnemonic = "quantum resist secure wallet phrase post entropy example".to_string();
-        self.config.write().recovery_options.mnemonic = Some(mnemonic.clone());
-        log::info!("Generated recovery mnemonic");
-        Ok(mnemonic)
+        // DSM recovery is recovery-capsule based (see `recovery_sdk` /
+        // `crate::recovery`), not BIP39 mnemonic based. This entry point
+        // previously returned a hardcoded constant phrase that recovered
+        // nothing — a dangerous fake seed. Fail explicitly rather than hand a
+        // caller a worthless "recovery" string.
+        Err(DsmError::invalid_operation(
+            "mnemonic-based recovery is not supported; use recovery capsules (recovery_sdk)",
+        ))
     }
 
     pub fn create_backup(&self, path: &Path) -> Result<(), DsmError> {
@@ -1767,18 +1769,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_generate_recovery_mnemonic_and_config() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_generate_recovery_mnemonic_is_unsupported() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.unlock("")?;
-        let mnem = wallet.generate_recovery_mnemonic()?;
-        assert!(mnem.contains("quantum"));
-        let cfg = wallet.config.read();
-        let m = cfg
-            .recovery_options
-            .mnemonic
-            .as_ref()
-            .unwrap_or_else(|| panic!("mnemonic not set"));
-        assert_eq!(m, &mnem);
+        // Mnemonic-based recovery is intentionally unsupported (DSM uses
+        // recovery capsules); the call must fail rather than fabricate a seed.
+        assert!(wallet.generate_recovery_mnemonic().is_err());
+        assert!(wallet.config.read().recovery_options.mnemonic.is_none());
         Ok(())
     }
 
