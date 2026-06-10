@@ -311,6 +311,36 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
                     ON device_tree_states(genesis_b32, version_number);
+
+                -- Single-assignment store for recovery-authority anchors
+                -- (spec §0.5 bind-once). Keyed by genesis: the FIRST valid
+                -- anchor for a genesis wins and is immutable thereafter; a
+                -- different anchor for the same genesis is rejected (409).
+                -- Storage enforces single-assignment ONLY — it does not attest
+                -- recovery validity; clients verify the anchor cryptographically.
+                CREATE TABLE IF NOT EXISTS recovery_authority_anchors (
+                    genesis_b32        TEXT PRIMARY KEY,
+                    anchor_hash        BLOB NOT NULL,
+                    payload            BLOB NOT NULL,
+                    first_written_tick INTEGER NOT NULL
+                );
+
+                -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
+                -- layer 1). One row per (device, head_number); a new head is
+                -- accepted only if it links the current tip (parent_head_hash ==
+                -- current head_hash) at the next head_number. No overwrite, no
+                -- fork. Full history is retained so recovery can read the head at
+                -- or before the tombstone snapshot. Storage enforces the chain
+                -- shape ONLY; clients verify head signatures + inclusion.
+                CREATE TABLE IF NOT EXISTS pdsmt_head_chain (
+                    device_b32        TEXT NOT NULL,
+                    head_number       INTEGER NOT NULL,
+                    head_hash         BLOB NOT NULL,
+                    parent_head_hash  BLOB NOT NULL,
+                    payload           BLOB NOT NULL,
+                    inserted_at_tick  INTEGER NOT NULL,
+                    PRIMARY KEY (device_b32, head_number)
+                );
             "#,
         )?;
         Ok(())
@@ -655,6 +685,235 @@ pub async fn get_device_tree_state_version(
             )
             .optional()?;
         Ok(version_i64.map(|v| u64::try_from(v).unwrap_or(0)))
+    })
+    .await
+}
+
+/// Outcome of [`insert_recovery_authority_anchor_if_absent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAnchorUpsertOutcome {
+    /// No prior anchor existed for this genesis; the row was newly inserted.
+    Inserted,
+    /// An identical anchor (same `anchor_hash`) already exists — idempotent replay.
+    AlreadyExistsIdentical,
+    /// A DIFFERENT anchor already exists for this genesis — rejected (bind-once).
+    Conflict,
+}
+
+/// Single-assignment insert of a recovery-authority anchor, keyed by genesis
+/// (spec §0.5 bind-once). First write wins; an identical replay (same
+/// `anchor_hash`) is idempotent; any DIFFERENT anchor for the same genesis is
+/// rejected. The read-then-write is wrapped in one transaction so concurrent
+/// writers serialise. Storage enforces single-assignment ONLY — it does NOT
+/// attest recovery validity; clients verify the anchor cryptographically.
+pub async fn insert_recovery_authority_anchor_if_absent(
+    pool: &DBPool,
+    genesis_b32: &str,
+    anchor_hash: &[u8],
+    payload: &[u8],
+    first_written_tick: u64,
+) -> Result<RecoveryAnchorUpsertOutcome> {
+    let genesis_b32 = genesis_b32.to_string();
+    let anchor_hash = anchor_hash.to_vec();
+    let payload = payload.to_vec();
+    let tick_i64 = i64::try_from(first_written_tick)
+        .map_err(|_| anyhow!("first_written_tick {first_written_tick} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        let prior_hash: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT anchor_hash FROM recovery_authority_anchors WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let outcome = match prior_hash {
+            Some(existing) if existing == anchor_hash => {
+                RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical
+            }
+            Some(_) => RecoveryAnchorUpsertOutcome::Conflict,
+            None => {
+                tx.execute(
+                    "INSERT INTO recovery_authority_anchors
+                       (genesis_b32, anchor_hash, payload, first_written_tick)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![genesis_b32, anchor_hash, payload, tick_i64],
+                )?;
+                RecoveryAnchorUpsertOutcome::Inserted
+            }
+        };
+
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Return the persisted recovery-authority anchor payload bytes for a genesis,
+/// or `None` if none has been written.
+pub async fn get_recovery_authority_anchor_payload(
+    pool: &DBPool,
+    genesis_b32: &str,
+) -> Result<Option<Vec<u8>>> {
+    let genesis_b32 = genesis_b32.to_string();
+    with_conn(pool, move |conn| {
+        let payload: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM recovery_authority_anchors WHERE genesis_b32=?1",
+                params![genesis_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload)
+    })
+    .await
+}
+
+// ============================================================
+// Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4 layer 1)
+// ============================================================
+
+/// Outcome of [`insert_pdsmt_head_if_chained`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PdsmtHeadChainOutcome {
+    /// The head was appended at `head_number` (0 = genesis head).
+    Appended { head_number: u64 },
+    /// A head with the SAME hash already exists at this `head_number` — idempotent replay.
+    AlreadyExistsIdentical,
+    /// The head does not link the current tip (fork / gap / stale / position mismatch).
+    Conflict,
+}
+
+/// Append a PDSMT head iff it correctly links the device's current chain tip:
+/// the first head must be the genesis head (`head_number == 0`, `parent_head_hash`
+/// all-zero); a later head must have `head_number == tip + 1` and
+/// `parent_head_hash == tip head_hash`. An identical replay at an existing position
+/// is idempotent; anything else is a [`PdsmtHeadChainOutcome::Conflict`]. Read+write
+/// run in one transaction so concurrent posters serialise. Append-only: existing rows
+/// are never updated or deleted (full history retained for snapshot reads).
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_pdsmt_head_if_chained(
+    pool: &DBPool,
+    device_b32: &str,
+    head_number: u64,
+    head_hash: &[u8],
+    parent_head_hash: &[u8],
+    payload: &[u8],
+    inserted_at_tick: u64,
+) -> Result<PdsmtHeadChainOutcome> {
+    let device_b32 = device_b32.to_string();
+    let head_hash = head_hash.to_vec();
+    let parent_head_hash = parent_head_hash.to_vec();
+    let payload = payload.to_vec();
+    let head_number_i64 = i64::try_from(head_number)
+        .map_err(|_| anyhow!("head_number {head_number} does not fit in i64"))?;
+    let tick_i64 = i64::try_from(inserted_at_tick)
+        .map_err(|_| anyhow!("inserted_at_tick {inserted_at_tick} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        // A row already at this position? (idempotent replay vs position fork)
+        let at_hash: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT head_hash FROM pdsmt_head_chain WHERE device_b32=?1 AND head_number=?2",
+                params![device_b32, head_number_i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let outcome = if let Some(existing) = at_hash {
+            if existing == head_hash {
+                PdsmtHeadChainOutcome::AlreadyExistsIdentical
+            } else {
+                PdsmtHeadChainOutcome::Conflict
+            }
+        } else {
+            // Current tip (highest head_number) for this device.
+            let tip: Option<(i64, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT head_number, head_hash FROM pdsmt_head_chain
+                     WHERE device_b32=?1 ORDER BY head_number DESC LIMIT 1",
+                    params![device_b32],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+
+            let chains = match &tip {
+                None => head_number == 0 && parent_head_hash.iter().all(|&b| b == 0),
+                Some((tip_n, tip_hash)) => {
+                    let tip_n_u = u64::try_from(*tip_n).unwrap_or(u64::MAX);
+                    head_number == tip_n_u.saturating_add(1) && &parent_head_hash == tip_hash
+                }
+            };
+
+            if chains {
+                tx.execute(
+                    "INSERT INTO pdsmt_head_chain
+                       (device_b32, head_number, head_hash, parent_head_hash, payload, inserted_at_tick)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        device_b32,
+                        head_number_i64,
+                        head_hash,
+                        parent_head_hash,
+                        payload,
+                        tick_i64
+                    ],
+                )?;
+                PdsmtHeadChainOutcome::Appended { head_number }
+            } else {
+                PdsmtHeadChainOutcome::Conflict
+            }
+        };
+
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Return the payload of the device's latest (highest `head_number`) PDSMT head,
+/// or `None` if the chain is empty.
+pub async fn get_pdsmt_head_latest(
+    pool: &DBPool,
+    device_b32: &str,
+) -> Result<Option<Vec<u8>>> {
+    let device_b32 = device_b32.to_string();
+    with_conn(pool, move |conn| {
+        let payload: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM pdsmt_head_chain WHERE device_b32=?1
+                 ORDER BY head_number DESC LIMIT 1",
+                params![device_b32],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload)
+    })
+    .await
+}
+
+/// Return the payload of the device's PDSMT head at a specific `head_number`
+/// (for reading the head at/before the recovery snapshot), or `None`.
+pub async fn get_pdsmt_head_at(
+    pool: &DBPool,
+    device_b32: &str,
+    head_number: u64,
+) -> Result<Option<Vec<u8>>> {
+    let device_b32 = device_b32.to_string();
+    let head_number_i64 = i64::try_from(head_number)
+        .map_err(|_| anyhow!("head_number {head_number} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let payload: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM pdsmt_head_chain WHERE device_b32=?1 AND head_number=?2",
+                params![device_b32, head_number_i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload)
     })
     .await
 }
@@ -1645,6 +1904,195 @@ mod tests {
             .await
             .expect("read payload");
         assert_eq!(p.as_deref(), Some(b"payload1".as_ref()));
+    }
+
+    // -----------------------------------------------------------------
+    // Recovery-authority anchor — single-assignment / bind-once (§0.5).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn recovery_anchor_first_write_inserts() {
+        let pool = make_inmem_pool().await;
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xAB; 32],
+            b"anchor-bytes-1",
+            7,
+        )
+        .await
+        .expect("insert");
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::Inserted);
+        let p = get_recovery_authority_anchor_payload(&pool, "GENESISA")
+            .await
+            .expect("read");
+        assert_eq!(p.as_deref(), Some(b"anchor-bytes-1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn recovery_anchor_identical_replay_is_idempotent() {
+        let pool = make_inmem_pool().await;
+        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-bytes-1", 7)
+            .await
+            .unwrap();
+        // Same genesis, same anchor_hash (even with a different tick) → idempotent.
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xAB; 32],
+            b"anchor-bytes-1",
+            99,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical);
+        let p = get_recovery_authority_anchor_payload(&pool, "GENESISA")
+            .await
+            .unwrap();
+        assert_eq!(p.as_deref(), Some(b"anchor-bytes-1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn recovery_anchor_different_same_genesis_conflicts() {
+        let pool = make_inmem_pool().await;
+        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-bytes-1", 7)
+            .await
+            .unwrap();
+        // Same genesis, DIFFERENT anchor_hash → bind-once rejects (no overwrite).
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISA",
+            &[0xCD; 32],
+            b"anchor-bytes-2",
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::Conflict);
+        // The first anchor is preserved unchanged.
+        let p = get_recovery_authority_anchor_payload(&pool, "GENESISA")
+            .await
+            .unwrap();
+        assert_eq!(p.as_deref(), Some(b"anchor-bytes-1".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn recovery_anchor_different_genesis_succeeds() {
+        let pool = make_inmem_pool().await;
+        insert_recovery_authority_anchor_if_absent(&pool, "GENESISA", &[0xAB; 32], b"anchor-a", 7)
+            .await
+            .unwrap();
+        let outcome = insert_recovery_authority_anchor_if_absent(
+            &pool,
+            "GENESISB",
+            &[0xCD; 32],
+            b"anchor-b",
+            8,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, RecoveryAnchorUpsertOutcome::Inserted);
+    }
+
+    // -----------------------------------------------------------------
+    // Append-only PDSMT head chain (§0.5 gap 13, R4 layer 1).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pdsmt_head_genesis_appends_then_valid_child_appends() {
+        let pool = make_inmem_pool().await;
+        let h0 = [0x10u8; 32];
+        let o0 = insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &h0, &[0u8; 32], b"head0", 1)
+            .await
+            .unwrap();
+        assert_eq!(o0, PdsmtHeadChainOutcome::Appended { head_number: 0 });
+
+        let h1 = [0x11u8; 32];
+        // Valid child: head_number 1, parent == h0.
+        let o1 = insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &h1, &h0, b"head1", 2)
+            .await
+            .unwrap();
+        assert_eq!(o1, PdsmtHeadChainOutcome::Appended { head_number: 1 });
+
+        assert_eq!(
+            get_pdsmt_head_latest(&pool, "DEVA").await.unwrap().as_deref(),
+            Some(b"head1".as_ref())
+        );
+        // History retained: head at/before snapshot reads the older head.
+        assert_eq!(
+            get_pdsmt_head_at(&pool, "DEVA", 0).await.unwrap().as_deref(),
+            Some(b"head0".as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn pdsmt_head_non_genesis_first_rejected() {
+        let pool = make_inmem_pool().await;
+        // First head must be genesis (number 0, zero parent).
+        let bad_num = insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &[0x10; 32], &[0u8; 32], b"x", 1)
+            .await
+            .unwrap();
+        assert_eq!(bad_num, PdsmtHeadChainOutcome::Conflict);
+        let bad_parent =
+            insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &[0x10; 32], &[0x99; 32], b"x", 1)
+                .await
+                .unwrap();
+        assert_eq!(bad_parent, PdsmtHeadChainOutcome::Conflict);
+    }
+
+    #[tokio::test]
+    async fn pdsmt_head_fork_and_gap_rejected() {
+        let pool = make_inmem_pool().await;
+        let h0 = [0x10u8; 32];
+        insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &h0, &[0u8; 32], b"head0", 1)
+            .await
+            .unwrap();
+        // Fork: head_number 1 but parent != h0.
+        let fork = insert_pdsmt_head_if_chained(&pool, "DEVA", 1, &[0x11; 32], &[0xEE; 32], b"f", 2)
+            .await
+            .unwrap();
+        assert_eq!(fork, PdsmtHeadChainOutcome::Conflict);
+        // Gap: head_number 2 with no head 1 yet.
+        let gap = insert_pdsmt_head_if_chained(&pool, "DEVA", 2, &[0x12; 32], &h0, b"g", 3)
+            .await
+            .unwrap();
+        assert_eq!(gap, PdsmtHeadChainOutcome::Conflict);
+    }
+
+    #[tokio::test]
+    async fn pdsmt_head_replay_idempotent_but_position_fork_conflicts() {
+        let pool = make_inmem_pool().await;
+        let h0 = [0x10u8; 32];
+        insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &h0, &[0u8; 32], b"head0", 1)
+            .await
+            .unwrap();
+        // Identical replay at position 0 → idempotent.
+        let replay = insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &h0, &[0u8; 32], b"head0", 9)
+            .await
+            .unwrap();
+        assert_eq!(replay, PdsmtHeadChainOutcome::AlreadyExistsIdentical);
+        // DIFFERENT head at the same position → conflict (no overwrite).
+        let fork0 = insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &[0xAB; 32], &[0u8; 32], b"evil", 9)
+            .await
+            .unwrap();
+        assert_eq!(fork0, PdsmtHeadChainOutcome::Conflict);
+        assert_eq!(
+            get_pdsmt_head_latest(&pool, "DEVA").await.unwrap().as_deref(),
+            Some(b"head0".as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn pdsmt_head_distinct_devices_independent() {
+        let pool = make_inmem_pool().await;
+        let a = insert_pdsmt_head_if_chained(&pool, "DEVA", 0, &[0x10; 32], &[0u8; 32], b"a0", 1)
+            .await
+            .unwrap();
+        let b = insert_pdsmt_head_if_chained(&pool, "DEVB", 0, &[0x20; 32], &[0u8; 32], b"b0", 1)
+            .await
+            .unwrap();
+        assert_eq!(a, PdsmtHeadChainOutcome::Appended { head_number: 0 });
+        assert_eq!(b, PdsmtHeadChainOutcome::Appended { head_number: 0 });
     }
 
     #[tokio::test]

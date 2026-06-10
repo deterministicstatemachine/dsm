@@ -1328,7 +1328,11 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         // Phase B.7 (issue #278) — DeviceTreeViewer payload is owned by
         // the SDK's identity routes (`identity.devtree.snapshot`); the
         // core bridge never constructs or consumes it.
-        | Some(gp::envelope::Payload::DeviceTreeSnapshotResponse(_)) => {
+        | Some(gp::envelope::Payload::DeviceTreeSnapshotResponse(_))
+        // Secondary-device admission envelopes are BLE-transport payloads handled by the
+        // bilateral transport adapter; the core bridge never routes them directly.
+        | Some(gp::envelope::Payload::DeviceAdmissionRequest(_))
+        | Some(gp::envelope::Payload::DeviceAdmission(_)) => {
             gp::envelope::Payload::Error(gp::Error {
                 code: 501,
                 message: "SDK-owned payloads are handled at the SDK layer".to_string(),

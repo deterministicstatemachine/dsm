@@ -88,10 +88,10 @@ pub(crate) struct CachedWithdrawalPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct QuorumDeviceIdentity {
-    device_id: [u8; 32],
-    genesis_hash: [u8; 32],
-    public_key: Vec<u8>,
+pub(crate) struct QuorumDeviceIdentity {
+    pub(crate) device_id: [u8; 32],
+    pub(crate) genesis_hash: [u8; 32],
+    pub(crate) public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -2456,7 +2456,7 @@ fn select_quorum_device_identity(
     None
 }
 
-async fn fetch_quorum_device_identity(
+pub(crate) async fn fetch_quorum_device_identity(
     storage_endpoints: &[String],
     device_id: [u8; 32],
 ) -> Result<QuorumDeviceIdentity, String> {
@@ -2653,7 +2653,7 @@ impl AppRouter for AppRouterImpl {
             // State/sys routes
             "state.export" | "state.info" | "sys.tick" => self.handle_state_query(q).await,
             // System routes
-            "system.genesis" | "system.secondary_device" => self.handle_system_query(q).await,
+            "system.genesis" => self.handle_system_query(q).await,
             // Faucet query
             "faucet.check_nearby" => self.handle_faucet_query(q).await,
             // Identity routes
@@ -2778,6 +2778,8 @@ impl AppRouter for AppRouterImpl {
             m if m.starts_with("recovery.") || m == "nfc.ring.write" || m == "nfc.ring.read" => {
                 self.handle_recovery_invoke(i).await
             }
+            // Secondary-device admission invoke routes (gated additional-device enrollment)
+            m if m.starts_with("device.") => self.handle_device_invoke(i).await,
             // Bitcoin invoke routes
             m if m.starts_with("bitcoin.") => self.handle_bitcoin_invoke(i).await,
             _ => err(format!(

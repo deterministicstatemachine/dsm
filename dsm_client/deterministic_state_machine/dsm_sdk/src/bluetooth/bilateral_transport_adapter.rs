@@ -61,6 +61,26 @@ impl BilateralTransportAdapter {
         &self.bilateral_handler
     }
 
+    /// Send a secondary-device admission REQUEST envelope to the existing device over BLE
+    /// (NEW-device initiate). Chunked transport (the admission is too large for QR).
+    pub async fn send_admission_request(
+        &self,
+        peer_address: &str,
+        envelope: &[u8],
+    ) -> Result<(), DsmError> {
+        queue_follow_up_chunks(peer_address, BleFrameType::DeviceAdmissionRequest, envelope).await
+    }
+
+    /// Send a gate-signed admission RESPONSE envelope back to the new device over BLE
+    /// (EXISTING-device approve). Chunked transport.
+    pub async fn send_admission_response(
+        &self,
+        peer_address: &str,
+        envelope: &[u8],
+    ) -> Result<(), DsmError> {
+        queue_follow_up_chunks(peer_address, BleFrameType::DeviceAdmissionResponse, envelope).await
+    }
+
     pub async fn cancel_prepared_session_for_counterparty(&self, counterparty_device_id: [u8; 32]) {
         self.bilateral_handler
             .cancel_prepared_session_for_counterparty(counterparty_device_id)
@@ -407,6 +427,41 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         .handle_commit_response(&message.payload)
                         .await?;
                     Ok(Vec::new())
+                }
+                // Secondary-device admission (§16.3). REQUEST: the existing device holds it pending
+                // the owner's explicit approval (the gate) — no immediate response. RESPONSE: the
+                // new device verifies + adopts.
+                BleFrameType::DeviceAdmissionRequest => {
+                    match crate::sdk::DeviceAdmissionSDK::receive_admission_request(
+                        &message.payload,
+                        &message.peer_address,
+                    ) {
+                        Ok(new_id) => {
+                            info!(
+                                "[ADMISSION] request from {} held pending owner approval (device {})",
+                                message.peer_address, new_id
+                            );
+                            Ok(Vec::new())
+                        }
+                        Err(e) => {
+                            warn!("[ADMISSION] request rejected: {e}");
+                            Err(e)
+                        }
+                    }
+                }
+                BleFrameType::DeviceAdmissionResponse => {
+                    match crate::sdk::DeviceAdmissionSDK::handle_admission_response(&message.payload)
+                        .await
+                    {
+                        Ok((_genesis, _new_id)) => {
+                            info!("[ADMISSION] adopted into the device tree");
+                            Ok(Vec::new())
+                        }
+                        Err(e) => {
+                            warn!("[ADMISSION] adopt failed: {e}");
+                            Err(e)
+                        }
+                    }
                 }
                 BleFrameType::Unspecified => Ok(vec![TransportOutbound::new(
                     BleFrameType::Unspecified,

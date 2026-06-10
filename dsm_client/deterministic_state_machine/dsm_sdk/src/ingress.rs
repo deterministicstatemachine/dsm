@@ -296,7 +296,7 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     // completed genesis before this code existed get their auth tokens
     // populated on the next launch.  Idempotent at the storage-node level;
     // tokens stored via `store_auth_token`, read on every PUT path via
-    // `BitcoinTapSdk::resolve_storage_auth`.  Best-effort: failures are
+    // `storage_io::resolve_storage_auth`.  Best-effort: failures are
     // logged but never block bootstrap completion.
     let device_id_b32 = crate::util::text_id::encode_base32_crockford(&context.device_id);
     let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&context.genesis_hash);

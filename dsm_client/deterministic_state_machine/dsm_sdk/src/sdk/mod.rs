@@ -48,6 +48,7 @@ pub mod b0x_sdk;
 pub mod chain_tip_store;
 pub mod core_sdk;
 pub mod counterparty_genesis_helpers;
+pub mod device_admission_sdk;
 pub mod dlv_sdk;
 pub mod external_commitment_sdk;
 // pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
@@ -68,6 +69,7 @@ pub mod unilateral_ops_sdk;
 pub mod discovery;
 #[cfg(target_os = "android")]
 pub mod preview;
+pub mod storage_io;
 pub mod storage_node_health;
 pub mod storage_node_sdk;
 
@@ -145,6 +147,7 @@ pub use bitcoin_key_store::BitcoinKeyStore;
 pub use dlv_pre_commitment_sdk::DlvPreCommitmentSdk;
 pub use dlv_receipt_sdk::DlvReceiptSdk;
 pub use recovery_sdk::RecoverySDK;
+pub use device_admission_sdk::DeviceAdmissionSDK;
 pub use token_sdk::TokenSDK;
 pub use token_mpc_sdk::TokenMpcSDK;
 // chain_tip_sync_sdk re-exports removed alongside the module deletion above.

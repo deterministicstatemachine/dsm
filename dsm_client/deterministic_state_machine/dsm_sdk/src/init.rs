@@ -27,6 +27,27 @@ use crate::handlers::misc_routes::dispatch_dbrw_query;
 use dsm::types::proto as pb;
 use prost::Message;
 
+/// Deterministically derive the device's identity signing keypair (SPHINCS+).
+///
+/// CANONICAL derivation — `genesis_hash || device_id || K_DBRW`, compressed by
+/// `SignatureKeyPair::generate_from_entropy` (domain tag `DSM/sphincs-seed`). This is
+/// the SOLE definition: both wallet init (below) and recovery-authority anchoring
+/// (`RecoverySDK`) MUST call it, so the re-derived keypair is byte-identical to the one
+/// registered in the device tree. A divergent copy would silently break every EK-cert
+/// chain and every recovery-authority anchor signature, so the derivation must never be
+/// duplicated inline.
+pub fn derive_device_signing_keypair(
+    genesis_hash: &[u8; 32],
+    device_id: &[u8; 32],
+    k_dbrw: &[u8; 32],
+) -> Result<dsm::crypto::signatures::SignatureKeyPair, dsm::types::error::DsmError> {
+    let mut key_entropy = Vec::with_capacity(96);
+    key_entropy.extend_from_slice(genesis_hash);
+    key_entropy.extend_from_slice(device_id);
+    key_entropy.extend_from_slice(k_dbrw);
+    dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&key_entropy)
+}
+
 #[derive(Debug, Clone)]
 pub struct SdkConfig {
     pub node_id: String,
@@ -490,11 +511,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // Get DBRW binding key for bilateral transaction gating (Canon 1)
         // Note: Health state tracking removed - always proceed
 
-        let mut key_entropy = Vec::with_capacity(96);
-        key_entropy.extend_from_slice(&gen_fixed);
-        key_entropy.extend_from_slice(&dev_fixed);
-        key_entropy.extend_from_slice(&dbrw_fixed);
-        let keypair = SignatureKeyPair::generate_from_entropy(&key_entropy)
+        let keypair = derive_device_signing_keypair(&gen_fixed, &dev_fixed, &dbrw_fixed)
             .map_err(|e| format!("deterministic keypair derivation failed: {e}"))?;
         log::info!(
             "[SDK Init] Derived signing keypair, pubkey_len={}",
@@ -632,4 +649,35 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_device_signing_keypair;
+
+    #[test]
+    fn device_signing_keypair_derivation_is_deterministic_and_sensitive() {
+        let g = [0x11u8; 32];
+        let d = [0x22u8; 32];
+        let k = [0x33u8; 32];
+        let a = derive_device_signing_keypair(&g, &d, &k).expect("derive a");
+        let b = derive_device_signing_keypair(&g, &d, &k).expect("derive b");
+        // Deterministic: same inputs → byte-identical keypair (the property that lets
+        // recovery re-derive the device key without persisting the secret).
+        assert_eq!(a.public_key, b.public_key);
+        assert_eq!(a.secret_key, b.secret_key);
+        // Sensitive: changing ANY of the three inputs changes the keypair.
+        assert_ne!(
+            a.public_key,
+            derive_device_signing_keypair(&[0x99; 32], &d, &k).unwrap().public_key
+        );
+        assert_ne!(
+            a.public_key,
+            derive_device_signing_keypair(&g, &[0x99; 32], &k).unwrap().public_key
+        );
+        assert_ne!(
+            a.public_key,
+            derive_device_signing_keypair(&g, &d, &[0x99; 32]).unwrap().public_key
+        );
+    }
 }

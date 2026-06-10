@@ -12,7 +12,7 @@
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
-use crate::types::proto::{Message as _, TombstoneReceiptProto};
+use crate::types::proto::{Message as _, SuccessionReceiptProto, TombstoneReceiptProto};
 use crate::utils::deterministic_time as dt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -143,6 +143,39 @@ impl SuccessionReceipt {
     /// Verify succession signature
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, DsmError> {
         sphincs_verify(public_key, &self.succession_hash, &self.signature)
+    }
+
+    /// Serialize to canonical protobuf bytes (mirrors `TombstoneReceipt::to_bytes`).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        SuccessionReceiptProto {
+            device_id: self.device_id.clone(),
+            tombstone_hash: self.tombstone_hash.clone(),
+            new_device_commitment: self.new_device_commitment.clone(),
+            tick: self.tick,
+            signature: self.signature.clone(),
+            succession_hash: self.succession_hash.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    /// Deserialize from protobuf bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        let p = SuccessionReceiptProto::decode(bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("SuccessionReceipt::from_bytes: {e}"),
+                "SuccessionReceipt",
+                None::<String>,
+                Some(e),
+            )
+        })?;
+        Ok(Self {
+            device_id: p.device_id,
+            tombstone_hash: p.tombstone_hash,
+            new_device_commitment: p.new_device_commitment,
+            tick: p.tick,
+            signature: p.signature,
+            succession_hash: p.succession_hash,
+        })
     }
 }
 
@@ -379,6 +412,32 @@ mod tests {
         assert_eq!(decoded.tombstone_hash, original.tombstone_hash);
         assert!(verify_tombstone(&decoded, &pk)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_succession_protobuf_roundtrip() -> Result<(), DsmError> {
+        init_tombstone_subsystem();
+        let device_id = "device_succession_round_trip";
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair()?;
+        let tombstone = create_tombstone(&[7; 32], 1, &[9; 32], device_id, &sk)?;
+        let original = create_succession(
+            &tombstone.tombstone_hash,
+            &[0xAB; 32].to_vec(),
+            device_id,
+            &sk,
+        )?;
+
+        let decoded = SuccessionReceipt::from_bytes(&original.to_bytes())?;
+        assert_eq!(decoded.device_id, original.device_id);
+        assert_eq!(decoded.tombstone_hash, original.tombstone_hash);
+        assert_eq!(decoded.new_device_commitment, original.new_device_commitment);
+        assert_eq!(decoded.tick, original.tick);
+        assert_eq!(decoded.signature, original.signature);
+        assert_eq!(decoded.succession_hash, original.succession_hash);
+        assert!(verify_succession(&decoded, &tombstone.tombstone_hash, &pk)?);
+        // Re-encode is byte-identical (canonical).
+        assert_eq!(original.to_bytes(), decoded.to_bytes());
         Ok(())
     }
 }

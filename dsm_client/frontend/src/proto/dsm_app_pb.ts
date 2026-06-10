@@ -688,6 +688,20 @@ export enum BleFrameType {
    * @generated from enum value: BLE_FRAME_TYPE_BILATERAL_CONFIRM = 12;
    */
   BILATERAL_CONFIRM = 12,
+
+  /**
+   * Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
+   *
+   * @generated from enum value: BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST = 13;
+   */
+  DEVICE_ADMISSION_REQUEST = 13,
+
+  /**
+   * Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
+   *
+   * @generated from enum value: BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14;
+   */
+  DEVICE_ADMISSION_RESPONSE = 14,
 }
 // Retrieve enum metadata with: proto3.getEnumType(BleFrameType)
 proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
@@ -704,6 +718,46 @@ proto3.util.setEnumType(BleFrameType, "dsm.BleFrameType", [
   { no: 10, name: "BLE_FRAME_TYPE_RECONCILIATION_REQUEST" },
   { no: 11, name: "BLE_FRAME_TYPE_RECONCILIATION_RESPONSE" },
   { no: 12, name: "BLE_FRAME_TYPE_BILATERAL_CONFIRM" },
+  { no: 13, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST" },
+  { no: 14, name: "BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE" },
+]);
+
+/**
+ * Canonical value-capability (R4 anti-shrink) — the ONLY representation; there is no
+ * legacy bool. UNSPECIFIED(0) is invalid and MUST be rejected on decode (never read as
+ * NO). YES/UNKNOWN include in the recovery gate; only proven NO excludes.
+ *
+ * @generated from enum dsm.ValueCapabilityV1
+ */
+export enum ValueCapabilityV1 {
+  /**
+   * invalid sentinel — decode rejects
+   *
+   * @generated from enum value: VALUE_CAPABILITY_V1_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: VALUE_CAPABILITY_V1_YES = 1;
+   */
+  YES = 1,
+
+  /**
+   * @generated from enum value: VALUE_CAPABILITY_V1_NO = 2;
+   */
+  NO = 2,
+
+  /**
+   * @generated from enum value: VALUE_CAPABILITY_V1_UNKNOWN = 3;
+   */
+  UNKNOWN = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(ValueCapabilityV1)
+proto3.util.setEnumType(ValueCapabilityV1, "dsm.ValueCapabilityV1", [
+  { no: 0, name: "VALUE_CAPABILITY_V1_UNSPECIFIED" },
+  { no: 1, name: "VALUE_CAPABILITY_V1_YES" },
+  { no: 2, name: "VALUE_CAPABILITY_V1_NO" },
+  { no: 3, name: "VALUE_CAPABILITY_V1_UNKNOWN" },
 ]);
 
 /**
@@ -11863,6 +11917,280 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
 }
 
 /**
+ * Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
+ * device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
+ * device signing key (the gate — only a key already in the tree can authorize the insert). The new
+ * device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
+ * bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+ * the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
+ * Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
+ * (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
+ * signature_by_new_device verifies under new_device_signing_pubkey; (d) parent root/version match
+ * the current accepted frontier; (e) inserting new_device_id yields the next root. Replay is
+ * prevented by the monotonic version (an admission only applies at the frontier it was signed for).
+ *
+ * @generated from message dsm.AddDeviceAdmissionV1
+ */
+export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signer_device_id = 2;
+   */
+  signerDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_id = 3;
+   */
+  newDeviceId = new Uint8Array(0);
+
+  /**
+   * new device SPHINCS+ signing pubkey
+   *
+   * @generated from field: bytes new_device_signing_pubkey = 4;
+   */
+  newDeviceSigningPubkey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes parent_device_tree_root = 5;
+   */
+  parentDeviceTreeRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 parent_device_tree_version = 6;
+   */
+  parentDeviceTreeVersion = protoInt64.zero;
+
+  /**
+   * existing device — the gate
+   *
+   * @generated from field: bytes signature_by_signer_device = 7;
+   */
+  signatureBySignerDevice = new Uint8Array(0);
+
+  /**
+   * new device — DBRW-bound possession
+   *
+   * @generated from field: bytes signature_by_new_device = 8;
+   */
+  signatureByNewDevice = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AddDeviceAdmissionV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdmissionV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "new_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "new_device_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "parent_device_tree_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "parent_device_tree_version", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "signature_by_signer_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "signature_by_new_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionV1 {
+    return new AddDeviceAdmissionV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdmissionV1 {
+    return new AddDeviceAdmissionV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdmissionV1 {
+    return new AddDeviceAdmissionV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdmissionV1 | PlainMessage<AddDeviceAdmissionV1> | undefined, b: AddDeviceAdmissionV1 | PlainMessage<AddDeviceAdmissionV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdmissionV1, a, b);
+  }
+}
+
+/**
+ * The new (joining) device's half of an admission, sent to the existing authorized device over the
+ * co-present BLE link. The existing device verifies the self-attestation, then gate-signs an
+ * AddDeviceAdmissionV1 and inserts. (genesis_hash comes from the existing device's QR the new
+ * device scanned.)
+ *
+ * @generated from message dsm.AddDeviceAdmissionRequestV1
+ */
+export class AddDeviceAdmissionRequestV1 extends Message<AddDeviceAdmissionRequestV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_id = 2;
+   */
+  newDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_signing_pubkey = 3;
+   */
+  newDeviceSigningPubkey = new Uint8Array(0);
+
+  /**
+   * DBRW-bound self-attestation
+   *
+   * @generated from field: bytes signature_by_new_device = 4;
+   */
+  signatureByNewDevice = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AddDeviceAdmissionRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdmissionRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "new_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "new_device_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "signature_by_new_device", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionRequestV1 {
+    return new AddDeviceAdmissionRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdmissionRequestV1 {
+    return new AddDeviceAdmissionRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdmissionRequestV1 {
+    return new AddDeviceAdmissionRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdmissionRequestV1 | PlainMessage<AddDeviceAdmissionRequestV1> | undefined, b: AddDeviceAdmissionRequestV1 | PlainMessage<AddDeviceAdmissionRequestV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdmissionRequestV1, a, b);
+  }
+}
+
+/**
+ * NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
+ * existing device, the existing device's signing pubkey (from the QR the new device scanned), and
+ * the same 32-byte entropy used to build the request (for identity setup).
+ *
+ * @generated from message dsm.AddDeviceAdoptRequestV1
+ */
+export class AddDeviceAdoptRequestV1 extends Message<AddDeviceAdoptRequestV1> {
+  /**
+   * AddDeviceAdmissionV1 bytes
+   *
+   * @generated from field: bytes admission = 1;
+   */
+  admission = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signer_signing_pubkey = 2;
+   */
+  signerSigningPubkey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes entropy = 3;
+   */
+  entropy = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AddDeviceAdoptRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdoptRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "admission", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signer_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdoptRequestV1 {
+    return new AddDeviceAdoptRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdoptRequestV1 {
+    return new AddDeviceAdoptRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdoptRequestV1 {
+    return new AddDeviceAdoptRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdoptRequestV1 | PlainMessage<AddDeviceAdoptRequestV1> | undefined, b: AddDeviceAdoptRequestV1 | PlainMessage<AddDeviceAdoptRequestV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdoptRequestV1, a, b);
+  }
+}
+
+/**
+ * NEW-device initiate input (device.requestAdmission): everything the new device needs to start the
+ * admission handshake with the existing device over BLE. genesis_hash + signer_signing_pubkey come
+ * from the existing device's scanned QR; entropy is platform-generated; ble_address is the existing
+ * device's BLE address (from discovery).
+ *
+ * @generated from message dsm.AddDeviceAdmissionInitiateV1
+ */
+export class AddDeviceAdmissionInitiateV1 extends Message<AddDeviceAdmissionInitiateV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes entropy = 2;
+   */
+  entropy = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signer_signing_pubkey = 3;
+   */
+  signerSigningPubkey = new Uint8Array(0);
+
+  /**
+   * @generated from field: string ble_address = 4;
+   */
+  bleAddress = "";
+
+  constructor(data?: PartialMessage<AddDeviceAdmissionInitiateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdmissionInitiateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "signer_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionInitiateV1 {
+    return new AddDeviceAdmissionInitiateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdmissionInitiateV1 {
+    return new AddDeviceAdmissionInitiateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdmissionInitiateV1 {
+    return new AddDeviceAdmissionInitiateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdmissionInitiateV1 | PlainMessage<AddDeviceAdmissionInitiateV1> | undefined, b: AddDeviceAdmissionInitiateV1 | PlainMessage<AddDeviceAdmissionInitiateV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdmissionInitiateV1, a, b);
+  }
+}
+
+/**
  * ============================ AUTH / REGISTRATION ==========================
  * Device registration request/response for storage node authentication.
  * Binary-only: raw 32-byte identifiers, no text encoding on the wire.
@@ -17983,6 +18311,21 @@ export class Envelope extends Message<Envelope> {
      */
     value: DeviceTreeSnapshotResponse;
     case: "deviceTreeSnapshotResponse";
+  } | {
+    /**
+     * Secondary-device admission (§16.3) — co-present BLE handshake (request → gate-signed
+     * admission). New device → existing device, then existing → new device.
+     *
+     * @generated from field: dsm.AddDeviceAdmissionRequestV1 device_admission_request = 108;
+     */
+    value: AddDeviceAdmissionRequestV1;
+    case: "deviceAdmissionRequest";
+  } | {
+    /**
+     * @generated from field: dsm.AddDeviceAdmissionV1 device_admission = 109;
+     */
+    value: AddDeviceAdmissionV1;
+    case: "deviceAdmission";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18089,6 +18432,8 @@ export class Envelope extends Message<Envelope> {
     { no: 105, name: "cdbrw_verify_response", kind: "message", T: CdbrwVerifyResponse, oneof: "payload" },
     { no: 106, name: "cdbrw_enroll_response", kind: "message", T: CdbrwEnrollResponse, oneof: "payload" },
     { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
+    { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
+    { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
@@ -19044,6 +19389,985 @@ export class TombstoneReceiptProto extends Message<TombstoneReceiptProto> {
 
   static equals(a: TombstoneReceiptProto | PlainMessage<TombstoneReceiptProto> | undefined, b: TombstoneReceiptProto | PlainMessage<TombstoneReceiptProto> | undefined): boolean {
     return proto3.util.equals(TombstoneReceiptProto, a, b);
+  }
+}
+
+/**
+ * Wire codec for `dsm::recovery::authority_anchor::RecoveryAuthorityAnchor`
+ * (spec §0.5 step 5) — the genesis-chained declaration anchoring a device's
+ * recovery-authority SPHINCS+ pubkey. `device_signature` is by the genesis
+ * signing key (genesis binding); `authority_signature` is by K_A (possession).
+ *
+ * @generated from message dsm.RecoveryAuthorityAnchorProto
+ */
+export class RecoveryAuthorityAnchorProto extends Message<RecoveryAuthorityAnchorProto> {
+  /**
+   * @generated from field: bytes genesis_id = 1;
+   */
+  genesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * H(K_A_pub)
+   *
+   * @generated from field: bytes authority_pubkey_commit = 3;
+   */
+  authorityPubkeyCommit = new Uint8Array(0);
+
+  /**
+   * SPX256f genesis-key sig
+   *
+   * @generated from field: bytes device_signature = 4;
+   */
+  deviceSignature = new Uint8Array(0);
+
+  /**
+   * SPX256f K_A sig
+   *
+   * @generated from field: bytes authority_signature = 5;
+   */
+  authoritySignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecoveryAuthorityAnchorProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecoveryAuthorityAnchorProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "authority_pubkey_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "device_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "authority_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryAuthorityAnchorProto {
+    return new RecoveryAuthorityAnchorProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryAuthorityAnchorProto {
+    return new RecoveryAuthorityAnchorProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryAuthorityAnchorProto {
+    return new RecoveryAuthorityAnchorProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecoveryAuthorityAnchorProto | PlainMessage<RecoveryAuthorityAnchorProto> | undefined, b: RecoveryAuthorityAnchorProto | PlainMessage<RecoveryAuthorityAnchorProto> | undefined): boolean {
+    return proto3.util.equals(RecoveryAuthorityAnchorProto, a, b);
+  }
+}
+
+/**
+ * Authenticated Enumerable Per-Device SMT posting (spec §0.5, gap 13) — the
+ * signed HEAD of a device's posted PDSMT snapshot used for recovery gate-set
+ * enumeration. DUAL-KEYED: addressed by `device_id` (the PDSMT and rel_key are
+ * device-scoped) but carries `genesis_id` and is signed by the genesis-anchored
+ * recovery authority (`authority_pubkey_commit` == H(K_A_pub), bound via the
+ * RecoveryAuthorityAnchor). `signature` covers all other fields (BLAKE3
+ * domain-separated digest). Device selects the PDSMT; genesis authenticates the
+ * authority. Storage is availability-only; clients verify.
+ *
+ * @generated from message dsm.PostedPdsmtHeadV1
+ */
+export class PostedPdsmtHeadV1 extends Message<PostedPdsmtHeadV1> {
+  /**
+   * @generated from field: bytes genesis_id = 1;
+   */
+  genesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes pd_smt_root = 3;
+   */
+  pdSmtRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes leaf_index_root = 4;
+   */
+  leafIndexRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes snapshot_id = 5;
+   */
+  snapshotId = new Uint8Array(0);
+
+  /**
+   * H(K_A_pub)
+   *
+   * @generated from field: bytes authority_pubkey_commit = 6;
+   */
+  authorityPubkeyCommit = new Uint8Array(0);
+
+  /**
+   * Append-only head chain (R4 layer 1): each head links its predecessor and
+   * carries a monotone position. The genesis head uses parent_head_hash = 32 zero
+   * bytes and head_number = 0. head_hash (not stored) = the signing digest().
+   *
+   * @generated from field: bytes parent_head_hash = 7;
+   */
+  parentHeadHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 head_number = 8;
+   */
+  headNumber = protoInt64.zero;
+
+  /**
+   * SPX256f K_A sig over the head digest
+   *
+   * @generated from field: bytes signature = 9;
+   */
+  signature = new Uint8Array(0);
+
+  /**
+   * Raw recovery-authority pubkey (K_A_pub) that produced `signature`. A third party can
+   * verify the head WITHOUT a separate pubkey source: require H(authority_pubkey) ==
+   * authority_pubkey_commit AND that commit == the genesis-anchored commit (from the
+   * RecoveryAuthorityAnchor), then verify the signature under authority_pubkey. Presence
+   * alone is NOT authority — trust still flows from the bind-once anchored commit.
+   *
+   * SPX256f pk
+   *
+   * @generated from field: bytes authority_pubkey = 10;
+   */
+  authorityPubkey = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PostedPdsmtHeadV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PostedPdsmtHeadV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "pd_smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "leaf_index_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "snapshot_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "authority_pubkey_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "parent_head_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "head_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 9, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "authority_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PostedPdsmtHeadV1 {
+    return new PostedPdsmtHeadV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PostedPdsmtHeadV1 {
+    return new PostedPdsmtHeadV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PostedPdsmtHeadV1 {
+    return new PostedPdsmtHeadV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PostedPdsmtHeadV1 | PlainMessage<PostedPdsmtHeadV1> | undefined, b: PostedPdsmtHeadV1 | PlainMessage<PostedPdsmtHeadV1> | undefined): boolean {
+    return proto3.util.equals(PostedPdsmtHeadV1, a, b);
+  }
+}
+
+/**
+ * One enumerable, committed leaf/index record of a posted PDSMT snapshot.
+ * `value_capability` is part of the SIGNED/COMMITTED record (committed under
+ * `leaf_index_root`) — NOT server metadata. `counterparty_genesis_id` is optional
+ * context (empty if unknown): it cannot compute `rel_key` (device-pair derived) but
+ * is useful once C's device membership under its own genesis is verified.
+ *
+ * @generated from message dsm.PostedPdsmtLeafRecordV1
+ */
+export class PostedPdsmtLeafRecordV1 extends Message<PostedPdsmtLeafRecordV1> {
+  /**
+   * @generated from field: bytes genesis_id = 1;
+   */
+  genesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_device_id = 2;
+   */
+  ownerDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes rel_key = 3;
+   */
+  relKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes counterparty_device_id = 4;
+   */
+  counterpartyDeviceId = new Uint8Array(0);
+
+  /**
+   * optional (empty if unknown)
+   *
+   * @generated from field: bytes counterparty_genesis_id = 5;
+   */
+  counterpartyGenesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes current_tip = 6;
+   */
+  currentTip = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.ValueCapabilityV1 value_capability = 7;
+   */
+  valueCapability = ValueCapabilityV1.UNSPECIFIED;
+
+  /**
+   * @generated from field: string value_capability_reason = 8;
+   */
+  valueCapabilityReason = "";
+
+  /**
+   * @generated from field: bytes inclusion_proof_to_pd_smt_root = 9;
+   */
+  inclusionProofToPdSmtRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes inclusion_proof_to_leaf_index_root = 10;
+   */
+  inclusionProofToLeafIndexRoot = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PostedPdsmtLeafRecordV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PostedPdsmtLeafRecordV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "owner_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "rel_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "counterparty_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "counterparty_genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "current_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "value_capability", kind: "enum", T: proto3.getEnumType(ValueCapabilityV1) },
+    { no: 8, name: "value_capability_reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "inclusion_proof_to_pd_smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "inclusion_proof_to_leaf_index_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PostedPdsmtLeafRecordV1 {
+    return new PostedPdsmtLeafRecordV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PostedPdsmtLeafRecordV1 {
+    return new PostedPdsmtLeafRecordV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PostedPdsmtLeafRecordV1 {
+    return new PostedPdsmtLeafRecordV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PostedPdsmtLeafRecordV1 | PlainMessage<PostedPdsmtLeafRecordV1> | undefined, b: PostedPdsmtLeafRecordV1 | PlainMessage<PostedPdsmtLeafRecordV1> | undefined): boolean {
+    return proto3.util.equals(PostedPdsmtLeafRecordV1, a, b);
+  }
+}
+
+/**
+ * The enumerable leaf set posted alongside a PDSMT head (availability-only; the head's
+ * signed `leaf_index_root` is the authority — a verifier checks every leaf against it).
+ *
+ * @generated from message dsm.PostedPdsmtLeafSetV1
+ */
+export class PostedPdsmtLeafSetV1 extends Message<PostedPdsmtLeafSetV1> {
+  /**
+   * @generated from field: repeated dsm.PostedPdsmtLeafRecordV1 leaves = 1;
+   */
+  leaves: PostedPdsmtLeafRecordV1[] = [];
+
+  constructor(data?: PartialMessage<PostedPdsmtLeafSetV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PostedPdsmtLeafSetV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "leaves", kind: "message", T: PostedPdsmtLeafRecordV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PostedPdsmtLeafSetV1 {
+    return new PostedPdsmtLeafSetV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PostedPdsmtLeafSetV1 {
+    return new PostedPdsmtLeafSetV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PostedPdsmtLeafSetV1 {
+    return new PostedPdsmtLeafSetV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PostedPdsmtLeafSetV1 | PlainMessage<PostedPdsmtLeafSetV1> | undefined, b: PostedPdsmtLeafSetV1 | PlainMessage<PostedPdsmtLeafSetV1> | undefined): boolean {
+    return proto3.util.equals(PostedPdsmtLeafSetV1, a, b);
+  }
+}
+
+/**
+ * Wire codec for `dsm::recovery::tombstone::SuccessionReceipt` (mirrors
+ * TombstoneReceiptProto) — the SPHINCS+-signed new-device succession receipt.
+ *
+ * @generated from message dsm.SuccessionReceiptProto
+ */
+export class SuccessionReceiptProto extends Message<SuccessionReceiptProto> {
+  /**
+   * @generated from field: string device_id = 1;
+   */
+  deviceId = "";
+
+  /**
+   * @generated from field: bytes tombstone_hash = 2;
+   */
+  tombstoneHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_commitment = 3;
+   */
+  newDeviceCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 tick = 4;
+   */
+  tick = protoInt64.zero;
+
+  /**
+   * SPX256f
+   *
+   * @generated from field: bytes signature = 5;
+   */
+  signature = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes succession_hash = 6;
+   */
+  successionHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SuccessionReceiptProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SuccessionReceiptProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "tombstone_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "new_device_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "succession_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SuccessionReceiptProto {
+    return new SuccessionReceiptProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SuccessionReceiptProto {
+    return new SuccessionReceiptProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SuccessionReceiptProto {
+    return new SuccessionReceiptProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SuccessionReceiptProto | PlainMessage<SuccessionReceiptProto> | undefined, b: SuccessionReceiptProto | PlainMessage<SuccessionReceiptProto> | undefined): boolean {
+    return proto3.util.equals(SuccessionReceiptProto, a, b);
+  }
+}
+
+/**
+ * Wire codec for `dsm::recovery::activation::RecoveryActivationSeal` (§0.5) — the
+ * gate-set seal validated by validate_recovery_activation.
+ *
+ * @generated from message dsm.RecoveryActivationSealProto
+ */
+export class RecoveryActivationSealProto extends Message<RecoveryActivationSealProto> {
+  /**
+   * @generated from field: bytes genesis_id = 1;
+   */
+  genesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes old_device_id = 2;
+   */
+  oldDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes new_device_id = 3;
+   */
+  newDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recovery_intent_digest = 4;
+   */
+  recoveryIntentDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes tombstone_proposal_digest = 5;
+   */
+  tombstoneProposalDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes contact_set_commit = 6;
+   */
+  contactSetCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes evidence_root = 7;
+   */
+  evidenceRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 synced_contact_count = 8;
+   */
+  syncedContactCount = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes final_per_device_smt_root = 9;
+   */
+  finalPerDeviceSmtRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes final_receipt_roll = 10;
+   */
+  finalReceiptRoll = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecoveryActivationSealProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecoveryActivationSealProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "old_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "new_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recovery_intent_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "tombstone_proposal_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "contact_set_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "evidence_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "synced_contact_count", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 9, name: "final_per_device_smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "final_receipt_roll", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryActivationSealProto {
+    return new RecoveryActivationSealProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryActivationSealProto {
+    return new RecoveryActivationSealProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryActivationSealProto {
+    return new RecoveryActivationSealProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecoveryActivationSealProto | PlainMessage<RecoveryActivationSealProto> | undefined, b: RecoveryActivationSealProto | PlainMessage<RecoveryActivationSealProto> | undefined): boolean {
+    return proto3.util.equals(RecoveryActivationSealProto, a, b);
+  }
+}
+
+/**
+ * The recovery bundle (§0.5 Phase C) — the transmitted succession artifacts. It carries
+ * the genesis-anchored recovery authority pubkey, the tombstone/succession pair, and the
+ * activation seal. It deliberately does NOT inline per-counterparty evidence: that is
+ * re-derived + re-verified from each counterparty's OWN posted, genesis-authenticated
+ * state (its PDSMT head + relationship state history) — the §0.5 posted-state authority,
+ * fetched not bundled. Sub-objects are nested canonical bytes (each via its own codec).
+ *
+ * @generated from message dsm.RecoveryBundleV1
+ */
+export class RecoveryBundleV1 extends Message<RecoveryBundleV1> {
+  /**
+   * K_A_pub (SPHINCS+ pk)
+   *
+   * @generated from field: bytes authority_pubkey = 1;
+   */
+  authorityPubkey = new Uint8Array(0);
+
+  /**
+   * TombstoneReceipt.to_bytes
+   *
+   * @generated from field: bytes tombstone = 2;
+   */
+  tombstone = new Uint8Array(0);
+
+  /**
+   * SuccessionReceipt.to_bytes
+   *
+   * @generated from field: bytes succession = 3;
+   */
+  succession = new Uint8Array(0);
+
+  /**
+   * RecoveryActivationSeal.to_bytes
+   *
+   * @generated from field: bytes activation_seal = 4;
+   */
+  activationSeal = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecoveryBundleV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecoveryBundleV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "authority_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "tombstone", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "succession", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "activation_seal", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryBundleV1 {
+    return new RecoveryBundleV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryBundleV1 {
+    return new RecoveryBundleV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryBundleV1 {
+    return new RecoveryBundleV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecoveryBundleV1 | PlainMessage<RecoveryBundleV1> | undefined, b: RecoveryBundleV1 | PlainMessage<RecoveryBundleV1> | undefined): boolean {
+    return proto3.util.equals(RecoveryBundleV1, a, b);
+  }
+}
+
+/**
+ * One device-level balance-witness entry (CPTA policy_commit -> u64 balance). Encoded
+ * sorted by policy_commit to match the canonical chain-tip hash (BTreeMap order).
+ *
+ * @generated from message dsm.BalanceWitnessEntryProto
+ */
+export class BalanceWitnessEntryProto extends Message<BalanceWitnessEntryProto> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 value = 2;
+   */
+  value = protoInt64.zero;
+
+  constructor(data?: PartialMessage<BalanceWitnessEntryProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BalanceWitnessEntryProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "value", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceWitnessEntryProto {
+    return new BalanceWitnessEntryProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BalanceWitnessEntryProto {
+    return new BalanceWitnessEntryProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BalanceWitnessEntryProto {
+    return new BalanceWitnessEntryProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BalanceWitnessEntryProto | PlainMessage<BalanceWitnessEntryProto> | undefined, b: BalanceWitnessEntryProto | PlainMessage<BalanceWitnessEntryProto> | undefined): boolean {
+    return proto3.util.equals(BalanceWitnessEntryProto, a, b);
+  }
+}
+
+/**
+ * Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
+ * EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
+ * canonical operation bytes, entropy, optional encapsulated_entropy, optional
+ * dbrw_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
+ * they sign the digest). proto3 `optional` distinguishes None from an empty Some, which the
+ * chain-tip hash treats differently; a faithful round-trip is REQUIRED so a decoder can
+ * recompute the tip and assert equality.
+ *
+ * @generated from message dsm.RelationshipChainStateProto
+ */
+export class RelationshipChainStateProto extends Message<RelationshipChainStateProto> {
+  /**
+   * @generated from field: bytes rel_key = 1;
+   */
+  relKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes embedded_parent = 2;
+   */
+  embeddedParent = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes counterparty_devid = 3;
+   */
+  counterpartyDevid = new Uint8Array(0);
+
+  /**
+   * Operation::to_bytes (canonical)
+   *
+   * @generated from field: bytes operation = 4;
+   */
+  operation = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes entropy = 5;
+   */
+  entropy = new Uint8Array(0);
+
+  /**
+   * None vs Some(empty) preserved
+   *
+   * @generated from field: optional bytes encapsulated_entropy = 6;
+   */
+  encapsulatedEntropy?: Uint8Array;
+
+  /**
+   * @generated from field: optional bytes dbrw_summary_hash = 7;
+   */
+  dbrwSummaryHash?: Uint8Array;
+
+  /**
+   * @generated from field: repeated dsm.BalanceWitnessEntryProto balance_witness = 8;
+   */
+  balanceWitness: BalanceWitnessEntryProto[] = [];
+
+  /**
+   * SPX256f
+   *
+   * @generated from field: optional bytes entity_sig = 9;
+   */
+  entitySig?: Uint8Array;
+
+  /**
+   * SPX256f
+   *
+   * @generated from field: optional bytes counterparty_sig = 10;
+   */
+  counterpartySig?: Uint8Array;
+
+  constructor(data?: PartialMessage<RelationshipChainStateProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RelationshipChainStateProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "rel_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "embedded_parent", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "counterparty_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "operation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "encapsulated_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 7, name: "dbrw_summary_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 8, name: "balance_witness", kind: "message", T: BalanceWitnessEntryProto, repeated: true },
+    { no: 9, name: "entity_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 10, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipChainStateProto {
+    return new RelationshipChainStateProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RelationshipChainStateProto {
+    return new RelationshipChainStateProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RelationshipChainStateProto {
+    return new RelationshipChainStateProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RelationshipChainStateProto | PlainMessage<RelationshipChainStateProto> | undefined, b: RelationshipChainStateProto | PlainMessage<RelationshipChainStateProto> | undefined): boolean {
+    return proto3.util.equals(RelationshipChainStateProto, a, b);
+  }
+}
+
+/**
+ * A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a
+ * counterparty's states from the capsule floor `floor_tip` (h_cap, EXCLUSIVE) up to
+ * `current_tip` (T_old_current). Content-id = BLAKE3("DSM/recovery/rel-chain-segment/v1" ||
+ * canonical-bytes). The verifier recomputes each state's chain tip, checks adjacency
+ * floor ->* current via embedded_parent, and that rel_key is uniform. An EMPTY `states` is
+ * valid iff floor_tip == current_tip (the no-divergence common case).
+ *
+ * @generated from message dsm.RelationshipChainSegmentV1
+ */
+export class RelationshipChainSegmentV1 extends Message<RelationshipChainSegmentV1> {
+  /**
+   * @generated from field: bytes rel_key = 1;
+   */
+  relKey = new Uint8Array(0);
+
+  /**
+   * h_cap (segment starts AFTER this)
+   *
+   * @generated from field: bytes floor_tip = 2;
+   */
+  floorTip = new Uint8Array(0);
+
+  /**
+   * T_old_current (segment ends here)
+   *
+   * @generated from field: bytes current_tip = 3;
+   */
+  currentTip = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.RelationshipChainStateProto states = 4;
+   */
+  states: RelationshipChainStateProto[] = [];
+
+  constructor(data?: PartialMessage<RelationshipChainSegmentV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RelationshipChainSegmentV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "rel_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "floor_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "current_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "states", kind: "message", T: RelationshipChainStateProto, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipChainSegmentV1 {
+    return new RelationshipChainSegmentV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RelationshipChainSegmentV1 {
+    return new RelationshipChainSegmentV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RelationshipChainSegmentV1 {
+    return new RelationshipChainSegmentV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RelationshipChainSegmentV1 | PlainMessage<RelationshipChainSegmentV1> | undefined, b: RelationshipChainSegmentV1 | PlainMessage<RelationshipChainSegmentV1> | undefined): boolean {
+    return proto3.util.equals(RelationshipChainSegmentV1, a, b);
+  }
+}
+
+/**
+ * The new (A_new,C) bilateral establishment receipt (rel_key = new_rel_key) — the FIRST
+ * state of the successor relationship whose CreateRelationship op binds the carry-forward
+ * commitment. Content-id = BLAKE3("DSM/recovery/establish-receipt/v1" || canonical-bytes).
+ * The verifier checks it is a first-state establishment and that the carry-forward
+ * commitment is bound INTO the signed state hash (see verify_succession_semantics).
+ *
+ * @generated from message dsm.RecoveryEstablishmentReceiptV1
+ */
+export class RecoveryEstablishmentReceiptV1 extends Message<RecoveryEstablishmentReceiptV1> {
+  /**
+   * new_rel_key
+   *
+   * @generated from field: bytes rel_key = 1;
+   */
+  relKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.RelationshipChainStateProto state = 2;
+   */
+  state?: RelationshipChainStateProto;
+
+  constructor(data?: PartialMessage<RecoveryEstablishmentReceiptV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecoveryEstablishmentReceiptV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "rel_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "state", kind: "message", T: RelationshipChainStateProto },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryEstablishmentReceiptV1 {
+    return new RecoveryEstablishmentReceiptV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryEstablishmentReceiptV1 {
+    return new RecoveryEstablishmentReceiptV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryEstablishmentReceiptV1 {
+    return new RecoveryEstablishmentReceiptV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecoveryEstablishmentReceiptV1 | PlainMessage<RecoveryEstablishmentReceiptV1> | undefined, b: RecoveryEstablishmentReceiptV1 | PlainMessage<RecoveryEstablishmentReceiptV1> | undefined): boolean {
+    return proto3.util.equals(RecoveryEstablishmentReceiptV1, a, b);
+  }
+}
+
+/**
+ * A device's K_A-signed dBTC vault index (P5 dBTC enumeration). The healthy device posts the
+ * list of its dBTC vault ids; a recovering device fetches it as the CANDIDATE set to
+ * reconcile. Authenticated like PostedPdsmtHeadV1 (carries authority_pubkey; H(it) ==
+ * authority_pubkey_commit == the genesis-anchored commit; signature over the digest).
+ * Enumeration completeness is NOT a safety property — per-vault Bitcoin backing verification
+ * is the gate — so a forged/partial index only yields Bitcoin-verify-out or a locked deadlock,
+ * never a double-spend. Availability-only storage; clients verify.
+ *
+ * @generated from message dsm.PostedDbtcVaultIndexV1
+ */
+export class PostedDbtcVaultIndexV1 extends Message<PostedDbtcVaultIndexV1> {
+  /**
+   * @generated from field: bytes genesis_id = 1;
+   */
+  genesisId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * Base32 Crockford vault ids
+   *
+   * @generated from field: repeated string vault_ids = 3;
+   */
+  vaultIds: string[] = [];
+
+  /**
+   * H(K_A_pub)
+   *
+   * @generated from field: bytes authority_pubkey_commit = 4;
+   */
+  authorityPubkeyCommit = new Uint8Array(0);
+
+  /**
+   * SPX256f pk (carried; checked vs commit)
+   *
+   * @generated from field: bytes authority_pubkey = 5;
+   */
+  authorityPubkey = new Uint8Array(0);
+
+  /**
+   * SPX256f K_A sig over the digest
+   *
+   * @generated from field: bytes signature = 6;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PostedDbtcVaultIndexV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PostedDbtcVaultIndexV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "vault_ids", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 4, name: "authority_pubkey_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "authority_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PostedDbtcVaultIndexV1 {
+    return new PostedDbtcVaultIndexV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PostedDbtcVaultIndexV1 {
+    return new PostedDbtcVaultIndexV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PostedDbtcVaultIndexV1 {
+    return new PostedDbtcVaultIndexV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PostedDbtcVaultIndexV1 | PlainMessage<PostedDbtcVaultIndexV1> | undefined, b: PostedDbtcVaultIndexV1 | PlainMessage<PostedDbtcVaultIndexV1> | undefined): boolean {
+    return proto3.util.equals(PostedDbtcVaultIndexV1, a, b);
+  }
+}
+
+/**
+ * Lightweight recovery succession proof (spec §0.5 — bilateral re-establish). A_new posts the
+ * minimal artifacts a counterparty C needs to run its re-establish accept-guard BEFORE
+ * co-signing: the genesis-anchored recovery authority pubkey (K_A_pub) plus the
+ * tombstone/succession pair proving A_new succeeds A_old. Distinct from RecoveryBundleV1 (which
+ * also carries the activation seal — produced only AFTER all re-establishes, so unavailable at
+ * re-establish time). Sub-objects are nested canonical bytes via their own codecs. Availability
+ * -only; C genesis-anchors authority_pubkey via A_new's RecoveryAuthorityAnchor before trusting.
+ *
+ * @generated from message dsm.RecoverySuccessionProofV1
+ */
+export class RecoverySuccessionProofV1 extends Message<RecoverySuccessionProofV1> {
+  /**
+   * K_A_pub (SPHINCS+ pk)
+   *
+   * @generated from field: bytes authority_pubkey = 1;
+   */
+  authorityPubkey = new Uint8Array(0);
+
+  /**
+   * TombstoneReceipt.to_bytes
+   *
+   * @generated from field: bytes tombstone = 2;
+   */
+  tombstone = new Uint8Array(0);
+
+  /**
+   * SuccessionReceipt.to_bytes
+   *
+   * @generated from field: bytes succession = 3;
+   */
+  succession = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecoverySuccessionProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecoverySuccessionProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "authority_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "tombstone", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "succession", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoverySuccessionProofV1 {
+    return new RecoverySuccessionProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoverySuccessionProofV1 {
+    return new RecoverySuccessionProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoverySuccessionProofV1 {
+    return new RecoverySuccessionProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecoverySuccessionProofV1 | PlainMessage<RecoverySuccessionProofV1> | undefined, b: RecoverySuccessionProofV1 | PlainMessage<RecoverySuccessionProofV1> | undefined): boolean {
+    return proto3.util.equals(RecoverySuccessionProofV1, a, b);
   }
 }
 

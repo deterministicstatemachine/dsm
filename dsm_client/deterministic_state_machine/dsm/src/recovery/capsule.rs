@@ -26,6 +26,8 @@ const RECOVERY_AEAD_CONTEXT: &str = "DSM/recovery-aead\0";
 const RECOVERY_AUTHORITY_CONTEXT: &str = "DSM/recovery-authority\0";
 const RECOVERY_NONCE_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_NONCE;
 const RECOVERY_CHALLENGE_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_CHALLENGE;
+const RECOVERY_CONTACT_SET_DOMAIN: &str =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_CONTACT_SET;
 
 /// Initialize the capsule encryption/decryption subsystem.
 pub fn init_capsule_subsystem() -> Result<(), DsmError> {
@@ -85,6 +87,55 @@ pub struct RecoveryCapsule {
     /// from AK at the next step, but carrying the prior cert lets a third
     /// party re-verify the entire pre-recovery chain if needed.
     pub last_certs: HashMap<String, Vec<u8>>,
+    /// v6 extension: commitment to the capsule's contact set (gate-set anchor, R4).
+    /// `BLAKE3("DSM/recovery-contact-set" || u32 count || for each sorted id:
+    /// u32 len || id)`. Empty (`vec![]`) for pre-v6 capsules. This is the
+    /// spender's OWN committed gate-set; recovery unions it with
+    /// publicly-discoverable contact anchors so the spender cannot unilaterally
+    /// shrink the recovery gate-set.
+    pub contact_set_commit: Vec<u8>,
+}
+
+/// Compute the contact-set commitment from the capsule's counterparty set
+/// (gate-set anchor, R4):
+/// `BLAKE3("DSM/recovery-contact-set" || u32 count || for each sorted id:
+/// u32 len || id_bytes)`.
+///
+/// Deterministic in the sorted counterparty-id set, so it is stable across
+/// encode/decode and independent of map iteration order.
+fn hash_sorted_contact_ids(sorted: &[String]) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(RECOVERY_CONTACT_SET_DOMAIN);
+    hasher.update(&(sorted.len() as u32).to_le_bytes());
+    for id in sorted {
+        let b = id.as_bytes();
+        hasher.update(&(b.len() as u32).to_le_bytes());
+        hasher.update(b);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+pub fn compute_contact_set_commit(
+    counterparty_tips: &HashMap<String, (u64, Vec<u8>)>,
+) -> [u8; 32] {
+    let mut ids: Vec<String> = counterparty_tips.keys().cloned().collect();
+    ids.sort_unstable();
+    hash_sorted_contact_ids(&ids)
+}
+
+/// Same commitment as [`compute_contact_set_commit`] but over raw 32-byte device
+/// ids — the form the activation seal (P4) works in. Each id is encoded to the
+/// canonical Crockford string used as the capsule's `counterparty_tips` keys, so
+/// the capsule and seal contact-set commitments are byte-identical for the same
+/// contact set (gate-set anchor consistency, R4).
+pub fn contact_set_commit_from_device_ids(
+    ids: &std::collections::BTreeSet<[u8; 32]>,
+) -> [u8; 32] {
+    let mut strs: Vec<String> = ids
+        .iter()
+        .map(|id| crate::types::identifiers::encode_crockford(id))
+        .collect();
+    strs.sort_unstable();
+    hash_sorted_contact_ids(&strs)
 }
 
 /// Encrypted capsule for NFC storage.
@@ -236,6 +287,11 @@ impl RecoveryCapsule {
             out.extend_from_slice(&(cert.len() as u32).to_le_bytes());
             out.extend_from_slice(cert);
         }
+        // v6 extension: contact-set commitment (gate-set anchor, R4).
+        // Backward-compatible trailing field: pre-v6 capsules omit it and decode
+        // it as empty.
+        out.extend_from_slice(&(self.contact_set_commit.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.contact_set_commit);
         out
     }
 }
@@ -335,6 +391,7 @@ pub fn create_encrypted_capsule_with_binding(
         counter,
     };
     let rollup_hash = rollup.current_hash().to_vec();
+    let contact_set_commit = compute_contact_set_commit(&counterparty_tips).to_vec();
     let capsule = RecoveryCapsule {
         smt_root: smt_root.to_vec(),
         counterparty_tips,
@@ -349,6 +406,7 @@ pub fn create_encrypted_capsule_with_binding(
         // (n=0 case) for any relationship not represented here.
         cert_chain_heads: HashMap::new(),
         last_certs: HashMap::new(),
+        contact_set_commit,
     };
     encrypt_capsule_with_key(&capsule, key)
 }
@@ -386,6 +444,7 @@ pub fn create_encrypted_capsule_with_cert_chain(
         counter,
     };
     let rollup_hash = rollup.current_hash().to_vec();
+    let contact_set_commit = compute_contact_set_commit(&counterparty_tips).to_vec();
     let capsule = RecoveryCapsule {
         smt_root: smt_root.to_vec(),
         counterparty_tips,
@@ -396,6 +455,7 @@ pub fn create_encrypted_capsule_with_cert_chain(
         genesis_hash: genesis_hash.to_vec(),
         cert_chain_heads,
         last_certs,
+        contact_set_commit,
     };
     encrypt_capsule_with_key(&capsule, key)
 }
@@ -537,6 +597,23 @@ fn validate_capsule(capsule: &RecoveryCapsule, metadata: &CapsuleMetadata) -> Re
             capsule.genesis_hash.len()
         )));
     }
+    // v6 contact-set commitment (gate-set anchor, R4): when present it must be
+    // 32 bytes and recompute byte-for-byte from the capsule's counterparty set,
+    // binding the committed gate-set to the sealed tips. Empty = pre-v6.
+    if !capsule.contact_set_commit.is_empty() {
+        if capsule.contact_set_commit.len() != 32 {
+            return Err(DsmError::verification(format!(
+                "Invalid contact_set_commit length: expected 32 or empty, got {}",
+                capsule.contact_set_commit.len()
+            )));
+        }
+        let expected = compute_contact_set_commit(&capsule.counterparty_tips);
+        if capsule.contact_set_commit.as_slice() != expected {
+            return Err(DsmError::verification(
+                "Recovery capsule contact_set_commit mismatch",
+            ));
+        }
+    }
     if capsule.metadata.version != metadata.version
         || capsule.metadata.counter != metadata.counter
         || capsule.metadata.logical_time != metadata.logical_time
@@ -650,6 +727,13 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
     } else {
         HashMap::new()
     };
+    // v6 extension: contact-set commitment (backward-compatible).
+    // Pre-v6 capsules have no remaining bytes here and decode as empty.
+    let contact_set_commit = if p.len() >= 4 {
+        read_len_bytes(&mut p)?
+    } else {
+        Vec::new()
+    };
     if !p.is_empty() {
         return Err(DsmError::invalid_operation(
             "capsule decode: trailing plaintext bytes",
@@ -665,6 +749,7 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
         genesis_hash,
         cert_chain_heads,
         last_certs,
+        contact_set_commit,
     })
 }
 
@@ -775,6 +860,7 @@ mod tests {
             genesis_hash: vec![0x55; 32],
             cert_chain_heads: HashMap::new(),
             last_certs: HashMap::new(),
+            contact_set_commit: vec![],
         };
 
         let bytes = capsule.to_bytes();
@@ -969,6 +1055,7 @@ mod tests {
             genesis_hash: Vec::new(),
             cert_chain_heads: HashMap::new(),
             last_certs: HashMap::new(),
+            contact_set_commit: vec![],
         };
 
         assert!(encrypt_capsule_with_key(&capsule, &key).is_err());
@@ -1019,6 +1106,49 @@ mod tests {
         Ok(())
     }
 
+    /// v6 gate-set anchor (R4): the constructor derives `contact_set_commit`
+    /// from the counterparty set, it round-trips encrypt→wire→decrypt, and a
+    /// tampered commitment is rejected by validate.
+    #[test]
+    fn test_capsule_contact_set_commit_round_trip_and_validate() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let key = derive_recovery_key(MNEMONIC)?;
+        let mut tips = HashMap::new();
+        tips.insert("alice".to_string(), (1u64, vec![0xAA; 32]));
+        tips.insert("bob".to_string(), (2u64, vec![0xBB; 32]));
+
+        let expected = compute_contact_set_commit(&tips);
+        let encrypted = create_encrypted_capsule_with_key(
+            &[0x11; 32],
+            tips.clone(),
+            &ReceiptRollup::new(),
+            &key,
+            9,
+        )?;
+        let wire = encrypted.to_bytes();
+        let restored = EncryptedCapsule::from_bytes(&wire)?;
+        let decrypted = decrypt_capsule_with_key(&restored, &key)?;
+
+        // Commitment is populated, 32 bytes, and recomputes from the tips.
+        assert_eq!(decrypted.contact_set_commit.as_slice(), expected.as_slice());
+        assert_eq!(
+            compute_contact_set_commit(&decrypted.counterparty_tips),
+            expected
+        );
+
+        // Tampering the commitment must fail validation on the encrypt path.
+        let mut bad = decrypted.clone();
+        bad.contact_set_commit[0] ^= 0x01;
+        assert!(encrypt_capsule_with_key(&bad, &key).is_err());
+
+        // The contact set is order-independent.
+        let mut reordered = HashMap::new();
+        reordered.insert("bob".to_string(), (2u64, vec![0xBB; 32]));
+        reordered.insert("alice".to_string(), (1u64, vec![0xAA; 32]));
+        assert_eq!(compute_contact_set_commit(&reordered), expected);
+        Ok(())
+    }
+
     /// Pre-v5 capsules (no cert_chain_heads, no last_certs) must continue
     /// to round-trip. The v5 fields are appended trailing-optional so old
     /// capsules decode with empty maps.
@@ -1065,6 +1195,7 @@ mod tests {
             genesis_hash: vec![0x55; 32],
             cert_chain_heads: HashMap::new(),
             last_certs: HashMap::new(),
+            contact_set_commit: vec![],
         };
 
         assert!(encrypt_capsule_with_key(&capsule, &key).is_err());
@@ -1091,6 +1222,7 @@ mod tests {
             genesis_hash: vec![0x55; 31],
             cert_chain_heads: HashMap::new(),
             last_certs: HashMap::new(),
+            contact_set_commit: vec![],
         };
 
         assert!(encrypt_capsule_with_key(&capsule, &key).is_err());

@@ -732,6 +732,7 @@ mod tests {
                     chain_tip: failed_chain_tip,
                     counterparty_devid: failed_chain_state.counterparty_devid,
                     state: Some(failed_chain_state.clone()),
+                    value_capability: dsm::types::device_state::ValueCapability::Unknown,
                 },
             )],
             64,
