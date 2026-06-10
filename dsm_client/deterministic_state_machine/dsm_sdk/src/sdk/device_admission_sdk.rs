@@ -19,9 +19,20 @@ use dsm::common::device_admission::{
 use dsm::types::error::DsmError;
 use dsm::types::proto::{AddDeviceAdmissionRequestV1, Message as _};
 
+use std::sync::Mutex;
+
 use crate::sdk::app_state::AppState;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
+
+/// Co-present handshake state (SDK transport state, not protocol state). The admission round-trip
+/// is two BLE messages seconds apart; these hold the small per-side context between them.
+/// NEW device, set at `begin_admission`, consumed at `handle_admission_response`: (entropy,
+/// signer_pubkey-from-QR).
+static PENDING_OUTBOUND: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
+/// EXISTING device, set at `receive_admission_request`, consumed at `approve_pending_admission`:
+/// the requesting device's `AddDeviceAdmissionRequestV1` bytes, held until the owner approves.
+static PENDING_INBOUND: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 pub struct DeviceAdmissionSDK;
 
@@ -74,7 +85,7 @@ impl DeviceAdmissionSDK {
     /// EXISTING (authority) device: verify the new device's request, gate-sign, and insert. Returns
     /// the gate-signed `AddDeviceAdmission` bytes to send back over BLE. Fail-closed.
     pub async fn approve_admission(request_bytes: &[u8]) -> Result<Vec<u8>, DsmError> {
-        let req = AddDeviceAdmissionRequestV1::decode(request_bytes).map_err(|e| {
+        let req = crate::generated::AddDeviceAdmissionRequestV1::decode(request_bytes).map_err(|e| {
             DsmError::serialization_error(
                 format!("admission request decode: {e}"),
                 "AddDeviceAdmissionRequestV1",
@@ -185,5 +196,111 @@ impl DeviceAdmissionSDK {
         crate::initialize_sdk_context(device_id, genesis, entropy.to_vec())?;
 
         Ok((admission.genesis_hash, admission.new_device_id))
+    }
+
+    // ───────────────────────── BLE handshake (Envelope v3) ─────────────────────────
+
+    /// Wrap an admission payload in a canonical Envelope v3 for BLE transport.
+    fn build_admission_envelope(
+        payload: crate::generated::envelope::Payload,
+        genesis: &[u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        let device_id = Self::id32(AppState::get_device_id(), "device_id")?;
+        let ticks = crate::util::deterministic_time::tick();
+        let env = crate::bluetooth::bilateral_envelope::build_envelope(
+            &device_id, genesis, ticks, None, payload,
+        )?;
+        Ok(crate::envelope::transport::to_canonical_bytes(&env))
+    }
+
+    /// NEW device: build the request Envelope to send as a `DEVICE_ADMISSION_REQUEST` frame, and
+    /// stash the pending `(entropy, signer_pubkey)` (from the scanned QR) needed to adopt the
+    /// response. Returns the canonical envelope bytes.
+    pub async fn begin_admission(
+        genesis: [u8; 32],
+        entropy: Vec<u8>,
+        signer_pubkey: Vec<u8>,
+    ) -> Result<Vec<u8>, DsmError> {
+        let req_bytes = Self::build_admission_request(genesis, &entropy).await?;
+        let req = crate::generated::AddDeviceAdmissionRequestV1::decode(&*req_bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("begin_admission re-decode: {e}"),
+                "AddDeviceAdmissionRequestV1",
+                None::<String>,
+                Some(e),
+            )
+        })?;
+        *PENDING_OUTBOUND.lock().unwrap_or_else(|p| p.into_inner()) = Some((entropy, signer_pubkey));
+        Self::build_admission_envelope(
+            crate::generated::envelope::Payload::DeviceAdmissionRequest(req),
+            &genesis,
+        )
+    }
+
+    /// EXISTING device: an admission request arrived over BLE. Decode + hold it pending the
+    /// owner's approval (the gate). Returns the requesting `new_device_id` (Base32) for the UI.
+    pub fn receive_admission_request(envelope_bytes: &[u8]) -> Result<String, DsmError> {
+        let env = crate::envelope::transport::from_canonical_bytes(envelope_bytes)
+            .map_err(|e| DsmError::verification(format!("admission request envelope: {e}")))?;
+        let req = match env.payload {
+            Some(crate::generated::envelope::Payload::DeviceAdmissionRequest(r)) => r,
+            _ => {
+                return Err(DsmError::verification(
+                    "admission request: unexpected envelope payload",
+                ))
+            }
+        };
+        let new_id = crate::util::text_id::encode_base32_crockford(&req.new_device_id);
+        *PENDING_INBOUND.lock().unwrap_or_else(|p| p.into_inner()) = Some(req.encode_to_vec());
+        Ok(new_id)
+    }
+
+    /// EXISTING device: the owner approved — gate-sign + insert the held request and return the
+    /// response Envelope to send as a `DEVICE_ADMISSION_RESPONSE` frame. Clears the pending request.
+    pub async fn approve_pending_admission() -> Result<Vec<u8>, DsmError> {
+        let req_bytes = PENDING_INBOUND
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .ok_or_else(|| DsmError::InvalidState("no pending admission request to approve".into()))?;
+        let admission_bytes = Self::approve_admission(&req_bytes).await?;
+        let adm_proto = crate::generated::AddDeviceAdmissionV1::decode(&*admission_bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("approve_pending_admission re-decode: {e}"),
+                "AddDeviceAdmissionV1",
+                None::<String>,
+                Some(e),
+            )
+        })?;
+        let genesis = Self::id32(Some(adm_proto.genesis_hash.clone()), "genesis_hash")?;
+        Self::build_admission_envelope(
+            crate::generated::envelope::Payload::DeviceAdmission(adm_proto),
+            &genesis,
+        )
+    }
+
+    /// NEW device: a gate-signed admission arrived over BLE. Verify (gate sig under the QR pubkey +
+    /// self-attestation), adopt, and establish identity. Consumes the pending outbound state.
+    /// Returns `(genesis, new_device_id)`.
+    pub async fn handle_admission_response(
+        envelope_bytes: &[u8],
+    ) -> Result<([u8; 32], [u8; 32]), DsmError> {
+        let env = crate::envelope::transport::from_canonical_bytes(envelope_bytes)
+            .map_err(|e| DsmError::verification(format!("admission response envelope: {e}")))?;
+        let adm_proto = match env.payload {
+            Some(crate::generated::envelope::Payload::DeviceAdmission(a)) => a,
+            _ => {
+                return Err(DsmError::verification(
+                    "admission response: unexpected envelope payload",
+                ))
+            }
+        };
+        let admission_bytes = adm_proto.encode_to_vec();
+        let (entropy, signer_pubkey) = PENDING_OUTBOUND
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .ok_or_else(|| DsmError::InvalidState("no pending admission to adopt".into()))?;
+        Self::adopt_admission(&admission_bytes, &signer_pubkey, &entropy).await
     }
 }
