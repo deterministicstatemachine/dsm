@@ -333,9 +333,13 @@ impl DlvReceiptSdk {
     async fn put_object(&self, endpoint: &str, obj_key: &str, body: &[u8]) -> Result<(), DsmError> {
         let url = format!("{}/api/v2/object/put", endpoint.trim_end_matches('/'));
 
-        // Compute DLV partition ID (same pattern as StorageNodeSDK::store_data)
+        // Compute DLV partition ID (same pattern as StorageNodeSDK::store_data).
+        // Must use TAG_DSM_DLV_PARTITION (not the _NUL variant): `domain_hash`
+        // already appends the NUL terminator, so passing the pre-terminated
+        // _NUL tag double-appended `\0` and produced a different partition id
+        // than StorageNodeSDK for the same key.
         let dlv_id = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_DLV_PARTITION_NUL,
+            dsm::common::domain_tags::TAG_DSM_DLV_PARTITION,
             obj_key.as_bytes(),
         );
         let dlv_id_b32 = text_id::encode_base32_crockford(dlv_id.as_bytes());
