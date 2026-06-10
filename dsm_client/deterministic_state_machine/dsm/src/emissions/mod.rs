@@ -170,7 +170,7 @@ impl EmissionWitness {
 #[derive(Clone, Debug)]
 pub struct JoinActivationProof {
     pub id: [u8; 32],
-    pub gate_proof: Vec<u8>, // Kept as-is; verification lives outside this module today.
+    pub gate_proof: Vec<u8>, // Verified in-module by `verify_emission` via `paidk_proof::verify_paidk_gate_proof`.
     pub nonce: [u8; 32],
 }
 

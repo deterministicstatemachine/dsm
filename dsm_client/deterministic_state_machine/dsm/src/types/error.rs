@@ -994,10 +994,13 @@ impl DsmError {
         DsmError::LockError
     }
 
-    /// Creates a new timeout error
+    /// Creates a new time-related error (used for timeout/clock failures).
+    ///
+    /// Note: returns `DsmError::TimeError`, not the `DsmError::Timeout` variant
+    /// (which is never constructed).
     ///
     /// # Arguments
-    /// * `message` - Description of the timeout error
+    /// * `message` - Description of the error
     pub fn timeout(message: impl Into<String>) -> Self {
         DsmError::TimeError(message.into())
     }
