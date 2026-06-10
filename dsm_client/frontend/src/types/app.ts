@@ -26,4 +26,5 @@ export type ScreenType =
   | 'lock_setup'
   | 'recovery'
   | 'nfc_recovery'
-  | 'recovery_pipeline';
+  | 'recovery_pipeline'
+  | 'additional_device';

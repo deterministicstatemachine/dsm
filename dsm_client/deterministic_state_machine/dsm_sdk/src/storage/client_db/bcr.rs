@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
-use dsm::types::device_state::{DeviceState, RelChainTip, RelationshipChainState};
+use dsm::types::device_state::{DeviceState, RelChainTip, RelationshipChainState, ValueCapability};
 use dsm::types::operations::Operation;
 use log::warn;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -64,7 +64,11 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
 // ──────────────────────────────────────────────────────────────────────────
 
 const REL_CHAIN_STATE_VERSION: u8 = 0x02;
-const DEVICE_STATE_VERSION: u8 = 0x01;
+// v0x02 (spec §0.5 gap 13): adds the canonical per-tip `value_capability` byte. This is a
+// BREAKING bump with NO back-compat reader by design (no-legacy directive) — a v0x01 blob
+// is rejected by `decode_device_state`; the device head is re-derived from the authoritative
+// BCR chain-state archive / re-initialized. There is no default-false and no silent fallback.
+const DEVICE_STATE_VERSION: u8 = 0x02;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -269,6 +273,8 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(rk);
         out.extend_from_slice(&tip.chain_tip);
         out.extend_from_slice(&tip.counterparty_devid);
+        // Canonical value-capability (R4): 1=Yes, 2=No, 3=Unknown. Always explicit.
+        out.push(tip.value_capability.commit_tag());
 
         match tip.state.as_ref() {
             Some(s) => {
@@ -325,6 +331,11 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
             take::<32>(&mut cursor).map_err(|e| anyhow!("tip chain_tip: {e}"))?;
         let cp_devid: [u8; 32] =
             take::<32>(&mut cursor).map_err(|e| anyhow!("tip cp_devid: {e}"))?;
+        // Canonical value-capability (R4) — fail-closed: an absent/invalid byte (e.g. a
+        // legacy v0x01 layout, which lacked it) is REJECTED, never read as `No`.
+        let vc_byte = read_u8(&mut cursor).map_err(|e| anyhow!("tip value_capability: {e}"))?;
+        let value_capability = ValueCapability::from_wire(vc_byte as i32)
+            .ok_or_else(|| anyhow!("tip value_capability invalid byte: {vc_byte}"))?;
         let state_flag = read_u8(&mut cursor).map_err(|e| anyhow!("tip state flag: {e}"))?;
         let state = match state_flag {
             0 => None,
@@ -348,6 +359,7 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
                 chain_tip,
                 counterparty_devid: cp_devid,
                 state,
+                value_capability,
             },
         ));
     }
@@ -673,6 +685,7 @@ mod tests {
                     chain_tip: rel.compute_chain_tip(),
                     counterparty_devid: counterparty,
                     state: Some(rel.clone()),
+                    value_capability: ValueCapability::Unknown,
                 },
             )],
             1024,
@@ -699,6 +712,7 @@ mod tests {
                     chain_tip,
                     counterparty_devid: counterparty,
                     state: None,
+                    value_capability: ValueCapability::Unknown,
                 },
             )],
             1024,
@@ -763,6 +777,11 @@ mod tests {
             Some(rel.counterparty_devid)
         );
         assert!(decoded.tip_state(&rel_key).is_some());
+        // Canonical value_capability round-trips (the sample tip is Unknown).
+        assert_eq!(
+            decoded.rel_chain_tip(&rel_key).map(|t| t.value_capability),
+            head.rel_chain_tip(&rel_key).map(|t| t.value_capability)
+        );
     }
 
     #[test]
@@ -779,6 +798,30 @@ mod tests {
             original_tip.counterparty_devid
         );
         assert!(decoded_tip.state.is_none());
+        assert_eq!(decoded_tip.value_capability, original_tip.value_capability);
+    }
+
+    #[test]
+    fn device_head_codec_rejects_invalid_value_capability_byte() {
+        // A state-less tip serializes ending with [value_capability, state_flag].
+        let (_, _rel_key, head) = head_with_state_less_tip();
+        let bytes = encode_device_state(&head);
+        let n = bytes.len();
+        // Sanity: trailing bytes are value_capability=Unknown(3) then state_flag=0.
+        assert_eq!(bytes[n - 1], 0, "state_flag should be 0 (state-less tip)");
+        assert_eq!(bytes[n - 2], 3, "value_capability should be Unknown(3)");
+
+        // Corrupt to UNSPECIFIED(0): decode MUST reject — never silently read as `No`.
+        let mut zeroed = bytes.clone();
+        zeroed[n - 2] = 0;
+        assert!(
+            decode_device_state(&zeroed).is_err(),
+            "UNSPECIFIED value_capability must be rejected, never read as No"
+        );
+        // Out-of-range value is also rejected.
+        let mut oob = bytes;
+        oob[n - 2] = 9;
+        assert!(decode_device_state(&oob).is_err());
     }
 
     #[test]
