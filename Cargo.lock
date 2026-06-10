@@ -1309,7 +1309,7 @@ dependencies = [
  "proptest",
  "prost 0.14.4",
  "prost-build 0.14.3",
- "prost-types 0.14.3",
+ "prost-types 0.14.4",
  "protoc-bin-vendored",
  "quickcheck",
  "rand 0.9.4",
@@ -1383,7 +1383,7 @@ dependencies = [
  "proptest",
  "prost 0.14.4",
  "prost-build 0.14.3",
- "prost-types 0.14.3",
+ "prost-types 0.14.4",
  "protoc-bin-vendored",
  "quickcheck",
  "rand 0.9.4",
@@ -3544,7 +3544,7 @@ dependencies = [
  "petgraph 0.8.3",
  "prettyplease",
  "prost 0.14.4",
- "prost-types 0.14.3",
+ "prost-types 0.14.4",
  "regex",
  "syn",
  "tempfile",
@@ -3587,9 +3587,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.14.3"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
+checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
 dependencies = [
  "prost 0.14.4",
 ]
