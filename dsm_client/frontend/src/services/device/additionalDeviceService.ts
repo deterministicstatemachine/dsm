@@ -2,35 +2,46 @@
 //
 // Additional Device (secondary/Nth device) enrollment — frontend transport only.
 //
-// ARCHITECTURE: all business logic lives in Rust. This module is pure transport: it forwards
-// the scanned genesis-device QR (ContactQrV3 bytes) to Rust via the agnostic ingress and renders
-// whatever Rust returns. Rust derives DevID_new, drives the BLE admission exchange with the
-// existing authorized device (which signs an AddDeviceAdmission with its device signing key),
-// verifies the admission, and inserts the new device into the genesis Device Tree. The UI never
-// derives ids, generates entropy, or makes admission decisions.
+// ARCHITECTURE: all business logic lives in Rust. This module is pure transport: it forwards the
+// inputs to Rust via the agnostic ingress and renders what Rust returns. Rust derives DevID_new,
+// runs the co-present BLE admission handshake (the new device requests; the existing device's owner
+// approves → gate-signs with its device key → inserts into the genesis Device Tree). The UI never
+// derives ids or makes admission decisions; it only generates platform entropy (as genesis does).
 
 import { routerInvokeBin } from '../../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
 import { decodeContactQrV3Payload } from '../qr/contactQrService';
 import { encodeBase32Crockford } from '../../utils/textId';
+import * as pb from '../../proto/dsm_app_pb';
 
-export type AdmissionRequestResult = {
-  ok: boolean;
-  /** Human-readable status/error surfaced from Rust. */
-  message?: string;
-};
+export type AdmissionResult = { ok: boolean; message?: string };
+
+function argpack(body: Uint8Array): Uint8Array {
+  return new pb.ArgPack({ codec: pb.Codec.PROTO, body }).toBinary();
+}
+
+function readValue(resBytes: Uint8Array): { ok: boolean; value?: string; error?: string } {
+  if (!resBytes || resBytes.length === 0) return { ok: false, error: 'empty response' };
+  const env = decodeFramedEnvelopeV3(resBytes);
+  if (env.payload.case === 'error') {
+    return { ok: false, error: env.payload.value?.message ?? 'error' };
+  }
+  if (env.payload.case === 'appStateResponse') {
+    return { ok: true, value: env.payload.value?.value ?? '' };
+  }
+  return { ok: true };
+}
 
 /**
- * Extract the genesis identity from a scanned/pasted genesis-device QR (ContactQrV3). Pure
- * decode — no logic. Returns null if the QR is not a valid ContactQrV3.
+ * Decode the existing device's scanned/pasted QR (ContactQrV3). Pure decode — returns the genesis
+ * + device id (Base32) for display, or null if invalid.
  */
 export function readGenesisFromQr(
   qrData: string,
 ): { genesisHashB32: string; deviceIdB32: string } | null {
   const decoded = decodeContactQrV3Payload(qrData);
-  if (!decoded?.contact) return null;
+  if (!decoded?.contact?.genesisHash?.length) return null;
   const c = decoded.contact;
-  if (!c.genesisHash?.length) return null;
   return {
     genesisHashB32: encodeBase32Crockford(c.genesisHash),
     deviceIdB32: c.deviceId?.length ? encodeBase32Crockford(c.deviceId) : '',
@@ -38,25 +49,49 @@ export function readGenesisFromQr(
 }
 
 /**
- * Ask Rust to enroll THIS device into the genesis tree advertised by the scanned QR. Forwards
- * the raw ContactQrV3 bytes; Rust extracts the genesis, derives DevID_new, and runs the
- * admission handshake with the existing authorized device. Transport only.
+ * NEW device: start the admission handshake. `qrData` is the existing device's QR (carries genesis
+ * + its signing pubkey); `bleAddress` is the existing device's BLE address (from discovery). Rust
+ * derives DevID_new, builds the request, and sends it; the existing device's owner then approves.
  */
-export async function requestAdditionalDeviceAdmission(
+export async function requestAdmission(
   qrData: string,
-): Promise<AdmissionRequestResult> {
+  bleAddress: string,
+): Promise<AdmissionResult> {
   const decoded = decodeContactQrV3Payload(qrData);
-  if (!decoded) {
+  if (!decoded?.contact?.genesisHash?.length) {
     return { ok: false, message: 'Not a valid genesis device QR.' };
   }
-  // Forward the validated ContactQrV3 canonical bytes; Rust extracts the genesis + runs admission.
-  const resBytes = await routerInvokeBin('device.requestAdmission', decoded.rawBytes);
-  if (!resBytes || resBytes.length === 0) {
-    return { ok: false, message: 'device.requestAdmission: empty response' };
+  const contact = pb.ContactQrV3.fromBinary(decoded.rawBytes);
+  if (!contact.signingPublicKey?.length) {
+    return { ok: false, message: 'QR is missing the existing device’s signing key.' };
   }
-  const env = decodeFramedEnvelopeV3(resBytes);
-  if (env.payload.case === 'error') {
-    return { ok: false, message: env.payload.value?.message ?? 'admission failed' };
+  if (!bleAddress) {
+    return { ok: false, message: 'No Bluetooth address for the existing device.' };
   }
-  return { ok: true, message: 'Device admitted to the genesis tree.' };
+  const entropy = crypto.getRandomValues(new Uint8Array(32));
+  const req = new pb.AddDeviceAdmissionInitiateV1({
+    genesisHash: contact.genesisHash,
+    entropy,
+    signerSigningPubkey: contact.signingPublicKey,
+    bleAddress,
+  });
+  const res = readValue(await routerInvokeBin('device.requestAdmission', argpack(req.toBinary())));
+  return res.ok
+    ? { ok: true, message: 'Request sent — approve it on the existing device.' }
+    : { ok: false, message: res.error };
+}
+
+/**
+ * EXISTING device: poll for a pending admission. Returns the requesting device id (Base32) the
+ * owner is being asked to approve, or '' if none.
+ */
+export async function pollPendingAdmission(): Promise<string> {
+  const res = readValue(await routerInvokeBin('device.pendingAdmission', argpack(new Uint8Array(0))));
+  return res.ok ? res.value ?? '' : '';
+}
+
+/** EXISTING device: owner approves the pending admission — Rust gate-signs, inserts, and replies. */
+export async function approveAdmission(): Promise<AdmissionResult> {
+  const res = readValue(await routerInvokeBin('device.approveAdmission', argpack(new Uint8Array(0))));
+  return res.ok ? { ok: true, message: 'Approved.' } : { ok: false, message: res.error };
 }
