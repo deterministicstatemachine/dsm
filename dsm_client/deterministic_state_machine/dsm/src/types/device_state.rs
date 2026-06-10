@@ -96,6 +96,70 @@ fn hex_short(b: &[u8; 32]) -> String {
     s
 }
 
+/// Canonical value-capability of a relationship, for recovery gate-set construction
+/// (spec §0.5 gap 13, R4 anti-shrink). This is the ONLY representation — there is no
+/// legacy bool, no default-false, no `missing == No`.
+///
+/// - `Yes` — PROVEN value-capable: a value-bearing op was observed. Sticky; never downgraded.
+/// - `No` — PROVEN never value-capable: the relationship's birth was witnessed and complete
+///   observed history shows no value-bearing op.
+/// - `Unknown` — INCOMPLETE PROOF: imported / capsule-restored / partial or unwitnessed
+///   history. Transitional — eliminated by canonicalization when history becomes provable.
+///
+/// **Invariant: `Unknown` is NOT false. `Unknown` is INCLUDED in the recovery gate. Only
+/// proven `No` is excluded.** No relationship may be excluded unless exclusion is proven.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueCapability {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl ValueCapability {
+    /// Canonical wire value (matches proto `ValueCapabilityV1`; `0`/UNSPECIFIED is invalid).
+    pub fn to_wire(self) -> i32 {
+        match self {
+            ValueCapability::Yes => 1,
+            ValueCapability::No => 2,
+            ValueCapability::Unknown => 3,
+        }
+    }
+
+    /// Decode from the wire, **fail-closed**: `0`/UNSPECIFIED and any unrecognized value are
+    /// rejected (returned `None`) — NEVER silently treated as `No` or any other variant.
+    pub fn from_wire(v: i32) -> Option<Self> {
+        match v {
+            1 => Some(ValueCapability::Yes),
+            2 => Some(ValueCapability::No),
+            3 => Some(ValueCapability::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Stable 1-byte tag for domain-separated commitments (equals the wire value).
+    pub fn commit_tag(self) -> u8 {
+        self.to_wire() as u8
+    }
+
+    /// R4 gate inclusion: include unless PROVEN `No`. (`Yes` and `Unknown` both include.)
+    pub fn includes_in_gate(self) -> bool {
+        !matches!(self, ValueCapability::No)
+    }
+
+    /// Sticky-monotone update on an accepted op. A value-bearing op proves `Yes` (and `Yes`
+    /// is never downgraded); a non-value op leaves the prior verdict unchanged. Starting
+    /// from `No` (a freshly witnessed birth) this yields `Yes` on first value op and `No`
+    /// otherwise; starting from `Unknown` (unwitnessed history) a non-value op keeps
+    /// `Unknown` (we still cannot prove `No`).
+    pub fn advance(self, op_is_value_bearing: bool) -> Self {
+        if op_is_value_bearing {
+            ValueCapability::Yes
+        } else {
+            self
+        }
+    }
+}
+
 /// Cached per-relationship tip metadata.
 ///
 /// Contains the current chain tip digest (mirror of the SMT leaf) plus the
@@ -114,6 +178,11 @@ pub struct RelChainTip {
     /// Full state at the tip, if available. `None` when the tip was restored
     /// from a recovery capsule that only carried the digest.
     pub state: Option<RelationshipChainState>,
+
+    /// Canonical value-capability (R4 anti-shrink). Witnessed-birth relationships are
+    /// `Yes`/`No`; imported/capsule-restored tips are `Unknown` until history proves
+    /// otherwise. There is no legacy/default form — every tip carries this explicitly.
+    pub value_capability: ValueCapability,
 }
 
 /// One accepted state in a per-relationship straight hash chain (§2.1).
@@ -438,6 +507,19 @@ impl DeviceState {
         *self.smt.root()
     }
 
+    /// Per-Device SMT inclusion proof for a relationship leaf (`rel_key → current chain
+    /// tip`) against [`Self::root`]. Used by the recovery PDSMT head builder to attest
+    /// each posted leaf. Generated from the live SMT (which may also hold vault leaves),
+    /// so the proof recomputes the true `root()`.
+    pub fn rel_inclusion_proof(
+        &self,
+        rel_key: &[u8; 32],
+    ) -> Result<crate::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
+        self.smt.get_inclusion_proof(rel_key, 256).map_err(|e| {
+            DsmError::invalid_operation(format!("rel_inclusion_proof: {e}"))
+        })
+    }
+
     /// Stash a legacy `State.hash` as a verification anchor. Callers that
     /// hold a legacy State and want `legacy_anchor()` to return its hash
     /// (for hash-adjacency verification) use this. Strictly compat path —
@@ -648,14 +730,26 @@ impl DeviceState {
 
         let child_r_a = smt_proofs.post_root;
 
-        // Update the tip cache with the new state.
+        // Update the tip cache with the new state. value_capability is sticky-monotone:
+        // a missing prior means we are witnessing this relationship's birth, so we start
+        // from `No` (proven non-value until a value op is seen); an existing prior
+        // (including a restored `Unknown`) is advanced — `Yes` is never downgraded and a
+        // restored `Unknown` only becomes `Yes` (never `No`) since earlier history is
+        // unproven.
         let mut new_tips = self.tips.clone();
+        let prior_vc = self
+            .tips
+            .get(&rel_key)
+            .map(|t| t.value_capability)
+            .unwrap_or(ValueCapability::No);
+        let value_capability = prior_vc.advance(new_chain_state.operation.is_value_bearing());
         new_tips.insert(
             rel_key,
             RelChainTip {
                 chain_tip: child_chain_tip,
                 counterparty_devid,
                 state: Some(new_chain_state.clone()),
+                value_capability,
             },
         );
 
@@ -939,6 +1033,88 @@ mod tests {
         assert!(
             !bob.balances.contains_key(&custom_token),
             "advance must not mutate &self"
+        );
+    }
+
+    #[test]
+    fn value_capability_is_sticky_monotone_and_fail_closed() {
+        use ValueCapability::*;
+        // Sticky-monotone toward Yes; `Yes` is NEVER downgraded — this is the Gemini
+        // fatal case (value then later non-value / zero-balance MUST stay value-capable).
+        assert_eq!(No.advance(true), Yes);
+        assert_eq!(Yes.advance(false), Yes);
+        assert_eq!(Yes.advance(true), Yes);
+        assert_eq!(No.advance(false), No);
+        assert_eq!(Unknown.advance(false), Unknown);
+        assert_eq!(Unknown.advance(true), Yes);
+        // Gate inclusion: include unless PROVEN No.
+        assert!(Yes.includes_in_gate() && Unknown.includes_in_gate() && !No.includes_in_gate());
+        // Wire is fail-closed: only 1/2/3 are valid; UNSPECIFIED(0) and any other value are
+        // rejected — NEVER silently mapped to `No`.
+        assert_eq!(ValueCapability::from_wire(1), Some(Yes));
+        assert_eq!(ValueCapability::from_wire(2), Some(No));
+        assert_eq!(ValueCapability::from_wire(3), Some(Unknown));
+        assert_eq!(ValueCapability::from_wire(0), None);
+        assert_eq!(ValueCapability::from_wire(4), None);
+        assert_eq!(ValueCapability::from_wire(-1), None);
+        for v in [Yes, No, Unknown] {
+            assert_eq!(ValueCapability::from_wire(v.to_wire()), Some(v));
+        }
+    }
+
+    #[test]
+    fn advance_sets_value_capability_sticky_yes_and_birth_no() {
+        use crate::core::bilateral_transaction_manager::{
+            compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        let dev = fresh_device(0xAB);
+
+        // Relationship whose FIRST op is value-bearing → Yes.
+        let cp = devid(0xC0);
+        let rk = compute_smt_key(&dev.devid, &cp);
+        let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+        let o1 = dev
+            .advance(
+                rk,
+                cp,
+                mint_op(10),
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc(0xF1),
+                    direction: BalanceDirection::Credit,
+                    amount: 10,
+                }],
+                Some(init),
+                None,
+            )
+            .expect("value advance");
+        assert_eq!(
+            o1.new_device_state.rel_chain_tip(&rk).unwrap().value_capability,
+            ValueCapability::Yes
+        );
+
+        // A LATER non-value op on the same relationship (e.g. balance now drained) MUST
+        // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
+        let o2 = o1
+            .new_device_state
+            .advance(rk, cp, op(), entropy(2), None, &[], None, None)
+            .expect("non-value advance");
+        assert_eq!(
+            o2.new_device_state.rel_chain_tip(&rk).unwrap().value_capability,
+            ValueCapability::Yes
+        );
+
+        // A DIFFERENT relationship whose first-ever op is non-value → `No` (witnessed birth).
+        let cp2 = devid(0xD0);
+        let rk2 = compute_smt_key(&dev.devid, &cp2);
+        let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
+        let o3 = dev
+            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
+            .expect("first non-value advance");
+        assert_eq!(
+            o3.new_device_state.rel_chain_tip(&rk2).unwrap().value_capability,
+            ValueCapability::No
         );
     }
 
