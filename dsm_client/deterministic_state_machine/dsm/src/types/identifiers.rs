@@ -15,7 +15,14 @@ use std::fmt;
 
 /// Base32 Crockford encoding for display boundaries only.
 /// Alphabet: 0-9 A-H J-K M-N P-T V-Z (excludes I, L, O, U).
-fn encode_crockford(bytes: &[u8]) -> String {
+/// Crockford Base32 encoder (MSB-first 5-bit packing, no padding).
+///
+/// `pub(crate)` so the recovery contact-set commitment can encode raw device-id
+/// bytes to the EXACT same canonical string the SDK uses for capsule
+/// `counterparty_tips` keys — keeping the capsule and activation-seal contact-set
+/// commitments byte-identical. This algorithm MUST match
+/// `dsm_sdk::util::text_id::encode_base32_crockford`.
+pub(crate) fn encode_crockford(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }

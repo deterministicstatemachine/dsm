@@ -348,6 +348,7 @@ mod tests {
     #[test]
     fn parse_transfer_fields_returns_canonical_dbtc() {
         let op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: vec![0x11; 32],
             amount: Balance::from_state(5, [0u8; 32]),
             token_id: b"DBTC".to_vec(),
@@ -370,6 +371,7 @@ mod tests {
     fn parse_transfer_preserves_public_key_recipient_bytes() {
         let recipient_owner = vec![0x42; 64];
         let op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: vec![0x11; 32],
             amount: Balance::from_state(7, [0u8; 32]),
             token_id: b"ERA".to_vec(),

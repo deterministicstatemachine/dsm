@@ -128,6 +128,7 @@ fn build_signed_token_transfer(
     recipient: Vec<u8>,
 ) -> Operation {
     let mut op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         token_id,
         to_device_id,
         amount: Balance::from_state(amount, current_state.hash),
