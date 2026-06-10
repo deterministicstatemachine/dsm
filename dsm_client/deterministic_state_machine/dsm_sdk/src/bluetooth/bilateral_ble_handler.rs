@@ -1764,6 +1764,32 @@ impl BilateralBleHandler {
             .await
     }
 
+    /// A_NEW side initiate (spec §0.5 bilateral re-establish). After identity recovery, call this
+    /// — with an active BLE session to `counterparty_device_id` (a recovered contact) — to build
+    /// the recovery-establish operation over C's REAL `(A_old,C)` frontier and start the ordinary
+    /// bilateral prepare carrying it. The returned `(envelope_bytes, commitment_hash)` is sent
+    /// over BLE exactly like any other prepare; C automatically gates co-signing on the
+    /// re-establish accept-guard (see [`Self::handle_prepare_request`]).
+    ///
+    /// This is the symmetric counterpart to the wired accept-guard. The only device-dependent
+    /// step is having a live session to C; the op construction + carry-forward are deterministic.
+    /// Fail-closed: A had no sealed relationship with the counterparty, or C has no posted
+    /// `(A_old,C)` leaf to source its current tip, aborts before any prepare is sent.
+    pub async fn initiate_recovery_reestablish(
+        &self,
+        counterparty_device_id: [u8; 32],
+        validity_iterations: u64,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        let op = crate::sdk::RecoverySDK::begin_recovery_reestablish(&counterparty_device_id)
+            .await?;
+        self.prepare_bilateral_transaction_with_commitment(
+            counterparty_device_id,
+            op,
+            validity_iterations,
+        )
+        .await
+    }
+
     /// Cancel / fail the in-flight Prepared session for `counterparty_device_id`, if any.
     ///
     /// Called when the BLE send of the prepare message fails so that the next
@@ -1956,6 +1982,28 @@ impl BilateralBleHandler {
         // Deserialize operation
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
+
+        // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
+        // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
+        // co-signing — that A_new holds the genesis-anchored recovery authority and that the
+        // carry-forward commitment bridges C's REAL CURRENT (A_old,C) frontier. This blocks a
+        // non-authority forger (MITM / malicious node / C itself) and blocks ANYONE from
+        // re-establishing onto a fabricated or stale frontier; it does NOT (and cannot)
+        // distinguish the owner from a mnemonic thief — double-spend safety vs a recovering
+        // party comes from gate 2 (P5 LOCKED_RECOVERY + frontier reconciliation). Fail-closed:
+        // any failure aborts the prepare (C does not co-sign). `sender_device_id` is A_new.
+        // Ordinary establishes are untouched (guard runs only for the recovery-establish marker).
+        if dsm::recovery::is_recovery_establish_op(&operation) {
+            crate::sdk::RecoverySDK::verify_incoming_recovery_reestablish(
+                &operation,
+                &sender_device_id,
+            )
+            .await?;
+            info!(
+                "Recovery re-establish accept-guard PASSED for sender={}",
+                bytes_to_base32(&sender_device_id[..8])
+            );
+        }
 
         // Capture transfer metadata for the orchestration layer to run hooks.
         // Delegate to the application layer so the transport stays coin-agnostic.
@@ -3208,22 +3256,21 @@ impl BilateralBleHandler {
             dsm::types::operations::Operation::Transfer {
                 amount, token_id, ..
             } => {
-                let tid = std::str::from_utf8(token_id).unwrap_or("");
-                if tid.is_empty() {
-                    Vec::new()
-                } else {
-                    match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
-                        Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
-                            policy_commit: pc,
-                            direction: dsm::types::device_state::BalanceDirection::Debit,
-                            amount: amount.value(),
-                        }],
-                        Err(e) => {
-                            log::warn!(
-                                "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
-                            );
-                            Vec::new()
-                        }
+                // §9.5: independently resolve the sender's installed policy_commit;
+                // unresolved -> empty deltas -> conservation guard rejects (fail closed).
+                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                {
+                    Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Debit,
+                        amount: amount.value(),
+                    }],
+                    _ => {
+                        log::warn!(
+                            "[bilateral_ble] sender delta: policy_commit unresolved (fail closed) token={}",
+                            String::from_utf8_lossy(token_id)
+                        );
+                        Vec::new()
                     }
                 }
             }
@@ -4096,22 +4143,22 @@ impl BilateralBleHandler {
             Operation::Transfer {
                 amount, token_id, ..
             } => {
-                let tid = std::str::from_utf8(token_id).unwrap_or("");
-                if tid.is_empty() {
-                    Vec::new()
-                } else {
-                    match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
-                        Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
-                            policy_commit: pc,
-                            direction: dsm::types::device_state::BalanceDirection::Credit,
-                            amount: amount.value(),
-                        }],
-                        Err(e) => {
-                            log::warn!(
-                                "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
-                            );
-                            Vec::new()
-                        }
+                // §9.5: independently resolve the receiver's installed policy_commit.
+                // Unresolved/uninstalled -> empty deltas -> the conservation guard
+                // rejects the Transfer (fail closed). Never absorb the peer's commit.
+                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                {
+                    Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: amount.value(),
+                    }],
+                    _ => {
+                        log::warn!(
+                            "[bilateral_ble] receiver delta: policy_commit unresolved (fail closed) token={}",
+                            String::from_utf8_lossy(token_id)
+                        );
+                        Vec::new()
                     }
                 }
             }
@@ -4667,23 +4714,23 @@ impl BilateralBleHandler {
                     Operation::Transfer {
                         amount, token_id, ..
                     } => {
-                        let tid = std::str::from_utf8(token_id).unwrap_or("");
-                        if tid.is_empty() {
-                            Vec::new()
-                        } else {
-                            match dsm::core::token::token_state_manager::resolve_policy_commit(tid)
-                            {
-                                Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
-                                    policy_commit: pc,
-                                    direction: dsm::types::device_state::BalanceDirection::Debit,
-                                    amount: amount.value(),
-                                }],
-                                Err(e) => {
-                                    log::warn!(
-                                        "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
-                                    );
-                                    Vec::new()
-                                }
+                        // §9.5: independently resolve the sender's installed
+                        // policy_commit; unresolved -> empty deltas -> conservation
+                        // guard rejects (fail closed).
+                        match crate::bridge::app_router()
+                            .map(|r| r.resolve_policy_commit_strict(token_id))
+                        {
+                            Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
+                                policy_commit: pc,
+                                direction: dsm::types::device_state::BalanceDirection::Debit,
+                                amount: amount.value(),
+                            }],
+                            _ => {
+                                log::warn!(
+                                    "[bilateral_ble] sender delta: policy_commit unresolved (fail closed) token={}",
+                                    String::from_utf8_lossy(token_id)
+                                );
+                                Vec::new()
                             }
                         }
                     }
@@ -5682,6 +5729,7 @@ mod tests {
         }
 
         let stale_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),
@@ -5695,6 +5743,7 @@ mod tests {
             signature: Vec::new(),
         };
         let next_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),
@@ -5800,6 +5849,7 @@ mod tests {
         }
 
         let accepted_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: counterparty_device_id.to_vec(),
             amount: Balance::from_state(1, [1u8; 32]),
             token_id: b"ERA".to_vec(),

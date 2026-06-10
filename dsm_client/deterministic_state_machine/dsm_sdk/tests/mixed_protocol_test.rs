@@ -26,6 +26,7 @@ fn make_transfer_op(
     message: &str,
 ) -> Operation {
     Operation::Transfer {
+        policy_commit: [0u8; 32],
         to_device_id: remote_device_id.to_vec(),
         amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"token_1".to_vec(),

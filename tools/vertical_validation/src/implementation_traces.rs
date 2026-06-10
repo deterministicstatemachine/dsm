@@ -1889,6 +1889,7 @@ fn build_signed_transfer(
     recipient: Vec<u8>,
 ) -> Operation {
     let mut op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         token_id,
         to_device_id: recipient.clone(),
         amount: Balance::from_state(amount, current_state.hash),
@@ -1921,6 +1922,7 @@ fn build_signed_transfer_to_owner(
     recipient: Vec<u8>,
 ) -> Operation {
     let mut op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         token_id,
         to_device_id,
         amount: Balance::from_state(amount, current_state.hash),
@@ -1950,6 +1952,7 @@ fn build_signed_bilateral_transfer(
     nonce: u8,
 ) -> Operation {
     let mut op = Operation::Transfer {
+        policy_commit: [0u8; 32],
         token_id: b"ERA".to_vec(),
         to_device_id: remote_device_id.to_vec(),
         amount: Balance::from_state(1, [0u8; 32]),

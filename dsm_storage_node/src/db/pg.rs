@@ -444,6 +444,33 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_device_tree_states_version
                     ON device_tree_states(genesis_b32, version_number);
+
+                -- Single-assignment store for recovery-authority anchors
+                -- (spec §0.5 bind-once). Keyed by genesis: the FIRST valid
+                -- anchor wins and is immutable; a different anchor for the same
+                -- genesis is rejected (409). Storage enforces single-assignment
+                -- ONLY — clients verify the anchor cryptographically.
+                CREATE TABLE IF NOT EXISTS recovery_authority_anchors (
+                    genesis_b32        TEXT PRIMARY KEY,
+                    anchor_hash        BYTEA NOT NULL,
+                    payload            BYTEA NOT NULL,
+                    first_written_tick BIGINT NOT NULL
+                );
+
+                -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
+                -- layer 1). One row per (device, head_number); a head is accepted
+                -- only if it links the current tip. No overwrite, no fork. Full
+                -- history retained for snapshot reads. Storage enforces the chain
+                -- shape ONLY; clients verify head signatures + inclusion.
+                CREATE TABLE IF NOT EXISTS pdsmt_head_chain (
+                    device_b32        TEXT NOT NULL,
+                    head_number       BIGINT NOT NULL,
+                    head_hash         BYTEA NOT NULL,
+                    parent_head_hash  BYTEA NOT NULL,
+                    payload           BYTEA NOT NULL,
+                    inserted_at_tick  BIGINT NOT NULL,
+                    PRIMARY KEY (device_b32, head_number)
+                );
             "#,
         )
         .await?;
@@ -699,6 +726,243 @@ pub async fn get_device_tree_state_version(pool: &Pool, genesis_b32: &str) -> Re
     Ok(row.map(|r| {
         let v: i64 = r.get(0);
         u64::try_from(v).unwrap_or(0)
+    }))
+}
+
+// ============================================================
+// Recovery-authority anchor — single-assignment (spec §0.5 bind-once)
+// ============================================================
+
+/// Outcome of [`insert_recovery_authority_anchor_if_absent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAnchorUpsertOutcome {
+    /// No prior anchor existed for this genesis; the row was newly inserted.
+    Inserted,
+    /// An identical anchor (same `anchor_hash`) already exists — idempotent replay.
+    AlreadyExistsIdentical,
+    /// A DIFFERENT anchor already exists for this genesis — rejected (bind-once).
+    Conflict,
+}
+
+/// Single-assignment insert of a recovery-authority anchor, keyed by genesis
+/// (spec §0.5 bind-once). First write wins; an identical replay (same
+/// `anchor_hash`) is idempotent; any DIFFERENT anchor for the same genesis is
+/// rejected. Runs as a `SERIALIZABLE` transaction with `FOR UPDATE` so concurrent
+/// writers serialise. Storage enforces single-assignment ONLY — it does NOT attest
+/// recovery validity; clients verify the anchor cryptographically.
+pub async fn insert_recovery_authority_anchor_if_absent(
+    pool: &Pool,
+    genesis_b32: &str,
+    anchor_hash: &[u8],
+    payload: &[u8],
+    first_written_tick: u64,
+) -> Result<RecoveryAnchorUpsertOutcome> {
+    use tokio_postgres::IsolationLevel;
+
+    let tick_i64 = i64::try_from(first_written_tick)
+        .map_err(|_| anyhow::anyhow!("first_written_tick {first_written_tick} does not fit in i64"))?;
+
+    let mut client = pool.get().await?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .await?;
+
+    let row = tx
+        .query_opt(
+            "SELECT anchor_hash FROM recovery_authority_anchors WHERE genesis_b32 = $1 FOR UPDATE",
+            &[&genesis_b32],
+        )
+        .await?;
+
+    let outcome = match row {
+        Some(r) => {
+            let existing: Vec<u8> = r.get(0);
+            if existing == anchor_hash {
+                RecoveryAnchorUpsertOutcome::AlreadyExistsIdentical
+            } else {
+                RecoveryAnchorUpsertOutcome::Conflict
+            }
+        }
+        None => {
+            let stmt = tx
+                .prepare_cached(
+                    "INSERT INTO recovery_authority_anchors
+                       (genesis_b32, anchor_hash, payload, first_written_tick)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .await?;
+            tx.execute(&stmt, &[&genesis_b32, &anchor_hash, &payload, &tick_i64])
+                .await?;
+            RecoveryAnchorUpsertOutcome::Inserted
+        }
+    };
+
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Return the persisted recovery-authority anchor payload bytes for a genesis,
+/// or `None` if none has been written.
+pub async fn get_recovery_authority_anchor_payload(
+    pool: &Pool,
+    genesis_b32: &str,
+) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT payload FROM recovery_authority_anchors WHERE genesis_b32 = $1",
+            &[&genesis_b32],
+        )
+        .await?;
+    Ok(row.map(|r| {
+        let payload: Vec<u8> = r.get(0);
+        payload
+    }))
+}
+
+// ============================================================
+// Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4 layer 1)
+// ============================================================
+
+/// Outcome of [`insert_pdsmt_head_if_chained`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PdsmtHeadChainOutcome {
+    /// The head was appended at `head_number` (0 = genesis head).
+    Appended { head_number: u64 },
+    /// A head with the SAME hash already exists at this `head_number` — idempotent replay.
+    AlreadyExistsIdentical,
+    /// The head does not link the current tip (fork / gap / stale / position mismatch).
+    Conflict,
+}
+
+/// Append a PDSMT head iff it correctly links the device's current chain tip (see the
+/// sqlite twin for the full contract). Runs as a `SERIALIZABLE` transaction with
+/// `FOR UPDATE` so concurrent posters serialise. Append-only: existing rows are never
+/// updated or deleted.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_pdsmt_head_if_chained(
+    pool: &Pool,
+    device_b32: &str,
+    head_number: u64,
+    head_hash: &[u8],
+    parent_head_hash: &[u8],
+    payload: &[u8],
+    inserted_at_tick: u64,
+) -> Result<PdsmtHeadChainOutcome> {
+    use tokio_postgres::IsolationLevel;
+
+    let head_number_i64 = i64::try_from(head_number)
+        .map_err(|_| anyhow::anyhow!("head_number {head_number} does not fit in i64"))?;
+    let tick_i64 = i64::try_from(inserted_at_tick)
+        .map_err(|_| anyhow::anyhow!("inserted_at_tick {inserted_at_tick} does not fit in i64"))?;
+
+    let mut client = pool.get().await?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .await?;
+
+    // A row already at this position? (idempotent replay vs position fork)
+    let at_row = tx
+        .query_opt(
+            "SELECT head_hash FROM pdsmt_head_chain WHERE device_b32 = $1 AND head_number = $2 FOR UPDATE",
+            &[&device_b32, &head_number_i64],
+        )
+        .await?;
+
+    let outcome = if let Some(r) = at_row {
+        let existing: Vec<u8> = r.get(0);
+        if existing == head_hash {
+            PdsmtHeadChainOutcome::AlreadyExistsIdentical
+        } else {
+            PdsmtHeadChainOutcome::Conflict
+        }
+    } else {
+        let tip = tx
+            .query_opt(
+                "SELECT head_number, head_hash FROM pdsmt_head_chain
+                 WHERE device_b32 = $1 ORDER BY head_number DESC LIMIT 1 FOR UPDATE",
+                &[&device_b32],
+            )
+            .await?;
+
+        let chains = match &tip {
+            None => head_number == 0 && parent_head_hash.iter().all(|&b| b == 0),
+            Some(r) => {
+                let tip_n: i64 = r.get(0);
+                let tip_hash: Vec<u8> = r.get(1);
+                let tip_n_u = u64::try_from(tip_n).unwrap_or(u64::MAX);
+                head_number == tip_n_u.saturating_add(1) && parent_head_hash == tip_hash.as_slice()
+            }
+        };
+
+        if chains {
+            let stmt = tx
+                .prepare_cached(
+                    "INSERT INTO pdsmt_head_chain
+                       (device_b32, head_number, head_hash, parent_head_hash, payload, inserted_at_tick)
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .await?;
+            tx.execute(
+                &stmt,
+                &[
+                    &device_b32,
+                    &head_number_i64,
+                    &head_hash,
+                    &parent_head_hash,
+                    &payload,
+                    &tick_i64,
+                ],
+            )
+            .await?;
+            PdsmtHeadChainOutcome::Appended { head_number }
+        } else {
+            PdsmtHeadChainOutcome::Conflict
+        }
+    };
+
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Return the payload of the device's latest (highest `head_number`) PDSMT head, or `None`.
+pub async fn get_pdsmt_head_latest(pool: &Pool, device_b32: &str) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT payload FROM pdsmt_head_chain WHERE device_b32 = $1
+             ORDER BY head_number DESC LIMIT 1",
+            &[&device_b32],
+        )
+        .await?;
+    Ok(row.map(|r| {
+        let payload: Vec<u8> = r.get(0);
+        payload
+    }))
+}
+
+/// Return the payload of the device's PDSMT head at a specific `head_number`, or `None`.
+pub async fn get_pdsmt_head_at(
+    pool: &Pool,
+    device_b32: &str,
+    head_number: u64,
+) -> Result<Option<Vec<u8>>> {
+    let head_number_i64 = i64::try_from(head_number)
+        .map_err(|_| anyhow::anyhow!("head_number {head_number} does not fit in i64"))?;
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT payload FROM pdsmt_head_chain WHERE device_b32 = $1 AND head_number = $2",
+            &[&device_b32, &head_number_i64],
+        )
+        .await?;
+    Ok(row.map(|r| {
+        let payload: Vec<u8> = r.get(0);
+        payload
     }))
 }
 

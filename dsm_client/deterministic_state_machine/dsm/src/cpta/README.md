@@ -104,3 +104,20 @@ let token = create_token_from_genesis(&genesis, "creator_id", metadata, balance)
 - **Global Discoverability**: All policy anchors are globally discoverable
 - **Caching**: Policies are cached after verification for efficiency
 - **Rejection Guarantee**: Tokens with invalid or unverifiable CTPAs are treated as non-existent
+
+## Custom-Token Transfer Readiness — INCOMPLETE
+
+Per the token-policy + per-transfer readiness doctrine
+(`.github/instructions/token-policy-readiness.instructions.md`), custom-token
+transfer readiness is **not yet complete**. Shipped today (Layer A): `policy_commit`
+is bound into the signed `Operation::Transfer` and rejected on mismatch (§9.5),
+balance conservation is enforced by construction at `DeviceState::advance`, and both
+online and bilateral receive paths fail closed with no peer-policy absorption.
+
+Still tracked (Layer B): receiver-side installed-policy verification (#468),
+sender-side readiness preflight (#469), online published readiness object (#470),
+offline direct readiness exchange (#471), the fail-closed test matrix (#472),
+extending `policy_commit` binding to Mint/Burn/CreateToken (#473), and
+issuer/root-signed anchor verification (#466). Until these close, custom-token
+transfers enforce binding + conservation + fail-closed but NOT full per-transfer
+counterparty readiness.
