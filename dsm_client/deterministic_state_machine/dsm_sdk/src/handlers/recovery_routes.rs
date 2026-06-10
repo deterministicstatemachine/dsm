@@ -740,6 +740,31 @@ impl AppRouterImpl {
                                     let mut sender_arr = [0u8; 32];
                                     sender_arr.copy_from_slice(&sender_device_id_bytes);
 
+                                    // Verify the tombstone signature against the
+                                    // sender's known contact signing key BEFORE acting
+                                    // on it. The notification arrives at a storage key
+                                    // any party can write, so an unverified receipt must
+                                    // never tombstone a device or emit an ACK.
+                                    let sender_pubkey =
+                                        crate::storage::client_db::get_contact_by_device_id(
+                                            &sender_arr,
+                                        )
+                                        .ok()
+                                        .flatten()
+                                        .map(|c| c.public_key)
+                                        .unwrap_or_default();
+                                    if sender_pubkey.is_empty()
+                                        || !dsm::recovery::tombstone::verify_tombstone(
+                                            &receipt,
+                                            &sender_pubkey,
+                                        )
+                                        .unwrap_or(false)
+                                    {
+                                        return err(
+                                            "Tombstone signature verification failed".into()
+                                        );
+                                    }
+
                                     // Store as tombstoned device
                                     let tick = crate::util::deterministic_time::tick();
                                     if let Err(e) =
