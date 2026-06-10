@@ -129,9 +129,11 @@ pub fn verify_smt_inclusion_proof_bytes(
         return Ok(false);
     }
 
-    // Require an existing leaf with matching key/value.
+    // Require an existing leaf with matching key/value. This is an INCLUSION
+    // verifier, so a non-inclusion (`Absent`) witness must fail closed —
+    // previously the `Absent` arm returned `true`, accepting an absence proof
+    // as if it proved inclusion of the caller-supplied value.
     let leaf_ok = match &proof.v_path {
-        Some(pb::smt_proof::VPath::Absent(_)) => true,
         Some(pb::smt_proof::VPath::ExistingLeaf(l)) => {
             l.key.len() == 32
                 && l.value.len() == 32
@@ -211,6 +213,16 @@ pub fn verify_device_tree_inclusion_proof_bytes(
         let mut arr = [0u8; 32];
         arr.copy_from_slice(s);
         siblings.push(arr);
+    }
+
+    // `path_bits_len` is an attacker-controlled u32 decoded from protobuf and is
+    // independent of the `MAX_PROOF_BYTES` byte cap (which only bounds the packed
+    // bytes). The canonical device-tree proof carries exactly one path bit per
+    // sibling level, so enforce that invariant before allocating/iterating —
+    // otherwise a tiny proof declaring `path_bits_len = u32::MAX` drives a
+    // multi-billion-entry `Vec::with_capacity` + loop (memory/CPU DoS).
+    if proof.path_bits_len as usize != proof.siblings.len() {
+        return Ok(false);
     }
 
     // Unpack LSB-first bitfield.
