@@ -159,7 +159,14 @@ pub fn verify_challenge_response_with_keypair(
     }
     distance = distance.sqrt() / 256.0f32;
 
-    if threshold > 0.0f32 && distance > threshold {
+    // Fail closed: always apply the gamma-distance gate. Previously this was
+    // gated on `threshold > 0.0`, so a request carrying epsilon_intra ==
+    // epsilon_inter == 0 (or negative) skipped the anti-clone tolerance check
+    // entirely and accepted any gamma. Since the thresholds are caller-supplied,
+    // that let a caller disable the biometric tolerance dimension by sending
+    // zeros. A non-positive threshold now only admits an exact-match gamma
+    // (distance == 0); a real enrolled epsilon is always > 0.
+    if distance > threshold {
         return Ok(CdbrwVerificationOutcome::rejected(
             "gamma_distance_exceeded",
             distance,
