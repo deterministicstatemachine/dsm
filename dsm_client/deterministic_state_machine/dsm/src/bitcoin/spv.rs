@@ -120,7 +120,12 @@ pub fn verify_spv_proof(txid: &[u8; 32], merkle_root: &[u8; 32], proof: &SpvProo
         idx >>= 1;
     }
 
-    current == *merkle_root
+    // After folding `siblings.len()` levels, every bit of the leaf index must
+    // have been consumed. If high bits remain, the index addresses a deeper
+    // tree than the proof provides — reject rather than silently dropping them
+    // (otherwise index `i` and `i + (1 << siblings.len())` verify identically,
+    // a proof-malleability hole).
+    current == *merkle_root && idx == 0
 }
 
 /// Extract the Merkle root from a raw 80-byte Bitcoin block header.
