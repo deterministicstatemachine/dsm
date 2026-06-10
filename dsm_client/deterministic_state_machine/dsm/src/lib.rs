@@ -93,7 +93,6 @@ pub mod bitcoin;
 pub mod performance;
 pub mod prelude;
 pub mod recovery;
-pub mod serialization;
 pub mod storage;
 pub mod telemetry;
 pub mod types;
