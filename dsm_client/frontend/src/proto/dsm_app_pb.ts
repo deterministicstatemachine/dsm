@@ -12131,6 +12131,66 @@ export class AddDeviceAdoptRequestV1 extends Message<AddDeviceAdoptRequestV1> {
 }
 
 /**
+ * NEW-device initiate input (device.requestAdmission): everything the new device needs to start the
+ * admission handshake with the existing device over BLE. genesis_hash + signer_signing_pubkey come
+ * from the existing device's scanned QR; entropy is platform-generated; ble_address is the existing
+ * device's BLE address (from discovery).
+ *
+ * @generated from message dsm.AddDeviceAdmissionInitiateV1
+ */
+export class AddDeviceAdmissionInitiateV1 extends Message<AddDeviceAdmissionInitiateV1> {
+  /**
+   * @generated from field: bytes genesis_hash = 1;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes entropy = 2;
+   */
+  entropy = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signer_signing_pubkey = 3;
+   */
+  signerSigningPubkey = new Uint8Array(0);
+
+  /**
+   * @generated from field: string ble_address = 4;
+   */
+  bleAddress = "";
+
+  constructor(data?: PartialMessage<AddDeviceAdmissionInitiateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AddDeviceAdmissionInitiateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "signer_signing_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AddDeviceAdmissionInitiateV1 {
+    return new AddDeviceAdmissionInitiateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AddDeviceAdmissionInitiateV1 {
+    return new AddDeviceAdmissionInitiateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AddDeviceAdmissionInitiateV1 {
+    return new AddDeviceAdmissionInitiateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AddDeviceAdmissionInitiateV1 | PlainMessage<AddDeviceAdmissionInitiateV1> | undefined, b: AddDeviceAdmissionInitiateV1 | PlainMessage<AddDeviceAdmissionInitiateV1> | undefined): boolean {
+    return proto3.util.equals(AddDeviceAdmissionInitiateV1, a, b);
+  }
+}
+
+/**
  * ============================ AUTH / REGISTRATION ==========================
  * Device registration request/response for storage node authentication.
  * Binary-only: raw 32-byte identifiers, no text encoding on the wire.

@@ -1689,6 +1689,17 @@ message AddDeviceAdoptRequestV1 {
   bytes entropy               = 3 [(dsm_fixed_len)=32];
 }
 
+// NEW-device initiate input (device.requestAdmission): everything the new device needs to start the
+// admission handshake with the existing device over BLE. genesis_hash + signer_signing_pubkey come
+// from the existing device's scanned QR; entropy is platform-generated; ble_address is the existing
+// device's BLE address (from discovery).
+message AddDeviceAdmissionInitiateV1 {
+  bytes  genesis_hash         = 1 [(dsm_fixed_len)=32];
+  bytes  entropy              = 2 [(dsm_fixed_len)=32];
+  bytes  signer_signing_pubkey = 3 [(dsm_max_len)=4096];
+  string ble_address          = 4;
+}
+
 // ============================ AUTH / REGISTRATION ==========================
 // Device registration request/response for storage node authentication.
 // Binary-only: raw 32-byte identifiers, no text encoding on the wire.

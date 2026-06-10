@@ -4,7 +4,7 @@
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::bridge::{AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use crate::storage::client_db::export_state_blob;
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
@@ -272,4 +272,109 @@ impl AppRouterImpl {
             _ => err(format!("unknown system query: {}", q.path)),
         }
     }
+
+    /// Dispatch handler for `device.*` invoke routes — secondary-device admission handshake.
+    /// All logic is in `DeviceAdmissionSDK`; these arms decode args + drive the BLE send.
+    pub(crate) async fn handle_device_invoke(&self, i: AppInvoke) -> AppResult {
+        let body = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p.body,
+            Err(e) => return err(format!("{}: decode ArgPack failed: {e}", i.method)),
+        };
+        match i.method.as_str() {
+            // EXISTING device: which device (if any) is awaiting the owner's approval (poll).
+            "device.pendingAdmission" => {
+                let v =
+                    crate::sdk::DeviceAdmissionSDK::pending_admission_device_id().unwrap_or_default();
+                device_ok("device.pendingAdmission", &v)
+            }
+            // NEW device: start the handshake (build request + send over BLE to the existing device).
+            "device.requestAdmission" => {
+                #[cfg(all(target_os = "android", feature = "bluetooth"))]
+                {
+                    let req = match generated::AddDeviceAdmissionInitiateV1::decode(&*body) {
+                        Ok(r) => r,
+                        Err(e) => return err(format!("device.requestAdmission: decode: {e}")),
+                    };
+                    if req.genesis_hash.len() != 32 {
+                        return err("device.requestAdmission: genesis_hash must be 32 bytes".into());
+                    }
+                    if req.entropy.len() != 32 {
+                        return err("device.requestAdmission: entropy must be 32 bytes".into());
+                    }
+                    if req.signer_signing_pubkey.is_empty() {
+                        return err("device.requestAdmission: signer pubkey required".into());
+                    }
+                    if req.ble_address.is_empty() {
+                        return err("device.requestAdmission: ble_address required".into());
+                    }
+                    let mut g = [0u8; 32];
+                    g.copy_from_slice(&req.genesis_hash);
+                    let env = match crate::sdk::DeviceAdmissionSDK::begin_admission(
+                        g,
+                        req.entropy,
+                        req.signer_signing_pubkey,
+                    )
+                    .await
+                    {
+                        Ok(e) => e,
+                        Err(e) => return err(format!("device.requestAdmission: {e}")),
+                    };
+                    let adapter = match crate::bridge::get_ble_transport_adapter().await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return err(format!(
+                                "device.requestAdmission: BLE transport not ready: {e}"
+                            ))
+                        }
+                    };
+                    match adapter.send_admission_request(&req.ble_address, &env).await {
+                        Ok(()) => device_ok("device.requestAdmission", "request-sent"),
+                        Err(e) => err(format!("device.requestAdmission: send failed: {e}")),
+                    }
+                }
+                #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+                {
+                    let _ = body;
+                    err("device.requestAdmission: BLE admission requires the Android build".into())
+                }
+            }
+            // EXISTING device: owner approves → gate-sign + insert + send the response back.
+            "device.approveAdmission" => {
+                #[cfg(all(target_os = "android", feature = "bluetooth"))]
+                {
+                    let (env, peer) =
+                        match crate::sdk::DeviceAdmissionSDK::approve_pending_admission().await {
+                            Ok(v) => v,
+                            Err(e) => return err(format!("device.approveAdmission: {e}")),
+                        };
+                    let adapter = match crate::bridge::get_ble_transport_adapter().await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return err(format!(
+                                "device.approveAdmission: BLE transport not ready: {e}"
+                            ))
+                        }
+                    };
+                    match adapter.send_admission_response(&peer, &env).await {
+                        Ok(()) => device_ok("device.approveAdmission", "approved"),
+                        Err(e) => err(format!("device.approveAdmission: send failed: {e}")),
+                    }
+                }
+                #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+                {
+                    err("device.approveAdmission: BLE admission requires the Android build".into())
+                }
+            }
+            _ => err(format!("unknown device invoke: {}", i.method)),
+        }
+    }
+}
+
+fn device_ok(key: &str, value: &str) -> AppResult {
+    pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+        generated::AppStateResponse {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+        },
+    ))
 }

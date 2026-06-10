@@ -31,8 +31,9 @@ use crate::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 /// signer_pubkey-from-QR).
 static PENDING_OUTBOUND: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
 /// EXISTING device, set at `receive_admission_request`, consumed at `approve_pending_admission`:
-/// the requesting device's `AddDeviceAdmissionRequestV1` bytes, held until the owner approves.
-static PENDING_INBOUND: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+/// the requesting device's `AddDeviceAdmissionRequestV1` bytes + the BLE peer address to reply to,
+/// held until the owner approves.
+static PENDING_INBOUND: Mutex<Option<(Vec<u8>, String)>> = Mutex::new(None);
 
 pub struct DeviceAdmissionSDK;
 
@@ -237,9 +238,13 @@ impl DeviceAdmissionSDK {
         )
     }
 
-    /// EXISTING device: an admission request arrived over BLE. Decode + hold it pending the
-    /// owner's approval (the gate). Returns the requesting `new_device_id` (Base32) for the UI.
-    pub fn receive_admission_request(envelope_bytes: &[u8]) -> Result<String, DsmError> {
+    /// EXISTING device: an admission request arrived over BLE. Decode + hold it (with the BLE peer
+    /// to reply to) pending the owner's approval (the gate). Returns the requesting `new_device_id`
+    /// (Base32) for the UI prompt.
+    pub fn receive_admission_request(
+        envelope_bytes: &[u8],
+        peer_address: &str,
+    ) -> Result<String, DsmError> {
         let env = crate::envelope::transport::from_canonical_bytes(envelope_bytes)
             .map_err(|e| DsmError::verification(format!("admission request envelope: {e}")))?;
         let req = match env.payload {
@@ -251,14 +256,27 @@ impl DeviceAdmissionSDK {
             }
         };
         let new_id = crate::util::text_id::encode_base32_crockford(&req.new_device_id);
-        *PENDING_INBOUND.lock().unwrap_or_else(|p| p.into_inner()) = Some(req.encode_to_vec());
+        *PENDING_INBOUND.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((req.encode_to_vec(), peer_address.to_string()));
         Ok(new_id)
     }
 
-    /// EXISTING device: the owner approved — gate-sign + insert the held request and return the
-    /// response Envelope to send as a `DEVICE_ADMISSION_RESPONSE` frame. Clears the pending request.
-    pub async fn approve_pending_admission() -> Result<Vec<u8>, DsmError> {
-        let req_bytes = PENDING_INBOUND
+    /// EXISTING device: the requesting device id (Base32) currently awaiting the owner's approval,
+    /// if any. Polled by the existing device's UI to show the approve prompt.
+    pub fn pending_admission_device_id() -> Option<String> {
+        let g = PENDING_INBOUND.lock().unwrap_or_else(|p| p.into_inner());
+        g.as_ref().and_then(|(req_bytes, _)| {
+            crate::generated::AddDeviceAdmissionRequestV1::decode(req_bytes.as_slice())
+                .ok()
+                .map(|r| crate::util::text_id::encode_base32_crockford(&r.new_device_id))
+        })
+    }
+
+    /// EXISTING device: the owner approved — gate-sign + insert the held request. Returns the
+    /// `(response Envelope bytes, BLE peer address)` so the caller sends a `DEVICE_ADMISSION_RESPONSE`
+    /// frame back. Clears the pending request.
+    pub async fn approve_pending_admission() -> Result<(Vec<u8>, String), DsmError> {
+        let (req_bytes, peer) = PENDING_INBOUND
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
@@ -273,10 +291,11 @@ impl DeviceAdmissionSDK {
             )
         })?;
         let genesis = Self::id32(Some(adm_proto.genesis_hash.clone()), "genesis_hash")?;
-        Self::build_admission_envelope(
+        let env = Self::build_admission_envelope(
             crate::generated::envelope::Payload::DeviceAdmission(adm_proto),
             &genesis,
-        )
+        )?;
+        Ok((env, peer))
     }
 
     /// NEW device: a gate-signed admission arrived over BLE. Verify (gate sig under the QR pubkey +

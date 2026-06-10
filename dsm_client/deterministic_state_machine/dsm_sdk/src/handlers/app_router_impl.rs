@@ -2778,6 +2778,8 @@ impl AppRouter for AppRouterImpl {
             m if m.starts_with("recovery.") || m == "nfc.ring.write" || m == "nfc.ring.read" => {
                 self.handle_recovery_invoke(i).await
             }
+            // Secondary-device admission invoke routes (gated additional-device enrollment)
+            m if m.starts_with("device.") => self.handle_device_invoke(i).await,
             // Bitcoin invoke routes
             m if m.starts_with("bitcoin.") => self.handle_bitcoin_invoke(i).await,
             _ => err(format!(
