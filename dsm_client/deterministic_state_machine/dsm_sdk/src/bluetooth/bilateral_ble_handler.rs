@@ -1764,6 +1764,32 @@ impl BilateralBleHandler {
             .await
     }
 
+    /// A_NEW side initiate (spec §0.5 bilateral re-establish). After identity recovery, call this
+    /// — with an active BLE session to `counterparty_device_id` (a recovered contact) — to build
+    /// the recovery-establish operation over C's REAL `(A_old,C)` frontier and start the ordinary
+    /// bilateral prepare carrying it. The returned `(envelope_bytes, commitment_hash)` is sent
+    /// over BLE exactly like any other prepare; C automatically gates co-signing on the
+    /// re-establish accept-guard (see [`Self::handle_prepare_request`]).
+    ///
+    /// This is the symmetric counterpart to the wired accept-guard. The only device-dependent
+    /// step is having a live session to C; the op construction + carry-forward are deterministic.
+    /// Fail-closed: A had no sealed relationship with the counterparty, or C has no posted
+    /// `(A_old,C)` leaf to source its current tip, aborts before any prepare is sent.
+    pub async fn initiate_recovery_reestablish(
+        &self,
+        counterparty_device_id: [u8; 32],
+        validity_iterations: u64,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        let op = crate::sdk::RecoverySDK::begin_recovery_reestablish(&counterparty_device_id)
+            .await?;
+        self.prepare_bilateral_transaction_with_commitment(
+            counterparty_device_id,
+            op,
+            validity_iterations,
+        )
+        .await
+    }
+
     /// Cancel / fail the in-flight Prepared session for `counterparty_device_id`, if any.
     ///
     /// Called when the BLE send of the prepare message fails so that the next
@@ -1956,6 +1982,28 @@ impl BilateralBleHandler {
         // Deserialize operation
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
+
+        // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
+        // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
+        // co-signing — that A_new holds the genesis-anchored recovery authority and that the
+        // carry-forward commitment bridges C's REAL CURRENT (A_old,C) frontier. This blocks a
+        // non-authority forger (MITM / malicious node / C itself) and blocks ANYONE from
+        // re-establishing onto a fabricated or stale frontier; it does NOT (and cannot)
+        // distinguish the owner from a mnemonic thief — double-spend safety vs a recovering
+        // party comes from gate 2 (P5 LOCKED_RECOVERY + frontier reconciliation). Fail-closed:
+        // any failure aborts the prepare (C does not co-sign). `sender_device_id` is A_new.
+        // Ordinary establishes are untouched (guard runs only for the recovery-establish marker).
+        if dsm::recovery::is_recovery_establish_op(&operation) {
+            crate::sdk::RecoverySDK::verify_incoming_recovery_reestablish(
+                &operation,
+                &sender_device_id,
+            )
+            .await?;
+            info!(
+                "Recovery re-establish accept-guard PASSED for sender={}",
+                bytes_to_base32(&sender_device_id[..8])
+            );
+        }
 
         // Capture transfer metadata for the orchestration layer to run hooks.
         // Delegate to the application layer so the transport stays coin-agnostic.
