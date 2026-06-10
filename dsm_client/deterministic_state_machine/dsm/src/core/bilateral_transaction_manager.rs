@@ -17,7 +17,6 @@ use crate::core::contact_manager::DsmContactManager;
 use crate::commitments::precommit::PreCommitment as CanonicalPreCommitment;
 use crate::core::chain_tip_store::{noop_chain_tip_store, ChainTipStore};
 use crate::core::state_machine::bilateral::BilateralStateManager;
-use crate::core::state_machine::relationship::RelationshipStatePair as StatePair;
 use crate::crypto::canonical_lp;
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::merkle::sparse_merkle_tree::{empty_leaf, SmtReplaceResult, SparseMerkleTree};
@@ -496,22 +495,6 @@ impl BilateralTransactionManager {
             .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, operation)
     }
 
-    /// Execute a bilateral state transition (public wrapper for receiver-side finalize)
-    pub fn execute_transition_bytes(
-        &mut self,
-        local_device_id: &[u8; 32],
-        remote_device_id: &[u8; 32],
-        operation: Operation,
-        entropy: [u8; 32],
-    ) -> Result<StatePair, DsmError> {
-        self.bilateral_state_manager.execute_transition_bytes(
-            local_device_id,
-            remote_device_id,
-            operation,
-            entropy,
-        )
-    }
-
     /// Update anchor from a real SMT-Replace result (§4.2).
     ///
     /// The `replace_result` MUST come from `commit_bilateral_smt_update()` for the
@@ -865,154 +848,6 @@ impl BilateralTransactionManager {
         self.pending_commitments
             .insert(bilateral.bilateral_commitment_hash, bilateral.clone());
         Ok(bilateral)
-    }
-
-    /// Execute a bilateral transaction with real SMT-Replace (§4.2).
-    ///
-    /// The caller MUST provide `&mut SparseMerkleTree`. The replace happens
-    /// atomically with the anchor update — no speculative proofs.
-    pub async fn execute_bilateral_transaction(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        operation: Operation,
-        offline: bool,
-        smt: &mut SparseMerkleTree,
-    ) -> Result<BilateralTransactionResult, DsmError> {
-        let mut anchor = self
-            .relationships
-            .get(remote_device_id)
-            .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?
-            .clone();
-        if offline {
-            self.exec_offline(remote_device_id, operation, &mut anchor, smt)
-                .await
-        } else {
-            self.exec_online(remote_device_id, operation, &mut anchor, smt)
-                .await
-        }
-    }
-
-    async fn exec_offline(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        operation: Operation,
-        anchor: &mut BilateralRelationshipAnchor,
-        smt: &mut SparseMerkleTree,
-    ) -> Result<BilateralTransactionResult, DsmError> {
-        // Tripwire: shared chain_tip must match persisted contact tip
-        if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
-            if let Some(contact_tip) = contact.chain_tip {
-                if anchor.chain_tip != contact_tip {
-                    log::warn!(
-                        "[BTM][TRIPWIRE:exec_offline] anchor={} contact={}",
-                        labeling::hash_to_short_id(&anchor.chain_tip),
-                        labeling::hash_to_short_id(&contact_tip),
-                    );
-                    return Err(DsmError::deterministic_safety(
-                        DeterministicSafetyClass::ParentConsumed,
-                        "Tripwire: relationship chain tip diverged from persisted value",
-                    ));
-                }
-            }
-        } else {
-            return Err(DsmError::RelationshipNotFound(
-                "remote contact missing for exec_offline".into(),
-            ));
-        }
-
-        let _ = self
-            .create_bilateral_precommitment(remote_device_id, operation.clone(), 300)
-            .await?;
-        let entropy = self
-            .bilateral_state_manager
-            .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, &operation)?;
-        let sp: StatePair = self.bilateral_state_manager.execute_transition_bytes(
-            &self.local_device_id,
-            remote_device_id,
-            operation.clone(),
-            entropy,
-        )?;
-        let current_tip = anchor.chain_tip;
-        let receipt_sigma = compute_precommit(&current_tip, &operation.to_bytes(), &entropy);
-        let new_tip = compute_successor_tip(
-            &current_tip,
-            &operation.to_bytes(),
-            &entropy,
-            &receipt_sigma,
-        );
-        let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
-
-        // §4.2: SMT-Replace FIRST, then anchor update from the result.
-        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
-        self.update_anchor_from_replace(remote_device_id, anchor, new_tip, &replace_result)?;
-
-        Ok(BilateralTransactionResult {
-            local_state: sp.entity_state,
-            remote_state: sp.counterparty_state,
-            relationship_anchor: anchor.clone(),
-            transaction_hash: tx_hash,
-            completed_offline: true,
-        })
-    }
-
-    async fn exec_online(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        operation: Operation,
-        anchor: &mut BilateralRelationshipAnchor,
-        smt: &mut SparseMerkleTree,
-    ) -> Result<BilateralTransactionResult, DsmError> {
-        // Tripwire: shared chain_tip must match persisted contact tip
-        if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
-            if let Some(contact_tip) = contact.chain_tip {
-                if anchor.chain_tip != contact_tip {
-                    log::warn!(
-                        "[BTM][TRIPWIRE:exec_online] anchor={} contact={}",
-                        labeling::hash_to_short_id(&anchor.chain_tip),
-                        labeling::hash_to_short_id(&contact_tip),
-                    );
-                    return Err(DsmError::deterministic_safety(
-                        DeterministicSafetyClass::ParentConsumed,
-                        "Tripwire: relationship chain tip diverged from persisted value",
-                    ));
-                }
-            }
-        } else {
-            return Err(DsmError::RelationshipNotFound(
-                "remote contact missing for exec_online".into(),
-            ));
-        }
-
-        let entropy = self
-            .bilateral_state_manager
-            .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, &operation)?;
-        let sp: StatePair = self.bilateral_state_manager.execute_transition_bytes(
-            &self.local_device_id,
-            remote_device_id,
-            operation.clone(),
-            entropy,
-        )?;
-        let current_tip = anchor.chain_tip;
-        let receipt_sigma = compute_precommit(&current_tip, &operation.to_bytes(), &entropy);
-        let new_tip = compute_successor_tip(
-            &current_tip,
-            &operation.to_bytes(),
-            &entropy,
-            &receipt_sigma,
-        );
-        let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
-
-        // §4.2: SMT-Replace FIRST, then anchor update from the result.
-        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
-        self.update_anchor_from_replace(remote_device_id, anchor, new_tip, &replace_result)?;
-
-        Ok(BilateralTransactionResult {
-            local_state: sp.entity_state,
-            remote_state: sp.counterparty_state,
-            relationship_anchor: anchor.clone(),
-            transaction_hash: tx_hash,
-            completed_offline: false,
-        })
     }
 
     /// Update anchor from a real `SmtReplaceResult` (§4.2).
@@ -1573,41 +1408,7 @@ mod tests {
     use super::*;
     use crate::types::operations::{Operation, TransactionMode, VerificationType};
     use crate::types::token_types::Balance;
-    use std::sync::{Arc, Mutex};
     use tokio; // for #[tokio::test]
-
-    #[derive(Default)]
-    struct TestChainTipStore {
-        tips: Mutex<HashMap<[u8; 32], [u8; 32]>>,
-    }
-
-    impl crate::core::chain_tip_store::ChainTipStore for TestChainTipStore {
-        fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]> {
-            self.tips
-                .lock()
-                .ok()
-                .and_then(|m| m.get(device_id).copied())
-        }
-
-        fn set_contact_chain_tip(
-            &self,
-            device_id: &[u8; 32],
-            expected_parent_tip: [u8; 32],
-            new_tip: [u8; 32],
-        ) -> Result<bool, DsmError> {
-            if let Ok(mut m) = self.tips.lock() {
-                let current = m.get(device_id).copied().unwrap_or([0u8; 32]);
-                if current != expected_parent_tip {
-                    return Ok(false);
-                }
-                m.insert(*device_id, new_tip);
-                return Ok(true);
-            }
-            Err(DsmError::InvalidState(
-                "TestChainTipStore mutex poisoned".to_string(),
-            ))
-        }
-    }
 
     fn make_manager_ids() -> ([u8; 32], [u8; 32]) {
         ([1u8; 32], [2u8; 32])
@@ -1787,93 +1588,6 @@ mod tests {
         assert!(pre
             .verify_local_signature(manager.signature_keypair.public_key())
             .unwrap());
-    }
-
-    #[tokio::test]
-    async fn execute_transaction_offline_updates_anchor_and_contact() {
-        let (mut manager, _kp) = make_manager();
-        let contact = make_verified_contact("Dave", true, true);
-        let remote_id = contact.device_id;
-        let remote_genesis = contact.genesis_hash;
-        manager.add_verified_contact(contact).expect("add");
-        let anchor = manager
-            .establish_relationship(&remote_id)
-            .await
-            .expect("establish");
-        // Establish relationship now uses deterministic initial relationship tip (h_0)
-        let initial_tip = initial_relationship_chain_tip(
-            &make_manager_ids().0,
-            &make_manager_ids().1,
-            &remote_id,
-            &remote_genesis,
-        );
-        assert_eq!(anchor.chain_tip, initial_tip);
-
-        let op = signed_transfer_op(&manager.signature_keypair, "m", 3);
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        manager
-            .execute_bilateral_transaction(&remote_id, op, true, &mut smt)
-            .await
-            .expect("exec");
-        let updated = manager.get_relationship(&remote_id).expect("rel");
-        // After transition, shared chain tip must have advanced from h_0
-        assert_ne!(updated.chain_tip, initial_tip);
-        // §4.2: anchor proof is derived from SmtReplaceResult. No later override pattern.
-        assert!(
-            updated.smt_proof.is_some(),
-            "anchor must have real SMT proof after transition"
-        );
-        let proof = updated.smt_proof.as_ref().unwrap();
-        assert_eq!(
-            proof.state_hash, updated.chain_tip,
-            "proof state_hash must match chain tip"
-        );
-        assert_ne!(proof.smt_root, [0u8; 32], "proof root must not be zero");
-        assert!(manager.has_verified_contact(&remote_id));
-    }
-
-    #[tokio::test]
-    async fn update_anchor_persists_shared_tip_for_contact() {
-        crate::utils::deterministic_time::reset_for_tests();
-
-        let (local_device_id, local_genesis_hash) = make_manager_ids();
-        let contact_manager = DsmContactManager::new(local_device_id, vec![]);
-        let key_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
-        let kp = SignatureKeyPair::generate_from_entropy(&key_entropy)
-            .map_err(|e| DsmError::crypto("Failed to generate test keypair", Some(e)))
-            .unwrap();
-
-        let chain_tip_store = Arc::new(TestChainTipStore::default());
-        let mut manager = BilateralTransactionManager::new_with_chain_tip_store(
-            contact_manager,
-            kp,
-            local_device_id,
-            local_genesis_hash,
-            chain_tip_store.clone(),
-        );
-
-        let contact = make_verified_contact("RemoteTip", true, true);
-        let remote_id = contact.device_id;
-        manager.add_verified_contact(contact).expect("add");
-        manager
-            .establish_relationship(&remote_id)
-            .await
-            .expect("establish");
-
-        let op = signed_transfer_op(&manager.signature_keypair, "m", 33);
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        manager
-            .execute_bilateral_transaction(&remote_id, op, true, &mut smt)
-            .await
-            .expect("exec");
-
-        let rel = manager.get_relationship(&remote_id).expect("relationship");
-        let persisted = chain_tip_store
-            .get_contact_chain_tip(&remote_id)
-            .expect("persisted contact tip");
-
-        // Persisted tip must match the shared relationship chain tip
-        assert_eq!(persisted, rel.chain_tip);
     }
 
     #[tokio::test]
