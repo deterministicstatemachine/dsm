@@ -5,7 +5,8 @@
 //! Index-only, clockless, signature-free storage node for the DSM network.
 //! Serves protobuf-only HTTP/2 endpoints for genesis anchoring, ByteCommit
 //! mirroring, DLV slot management, unilateral b0x transport, and inter-node
-//! replication. Parameters: N=6, K=3, U_up=0.85, U_down=0.35.
+//! replication. (Capacity/scaling parameters are configured at runtime via the
+//! `[replication]` config section and `ReplicationConfig`, not hardcoded here.)
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
