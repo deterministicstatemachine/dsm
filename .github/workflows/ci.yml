@@ -23,6 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-latest ships ~14 GB free, which the `--all-features` workspace
+      # build plus the full test-binary set (with debug info) overflows
+      # ("No space left on device", os error 28). Reclaim the preinstalled
+      # toolchains this job never uses (~25 GB) before building. Plain shell,
+      # no third-party action, to keep the CI supply chain minimal.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
       # Pinned: rustfmt/clippy output is version-specific. `@stable` drifts on
       # every release and then fails unchanged code on `cargo fmt --check`.
       # Bump this pin deliberately and reformat in the same PR.

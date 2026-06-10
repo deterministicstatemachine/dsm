@@ -6,11 +6,54 @@
 //! Uses AEAD-encrypted NFC capsules containing SMT roots, per-counterparty bilateral tips,
 //! and receipt rollups for immediate recovery without history replay.
 
+pub mod activation;
+pub mod assembly;
+pub mod authority_anchor;
+pub mod bearer_lock;
+pub mod bundle;
+pub mod dbtc_backing;
+pub mod dbtc_reconcile;
+pub mod dbtc_vault_index;
 pub mod capsule;
+pub mod chain_segment;
+pub mod gate_set;
+pub mod pdsmt_posting;
 pub mod rollup;
+pub mod succession_binding;
+pub mod succession_proof;
 pub mod tombstone;
 
+pub use activation::{
+    compute_evidence_root, validate_recovery_activation, RecoveryActivationSeal,
+};
+pub use assembly::{
+    assemble_recovery_activation, AssembledActivation, CounterpartyRecoveryInput,
+    RecoveryAssemblyInputs,
+};
+pub use authority_anchor::{
+    compute_authority_pubkey_commit, create_recovery_authority_anchor, RecoveryAuthorityAnchor,
+};
+pub use bearer_lock::{reconcile_token_frontier, BearerAssetLockState};
+pub use dbtc_backing::{classify_dbtc_backing, DbtcBitcoinFacts};
+pub use dbtc_reconcile::{aggregate_dbtc_frontier, DbtcVaultCondition, DbtcVaultOutcome};
+pub use dbtc_vault_index::{build_dbtc_vault_index, PostedDbtcVaultIndex};
+pub use bundle::RecoveryBundle;
+pub use chain_segment::{
+    rel_chain_state_from_proto, rel_chain_state_to_proto, RecoveryEstablishmentReceipt,
+    RelationshipChainSegment,
+};
+pub use gate_set::{build_gate_set, CounterpartyValueWitness, FrozenGateSet};
+pub use pdsmt_posting::{
+    build_pdsmt_snapshot, decode_leaf_set, encode_leaf_set, verify_head_with_leaves,
+    PostedPdsmtHead, PostedPdsmtLeafRecord, GENESIS_PARENT_HEAD_HASH,
+};
 pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
+pub use succession_binding::{
+    build_recovery_establishment_op, compute_carry_forward_commitment, is_recovery_establish_op,
+    recovery_establishment_floor, verify_forward_ancestry, verify_recovery_reestablish_request,
+    CrossRelationshipSuccessionEvidence, RECOVERY_ESTABLISH_MESSAGE,
+};
+pub use succession_proof::RecoverySuccessionProof;
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
