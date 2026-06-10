@@ -2510,11 +2510,12 @@ impl BitcoinTapSdk {
             DsmError::InvalidState("reconcile_dbtc_asset: no device identity".into())
         })?;
         let device_str = crate::util::text_id::encode_base32_crockford(&device_id);
-        let hint_sats = crate::storage::client_db::get_balance_projection(&device_str, DBTC_TOKEN_ID)
-            .ok()
-            .flatten()
-            .map(|p| p.available)
-            .unwrap_or(0);
+        let hint_sats =
+            crate::storage::client_db::get_balance_projection(&device_str, DBTC_TOKEN_ID)
+                .ok()
+                .flatten()
+                .map(|p| p.available)
+                .unwrap_or(0);
 
         // Live Bitcoin source for backing verification (UTXO liveness + confirmation). If it
         // can't be constructed, facts are conservative → no vault unlocks (fail-closed).
@@ -2617,7 +2618,7 @@ impl BitcoinTapSdk {
         #[cfg(test)]
         {
             let _ = mempool;
-            return DBTC_BACKING_TEST_FACTS
+            DBTC_BACKING_TEST_FACTS
                 .lock()
                 .ok()
                 .and_then(|m| m.get(&ad.vault_id).copied())
@@ -2625,7 +2626,7 @@ impl BitcoinTapSdk {
                     htlc_utxo_unspent: false,
                     funding_confirmed: false,
                     preimage_derivable: false,
-                });
+                })
         }
         #[cfg(not(test))]
         {
@@ -2643,11 +2644,11 @@ impl BitcoinTapSdk {
             }
             // UTXO liveness: a UTXO present at the HTLC address = the BTC is still locked
             // (unspent); any confirmed UTXO = funding buried. Same gate the planner uses.
-            let (htlc_utxo_unspent, funding_confirmed) = match mp.address_utxos(&ad.htlc_address).await
-            {
-                Ok(utxos) if !utxos.is_empty() => (true, utxos.iter().any(|u| u.confirmed)),
-                _ => (false, false),
-            };
+            let (htlc_utxo_unspent, funding_confirmed) =
+                match mp.address_utxos(&ad.htlc_address).await {
+                    Ok(utxos) if !utxos.is_empty() => (true, utxos.iter().any(|u| u.confirmed)),
+                    _ => (false, false),
+                };
             // Bearer claim-preimage derivability: re-derive from the (deterministic) manifold
             // seed + the ad's deposit_nonce and confirm it matches the vault's HTLC hash_lock.
             let preimage_derivable = Self::dbtc_preimage_matches(ad).await.unwrap_or(false);
@@ -2689,8 +2690,9 @@ impl BitcoinTapSdk {
         if digest.as_bytes() != ad.vault_proto_digest.as_slice() {
             return Ok(false);
         }
-        let vault = generated::LimboVaultProto::decode(proto_bytes.as_slice())
-            .map_err(|e| DsmError::verification(format!("dbtc backing: vault proto decode: {e}")))?;
+        let vault = generated::LimboVaultProto::decode(proto_bytes.as_slice()).map_err(|e| {
+            DsmError::verification(format!("dbtc backing: vault proto decode: {e}"))
+        })?;
         let hash_lock = match vault.fulfillment_condition.and_then(|f| f.kind) {
             Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(htlc)) => htlc.hash_lock,
             _ => return Ok(false),
@@ -5520,10 +5522,16 @@ mod tests {
             Some(C::InFlight)
         );
         for s in ["limbo", "initiated", "awaiting_confirmation", "claimable"] {
-            assert_eq!(BitcoinTapSdk::classify_dbtc_lifecycle(s, true), Some(C::InFlight));
+            assert_eq!(
+                BitcoinTapSdk::classify_dbtc_lifecycle(s, true),
+                Some(C::InFlight)
+            );
         }
         for s in ["unlocked", "claimed", "spent", "completed", "invalidated"] {
-            assert_eq!(BitcoinTapSdk::classify_dbtc_lifecycle(s, true), Some(C::Finalized));
+            assert_eq!(
+                BitcoinTapSdk::classify_dbtc_lifecycle(s, true),
+                Some(C::Finalized)
+            );
         }
         for s in ["expired", "refunded"] {
             assert_eq!(
@@ -5568,7 +5576,12 @@ mod tests {
         DBTC_BACKING_TEST_FACTS.lock().unwrap().clear();
     }
 
-    async fn put_ad(vault_id: [u8; 32], amount_sats: u64, routeable: bool, lifecycle: &str) -> String {
+    async fn put_ad(
+        vault_id: [u8; 32],
+        amount_sats: u64,
+        routeable: bool,
+        lifecycle: &str,
+    ) -> String {
         let ad = test_advertisement(vault_id, amount_sats, routeable, 1, lifecycle);
         let key = BitcoinTapSdk::vault_advertisement_key(&ad.vault_id);
         BitcoinTapSdk::storage_put_bytes(&key, &ad.encode_to_vec())
@@ -5598,7 +5611,9 @@ mod tests {
         // Bitcoin truth confirms: HTLC UTXO unspent + confirmed + bearer can derive preimage.
         set_backing_facts(&vid, true, true, true);
 
-        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid])
+            .await
+            .expect("reconcile");
         assert_eq!(state, dsm::recovery::BearerAssetLockState::Spendable);
         assert_eq!(
             crate::storage::client_db::recovery::get_asset_lock(DBTC_TOKEN_ID.as_bytes())
@@ -5617,7 +5632,9 @@ mod tests {
         // Active ad, but NO Bitcoin backing facts (unreachable/unverified) → must NOT unlock.
         let vid = put_ad(vid_from_label("dbtc-active-noverify"), 500, true, "active").await;
 
-        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid])
+            .await
+            .expect("reconcile");
         assert_ne!(
             state,
             dsm::recovery::BearerAssetLockState::Spendable,
@@ -5634,7 +5651,9 @@ mod tests {
         // Ad claims active, but Bitcoin says the HTLC UTXO is SPENT (already withdrawn).
         set_backing_facts(&vid, false, true, true);
 
-        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid])
+            .await
+            .expect("reconcile");
         assert_ne!(state, dsm::recovery::BearerAssetLockState::Spendable);
     }
 
@@ -5646,7 +5665,9 @@ mod tests {
         // A limbo (deposit-in-progress) vault → InFlight → no spendable value → blocked.
         let vid = put_ad(vid_from_label("dbtc-limbo"), 500, true, "limbo").await;
 
-        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid])
+            .await
+            .expect("reconcile");
         assert_eq!(state, dsm::recovery::BearerAssetLockState::InFlight);
     }
 
@@ -5657,7 +5678,9 @@ mod tests {
         dbtc_reconcile_test_identity();
         // Candidate with NO posted ad → completeness failure → stays LockedRecovery.
         let vid = crate::util::text_id::encode_base32_crockford(&vid_from_label("dbtc-absent"));
-        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid])
+            .await
+            .expect("reconcile");
         assert_eq!(state, dsm::recovery::BearerAssetLockState::LockedRecovery);
     }
 
@@ -5667,7 +5690,9 @@ mod tests {
         init_withdrawal_test_db();
         dbtc_reconcile_test_identity();
         let vid = put_ad(vid_from_label("dbtc-weird"), 500, true, "weird_state").await;
-        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid]).await.expect("reconcile");
+        let state = BitcoinTapSdk::reconcile_dbtc_asset(&[vid])
+            .await
+            .expect("reconcile");
         assert_eq!(state, dsm::recovery::BearerAssetLockState::LockedRecovery);
     }
 }

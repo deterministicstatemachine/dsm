@@ -221,11 +221,20 @@ mod tests {
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
         // Return the genesis-anchored authority commit (what build_gate_set/verify take).
-        (head, compute_authority_pubkey_commit(&kp.public_key), leaves)
+        (
+            head,
+            compute_authority_pubkey_commit(&kp.public_key),
+            leaves,
+        )
     }
 
     /// A counterparty `c` posts its OWN snapshot containing a value-capable leaf about A_old.
-    fn witness_for(c: [u8; 32], c_genesis: [u8; 32], seed: u8, vc: ValueCapability) -> CounterpartyValueWitness {
+    fn witness_for(
+        c: [u8; 32],
+        c_genesis: [u8; 32],
+        seed: u8,
+        vc: ValueCapability,
+    ) -> CounterpartyValueWitness {
         let (head, commit, leaves) = posted_snapshot(c, c_genesis, seed, &[(A_OLD, vc)]);
         CounterpartyValueWitness {
             head,
@@ -241,17 +250,16 @@ mod tests {
         let c2 = [0xC2; 32];
         let c3 = [0xC3; 32];
         // C1, C2 value-capable; C3 a pure contact relationship.
-        let (head, pk, leaves) =
-            posted_snapshot(
-                A_OLD,
-                g_a,
-                0x42,
-                &[
-                    (c1, ValueCapability::Yes),
-                    (c2, ValueCapability::Yes),
-                    (c3, ValueCapability::No),
-                ],
-            );
+        let (head, pk, leaves) = posted_snapshot(
+            A_OLD,
+            g_a,
+            0x42,
+            &[
+                (c1, ValueCapability::Yes),
+                (c2, ValueCapability::Yes),
+                (c3, ValueCapability::No),
+            ],
+        );
         let gs = build_gate_set(&A_OLD, &head, &pk, &leaves, &[]).expect("gate set");
         assert_eq!(gs.members, BTreeSet::from([c1, c2]));
         assert_eq!(
@@ -323,8 +331,12 @@ mod tests {
         let c1 = [0xC1; 32];
         let (head, pk, leaves) = posted_snapshot(A_OLD, g_a, 0x42, &[(c1, ValueCapability::Yes)]);
         // Witness whose leaf is about a DIFFERENT device, not A_old.
-        let (w_head, w_commit, w_leaves) =
-            posted_snapshot([0xC9; 32], [0xD9; 32], 0x55, &[([0xBB; 32], ValueCapability::Yes)]);
+        let (w_head, w_commit, w_leaves) = posted_snapshot(
+            [0xC9; 32],
+            [0xD9; 32],
+            0x55,
+            &[([0xBB; 32], ValueCapability::Yes)],
+        );
         let w = CounterpartyValueWitness {
             head: w_head,
             authority_commit: w_commit,

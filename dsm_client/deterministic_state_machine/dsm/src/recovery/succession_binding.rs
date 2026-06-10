@@ -144,7 +144,9 @@ pub fn verify_forward_ancestry(
     let mut last = *floor_tip;
     for s in chain {
         if &s.rel_key != rel_key {
-            return Err(DsmError::verification("ancestry: rel_key mismatch in chain"));
+            return Err(DsmError::verification(
+                "ancestry: rel_key mismatch in chain",
+            ));
         }
         if s.embedded_parent != parent {
             return Err(DsmError::verification(
@@ -227,7 +229,9 @@ pub fn verify_recovery_reestablish_request(
     // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored authority).
     let a_old_str = crate::types::identifiers::encode_crockford(a_old);
     if tombstone.device_id != a_old_str {
-        return Err(DsmError::verification("reestablish: tombstone is not for A_old"));
+        return Err(DsmError::verification(
+            "reestablish: tombstone is not for A_old",
+        ));
     }
     if succession.new_device_commitment.as_slice() != a_new {
         return Err(DsmError::verification(
@@ -324,16 +328,22 @@ impl CrossRelationshipSuccessionEvidence {
             return Err(DsmError::verification("succession: A_old == A_new"));
         }
         if self.old_rel_key != compute_smt_key(&self.a_old, &self.c) {
-            return Err(DsmError::verification("succession: old_rel_key != H(A_old,C)"));
+            return Err(DsmError::verification(
+                "succession: old_rel_key != H(A_old,C)",
+            ));
         }
         if self.new_rel_key != compute_smt_key(&self.a_new, &self.c) {
-            return Err(DsmError::verification("succession: new_rel_key != H(A_new,C)"));
+            return Err(DsmError::verification(
+                "succession: new_rel_key != H(A_new,C)",
+            ));
         }
 
         // 2. A_new is the mnemonic-authorized successor of A_old (genesis-anchored auth).
         let a_old_str = crate::types::identifiers::encode_crockford(&self.a_old);
         if self.tombstone.device_id != a_old_str {
-            return Err(DsmError::verification("succession: tombstone is not for A_old"));
+            return Err(DsmError::verification(
+                "succession: tombstone is not for A_old",
+            ));
         }
         if self.succession.new_device_commitment.as_slice() != self.a_new {
             return Err(DsmError::verification(
@@ -484,7 +494,12 @@ mod tests {
     const A_NEW: [u8; 32] = [0xA1; 32];
     const C: [u8; 32] = [0xC0; 32];
 
-    fn old_state(rel_key: [u8; 32], parent: [u8; 32], endpoint: [u8; 32], e: u8) -> RelationshipChainState {
+    fn old_state(
+        rel_key: [u8; 32],
+        parent: [u8; 32],
+        endpoint: [u8; 32],
+        e: u8,
+    ) -> RelationshipChainState {
         RelationshipChainState {
             rel_key,
             embedded_parent: parent,
@@ -506,9 +521,13 @@ mod tests {
 
         let tombstone = create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &kp.secret_key)
             .expect("tombstone");
-        let succession =
-            create_succession(&tombstone.tombstone_hash, &A_NEW.to_vec(), &a_old_str, &kp.secret_key)
-                .expect("succession");
+        let succession = create_succession(
+            &tombstone.tombstone_hash,
+            A_NEW.as_ref(),
+            &a_old_str,
+            &kp.secret_key,
+        )
+        .expect("succession");
 
         let old_rel_key = compute_smt_key(&A_OLD, &C);
         let new_rel_key = compute_smt_key(&A_NEW, &C);
@@ -566,7 +585,8 @@ mod tests {
     #[test]
     fn valid_semantics_pass() {
         let (ev, pk) = fixture();
-        ev.verify_succession_semantics(&pk).expect("valid semantics");
+        ev.verify_succession_semantics(&pk)
+            .expect("valid semantics");
     }
 
     #[test]
@@ -646,7 +666,7 @@ mod tests {
         let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
         ev.succession = create_succession(
             &ev.tombstone.tombstone_hash,
-            &[0xBB; 32].to_vec(),
+            [0xBB; 32].as_ref(),
             &a_old_str,
             &kp.secret_key,
         )
@@ -755,10 +775,17 @@ mod tests {
         use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
         let mut pd = SparseMerkleTree::new(256);
         pd.update_leaf(&ev.old_rel_key, &ev.t_old_current).unwrap();
-        pd.update_leaf(&ev.new_rel_key, &ev.t_new_established).unwrap();
+        pd.update_leaf(&ev.new_rel_key, &ev.t_new_established)
+            .unwrap();
         ev.counterparty_root = *pd.root();
-        ev.old_inclusion_proof = pd.get_inclusion_proof(&ev.old_rel_key, 256).unwrap().to_bytes();
-        ev.new_inclusion_proof = pd.get_inclusion_proof(&ev.new_rel_key, 256).unwrap().to_bytes();
+        ev.old_inclusion_proof = pd
+            .get_inclusion_proof(&ev.old_rel_key, 256)
+            .unwrap()
+            .to_bytes();
+        ev.new_inclusion_proof = pd
+            .get_inclusion_proof(&ev.new_rel_key, 256)
+            .unwrap()
+            .to_bytes();
     }
 
     #[test]
@@ -768,7 +795,9 @@ mod tests {
         // verifier, which cannot decode/validate these — a latent liveness-fatal mismatch.)
         let (mut ev, pk) = fixture();
         with_real_inclusion(&mut ev);
-        let tip = ev.verify(&pk).expect("full evidence with real PDSMT proofs verifies");
+        let tip = ev
+            .verify(&pk)
+            .expect("full evidence with real PDSMT proofs verifies");
         assert_eq!(tip, ev.t_new_established);
     }
 
@@ -817,7 +846,15 @@ mod tests {
     fn reestablish_accept_guard_passes_for_valid_request() {
         let (op, ev, pk) = reestablish_request();
         verify_recovery_reestablish_request(
-            &op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
+            &op,
+            &A_OLD,
+            &A_NEW,
+            &C,
+            &ev.tombstone,
+            &ev.succession,
+            &pk,
+            &ev.h_cap,
+            &ev.old_chain,
         )
         .expect("valid recovery re-establish request must be accepted");
     }
@@ -827,7 +864,15 @@ mod tests {
         let (_op, ev, pk) = reestablish_request();
         let bad_op = build_recovery_establishment_op(&C, &[0xBE; 32], &ev.h_cap); // not the real carry-forward
         assert!(verify_recovery_reestablish_request(
-            &bad_op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
+            &bad_op,
+            &A_OLD,
+            &A_NEW,
+            &C,
+            &ev.tombstone,
+            &ev.succession,
+            &pk,
+            &ev.h_cap,
+            &ev.old_chain,
         )
         .is_err());
     }
@@ -838,7 +883,14 @@ mod tests {
         let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x01; 32]).unwrap();
         // A thief without A's genesis-anchored authority can't pass verify_recovery_pair.
         assert!(verify_recovery_reestablish_request(
-            &op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &other.public_key, &ev.h_cap,
+            &op,
+            &A_OLD,
+            &A_NEW,
+            &C,
+            &ev.tombstone,
+            &ev.succession,
+            &other.public_key,
+            &ev.h_cap,
             &ev.old_chain,
         )
         .is_err());
@@ -848,7 +900,14 @@ mod tests {
     fn reestablish_rejects_non_create_relationship_op() {
         let (_op, ev, pk) = reestablish_request();
         assert!(verify_recovery_reestablish_request(
-            &Operation::Noop, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap,
+            &Operation::Noop,
+            &A_OLD,
+            &A_NEW,
+            &C,
+            &ev.tombstone,
+            &ev.succession,
+            &pk,
+            &ev.h_cap,
             &ev.old_chain,
         )
         .is_err());
@@ -859,7 +918,14 @@ mod tests {
         let (op, ev, pk) = reestablish_request();
         // Same op but verified as if C were a DIFFERENT device → counterparty_id != C(self).
         assert!(verify_recovery_reestablish_request(
-            &op, &A_OLD, &A_NEW, &[0xDD; 32], &ev.tombstone, &ev.succession, &pk, &ev.h_cap,
+            &op,
+            &A_OLD,
+            &A_NEW,
+            &[0xDD; 32],
+            &ev.tombstone,
+            &ev.succession,
+            &pk,
+            &ev.h_cap,
             &ev.old_chain,
         )
         .is_err());
@@ -871,7 +937,15 @@ mod tests {
         // Tamper C's old chain so h_cap no longer walks to the committed t_old_current.
         ev.old_chain[0].embedded_parent = [0xDE; 32];
         assert!(verify_recovery_reestablish_request(
-            &op, &A_OLD, &A_NEW, &C, &ev.tombstone, &ev.succession, &pk, &ev.h_cap, &ev.old_chain,
+            &op,
+            &A_OLD,
+            &A_NEW,
+            &C,
+            &ev.tombstone,
+            &ev.succession,
+            &pk,
+            &ev.h_cap,
+            &ev.old_chain,
         )
         .is_err());
     }

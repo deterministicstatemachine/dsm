@@ -1780,8 +1780,8 @@ impl BilateralBleHandler {
         counterparty_device_id: [u8; 32],
         validity_iterations: u64,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
-        let op = crate::sdk::RecoverySDK::begin_recovery_reestablish(&counterparty_device_id)
-            .await?;
+        let op =
+            crate::sdk::RecoverySDK::begin_recovery_reestablish(&counterparty_device_id).await?;
         self.prepare_bilateral_transaction_with_commitment(
             counterparty_device_id,
             op,

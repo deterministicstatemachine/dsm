@@ -37,9 +37,7 @@ use crate::recovery::activation::{
 };
 use crate::recovery::chain_segment::{RecoveryEstablishmentReceipt, RelationshipChainSegment};
 use crate::recovery::gate_set::{build_gate_set, CounterpartyValueWitness, FrozenGateSet};
-use crate::recovery::pdsmt_posting::{
-    verify_head_with_leaves, PostedPdsmtHead, PostedPdsmtLeafRecord,
-};
+use crate::recovery::pdsmt_posting::{verify_head_with_leaves, PostedPdsmtHead, PostedPdsmtLeafRecord};
 use crate::recovery::succession_binding::{
     compute_carry_forward_commitment, CrossRelationshipSuccessionEvidence,
 };
@@ -376,7 +374,11 @@ mod tests {
             authority_pubkey: kp.public_key.clone(),
         };
         head.signature = sphincs_sign(&kp.secret_key, &head.digest()).expect("sign");
-        (head, compute_authority_pubkey_commit(&kp.public_key), leaves)
+        (
+            head,
+            compute_authority_pubkey_commit(&kp.public_key),
+            leaves,
+        )
     }
 
     fn old_chain_state(rel_key: [u8; 32], parent: [u8; 32], tag: u8) -> RelationshipChainState {
@@ -407,9 +409,13 @@ mod tests {
         let a_old_str = crate::types::identifiers::encode_crockford(&A_OLD);
         let tombstone =
             create_tombstone(&[0x01; 32], 0, &[0x02; 32], &a_old_str, &ka.secret_key).expect("t");
-        let succession =
-            create_succession(&tombstone.tombstone_hash, &A_NEW.to_vec(), &a_old_str, &ka.secret_key)
-                .expect("s");
+        let succession = create_succession(
+            &tombstone.tombstone_hash,
+            A_NEW.as_ref(),
+            &a_old_str,
+            &ka.secret_key,
+        )
+        .expect("s");
 
         let old_rel_key = compute_smt_key(&A_OLD, &c);
         let new_rel_key = compute_smt_key(&A_NEW, &c);

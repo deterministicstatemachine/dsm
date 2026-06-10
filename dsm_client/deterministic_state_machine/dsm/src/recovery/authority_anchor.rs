@@ -44,10 +44,8 @@ use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, RecoveryAuthorityAnchorProto};
 
-const AUTHORITY_COMMIT_DOMAIN: &str =
-    crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_COMMIT;
-const AUTHORITY_ANCHOR_DOMAIN: &str =
-    crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_ANCHOR;
+const AUTHORITY_COMMIT_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_COMMIT;
+const AUTHORITY_ANCHOR_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_ANCHOR;
 
 /// Commit to a recovery-authority public key (length-prefixed, domain-separated).
 pub fn compute_authority_pubkey_commit(authority_pubkey: &[u8]) -> [u8; 32] {
@@ -126,7 +124,8 @@ impl RecoveryAuthorityAnchor {
                 "authority-anchor: device_id does not match the device under recovery",
             ));
         }
-        if self.authority_pubkey_commit != compute_authority_pubkey_commit(candidate_authority_pubkey)
+        if self.authority_pubkey_commit
+            != compute_authority_pubkey_commit(candidate_authority_pubkey)
         {
             return Err(DsmError::verification(
                 "authority-anchor: candidate authority pubkey does not match the anchored commitment",
@@ -138,7 +137,11 @@ impl RecoveryAuthorityAnchor {
                 "authority-anchor: genesis signing-key signature invalid (genesis binding failed)",
             ));
         }
-        if !sphincs_verify(candidate_authority_pubkey, &digest, &self.authority_signature)? {
+        if !sphincs_verify(
+            candidate_authority_pubkey,
+            &digest,
+            &self.authority_signature,
+        )? {
             return Err(DsmError::verification(
                 "authority-anchor: authority self-signature invalid (possession proof failed)",
             ));
@@ -171,7 +174,10 @@ impl RecoveryAuthorityAnchor {
         Ok(Self {
             genesis_id: fixed32(&p.genesis_id, "genesis_id")?,
             device_id: fixed32(&p.device_id, "device_id")?,
-            authority_pubkey_commit: fixed32(&p.authority_pubkey_commit, "authority_pubkey_commit")?,
+            authority_pubkey_commit: fixed32(
+                &p.authority_pubkey_commit,
+                "authority_pubkey_commit",
+            )?,
             device_signature: p.device_signature,
             authority_signature: p.authority_signature,
         })
@@ -238,7 +244,11 @@ mod tests {
             &authority_kp.secret_key,
         )
         .expect("anchor");
-        (anchor, device_kp.public_key.clone(), authority_kp.public_key.clone())
+        (
+            anchor,
+            device_kp.public_key.clone(),
+            authority_kp.public_key.clone(),
+        )
     }
 
     #[test]
@@ -252,7 +262,9 @@ mod tests {
         let (anchor, gpk, _apk) = fixture();
         let other = kp(0x99);
         // Different authority pubkey → commitment mismatch (and possession-proof fail).
-        assert!(anchor.verify(&GENESIS, &DEVICE, &gpk, &other.public_key).is_err());
+        assert!(anchor
+            .verify(&GENESIS, &DEVICE, &gpk, &other.public_key)
+            .is_err());
     }
 
     #[test]
@@ -267,7 +279,9 @@ mod tests {
         let (anchor, _gpk, apk) = fixture();
         let other = kp(0x55);
         // A different device-key holder cannot have produced the genesis-binding sig.
-        assert!(anchor.verify(&GENESIS, &DEVICE, &other.public_key, &apk).is_err());
+        assert!(anchor
+            .verify(&GENESIS, &DEVICE, &other.public_key, &apk)
+            .is_err());
     }
 
     #[test]
@@ -315,7 +329,10 @@ mod tests {
             &thief_auth.secret_key,
         )
         .expect("forged");
-        assert_ne!(legit.authority_pubkey_commit, forged.authority_pubkey_commit);
+        assert_ne!(
+            legit.authority_pubkey_commit,
+            forged.authority_pubkey_commit
+        );
         // The legit authority pubkey does not validate against the forged anchor.
         assert!(forged.verify(&GENESIS, &DEVICE, &gpk, &legit_apk).is_err());
     }
@@ -327,7 +344,9 @@ mod tests {
         let decoded = RecoveryAuthorityAnchor::from_bytes(&bytes).expect("decode");
         assert_eq!(anchor, decoded);
         // The decoded anchor still verifies end-to-end.
-        decoded.verify(&GENESIS, &DEVICE, &gpk, &apk).expect("verify after round-trip");
+        decoded
+            .verify(&GENESIS, &DEVICE, &gpk, &apk)
+            .expect("verify after round-trip");
         // Re-encode is byte-identical (canonical).
         assert_eq!(bytes, decoded.to_bytes());
     }

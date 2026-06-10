@@ -187,13 +187,12 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
       if (!mountedRef.current) return;
 
       const pendingGoLive = activation.startsWith('assembled;awaiting-go-live');
+      const activationMsg = pendingGoLive
+        ? 'Identity succession assembled — activation pends go-live. '
+        : `Activation: ${activation}. `;
       setPhase('complete');
       setStatusMsg(
-        `Recovery complete. ${result.resumed} relationship(s) restored. ` +
-          (pendingGoLive
-            ? 'Identity succession assembled — activation pends go-live. '
-            : `Activation: ${activation}. `) +
-          `dBTC: ${dbtc}.`,
+        `Recovery complete. ${result.resumed} relationship(s) restored. ${activationMsg}dBTC: ${dbtc}.`,
       );
     } catch (error: unknown) {
       if (!mountedRef.current) return;
