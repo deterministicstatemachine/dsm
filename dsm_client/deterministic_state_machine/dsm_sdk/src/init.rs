@@ -436,7 +436,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             contact_manager::DsmContactManager,
             bilateral_transaction_manager::BilateralTransactionManager,
         };
-        use dsm::crypto::signatures::SignatureKeyPair;
 
         let (dev, gen) = match (
             crate::sdk::app_state::AppState::get_device_id(),

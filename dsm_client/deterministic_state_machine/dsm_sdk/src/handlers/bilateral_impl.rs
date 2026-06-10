@@ -228,6 +228,7 @@ impl BilateralHandler for BiImpl {
                             // Send chunks via the shared JNI BLE dispatch helper.
                             #[cfg(all(target_os = "android", feature = "jni"))]
                             {
+                                use dsm::types::error::DsmError;
                                 let jvm = crate::jni::jni_common::get_java_vm().ok_or_else(|| {
                                     DsmError::internal(
                                         "JavaVM not initialized",

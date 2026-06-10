@@ -61,6 +61,17 @@ use crate::jni::bilateral_poll::{
     POLL_ATTEMPTS_TIMEOUT, POLL_TOTAL_ITERATIONS,
 };
 
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::bluetooth::BleTransportDelegate;
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::jni::state::{parse_hex_32, DEVICE_ID_TO_ADDR};
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::storage::client_db::get_contact_chain_tip;
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use jni::objects::{JObject, JValue};
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use tokio::runtime::Handle;
+
 // --- Helpers to convert raw JNI handles ---
 /// Convert raw JNIEnv pointer to safe wrapper.
 /// Returns None on failure instead of aborting the process.
@@ -1256,9 +1267,13 @@ fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
 /// the core bridge which rejects them with error 409). The `device_address`
 /// parameter enables session routing for bilateral messages received as complete
 /// 0x03 envelopes rather than BLE chunks.
+#[cfg_attr(
+    not(all(target_os = "android", feature = "bluetooth")),
+    allow(unused_variables)
+)]
 fn process_envelope_v3_impl(
     req: &[u8],
-    _device_address: Option<&str>,
+    device_address: Option<&str>,
 ) -> Result<Vec<u8>, IngressShimError> {
     ensure_bootstrap();
 
@@ -2303,10 +2318,34 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                 // Deterministic balance anchor — same derivation as wallet.send path
                                 let balance_anchor = dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR, &[],
                                 );
+                                // §9.5: bind the token's canonical policy_commit into the
+                                // hint-built transfer. Resolve from the locally installed
+                                // policy and fail closed — same doctrine as wallet.send
+                                // (never absorb a peer-supplied commit).
+                                let policy_commit = match crate::bridge::app_router()
+                                    .ok_or_else(|| {
+                                        dsm::types::error::DsmError::state(
+                                            "app router not installed".to_string(),
+                                        )
+                                    })
+                                    .and_then(|router| {
+                                        router.resolve_policy_commit_strict(token_id.as_bytes())
+                                    }) {
+                                    Ok(pc) => pc,
+                                    Err(e) => {
+                                        results.push(gp::OpResult {
+                                            op_id, accepted: false,
+                                            error: Some(gp::Error { code: 465, message: format!("policy_commit resolve failed for {token_id}: {e}"), ..Default::default() }),
+                                            ..Default::default()
+                                        });
+                                        continue;
+                                    }
+                                };
                                 let hint_op = dsm::types::operations::Operation::Transfer {
                                     to_device_id: cid_arr.to_vec(),
                                     amount: dsm::types::token_types::Balance::from_state(transfer_amount, *balance_anchor.as_bytes()),
                                     token_id: token_id.as_bytes().to_vec(),
+                                    policy_commit,
                                     mode: dsm::types::operations::TransactionMode::Bilateral,
                                     nonce: vec![],
                                     verification: dsm::types::operations::VerificationType::Bilateral,
