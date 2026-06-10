@@ -5,6 +5,7 @@
 //! Implements the [`RecoveryHandler`] trait
 //! for capsule decryption and recovery session management at the SDK layer.
 
+use crate::storage::client_db::recovery::RecoveryState;
 use dsm::core::bridge::RecoveryHandler;
 use dsm::recovery::capsule::{decrypt_capsule_with_key, EncryptedCapsule};
 use dsm::recovery::tombstone::{create_succession, create_tombstone};
@@ -383,6 +384,32 @@ impl RecoveryHandler for RecoveryImpl {
                 ));
             };
 
+            // Anti-rollback floor (P3/T3.2): the resume tip MUST match the owner's
+            // own sealed floor staged from the capsule. A request cannot set a
+            // relationship tip that diverges from the capsule floor — this closes
+            // the resume-time rollback where a counterparty-supplied tip would be
+            // applied before the capsule floor is restored. Fail-closed if the
+            // floor cannot be read. (Forward extension above the floor is handled
+            // by the activation-seal flow with a co-signed chain proof.)
+            match crate::storage::client_db::recovery::resume_tip_diverges_from_floor(
+                counterparty_device_id,
+                &head_hash_32,
+            ) {
+                Ok(true) => {
+                    return Err(format!(
+                        "[RECOVERY] resume tip diverges from capsule floor for {}: refusing rollback",
+                        &device_id_b32[..device_id_b32.len().min(16)]
+                    ));
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "[RECOVERY] cannot read capsule floor for resume of {}: {e}",
+                        &device_id_b32[..device_id_b32.len().min(16)]
+                    ));
+                }
+            }
+
             // Update contact chain tips to recovered values (both shared + local tip)
             if let Err(e) = crate::storage::client_db::restore_finalized_bilateral_chain_tip(
                 counterparty_device_id,
@@ -476,8 +503,13 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 5. Store recovery phase
-    let _ =
-        crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"tombstoning");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Tombstoning);
+
+    // 5a. P5: start this recovery cycle with a clean bearer-asset lock registry so stale
+    // reconciliations from a prior cycle cannot leave an asset spendable (fail-closed).
+    if let Err(e) = crate::storage::client_db::recovery::clear_asset_locks() {
+        return Err(format!("[RECOVERY] Failed to clear stale bearer-asset locks: {e}"));
+    }
 
     // 6. Create tombstone receipt
     let old_device_id_str = crate::util::text_id::encode_base32_crockford(&old_device_id);
@@ -512,7 +544,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     );
 
     // 7. Create succession receipt
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"succession");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Succession);
 
     let new_device_id_str = crate::util::text_id::encode_base32_crockford(&new_device_id);
     let succession = create_succession(
@@ -550,6 +582,27 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
         &new_device_id_str[..new_device_id_str.len().min(16)]
     );
 
+    // 7b. P5 bearer-asset LOCKED_RECOVERY (spec §0.4): the capsule is a continuity hint,
+    // NOT a balance oracle. Identity succession does NOT make recovered bearer assets
+    // spendable — every restored bearer asset enters LockedRecovery and stays there until
+    // its OWN verified frontier reconciles (generic tokens via reconcile_token_asset; dBTC
+    // only via the dedicated frontier-replay pass). Lock under BOTH device ids so the
+    // token-keyed registry covers whichever device the restored projections landed under.
+    // Fail-closed: if we cannot lock, abort rather than leave bearer assets spendable.
+    let mut locked_assets = 0usize;
+    for dev_str in [&old_device_id_str, &new_device_id_str] {
+        match crate::storage::client_db::recovery::lock_all_restored_bearer_assets(dev_str) {
+            Ok(n) => locked_assets += n,
+            Err(e) => {
+                return Err(format!(
+                    "[RECOVERY] Failed to lock restored bearer assets (refusing to proceed with \
+                     spendable recovered assets): {e}"
+                ));
+            }
+        }
+    }
+    log::info!("[RECOVERY] {locked_assets} restored bearer-asset projection(s) set LockedRecovery");
+
     // 8. Initialize sync gate from capsule counterparty IDs
     let counterparty_ids = crate::storage::client_db::recovery::get_capsule_counterparty_ids()
         .map_err(|e| format!("Failed to read counterparty IDs: {e}"))?;
@@ -560,8 +613,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 9. Propagate tombstone to storage nodes
-    let _ =
-        crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"propagating");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Propagating);
 
     let mut pushed = 0u64;
     let mut failed = 0u64;
@@ -591,7 +643,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     }
 
     // 10. Set phase to polling
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"polling");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Polling);
 
     Ok(format!(
         "phase=polling,tombstone_hash={},pushed={},failed={},total={}",
@@ -614,7 +666,7 @@ pub fn resume_all_contacts() -> Result<String, String> {
         ));
     }
 
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"resuming");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Resuming);
 
     // Get recovered chain tips and resume each
     let tips = crate::storage::client_db::recovery::get_recovered_chain_tips()
@@ -644,10 +696,27 @@ pub fn resume_all_contacts() -> Result<String, String> {
         }
     }
 
+    // P5: (re)lock any restored bearer-asset projections materialized during resume
+    // (INSERT-IF-ABSENT — never clobbers assets already reconciled this cycle). The capsule
+    // is a continuity hint, never a balance oracle; these stay LockedRecovery until each
+    // asset's frontier reconciles. Fail-closed: a locking failure aborts before cleanup.
+    if let Some(dev) = crate::sdk::app_state::AppState::get_device_id() {
+        let dev_str = crate::util::text_id::encode_base32_crockford(&dev);
+        match crate::storage::client_db::recovery::lock_all_restored_bearer_assets(&dev_str) {
+            Ok(n) => log::info!("[RECOVERY] {n} restored bearer-asset projection(s) locked at resume"),
+            Err(e) => {
+                return Err(format!(
+                    "[RECOVERY] Failed to lock restored bearer assets at resume (refusing to \
+                     complete with spendable recovered assets): {e}"
+                ));
+            }
+        }
+    }
+
     // Cleanup
     let _ = crate::storage::client_db::recovery::clear_recovery_sync_status();
     let _ = crate::storage::client_db::recovery::clear_recovered_chain_tips();
-    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"complete");
+    let _ = crate::storage::client_db::recovery::set_recovery_state(RecoveryState::Complete);
 
     Ok(format!("success=true,resumed={}", resumed))
 }

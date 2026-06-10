@@ -24,13 +24,16 @@ impl AppRouterImpl {
                 let resp = generated::AppStateResponse {
                     key: "recovery.status".to_string(),
                     value: Some(format!(
-                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={},auto_write={}",
+                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={},auto_write={},capsule_dirty={},accepted_state_index={},capsule_state_index={}",
                         status.enabled,
                         status.configured,
                         status.pending_capsule,
                         status.capsule_count,
                         status.last_capsule_index,
                         auto_write,
+                        status.capsule_dirty,
+                        status.accepted_state_index,
+                        status.capsule_state_index,
                     )),
                 };
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
@@ -108,8 +111,13 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("recovery.enable: {e}")),
                 };
 
-                if mnemonic.split_whitespace().count() < 12 {
-                    return err("recovery.enable: mnemonic must be at least 12 words".into());
+                // Mainnet recovery authority MUST encode >=256 bits of entropy
+                // (24-word BIP39). 12-word phrases must NOT be the primary mainnet
+                // recovery authority (spec §3.1, condition T0.2).
+                if mnemonic.split_whitespace().count() < 24 {
+                    return err(
+                        "recovery.enable: mnemonic must be a 24-word (256-bit) phrase".into(),
+                    );
                 }
 
                 // Derive and cache the recovery key in memory
@@ -122,6 +130,41 @@ impl AppRouterImpl {
                 // Enable NFC backup in SQLite prefs
                 if let Err(e) = crate::sdk::recovery_sdk::RecoverySDK::enable_nfc_backup() {
                     return err(format!("recovery.enable failed: {e}"));
+                }
+
+                // Best-effort: publish the genesis-anchored recovery-authority anchor
+                // (§0.5) so counterparties can later authenticate this device's
+                // tombstone/succession. OFFLINE-FIRST — spawned detached so it NEVER
+                // blocks enable; if the device is offline (or a conflicting anchor is
+                // already bound) it is logged and left for a later online retry.
+                // Bind-once is enforced server-side per genesis, so a re-publish of the
+                // same anchor is idempotent.
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    rt.spawn(async {
+                        match crate::sdk::recovery_sdk::RecoverySDK::publish_authority_anchor().await
+                        {
+                            Ok(n) => log::info!(
+                                "[RECOVERY] published recovery-authority anchor to {n} node(s)"
+                            ),
+                            Err(e) => log::warn!(
+                                "[RECOVERY] recovery-authority anchor publish deferred \
+                                 (best-effort, will retry when online): {e}"
+                            ),
+                        }
+                        // P5 dBTC enumeration: publish the signed dBTC vault index so a future
+                        // recovered device can discover this identity's vaults (best-effort).
+                        match crate::sdk::recovery_sdk::RecoverySDK::publish_dbtc_vault_index().await {
+                            Ok(n) => log::info!("[RECOVERY] published dBTC vault index ({n} vaults)"),
+                            Err(e) => log::warn!(
+                                "[RECOVERY] dBTC vault index publish deferred (best-effort): {e}"
+                            ),
+                        }
+                    });
+                } else {
+                    log::warn!(
+                        "[RECOVERY] no async runtime to publish recovery-authority anchor; \
+                         deferring to a later online sync"
+                    );
                 }
 
                 // Create first capsule immediately
@@ -172,8 +215,12 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("recovery.cacheMnemonic: {e}")),
                 };
 
-                if mnemonic.split_whitespace().count() < 12 {
-                    return err("recovery.cacheMnemonic: mnemonic must be at least 12 words".into());
+                // Mainnet recovery authority MUST be a 24-word (256-bit) phrase
+                // (spec §3.1, condition T0.2).
+                if mnemonic.split_whitespace().count() < 24 {
+                    return err(
+                        "recovery.cacheMnemonic: mnemonic must be a 24-word (256-bit) phrase".into(),
+                    );
                 }
 
                 if let Err(e) =
@@ -858,6 +905,89 @@ impl AppRouterImpl {
                 }
                 Err(e) => err(format!("recovery.resumeAll failed: {e}")),
             },
+
+            // -------- recovery.activate (spec §0.5 Phase D step 2) --------
+            // Decode the persisted recovery state into a RecoveryActivationContext, then run
+            // the activation orchestration: fetch A_old's + every counterparty's online-posted
+            // genesis-authenticated state, assemble + verify per-counterparty cross-relationship
+            // succession evidence, and feed the SOLE unlock chokepoint. The chokepoint stays
+            // FAIL-CLOSED (recording disabled until the audited go-live + P5); a clean assembly
+            // that hits that gate is reported as a status, not a failure, so the end-to-end path
+            // is observably reachable. Genuine evidence/gate failures are surfaced as errors.
+            "recovery.activate" => {
+                let ctx = match crate::sdk::recovery_sdk::RecoverySDK::build_activation_context_from_persisted() {
+                    Ok(c) => c,
+                    Err(e) => return err(format!("recovery.activate: context: {e}")),
+                };
+                match crate::sdk::recovery_sdk::RecoverySDK::build_and_activate_recovery(&ctx).await {
+                    Ok(()) => {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.activate".to_string(),
+                            value: Some("activated".to_string()),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    // The designed fail-closed gate (no spend unlock pre-go-live): report the
+                    // assembled-but-disabled state as a status so the pipeline is observably wired.
+                    Err(dsm::types::error::DsmError::InvalidState(msg))
+                        if msg.contains("recovery activation recording disabled") =>
+                    {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.activate".to_string(),
+                            value: Some(format!("assembled;awaiting-go-live:{msg}")),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    Err(e) => err(format!("recovery.activate failed: {e}")),
+                }
+            }
+
+            // -------- recovery.reconcileDbtc (spec §0.4 P5 — dBTC pass) --------
+            // Reconcile the recovered dBTC bearer asset from posted vault advertisements.
+            // Candidate vault ids are caller-supplied (comma-separated) until authenticated
+            // fresh-device vault ENUMERATION exists (deferred); with none, dBTC stays
+            // LockedRecovery and a "dbtc-locked;awaiting-enumeration" status is returned (not a
+            // hard error). dBTC is unlocked only for vaults whose posted frontier proves it;
+            // any incomplete/unverifiable evidence keeps it LockedRecovery (fail-closed).
+            "recovery.reconcileDbtc" => {
+                let mut candidates: Vec<String> = match Self::decode_recovery_string_param(&i.args) {
+                    Ok(s) => s
+                        .split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                // No explicit candidates → auto-source from the posted, K_A-verified dBTC vault
+                // index for A_old. If that's unavailable, candidates stay empty and the
+                // reconcile returns the awaiting-enumeration status (dBTC stays locked).
+                if candidates.is_empty() {
+                    match crate::sdk::recovery_sdk::RecoverySDK::auto_dbtc_vault_candidates().await {
+                        Ok(ids) => candidates = ids,
+                        Err(e) => log::debug!("[recovery.reconcileDbtc] no vault index: {e}"),
+                    }
+                }
+                match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reconcile_dbtc_asset(&candidates)
+                    .await
+                {
+                    Ok(state) => {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.reconcileDbtc".to_string(),
+                            value: Some(format!("dbtc-state={}", state.label())),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    // Deferred enumeration: report as a status, not a failure (dBTC stays locked).
+                    Err(e) if e.to_string().contains("MissingDbtcVaultEnumeration") => {
+                        let resp = generated::AppStateResponse {
+                            key: "recovery.reconcileDbtc".to_string(),
+                            value: Some(format!("dbtc-locked;awaiting-enumeration:{e}")),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                    }
+                    Err(e) => err(format!("recovery.reconcileDbtc failed: {e}")),
+                }
+            }
 
             _ => err(format!("unknown recovery invoke method: {}", i.method)),
         }
