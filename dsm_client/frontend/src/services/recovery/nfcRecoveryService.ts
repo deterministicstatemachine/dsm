@@ -385,6 +385,34 @@ export async function resumeAll(): Promise<ResumeResult> {
   };
 }
 
+/**
+ * Identity activation — gathers every counterparty's already-posted, genesis-authenticated
+ * evidence and assembles the cross-relationship succession (build_and_activate_recovery on the
+ * backend). Returns the backend status string. NOTE: activation RECORDING is intentionally
+ * fail-closed until go-live, so a successful assembly returns "assembled;awaiting-go-live:..."
+ * — that is the expected, non-error state for now (not a failure).
+ */
+export async function activateRecovery(): Promise<string> {
+  const res = await routerInvokeBin('recovery.activate', new Uint8Array(0));
+  return extractAppStateValue(res);
+}
+
+/**
+ * dBTC bearer-asset reconciliation after recovery. Returns the backend status string, e.g.
+ * "dbtc-state=<label>" or "dbtc-locked;awaiting-enumeration:<reason>" (fail-closed — dBTC stays
+ * locked when evidence is incomplete).
+ */
+export async function reconcileDbtc(): Promise<string> {
+  const res = await routerInvokeBin('recovery.reconcileDbtc', new Uint8Array(0));
+  return extractAppStateValue(res);
+}
+
+/** Final recovery cleanup after all counterparties resumed. Returns true on success. */
+export async function completeRecovery(): Promise<boolean> {
+  const res = await routerInvokeBin('recovery.completeResume', new Uint8Array(0));
+  return parseKeyValuePairs(extractAppStateValue(res)).success === 'true';
+}
+
 export type TombstoneCheck = {
   found: boolean;
   tombstonedDevice: string;
