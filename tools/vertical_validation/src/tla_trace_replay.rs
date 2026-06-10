@@ -1428,6 +1428,7 @@ fn build_direct_signed_transfer(
     nonce.extend_from_slice(&payload_hash[..8]);
 
     let mut operation = Operation::Transfer {
+        policy_commit: [0u8; 32],
         token_id: TRACE_TOKEN_ID.to_vec(),
         to_device_id: recipient.clone(),
         amount: Balance::from_state(1, current_state.hash),

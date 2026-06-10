@@ -2,10 +2,13 @@
 
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
+  activateRecovery,
+  completeRecovery,
   executePipeline,
   getRecoveryPhase,
   getSyncProgress,
   pollAcks,
+  reconcileDbtc,
   resumeAll,
   type AckStatus,
   type PipelineResult,
@@ -170,8 +173,28 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
       const result = await resumeAll();
       if (!mountedRef.current) return;
       setResumeCount(result.resumed);
+
+      // Re-establish across counterparties: gather each counterparty's already-posted,
+      // genesis-authenticated evidence and assemble the cross-relationship succession. Activation
+      // RECORDING is fail-closed until go-live, so "assembled;awaiting-go-live:..." is success.
+      setStatusMsg('Re-establishing with counterparties (assembling succession)...');
+      const activation = await activateRecovery();
+      if (!mountedRef.current) return;
+
+      // Reconcile recovered dBTC bearer state (fail-closed; stays locked if evidence incomplete).
+      setStatusMsg('Reconciling recovered assets...');
+      const dbtc = await reconcileDbtc();
+      if (!mountedRef.current) return;
+
+      const pendingGoLive = activation.startsWith('assembled;awaiting-go-live');
       setPhase('complete');
-      setStatusMsg(`Recovery complete. ${result.resumed} relationship(s) restored.`);
+      setStatusMsg(
+        `Recovery complete. ${result.resumed} relationship(s) restored. ` +
+          (pendingGoLive
+            ? 'Identity succession assembled — activation pends go-live. '
+            : `Activation: ${activation}. `) +
+          `dBTC: ${dbtc}.`,
+      );
     } catch (error: unknown) {
       if (!mountedRef.current) return;
       setErrorMsg(error instanceof Error ? error.message : String(error));
@@ -185,6 +208,19 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
     setErrorMsg('');
     setPhase('staged');
   }, []);
+
+  // Final cleanup on DONE: run the backend's completeResume terminator, then leave. Best-effort —
+  // navigation proceeds even if cleanup reports an issue (the recovered state is already restored).
+  const onDone = useCallback(async () => {
+    if (resumeCount > 0) {
+      try {
+        await completeRecovery();
+      } catch {
+        // non-fatal; recovery state already restored. Proceed to wallet.
+      }
+    }
+    onNavigate?.('wallet');
+  }, [resumeCount, onNavigate]);
 
   const progressIdx = phaseIndex(phase);
 
@@ -321,7 +357,7 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
               </div>
             )}
             <div className="nfc-actions">
-              <button className="nfc-btn" onClick={() => onNavigate?.('wallet')}>
+              <button className="nfc-btn" onClick={() => void onDone()}>
                 {resumeCount > 0 ? 'DONE' : 'BACK TO WALLET'}
               </button>
             </div>

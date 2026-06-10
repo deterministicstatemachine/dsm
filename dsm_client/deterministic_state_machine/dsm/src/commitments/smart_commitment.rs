@@ -352,6 +352,8 @@ impl SmartCommitment {
             amount: Balance::zero(),
             recipient: recipient.clone(),
             token_id: Vec::new(),
+            // Placeholder commitment scaffolding op (empty token, zero amount).
+            policy_commit: [0u8; 32],
             to: recipient.clone(),
             message: String::new(),
             mode: TransactionMode::Bilateral,
@@ -428,6 +430,8 @@ impl SmartCommitment {
             amount: Balance::zero(),
             recipient: recipient.clone(),
             token_id: Vec::new(),
+            // Placeholder commitment scaffolding op (empty token, zero amount).
+            policy_commit: [0u8; 32],
             to: recipient.clone(),
             message: String::new(),
             mode: TransactionMode::Bilateral,
@@ -495,6 +499,8 @@ impl SmartCommitment {
             amount: Balance::zero(),
             recipient: recipient.clone(),
             token_id: Vec::new(),
+            // Placeholder commitment scaffolding op (empty token, zero amount).
+            policy_commit: [0u8; 32],
             to: recipient.clone(),
             message: String::new(),
             mode: TransactionMode::Bilateral,
@@ -1556,6 +1562,7 @@ mod tests {
     fn test_smart_commitment_creation_types_compile() {
         let (_pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let mut op = Operation::Transfer {
+            policy_commit: [0u8; 32],
             to_device_id: b"recipient".to_vec(),
             amount: Balance::from_state(100, [0u8; 32]),
             recipient: b"abcd".to_vec(),

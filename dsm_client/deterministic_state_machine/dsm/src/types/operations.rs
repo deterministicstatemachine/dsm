@@ -184,6 +184,11 @@ pub enum Operation {
         amount: Balance,
         /// Binary identifier of the token type being transferred.
         token_id: Vec<u8>,
+        /// CPTA policy commitment (32B) binding this transfer to the token's
+        /// canonical policy (§9.5: "All TokenOps MUST include policy_commit;
+        /// verifiers reject if it differs from the token's creation
+        /// policy_commit"). See token-policy-readiness doctrine §4.
+        policy_commit: [u8; 32],
         /// Bilateral (3-phase commit) or unilateral execution mode.
         mode: TransactionMode,
         /// Unique nonce preventing replay of this transfer.
@@ -506,7 +511,168 @@ pub enum Operation {
     },
 }
 
+/// The bearer asset an egress operation moves, for the per-asset recovery spend-gate
+/// (spec §0.4 P5). Produced by [`Operation::egress_asset`] — the canonical, exhaustive
+/// companion to [`Operation::is_value_egress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressAsset {
+    /// Not a value-egress operation — no per-asset gate applies.
+    NotEgress,
+    /// Egress of a specific bearer asset (`token_id`) of `amount` units. `amount` is the
+    /// egress quantity used for the `Reduced`-frontier cap; `u64::MAX` when an egress op
+    /// cannot be sized (treated as exceeding any reduced frontier — fail-closed).
+    Asset { token_id: Vec<u8>, amount: u64 },
+    /// A value-egress operation whose canonical bearer-asset id cannot be determined
+    /// (e.g. a vault-keyed DLV unlock/claim, or a tokenless DLV). The gate FAILS CLOSED on
+    /// this whenever any recovery lock is present — it cannot prove the op avoids a locked
+    /// asset. Per-vault resolution is a deferred refinement.
+    Unidentified,
+}
+
 impl Operation {
+    /// Classify whether this operation is owner-initiated **value egress** for
+    /// the recovery spend-gate (spec condition R3).
+    ///
+    /// "Value egress" = an operation that moves the owner's existing value out of
+    /// spendable balance or between value states (spend, burn, lock, unlock,
+    /// vault create/unlock/claim/invalidate). While identity recovery is in
+    /// progress these MUST be refused; otherwise the old and successor devices
+    /// could both move the same pre-recovery value — the split-acceptance
+    /// recovery double-spend (spec vector V1).
+    ///
+    /// Pure value *ingress* (receiving, minting, token creation) and
+    /// identity / relationship / recovery / link / neutral operations are NOT
+    /// egress and proceed normally — recovery itself must be able to advance, and
+    /// receiving value can never create a double-spend of the owner's funds.
+    ///
+    /// The match is exhaustive (no wildcard): a new `Operation` variant will fail
+    /// to compile until it is consciously classified here. This compile-time
+    /// enumeration is the discipline behind spec condition R3 (no value-egress
+    /// path may silently bypass the gate).
+    pub fn is_value_egress(&self) -> bool {
+        use Operation::*;
+        match self {
+            // Owner value egress / value-state movement of the owner's funds.
+            Transfer { .. }
+            | Burn { .. }
+            | Lock { .. }
+            | LockToken { .. }
+            | Unlock { .. }
+            | UnlockToken { .. }
+            | DlvCreate { .. }
+            | DlvUnlock { .. }
+            | DlvClaim { .. }
+            | DlvInvalidate { .. } => true,
+
+            // Not value egress: ingress (Receive / Mint / CreateToken), identity,
+            // relationship, recovery, links, invalidation, generic, and no-op.
+            Genesis
+            | Create { .. }
+            | Update { .. }
+            | Mint { .. }
+            | AddRelationship { .. }
+            | CreateRelationship { .. }
+            | RemoveRelationship { .. }
+            | Recovery { .. }
+            | Delete { .. }
+            | Link { .. }
+            | Unlink { .. }
+            | Invalidate { .. }
+            | Generic { .. }
+            | Receive { .. }
+            | CreateToken { .. }
+            | Noop => false,
+        }
+    }
+
+    /// Classify whether this operation is **value-bearing** — value moving in ANY
+    /// direction (egress OR ingress) — for the recovery gate-set criterion (spec
+    /// §0.5 step 6).
+    ///
+    /// A relationship is **value-capable** (and thus a recovery gate-set member) iff
+    /// its posted state has accepted ≥1 value-bearing operation, OR its relationship
+    /// policy independently marks it value-bearing (the policy branch is applied by
+    /// the discovery layer, where policy is in scope). Pure contact/social
+    /// relationships that never carried value are excluded from the gate-set.
+    ///
+    /// This is strictly broader than [`Self::is_value_egress`]: it ALSO counts value
+    /// *ingress* (`Mint` / `Receive` / `CreateToken`), because a relationship that
+    /// only ever received value still holds reconcilable value at recovery time and
+    /// must be in the gate-set. Egress and ingress are kept in one classifier (egress
+    /// via `is_value_egress`, plus the ingress arm here) so the two cannot drift.
+    pub fn is_value_bearing(&self) -> bool {
+        use Operation::*;
+        if self.is_value_egress() {
+            return true;
+        }
+        // Value ingress: receiving, minting, and token creation bring value INTO the
+        // relationship without being egress. Everything else (identity, relationship,
+        // recovery, links, invalidation, generic, no-op) is non-value.
+        matches!(self, Mint { .. } | Receive { .. } | CreateToken { .. })
+    }
+
+    /// The bearer asset this operation egresses (spec §0.4 P5 per-asset spend-gate).
+    ///
+    /// EXHAUSTIVE companion to [`Self::is_value_egress`]: every egress variant yields either
+    /// [`EgressAsset::Asset`] (a canonical `token_id` + egress amount) or
+    /// [`EgressAsset::Unidentified`] (egress whose asset can't be named yet — vault-keyed
+    /// DLV ops, tokenless DLV); every non-egress variant yields [`EgressAsset::NotEgress`].
+    /// The invariant `is_value_egress() == !matches!(egress_asset(), NotEgress)` is tested.
+    pub fn egress_asset(&self) -> EgressAsset {
+        use Operation::*;
+        match self {
+            Transfer { token_id, amount, .. } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: amount.value(),
+            },
+            Burn { token_id, amount, .. } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: amount.value(),
+            },
+            Lock { token_id, amount, .. } | Unlock { token_id, amount, .. } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: amount.value(),
+            },
+            LockToken { token_id, amount, .. } | UnlockToken { token_id, amount, .. } => {
+                EgressAsset::Asset {
+                    token_id: token_id.clone(),
+                    // i64 lock/unlock quantity; clamp negatives to 0 (no canonical egress size).
+                    amount: (*amount).max(0) as u64,
+                }
+            }
+            // A token-bound DLV names its asset; a tokenless DLV cannot be sized → Unidentified.
+            DlvCreate {
+                token_id: Some(token_id),
+                locked_amount,
+                ..
+            } => EgressAsset::Asset {
+                token_id: token_id.clone(),
+                amount: locked_amount.as_ref().map(|b| b.value()).unwrap_or(u64::MAX),
+            },
+            DlvCreate { token_id: None, .. } => EgressAsset::Unidentified,
+            // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
+            DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
+
+            // Non-egress: ingress, identity, relationship, recovery, links, generic, no-op.
+            Genesis
+            | Create { .. }
+            | Update { .. }
+            | Mint { .. }
+            | AddRelationship { .. }
+            | CreateRelationship { .. }
+            | RemoveRelationship { .. }
+            | Recovery { .. }
+            | Delete { .. }
+            | Link { .. }
+            | Unlink { .. }
+            | Invalidate { .. }
+            | Generic { .. }
+            | Receive { .. }
+            | CreateToken { .. }
+            | Noop => EgressAsset::NotEgress,
+        }
+    }
+
     /// Canonical, deterministic encoding for cryptographic use.
     /// Encoding rules:
     /// - Variant tag: u8 fixed per variant below
@@ -624,6 +790,7 @@ impl Operation {
                 to_device_id,
                 amount,
                 token_id,
+                policy_commit,
                 mode,
                 nonce,
                 verification,
@@ -639,6 +806,8 @@ impl Operation {
                 let bal = amount.to_le_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
+                // CPTA policy commitment (§9.5) — bound into the signed bytes.
+                put_bytes(&mut out, policy_commit);
                 put_mode(&mut out, mode);
                 put_bytes(&mut out, nonce);
                 put_verification(&mut out, verification);
@@ -1212,6 +1381,11 @@ impl Operation {
                 let to_device_id = get_bytes(&mut input)?;
                 let amount = dec_balance(&mut input)?;
                 let token_id = get_bytes(&mut input)?;
+                // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("transfer policy_commit must be 32 bytes")
+                    })?;
                 let mode = dec_mode(&mut input)?;
                 let nonce = get_bytes(&mut input)?;
                 let verification = dec_verification(&mut input)?;
@@ -1233,6 +1407,7 @@ impl Operation {
                     to_device_id,
                     amount,
                     token_id,
+                    policy_commit,
                     mode,
                     nonce,
                     verification,
@@ -1648,6 +1823,16 @@ impl Operation {
             }
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
+        // Canonical decode requires full byte exhaustion: a valid operation must
+        // consume its entire input. Trailing bytes are non-canonical — a distinct
+        // wire string that decodes to the same operation — and are rejected so a
+        // signed operation has exactly one byte encoding. (issue #450)
+        if !input.is_empty() {
+            return Err(DsmError::invalid_operation(format!(
+                "trailing bytes after operation: {} leftover",
+                input.len()
+            )));
+        }
         Ok(op)
     }
 
@@ -1773,6 +1958,78 @@ impl Operation {
             _ => {}
         }
         clone
+    }
+
+    /// Return a clone of this operation with the signature field set to `sig`
+    /// for variants that carry a signature. Mirror of [`with_cleared_signature`].
+    ///
+    /// [`with_cleared_signature`]: Operation::with_cleared_signature
+    pub fn with_signature(&self, sig: Vec<u8>) -> Self {
+        let mut clone = self.clone();
+        match &mut clone {
+            Operation::Transfer { signature, .. }
+            | Operation::CreateToken { signature, .. }
+            | Operation::Lock { signature, .. }
+            | Operation::Unlock { signature, .. }
+            | Operation::LockToken { signature, .. }
+            | Operation::UnlockToken { signature, .. }
+            | Operation::Generic { signature, .. }
+            | Operation::DlvCreate { signature, .. }
+            | Operation::DlvUnlock { signature, .. }
+            | Operation::DlvClaim { signature, .. }
+            | Operation::DlvInvalidate { signature, .. } => {
+                *signature = sig;
+            }
+            _ => {}
+        }
+        clone
+    }
+
+    /// §4.2.1 Authoritative binding: decode the sender's signed canonical
+    /// preimage and bind it to the verified signature. This is the SINGLE
+    /// trusted source for an inbound signed operation — callers MUST route
+    /// every value read (amount/token_id/recipient/nonce/message) off the
+    /// returned [`Operation`], never off any parallel structured field that
+    /// traveled alongside the signed bytes.
+    ///
+    /// Steps:
+    /// 1. SPHINCS+ verify `signature` over `canonical_operation_bytes` under
+    ///    `signer_pubkey` (fail fast — never decode unauthenticated bytes).
+    /// 2. [`Operation::from_bytes`] the canonical preimage.
+    /// 3. Enforce canonical re-serialization equality
+    ///    `op.with_cleared_signature().to_bytes() == canonical_operation_bytes`.
+    ///    This rejects trailing garbage and any non-canonical encoding for this
+    ///    path (independent of the global decoder exhaustion guard, issue #450).
+    /// 4. Return the operation with the verified signature re-attached, so the
+    ///    result is byte-identical to the operation the sender signed.
+    pub fn decode_and_bind_signed(
+        canonical_operation_bytes: &[u8],
+        signature: &[u8],
+        signer_pubkey: &[u8],
+    ) -> Result<Operation, DsmError> {
+        match crate::crypto::sphincs::sphincs_verify(
+            signer_pubkey,
+            canonical_operation_bytes,
+            signature,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Err(DsmError::verification("signed operation signature invalid")),
+            Err(e) => {
+                return Err(DsmError::verification(format!(
+                    "signed operation signature verification error: {e}"
+                )))
+            }
+        }
+
+        let op = Operation::from_bytes(canonical_operation_bytes)?;
+
+        if op.with_cleared_signature().to_bytes() != canonical_operation_bytes {
+            return Err(DsmError::invalid_operation(
+                "non-canonical signed operation bytes (re-serialization mismatch)",
+            ));
+        }
+
+        Ok(op.with_signature(signature.to_vec()))
     }
 }
 
@@ -2068,6 +2325,149 @@ mod tests {
         decoded
     }
 
+    #[test]
+    fn is_value_egress_classifies_owner_value_movement() {
+        // Egress: owner value movement must be gated during identity recovery.
+        assert!(Operation::Burn {
+            amount: test_balance(1),
+            token_id: vec![1],
+            proof_of_ownership: vec![],
+            message: String::new(),
+        }
+        .is_value_egress());
+        assert!(Operation::LockToken {
+            token_id: vec![1],
+            amount: 1,
+            purpose: b"dlv_collateral".to_vec(),
+            mode: TransactionMode::Unilateral,
+            signature: vec![],
+        }
+        .is_value_egress());
+
+        // Not egress: ingress + identity/neutral operations proceed during recovery.
+        assert!(!Operation::Genesis.is_value_egress());
+        assert!(!Operation::Noop.is_value_egress());
+        assert!(!Operation::default().is_value_egress());
+        assert!(!Operation::Mint {
+            amount: test_balance(1),
+            token_id: vec![1],
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        }
+        .is_value_egress());
+    }
+
+    #[test]
+    fn is_value_bearing_classifies_value_capable_relationships() {
+        // Egress ops are value-bearing (superset of is_value_egress).
+        let burn = Operation::Burn {
+            amount: test_balance(1),
+            token_id: vec![1],
+            proof_of_ownership: vec![],
+            message: String::new(),
+        };
+        assert!(burn.is_value_egress() && burn.is_value_bearing());
+
+        // Ingress ops are value-bearing but NOT egress — a relationship that only
+        // received value is still value-capable (must be in the recovery gate-set).
+        let mint = Operation::Mint {
+            amount: test_balance(1),
+            token_id: vec![1],
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        };
+        assert!(!mint.is_value_egress() && mint.is_value_bearing());
+        let receive = Operation::Receive {
+            token_id: b"TKN".to_vec(),
+            from_device_id: vec![0xAA; 32],
+            amount: test_balance(1),
+            recipient: vec![],
+            message: String::new(),
+            mode: TransactionMode::Unilateral,
+            nonce: vec![],
+            verification: VerificationType::Standard,
+            sender_state_hash: None,
+        };
+        assert!(!receive.is_value_egress() && receive.is_value_bearing());
+
+        // Pure contact/social/neutral relationships are NOT value-capable.
+        assert!(!Operation::Genesis.is_value_bearing());
+        assert!(!Operation::Noop.is_value_bearing());
+        assert!(!Operation::default().is_value_bearing());
+        assert!(!Operation::AddRelationship {
+            from_id: [1; 32],
+            to_id: [2; 32],
+            relationship_type: b"bilateral_transfer".to_vec(),
+            metadata: vec![],
+            proof: vec![],
+            mode: TransactionMode::Bilateral,
+            message: String::new(),
+        }
+        .is_value_bearing());
+    }
+
+    #[test]
+    fn egress_asset_matches_is_value_egress_and_extracts_token() {
+        // P5: egress_asset is the canonical asset-id companion to is_value_egress. The
+        // invariant `is_value_egress() == (egress_asset() != NotEgress)` must hold for every
+        // variant — a representative sample across egress / ingress / neutral.
+        let burn = Operation::Burn {
+            amount: test_balance(7),
+            token_id: b"ERA".to_vec(),
+            proof_of_ownership: vec![],
+            message: String::new(),
+        };
+        assert_eq!(
+            burn.egress_asset(),
+            EgressAsset::Asset { token_id: b"ERA".to_vec(), amount: 7 }
+        );
+
+        let lt = Operation::LockToken {
+            token_id: b"ERA".to_vec(),
+            amount: -5, // negative i64 clamps to 0 (no canonical egress size)
+            purpose: b"dlv".to_vec(),
+            mode: TransactionMode::Unilateral,
+            signature: vec![],
+        };
+        assert_eq!(
+            lt.egress_asset(),
+            EgressAsset::Asset { token_id: b"ERA".to_vec(), amount: 0 }
+        );
+
+        // Vault-keyed DLV claim → asset can't be named here → Unidentified (fail-closed gate).
+        let claim = Operation::DlvClaim {
+            vault_id: vec![1, 2, 3],
+            claim_proof: vec![],
+            claimant_public_key: vec![],
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        };
+        assert_eq!(claim.egress_asset(), EgressAsset::Unidentified);
+        assert!(claim.is_value_egress());
+
+        // Non-egress → NotEgress.
+        assert_eq!(Operation::Noop.egress_asset(), EgressAsset::NotEgress);
+        assert_eq!(Operation::Genesis.egress_asset(), EgressAsset::NotEgress);
+
+        // The invariant, across a representative set.
+        let mint = Operation::Mint {
+            amount: test_balance(1),
+            token_id: b"ERA".to_vec(),
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        };
+        for op in [&burn, &lt, &claim, &mint, &Operation::Noop, &Operation::Genesis] {
+            assert_eq!(
+                op.is_value_egress(),
+                !matches!(op.egress_asset(), EgressAsset::NotEgress),
+                "egress_asset must agree with is_value_egress for {op:?}"
+            );
+        }
+    }
+
     // ------------------------------------------------------------------ //
     //  Round-trip tests for every variant
     // ------------------------------------------------------------------ //
@@ -2122,6 +2522,7 @@ mod tests {
         #[test]
         fn transfer_no_precommit() {
             roundtrip(&Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(500),
                 token_id: b"ERA".to_vec(),
@@ -2147,6 +2548,7 @@ mod tests {
                 security_params: SecurityParameters::default(),
             };
             roundtrip(&Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(1000),
                 token_id: b"TKN".to_vec(),
@@ -2164,6 +2566,7 @@ mod tests {
         #[test]
         fn transfer_custom_verification() {
             roundtrip(&Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(42),
                 token_id: b"ERA".to_vec(),
@@ -2481,6 +2884,7 @@ mod tests {
             ];
             for vt in types {
                 roundtrip(&Operation::Transfer {
+                    policy_commit: [0u8; 32],
                     to_device_id: vec![0x01; 32],
                     amount: test_balance(1),
                     token_id: b"ERA".to_vec(),
@@ -2506,6 +2910,7 @@ mod tests {
         #[test]
         fn validate_transfer_zero_amount() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(0),
                 token_id: b"ERA".to_vec(),
@@ -2524,6 +2929,7 @@ mod tests {
         #[test]
         fn validate_transfer_positive_amount() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
@@ -2642,6 +3048,7 @@ mod tests {
             assert_eq!(Operation::Noop.get_operation_type(), "noop");
 
             let transfer = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![],
                 amount: test_balance(1),
                 token_id: vec![],
@@ -2744,6 +3151,7 @@ mod tests {
         #[test]
         fn clears_transfer_signature() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
@@ -2864,6 +3272,136 @@ mod tests {
             *bytes.last_mut().unwrap() = 99;
             assert!(Operation::from_bytes(&bytes).is_err());
         }
+
+        #[test]
+        fn trailing_bytes_after_transfer_rejected() {
+            let mut bytes = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(100),
+                token_id: b"ERA".to_vec(),
+                policy_commit: [0u8; 32],
+                mode: TransactionMode::Unilateral,
+                nonce: vec![0xFF; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x02; 32],
+                to: vec![0x03; 32],
+                message: "x".into(),
+                signature: vec![0xAA; 32],
+            }
+            .to_bytes();
+            // Exact bytes decode fine; one trailing byte is non-canonical.
+            assert!(Operation::from_bytes(&bytes).is_ok());
+            bytes.push(0x00);
+            assert!(Operation::from_bytes(&bytes).is_err());
+        }
+
+        #[test]
+        fn trailing_bytes_after_create_rejected() {
+            let mut bytes = Operation::Create {
+                message: "hello".into(),
+                identity_data: vec![1, 2, 3],
+                public_key: vec![4, 5],
+                metadata: vec![],
+                commitment: vec![],
+                proof: vec![],
+                mode: TransactionMode::Bilateral,
+            }
+            .to_bytes();
+            assert!(Operation::from_bytes(&bytes).is_ok());
+            bytes.extend_from_slice(&[0xFF, 0xFF]);
+            assert!(Operation::from_bytes(&bytes).is_err());
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  decode_and_bind_signed — authoritative inbound binding (issue #446)
+    // ------------------------------------------------------------------ //
+    mod decode_and_bind {
+        use super::*;
+        use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+
+        /// Build a legitimately signed Transfer the way the sender does:
+        /// sign over `signing_op.to_bytes()` with an EMPTY signature field, and
+        /// that exact buffer is the `canonical_operation_bytes` preimage.
+        /// Returns `(canonical_bytes, signature, signer_public_key)`.
+        fn signed_transfer() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+            let kp =
+                generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
+            let signing_op = Operation::Transfer {
+                to_device_id: vec![0x11; 32],
+                amount: test_balance(42),
+                token_id: b"ERA".to_vec(),
+                policy_commit: [0u8; 32],
+                mode: TransactionMode::Unilateral,
+                nonce: vec![0xAB; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x22; 32],
+                to: vec![0x33; 32],
+                message: "unit".into(),
+                signature: Vec::new(),
+            };
+            let canonical = signing_op.to_bytes();
+            let sig = sphincs_sign(&kp.secret_key, &canonical).expect("sign");
+            (canonical, sig, kp.public_key.clone())
+        }
+
+        #[test]
+        fn clean_accept_binds_canonical_values() {
+            let (canonical, sig, pk) = signed_transfer();
+            let bound = Operation::decode_and_bind_signed(&canonical, &sig, &pk)
+                .expect("bind should accept a clean signed op");
+
+            // The bound op derives SOLELY from the signed canonical bytes — there is
+            // no structured field input to the helper, so a tampered sibling field
+            // (the issue #446 attack) cannot influence these values.
+            assert!(
+                matches!(bound, Operation::Transfer { .. }),
+                "expected Transfer"
+            );
+            if let Operation::Transfer {
+                to_device_id,
+                amount,
+                token_id,
+                nonce,
+                ..
+            } = &bound
+            {
+                assert_eq!(to_device_id, &vec![0x11; 32]);
+                assert_eq!(amount.value(), 42);
+                assert_eq!(token_id, &b"ERA".to_vec());
+                assert_eq!(nonce, &vec![0xAB; 16]);
+            }
+
+            // Signature re-attached, and re-clearing reproduces the exact preimage.
+            assert_eq!(bound.get_signature(), Some(sig));
+            assert_eq!(bound.with_cleared_signature().to_bytes(), canonical);
+        }
+
+        #[test]
+        fn trailing_garbage_rejected() {
+            let kp =
+                generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
+            let (canonical, _sig, pk) = signed_transfer();
+            let mut tampered = canonical;
+            tampered.push(0xFF);
+            // Sign the trailing-garbage bytes so the SIGNATURE itself verifies; the
+            // re-serialization equality check must still reject the non-canonical input.
+            let sig = sphincs_sign(&kp.secret_key, &tampered).expect("sign");
+            assert!(Operation::decode_and_bind_signed(&tampered, &sig, &pk).is_err());
+        }
+
+        #[test]
+        fn wrong_signature_rejected() {
+            let (canonical, _sig, pk) = signed_transfer();
+            let other =
+                generate_keypair_from_seed(SphincsVariant::SPX256f, &[9u8; 32]).expect("keypair2");
+            let bad_sig = sphincs_sign(&other.secret_key, &canonical).expect("sign");
+            // Verify under the ORIGINAL signer's key -> signature mismatch -> reject,
+            // before any decoded value is trusted.
+            assert!(Operation::decode_and_bind_signed(&canonical, &bad_sig, &pk).is_err());
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -2875,6 +3413,7 @@ mod tests {
         #[test]
         fn is_valid_transfer_positive() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 token_id: b"ERA".to_vec(),
@@ -2893,6 +3432,7 @@ mod tests {
         #[test]
         fn is_valid_transfer_zero() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(0),
                 token_id: b"ERA".to_vec(),
@@ -2947,6 +3487,7 @@ mod tests {
         fn has_expired_returns_false() {
             assert!(!TokenOps::has_expired(&Operation::Genesis));
             let transfer = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![],
                 amount: test_balance(1),
                 token_id: vec![],
@@ -3089,6 +3630,7 @@ mod tests {
         #[test]
         fn encoding_is_deterministic() {
             let op = Operation::Transfer {
+                policy_commit: [0u8; 32],
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(42),
                 token_id: b"ERA".to_vec(),
@@ -3114,6 +3656,7 @@ mod tests {
                     fixed.insert(k.to_string(), v.clone());
                 }
                 Operation::Transfer {
+                    policy_commit: [0u8; 32],
                     to_device_id: vec![],
                     amount: test_balance(1),
                     token_id: vec![],

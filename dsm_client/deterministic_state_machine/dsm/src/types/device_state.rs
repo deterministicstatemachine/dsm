@@ -96,6 +96,70 @@ fn hex_short(b: &[u8; 32]) -> String {
     s
 }
 
+/// Canonical value-capability of a relationship, for recovery gate-set construction
+/// (spec §0.5 gap 13, R4 anti-shrink). This is the ONLY representation — there is no
+/// legacy bool, no default-false, no `missing == No`.
+///
+/// - `Yes` — PROVEN value-capable: a value-bearing op was observed. Sticky; never downgraded.
+/// - `No` — PROVEN never value-capable: the relationship's birth was witnessed and complete
+///   observed history shows no value-bearing op.
+/// - `Unknown` — INCOMPLETE PROOF: imported / capsule-restored / partial or unwitnessed
+///   history. Transitional — eliminated by canonicalization when history becomes provable.
+///
+/// **Invariant: `Unknown` is NOT false. `Unknown` is INCLUDED in the recovery gate. Only
+/// proven `No` is excluded.** No relationship may be excluded unless exclusion is proven.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueCapability {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl ValueCapability {
+    /// Canonical wire value (matches proto `ValueCapabilityV1`; `0`/UNSPECIFIED is invalid).
+    pub fn to_wire(self) -> i32 {
+        match self {
+            ValueCapability::Yes => 1,
+            ValueCapability::No => 2,
+            ValueCapability::Unknown => 3,
+        }
+    }
+
+    /// Decode from the wire, **fail-closed**: `0`/UNSPECIFIED and any unrecognized value are
+    /// rejected (returned `None`) — NEVER silently treated as `No` or any other variant.
+    pub fn from_wire(v: i32) -> Option<Self> {
+        match v {
+            1 => Some(ValueCapability::Yes),
+            2 => Some(ValueCapability::No),
+            3 => Some(ValueCapability::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Stable 1-byte tag for domain-separated commitments (equals the wire value).
+    pub fn commit_tag(self) -> u8 {
+        self.to_wire() as u8
+    }
+
+    /// R4 gate inclusion: include unless PROVEN `No`. (`Yes` and `Unknown` both include.)
+    pub fn includes_in_gate(self) -> bool {
+        !matches!(self, ValueCapability::No)
+    }
+
+    /// Sticky-monotone update on an accepted op. A value-bearing op proves `Yes` (and `Yes`
+    /// is never downgraded); a non-value op leaves the prior verdict unchanged. Starting
+    /// from `No` (a freshly witnessed birth) this yields `Yes` on first value op and `No`
+    /// otherwise; starting from `Unknown` (unwitnessed history) a non-value op keeps
+    /// `Unknown` (we still cannot prove `No`).
+    pub fn advance(self, op_is_value_bearing: bool) -> Self {
+        if op_is_value_bearing {
+            ValueCapability::Yes
+        } else {
+            self
+        }
+    }
+}
+
 /// Cached per-relationship tip metadata.
 ///
 /// Contains the current chain tip digest (mirror of the SMT leaf) plus the
@@ -114,6 +178,11 @@ pub struct RelChainTip {
     /// Full state at the tip, if available. `None` when the tip was restored
     /// from a recovery capsule that only carried the digest.
     pub state: Option<RelationshipChainState>,
+
+    /// Canonical value-capability (R4 anti-shrink). Witnessed-birth relationships are
+    /// `Yes`/`No`; imported/capsule-restored tips are `Unknown` until history proves
+    /// otherwise. There is no legacy/default form — every tip carries this explicitly.
+    pub value_capability: ValueCapability,
 }
 
 /// One accepted state in a per-relationship straight hash chain (§2.1).
@@ -246,6 +315,96 @@ pub enum BalanceDirection {
     Debit,
 }
 
+/// By-construction balance-conservation guard for [`DeviceState::advance`].
+///
+/// Validates that `deltas` exactly realize `operation` for the device identified
+/// by `local_devid`, so a caller cannot apply a balance mutation that diverges
+/// from the (authenticated) signed operation. Mirrors the reference semantics of
+/// `core::state_machine::transition::verify_token_balance_consistency`, lifted to
+/// operate on `&[BalanceDelta]` (code correspondence: lean4
+/// `DSMOfflineFinality.lean` `commitTransfer` / `commit_conservation`).
+///
+/// - `Transfer`: exactly one delta, `amount == op.amount`, direction is `Credit`
+///   iff this device is the recipient (`op.to_device_id == local_devid`) else
+///   `Debit`, and `policy_commit == op.policy_commit` (§9.5 token binding).
+/// - `Mint`: exactly one `Credit` delta of `amount`.
+/// - `Burn`: exactly one `Debit` delta of `amount`.
+/// - Every other operation: no balance deltas.
+fn validate_conservation(
+    local_devid: &[u8; 32],
+    operation: &Operation,
+    deltas: &[BalanceDelta],
+) -> Result<(), DsmError> {
+    match operation {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            ..
+        } => {
+            if deltas.len() != 1 {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer must apply exactly one balance delta",
+                ));
+            }
+            let d = &deltas[0];
+            if d.amount != amount.value() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer delta amount != operation amount",
+                ));
+            }
+            let is_recipient =
+                to_device_id.len() == 32 && to_device_id.as_slice() == local_devid.as_slice();
+            let expected = if is_recipient {
+                BalanceDirection::Credit
+            } else {
+                BalanceDirection::Debit
+            };
+            if d.direction != expected {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer delta direction does not match sender/recipient role",
+                ));
+            }
+            if &d.policy_commit != policy_commit {
+                return Err(DsmError::invalid_operation(
+                    "conservation: transfer delta policy_commit != operation policy_commit",
+                ));
+            }
+            Ok(())
+        }
+        Operation::Mint { amount, .. } => {
+            if deltas.len() != 1
+                || deltas[0].direction != BalanceDirection::Credit
+                || deltas[0].amount != amount.value()
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: mint must apply exactly one credit delta of the mint amount",
+                ));
+            }
+            Ok(())
+        }
+        Operation::Burn { amount, .. } => {
+            if deltas.len() != 1
+                || deltas[0].direction != BalanceDirection::Debit
+                || deltas[0].amount != amount.value()
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: burn must apply exactly one debit delta of the burn amount",
+                ));
+            }
+            Ok(())
+        }
+        _ => {
+            if !deltas.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: non-balance operation must not apply balance deltas",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Result of a successful [`DeviceState::advance`] build.
 ///
 /// The caller must CAS-swap the device head from `parent_r_a` to
@@ -346,6 +505,19 @@ impl DeviceState {
     /// Current device head `r_A` — the Per-Device SMT root (§2.2).
     pub fn root(&self) -> [u8; 32] {
         *self.smt.root()
+    }
+
+    /// Per-Device SMT inclusion proof for a relationship leaf (`rel_key → current chain
+    /// tip`) against [`Self::root`]. Used by the recovery PDSMT head builder to attest
+    /// each posted leaf. Generated from the live SMT (which may also hold vault leaves),
+    /// so the proof recomputes the true `root()`.
+    pub fn rel_inclusion_proof(
+        &self,
+        rel_key: &[u8; 32],
+    ) -> Result<crate::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
+        self.smt.get_inclusion_proof(rel_key, 256).map_err(|e| {
+            DsmError::invalid_operation(format!("rel_inclusion_proof: {e}"))
+        })
     }
 
     /// Stash a legacy `State.hash` as a verification anchor. Callers that
@@ -485,6 +657,15 @@ impl DeviceState {
             }
         };
 
+        // §9.5 + balance conservation (token-policy doctrine §4; code
+        // correspondence: lean4 DSMOfflineFinality.lean commit_conservation /
+        // commitTransfer): the supplied deltas MUST exactly realize the signed
+        // operation — one delta of op.amount, role-correct direction, bound to the
+        // op's policy_commit. This is the by-construction guard at the sole
+        // balance-mutation chokepoint; it rejects value creation/substitution
+        // regardless of caller.
+        validate_conservation(&self.devid, &operation, deltas)?;
+
         // Apply deltas to a working copy. Failures leave self untouched.
         let mut new_balances = self.balances.clone();
         for d in deltas {
@@ -549,14 +730,26 @@ impl DeviceState {
 
         let child_r_a = smt_proofs.post_root;
 
-        // Update the tip cache with the new state.
+        // Update the tip cache with the new state. value_capability is sticky-monotone:
+        // a missing prior means we are witnessing this relationship's birth, so we start
+        // from `No` (proven non-value until a value op is seen); an existing prior
+        // (including a restored `Unknown`) is advanced — `Yes` is never downgraded and a
+        // restored `Unknown` only becomes `Yes` (never `No`) since earlier history is
+        // unproven.
         let mut new_tips = self.tips.clone();
+        let prior_vc = self
+            .tips
+            .get(&rel_key)
+            .map(|t| t.value_capability)
+            .unwrap_or(ValueCapability::No);
+        let value_capability = prior_vc.advance(new_chain_state.operation.is_value_bearing());
         new_tips.insert(
             rel_key,
             RelChainTip {
                 chain_tip: child_chain_tip,
                 counterparty_devid,
                 state: Some(new_chain_state.clone()),
+                value_capability,
             },
         );
 
@@ -687,6 +880,95 @@ mod tests {
         }
     }
 
+    fn bal(amount: u64) -> crate::types::token_types::Balance {
+        crate::types::token_types::Balance::from_state(amount, [0u8; 32])
+    }
+
+    /// A Mint op carrying one credit of `amount` — satisfies the conservation
+    /// guard for a single Credit `BalanceDelta` of the same amount.
+    fn mint_op(amount: u64) -> Operation {
+        Operation::Mint {
+            amount: bal(amount),
+            token_id: b"ERA".to_vec(),
+            authorized_by: vec![],
+            proof_of_authorization: vec![],
+            message: String::new(),
+        }
+    }
+
+    /// A Burn op carrying one debit of `amount` — satisfies the conservation
+    /// guard for a single Debit `BalanceDelta` of the same amount.
+    fn burn_op(amount: u64) -> Operation {
+        Operation::Burn {
+            amount: bal(amount),
+            token_id: b"ERA".to_vec(),
+            proof_of_ownership: vec![],
+            message: String::new(),
+        }
+    }
+
+    /// Value op matching a delta's direction/amount for conservation-guard tests.
+    fn value_op(dir: BalanceDirection, amount: u64) -> Operation {
+        match dir {
+            BalanceDirection::Credit => mint_op(amount),
+            BalanceDirection::Debit => burn_op(amount),
+        }
+    }
+
+    #[test]
+    fn conservation_guard_rules() {
+        let me = devid(0xAA);
+        let other = devid(0xBB);
+        let pcx = pc(0xCC);
+        let xfer = |to: [u8; 32], amt: u64, pcv: [u8; 32]| Operation::Transfer {
+            to_device_id: to.to_vec(),
+            amount: bal(amt),
+            token_id: b"ERA".to_vec(),
+            policy_commit: pcv,
+            mode: crate::types::operations::TransactionMode::Unilateral,
+            nonce: vec![],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![],
+            to: vec![],
+            message: String::new(),
+            signature: vec![],
+        };
+        let credit = |amt: u64, pcv: [u8; 32]| BalanceDelta {
+            policy_commit: pcv,
+            direction: BalanceDirection::Credit,
+            amount: amt,
+        };
+        let debit = |amt: u64, pcv: [u8; 32]| BalanceDelta {
+            policy_commit: pcv,
+            direction: BalanceDirection::Debit,
+            amount: amt,
+        };
+
+        // Transfer: recipient credits, sender debits — accepted.
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx)]).is_ok());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[debit(5, pcx)]).is_ok());
+        // Wrong amount / direction / token / count — rejected.
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(6, pcx)]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[debit(5, pcx)]).is_err());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[]).is_err());
+        assert!(
+            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx), credit(5, pcx)])
+                .is_err()
+        );
+        // Mint: one credit==amount; Burn: one debit==amount.
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)]).is_ok());
+        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)]).is_err());
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)]).is_err());
+        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)]).is_ok());
+        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)]).is_err());
+        // Non-balance op must carry no deltas.
+        assert!(validate_conservation(&me, &op(), &[]).is_ok());
+        assert!(validate_conservation(&me, &op(), &[credit(1, pcx)]).is_err());
+    }
+
     fn entropy(seed: u8) -> Vec<u8> {
         let mut h = crate::crypto::blake3::dsm_domain_hasher(
             crate::common::domain_tags::TAG_DSM_TEST_ENTROPY,
@@ -725,7 +1007,7 @@ mod tests {
             .advance(
                 rk_self,
                 bob.devid,
-                op(),
+                mint_op(50),
                 entropy(42),
                 None,
                 &[BalanceDelta {
@@ -751,6 +1033,88 @@ mod tests {
         assert!(
             !bob.balances.contains_key(&custom_token),
             "advance must not mutate &self"
+        );
+    }
+
+    #[test]
+    fn value_capability_is_sticky_monotone_and_fail_closed() {
+        use ValueCapability::*;
+        // Sticky-monotone toward Yes; `Yes` is NEVER downgraded — this is the Gemini
+        // fatal case (value then later non-value / zero-balance MUST stay value-capable).
+        assert_eq!(No.advance(true), Yes);
+        assert_eq!(Yes.advance(false), Yes);
+        assert_eq!(Yes.advance(true), Yes);
+        assert_eq!(No.advance(false), No);
+        assert_eq!(Unknown.advance(false), Unknown);
+        assert_eq!(Unknown.advance(true), Yes);
+        // Gate inclusion: include unless PROVEN No.
+        assert!(Yes.includes_in_gate() && Unknown.includes_in_gate() && !No.includes_in_gate());
+        // Wire is fail-closed: only 1/2/3 are valid; UNSPECIFIED(0) and any other value are
+        // rejected — NEVER silently mapped to `No`.
+        assert_eq!(ValueCapability::from_wire(1), Some(Yes));
+        assert_eq!(ValueCapability::from_wire(2), Some(No));
+        assert_eq!(ValueCapability::from_wire(3), Some(Unknown));
+        assert_eq!(ValueCapability::from_wire(0), None);
+        assert_eq!(ValueCapability::from_wire(4), None);
+        assert_eq!(ValueCapability::from_wire(-1), None);
+        for v in [Yes, No, Unknown] {
+            assert_eq!(ValueCapability::from_wire(v.to_wire()), Some(v));
+        }
+    }
+
+    #[test]
+    fn advance_sets_value_capability_sticky_yes_and_birth_no() {
+        use crate::core::bilateral_transaction_manager::{
+            compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        let dev = fresh_device(0xAB);
+
+        // Relationship whose FIRST op is value-bearing → Yes.
+        let cp = devid(0xC0);
+        let rk = compute_smt_key(&dev.devid, &cp);
+        let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+        let o1 = dev
+            .advance(
+                rk,
+                cp,
+                mint_op(10),
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc(0xF1),
+                    direction: BalanceDirection::Credit,
+                    amount: 10,
+                }],
+                Some(init),
+                None,
+            )
+            .expect("value advance");
+        assert_eq!(
+            o1.new_device_state.rel_chain_tip(&rk).unwrap().value_capability,
+            ValueCapability::Yes
+        );
+
+        // A LATER non-value op on the same relationship (e.g. balance now drained) MUST
+        // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
+        let o2 = o1
+            .new_device_state
+            .advance(rk, cp, op(), entropy(2), None, &[], None, None)
+            .expect("non-value advance");
+        assert_eq!(
+            o2.new_device_state.rel_chain_tip(&rk).unwrap().value_capability,
+            ValueCapability::Yes
+        );
+
+        // A DIFFERENT relationship whose first-ever op is non-value → `No` (witnessed birth).
+        let cp2 = devid(0xD0);
+        let rk2 = compute_smt_key(&dev.devid, &cp2);
+        let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
+        let o3 = dev
+            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
+            .expect("first non-value advance");
+        assert_eq!(
+            o3.new_device_state.rel_chain_tip(&rk2).unwrap().value_capability,
+            ValueCapability::No
         );
     }
 
@@ -784,7 +1148,7 @@ mod tests {
             .advance(
                 rk_bob,
                 bob,
-                op(),
+                burn_op(30),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -808,7 +1172,7 @@ mod tests {
             .advance(
                 rk_chrl,
                 charlie,
-                op(),
+                burn_op(50),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -866,7 +1230,7 @@ mod tests {
             .advance(
                 rk_bob,
                 bob,
-                op(),
+                burn_op(10),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -882,7 +1246,7 @@ mod tests {
             .advance(
                 rk_chrl,
                 charlie,
-                op(),
+                burn_op(20),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -933,7 +1297,7 @@ mod tests {
             .advance(
                 rk,
                 bob,
-                op(),
+                burn_op(10),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -949,7 +1313,7 @@ mod tests {
             .advance(
                 rk,
                 bob,
-                op(),
+                burn_op(20),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -994,7 +1358,7 @@ mod tests {
         let r = dev.advance(
             rk,
             bob,
-            op(),
+            burn_op(10),
             entropy(1),
             None,
             &[BalanceDelta {
@@ -1027,7 +1391,7 @@ mod tests {
         let r = dev.advance(
             rk,
             bob,
-            op(),
+            mint_op(1),
             entropy(1),
             None,
             &[BalanceDelta {
@@ -1076,7 +1440,7 @@ mod tests {
                 .advance(
                     rk,
                     *party,
-                    op(),
+                    value_op(dir, amt),
                     entropy(i as u8),
                     None,
                     &[BalanceDelta {

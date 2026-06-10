@@ -4,7 +4,7 @@
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::bridge::{AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use crate::storage::client_db::export_state_blob;
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
@@ -269,117 +269,112 @@ impl AppRouterImpl {
         match q.path.as_str() {
             // -------- system.genesis (QueryOp) --------
             "system.genesis" => handle_system_genesis_query(q),
-            // -------- system.secondary_device (Add device to existing genesis) --------
-            "system.secondary_device" => {
-                // Decode ArgPack
-                let pack = match generated::ArgPack::decode(&*q.params) {
-                    Ok(p) => p,
-                    Err(e) => return err(format!("decode ArgPack failed: {e}")),
-                };
-                if pack.codec != generated::Codec::Proto as i32 {
-                    return err("system.secondary_device: ArgPack.codec must be PROTO".into());
-                }
-                // Decode SecondaryDeviceRequest
-                let req = match generated::SecondaryDeviceRequest::decode(&*pack.body) {
-                    Ok(r) => r,
-                    Err(e) => return err(format!("decode SecondaryDeviceRequest failed: {e}")),
-                };
-
-                // Validate inputs
-                if req.genesis_hash.len() != 32 {
-                    return err("system.secondary_device: genesis_hash must be 32 bytes".into());
-                }
-                if req.device_entropy.len() != 32 {
-                    return err("system.secondary_device: device_entropy must be 32 bytes".into());
-                }
-
-                let fut = async move {
-                    let cfg =
-                        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
-                            .await
-                        {
-                            Ok(cfg) => cfg,
-                            Err(e) => {
-                                return Err(format!("No storage node config available: {}", e))
-                            }
-                        };
-                    let res = crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg)
-                        .await
-                        .map_err(|e| format!("sdk.new: {e}"))?
-                        .add_secondary_device(req.genesis_hash.clone(), req.device_entropy.clone())
-                        .await
-                        .map_err(|e| format!("Secondary device binding failed: {e}"))?;
-
-                    // Persist identity
-                    let device_id = res.genesis_device_id.clone();
-                    let genesis_hash = req.genesis_hash.clone();
-                    let public_key =
-                        crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
-                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-                    )
-                    .to_vec();
-
-                    crate::sdk::app_state::AppState::set_identity_info(
-                        device_id.clone(),
-                        public_key.clone(),
-                        genesis_hash.clone(),
-                        smt_root,
-                    );
-                    crate::sdk::app_state::AppState::set_has_identity(true);
-
-                    // Persist the post-add Device Tree root so bilateral
-                    // settlement (which reads the head's device_tree_root
-                    // out of AppState) verifies against the multi-device
-                    // R_G — not the single-leaf root the prior flow
-                    // installed. Source of truth is the
-                    // DeviceTreeSnapshot the SDK returned.
-                    if let Some(snapshot) = res.device_tree {
-                        crate::sdk::app_state::AppState::set_device_tree_root(snapshot.root_hash);
-                    }
-
-                    let _ = crate::initialize_sdk_context(
-                        device_id.clone(),
-                        genesis_hash.clone(),
-                        req.device_entropy.clone(),
-                    );
-
-                    // Build SecondaryDeviceResponse, surfacing the new
-                    // Device Tree summary to the WebView so the frontend
-                    // can render the post-add R_G / device_count /
-                    // version_number without rederiving the tree.
-                    //
-                    // `res.device_tree` is a [`DeviceTreeSnapshot`] which
-                    // converts to the `crate::generated::DeviceTreeV1`
-                    // prost type. Here we need the
-                    // `dsm::types::proto::DeviceTreeV1` instance — they
-                    // are distinct prost generations of the same .proto
-                    // message, so we copy fields by hand rather than
-                    // re-routing through a serialised round-trip.
-                    let device_tree_proto = res.device_tree.map(|s| generated::DeviceTreeV1 {
-                        schema_version: 1,
-                        root_hash: s.root_hash.to_vec(),
-                        device_count: s.device_count,
-                        version_number: s.version_number,
-                    });
-                    let resp = generated::SecondaryDeviceResponse {
-                        device_id,
-                        genesis_hash: Some(generated::Hash32 { v: genesis_hash }),
-                        success: true,
-                        device_tree: device_tree_proto,
-                    };
-                    Ok::<generated::SecondaryDeviceResponse, String>(resp)
-                };
-
-                let resp = match crate::runtime::get_runtime().block_on(fut) {
-                    Ok(r) => r,
-                    Err(e) => return err(e),
-                };
-
-                // Return as Envelope.secondaryDeviceResponse (field 43)
-                pack_envelope_ok(generated::envelope::Payload::SecondaryDeviceResponse(resp))
-            }
             _ => err(format!("unknown system query: {}", q.path)),
         }
     }
+
+    /// Dispatch handler for `device.*` invoke routes — secondary-device admission handshake.
+    /// All logic is in `DeviceAdmissionSDK`; these arms decode args + drive the BLE send.
+    pub(crate) async fn handle_device_invoke(&self, i: AppInvoke) -> AppResult {
+        let body = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p.body,
+            Err(e) => return err(format!("{}: decode ArgPack failed: {e}", i.method)),
+        };
+        match i.method.as_str() {
+            // EXISTING device: which device (if any) is awaiting the owner's approval (poll).
+            "device.pendingAdmission" => {
+                let v =
+                    crate::sdk::DeviceAdmissionSDK::pending_admission_device_id().unwrap_or_default();
+                device_ok("device.pendingAdmission", &v)
+            }
+            // NEW device: start the handshake (build request + send over BLE to the existing device).
+            "device.requestAdmission" => {
+                #[cfg(all(target_os = "android", feature = "bluetooth"))]
+                {
+                    let req = match generated::AddDeviceAdmissionInitiateV1::decode(&*body) {
+                        Ok(r) => r,
+                        Err(e) => return err(format!("device.requestAdmission: decode: {e}")),
+                    };
+                    if req.genesis_hash.len() != 32 {
+                        return err("device.requestAdmission: genesis_hash must be 32 bytes".into());
+                    }
+                    if req.entropy.len() != 32 {
+                        return err("device.requestAdmission: entropy must be 32 bytes".into());
+                    }
+                    if req.signer_signing_pubkey.is_empty() {
+                        return err("device.requestAdmission: signer pubkey required".into());
+                    }
+                    if req.ble_address.is_empty() {
+                        return err("device.requestAdmission: ble_address required".into());
+                    }
+                    let mut g = [0u8; 32];
+                    g.copy_from_slice(&req.genesis_hash);
+                    let env = match crate::sdk::DeviceAdmissionSDK::begin_admission(
+                        g,
+                        req.entropy,
+                        req.signer_signing_pubkey,
+                    )
+                    .await
+                    {
+                        Ok(e) => e,
+                        Err(e) => return err(format!("device.requestAdmission: {e}")),
+                    };
+                    let adapter = match crate::bridge::get_ble_transport_adapter().await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return err(format!(
+                                "device.requestAdmission: BLE transport not ready: {e}"
+                            ))
+                        }
+                    };
+                    match adapter.send_admission_request(&req.ble_address, &env).await {
+                        Ok(()) => device_ok("device.requestAdmission", "request-sent"),
+                        Err(e) => err(format!("device.requestAdmission: send failed: {e}")),
+                    }
+                }
+                #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+                {
+                    let _ = body;
+                    err("device.requestAdmission: BLE admission requires the Android build".into())
+                }
+            }
+            // EXISTING device: owner approves → gate-sign + insert + send the response back.
+            "device.approveAdmission" => {
+                #[cfg(all(target_os = "android", feature = "bluetooth"))]
+                {
+                    let (env, peer) =
+                        match crate::sdk::DeviceAdmissionSDK::approve_pending_admission().await {
+                            Ok(v) => v,
+                            Err(e) => return err(format!("device.approveAdmission: {e}")),
+                        };
+                    let adapter = match crate::bridge::get_ble_transport_adapter().await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return err(format!(
+                                "device.approveAdmission: BLE transport not ready: {e}"
+                            ))
+                        }
+                    };
+                    match adapter.send_admission_response(&peer, &env).await {
+                        Ok(()) => device_ok("device.approveAdmission", "approved"),
+                        Err(e) => err(format!("device.approveAdmission: send failed: {e}")),
+                    }
+                }
+                #[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+                {
+                    err("device.approveAdmission: BLE admission requires the Android build".into())
+                }
+            }
+            _ => err(format!("unknown device invoke: {}", i.method)),
+        }
+    }
+}
+
+fn device_ok(key: &str, value: &str) -> AppResult {
+    pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+        generated::AppStateResponse {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+        },
+    ))
 }
