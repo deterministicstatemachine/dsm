@@ -68,4 +68,37 @@ object SiliconFingerprintNative {
         warmupRounds: Int,
         rotationBits: Int
     ): LongArray?
+
+    /**
+     * Extractor-sweep raw capture: exposes the walk-altering C-DBRW knobs and
+     * returns the richest raw observable so the host can derive every candidate
+     * summary offline (bin-scale, transition/signed deltas, moments, per-core
+     * lanes, µ-KL). Used to search the extractor — orbit × ARX × observable —
+     * for the strongest same-model device separation, NOT a production path.
+     *
+     * @param injectionCadence inject µ_n every k ARX steps; pure ARX rounds in
+     *        between. k > 1 tests whether the map is too mixing-heavy and
+     *        washing out silicon structure.
+     * @param cpuCore pin+verify to this logical core for per-core lanes; -1 for
+     *        current-core (merged) behaviour. Returns null if an explicit pin
+     *        cannot be verified.
+     * @return length `2*probes + 256`: `[0, probes)` per-probe CNTVCT timing
+     *         deltas; `[probes, 2*probes)` per-probe perf CPU-cycle deltas (pair
+     *         with CNTVCT for the two-clock ratio = realized CPU freq / reference,
+     *         frequency-normalized); `[2*probes, 2*probes+256)` µ-byte histogram
+     *         counts. `null` on substrate-gate failure or unverifiable pin.
+     */
+    @JvmStatic
+    external fun captureOrbitRaw(
+        envBytes: ByteArray,
+        challenge: ByteArray,
+        thermalBytes: ByteArray,
+        arenaBytes: Int,
+        probes: Int,
+        stepsPerProbe: Int,
+        warmupRounds: Int,
+        rotationBits: Int,
+        injectionCadence: Int,
+        cpuCore: Int
+    ): LongArray?
 }
