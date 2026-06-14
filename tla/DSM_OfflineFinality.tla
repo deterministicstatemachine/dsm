@@ -151,13 +151,11 @@ ReceiverReceivePrepare(sid) ==
 \*     B-side in handle_commit_response and replaces the in-memory
 \*     A-only cached receipt with the fully co-signed bytes for archive.
 \*
-\* In strict cert-chain mode (set_strict_cert_chain_mode(true) — mainnet
-\* required), missing per-step EK artifacts on EITHER side cause the
-\* respective handler to return a structured error instead of advancing
-\* — so `hasBothSigs = TRUE` cannot be reached without genuine §11.1
-\* per-step EK signing on both sides. Pre-mainnet keeps the transitional
-\* fail-open path so legacy peers without per-step signing can still
-\* progress.
+\* The strict-aware verifier verify_per_step_ek_signing_strict_aware
+\* (receipts.rs:487) UNCONDITIONALLY returns a structured error when
+\* per-step EK artifacts are missing on either side — there is no mode
+\* toggle and no fail-open path. So `hasBothSigs = TRUE` cannot be reached
+\* without genuine §11.1 per-step EK signing on both sides.
 \*
 \* The full refinement is detailed in DSM_Tripwire.tla and verified
 \* end-to-end by per_step_signing_end_to_end_two_steps,
@@ -211,7 +209,7 @@ SessionFail(sid) ==
     /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
 
 \* ---------- SessionRecover ----------
-\* Maps to recover_accepted_sessions() in bilateral_ble_handler.rs:475-513
+\* Maps to recover_sender_commit_from_storage() in bilateral_ble_handler.rs:638
 \* Auto-commit accepted sessions with both sigs on BLE reconnect.
 \* Same Tripwire guard as Commit — if tip moved, recovery fails via
 \* TripwireAbort instead.

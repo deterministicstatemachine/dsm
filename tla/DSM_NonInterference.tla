@@ -16,9 +16,10 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 \* 4-device model with 2 disjoint bilateral pairs.
 \*
 \* Code traceability:
-\*   bilateral_transaction_manager.rs:133-143 (compute_smt_key)
-\*   state_machine/relationship.rs:1-6 (RelationshipManager isolation)
-\*   state_machine/mod.rs:52-87 (per-device state machines)
+\*   core/bilateral_transaction_manager.rs:144-154 (compute_smt_key)
+\*   core/state_machine/relationship.rs (RelationshipManager isolation, §3.4)
+\*   device_state.rs (per-relationship tips keyed by rel_key; SMT leaves
+\*   rel_key -> chain_tip)
 
 \* ========================================================================
 \* CONSTANTS

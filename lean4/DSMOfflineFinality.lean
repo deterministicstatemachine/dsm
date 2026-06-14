@@ -13,9 +13,11 @@
       (chainTip[sender] = tipAtCreation) prevents re-use.
 
   Code correspondence:
-    - compute_successor_tip(): bilateral_transaction_manager.rs:85-110
-    - finalize_offline_transfer(): bilateral_transaction_manager.rs:952
-    - Tripwire enforcement: bilateral_transaction_manager.rs:983-1006
+    - compute_successor_tip(): bilateral_transaction_manager.rs:165-177
+    - finalize_offline_transfer(): bilateral_transaction_manager.rs:1066
+      (core logic in finalize_offline_transfer_with_entropy:1089)
+    - Tripwire enforcement: bilateral_transaction_manager.rs:1131 (finalize),
+      :1285 (prepare)
 
   Discharges OMITTED obligations in DSM_OfflineFinality.tla:
     - IrreversibilityInductive: chain-tip arithmetic
@@ -59,9 +61,12 @@ axiom domain_hash_injective :
 -- ============================================================
 
 /-- Models compute_successor_tip() in bilateral_transaction_manager.rs.
-    The successor tip is computed as BLAKE3("DSM/tip", currentTip ‖ op ‖ entropy ‖ σ).
-    In the TLA+ model, this is abstracted as chainTip + 1. Here we prove
-    the mathematical property that justifies the abstraction. -/
+    The successor tip is computed as
+    BLAKE3("DSM/tip\0", currentTip ‖ op ‖ entropy ‖ receipt_digest).
+    The 4th input (the spec's σ slot, §16.6) is the BLAKE3 receipt digest,
+    NOT a raw signature. In the TLA+ model this is abstracted as chainTip + 1;
+    here we prove the mathematical property that justifies the abstraction.
+    (The `sigma` parameter below models that 4th input.) -/
 noncomputable def successorTip (currentTip : Nat) (op entropy sigma : Nat) : Nat :=
   domainHash "DSM/tip" (List.replicate currentTip 0 ++
                          List.replicate op 1 ++

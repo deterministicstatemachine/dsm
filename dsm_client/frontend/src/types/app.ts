@@ -14,7 +14,6 @@ export type ScreenType =
   | 'qr'
   | 'mycontact'
   | 'dev_dlv'
-  | 'dev_cdbrw'
   | 'dev_policy'
   | 'dev_sofi_launch'
   | 'sofi'

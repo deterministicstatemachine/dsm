@@ -261,6 +261,7 @@ mod tests {
                 entity_sig: None,
                 counterparty_sig: None,
                 dbrw_summary_hash: None,
+                island_attestation: None,
             },
             carry_forward_commitment: [0; 32],
             counterparty_root: [0x44; 32],

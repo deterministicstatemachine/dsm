@@ -2829,6 +2829,19 @@ message RelationshipChainStateProto {
   repeated BalanceWitnessEntryProto balance_witness = 8;
   optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
   optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
+  // Offline-bearer secure-element island attestation (anti-clone). Feeds compute_chain_tip,
+  // so the faithful codec MUST carry it. Message field -> Option in prost (None vs Some
+  // preserved). Absent on non-offline-bearer states.
+  IslandAttestationProto island_attestation = 11;
+}
+
+// Offline-bearer secure-element island attestation folded into a relationship chain tip
+// (anti-clone, see dsm_anticlone.instructions.md). Carried in the faithful codec because it
+// feeds compute_chain_tip.
+message IslandAttestationProto {
+  bytes id_island = 1 [(dsm_fixed_len)=32];   // SHA-256(leaf SubjectPublicKeyInfo)
+  bytes signature = 2 [(dsm_max_len)=65535];  // island signature over the framed intent challenge
+  bytes policy_id = 3 [(dsm_fixed_len)=32];   // pinning policy id under which the island was admitted
 }
 
 // A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a

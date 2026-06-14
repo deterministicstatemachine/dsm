@@ -56,7 +56,6 @@ export const {
 } = bilateral;
 
 export const {
-  captureCdbrwOrbitTimings,
   computeB0xAddressBridge,
   getArchitectureInfo,
   getDeviceIdBinBridgeAsync,

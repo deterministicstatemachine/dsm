@@ -57,14 +57,16 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
     - BalancesNonNegative: no negative balances
 
   Code traceability:
-    - BilateralPhase enum: bilateral_ble_handler.rs:75-84
-    - VaultState enum: limbo_vault.rs:102-119
-    - Tripwire enforcement: bilateral_transaction_manager.rs:983-1006
-    - Modal sync lock: sync_manager.rs:44-75
-    - Session recovery: bilateral_ble_handler.rs:475-513
+    - BilateralPhase enum: bilateral_session.rs:136 (imported into handler)
+    - VaultState enum: limbo_vault.rs:137
+    - Tripwire enforcement: bilateral_transaction_manager.rs:1131 (finalize),
+      :1285 (prepare)
+    - Modal sync lock: security/modal_sync_lock.rs
+    - Session recovery: recover_sender_commit_from_storage in
+      bilateral_ble_handler.rs:638
     - Recovery capsule: recovery/capsule.rs
     - Tombstone/Succession: recovery/tombstone.rs:26-67
-    - Vault expiry: limbo_vault.rs:1768 (VaultStatus::Expired)
+    - Vault expiry: terminal Invalidated transition, limbo_vault.rs:2145
 ***************************************************************************)
 
 \* ========================================================================
@@ -264,7 +266,7 @@ SessionFail(sid) ==
                    vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
 
 \* ---------- SessionRecover ----------
-\* Maps to recover_accepted_sessions() in bilateral_ble_handler.rs:475-513
+\* Maps to recover_sender_commit_from_storage() in bilateral_ble_handler.rs:638
 \* Auto-commit accepted sessions with both sigs on restart.
 SessionRecover(sid) ==
     /\ sessions[sid] /= NULL
@@ -306,7 +308,7 @@ TripwireAbort(sid) ==
 
 \* ---------- OnlineSubmit ----------
 \* Submit via b0x spool (online unilateral). Engages modal lock.
-\* Maps to B0xSDK submit flow, sync_manager.rs:44-75.
+\* Maps to B0xSDK submit flow, security/modal_sync_lock.rs.
 \* CRITICAL: Also blocks when any in-flight session exists (modal lock is
 \* relationship-wide, covering both online AND offline paths).
 \* Balance is escrowed (deducted) immediately at submission time.

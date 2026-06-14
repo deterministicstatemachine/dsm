@@ -92,6 +92,13 @@ constant_time_eq = "0.5.0"
 # Use RustCrypto alternatives instead
 p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8"] }  # ECDSA P-256
 p384 = { version = "0.13.0", features = ["ecdsa", "pkcs8"] }  # ECDSA P-384
+# External-device attestation verification only (Trezor TROPIC01 Ed25519 leg).
+# Classical by necessity; scoped to crypto::classical_verify + attestation. DSM's
+# own protocol signatures remain SPHINCS+ (see dsm_anticlone.instructions.md sec 9.2).
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+# External-device attestation certificate-chain parsing (verify only). Already in the
+# dependency tree transitively; promoted to a direct dep for the island verifier.
+x509-parser = "0.18"
 ff = "0.14.0"
 
 # Post-quantum cryptography - REPLACED with pure Rust implementation
