@@ -511,6 +511,7 @@ mod tests {
             entity_sig: None,
             counterparty_sig: None,
             dbrw_summary_hash: None,
+            island_attestation: None,
         }
     }
 
@@ -559,6 +560,7 @@ mod tests {
             entity_sig: None,
             counterparty_sig: None,
             dbrw_summary_hash: None,
+            island_attestation: None,
         };
         let t_new_established = est.compute_chain_tip();
         let ev = CrossRelationshipSuccessionEvidence {

@@ -242,16 +242,29 @@ static inline uint8_t derive_step_mu(const uint8_t substrate_digest[32], int ste
 
 // ---------------------------------------------------------------------------
 // Best-effort soft real-time on the capture thread.
+//
+// requested_cpu >= 0 pins to that exact core and verifies the pin (used by the
+// extractor-sweep "lane" knob — per-core capture). requested_cpu < 0 keeps the
+// legacy behaviour (pin to whatever core the thread is currently on). Returns
+// false only when an explicit per-core pin was requested and could not be
+// verified, so the caller can refuse rather than silently run on the wrong core.
 // ---------------------------------------------------------------------------
-static void best_effort_isolate_thread() {
+static bool best_effort_isolate_thread_core(int requested_cpu) {
     // CPU pinning reduces scheduler noise without escalating priority.
-    int cpu = sched_getcpu();
+    int cpu = (requested_cpu >= 0) ? requested_cpu : sched_getcpu();
     if (cpu >= 0) {
         cpu_set_t set;
         CPU_ZERO(&set);
         CPU_SET(cpu, &set);
         if (sched_setaffinity(0, sizeof(set), &set) != 0) {
-            ALOGW("sched_setaffinity failed errno=%d (continuing)", errno);
+            ALOGW("sched_setaffinity(cpu=%d) failed errno=%d", cpu, errno);
+            if (requested_cpu >= 0) return false;
+        } else if (requested_cpu >= 0) {
+            sched_yield();
+            if (sched_getcpu() != requested_cpu) {
+                ALOGW("pin verify failed: wanted cpu=%d got cpu=%d", requested_cpu, sched_getcpu());
+                return false;
+            }
         }
     }
     // mlockall is page-pressure mitigation, not an RT escalation.
@@ -264,6 +277,11 @@ static void best_effort_isolate_thread() {
     // mid-orbit on long-running enroll trials. The Kotlin promotion is the
     // closest userspace approximation the spec's Def 9.1(a) clause permits;
     // residual jitter is caught by the entropy health test.
+    return true;
+}
+
+static void best_effort_isolate_thread() {
+    (void)best_effort_isolate_thread_core(-1);
 }
 
 static void best_effort_release_thread() {
@@ -301,6 +319,172 @@ static bool fill_arena_from_urandom(uint8_t* arena, size_t bytes) {
     }
     close(fd);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Extractor-sweep raw capture.
+//
+// captureOrbitDensity bakes in injection-every-step, current-core pinning, and
+// returns only per-probe timing. To search the EXTRACTOR (not just the bin
+// scale) for the strongest same-model separation, this entry exposes the knobs
+// that genuinely change the walk and emits the richest raw observable so the
+// host can derive every summary offline:
+//   - rotationBits r        — ARX rotation constant (sweep {5,7,11,13,17})
+//   - injectionCadence k    — inject µ every k ARX steps; pure ARX rounds in
+//                             between (sweep {1,2,4,8}); tests whether the map
+//                             is too mixing-heavy and washing out structure
+//   - cpuCore               — pin+verify to a specific core for per-core lanes
+//                             (>=0), or -1 for current-core (merged) behaviour
+// Returns a jlongArray of length (2*probes + 256):
+//   [0, probes)            per-probe CNTVCT timing deltas (digital timing channel)
+//   [probes, 2*probes)     per-probe perf CPU-cycle deltas — paired with the
+//                          CNTVCT delta gives the TWO-CLOCK RATIO (realized CPU
+//                          freq / reference freq), an analog-side observable that
+//                          is frequency-normalized by construction
+//   [2*probes, 2*probes+256) µ-byte histogram ν_D counts (host confirms it is null)
+// Host derives: two-clock ratio trajectory, bin-scale re-binning (multi-scale
+// surface), N truncation, burn-in, transition/signed deltas, moments, per-core
+// lanes & cross-core deltas. cpuCore<0 returns null only if an explicit pin was
+// requested and could not be verified.
+// ---------------------------------------------------------------------------
+extern "C"
+JNIEXPORT jlongArray JNICALL
+Java_com_dsm_wallet_security_SiliconFingerprintNative_captureOrbitRaw(
+        JNIEnv* env,
+        jclass,
+        jbyteArray /* envBytes — kept for ABI symmetry */,
+        jbyteArray challengeBytes,
+        jbyteArray thermalBytesArr,
+        jint arenaBytes,
+        jint probes,
+        jint stepsPerProbe,
+        jint warmupRounds,
+        jint rotationBits,
+        jint injectionCadence,
+        jint cpuCore
+) {
+    if (arenaBytes <= 0 || probes <= 0 || stepsPerProbe <= 0 || warmupRounds < 0) {
+        return nullptr;
+    }
+    if (rotationBits <= 0 || rotationBits >= 32) return nullptr;
+    if (injectionCadence <= 0) return nullptr;
+    const uint32_t ab = (uint32_t)arenaBytes;
+    if ((ab & (ab - 1u)) != 0u) return nullptr;
+    if ((probes % 8) != 0) return nullptr;
+    if (!challengeBytes || env->GetArrayLength(challengeBytes) != 32) {
+        ALOGE("captureOrbitRaw: challenge must be 32 bytes");
+        return nullptr;
+    }
+    uint8_t challenge[32];
+    env->GetByteArrayRegion(challengeBytes, 0, 32, reinterpret_cast<jbyte*>(challenge));
+
+    uint8_t thermal_buf[32] = {};
+    size_t thermal_len = 0;
+    if (thermalBytesArr) {
+        jsize tl = env->GetArrayLength(thermalBytesArr);
+        thermal_len = (tl > 0 && tl <= (jsize)sizeof(thermal_buf)) ? (size_t)tl : 0;
+        if (thermal_len > 0) {
+            env->GetByteArrayRegion(thermalBytesArr, 0, (jsize)thermal_len,
+                                    reinterpret_cast<jbyte*>(thermal_buf));
+        }
+    }
+
+    uint8_t kdbrw[32] = {};
+    (void)dsm_get_cdbrw_binding_key(kdbrw);
+    sensors_init();
+
+    if (thermal_len == 0) {
+        ALOGE("captureOrbitRaw: thermal bytes required");
+        return nullptr;
+    }
+    if (g_sensors.n_cpufreq == 0 && !g_sensors.perf_available) {
+        ALOGE("captureOrbitRaw: no cpufreq or perf substrate channel");
+        return nullptr;
+    }
+
+    if (!best_effort_isolate_thread_core(cpuCore)) {
+        ALOGE("captureOrbitRaw: pin to cpu=%d failed — refusing", cpuCore);
+        return nullptr;
+    }
+
+    void* mem = mmap_arena((size_t)ab);
+    if (!mem) { best_effort_release_thread(); return nullptr; }
+    uint8_t* arena = reinterpret_cast<uint8_t*>(mem);
+    if (!fill_arena_from_urandom(arena, (size_t)ab)) {
+        munmap_arena(mem, (size_t)ab);
+        best_effort_release_thread();
+        return nullptr;
+    }
+
+    const uint32_t arena_mask = ab - 1u;
+    const uint32_t r = (uint32_t)rotationBits;
+    const int k = (int)injectionCadence;
+    uint32_t x = dsm_seed_orbit(challenge, kdbrw);
+    uint32_t idx = x & arena_mask;
+
+    for (int w = 0; w < warmupRounds; w++) {
+        volatile uint8_t sink = 0;
+        for (uint32_t i = 0; i < ab; i += 64) sink ^= arena[i];
+        if (sink == 0xFFu) ALOGE("unreachable warmup sink");
+    }
+
+    // Layout: [probes CNTVCT deltas][probes perf-cycle deltas][256 µ counts].
+    // The per-probe perf-cycle count alongside the CNTVCT (fixed-frequency
+    // system counter) delta lets the host form the TWO-CLOCK RATIO
+    // cycles/cntvct = realized CPU frequency / reference frequency — an
+    // analog-side observable (PLL/oscillator realized frequency, frequency-
+    // normalized by construction, so it cancels the DVFS setpoint).
+    std::vector<uint64_t> out((size_t)(2 * probes) + 256, 0ull);
+    uint64_t* deltas = out.data();
+    uint64_t* cycles = out.data() + probes;
+    uint64_t* mu_hist = out.data() + (size_t)(2 * probes);
+
+    constexpr int N_SUBSTRATE_REFRESH = 16;
+    uint8_t substrates[N_SUBSTRATE_REFRESH][32];
+    const int steps_per_substrate =
+        (stepsPerProbe + N_SUBSTRATE_REFRESH - 1) / N_SUBSTRATE_REFRESH;
+
+    for (int p = 0; p < probes; p++) {
+        for (int kk = 0; kk < N_SUBSTRATE_REFRESH; kk++) {
+            const uint64_t si = (uint64_t)p * (uint64_t)N_SUBSTRATE_REFRESH + (uint64_t)kk;
+            sample_substrate_digest(si, thermal_buf, thermal_len, substrates[kk]);
+        }
+        // perf-cycle reads bracket the timed region but sit OUTSIDE the CNTVCT
+        // window so the read() syscall does not pollute the timing channel.
+        const uint64_t c0 = read_perf_counter(g_sensors.perf_cycles_fd);
+        serializing_barrier();
+        const uint64_t t0 = read_cycle_counter();
+        for (int s = 0; s < stepsPerProbe; s++) {
+            int sub_idx = s / steps_per_substrate;
+            if (sub_idx >= N_SUBSTRATE_REFRESH) sub_idx = N_SUBSTRATE_REFRESH - 1;
+            volatile uint8_t _touch = arena[idx];
+            (void)_touch;
+            // Inject µ only every k steps; pure ARX rounds (µ=0) in between.
+            uint32_t mu = 0;
+            if ((s % k) == 0) {
+                mu = (uint32_t)derive_step_mu(substrates[sub_idx], s);
+                mu_hist[mu & 0xff]++;
+            }
+            x = (x + rotl32(x, r)) ^ mu;
+            idx = (idx + x) & arena_mask;
+        }
+        serializing_barrier();
+        const uint64_t t1 = read_cycle_counter();
+        const uint64_t c1 = read_perf_counter(g_sensors.perf_cycles_fd);
+        deltas[(size_t)p] = (t1 >= t0) ? (t1 - t0) : 0ull;
+        cycles[(size_t)p] = (c1 >= c0) ? (c1 - c0) : 0ull;
+    }
+
+    munmap_arena(mem, (size_t)ab);
+    best_effort_release_thread();
+    if (x == 0x7FFFFFFFu) ALOGE("unreachable state");
+
+    const jsize out_len = (jsize)(2 * probes + 256);
+    jlongArray ret = env->NewLongArray(out_len);
+    if (!ret) return nullptr;
+    env->SetLongArrayRegion(ret, 0, out_len,
+                            reinterpret_cast<const jlong*>(out.data()));
+    return ret;
 }
 
 // ---------------------------------------------------------------------------

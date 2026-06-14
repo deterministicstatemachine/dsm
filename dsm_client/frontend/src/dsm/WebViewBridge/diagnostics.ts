@@ -13,10 +13,6 @@ export interface ArchitectureInfo {
   recommendation: string;
 }
 
-export async function captureCdbrwOrbitTimings(): Promise<Uint8Array> {
-  return callBin("captureCdbrwOrbitTimings", new Uint8Array(0));
-}
-
 /** Export persisted bridge diagnostics log (if present). */
 export async function getDiagnosticsLogStrict(): Promise<Uint8Array> {
   try {

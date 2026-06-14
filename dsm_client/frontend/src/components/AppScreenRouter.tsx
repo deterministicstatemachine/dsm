@@ -8,7 +8,6 @@ import StorageScreen from './screens/StorageScreen';
 import TokenManagementScreen from './screens/TokenManagementScreen';
 import SettingsMainScreen from './screens/SettingsMainScreen';
 import DevDlvScreen from './screens/DevDlvScreen';
-import DevCdbrwScreen from './screens/DevCdbrwScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
 import DevSoFiLaunchScreen from './screens/DevSoFiLaunchScreen';
 import SofiHubScreen from './screens/SofiHubScreen';
@@ -29,7 +28,6 @@ const MemoStorage = React.memo(StorageScreen);
 const MemoTokens = React.memo(TokenManagementScreen);
 const MemoSettings = React.memo(SettingsMainScreen);
 const MemoDevDlv = React.memo(DevDlvScreen);
-const MemoDevCdbrw = React.memo(DevCdbrwScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
 const MemoDevSoFiLaunch = React.memo(DevSoFiLaunchScreen);
 const MemoSofi = React.memo(SofiHubScreen);
@@ -80,8 +78,6 @@ export default function AppScreenRouter({
       return <MemoSettings onNavigate={onNavigate} />;
     case 'dev_dlv':
       return <MemoDevDlv />;
-    case 'dev_cdbrw':
-      return <MemoDevCdbrw />;
     case 'dev_policy':
       return <MemoDevPolicy />;
     case 'dev_sofi_launch':

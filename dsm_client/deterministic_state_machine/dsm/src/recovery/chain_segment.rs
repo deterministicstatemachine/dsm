@@ -34,7 +34,7 @@ use crate::types::device_state::RelationshipChainState;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::proto::{
-    BalanceWitnessEntryProto, Message as _, RecoveryEstablishmentReceiptV1,
+    BalanceWitnessEntryProto, IslandAttestationProto, Message as _, RecoveryEstablishmentReceiptV1,
     RelationshipChainSegmentV1, RelationshipChainStateProto,
 };
 
@@ -82,6 +82,11 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
             .collect(),
         entity_sig: s.entity_sig.clone(),
         counterparty_sig: s.counterparty_sig.clone(),
+        island_attestation: s.island_attestation.as_ref().map(|a| IslandAttestationProto {
+            id_island: a.id_island.to_vec(),
+            signature: a.signature.clone(),
+            policy_id: a.policy_id.to_vec(),
+        }),
     }
 }
 
@@ -105,6 +110,15 @@ pub fn rel_chain_state_from_proto(
         }
     }
 
+    let island_attestation = match &p.island_attestation {
+        Some(a) => Some(crate::types::device_state::IslandAttestation {
+            id_island: fixed32("island_attestation.id_island", &a.id_island)?,
+            signature: a.signature.clone(),
+            policy_id: fixed32("island_attestation.policy_id", &a.policy_id)?,
+        }),
+        None => None,
+    };
+
     Ok(RelationshipChainState {
         rel_key: fixed32("rel_key", &p.rel_key)?,
         embedded_parent: fixed32("embedded_parent", &p.embedded_parent)?,
@@ -117,6 +131,7 @@ pub fn rel_chain_state_from_proto(
         entity_sig: p.entity_sig.clone(),
         counterparty_sig: p.counterparty_sig.clone(),
         dbrw_summary_hash,
+        island_attestation,
     })
 }
 
@@ -359,6 +374,7 @@ mod tests {
             entity_sig: Some(vec![0x11; 8]),
             counterparty_sig: None,
             dbrw_summary_hash: Some([tag; 32]),
+            island_attestation: None,
         }
     }
 
@@ -388,6 +404,20 @@ mod tests {
         let d_none = rel_chain_state_from_proto(&rel_chain_state_to_proto(&s_none)).expect("d");
         assert_eq!(d_none.encapsulated_entropy, None);
         assert_eq!(d_none.compute_chain_tip(), s_none.compute_chain_tip());
+
+        // An attested state must round-trip faithfully: island_attestation feeds
+        // compute_chain_tip, so a lossy codec would silently recompute the wrong tip.
+        let mut s_att = mk_state([0x55; 32], [0x01; 32], C, 2);
+        s_att.island_attestation = Some(crate::types::device_state::IslandAttestation {
+            id_island: [0x9a; 32],
+            signature: vec![0x42; 64],
+            policy_id: [0x7c; 32],
+        });
+        let d_att = rel_chain_state_from_proto(&rel_chain_state_to_proto(&s_att)).expect("att");
+        assert_eq!(d_att.island_attestation, s_att.island_attestation);
+        assert_eq!(d_att.compute_chain_tip(), s_att.compute_chain_tip());
+        // And the attested tip must differ from the unattested one (the fold is live).
+        assert_ne!(d_att.compute_chain_tip(), s.compute_chain_tip());
     }
 
     #[test]
@@ -472,6 +502,7 @@ mod tests {
             entity_sig: Some(vec![0x22; 8]),
             counterparty_sig: Some(vec![0x33; 8]),
             dbrw_summary_hash: None,
+            island_attestation: None,
         };
         RecoveryEstablishmentReceipt { rel_key: rk, state }
     }

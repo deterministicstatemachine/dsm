@@ -74,6 +74,13 @@ pub struct DeviceState {
     /// checks have a head_hash to compare against. Strictly compat path —
     /// new code reads `root()` (the SMT root, §2.2 canonical).
     legacy_anchor: Option<[u8; 32]>,
+
+    /// Device-level offline-bearer attestation capability (spec §10, optional
+    /// anti-clone authority tier). Gate state only — NOT part of any canonical
+    /// hash; `DeviceState` is current-truth-only and anchored by the SMT root.
+    /// Fresh genesis is `NotAttested`; an admitted island sets `Attested`; a
+    /// re-root after recovery resets to `NotAttested`. See [`crate::attestation`].
+    offline_bearer_attestation: OfflineBearerAttestation,
 }
 
 impl fmt::Debug for DeviceState {
@@ -160,6 +167,72 @@ impl ValueCapability {
     }
 }
 
+/// Device-level offline-bearer attestation capability (the optional anti-clone
+/// authority tier, spec §10). Mirrors the [`ValueCapability`] shape but with the
+/// **opposite gate polarity** and **no stickiness**:
+///
+/// - `Attested` — a genuine secure-element island (Trezor Safe 7 / TROPIC01) has
+///   been admitted under a pinning policy; the device may exercise offline-bearer
+///   authority. See [`crate::attestation`].
+/// - `NotAttested` — PROVEN no admitted island (fresh genesis, or re-rooted after
+///   recovery / new device). Offline-bearer authority is denied; transitions fall
+///   back to the online-checked settlement path.
+/// - `Unknown` — INCOMPLETE PROOF (imported / capsule-restored). Denied, fail-closed.
+///
+/// **Gate polarity (deny-unless-proven): only `Attested` permits the offline-bearer
+/// path.** This is the inverse of `ValueCapability`'s include-unless-proven-`No` gate,
+/// because attestation is a positive authority claim — absence of proof must deny it.
+///
+/// **Not sticky — resets on recovery.** Seed recovery restores funds but NEVER restores
+/// prior offline-bearer island authority (spec §5: bind the island identity, not the
+/// seed). After a re-root the device is `NotAttested` until a new island is admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineBearerAttestation {
+    Attested,
+    NotAttested,
+    Unknown,
+}
+
+impl OfflineBearerAttestation {
+    /// Canonical wire value (`0`/UNSPECIFIED is invalid, mirroring [`ValueCapability`]).
+    pub fn to_wire(self) -> i32 {
+        match self {
+            OfflineBearerAttestation::Attested => 1,
+            OfflineBearerAttestation::NotAttested => 2,
+            OfflineBearerAttestation::Unknown => 3,
+        }
+    }
+
+    /// Decode from the wire, **fail-closed**: `0`/UNSPECIFIED and any unrecognized
+    /// value are rejected (`None`) — NEVER silently treated as any variant.
+    pub fn from_wire(v: i32) -> Option<Self> {
+        match v {
+            1 => Some(OfflineBearerAttestation::Attested),
+            2 => Some(OfflineBearerAttestation::NotAttested),
+            3 => Some(OfflineBearerAttestation::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Stable 1-byte tag for domain-separated commitments (equals the wire value).
+    pub fn commit_tag(self) -> u8 {
+        self.to_wire() as u8
+    }
+
+    /// Offline-bearer gate: permit the offline path **only** when PROVEN `Attested`.
+    /// `NotAttested` and `Unknown` both deny (fail-closed deny-unless-proven).
+    pub fn permits_offline_bearer(self) -> bool {
+        matches!(self, OfflineBearerAttestation::Attested)
+    }
+
+    /// The attestation state after a re-root (recovery / new device). Authority is
+    /// NOT carried across recovery — the new island must be re-admitted. Always
+    /// `NotAttested`, never the prior value.
+    pub fn after_recovery() -> Self {
+        OfflineBearerAttestation::NotAttested
+    }
+}
+
 /// Cached per-relationship tip metadata.
 ///
 /// Contains the current chain tip digest (mirror of the SMT leaf) plus the
@@ -183,6 +256,20 @@ pub struct RelChainTip {
     /// `Yes`/`No`; imported/capsule-restored tips are `Unknown` until history proves
     /// otherwise. There is no legacy/default form — every tip carries this explicitly.
     pub value_capability: ValueCapability,
+}
+
+/// Offline-bearer secure-element attestation folded into a chain tip (anti-clone island
+/// binding, see `crate::attestation`). Carries the pinned per-device island identity, the
+/// island's signature over the framed canonical intent challenge, and the pinning-policy id.
+/// Present only on offline-bearer attested transitions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IslandAttestation {
+    /// Pinned per-device island identity = SHA-256(leaf SubjectPublicKeyInfo).
+    pub id_island: [u8; 32],
+    /// The island's signature over the framed canonical intent challenge.
+    pub signature: Vec<u8>,
+    /// Identifier of the pinning policy under which the island was admitted.
+    pub policy_id: [u8; 32],
 }
 
 /// One accepted state in a per-relationship straight hash chain (§2.1).
@@ -231,6 +318,11 @@ pub struct RelationshipChainState {
     /// Optional DBRW health summary commitment (§12). Advisory only —
     /// included in the hash iff present on the advancing device.
     pub dbrw_summary_hash: Option<[u8; 32]>,
+
+    /// Optional offline-bearer secure-element island attestation (anti-clone, see
+    /// [`crate::attestation`]). Folded into the chain tip iff present; absent on every
+    /// non-offline-bearer transition, so those tips hash exactly as before.
+    pub island_attestation: Option<IslandAttestation>,
 }
 
 impl RelationshipChainState {
@@ -286,6 +378,17 @@ impl RelationshipChainState {
         for (policy_commit, value) in &self.balance_witness {
             hasher.update(policy_commit);
             hasher.update(&value.to_le_bytes());
+        }
+
+        // Offline-bearer island attestation (anti-clone). Appended ONLY when present, so a
+        // non-attested transition hashes byte-for-byte as before: existing tips and vectors
+        // are unchanged. id_island and policy_id are fixed 32B; the signature is
+        // length-prefixed for unambiguous canonical bytes.
+        if let Some(att) = &self.island_attestation {
+            hasher.update(&att.id_island);
+            hasher.update(&(att.signature.len() as u32).to_le_bytes());
+            hasher.update(&att.signature);
+            hasher.update(&att.policy_id);
         }
 
         *hasher.finalize().as_bytes()
@@ -453,6 +556,7 @@ impl DeviceState {
             balances: BTreeMap::new(),
             tips: BTreeMap::new(),
             legacy_anchor: None,
+            offline_bearer_attestation: OfflineBearerAttestation::NotAttested,
         }
     }
 
@@ -536,6 +640,20 @@ impl DeviceState {
     /// Device genesis digest.
     pub fn genesis_digest(&self) -> [u8; 32] {
         self.genesis
+    }
+
+    /// Current device-level offline-bearer attestation capability (spec §10).
+    pub fn offline_bearer_attestation(&self) -> OfflineBearerAttestation {
+        self.offline_bearer_attestation
+    }
+
+    /// Admit (or clear) the device's offline-bearer attestation. This is the
+    /// ONLY mutator of the capability — set `Attested` after a genuine island
+    /// is verified under a pinning policy ([`crate::attestation`]), and reset
+    /// to `NotAttested` on re-root/recovery. Admission is a deliberate step,
+    /// never a side effect of an ordinary advance (which carries it forward).
+    pub fn set_offline_bearer_attestation(&mut self, state: OfflineBearerAttestation) {
+        self.offline_bearer_attestation = state;
     }
 
     /// Device identifier.
@@ -699,6 +817,7 @@ impl DeviceState {
             entity_sig: None,
             counterparty_sig: None,
             dbrw_summary_hash,
+            island_attestation: None,
         };
 
         // Derive h_{n+1} = H(canonical_bytes(new_chain_state)).
@@ -761,6 +880,7 @@ impl DeviceState {
             balances: new_balances,
             tips: new_tips,
             legacy_anchor: self.legacy_anchor,
+            offline_bearer_attestation: self.offline_bearer_attestation,
         };
 
         Ok(AdvanceOutcome {
@@ -825,6 +945,7 @@ impl DeviceState {
             balances: self.balances.clone(),
             tips: self.tips.clone(),
             legacy_anchor: self.legacy_anchor,
+            offline_bearer_attestation: self.offline_bearer_attestation,
         };
 
         Ok(VaultLeafOutcome {
@@ -869,6 +990,58 @@ mod tests {
 
     fn fresh_device(b: u8) -> DeviceState {
         DeviceState::new([0u8; 32], devid(b), pubkey(), 1024)
+    }
+
+    #[test]
+    fn offline_bearer_attestation_gate_is_deny_unless_proven_and_fail_closed() {
+        use OfflineBearerAttestation::*;
+        // Gate polarity: ONLY Attested permits the offline-bearer path.
+        assert!(Attested.permits_offline_bearer());
+        assert!(!NotAttested.permits_offline_bearer());
+        assert!(!Unknown.permits_offline_bearer());
+        // Wire codec round-trips for every variant; 0/UNSPECIFIED and unknowns fail closed.
+        for v in [Attested, NotAttested, Unknown] {
+            assert_eq!(OfflineBearerAttestation::from_wire(v.to_wire()), Some(v));
+            assert_eq!(v.commit_tag(), v.to_wire() as u8);
+        }
+        assert_eq!(OfflineBearerAttestation::from_wire(0), None);
+        assert_eq!(OfflineBearerAttestation::from_wire(4), None);
+        assert_eq!(OfflineBearerAttestation::from_wire(-1), None);
+        // Recovery never restores island authority — always NotAttested.
+        assert_eq!(OfflineBearerAttestation::after_recovery(), NotAttested);
+    }
+
+    #[test]
+    fn device_attestation_defaults_not_attested_and_carries_through_advance() {
+        use OfflineBearerAttestation::*;
+        // Fresh genesis device has no admitted island.
+        let mut dev = fresh_device(7);
+        assert_eq!(dev.offline_bearer_attestation(), NotAttested);
+        // Admission is the only mutator; an ordinary advance carries it forward.
+        dev.set_offline_bearer_attestation(Attested);
+        assert_eq!(dev.offline_bearer_attestation(), Attested);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &devid(7),
+                &devid(8),
+            );
+        let outcome = dev
+            .advance(
+                [0x55; 32],
+                devid(8),
+                op(),
+                vec![0x01; 32],
+                None,
+                &[],
+                Some(init_tip),
+                None,
+            )
+            .expect("advance");
+        assert_eq!(
+            outcome.new_device_state.offline_bearer_attestation(),
+            Attested,
+            "ordinary advance must carry the attestation forward unchanged"
+        );
     }
 
     fn op() -> Operation {

@@ -16,9 +16,10 @@
       independent of global T. For inactive u, refresh = 0.
 
   Code correspondence:
-    - compute_smt_key(): bilateral_transaction_manager.rs:133-143
+    - compute_smt_key(): core/bilateral_transaction_manager.rs:144-154
       (min/max(DevID_A, DevID_B) → deterministic, per-pair key)
-    - RelationshipManager: state_machine/relationship.rs:1-6
+    - Per-relationship isolation: device_state.rs (tips keyed by rel_key;
+      SMT leaves rel_key → chain_tip), core/state_machine/relationship.rs (§3.4)
       ("isolated context" per bilateral pair)
 
   Discharges OMITTED obligations in DSM_NonInterference.tla:
@@ -31,7 +32,7 @@
 -- ============================================================
 
 /-- SMT key for a bilateral pair, derived from min/max(DevID_A, DevID_B).
-    Models compute_smt_key() in bilateral_transaction_manager.rs:133-143.
+    Models compute_smt_key() in core/bilateral_transaction_manager.rs:144-154.
     Lexicographic ordering ensures both parties compute the same key. -/
 def relKey (a b : Nat) : Nat × Nat :=
   if a ≤ b then (a, b) else (b, a)

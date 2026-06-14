@@ -13,7 +13,6 @@
 //! | ML-KEM-768 (Kyber) | [`kyber`] | Post-quantum key encapsulation mechanism |
 //! | AES-256-GCM | [`aead`] | Symmetric authenticated encryption |
 //! | Salted-BLAKE3 commitments | [`blake3`] (`dsm_domain_hasher`) | Hiding + binding via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` (e.g. `dlv_content_commitment` in `vault::limbo_vault`) |
-//! | C-DBRW | [`cdbrw_binding`] | Challenge-seeded DBRW anti-cloning (post-quantum) |
 //!
 //! # Removed: classical group-based commitment module
 //!
@@ -49,7 +48,6 @@
 //! - **Key exchange**: [`kyber`] (ML-KEM-768)
 //! - **Symmetric AEAD**: [`aead`] (AES-256-GCM)
 //! - **Commitments**: salted BLAKE3 (no dedicated module — call `blake3::dsm_domain_hasher` with a per-purpose tag; canonical pattern lives at `vault::limbo_vault::dlv_content_commitment`)
-//! - **Anti-cloning**: [`cdbrw_binding`]
 //! - **RNG**: [`rng`] (OS and deterministic random byte generation)
 
 use crate::types::error::DsmError;
@@ -61,6 +59,8 @@ pub mod blake3;
 pub mod canonical_lp;
 pub mod cdbrw_binding;
 pub mod cdbrw_moments;
+pub mod device_anchor;
+pub mod classical_verify;
 pub mod ephemeral_key;
 pub mod hash;
 pub mod hkdf;

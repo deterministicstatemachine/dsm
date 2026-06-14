@@ -20071,6 +20071,15 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
    */
   counterpartySig?: Uint8Array;
 
+  /**
+   * Offline-bearer secure-element island attestation (anti-clone). Feeds compute_chain_tip,
+   * so the faithful codec MUST carry it. Message field -> Option in prost (None vs Some
+   * preserved). Absent on non-offline-bearer states.
+   *
+   * @generated from field: dsm.IslandAttestationProto island_attestation = 11;
+   */
+  islandAttestation?: IslandAttestationProto;
+
   constructor(data?: PartialMessage<RelationshipChainStateProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20089,6 +20098,7 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
     { no: 8, name: "balance_witness", kind: "message", T: BalanceWitnessEntryProto, repeated: true },
     { no: 9, name: "entity_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
     { no: 10, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 11, name: "island_attestation", kind: "message", T: IslandAttestationProto },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipChainStateProto {
@@ -20105,6 +20115,65 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
 
   static equals(a: RelationshipChainStateProto | PlainMessage<RelationshipChainStateProto> | undefined, b: RelationshipChainStateProto | PlainMessage<RelationshipChainStateProto> | undefined): boolean {
     return proto3.util.equals(RelationshipChainStateProto, a, b);
+  }
+}
+
+/**
+ * Offline-bearer secure-element island attestation folded into a relationship chain tip
+ * (anti-clone, see dsm_anticlone.instructions.md). Carried in the faithful codec because it
+ * feeds compute_chain_tip.
+ *
+ * @generated from message dsm.IslandAttestationProto
+ */
+export class IslandAttestationProto extends Message<IslandAttestationProto> {
+  /**
+   * SHA-256(leaf SubjectPublicKeyInfo)
+   *
+   * @generated from field: bytes id_island = 1;
+   */
+  idIsland = new Uint8Array(0);
+
+  /**
+   * island signature over the framed intent challenge
+   *
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  /**
+   * pinning policy id under which the island was admitted
+   *
+   * @generated from field: bytes policy_id = 3;
+   */
+  policyId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<IslandAttestationProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.IslandAttestationProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "id_island", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "policy_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IslandAttestationProto {
+    return new IslandAttestationProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): IslandAttestationProto {
+    return new IslandAttestationProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): IslandAttestationProto {
+    return new IslandAttestationProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: IslandAttestationProto | PlainMessage<IslandAttestationProto> | undefined, b: IslandAttestationProto | PlainMessage<IslandAttestationProto> | undefined): boolean {
+    return proto3.util.equals(IslandAttestationProto, a, b);
   }
 }
 
