@@ -443,7 +443,7 @@ fn l_tree(p: &Params, pub_seed: &[u8], addr: &SpxAddress, pk_vec: &mut [u8]) -> 
         while idx + 1 < count {
             a.set_tree_height(layer);
             a.set_tree_index((idx / 2) as u32);
-            let left = &pk_vec[write * p.n..(write + 1) * p.n];
+            let left = &pk_vec[idx * p.n..(idx + 1) * p.n];
             let right = &pk_vec[(idx + 1) * p.n..(idx + 2) * p.n];
             let combined = thash(p.n, pub_seed, &a, &[left, right]);
             pk_vec[write * p.n..(write + 1) * p.n].copy_from_slice(&combined);
@@ -1323,3 +1323,59 @@ mod tests {
         );
     }
 }
+
+// __POSTFIX_SCAN_BEGIN__
+#[cfg(test)]
+mod postfix_malleability_scan {
+    use super::*;
+
+    #[test]
+    fn sphincs_postfix_malleability() {
+        let v = SphincsVariant::SPX256s;
+        let kp = generate_keypair_from_seed(v, &[0x5C; 32]).unwrap();
+        let msg = [0xA7u8; 32];
+        let sig = sign(v, &kp.secret_key, &msg).unwrap();
+
+        // Happy path must still hold after the l_tree fix.
+        assert!(verify(v, &kp.public_key, &msg, &sig).unwrap(), "honest signature must verify after fix");
+
+        let valid_after_flip = |pos: usize, bit: u8| -> bool {
+            let mut s = sig.clone();
+            s[pos] ^= bit;
+            verify(v, &kp.public_key, &msg, &s).unwrap()
+        };
+
+        // 1) Full-signature single-bit sweep. A dropped byte frees all its bits,
+        //    so one bit per position detects any unchecked byte anywhere.
+        let mut weak: Vec<usize> = Vec::new();
+        for pos in 0..sig.len() {
+            if valid_after_flip(pos, 0x01) {
+                weak.push(pos);
+            }
+        }
+
+        // 2) Re-probe the exact offsets the pre-fix diagnostic flagged: WOTS
+        //    element 59 across all 8 hypertree layers, all 8 bits each.
+        let mut el59_still: Vec<(usize, u8)> = Vec::new();
+        for l in 0..8usize {
+            let pos = 10592 + l * 2400 + 59 * 32;
+            for b in 0..8u8 {
+                if valid_after_flip(pos, 1u8 << b) {
+                    el59_still.push((l, b));
+                }
+            }
+        }
+
+        println!("POSTFIX sig_len={}", sig.len());
+        println!("POSTFIX full_sweep_malleable_count={}", weak.len());
+        if !weak.is_empty() {
+            let head: Vec<usize> = weak.iter().take(24).cloned().collect();
+            println!("POSTFIX malleable_positions_first24={:?}", head);
+        }
+        println!("POSTFIX el59_all_layers_still_malleable={:?}", el59_still);
+
+        assert!(weak.is_empty(), "malleable byte positions remain: {}", weak.len());
+        assert!(el59_still.is_empty(), "element59 offsets still malleable: {:?}", el59_still);
+    }
+}
+// __POSTFIX_SCAN_END__

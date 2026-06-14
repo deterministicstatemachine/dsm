@@ -143,6 +143,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- Boot-time C-DBRW entropy capture (silicon fingerprint at coldest reachable state) -->
+        <receiver
+            android:name="com.dsm.wallet.security.BootEntropyReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
+
         <!-- Auto-start proximity service on reboot IF user chose Always-on -->
         <receiver
             android:name="com.dsm.wallet.proximity.BootCompletedReceiver"
