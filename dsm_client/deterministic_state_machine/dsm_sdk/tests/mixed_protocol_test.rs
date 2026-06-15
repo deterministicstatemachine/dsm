@@ -38,6 +38,7 @@ fn make_transfer_op(
         to: b"Bob".to_vec(),
         message: message.into(),
         signature: vec![0u8; 64],
+        authority_policy: None,
     }
 }
 
@@ -162,6 +163,7 @@ async fn test_offline_offline_tripwire() {
             &precommit1.bilateral_commitment_hash,
             &[1u8; 32],
             &mut smt,
+            dsm::types::device_state::ValueCapability::Yes,
         )
         .await;
 
@@ -186,6 +188,7 @@ async fn test_offline_offline_tripwire() {
             &precommit2.bilateral_commitment_hash,
             &[2u8; 32],
             &mut smt,
+            dsm::types::device_state::ValueCapability::Yes,
         )
         .await;
 

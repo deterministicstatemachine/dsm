@@ -996,6 +996,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     recipient: recipient.to_vec(),
                     to: crate::util::text_id::encode_base32_crockford(recipient).into_bytes(),
                     signature: Vec::new(),
+                    authority_policy: None,
                 };
 
                 let signature = self.sign_transfer_operation(&op)?;
@@ -1511,6 +1512,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             recipient: recipient.as_bytes().to_vec(),
             to: recipient.clone().into_bytes(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let signature = self.sign_transfer_operation(&op)?;
@@ -1558,6 +1560,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             recipient: to.as_bytes().to_vec(),
             to: to.into_bytes(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let signature = self.sign_transfer_operation(&op)?;
@@ -1590,6 +1593,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             recipient: id.as_bytes().to_vec(),
             to: id.into_bytes(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let signature = self.sign_transfer_operation(&op)?;
@@ -1971,6 +1975,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             pre_commit: Some(pre_commitment_op),
             to: crate::util::text_id::encode_base32_crockford(&recipient).into_bytes(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let signature = self.sign_transfer_operation(&bilateral_transfer_op)?;
@@ -2401,6 +2406,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             recipient: b"system.fee.device_id".to_vec(),
             to: b"system.fee.device_id".to_vec(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let signature = self.sign_transfer_operation(&fee_transfer_op)?;
@@ -2585,6 +2591,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 .clone()
                 .unwrap_or_else(|| "Transfer via WalletSDK".to_string()),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let applied_signature = match self.sign_transfer_operation(&op) {

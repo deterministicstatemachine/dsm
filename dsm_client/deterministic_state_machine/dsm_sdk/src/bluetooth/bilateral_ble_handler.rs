@@ -5741,6 +5741,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "stale".to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         let next_op = Operation::Transfer {
             policy_commit: [0u8; 32],
@@ -5755,6 +5756,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "fresh".to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let local_pending_hash = {
@@ -5861,6 +5863,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "accepted".to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let local_pending_hash = {

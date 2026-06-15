@@ -2842,6 +2842,8 @@ message IslandAttestationProto {
   bytes id_island = 1 [(dsm_fixed_len)=32];   // SHA-256(leaf SubjectPublicKeyInfo)
   bytes signature = 2 [(dsm_max_len)=65535];  // island signature over the framed intent challenge
   bytes policy_id = 3 [(dsm_fixed_len)=32];   // pinning policy id under which the island was admitted
+  bytes id_anchor_set = 4 [(dsm_fixed_len)=32];      // canonical anchor-set id (compute_anchor_set_id)
+  bytes ui_transcript_hash = 5 [(dsm_fixed_len)=32]; // UI transcript hash the island signed over
 }
 
 // A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a

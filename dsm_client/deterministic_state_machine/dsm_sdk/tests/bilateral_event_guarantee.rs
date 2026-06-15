@@ -241,6 +241,7 @@ async fn verify_frontend_event_guarantees() {
         to: b"bob".to_vec(),
         message: "event check".to_string(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     println!("[EVENT-TEST] Alice initiating transfer...");

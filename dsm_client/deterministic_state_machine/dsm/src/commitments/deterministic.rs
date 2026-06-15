@@ -291,6 +291,7 @@ mod tests {
             message: String::from("Test message"),
             amount: balance,
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let sig = sphincs_sign(&sk, &op.to_bytes()).expect("sign transfer");

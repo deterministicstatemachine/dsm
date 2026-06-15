@@ -1014,6 +1014,7 @@ impl AppRouterImpl {
             to: to_device_id_str.as_bytes().to_vec(),
             message: transfer_req.memo.clone(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         let signing_bytes = signing_op.to_bytes();
 
@@ -1194,6 +1195,7 @@ impl AppRouterImpl {
             to: to_device_id_str.as_bytes().to_vec(),
             message: transfer_req.memo.clone(),
             signature: canonical_signature.clone(),
+            authority_policy: None,
         };
 
         // Capture the canonical pre-send head BEFORE any local advance so the
@@ -1601,6 +1603,7 @@ impl AppRouterImpl {
                 to: to_device_id_str.as_bytes().to_vec(),
                 message: transfer_req.memo.clone(),
                 signature: canonical_signature.clone(),
+                authority_policy: None,
             };
 
             let sender_genesis_b32 = crate::util::text_id::encode_base32_crockford(

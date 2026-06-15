@@ -122,6 +122,7 @@ impl SmartCommitmentSDK {
                 recipient,
                 to,
                 signature: _,
+                authority_policy: _, // NOTE: storage codec does not yet persist authority_policy
             } => {
                 buf.extend_from_slice(b"XFER");
                 Self::push_bytes(&mut buf, token_id);
@@ -269,6 +270,7 @@ impl SmartCommitmentSDK {
             verification: VerificationType::Standard,
             pre_commit: None,
             signature: Vec::new(),
+            authority_policy: None,
         })
     }
 
@@ -528,6 +530,7 @@ mod tests {
             recipient: b"recip".to_vec(),
             to: b"to_addr".to_vec(),
             signature: vec![],
+            authority_policy: None,
         }
     }
 

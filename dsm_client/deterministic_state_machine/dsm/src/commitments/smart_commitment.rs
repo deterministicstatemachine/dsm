@@ -361,6 +361,7 @@ impl SmartCommitment {
             verification: VerificationType::Standard,
             pre_commit: None,
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let cond = CommitmentCondition::MultiSignature {
@@ -439,6 +440,7 @@ impl SmartCommitment {
             verification: VerificationType::Standard,
             pre_commit: None,
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let ctype = Self::determine_compound_type(&compound);
@@ -508,6 +510,7 @@ impl SmartCommitment {
             verification: VerificationType::Standard,
             pre_commit: None,
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let ctype = Self::determine_compound_type(&compound);
@@ -1574,6 +1577,7 @@ mod tests {
             verification: VerificationType::Standard,
             pre_commit: None,
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let sig = crate::crypto::sphincs::sphincs_sign(&sk, &op.to_bytes()).expect("sign transfer");

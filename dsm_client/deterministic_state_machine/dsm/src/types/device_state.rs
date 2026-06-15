@@ -266,6 +266,13 @@ pub struct RelChainTip {
 pub struct IslandAttestation {
     /// Pinned per-device island identity = SHA-256(leaf SubjectPublicKeyInfo).
     pub id_island: [u8; 32],
+    /// Canonical anchor-set identifier this attestation was produced under
+    /// (`crate::attestation::compute_anchor_set_id`). A receipt input so a re-verifier can
+    /// reconstruct `anchor_proof_hash` (the digest the §16.6 successor tip folds).
+    pub id_anchor_set: [u8; 32],
+    /// The on-device UI transcript hash the island signed over (consent-oracle binding). A receipt
+    /// input for reconstructing `anchor_proof_hash`.
+    pub ui_transcript_hash: [u8; 32],
     /// The island's signature over the framed canonical intent challenge.
     pub signature: Vec<u8>,
     /// Identifier of the pinning policy under which the island was admitted.
@@ -1106,6 +1113,7 @@ mod tests {
             to: vec![],
             message: String::new(),
             signature: vec![],
+            authority_policy: None,
         };
         let credit = |amt: u64, pcv: [u8; 32]| BalanceDelta {
             policy_commit: pcv,

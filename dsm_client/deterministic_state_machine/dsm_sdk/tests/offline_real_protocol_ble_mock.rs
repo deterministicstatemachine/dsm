@@ -391,6 +391,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
         to: b"bob".to_vec(),
         message: "offline pay".to_string(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     // === Prepare ===
@@ -776,6 +777,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         to: b"bob".to_vec(),
         message: "ab-1".to_string(),
         signature: Vec::new(),
+        authority_policy: None,
     };
     let op_ab_2 = Operation::Transfer {
         policy_commit: [0u8; 32],
@@ -790,6 +792,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         to: b"bob".to_vec(),
         message: "ab-2".to_string(),
         signature: Vec::new(),
+        authority_policy: None,
     };
     let op_ac_1 = Operation::Transfer {
         policy_commit: [0u8; 32],
@@ -804,6 +807,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         to: b"carol".to_vec(),
         message: "ac-1".to_string(),
         signature: Vec::new(),
+        authority_policy: None,
     };
     let op_ac_2 = Operation::Transfer {
         policy_commit: [0u8; 32],
@@ -818,6 +822,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         to: b"carol".to_vec(),
         message: "ac-2".to_string(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     offline_transfer_roundtrip(

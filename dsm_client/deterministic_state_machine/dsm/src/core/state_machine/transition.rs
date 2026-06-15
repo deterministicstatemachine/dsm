@@ -1524,6 +1524,7 @@ mod tests {
             verification: OpVerificationType::Standard,
             to: b"recipient".to_vec(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let bytes = op.to_bytes();
@@ -1937,6 +1938,7 @@ mod tests {
             verification: OpVerificationType::Standard,
             to: b"recipient".to_vec(),
             signature: vec![9u8],
+            authority_policy: None,
         };
 
         let result = verify_token_balance_consistency(&prev_state, &current_state, &transfer_op);
@@ -1999,6 +2001,7 @@ mod tests {
             verification: OpVerificationType::Standard,
             to: b"recipient".to_vec(),
             signature: vec![1u8],
+            authority_policy: None,
         };
 
         let entropy = vec![1, 2, 3, 4];
@@ -2064,10 +2067,12 @@ mod tests {
                     verification: OpVerificationType::Standard,
                     to: b"recipient".to_vec(),
                     signature: Vec::new(),
+                    authority_policy: None,
                 };
                 crate::crypto::sphincs::sphincs_sign(&sk, &unsigned.to_bytes())
                     .expect("sign outgoing transfer")
             },
+            authority_policy: None,
         };
 
         let next_state = create_next_state(
@@ -2313,6 +2318,7 @@ mod tests {
             verification: OpVerificationType::Standard,
             to: b"recipient".to_vec(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         // Sign the op so we reach the balance-derivation code path.
         let bytes = op.to_bytes();
@@ -2357,6 +2363,7 @@ mod tests {
             verification: crate::types::operations::VerificationType::Enhanced,
             to: b"recipient".to_vec(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         // Sign the transfer with the state's device key
@@ -2411,6 +2418,7 @@ mod tests {
             verification: crate::types::operations::VerificationType::Directory,
             to: b"recipient".to_vec(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         // Sign the transfer with the state's device key
@@ -2462,6 +2470,7 @@ mod tests {
             to: b"b32recipient".to_vec(),
             message: String::new(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         let bytes = op_unsigned.to_bytes();
         let sig = sphincs_sign(&sk, &bytes).unwrap_or_else(|e| panic!("sign failed: {e}"));
@@ -2507,6 +2516,7 @@ mod tests {
             to: b"b32recipient".to_vec(),
             message: String::new(),
             signature: vec![7u8; 16], // bogus
+            authority_policy: None,
         };
 
         let entropy = vec![1, 2, 3, 4];

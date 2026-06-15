@@ -105,6 +105,7 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
         to: recipient.to_vec(),
         message: String::new(),
         signature: vec![],
+        authority_policy: None,
     };
     let bytes = op.to_bytes();
     (op, bytes)

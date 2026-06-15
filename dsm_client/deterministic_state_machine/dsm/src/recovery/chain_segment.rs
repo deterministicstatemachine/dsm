@@ -86,6 +86,8 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
             id_island: a.id_island.to_vec(),
             signature: a.signature.clone(),
             policy_id: a.policy_id.to_vec(),
+            id_anchor_set: a.id_anchor_set.to_vec(),
+            ui_transcript_hash: a.ui_transcript_hash.to_vec(),
         }),
     }
 }
@@ -113,6 +115,11 @@ pub fn rel_chain_state_from_proto(
     let island_attestation = match &p.island_attestation {
         Some(a) => Some(crate::types::device_state::IslandAttestation {
             id_island: fixed32("island_attestation.id_island", &a.id_island)?,
+            id_anchor_set: fixed32("island_attestation.id_anchor_set", &a.id_anchor_set)?,
+            ui_transcript_hash: fixed32(
+                "island_attestation.ui_transcript_hash",
+                &a.ui_transcript_hash,
+            )?,
             signature: a.signature.clone(),
             policy_id: fixed32("island_attestation.policy_id", &a.policy_id)?,
         }),
@@ -410,6 +417,8 @@ mod tests {
         let mut s_att = mk_state([0x55; 32], [0x01; 32], C, 2);
         s_att.island_attestation = Some(crate::types::device_state::IslandAttestation {
             id_island: [0x9a; 32],
+            id_anchor_set: [0x3d; 32],
+            ui_transcript_hash: [0x5e; 32],
             signature: vec![0x42; 64],
             policy_id: [0x7c; 32],
         });

@@ -218,6 +218,7 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         entity_sig,
         counterparty_sig,
         dbrw_summary_hash,
+        island_attestation: None,
     };
     let chain_tip = state.compute_chain_tip();
     Ok((state, chain_tip))
@@ -634,6 +635,7 @@ mod tests {
             to: tag.to_vec(),
             message: String::from_utf8_lossy(tag).into_owned(),
             signature: vec![0xEE; 64],
+            authority_policy: None,
         }
     }
 

@@ -360,6 +360,7 @@ mod tests {
             to: b"recipient".to_vec(),
             message: "memo".to_string(),
             signature: vec![],
+            authority_policy: None,
         };
 
         let (amount, token_id) = parse_transfer_fields(&op.to_bytes());
@@ -383,6 +384,7 @@ mod tests {
             to: b"recipient".to_vec(),
             message: "memo".to_string(),
             signature: vec![],
+            authority_policy: None,
         };
 
         let parsed = super::parse_transfer(&op.to_bytes()).expect("transfer should parse");
