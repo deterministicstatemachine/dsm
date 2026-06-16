@@ -144,6 +144,7 @@ pub fn dsm_island_challenge(
     nonce: &[u8],
     expiry_tick: u64,
     ui_transcript: &[u8; 32],
+    receipt_commit: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = dsm_domain_hasher(ISLAND_ATTESTATION_DOMAIN);
     hasher.update(h_n);
@@ -155,6 +156,7 @@ pub fn dsm_island_challenge(
     hasher.update(nonce);
     hasher.update(&expiry_tick.to_le_bytes());
     hasher.update(ui_transcript);
+    hasher.update(receipt_commit);
     *hasher.finalize().as_bytes()
 }
 
@@ -200,6 +202,78 @@ pub fn compute_anchor_proof_hash(
     hasher.update(id_anchor_set);
     hasher.update(ui_transcript_hash);
     hasher.update(canonical_signature_bundle);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain tag for the anchor's own monotonic root frontier (separate from the Per-Device SMT root,
+/// which folds `anchor_proof_hash` and would be circular to sign over).
+pub const ANCHOR_FRONTIER_DOMAIN: &str = "DSM/anchor-frontier/v1";
+
+/// Deterministically advance the anchor's monotonic frontier:
+/// `successor_root = BLAKE3("DSM/anchor-frontier/v1" || parent_root || operation_hash || state_number)`.
+/// No signature dependency, so the receipt can both bind and advance it without circularity. The
+/// device requires `parent_root == stored_root`, recomputes this, and atomically advances.
+pub fn dsm_anchor_frontier_successor(
+    parent_root: &[u8; 32],
+    operation_hash: &[u8; 32],
+    state_number: u64,
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(ANCHOR_FRONTIER_DOMAIN);
+    hasher.update(parent_root);
+    hasher.update(operation_hash);
+    hasher.update(&state_number.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain-separated hash of the anchor's SubjectPublicKeyInfo, carried on the receipt so a verifier
+/// pins exactly which key signed (length-prefixed to forbid concatenation ambiguity).
+pub const ANCHOR_PUBKEY_HASH_DOMAIN: &str = "DSM/anchor-pubkey/v1";
+
+/// `BLAKE3("DSM/anchor-pubkey/v1" || len(spki) || spki)`.
+pub fn dsm_anchor_pubkey_hash(leaf_spki: &[u8]) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(ANCHOR_PUBKEY_HASH_DOMAIN);
+    hasher.update(&(leaf_spki.len() as u32).to_le_bytes());
+    hasher.update(leaf_spki);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain tag for the policy-content hash the receipt binds (distinct from the policy id).
+pub const POLICY_HASH_DOMAIN: &str = "DSM/policy-hash/v1";
+
+/// `BLAKE3("DSM/policy-hash/v1" || policy_id || anchor_set_id)` — a hash of the pinning policy's
+/// canonical contents the verifier checks against the enrolled value.
+pub fn dsm_policy_hash(policy_id: &[u8; 32], anchor_set_id: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(POLICY_HASH_DOMAIN);
+    hasher.update(policy_id);
+    hasher.update(anchor_set_id);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain tag for the stateful-receipt commitment appended to the island intent challenge.
+pub const OFFLINE_BEARER_RECEIPT_DOMAIN: &str = "DSM/offline-bearer/receipt/v1";
+
+/// Stateful-receipt commitment folded into the island challenge:
+/// `BLAKE3("DSM/offline-bearer/receipt/v1" || anchor_pubkey_hash || firmware_hash || policy_hash ||
+/// parent_root || successor_root || state_number)`. Binds the fields not already in
+/// [`dsm_island_challenge`] (operation_hash==payload_hash and device_id are already folded there;
+/// `h_n` there is the relationship chain tip, SEPARATE from the anchor `parent_root` bound here — the
+/// device's single monotonic frontier root). Host and device compute this identically; the verifier
+/// reconstructs it from the receipt.
+pub fn dsm_offline_bearer_receipt_commit(
+    anchor_pubkey_hash: &[u8; 32],
+    firmware_hash: &[u8; 32],
+    policy_hash: &[u8; 32],
+    parent_root: &[u8; 32],
+    successor_root: &[u8; 32],
+    state_number: u64,
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(OFFLINE_BEARER_RECEIPT_DOMAIN);
+    hasher.update(anchor_pubkey_hash);
+    hasher.update(firmware_hash);
+    hasher.update(policy_hash);
+    hasher.update(parent_root);
+    hasher.update(successor_root);
+    hasher.update(&state_number.to_le_bytes());
     *hasher.finalize().as_bytes()
 }
 
@@ -439,6 +513,11 @@ pub struct IslandIntent<'a> {
     /// On-device UI transcript hash ([`dsm_ui_transcript`]): the consent-oracle binding to
     /// exactly what the Safe 7 screen displayed and the human confirmed.
     pub ui_transcript: &'a [u8; 32],
+    /// Stateful-receipt commitment ([`dsm_offline_bearer_receipt_commit`]): binds the anchor pubkey
+    /// hash, measured firmware hash, policy hash, frontier successor root, and state number into the
+    /// signed challenge so the island authority cannot be replayed across firmware, policy, or
+    /// frontier position.
+    pub receipt_commit: &'a [u8; 32],
 }
 
 impl IslandIntent<'_> {
@@ -454,6 +533,7 @@ impl IslandIntent<'_> {
             self.nonce,
             self.expiry_tick,
             self.ui_transcript,
+            self.receipt_commit,
         )
     }
 }
@@ -598,21 +678,24 @@ mod tests {
         let rel = [3u8; 32];
         let dev = [4u8; 32];
         let ui = [5u8; 32];
-        let base = dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui);
+        let rc = [0xABu8; 32];
+        let base = dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc);
         // Deterministic: identical inputs -> identical challenge.
-        assert_eq!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui));
+        assert_eq!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc));
         // Every intent field is bound: flipping any one changes the challenge.
-        assert_ne!(base, dsm_island_challenge(&[9u8; 32], &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &[9u8; 32], &rel, &dev, 1, 1, b"nonce", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &[9u8; 32], &dev, 1, 1, b"nonce", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &[9u8; 32], 1, 1, b"nonce", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 2, 1, b"nonce", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 2, b"nonce", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"other", 7, &ui));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 8, &ui));
+        assert_ne!(base, dsm_island_challenge(&[9u8; 32], &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &[9u8; 32], &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &[9u8; 32], &dev, 1, 1, b"nonce", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &[9u8; 32], 1, 1, b"nonce", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 2, 1, b"nonce", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 2, b"nonce", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"other", 7, &ui, &rc));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 8, &ui, &rc));
         // The UI transcript is bound: a different on-device consent transcript (the human saw a
         // different action) changes the challenge, so the same signature cannot carry over.
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &[6u8; 32]));
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &[6u8; 32], &rc));
+        // The stateful-receipt commitment is bound: a different receipt_commit changes the challenge.
+        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &[0xCDu8; 32]));
     }
 
     #[test]
@@ -708,6 +791,7 @@ mod tests {
         let rel = [3u8; 32];
         let dev = [4u8; 32];
         let ui = [5u8; 32];
+        let rc = [6u8; 32];
         let intent = IslandIntent {
             h_n: &h_n,
             payload_hash: &payload,
@@ -718,6 +802,7 @@ mod tests {
             nonce: b"n0",
             expiry_tick: 9,
             ui_transcript: &ui,
+            receipt_commit: &rc,
         };
         let framed = frame_authenticate_device(&intent.challenge()).expect("frame");
         let sig = sk.sign(&framed).to_bytes();

@@ -235,6 +235,7 @@ pub struct OfflineBearerGateOutcome {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_offline_bearer_gate(
     transport: Option<&std::sync::Arc<dyn crate::crypto::anchor_transport::AnchorTransport>>,
+    frontier_store: &std::sync::Arc<dyn crate::core::chain_tip_store::ChainTipStore>,
     op: &crate::types::operations::Operation,
     current_tip: &[u8; 32],
     rel_key: &[u8; 32],
@@ -306,6 +307,23 @@ pub async fn run_offline_bearer_gate(
         ));
     }
 
+    // The anchor's SINGLE monotonic frontier (ONE per device, keyed by the anchor identity — NOT per
+    // relationship; every offline-bearer transition advances this one counter, so a clone must fork
+    // it). parent_root = the device's current frontier root; successor_root advances it
+    // deterministically (no signature dependency → no circularity). It is its OWN chain, separate
+    // from the relationship chain tip (`current_tip`).
+    let (parent_root, stored_state) = frontier_store
+        .get_anchor_frontier(&rec.id_anchor)
+        .unwrap_or(([0u8; 32], 0));
+    let state_number = stored_state + 1;
+    let operation_hash = payload_hash;
+    let successor_root = crate::attestation::dsm_anchor_frontier_successor(
+        &parent_root,
+        &operation_hash,
+        state_number,
+    );
+    let policy_hash = crate::attestation::dsm_policy_hash(&ap.policy_id, &id_anchor_set);
+
     // The request the device displays and computes the challenge over.
     let req = AnchorSignRequest {
         h_n: current_tip,
@@ -320,6 +338,10 @@ pub async fn run_offline_bearer_gate(
         asset: token_id.as_slice(),
         counterparty_id: &counterparty_id,
         policy_id: &ap.policy_id,
+        policy_hash: &policy_hash,
+        parent_root: &parent_root,
+        successor_root: &successor_root,
+        state_number,
     };
 
     // (3b) Sign on the device.
@@ -335,6 +357,22 @@ pub async fn run_offline_bearer_gate(
             "offline-bearer gate: anchor signature verification failed: {e} (fail-closed)"
         ))
     })?;
+
+    // (4b) Advance the device's SINGLE anchor frontier (CAS, keyed by id_anchor). Fail-closed if the
+    // advance is rejected — a stale/forked parent or non-monotonic state means a concurrent or
+    // cloned signer touched this device's one frontier.
+    let advanced = frontier_store
+        .set_anchor_frontier(&rec.id_anchor, parent_root, successor_root, state_number)
+        .map_err(|e| {
+            DsmError::verification(format!(
+                "offline-bearer gate: anchor frontier advance failed: {e} (fail-closed)"
+            ))
+        })?;
+    if !advanced {
+        return Err(DsmError::verification(
+            "offline-bearer gate: anchor frontier advance rejected — forked/concurrent advance (fail-closed)",
+        ));
+    }
 
     // The UI transcript the device bound (recompute the same bytes for the receipt + proof digest).
     let ui_transcript_hash = dsm_ui_transcript(
@@ -358,6 +396,13 @@ pub async fn run_offline_bearer_gate(
         ui_transcript_hash,
         signature,
         policy_id: ap.policy_id,
+        anchor_pubkey_hash: crate::attestation::dsm_anchor_pubkey_hash(&rec.leaf_spki),
+        firmware_hash: rec.firmware_hash,
+        policy_hash,
+        parent_root,
+        successor_root,
+        operation_hash,
+        state_number,
     };
 
     Ok(OfflineBearerGateOutcome {
@@ -1443,6 +1488,7 @@ impl BilateralTransactionManager {
             Some(
                 run_offline_bearer_gate(
                     self.anchor_transport.as_ref(),
+                    &self.chain_tip_store,
                     &pre.operation,
                     &current_tip,
                     &rel_key,
@@ -1735,10 +1781,11 @@ mod tests {
         };
         let op = make_op(Some(required.clone()));
         let (h_n, rel, dev, entropy) = ([0xAAu8; 32], [0xBBu8; 32], [0xCCu8; 32], [0xDDu8; 32]);
+        let store = crate::core::chain_tip_store::noop_chain_tip_store();
 
         // (3) Happy path: a valid anchor proof finalizes.
         let outcome =
-            run_offline_bearer_gate(Some(&anchor), &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
+            run_offline_bearer_gate(Some(&anchor), &store, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
                 .await
                 .expect("valid offline-bearer proof must finalize");
         // (6) The receipt reconstructs the exact anchor_proof_hash folded into the tip.
@@ -1753,17 +1800,17 @@ mod tests {
         assert_ne!(base_tip, attested_tip);
 
         // (4) Fail-closed: no transport present.
-        assert!(run_offline_bearer_gate(None, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
+        assert!(run_offline_bearer_gate(None, &store, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
             .await
             .is_err());
         // (4) Fail-closed: device rejects / signing fails.
         let rej: Arc<dyn AnchorTransport> = Arc::new(MockAnchorTransport::rejecting([7u8; 32]));
-        assert!(run_offline_bearer_gate(Some(&rej), &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
+        assert!(run_offline_bearer_gate(Some(&rej), &store, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
             .await
             .is_err());
         // (2) Fail-closed: value_capability not Yes.
         for vc in [ValueCapability::No, ValueCapability::Unknown] {
-            assert!(run_offline_bearer_gate(Some(&anchor), &op, &h_n, &rel, &dev, &entropy, 42, vc)
+            assert!(run_offline_bearer_gate(Some(&anchor), &store, &op, &h_n, &rel, &dev, &entropy, 42, vc)
                 .await
                 .is_err());
         }
@@ -1773,12 +1820,12 @@ mod tests {
             policy_id,
             anchor_set_id: [0x99u8; 32],
         }));
-        assert!(run_offline_bearer_gate(Some(&anchor), &wrong_op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
+        assert!(run_offline_bearer_gate(Some(&anchor), &store, &wrong_op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
             .await
             .is_err());
         // (1) A non-offline-bearer transfer (no policy) is not gated here.
         let plain = make_op(None);
-        assert!(run_offline_bearer_gate(Some(&anchor), &plain, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
+        assert!(run_offline_bearer_gate(Some(&anchor), &store, &plain, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
             .await
             .is_err());
 

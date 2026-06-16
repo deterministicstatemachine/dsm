@@ -88,6 +88,13 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
             policy_id: a.policy_id.to_vec(),
             id_anchor_set: a.id_anchor_set.to_vec(),
             ui_transcript_hash: a.ui_transcript_hash.to_vec(),
+            anchor_pubkey_hash: a.anchor_pubkey_hash.to_vec(),
+            firmware_hash: a.firmware_hash.to_vec(),
+            policy_hash: a.policy_hash.to_vec(),
+            parent_root: a.parent_root.to_vec(),
+            successor_root: a.successor_root.to_vec(),
+            operation_hash: a.operation_hash.to_vec(),
+            state_number: a.state_number,
         }),
     }
 }
@@ -122,6 +129,16 @@ pub fn rel_chain_state_from_proto(
             )?,
             signature: a.signature.clone(),
             policy_id: fixed32("island_attestation.policy_id", &a.policy_id)?,
+            anchor_pubkey_hash: fixed32(
+                "island_attestation.anchor_pubkey_hash",
+                &a.anchor_pubkey_hash,
+            )?,
+            firmware_hash: fixed32("island_attestation.firmware_hash", &a.firmware_hash)?,
+            policy_hash: fixed32("island_attestation.policy_hash", &a.policy_hash)?,
+            parent_root: fixed32("island_attestation.parent_root", &a.parent_root)?,
+            successor_root: fixed32("island_attestation.successor_root", &a.successor_root)?,
+            operation_hash: fixed32("island_attestation.operation_hash", &a.operation_hash)?,
+            state_number: a.state_number,
         }),
         None => None,
     };
@@ -421,6 +438,13 @@ mod tests {
             ui_transcript_hash: [0x5e; 32],
             signature: vec![0x42; 64],
             policy_id: [0x7c; 32],
+            anchor_pubkey_hash: [0x11; 32],
+            firmware_hash: [0x22; 32],
+            policy_hash: [0x33; 32],
+            parent_root: [0x44; 32],
+            successor_root: [0x55; 32],
+            operation_hash: [0x66; 32],
+            state_number: 7,
         });
         let d_att = rel_chain_state_from_proto(&rel_chain_state_to_proto(&s_att)).expect("att");
         assert_eq!(d_att.island_attestation, s_att.island_attestation);

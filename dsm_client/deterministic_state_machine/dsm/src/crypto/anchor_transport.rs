@@ -44,6 +44,9 @@ pub struct AnchorIdentityRecord {
     pub firmware_id: [u8; 32],
     /// Screen-layout template version that rendered the consent fields.
     pub screen_template_id: u32,
+    /// Device-measured firmware hash bound at enrollment — the value the secmon gate enforces and
+    /// the receipt commits to (distinct from the display-only `firmware_id`).
+    pub firmware_hash: [u8; 32],
 }
 
 /// One offline-bearer transition to be displayed on the device and signed by the anchor.
@@ -77,6 +80,17 @@ pub struct AnchorSignRequest<'a> {
     pub counterparty_id: &'a [u8; 32],
     /// Pinning-policy identifier (e.g. a "dual island required" policy).
     pub policy_id: &'a [u8; 32],
+    /// Hash of the pinning policy's canonical contents (stateful-receipt binding).
+    pub policy_hash: &'a [u8; 32],
+    /// The device's CURRENT single anchor frontier root this advance consumes (== device
+    /// `stored_root`; ONE per device keyed by anchor identity, NOT per relationship). Distinct from
+    /// `h_n`, the relationship chain tip.
+    pub parent_root: &'a [u8; 32],
+    /// Anchor monotonic-frontier successor root this advance produces
+    /// (`dsm_anchor_frontier_successor(parent_root, operation_hash, state_number)`).
+    pub successor_root: &'a [u8; 32],
+    /// Monotonic anchor-frontier counter for this advance.
+    pub state_number: u64,
 }
 
 /// Transport-agnostic handle to an offline-bearer signing anchor. Implemented by the BLE transport
@@ -119,6 +133,15 @@ pub fn verify_anchor_signature(
         &record.firmware_id,
         record.screen_template_id,
     );
+    let anchor_pubkey_hash = crate::attestation::dsm_anchor_pubkey_hash(&record.leaf_spki);
+    let receipt_commit = crate::attestation::dsm_offline_bearer_receipt_commit(
+        &anchor_pubkey_hash,
+        &record.firmware_hash,
+        req.policy_hash,
+        req.parent_root,
+        req.successor_root,
+        req.state_number,
+    );
     let intent = IslandIntent {
         h_n: req.h_n,
         payload_hash: req.payload_hash,
@@ -129,6 +152,7 @@ pub fn verify_anchor_signature(
         nonce: req.nonce,
         expiry_tick: req.expiry_tick,
         ui_transcript: &ui,
+        receipt_commit: &receipt_commit,
     };
     verify_island_intent_signature(&record.leaf_spki, &intent, signature)
 }
@@ -196,6 +220,9 @@ impl MockAnchorTransport {
             leaf_spki,
             firmware_id: self.firmware_id,
             screen_template_id: self.screen_template_id,
+            // Host-memory mock has no secure-element measurement; zero until enrollment wires the
+            // real measured hash (Step 2 / Track 3).
+            firmware_hash: [0u8; 32],
         }
     }
 }
@@ -239,6 +266,15 @@ impl AnchorTransport for MockAnchorTransport {
             &self.firmware_id,
             self.screen_template_id,
         );
+        let anchor_pubkey_hash = crate::attestation::dsm_anchor_pubkey_hash(&self.leaf_spki());
+        let receipt_commit = crate::attestation::dsm_offline_bearer_receipt_commit(
+            &anchor_pubkey_hash,
+            &[0u8; 32],
+            req.policy_hash,
+            req.parent_root,
+            req.successor_root,
+            req.state_number,
+        );
         let intent = IslandIntent {
             h_n: req.h_n,
             payload_hash: req.payload_hash,
@@ -249,6 +285,7 @@ impl AnchorTransport for MockAnchorTransport {
             nonce: req.nonce,
             expiry_tick: req.expiry_tick,
             ui_transcript: &ui,
+            receipt_commit: &receipt_commit,
         };
         let framed = crate::attestation::frame_authenticate_device(&intent.challenge())?;
         Ok(self.signing_key.sign(&framed).to_bytes().to_vec())
@@ -282,6 +319,10 @@ mod tests {
             asset: b"ERA",
             counterparty_id: cp,
             policy_id: policy,
+            policy_hash: &[0u8; 32],
+            parent_root: &[0u8; 32],
+            successor_root: &[0u8; 32],
+            state_number: 1,
         }
     }
 
@@ -340,5 +381,23 @@ mod tests {
             ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
         let req = sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10);
         assert!(anchor.sign(&req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn receipt_field_tamper_is_rejected() {
+        // The receipt_commit binds the frontier state_number into the challenge: a signature for
+        // state_number=5 must NOT verify when re-presented as state_number=6.
+        let anchor = MockAnchorTransport::from_seed([7u8; 32]);
+        let rec = anchor.get_identity().await.expect("id");
+        let (h_n, payload, rel, dev, cp, policy) =
+            ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
+        let signed = AnchorSignRequest {
+            state_number: 5,
+            ..sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10)
+        };
+        let claimed = AnchorSignRequest { state_number: 6, ..signed };
+        let sig = anchor.sign(&signed).await.expect("sign");
+        assert!(verify_anchor_signature(&rec, &signed, &sig).is_ok());
+        assert!(verify_anchor_signature(&rec, &claimed, &sig).is_err());
     }
 }

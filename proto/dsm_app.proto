@@ -2844,6 +2844,16 @@ message IslandAttestationProto {
   bytes policy_id = 3 [(dsm_fixed_len)=32];   // pinning policy id under which the island was admitted
   bytes id_anchor_set = 4 [(dsm_fixed_len)=32];      // canonical anchor-set id (compute_anchor_set_id)
   bytes ui_transcript_hash = 5 [(dsm_fixed_len)=32]; // UI transcript hash the island signed over
+  // Stateful-receipt fields (anchor monotonic frontier + firmware/policy binding). Append-only;
+  // NOT folded into compute_chain_tip (only id_island/signature/policy_id are), so tip bytes are
+  // unchanged. genesis/device_id are already on StitchedReceiptV2 and not duplicated here.
+  bytes anchor_pubkey_hash = 6 [(dsm_fixed_len)=32]; // dsm_anchor_pubkey_hash(leaf_spki)
+  bytes firmware_hash = 7 [(dsm_fixed_len)=32];      // device-measured firmware hash (secmon-gate enforced)
+  bytes policy_hash = 8 [(dsm_fixed_len)=32];        // dsm_policy_hash(policy_id, id_anchor_set)
+  bytes parent_root = 9 [(dsm_fixed_len)=32];        // anchor frontier root this advance consumes
+  bytes successor_root = 10 [(dsm_fixed_len)=32];    // anchor frontier root this advance produces
+  bytes operation_hash = 11 [(dsm_fixed_len)=32];    // == payload_hash of the transition
+  uint64 state_number = 12;                          // monotonic anchor frontier counter
 }
 
 // A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a

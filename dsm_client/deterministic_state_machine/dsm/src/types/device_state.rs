@@ -277,6 +277,20 @@ pub struct IslandAttestation {
     pub signature: Vec<u8>,
     /// Identifier of the pinning policy under which the island was admitted.
     pub policy_id: [u8; 32],
+    /// Domain-separated hash of the anchor's signing-key SPKI (which key signed this receipt).
+    pub anchor_pubkey_hash: [u8; 32],
+    /// Device-measured firmware hash the secmon gate enforced for this signature.
+    pub firmware_hash: [u8; 32],
+    /// Hash of the pinning policy's canonical contents (distinct from `policy_id`).
+    pub policy_hash: [u8; 32],
+    /// Anchor monotonic-frontier root this advance consumed (must equal the device's `stored_root`).
+    pub parent_root: [u8; 32],
+    /// Anchor monotonic-frontier root this advance produced (`stored_root` after the atomic advance).
+    pub successor_root: [u8; 32],
+    /// Operation payload hash this advance committed to (== the transition `payload_hash`).
+    pub operation_hash: [u8; 32],
+    /// Monotonic anchor-frontier counter for this advance.
+    pub state_number: u64,
 }
 
 /// One accepted state in a per-relationship straight hash chain (§2.1).
