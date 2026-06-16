@@ -23,7 +23,6 @@ use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
     AppRouterImpl, BiImpl, UniImpl, handle_system_genesis_query, install_app_router_adapter,
 };
-use crate::handlers::misc_routes::dispatch_dbrw_query;
 use dsm::types::proto as pb;
 use prost::Message;
 
@@ -380,11 +379,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                         }
                     }
                     "system.genesis" => handle_system_genesis_query(q),
-                    // Bootstrap needs C-DBRW enrollment/trust before the full
-                    // identity context exists. Keep this allowlist narrow.
-                    "cdbrw.enroll" | "cdbrw.measure_trust" | "cdbrw.reprove" => {
-                        dispatch_dbrw_query(q).await
-                    }
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),

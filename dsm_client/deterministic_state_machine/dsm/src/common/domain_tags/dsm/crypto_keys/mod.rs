@@ -2,29 +2,25 @@
 
 //! DSM namespace tags: crypto keys
 
-mod cdbrw;
 mod commitments;
+mod device_birth;
 mod key_derivation;
 mod nonce_randomness;
 
-pub use cdbrw::*;
 pub use commitments::*;
+pub use device_birth::*;
 pub use key_derivation::*;
 pub use nonce_randomness::*;
 
 #[cfg(test)]
 pub(super) const TAGS: &[&str] = &[
-    TAG_DSM_ATTRACTOR_COMMIT,
     TAG_DSM_BALANCE_COMMIT,
     TAG_DSM_BTC_NONCE,
-    TAG_DSM_CDBRW_BIND,
-    TAG_DSM_CDBRW_BINDING_RECORD,
-    TAG_DSM_CDBRW_RESPONSE,
-    TAG_DSM_CDBRW_SEED,
-    TAG_DSM_CDBRW_THERMAL,
     TAG_DSM_CERT_CHAIN_SK_AEAD,
     TAG_DSM_CODEC_HASH,
-    TAG_DSM_DBRW_BINDING_V2,
+    TAG_DSM_DEVICE_BIRTH_ATT,
+    TAG_DSM_DEVICE_BIRTH_NONCE,
+    TAG_DSM_SOFT_VAULT_BINDING,
     TAG_DSM_DETERMINISTIC_NONCE_32,
     TAG_DSM_DETERMINISTIC_NONCE_GCM,
     TAG_DSM_DET_RNG_SEED,

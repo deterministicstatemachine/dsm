@@ -518,7 +518,7 @@ impl B0xSDK {
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag_str);
         // Primary IKM: KDBRW — the secret hardware-bound entropy source
         #[cfg(all(target_os = "android", feature = "jni"))]
-        if let Some(k) = crate::jni::cdbrw::get_cdbrw_binding_key() {
+        if let Some(k) = crate::binding_key::get_binding_key() {
             hasher.update(&k);
         }
         // Augment with public material for domain separation

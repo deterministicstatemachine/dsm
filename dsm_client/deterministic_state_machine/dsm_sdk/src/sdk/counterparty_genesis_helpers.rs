@@ -236,23 +236,22 @@ pub async fn fetch_genesis_state(
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
     // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
-    // The MPC session derives the canonical K_DBRW internally from
-    // (genesis_id, device_id = genesis_id, hw, env) — we just supply the
-    // silicon inputs.
-    let silicon =
+    // Device-birth binding `AttA` is folded into the MPC keypair derivation in
+    // place of the removed silicon C-DBRW binding; the birth nonce is seeded
+    // from the platform's per-device entropy slot.
+    let entropy =
         crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
             dsm::types::error::DsmError::invalid_operation(
-                "counterparty_genesis_helpers: platform silicon inputs (hw, env) required",
+                "counterparty_genesis_helpers: platform device-birth entropy required",
             )
         })?;
-    create_genesis_via_blind_mpc(
-        device_id_arr,
-        nodes,
-        silicon.hw_entropy.clone(),
-        silicon.env_fingerprint.clone(),
-        None,
+    let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_entropy(
+        &entropy.hw_entropy,
+        &entropy.env_fingerprint,
+        dsm::crypto::device_birth::CreationMode::Genesis,
     )
-    .await
+    .derive_att();
+    create_genesis_via_blind_mpc(device_id_arr, nodes, device_birth_att, None).await
 }
 
 /// Verify a Genesis state against known storage nodes

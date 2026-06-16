@@ -9,7 +9,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::cdbrw_binding;
+    use crate::crypto::device_birth::{CreationMode, DeviceBirthInputs};
     use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
     use crate::crypto::kyber::generate_kyber_keypair_from_entropy;
     use crate::crypto::rng::{generate_deterministic_random, mix_entropy};
@@ -43,22 +43,16 @@ mod tests {
         }
 
         #[test]
-        fn pbt_cdbrw_binding_is_deterministic(
-            genesis_hash in any::<[u8; 32]>(),
-            device_id in any::<[u8; 32]>(),
-            hw in proptest::collection::vec(any::<u8>(), 1..=128),
-            env in proptest::collection::vec(any::<u8>(), 1..=128),
+        fn pbt_device_birth_att_is_deterministic(
+            nonce_commitment in any::<[u8; 32]>(),
+            schema in any::<u32>(),
+            protocol in any::<u32>(),
         ) {
-            let b1 = cdbrw_binding::derive_cdbrw_binding_key(
-                &genesis_hash, &device_id, &hw, &env,
-            )
-            .expect("valid inputs");
-            let b2 = cdbrw_binding::derive_cdbrw_binding_key(
-                &genesis_hash, &device_id, &hw, &env,
-            )
-            .expect("valid inputs");
+            let inputs =
+                DeviceBirthInputs::new(nonce_commitment, CreationMode::Genesis, schema, protocol);
+            let b1 = inputs.derive_att();
+            let b2 = inputs.derive_att();
             prop_assert_eq!(b1.len(), 32);
-            prop_assert_eq!(b2.len(), 32);
             prop_assert_eq!(b1, b2);
         }
 

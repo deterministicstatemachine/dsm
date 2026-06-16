@@ -161,25 +161,23 @@ fn get_enabled_features() -> Vec<String> {
 /// Expose core trustless genesis creation to SDK consumers.
 ///
 /// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
-/// `hw_entropy` and `env_fingerprint` are the silicon-binding inputs
-/// (whitepaper Definition 3); the canonical K_DBRW is derived inside
-/// the MPC session from `(genesis_id, device_id = genesis_id, hw, env)`
-/// per `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
+/// `device_birth_att` is the deterministic device-birth binding `AttA`
+/// (`BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(DeviceBirthRecordV1))`),
+/// computed by the SDK and folded into the per-device key derivation
+/// (whitepaper §11.1) in place of the removed silicon C-DBRW binding.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
+    device_birth_att: [u8; 32],
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, DsmError> {
     identity::create_trustless_genesis(
         device_id,
         storage_nodes,
-        hw_entropy,
-        env_fingerprint,
+        device_birth_att,
         metadata,
         storage,
     )

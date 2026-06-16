@@ -113,7 +113,7 @@ impl DbrwBindingKeyProvider {
 
 impl BindingKeyProvider for DbrwBindingKeyProvider {
     fn device_binding_key(&self) -> Result<[u8; 32], DsmError> {
-        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DBRW_BINDING_V2);
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SOFT_VAULT_BINDING);
         hasher.update(self.device_id_hint.as_bytes());
         let digest = hasher.finalize();
         let mut out = [0u8; 32];

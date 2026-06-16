@@ -1137,43 +1137,38 @@ impl CoreSDK {
         }
 
         let device_entropy = generate_device_entropy(&device_id_arr);
-        // Peek (don't take) the silicon inputs so the slot stays alive for
-        // any later restore-path probes. The slot is cleared only AFTER
-        // the publisher succeeds and K_DBRW is staged below — see the
-        // "fail-closed before install" contract in the doc comment.
-        let silicon =
+        // Peek (don't take) the platform entropy slot so it stays alive for any
+        // later restore-path probes. The slot is cleared only AFTER the
+        // publisher succeeds and the device-birth binding is installed below —
+        // see the "fail-closed before install" contract in the doc comment.
+        let entropy =
             crate::sdk::app_state::AppState::peek_platform_entropy_inputs().ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(
-                    "core_sdk: platform silicon inputs (hw, env) required for genesis",
+                    "core_sdk: platform device-birth entropy required for genesis",
                 )
             })?;
+        // Device-birth binding `AttA` replaces the silicon C-DBRW binding; the
+        // birth nonce is seeded from the platform's per-device entropy.
+        let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_entropy(
+            &entropy.hw_entropy,
+            &entropy.env_fingerprint,
+            dsm::crypto::device_birth::CreationMode::Genesis,
+        )
+        .derive_att();
 
         let genesis_state = create_genesis_via_blind_mpc_with_contributors(
             device_id_arr,
             storage_nodes,
-            silicon.hw_entropy.clone(),
-            silicon.env_fingerprint.clone(),
+            device_birth_att,
             device_entropy,
             contributor_entropies,
             client_entropy,
         )?;
 
-        // Derive (but do NOT install) the canonical K_DBRW. We need the
-        // genesis hash before this, but installation must wait until
-        // `before_install` confirms the network publish succeeded so a
-        // publisher error leaves the binding-key slot empty and the
-        // signing path gated.
-        let k_dbrw = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_state.hash,
-            &genesis_state.hash,
-            &silicon.hw_entropy,
-            &silicon.env_fingerprint,
-        )
-        .map_err(|e| {
-            dsm::types::error::DsmError::invalid_operation(format!(
-                "core_sdk: canonical K_DBRW derivation failed: {e}"
-            ))
-        })?;
+        // The device-birth binding `AttA` was computed above; install it only
+        // after `before_install` confirms the network publish succeeded so a
+        // publisher error leaves the binding-key slot empty and the signing
+        // path gated.
 
         // Run the pre-install hook with the freshly-computed genesis
         // hash. Storage-node SDK uses this slot to publish the initial
@@ -1189,9 +1184,9 @@ impl CoreSDK {
         }
 
         // From here on: COMMITTED. Install local state.
-        crate::binding_key::install_binding_key(k_dbrw.to_vec()).map_err(|e| {
+        crate::binding_key::install_binding_key(device_birth_att.to_vec()).map_err(|e| {
             dsm::types::error::DsmError::invalid_operation(format!(
-                "core_sdk: install canonical K_DBRW failed: {e}"
+                "core_sdk: install device-birth binding failed: {e}"
             ))
         })?;
         let _ = crate::sdk::app_state::AppState::take_platform_entropy_inputs();

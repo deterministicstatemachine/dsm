@@ -207,7 +207,7 @@ pub fn ensure_bootstrap() {
     }
 
     if SDK_READY.load(Ordering::SeqCst) {
-        let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
+        let dbrw_ok = crate::binding_key::get_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
         if !dbrw_ok {

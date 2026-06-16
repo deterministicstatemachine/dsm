@@ -77,32 +77,27 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             ));
         }
         // K_DBRW is installed by `core_sdk::create_genesis_with_passive_contributors`
-        // post-MPC using the canonical
-        //   derive_cdbrw_binding_key(genesis_hash, device_id = genesis_hash,
-        //                            hw, env)
-        // preimage. Pull it back out here for downstream uses (JNI
-        // installation, binding_record digest stamped into the genesis
-        // record).
-        let k_dbrw_vec = crate::binding_key::get_binding_key().ok_or_else(|| {
-            "system.genesis: canonical K_DBRW slot empty after MPC genesis".to_string()
+        // post-MPC. Pull the device-birth binding `AttA` back out of the
+        // binding-key slot to stamp a record digest into the persisted
+        // GenesisRecord.
+        let binding_vec = crate::binding_key::get_binding_key().ok_or_else(|| {
+            "system.genesis: device-birth binding slot empty after MPC genesis".to_string()
         })?;
-        if k_dbrw_vec.len() != 32 {
+        if binding_vec.len() != 32 {
             return Err(format!(
-                "system.genesis: canonical K_DBRW length must be 32, got {}",
-                k_dbrw_vec.len()
+                "system.genesis: device-birth binding length must be 32, got {}",
+                binding_vec.len()
             ));
         }
-        let mut k_dbrw_arr = [0u8; 32];
-        k_dbrw_arr.copy_from_slice(&k_dbrw_vec);
+        let mut binding_arr = [0u8; 32];
+        binding_arr.copy_from_slice(&binding_vec);
         let binding_record = crate::util::text_id::encode_base32_crockford(
             dsm::crypto::blake3::domain_hash(
-                dsm::common::domain_tags::TAG_DSM_CDBRW_BINDING_RECORD,
-                &k_dbrw_arr,
+                dsm::common::domain_tags::TAG_DSM_DEVICE_BIRTH_ATT,
+                &binding_arr,
             )
             .as_bytes(),
         );
-        #[cfg(all(target_os = "android", feature = "jni"))]
-        crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw_vec.clone());
         let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,

@@ -368,15 +368,13 @@ pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
 pub async fn create_genesis_via_blind_mpc(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
+    device_birth_att: [u8; 32],
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisState, DsmError> {
     let session = crate::core::identity::genesis_session::create_genesis(
         device_id,
         storage_nodes,
-        hw_entropy,
-        env_fingerprint,
+        device_birth_att,
         metadata,
     )
     .await?;
@@ -393,8 +391,7 @@ pub async fn create_genesis_via_blind_mpc(
 pub fn create_genesis_via_blind_mpc_with_contributors(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
+    device_birth_att: [u8; 32],
     device_entropy: [u8; 32],
     mpc_entropies: Vec<[u8; 32]>,
     metadata: Option<Vec<u8>>,
@@ -404,11 +401,9 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     let mut session = crate::core::identity::genesis_session::GenesisSession::new(metadata)?;
     session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
-    session.set_silicon_inputs(hw_entropy, env_fingerprint)?;
+    session.set_device_birth_att(device_birth_att)?;
     session.compute_commitments();
     session.compute_genesis_id();
-    // Canonical K_DBRW derived from (genesis_id, device_id = genesis_id, hw, env).
-    session.compute_dbrw_binding()?;
     session.validate_session()?;
 
     let gs = convert_session_to_genesis_state_compat(&session)?;
@@ -481,11 +476,11 @@ pub fn convert_session_to_genesis_state_compat(
     let hash = session.genesis_id;
     let initial_entropy = calculate_initial_entropy(&hash, &contribs)?;
 
-    // Silicon-bound master keypair per whitepaper §11.1 eq.13.  K_DBRW
-    // is folded into S_master and both keypairs are deterministic given
-    // (device_id, contributions, K_DBRW).  The genesis_session derivation
+    // Device-bound master keypair per whitepaper §11.1 eq.13.  The device-birth
+    // binding `AttA` is folded into S_master and both keypairs are deterministic
+    // given (device_id, contributions, AttA).  The genesis_session derivation
     // zeroises its IKM/seed buffers internally.
-    let mk = session.derive_silicon_bound_keypair()?;
+    let mk = session.derive_device_bound_keypair()?;
     let signing_key = SigningKey {
         public_key: mk.sphincs_public.clone(),
         secret_key: mk.sphincs_secret.clone(),
@@ -556,11 +551,10 @@ mod tests {
     async fn test_genesis_state_creation_mpc_only() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
 
         let res =
-            create_genesis_via_blind_mpc(device_id, nodes, hw, env, Some(b"test".to_vec())).await;
+            create_genesis_via_blind_mpc(device_id, nodes, att, Some(b"test".to_vec())).await;
 
         let genesis = match res {
             Ok(g) => g,
@@ -609,10 +603,9 @@ mod tests {
     async fn test_verification_mpc() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [7u8; 32];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
 
-        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, hw, env, None).await {
+        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, att, None).await {
             Ok(g) => g,
             Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
         };
@@ -631,14 +624,12 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let node_entropies = vec![[0x61; 32], [0x62; 32], [0x63; 32]];
         let metadata = b"meta".to_vec();
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
 
         let genesis = create_genesis_via_blind_mpc_with_contributors(
             device_id,
             nodes,
-            hw,
-            env,
+            att,
             device_entropy,
             node_entropies.clone(),
             Some(metadata.clone()),
@@ -667,10 +658,9 @@ mod tests {
 
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0x11; 32];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
 
-        let g = match create_genesis_via_blind_mpc(device_id, nodes, hw, env, None).await {
+        let g = match create_genesis_via_blind_mpc(device_id, nodes, att, None).await {
             Ok(x) => x,
             Err(_) => return,
         };

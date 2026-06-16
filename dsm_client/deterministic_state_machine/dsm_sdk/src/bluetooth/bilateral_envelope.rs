@@ -331,6 +331,7 @@ mod tests {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            sender_anchor_identity: None,
         };
         let body = req.encode_to_vec();
         let env = make_invoke_envelope("bilateral.prepare", &body);
@@ -389,6 +390,7 @@ mod tests {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            sender_anchor_identity: None,
         };
         let body = req.encode_to_vec();
         let mut env = make_invoke_envelope("bilateral.prepare", &body);

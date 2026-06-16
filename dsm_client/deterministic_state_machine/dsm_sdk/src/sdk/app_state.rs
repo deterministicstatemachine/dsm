@@ -1238,38 +1238,30 @@ mod tests {
 
     #[test]
     #[serial]
-    fn platform_entropy_inputs_drives_canonical_k_dbrw() {
+    fn platform_entropy_inputs_drives_device_birth_att() {
         setup_test_env();
-        // The whole point of the slot: feeding hw + env from the slot
-        // into the canonical four-input derive_cdbrw_binding_key (with
-        // the post-MPC genesis_hash + device_id) must produce the same
-        // K_DBRW as a direct call with the same four arrays.
-        let genesis_hash = [0xAAu8; 32];
-        let device_id = genesis_hash; // root device invariant
+        // The whole point of the slot: feeding hw + env from the slot into
+        // DeviceBirthInputs::from_entropy must produce the same device-birth
+        // AttA as a direct call with the same two arrays.
         let hw = b"hw_entropy_test_vector_32_bytes_aaaa".to_vec();
         let env = b"env_fingerprint_test_vector_aaaa".to_vec();
 
         AppState::set_platform_entropy_inputs(hw.clone(), env.clone()).expect("set");
         let taken = AppState::take_platform_entropy_inputs().expect("take");
 
-        let k_via_slot = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
+        use dsm::crypto::device_birth::{CreationMode, DeviceBirthInputs};
+        let att_via_slot = DeviceBirthInputs::from_entropy(
             &taken.hw_entropy,
             &taken.env_fingerprint,
+            CreationMode::Genesis,
         )
-        .expect("k_dbrw via slot");
-        let k_direct = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
-            &hw,
-            &env,
-        )
-        .expect("k_dbrw direct");
+        .derive_att();
+        let att_direct =
+            DeviceBirthInputs::from_entropy(&hw, &env, CreationMode::Genesis).derive_att();
 
         assert_eq!(
-            k_via_slot, k_direct,
-            "K_DBRW derived from the AppState slot must match a direct canonical call"
+            att_via_slot, att_direct,
+            "device-birth AttA derived from the AppState slot must match a direct call"
         );
     }
 

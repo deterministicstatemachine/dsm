@@ -316,47 +316,51 @@ fn kat_dsm_dev_tree_pad() {
 }
 
 // =============================================================================
-// §12 — DBRW binding (canonical four-input form, whitepaper Definition 3)
+// §11.1 — Device-birth binding AttA (replaces the removed §12 DBRW binding)
 // =============================================================================
 
 #[test]
-fn kat_dsm_cdbrw_bind() {
-    let genesis_hash = [0x11u8; 32];
-    let device_id = [0x22u8; 32];
-    let hw_entropy = [0x33u8; 32];
-    let env_fingerprint = [0x44u8; 32];
+fn kat_dsm_device_birth_att() {
+    use dsm::crypto::device_birth::{CreationMode, DeviceBirthInputs};
 
-    // Spec-side recomputation under the canonical four-input preimage:
-    //   BLAKE3("DSM/cdbrw/bind\0"
-    //          || LP(genesis_hash) || LP(device_id)
-    //          || LP(hw_entropy)   || LP(env_fingerprint))
+    let nonce_commitment = [0x33u8; 32];
+    let creation_mode = CreationMode::Genesis; // canonical small-int 1
+    let schema_version: u32 = 1;
+    let protocol_version: u32 = 1;
+
+    // Spec-side recomputation under the canonical preimage:
+    //   BLAKE3("DSM/device-birth-att/v1\0"
+    //          || LP(nonce_commitment) || LP([creation_mode])
+    //          || LP(schema_version_le) || LP(protocol_version_le))
+    let mode = [creation_mode.as_u8()];
+    let schema_le = schema_version.to_le_bytes();
+    let protocol_le = protocol_version.to_le_bytes();
     let mut input = Vec::new();
-    for slot in [&genesis_hash, &device_id, &hw_entropy, &env_fingerprint] {
+    for slot in [
+        nonce_commitment.as_slice(),
+        mode.as_slice(),
+        schema_le.as_slice(),
+        protocol_le.as_slice(),
+    ] {
         input.extend_from_slice(&(slot.len() as u32).to_le_bytes());
         input.extend_from_slice(slot);
     }
-    let spec = spec_digest("DSM/cdbrw/bind", &input);
+    let spec = spec_digest("DSM/device-birth-att/v1", &input);
 
     // Must match the production derivation byte-for-byte.
-    let prod = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-        &genesis_hash,
-        &device_id,
-        &hw_entropy,
-        &env_fingerprint,
-    ) {
-        Ok(k) => k,
-        Err(e) => panic!("derive_cdbrw_binding_key with valid inputs: {e:?}"),
-    };
+    let prod =
+        DeviceBirthInputs::new(nonce_commitment, creation_mode, schema_version, protocol_version)
+            .derive_att();
 
     assert_eq!(
         spec, prod,
-        "production derivation must match the spec-side recomputation"
+        "production AttA derivation must match the spec-side recomputation"
     );
 
     // Pin to lock the byte pattern across builds.
     assert_pin(
-        "DSM/cdbrw/bind",
+        "DSM/device-birth-att/v1",
         spec,
-        "1468dbc710bd6e305c02ca3b81a358b39bf1a5f5f4e8837a14b5ac8c1187e2ac",
+        "1532144c977d01a33d2e34fa1bbe22b64d815e67bb4a62cfdd542a9875ba6be0",
     );
 }

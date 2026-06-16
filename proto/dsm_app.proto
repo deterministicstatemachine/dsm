@@ -2114,6 +2114,27 @@ message GenesisLifecycleEvent {
   uint32 progress = 2; // 0–100, only meaningful for SECURING_PROGRESS
 }
 
+// Deterministic device-birth / lineage record (install binding, NOT an
+// anti-clone proof).  `AttA = BLAKE3("DSM/device-birth-att/v1\0" ||
+// ProtoDet(DeviceBirthRecordV1))`, folded into per-device key derivation in
+// place of the removed silicon C-DBRW binding.  Online safety remains tripwire
+// + parent-consumption uniqueness; offline-bearer anti-clone is the separate
+// secure-element anchor.
+message DeviceBirthRecordV1 {
+  enum CreationMode {
+    DEVICE_BIRTH_CREATION_MODE_UNSPECIFIED = 0;
+    DEVICE_BIRTH_CREATION_MODE_GENESIS = 1;             // INITIALIZE
+    DEVICE_BIRTH_CREATION_MODE_SECONDARY_DEVICE = 2;    // ADDITIONAL DEVICE
+    DEVICE_BIRTH_CREATION_MODE_RECOVERY_SUCCESSOR = 3;  // DEVICE RECOVERY
+  }
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
+  bytes device_public_key = 2 [(dsm_max_len)=4096];
+  bytes device_birth_nonce_commitment = 3 [(dsm_fixed_len)=32];
+  CreationMode creation_mode = 4;
+  uint32 schema_version = 5;
+  uint32 protocol_version = 6;
+}
+
 // Host-side measurement report forwarded into Rust bootstrap control.
 message BootstrapMeasurementReport {
   enum Phase {
@@ -2126,24 +2147,15 @@ message BootstrapMeasurementReport {
     BOOTSTRAP_PHASE_RESUME_FINALIZE = 6;
   }
 
-  enum TrustLevel {
-    BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0;
-    BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1;
-    BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2;
-    BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3;
-    BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4;
-  }
-
   Phase phase = 1;
   bytes device_id = 2 [(dsm_fixed_len)=32];
   bytes genesis_hash = 3 [(dsm_fixed_len)=32];
   uint32 progress_percent = 4;
-  bytes cdbrw_hw_entropy = 5 [(dsm_max_len)=1024];
-  bytes cdbrw_env_fingerprint = 6 [(dsm_max_len)=1024];
-  reserved 7; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
-              // from K_DBRW preimage.  See SystemGenesisRequest.
-  TrustLevel trust_level = 8;
+  reserved 5, 6, 7, 8; // removed C-DBRW: cdbrw_hw_entropy, cdbrw_env_fingerprint,
+                       // cdbrw_salt, trust_level. Replaced by device-birth binding.
   string error_message = 9;
+  // Deterministic device-birth record; AttA is derived from it (see above).
+  DeviceBirthRecordV1 device_birth = 10;
 }
 
 message BootstrapFinalizeResponse {
@@ -3908,16 +3920,14 @@ message InitializeIdentityContextOp {
   bytes binding_key  = 3 [(dsm_fixed_len)=32];
 }
 
-// Restore canonical identity context by re-deriving the binding key from
-// persisted deterministic C-DBRW inputs. This is the fast cold-start path
-// after a successful first bootstrap / enrollment.
+// Restore canonical identity context by recomputing the device-birth binding
+// `AttA` from the persisted deterministic device-birth record. This is the fast
+// cold-start path after a successful first bootstrap / enrollment.
 message RestoreIdentityContextOp {
   bytes device_id             = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
-  bytes cdbrw_hw_entropy      = 3 [(dsm_fixed_len)=32];
-  bytes cdbrw_env_fingerprint = 4 [(dsm_max_len)=1024];
-  reserved 5; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
-              // from K_DBRW preimage.  See SystemGenesisRequest.
+  reserved 3, 4, 5; // removed C-DBRW: cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt.
+  DeviceBirthRecordV1 device_birth = 6;
 }
 
 // Canonical startup/bootstrap request shared by native platforms.

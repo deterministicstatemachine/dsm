@@ -530,20 +530,26 @@ impl IdentitySDK {
             "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
-        // The MPC session derives the canonical K_DBRW internally from
-        // (genesis_id, device_id = genesis_id, hw, env) — we just supply
-        // the silicon inputs from the platform-entropy slot.
-        let silicon =
+        // Device-birth binding: AttA is folded into the MPC keypair derivation
+        // in place of the removed silicon C-DBRW binding.  We seed the birth
+        // nonce from the platform's per-device entropy slot (no orbit probe,
+        // trust gate, or K_DBRW).
+        let entropy =
             crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(
-                    "identity_sdk: platform silicon inputs (hw, env) required for genesis",
+                    "identity_sdk: platform device-birth entropy required for genesis",
                 )
             })?;
+        let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_entropy(
+            &entropy.hw_entropy,
+            &entropy.env_fingerprint,
+            dsm::crypto::device_birth::CreationMode::Genesis,
+        )
+        .derive_att();
         let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
             device_id_arr,
             test_nodes.clone(),
-            silicon.hw_entropy.clone(),
-            silicon.env_fingerprint.clone(),
+            device_birth_att,
             None,
         ))?;
 
@@ -976,7 +982,7 @@ impl IdentitySDK {
                 // DBRW binding key is only available on Android via JNI
                 #[cfg(all(target_os = "android", feature = "jni"))]
                 {
-                    let dbrw = crate::jni::cdbrw::get_cdbrw_binding_key().ok_or_else(|| {
+                    let dbrw = crate::binding_key::get_binding_key().ok_or_else(|| {
                         DsmError::InvalidState(
                             "Signing key not in AppState and DBRW unavailable for re-derivation. Restart the app.".into()
                         )

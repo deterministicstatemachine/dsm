@@ -579,7 +579,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
                 );
             }
 
-            let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
+            let dbrw_ok = crate::binding_key::get_binding_key()
                 .map(|k| k.len() == 32)
                 .unwrap_or(false);
             if !dbrw_ok {
@@ -4688,7 +4688,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
             // Genesis exists, check C-DBRW binding key; if C-DBRW does not have a usable binding key,
             // signal CDBRW_NOT_READY. Otherwise, conservatively report CDBRW_NOT_READY as well
             // (SDK init step still outstanding).
-            let has_binding_key = crate::jni::cdbrw::get_cdbrw_binding_key()
+            let has_binding_key = crate::binding_key::get_binding_key()
                 .map(|k| k.len() == 32)
                 .unwrap_or(false);
             if !has_binding_key {

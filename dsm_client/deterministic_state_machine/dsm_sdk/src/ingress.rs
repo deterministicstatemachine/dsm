@@ -128,12 +128,34 @@ fn startup_initialize_identity_context(
     }
 }
 
+/// Compute the device-birth binding `AttA` from a `DeviceBirthRecordV1`
+/// (install/device-lineage binding folded into the per-device key derivation).
+fn device_birth_att_from_record(
+    record: &pb::DeviceBirthRecordV1,
+) -> Result<[u8; 32], pb::Error> {
+    if record.device_birth_nonce_commitment.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "device-birth: nonce_commitment must be 32 bytes",
+        ));
+    }
+    let mut nonce_commitment = [0u8; 32];
+    nonce_commitment.copy_from_slice(&record.device_birth_nonce_commitment);
+    let creation_mode = dsm::crypto::device_birth::CreationMode::from_u8(record.creation_mode as u8)
+        .ok_or_else(|| {
+            ingress_error(ERROR_CODE_INVALID_INPUT, "device-birth: unknown creation_mode")
+        })?;
+    Ok(dsm::crypto::device_birth::DeviceBirthInputs::new(
+        nonce_commitment,
+        creation_mode,
+        record.schema_version,
+        record.protocol_version,
+    )
+    .derive_att())
+}
+
 fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Envelope, pb::Error> {
-    log::info!(
-        "FINALIZE_BOOTSTRAP: ENTRY phase={} trust={}",
-        report.phase,
-        report.trust_level
-    );
+    log::info!("FINALIZE_BOOTSTRAP: ENTRY phase={}", report.phase);
     // Scope guard: keep BOOTSTRAP_SECURING=true until this function exits, then clear it
     // unconditionally. This preserves phase=securing_device throughout the whole finalize
     // (including startup_initialize_identity_context which writes the identity), so any
@@ -179,63 +201,22 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     let device_id = report.device_id.clone();
     let genesis_hash = report.genesis_hash.clone();
 
-    // Strict enforcement: no feature gate and no default-allow path.
-    // A ReadOnly trust level from the bootstrap measurement means the device
-    // failed the C-DBRW entropy health test and MUST NOT be allowed to proceed
-    // through genesis creation. The caller surface returns a BootstrapResultReadOnly
-    // envelope and the genesis lifecycle emits an error event for telemetry.
-    match report.trust_level {
-        x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelReadOnly as i32 =>
-        {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            return Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultReadOnly as i32,
-                device_id,
-                genesis_hash,
-                "bootstrap rejected by Rust: read-only trust state",
-            ));
-        }
-        x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelBlocked as i32 =>
-        {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            return Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultBlocked as i32,
-                device_id,
-                genesis_hash,
-                "bootstrap rejected by Rust: blocked trust state",
-            ));
-        }
-        x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelUnspecified
-                as i32 =>
-        {
-            push_genesis_lifecycle_event(
-                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
-                0,
-            )?;
-            return Ok(bootstrap_finalize_envelope(
-                pb::bootstrap_finalize_response::Result::BootstrapResultRejected as i32,
-                device_id,
-                genesis_hash,
-                "bootstrap rejected by Rust: missing trust level",
-            ));
-        }
-        _ => {}
-    }
+    // Online safety is tripwire + parent-consumption uniqueness, so genesis is
+    // NOT gated on any device anti-clone measurement (the silicon C-DBRW gate is
+    // removed). The device-birth record deterministically fixes `AttA` — an
+    // install/device-lineage binding folded into the per-device key derivation.
+    let record = report.device_birth.as_ref().ok_or_else(|| {
+        ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "bootstrap_finalize: device_birth record required",
+        )
+    })?;
+    let device_birth_att = device_birth_att_from_record(record)?;
 
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id.clone(),
         genesis_hash_raw: genesis_hash.clone(),
-        cdbrw_hw_entropy: report.cdbrw_hw_entropy.clone(),
-        cdbrw_env_fingerprint: report.cdbrw_env_fingerprint.clone(),
+        device_birth_att_raw: device_birth_att.to_vec(),
     })
     .map_err(|e| {
         ingress_error(
@@ -244,13 +225,10 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         )
     })?;
 
-    #[cfg(target_os = "android")]
-    crate::jni::cdbrw::set_cdbrw_binding_key(context.cdbrw_binding.to_vec());
-
     if let Err(error) = startup_initialize_identity_context(
         context.device_id.to_vec(),
         context.genesis_hash.to_vec(),
-        context.cdbrw_binding.to_vec(),
+        context.device_birth_att.to_vec(),
     ) {
         log::error!(
             "FLASH_DEBUG: FINALIZE_BOOTSTRAP: startup_initialize_identity_context FAILED err={} BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
@@ -343,19 +321,11 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         });
     }
 
-    let ready_message = if report.trust_level
-        == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
-    {
-        "bootstrap ready with degraded trust: PIN required"
-    } else {
-        "bootstrap ready"
-    };
-
     Ok(bootstrap_finalize_envelope(
         pb::bootstrap_finalize_response::Result::BootstrapResultReady as i32,
         context.device_id.to_vec(),
         context.genesis_hash.to_vec(),
-        ready_message,
+        "bootstrap ready",
     ))
 }
 
@@ -802,8 +772,6 @@ fn install_identity_context_core(
                 format!("startup: invalid binding key: {e}"),
             )
         })?;
-        #[cfg(target_os = "android")]
-        crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
         return Ok(());
     }
 
@@ -813,8 +781,6 @@ fn install_identity_context_core(
             format!("startup: invalid binding key: {e}"),
         )
     })?;
-    #[cfg(target_os = "android")]
-    crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
 
     prime_identity_app_state(&device_id, &genesis_hash)?;
 
@@ -893,14 +859,19 @@ fn initialize_identity_context_core(
 fn restore_identity_context_core(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
-    cdbrw_hw_entropy: Vec<u8>,
-    cdbrw_env_fingerprint: Vec<u8>,
+    device_birth: Option<pb::DeviceBirthRecordV1>,
 ) -> Result<Vec<u8>, pb::Error> {
+    let record = device_birth.ok_or_else(|| {
+        ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "startup: restore_identity_context requires device_birth record",
+        )
+    })?;
+    let device_birth_att = device_birth_att_from_record(&record)?;
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id,
         genesis_hash_raw: genesis_hash,
-        cdbrw_hw_entropy,
-        cdbrw_env_fingerprint,
+        device_birth_att_raw: device_birth_att.to_vec(),
     })
     .map_err(|e| {
         ingress_error(
@@ -912,7 +883,7 @@ fn restore_identity_context_core(
     initialize_identity_context_core(
         context.device_id.to_vec(),
         context.genesis_hash.to_vec(),
-        context.cdbrw_binding.to_vec(),
+        context.device_birth_att.to_vec(),
     )
 }
 
@@ -1013,13 +984,7 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
             initialize_identity_context_core(op.device_id, op.genesis_hash, op.binding_key)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
-            // Phase 13: op.cdbrw_salt is `reserved 7;` in proto and ignored.
-            restore_identity_context_core(
-                op.device_id,
-                op.genesis_hash,
-                op.cdbrw_hw_entropy,
-                op.cdbrw_env_fingerprint,
-            )
+            restore_identity_context_core(op.device_id, op.genesis_hash, op.device_birth)
         }
         None => Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
@@ -1494,29 +1459,36 @@ endpoint = "http://127.0.0.1:8080"
         assert!(error.message.contains("binding_key must be 32 bytes"));
     }
 
+    fn test_device_birth_record() -> pb::DeviceBirthRecordV1 {
+        pb::DeviceBirthRecordV1 {
+            genesis_hash: vec![0x22; 32],
+            device_public_key: Vec::new(),
+            device_birth_nonce_commitment: vec![0x33; 32],
+            creation_mode:
+                pb::device_birth_record_v1::CreationMode::DeviceBirthCreationModeGenesis as i32,
+            schema_version: 1,
+            protocol_version: 1,
+        }
+    }
+
     #[test]
     #[serial]
     fn startup_restore_identity_context_derives_binding_key_and_router() {
         let _guard = setup_test_env();
-        let device_id = vec![0x11; 32];
-        let genesis_hash = vec![0x22; 32];
-        let hw = vec![0x33; 32];
-        let env = vec![0x44; 32];
-        let expected_binding = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
-            &hw,
-            &env,
+        let expected_att = dsm::crypto::device_birth::DeviceBirthInputs::new(
+            [0x33; 32],
+            dsm::crypto::device_birth::CreationMode::Genesis,
+            1,
+            1,
         )
-        .expect("binding derivation");
+        .derive_att();
 
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: hw,
-                    cdbrw_env_fingerprint: env,
+                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1528,7 +1500,7 @@ endpoint = "http://127.0.0.1:8080"
 
         assert_eq!(
             crate::fetch_dbrw_binding_key().expect("binding key"),
-            expected_binding.to_vec()
+            expected_att.to_vec()
         );
         assert!(crate::is_sdk_context_initialized());
     }
@@ -1543,8 +1515,7 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1558,8 +1529,7 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1579,8 +1549,7 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1594,8 +1563,7 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x99; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });

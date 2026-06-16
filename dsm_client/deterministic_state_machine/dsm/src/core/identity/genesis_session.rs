@@ -123,29 +123,15 @@ pub struct GenesisSession {
     pub session_id: [u8; 32],
     /// Device-specific entropy (32B)
     pub device_entropy: [u8; 32],
-    /// DBRW binding K_DBRW (32B) per whitepaper Definition 3 (canonical
-    /// four-input form):
-    ///
-    ///   `K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
-    ///                    || LP(genesis_id) || LP(device_id)
-    ///                    || LP(hw_entropy) || LP(env_fingerprint))`
-    ///
-    /// Derived inside the session by `compute_dbrw_binding()` AFTER
-    /// `compute_genesis_id()` (root-device invariant promotes
-    /// `device_id := genesis_id`), so the binding key reflects the
-    /// final protocol identity. Mixed into `S_master` IKM at keypair
-    /// derivation time — NEVER serialised, logged, or included in any
-    /// commitment. Zeroised when the session is dropped. Not part of
-    /// the genesis hash `G` (which whitepaper §2.5 keeps publicly
-    /// recomputable).
-    pub dbrw_binding: [u8; 32],
-    /// Silicon hardware entropy (Phase 2.2 calibration). Held in the
-    /// session so that `compute_dbrw_binding` can derive K_DBRW from
-    /// the canonical four-input preimage once `genesis_id` is known.
-    /// Zeroised on drop.
-    pub hw_entropy: Vec<u8>,
-    /// Canonical environment fingerprint. See `hw_entropy`.
-    pub env_fingerprint: Vec<u8>,
+    /// Deterministic device-birth binding `AttA` (32B): the install /
+    /// device-lineage material folded into `S_master` IKM (whitepaper
+    /// §11.1) in place of the removed silicon C-DBRW binding.  Computed by
+    /// the SDK from the canonical `DeviceBirthRecordV1`:
+    ///   `AttA = BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(record))`
+    /// and supplied to the session via `set_device_birth_att`.  NOT an
+    /// anti-clone proof and NOT part of the genesis hash `G` (which
+    /// whitepaper §2.5 keeps publicly recomputable).  Zeroised on drop.
+    pub device_birth_att: [u8; 32],
     /// Entropies from storage nodes (32B each)
     pub mpc_entropies: Vec<[u8; 32]>,
     /// Session metadata (opaque bytes)
@@ -184,9 +170,7 @@ impl GenesisSession {
         Ok(Self {
             session_id: sid,
             device_entropy: [0u8; 32],
-            dbrw_binding: [0u8; 32],
-            hw_entropy: Vec::new(),
-            env_fingerprint: Vec::new(),
+            device_birth_att: [0u8; 32],
             mpc_entropies: Vec::new(),
             metadata,
             commitments: Vec::new(),
@@ -198,63 +182,21 @@ impl GenesisSession {
         })
     }
 
-    /// Stage the silicon-binding inputs `(hw_entropy, env_fingerprint)`
-    /// that `compute_dbrw_binding()` will fold into the canonical K_DBRW
-    /// preimage once `compute_genesis_id` runs. Required before
-    /// `compute_dbrw_binding()` and `validate_session()`.
-    pub fn set_silicon_inputs(
-        &mut self,
-        hw_entropy: Vec<u8>,
-        env_fingerprint: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        if hw_entropy.is_empty() {
+    /// Stage the deterministic device-birth binding `AttA` that gets folded
+    /// into `S_master` IKM (whitepaper §11.1) in place of the removed silicon
+    /// C-DBRW binding.  `AttA` is computed by the SDK from the canonical
+    /// `DeviceBirthRecordV1`
+    /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(record))`) and
+    /// supplied here.  Required before `validate_session()` and
+    /// `derive_device_bound_keypair()`.  This is an install/device-lineage
+    /// binding, NOT an anti-clone proof.
+    pub fn set_device_birth_att(&mut self, device_birth_att: [u8; 32]) -> Result<(), DsmError> {
+        if device_birth_att == [0u8; 32] {
             return Err(DsmError::invalid_parameter(
-                "set_silicon_inputs: hw_entropy must not be empty",
+                "set_device_birth_att: AttA must not be all-zero",
             ));
         }
-        if env_fingerprint.is_empty() {
-            return Err(DsmError::invalid_parameter(
-                "set_silicon_inputs: env_fingerprint must not be empty",
-            ));
-        }
-        self.hw_entropy = hw_entropy;
-        self.env_fingerprint = env_fingerprint;
-        Ok(())
-    }
-
-    /// Derive the canonical K_DBRW from
-    ///   `BLAKE3("DSM/cdbrw/bind\0"
-    ///           || LP(genesis_id) || LP(device_id_bound)
-    ///           || LP(hw_entropy) || LP(env_fingerprint))`
-    /// and stash it on the session. The DSM root-device invariant is
-    /// `device_id = genesis_id` (see whitepaper §2.5 + the storage SDK's
-    /// post-genesis device_id promotion), so the device_id slot of the
-    /// preimage is bound to `genesis_id` here. The session's
-    /// `device_id` field — which is used in MPC canonical_a metadata —
-    /// is NOT mutated; that field stays the caller-supplied input so
-    /// publicly-observable derivations remain reproducible from the
-    /// public inputs.
-    ///
-    /// Preconditions:
-    /// - `compute_genesis_id` has been called (`genesis_id != [0u8; 32]`).
-    /// - `set_silicon_inputs` has been called.
-    pub fn compute_dbrw_binding(&mut self) -> Result<(), DsmError> {
-        if self.genesis_id == [0u8; 32] {
-            return Err(DsmError::invalid_operation(
-                "compute_dbrw_binding: genesis_id must be set first (call compute_genesis_id)",
-            ));
-        }
-        if self.hw_entropy.is_empty() || self.env_fingerprint.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "compute_dbrw_binding: silicon inputs not set (call set_silicon_inputs)",
-            ));
-        }
-        self.dbrw_binding = crate::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &self.genesis_id,
-            &self.genesis_id, // root invariant: device_id_bound = genesis_id
-            &self.hw_entropy,
-            &self.env_fingerprint,
-        )?;
+        self.device_birth_att = device_birth_att;
         Ok(())
     }
 
@@ -420,9 +362,9 @@ impl GenesisSession {
         if self.genesis_id == [0u8; 32] {
             return Err(DsmError::invalid_operation("Genesis ID not computed"));
         }
-        if self.dbrw_binding == [0u8; 32] {
+        if self.device_birth_att == [0u8; 32] {
             return Err(DsmError::invalid_operation(
-                "DBRW binding (K_DBRW) not set; required by whitepaper §11.1 eq.13",
+                "device-birth binding (AttA) not set; required by whitepaper §11.1 eq.13",
             ));
         }
         Ok(())
@@ -450,17 +392,17 @@ impl GenesisSession {
     /// Preconditions:
     /// - `compute_genesis_id` has been called (`genesis_id != [0u8; 32]`)
     /// - `dbrw_binding` is a non-zero `K_DBRW`
-    pub fn derive_silicon_bound_keypair(&self) -> Result<GenesisMasterKeypair, DsmError> {
+    pub fn derive_device_bound_keypair(&self) -> Result<GenesisMasterKeypair, DsmError> {
         use zeroize::Zeroize;
 
         if self.genesis_id == [0u8; 32] {
             return Err(DsmError::invalid_operation(
-                "compute_genesis_id must be called before derive_silicon_bound_keypair",
+                "compute_genesis_id must be called before derive_device_bound_keypair",
             ));
         }
-        if self.dbrw_binding == [0u8; 32] {
+        if self.device_birth_att == [0u8; 32] {
             return Err(DsmError::invalid_operation(
-                "K_DBRW must be set before derive_silicon_bound_keypair",
+                "device-birth AttA must be set before derive_device_bound_keypair",
             ));
         }
 
@@ -472,7 +414,7 @@ impl GenesisSession {
         // preimage is bound to `genesis_id`, matching the K_DBRW preimage
         // that `compute_dbrw_binding()` already used.
         let mut s_master =
-            derive_master_seed(&self.genesis_id, &self.genesis_id, &self.dbrw_binding);
+            derive_master_seed(&self.genesis_id, &self.genesis_id, &self.device_birth_att);
 
         // SPHINCS+ keypair from a 32-byte seed expanded out of S_master.
         let mut sphincs_seed_vec =
@@ -507,7 +449,7 @@ impl zeroize::Zeroize for GenesisSession {
     /// the session in serialised or in-memory form (whitepaper §11.1
     /// + §12 normative rule).
     fn zeroize(&mut self) {
-        self.dbrw_binding.zeroize();
+        self.device_birth_att.zeroize();
         self.device_entropy.zeroize();
         for e in &mut self.mpc_entropies {
             e.zeroize();
@@ -552,19 +494,23 @@ pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
 /// Pulled out as a free function so external verifiers (and the
 /// determinism property tests) can recompute it byte-for-byte from the
 /// public inputs (`g`, `device_id`) plus the held-on-device `K_DBRW`.
-pub fn derive_master_seed(g: &[u8; 32], device_id: &[u8; 32], k_dbrw: &[u8; 32]) -> [u8; 32] {
+pub fn derive_master_seed(
+    g: &[u8; 32],
+    device_id: &[u8; 32],
+    device_binding: &[u8; 32],
+) -> [u8; 32] {
     use zeroize::Zeroize;
 
     let s_0 = compute_step_salt(g);
     let mut ikm: Vec<u8> = Vec::with_capacity(32 * 4);
     ikm.extend_from_slice(g);
     ikm.extend_from_slice(device_id);
-    ikm.extend_from_slice(k_dbrw);
+    ikm.extend_from_slice(device_binding);
     ikm.extend_from_slice(&s_0);
 
     let s_master = crate::crypto::hkdf::extract(b"DSM/dev\0", &ikm);
 
-    // K_DBRW is now folded into S_master — clear the staging buffer.
+    // The device-birth binding is now folded into S_master — clear the buffer.
     ikm.zeroize();
 
     s_master
@@ -600,8 +546,7 @@ pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
 pub async fn create_genesis(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
+    device_birth_att: [u8; 32],
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisSession, DsmError> {
     if storage_nodes.len() < 3 {
@@ -639,12 +584,10 @@ pub async fn create_genesis(
     let mut session = GenesisSession::new(meta)?;
     session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
-    session.set_silicon_inputs(hw_entropy, env_fingerprint)?;
+    session.set_device_birth_att(device_birth_att)?;
 
     session.compute_commitments();
     session.compute_genesis_id();
-    // Canonical K_DBRW derived from (genesis_id, device_id = genesis_id, hw, env).
-    session.compute_dbrw_binding()?;
     session.validate_session()?;
 
     Ok(session)
@@ -652,17 +595,13 @@ pub async fn create_genesis(
 
 /// SDK-integrated genesis creation using a transport for node entropy collection.
 ///
-/// Silicon-binding inputs `(hw_entropy, env_fingerprint)` are mandatory
-/// — they feed the canonical K_DBRW derivation (whitepaper Definition 3,
-/// `BLAKE3("DSM/cdbrw/bind\0" || LP(genesis_id) || LP(device_id) ||
-///         LP(hw) || LP(env))`) once `genesis_id` is computed, which is
-/// then mixed into `S_master` IKM (whitepaper §11.1 eq.13) for the
-/// SPHINCS+/Kyber keypair derivation.
+/// The deterministic device-birth binding `AttA` is mandatory — it is mixed
+/// into `S_master` IKM (whitepaper §11.1 eq.13) for the SPHINCS+/Kyber keypair
+/// derivation in place of the removed silicon binding.
 pub async fn create_genesis_with_transport<T: GenesisTransport + Sync>(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
+    device_birth_att: [u8; 32],
     metadata: Option<Vec<u8>>,
     transport: &T,
 ) -> Result<GenesisSession, DsmError> {
@@ -690,7 +629,7 @@ pub async fn create_genesis_with_transport<T: GenesisTransport + Sync>(
     let mut session = GenesisSession::new(meta)?;
     session.initialize_mpc(device_id, storage_nodes.clone())?;
     session.device_entropy = device_entropy;
-    session.set_silicon_inputs(hw_entropy, env_fingerprint)?;
+    session.set_device_birth_att(device_birth_att)?;
 
     // Device commitment material for transport calls: H(session_id || device_entropy)
     let device_commitment = {
@@ -714,8 +653,6 @@ pub async fn create_genesis_with_transport<T: GenesisTransport + Sync>(
 
     session.compute_commitments();
     session.compute_genesis_id();
-    // Canonical K_DBRW derived from (genesis_id, device_id = genesis_id, hw, env).
-    session.compute_dbrw_binding()?;
     session.validate_session()?;
 
     Ok(session)
@@ -830,17 +767,14 @@ mod tests {
         s.device_entropy = id32(11);
         s.mpc_entropies = vec![id32(21), id32(22), id32(23)];
 
-        // Silicon inputs are mandatory for validate_session; K_DBRW is
-        // derived post-MPC from (genesis_id, device_id, hw, env).
-        s.set_silicon_inputs(vec![0xCC; 32], vec![0xDD; 32])
-            .unwrap();
+        // The device-birth binding AttA is mandatory for validate_session.
+        s.set_device_birth_att([0xCC; 32]).unwrap();
 
         s.compute_commitments();
         assert_eq!(s.commitments.len(), 1 + s.mpc_entropies.len());
         assert!(s.verify_commitments());
 
         s.compute_genesis_id();
-        s.compute_dbrw_binding().unwrap();
         assert_ne!(s.genesis_id, [0u8; 32]);
         s.validate_session().unwrap();
     }
@@ -849,9 +783,8 @@ mod tests {
     async fn test_create_genesis_path() {
         let dev = id32(0xAA);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
-        let s = create_genesis(dev, nodes, hw, env, Some(b"DSMv2|test".to_vec())).await;
+        let device_birth_att = [0xCC; 32];
+        let s = create_genesis(dev, nodes, device_birth_att, Some(b"DSMv2|test".to_vec())).await;
 
         let sess = match s {
             Ok(sess) => sess,
@@ -929,9 +862,8 @@ mod tests {
         use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
         let dev = id32(0x77);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
-        let session = create_genesis(dev, nodes, hw, env, Some(b"meta".to_vec()))
+        let att = [0xCC; 32];
+        let session = create_genesis(dev, nodes, att, Some(b"meta".to_vec()))
             .await
             .expect("create_genesis succeeds");
 
@@ -960,60 +892,47 @@ mod tests {
     }
 
     /// Helper: build a session with deterministic, fixed inputs so the
-    /// silicon-bound keypair derivation is reproducible across runs.
-    /// K_DBRW is derived from
-    ///   `(genesis_id, device_id = genesis_id, hw_entropy, env_fingerprint)`
-    /// by `compute_dbrw_binding()`.
+    /// device-bound keypair derivation is reproducible across runs.  The
+    /// device-birth binding `AttA` is supplied directly.
     fn deterministic_session(
         device_id: [u8; 32],
         nodes: Vec<NodeId>,
         device_entropy: [u8; 32],
         mpc_entropies: Vec<[u8; 32]>,
         metadata: Vec<u8>,
-        hw_entropy: Vec<u8>,
-        env_fingerprint: Vec<u8>,
+        device_birth_att: [u8; 32],
     ) -> GenesisSession {
         let mut s = GenesisSession::new(metadata).unwrap();
         s.initialize_mpc(device_id, nodes).unwrap();
         s.device_entropy = device_entropy;
         s.mpc_entropies = mpc_entropies;
-        s.set_silicon_inputs(hw_entropy, env_fingerprint).unwrap();
+        s.set_device_birth_att(device_birth_att).unwrap();
         s.compute_commitments();
         s.compute_genesis_id();
-        s.compute_dbrw_binding().unwrap();
         s
     }
 
-    /// Whitepaper §11.1 conformance: same `(device_id, hw_entropy,
-    /// env_fingerprint, participants, metadata, contributions)` ⇒ same
-    /// SPHINCS+ + Kyber keypair.  This is the core silicon-binding
-    /// determinism property.
+    /// Whitepaper §11.1 conformance: same `(device_id, device_birth_att,
+    /// participants, metadata, contributions)` ⇒ same SPHINCS+ + Kyber
+    /// keypair.  This is the core device-bound determinism property.
     #[test]
-    fn silicon_bound_keypair_is_deterministic_under_same_inputs() {
+    fn device_bound_keypair_is_deterministic_under_same_inputs() {
         let device_id = id32(0x42);
         let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
         let dev_e = id32(0xD0);
         let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
         let meta = b"DSMv2|determinism".to_vec();
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
 
-        let s1 = deterministic_session(
-            device_id,
-            nodes.clone(),
-            dev_e,
-            mpc_e.clone(),
-            meta.clone(),
-            hw.clone(),
-            env.clone(),
-        );
-        let s2 = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, hw, env);
+        let s1 =
+            deterministic_session(device_id, nodes.clone(), dev_e, mpc_e.clone(), meta.clone(), att);
+        let s2 = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, att);
 
         // Sanity: the two sessions agree on the public-recomputable G.
         assert_eq!(s1.genesis_id, s2.genesis_id);
 
-        let kp1 = s1.derive_silicon_bound_keypair().unwrap();
-        let kp2 = s2.derive_silicon_bound_keypair().unwrap();
+        let kp1 = s1.derive_device_bound_keypair().unwrap();
+        let kp2 = s2.derive_device_bound_keypair().unwrap();
 
         assert_eq!(kp1.sphincs_public, kp2.sphincs_public);
         assert_eq!(kp1.sphincs_secret, kp2.sphincs_secret);
@@ -1025,48 +944,35 @@ mod tests {
         assert!(!kp1.kyber_public.is_empty());
     }
 
-    /// Whitepaper §12 silicon-binding: differing silicon inputs
-    /// (`hw_entropy`, `env_fingerprint`) MUST produce different keypairs
-    /// even when every other public input is identical. Without this,
-    /// the silicon binding is merely decorative.
+    /// Differing device-birth bindings (`AttA`) MUST produce different
+    /// keypairs even when every public input (`G`) is identical — AttA is
+    /// the per-install material folded into the master-seed IKM (§11.1).
     #[test]
-    fn silicon_bound_keypair_changes_with_silicon_inputs() {
+    fn device_bound_keypair_changes_with_device_birth_att() {
         let device_id = id32(0x42);
         let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
         let dev_e = id32(0xD0);
         let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
-        let meta = b"DSMv2|silicon".to_vec();
-        let env = vec![0xDD; 32];
+        let meta = b"DSMv2|device-birth".to_vec();
 
-        let s_dev_a = deterministic_session(
+        let s_a = deterministic_session(
             device_id,
             nodes.clone(),
             dev_e,
             mpc_e.clone(),
             meta.clone(),
-            vec![0xA0; 32],
-            env.clone(),
+            [0xA0; 32],
         );
-        let s_dev_b = deterministic_session(
-            device_id,
-            nodes.clone(),
-            dev_e,
-            mpc_e.clone(),
-            meta.clone(),
-            vec![0xB0; 32],
-            env,
-        );
+        let s_b =
+            deterministic_session(device_id, nodes.clone(), dev_e, mpc_e.clone(), meta.clone(), [0xB0; 32]);
 
-        // Public-inputs ⇒ G is identical (the spec keeps G publicly
-        // recomputable; hw_entropy is not part of A).
-        assert_eq!(s_dev_a.genesis_id, s_dev_b.genesis_id);
+        // Public inputs ⇒ G is identical (AttA is not part of G).
+        assert_eq!(s_a.genesis_id, s_b.genesis_id);
 
-        // But the K_DBRW and the resulting keypairs must diverge —
-        // silicon is bound at the K_DBRW preimage AND one layer down
-        // in the master-seed IKM.
-        assert_ne!(s_dev_a.dbrw_binding, s_dev_b.dbrw_binding);
-        let kp_a = s_dev_a.derive_silicon_bound_keypair().unwrap();
-        let kp_b = s_dev_b.derive_silicon_bound_keypair().unwrap();
+        // But AttA and the resulting keypairs must diverge.
+        assert_ne!(s_a.device_birth_att, s_b.device_birth_att);
+        let kp_a = s_a.derive_device_bound_keypair().unwrap();
+        let kp_b = s_b.derive_device_bound_keypair().unwrap();
 
         assert_ne!(kp_a.sphincs_public, kp_b.sphincs_public);
         assert_ne!(kp_a.sphincs_secret, kp_b.sphincs_secret);
@@ -1074,36 +980,32 @@ mod tests {
         assert_ne!(kp_a.kyber_secret, kp_b.kyber_secret);
     }
 
-    /// Whitepaper §11.1 + §12 normative rule: `K_DBRW` MUST NEVER
-    /// appear in any externally-publishable bytes.  Concretely, no
-    /// 32-byte window of the SanitizedGenesisPayload encoding may
-    /// equal the `K_DBRW` value.
+    /// The device-birth binding `AttA` is folded into key derivation but MUST
+    /// NEVER appear in externally-publishable bytes: no 32-byte window of the
+    /// SanitizedGenesisPayload encoding may equal `AttA`.
     #[test]
-    fn k_dbrw_never_appears_in_sanitized_payload_bytes() {
+    fn device_birth_att_never_appears_in_sanitized_payload_bytes() {
         let device_id = id32(0x42);
         let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
         let dev_e = id32(0xD0);
         let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
         let meta = b"DSMv2|nonleak".to_vec();
-        // High-entropy silicon inputs so the derived K_DBRW has a
-        // byte-pattern unlikely to occur by accident anywhere in the
-        // payload.
-        let hw: Vec<u8> = vec![
-            0x9a, 0x73, 0x21, 0xf0, 0x4c, 0x88, 0xb1, 0x5d, 0xee, 0x06, 0x97, 0x42, 0xa8, 0x33,
-            0xcf, 0x10, 0x5b, 0xc4, 0x29, 0x77, 0x84, 0x1e, 0xd3, 0x6a, 0x2f, 0x90, 0xab, 0x71,
-            0x05, 0xfd, 0x68, 0x4e,
-        ];
-        let env: Vec<u8> = vec![
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
-            0xff, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98,
-            0x76, 0x54, 0x32, 0x10,
-        ];
-
-        let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, hw, env);
-        // K_DBRW is now session-derived from (genesis_id, device_id,
-        // hw, env); read it back to check it doesn't leak.
-        let k_dbrw: [u8; 32] = s.dbrw_binding;
-        let mk = s.derive_silicon_bound_keypair().unwrap();
+        // High-entropy AttA so its byte-pattern is unlikely to occur by
+        // accident anywhere in the payload.
+        let s = deterministic_session(
+            device_id,
+            nodes,
+            dev_e,
+            mpc_e,
+            meta,
+            [
+                0x9a, 0x73, 0x21, 0xf0, 0x4c, 0x88, 0xb1, 0x5d, 0xee, 0x06, 0x97, 0x42, 0xa8, 0x33,
+                0xcf, 0x10, 0x5b, 0xc4, 0x29, 0x77, 0x84, 0x1e, 0xd3, 0x6a, 0x2f, 0x90, 0xab, 0x71,
+                0x05, 0xfd, 0x68, 0x4e,
+            ],
+        );
+        let att: [u8; 32] = s.device_birth_att;
+        let mk = s.derive_device_bound_keypair().unwrap();
 
         // Construct the externally-publishable payload (the only thing
         // that is allowed to leave the device).
@@ -1129,19 +1031,19 @@ mod tests {
         flat.extend_from_slice(&mk.kyber_public);
 
         // Sanity: there's enough material to hold a 32-byte pattern.
-        assert!(flat.len() >= k_dbrw.len());
+        assert!(flat.len() >= att.len());
 
-        // No 32-byte window may equal K_DBRW.
+        // No 32-byte window may equal AttA.
         let mut leaked = false;
-        for w in flat.windows(k_dbrw.len()) {
-            if w == k_dbrw {
+        for w in flat.windows(att.len()) {
+            if w == att {
                 leaked = true;
                 break;
             }
         }
         assert!(
             !leaked,
-            "K_DBRW byte-pattern leaked into externally-publishable payload"
+            "AttA byte-pattern leaked into externally-publishable payload"
         );
     }
 
@@ -1200,13 +1102,11 @@ mod tests {
             (nodes[2].clone(), id32(0xA3)),
         ];
         let transport = FixedEntropyTransport::new(&map);
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
         let session = create_genesis_with_transport(
             device_id,
             nodes.clone(),
-            hw,
-            env,
+            att,
             Some(b"DSMv2|sub1".to_vec()),
             &transport,
         )
@@ -1256,10 +1156,9 @@ mod tests {
             (nodes[4].clone(), id32(0xB5)),
         ];
         let transport = FixedEntropyTransport::new(&map);
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
         let session =
-            create_genesis_with_transport(device_id, nodes.clone(), hw, env, None, &transport)
+            create_genesis_with_transport(device_id, nodes.clone(), att, None, &transport)
                 .await
                 .expect("5-node genesis should succeed");
 
@@ -1302,13 +1201,11 @@ mod tests {
             (nodes[2].clone(), id32(0xC3)),
         ];
         let transport = FixedEntropyTransport::new(&map);
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
         let session = create_genesis_with_transport(
             device_id,
             nodes,
-            hw,
-            env,
+            att,
             Some(b"DSMv2|sub3-transport".to_vec()),
             &transport,
         )
@@ -1333,32 +1230,21 @@ mod tests {
         let dev_e = id32(0xD0);
         let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
         let meta = b"DSMv2|recompute".to_vec();
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
+        let att = [0xCC; 32];
 
-        let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, hw, env);
+        let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, att);
 
-        // Spec-side recomputation: G already lives in s.genesis_id and
-        // dbrw_binding was derived by compute_dbrw_binding(). Per the
-        // root-device invariant the DevID slot of both the K_DBRW
-        // preimage and the §11.1 IKM is bound to genesis_id.
-        let s_master_session = derive_master_seed(&s.genesis_id, &s.genesis_id, &s.dbrw_binding);
+        // Spec-side: S_master = HKDF(IKM = G ‖ DevID(=G) ‖ AttA ‖ s_0).
+        let s_master_session =
+            derive_master_seed(&s.genesis_id, &s.genesis_id, &s.device_birth_att);
 
-        // Independent path: rebuild IKM from the spec layout directly,
-        // re-deriving K_DBRW from the canonical four-input preimage
-        // (with the device_id slot bound to genesis_id).
-        let k_dbrw = crate::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &s.genesis_id,
-            &s.genesis_id,
-            &s.hw_entropy,
-            &s.env_fingerprint,
-        )
-        .expect("derive_cdbrw_binding_key");
+        // Independent path: rebuild the §11.1 IKM directly from the public
+        // inputs + the session's AttA (root-device invariant: DevID slot = G).
         let s_0 = compute_step_salt(&s.genesis_id);
         let mut ikm: Vec<u8> = Vec::new();
         ikm.extend_from_slice(&s.genesis_id);
         ikm.extend_from_slice(&s.genesis_id);
-        ikm.extend_from_slice(&k_dbrw);
+        ikm.extend_from_slice(&s.device_birth_att);
         ikm.extend_from_slice(&s_0);
         let s_master_independent = crate::crypto::hkdf::extract(b"DSM/dev\0", &ikm);
 
