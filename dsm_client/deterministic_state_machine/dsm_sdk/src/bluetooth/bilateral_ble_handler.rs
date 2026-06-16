@@ -3441,6 +3441,11 @@ impl BilateralBleHandler {
             // §4.3: transmit pre-update SMT root (r_A) so receiver can fully verify
             // π_rel_parent (h_n ∈ r_A) per whitepaper §4.3 acceptance predicate #2.
             sender_smt_root_before: pre_root.to_vec(),
+            // Offline-bearer anchor attestation. None until the manager has an anchor transport
+            // (the Safe 7 BLE element) that produces an attestation at finalize; for OFFLINE_BEARER_
+            // REQUIRED transfers the receiver rejects a confirm that lacks one (fail-closed).
+            island_attestation: None,
+            anchor_expiry_tick: 0,
         };
 
         // 8. Wrap in envelope
@@ -3798,6 +3803,32 @@ impl BilateralBleHandler {
         Ok(())
     }
 
+    /// Convert the SDK's generated IslandAttestationProto into the core domain type. The SDK and
+    /// core have distinct generated proto modules, so this bridges the two.
+    fn island_attestation_from_generated(
+        p: &generated::IslandAttestationProto,
+    ) -> Result<dsm::types::device_state::IslandAttestation, DsmError> {
+        fn f32(name: &str, v: &[u8]) -> Result<[u8; 32], DsmError> {
+            <[u8; 32]>::try_from(v).map_err(|_| {
+                DsmError::invalid_operation(format!("island_attestation.{name} must be 32 bytes"))
+            })
+        }
+        Ok(dsm::types::device_state::IslandAttestation {
+            id_island: f32("id_island", &p.id_island)?,
+            id_anchor_set: f32("id_anchor_set", &p.id_anchor_set)?,
+            ui_transcript_hash: f32("ui_transcript_hash", &p.ui_transcript_hash)?,
+            signature: p.signature.clone(),
+            policy_id: f32("policy_id", &p.policy_id)?,
+            anchor_pubkey_hash: f32("anchor_pubkey_hash", &p.anchor_pubkey_hash)?,
+            firmware_hash: f32("firmware_hash", &p.firmware_hash)?,
+            policy_hash: f32("policy_hash", &p.policy_hash)?,
+            parent_root: f32("parent_root", &p.parent_root)?,
+            successor_root: f32("successor_root", &p.successor_root)?,
+            operation_hash: f32("operation_hash", &p.operation_hash)?,
+            state_number: p.state_number,
+        })
+    }
+
     /// 3-step protocol step 3 (receiver side): Handle BilateralConfirmRequest from sender.
     ///
     /// Verifies sender's signature, validates proofs, finalizes the receiver side
@@ -4135,6 +4166,39 @@ impl BilateralBleHandler {
             return Err(DsmError::invalid_operation(
                 "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
             ));
+        }
+
+        // Offline-bearer anchor enforcement (OFFLINE_BEARER_REQUIRED transfers only). The receiver
+        // releases value only if the sender's anchor attestation verifies against the PINNED
+        // enrollment for this counterparty (anchor pubkey + measured firmware hash + policy) and
+        // validly advances the pinned monotonic frontier. Fail-closed: a missing attestation, an
+        // un-admitted / fresh self-provisioned identity, a non-enrolled firmware, or a forked /
+        // replayed frontier rejects the transfer. `h_n` above is the shared relationship tip the gate
+        // signed as the transition input; the device's on-chip frontier is the primary serializer,
+        // this is the receiver-side identity pin + cross-receiver fork detector. Ordinary transfers
+        // are unaffected (the gate predicate is false for them).
+        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+            &session.operation,
+        ) {
+            let att_proto = confirm_request.island_attestation.as_ref().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "OFFLINE_BEARER_REQUIRED confirm missing anchor attestation (fail-closed)",
+                )
+            })?;
+            let att = Self::island_attestation_from_generated(att_proto)?;
+            let manager = self.bilateral_tx_manager.read().await;
+            manager.verify_incoming_offline_bearer_commit(
+                &session.counterparty_device_id,
+                &session.operation,
+                &h_n,
+                confirm_request.anchor_expiry_tick,
+                &pre_entropy,
+                &att,
+            )?;
+            info!(
+                "[BILATERAL] offline-bearer anchor verified against pinned enrollment for commitment {}",
+                bytes_to_base32(&commitment_hash[..8])
+            );
         }
 
         // Derive receiver-side credit deltas from the session operation.

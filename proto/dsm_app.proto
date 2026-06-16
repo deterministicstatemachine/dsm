@@ -1850,6 +1850,12 @@ message BilateralConfirmRequest {
   Hash32 shared_chain_tip_new        = 7; // h_{n+1}
   bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
   bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
+  // Offline-bearer (OFFLINE_BEARER_REQUIRED) only: the anchor attestation + the signed expiry tick
+  // the receiver needs to reconstruct + verify the anchor signature against its PINNED enrollment
+  // (anchor pubkey, firmware_hash, policy, frontier). Absent for ordinary transfers. The receiver
+  // rejects an OFFLINE_BEARER_REQUIRED confirm that lacks a valid, admitted attestation (fail-closed).
+  IslandAttestationProto island_attestation = 10;
+  uint64 anchor_expiry_tick                 = 11; // == the transition target state the gate signed as expiry_tick
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)

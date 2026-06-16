@@ -410,6 +410,7 @@ mod tests {
             shared_chain_tip_new: Some(generated::Hash32 { v: vec![0; 32] }),
             pre_entropy: vec![],
             sender_smt_root_before: vec![],
+            ..Default::default()
         };
         let body = req.encode_to_vec();
         let env = make_invoke_envelope("bilateral.confirm", &body);
@@ -435,6 +436,7 @@ mod tests {
             shared_chain_tip_new: Some(generated::Hash32 { v: vec![0; 32] }),
             pre_entropy: vec![],
             sender_smt_root_before: vec![],
+            ..Default::default()
         };
         let body = req.encode_to_vec();
         let mut env = make_invoke_envelope("bilateral.confirm", &body);
