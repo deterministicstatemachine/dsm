@@ -60,6 +60,18 @@ use crate::jni::bilateral_poll::{
     run_bilateral_poll, PollConfig, POLL_ATTEMPTS_STARTED, POLL_ATTEMPTS_SUCCESS,
     POLL_ATTEMPTS_TIMEOUT, POLL_TOTAL_ITERATIONS,
 };
+// Symbols used only on the Android BLE path (moved during the domain-tags / jni-state refactor;
+// these `use`s restore the android+bluetooth build, which had not been recompiled since).
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::bluetooth::bilateral_transport_adapter::BleTransportDelegate;
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::jni::state::{parse_hex_32, DEVICE_ID_TO_ADDR};
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::storage::client_db::get_contact_chain_tip;
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use jni::objects::{JObject, JValue};
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use tokio::runtime::Handle;
 
 // --- Helpers to convert raw JNI handles ---
 /// Convert raw JNIEnv pointer to safe wrapper.
@@ -1258,7 +1270,7 @@ fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
 /// 0x03 envelopes rather than BLE chunks.
 fn process_envelope_v3_impl(
     req: &[u8],
-    _device_address: Option<&str>,
+    device_address: Option<&str>,
 ) -> Result<Vec<u8>, IngressShimError> {
     ensure_bootstrap();
 
@@ -2317,6 +2329,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                         .to_vec(),
                                     message: req.memo_hint.clone(),
                                     signature: vec![],
+                                    policy_commit: [0u8; 32],
+                                    authority_policy: None,
                                 };
                                 hint_op.to_bytes()
                             } else {
