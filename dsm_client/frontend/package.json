@@ -44,7 +44,7 @@
     "ci": "npm run clean && npm run type-check && npm run lint && npm run test:ci && npm run build:android-webpack && npm run copy:android && npm run validate:android-assets"
   },
   "dependencies": {
-    "@types/react": "^19.2.14",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "buffer": "^6.0.3",
     "html5-qrcode": "^2.3.8",
