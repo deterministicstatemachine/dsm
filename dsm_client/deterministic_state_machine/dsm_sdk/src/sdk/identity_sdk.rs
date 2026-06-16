@@ -540,9 +540,8 @@ impl IdentitySDK {
                     "identity_sdk: platform device-birth entropy required for genesis",
                 )
             })?;
-        let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_entropy(
+        let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
             &entropy.hw_entropy,
-            &entropy.env_fingerprint,
             dsm::crypto::device_birth::CreationMode::Genesis,
         )
         .derive_att();

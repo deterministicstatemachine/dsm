@@ -1149,9 +1149,8 @@ impl CoreSDK {
             })?;
         // Device-birth binding `AttA` replaces the silicon C-DBRW binding; the
         // birth nonce is seeded from the platform's per-device entropy.
-        let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_entropy(
+        let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
             &entropy.hw_entropy,
-            &entropy.env_fingerprint,
             dsm::crypto::device_birth::CreationMode::Genesis,
         )
         .derive_att();

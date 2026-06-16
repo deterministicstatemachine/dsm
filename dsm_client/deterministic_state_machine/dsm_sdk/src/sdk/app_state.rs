@@ -1250,14 +1250,11 @@ mod tests {
         let taken = AppState::take_platform_entropy_inputs().expect("take");
 
         use dsm::crypto::device_birth::{CreationMode, DeviceBirthInputs};
-        let att_via_slot = DeviceBirthInputs::from_entropy(
-            &taken.hw_entropy,
-            &taken.env_fingerprint,
-            CreationMode::Genesis,
-        )
-        .derive_att();
+        let att_via_slot =
+            DeviceBirthInputs::from_platform_nonce(&taken.hw_entropy, CreationMode::Genesis)
+                .derive_att();
         let att_direct =
-            DeviceBirthInputs::from_entropy(&hw, &env, CreationMode::Genesis).derive_att();
+            DeviceBirthInputs::from_platform_nonce(&hw, CreationMode::Genesis).derive_att();
 
         assert_eq!(
             att_via_slot, att_direct,

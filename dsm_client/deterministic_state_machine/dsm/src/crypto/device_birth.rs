@@ -22,7 +22,7 @@
 //! lineage-distinctive material is the device-birth nonce commitment and the
 //! creation mode (`genesis | secondary_device | recovery_successor`).
 
-use crate::common::domain_tags::{TAG_DSM_DEVICE_BIRTH_ATT, TAG_DSM_DEVICE_BIRTH_NONCE};
+use crate::common::domain_tags::TAG_DSM_DEVICE_BIRTH_ATT;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::canonical_lp;
 
@@ -81,20 +81,20 @@ impl DeviceBirthInputs {
         }
     }
 
-    /// Build schema/protocol-v1 birth inputs from device-local platform entropy
-    /// bytes (online MPC-genesis path).  The bytes seed a device-birth nonce
-    /// commitment.  This is NOT a silicon attestation — no orbit probe, trust
-    /// gate, or K_DBRW; it merely binds the identity to this device install.
-    pub fn from_entropy(
-        hw_bytes: &[u8],
-        env_bytes: &[u8],
+    /// Build schema/protocol-v1 birth inputs from the platform-supplied 32-byte
+    /// device-birth nonce commitment — the SAME persisted per-install value the
+    /// host also carries in `DeviceBirthRecordV1.device_birth_nonce_commitment`.
+    /// Using it verbatim (no second hash) is what makes the MPC-genesis path and
+    /// the bootstrap-finalize path derive an IDENTICAL AttA, so the device's
+    /// re-derived signing key matches its published genesis AK.  NOT a silicon
+    /// attestation (no orbit probe, trust gate, or K_DBRW).
+    pub fn from_platform_nonce(
+        nonce_commitment_bytes: &[u8],
         creation_mode: CreationMode,
     ) -> Self {
-        let mut h = dsm_domain_hasher(TAG_DSM_DEVICE_BIRTH_NONCE);
-        h.update(hw_bytes);
-        h.update(env_bytes);
         let mut nonce_commitment = [0u8; 32];
-        nonce_commitment.copy_from_slice(h.finalize().as_bytes());
+        let n = nonce_commitment_bytes.len().min(32);
+        nonce_commitment[..n].copy_from_slice(&nonce_commitment_bytes[..n]);
         Self::new(nonce_commitment, creation_mode, 1, 1)
     }
 

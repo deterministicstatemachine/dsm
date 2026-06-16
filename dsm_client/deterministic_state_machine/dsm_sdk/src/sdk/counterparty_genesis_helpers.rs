@@ -245,9 +245,8 @@ pub async fn fetch_genesis_state(
                 "counterparty_genesis_helpers: platform device-birth entropy required",
             )
         })?;
-    let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_entropy(
+    let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
         &entropy.hw_entropy,
-        &entropy.env_fingerprint,
         dsm::crypto::device_birth::CreationMode::Genesis,
     )
     .derive_att();

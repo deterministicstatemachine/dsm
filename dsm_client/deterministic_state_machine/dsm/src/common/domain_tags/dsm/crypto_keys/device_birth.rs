@@ -9,12 +9,6 @@
 /// anti-clone proof.
 pub const TAG_DSM_DEVICE_BIRTH_ATT: &str = "DSM/device-birth-att/v1";
 
-/// Domain tag for the device-birth nonce commitment derived from device-local
-/// platform entropy: `commitment = BLAKE3(TAG || hw_bytes || env_bytes)`.  This
-/// seeds the birth nonce on the online MPC-genesis path; it is NOT a silicon
-/// attestation (no orbit probe, trust gate, or K_DBRW).
-pub const TAG_DSM_DEVICE_BIRTH_NONCE: &str = "DSM/device-birth-nonce/v1";
-
 /// Domain tag for the soft-vault at-rest device binding key (storage-encryption
 /// only; not a protocol identity).  `key = BLAKE3(TAG || device_id_hint)`.
 pub const TAG_DSM_SOFT_VAULT_BINDING: &str = "DSM/soft-vault-binding/v1";
