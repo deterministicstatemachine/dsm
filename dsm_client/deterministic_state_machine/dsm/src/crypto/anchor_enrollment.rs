@@ -163,6 +163,12 @@ pub trait AnchorEnrollmentStore: Send + Sync {
     ) -> Result<bool, DsmError>;
 }
 
+impl std::fmt::Debug for dyn AnchorEnrollmentStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AnchorEnrollmentStore(..)")
+    }
+}
+
 /// Reference in-memory [`AnchorEnrollmentStore`] (host wiring + tests; SDKs back it with storage).
 #[derive(Default)]
 pub struct InMemoryAnchorEnrollmentStore {
