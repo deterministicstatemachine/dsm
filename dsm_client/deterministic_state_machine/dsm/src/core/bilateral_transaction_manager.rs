@@ -789,6 +789,24 @@ impl BilateralTransactionManager {
             })
     }
 
+    /// Admit a counterparty's anchor only if it is not already admitted (idempotent). Returns
+    /// whether an admission was performed. Used so re-seeing a counterparty does not reset its
+    /// tracked monotonic frontier back to genesis.
+    pub fn admit_anchor_if_absent(
+        &self,
+        sender_device_id: [u8; 32],
+        record: crate::crypto::anchor_transport::AnchorIdentityRecord,
+        policy_hash: [u8; 32],
+        initial_root: [u8; 32],
+        initial_state: u64,
+    ) -> Result<bool, DsmError> {
+        if self.enrollment_store.get(&sender_device_id).is_some() {
+            return Ok(false);
+        }
+        self.admit_anchor(sender_device_id, record, policy_hash, initial_root, initial_state)?;
+        Ok(true)
+    }
+
     /// Receiver-side enforcement: verify an incoming OFFLINE_BEARER_REQUIRED commit's anchor
     /// attestation against the PINNED enrollment for `sender_device_id`, then CAS-advance the pinned
     /// frontier. Fail-closed — a non-admitted sender, a clone/fresh identity, a non-enrolled
@@ -813,6 +831,56 @@ impl BilateralTransactionManager {
             entropy,
             att,
         )
+    }
+
+    /// Sender-side: produce the offline-bearer anchor attestation for a pending precommitment by
+    /// running the anchor gate over the transition (signs with the admitted anchor transport and
+    /// advances the device's single frontier). Returns `None` when no anchor transport is admitted
+    /// or the op is not OFFLINE_BEARER_REQUIRED — so a build with no transport carries no attestation
+    /// and the receiver rejects fail-closed. The returned `u64` is the signed `expiry_tick` the
+    /// receiver must echo (as `anchor_expiry_tick`) to reconstruct the signature.
+    pub async fn attest_offline_bearer_for_commitment(
+        &self,
+        commitment_hash: &[u8; 32],
+        current_tip: &[u8; 32],
+        entropy: &[u8; 32],
+        value_capability: crate::types::device_state::ValueCapability,
+    ) -> Result<Option<(crate::types::device_state::IslandAttestation, u64)>, DsmError> {
+        use crate::types::operations::Operation;
+        if self.anchor_transport.is_none() {
+            return Ok(None);
+        }
+        let (op, expiry) = match self.pending_commitments.get(commitment_hash) {
+            Some(p) => (p.operation.clone(), p.target_state_number),
+            None => return Ok(None),
+        };
+        if !operation_requires_offline_bearer(&op) {
+            return Ok(None);
+        }
+        let counterparty: [u8; 32] = match &op {
+            Operation::Transfer { to_device_id, .. } => {
+                to_device_id.as_slice().try_into().map_err(|_| {
+                    DsmError::invalid_operation(
+                        "attest_offline_bearer: to_device_id must be 32 bytes",
+                    )
+                })?
+            }
+            _ => return Ok(None),
+        };
+        let rel_key = compute_smt_key(&self.local_device_id, &counterparty);
+        let outcome = run_offline_bearer_gate(
+            self.anchor_transport.as_ref(),
+            &self.chain_tip_store,
+            &op,
+            current_tip,
+            &rel_key,
+            &self.local_device_id,
+            entropy,
+            expiry,
+            value_capability,
+        )
+        .await?;
+        Ok(Some((outcome.island_attestation, expiry)))
     }
 
     pub fn list_relationships(&self) -> Vec<BilateralRelationshipAnchor> {
