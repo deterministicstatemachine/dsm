@@ -249,6 +249,16 @@ pub fn dsm_policy_hash(policy_id: &[u8; 32], anchor_set_id: &[u8; 32]) -> [u8; 3
     *hasher.finalize().as_bytes()
 }
 
+/// Canonical policy id for the default offline-bearer authority policy. A device that holds an anchor
+/// stamps this id on its OFFLINE_BEARER_REQUIRED transfers; the sender and receiver agree on it by
+/// construction (it travels in the operation and is folded, via `dsm_policy_hash`, into the signed
+/// receipt). A richer policy registry can replace this single default later.
+pub fn dsm_offline_bearer_policy_id() -> [u8; 32] {
+    *dsm_domain_hasher("DSM/offline-bearer/policy-id/v1")
+        .finalize()
+        .as_bytes()
+}
+
 /// Domain tag for the stateful-receipt commitment appended to the island intent challenge.
 pub const OFFLINE_BEARER_RECEIPT_DOMAIN: &str = "DSM/offline-bearer/receipt/v1";
 

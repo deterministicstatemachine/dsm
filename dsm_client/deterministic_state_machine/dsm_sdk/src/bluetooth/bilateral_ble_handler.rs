@@ -1320,37 +1320,14 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// mock-anchor test shortcut: force a plain bilateral transfer to OFFLINE_BEARER_REQUIRED so the
-    /// anti-clone anchor path is exercised end-to-end, pinning THIS device's mock anchor identity in
-    /// the policy's `anchor_set_id`. MUST be applied identically wherever the sender's operation is
-    /// built (the prepare request the receiver decodes AND the precommit), so both parties hash the
-    /// same op. No-op in real builds (the body compiles to nothing without the feature).
-    #[allow(unused_variables)]
-    async fn maybe_force_offline_bearer_for_test(&self, op: &mut Operation) {
-        #[cfg(feature = "mock-anchor")]
-        {
-            use dsm::crypto::anchor_transport::AnchorTransport;
-            if let Operation::Transfer {
-                authority_policy, ..
-            } = op
-            {
-                if authority_policy.is_none() {
-                    let mock = dsm::crypto::anchor_transport::MockAnchorTransport::from_seed(
-                        crate::bluetooth::mock_anchor_seed(&self.device_id),
-                    );
-                    if let Ok(rec) = mock.get_identity().await {
-                        *authority_policy = Some(dsm::types::operations::AuthorityPolicy {
-                            mode: dsm::types::operations::AuthorityMode::OfflineBearerRequired,
-                            policy_id: [0u8; 32],
-                            anchor_set_id: dsm::attestation::compute_anchor_set_id(&[rec.id_anchor]),
-                        });
-                        log::info!(
-                            "[mock-anchor] forced OFFLINE_BEARER_REQUIRED on transfer to exercise the anchor"
-                        );
-                    }
-                }
-            }
-        }
+    /// Stamp OFFLINE_BEARER_REQUIRED on a plain transfer iff this device holds an anchor (production
+    /// policy — the manager decides based on whether an anchor transport is admitted; the ONLY mocked
+    /// piece is the transport itself). MUST be applied identically wherever the sender's operation is
+    /// built — the prepare request the receiver decodes AND the precommit — so both parties hash the
+    /// same op. A device with no anchor leaves the transfer plain (online-checked fallback).
+    async fn apply_offline_bearer_policy(&self, op: &mut Operation) {
+        let m = self.bilateral_tx_manager.read().await;
+        m.apply_offline_bearer_policy(op).await;
     }
 
     pub async fn prepare_bilateral_transaction(
@@ -1360,7 +1337,7 @@ impl BilateralBleHandler {
         validity_iterations: u64,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
-        self.maybe_force_offline_bearer_for_test(&mut operation).await;
+        self.apply_offline_bearer_policy(&mut operation).await;
 
         self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
             .await?;
@@ -1694,6 +1671,16 @@ impl BilateralBleHandler {
                 .unwrap_or([0u8; 32]) // use zero if no relationship established yet
         };
 
+        // The sender's published anchor identity, so the receiver can PIN it at relationship
+        // establishment and verify every offline-bearer receipt against it. None when this device
+        // holds no anchor (the transfer is then not offline-bearer and the receiver does not pin).
+        let sender_anchor_identity = {
+            let m = self.bilateral_tx_manager.read().await;
+            m.anchor_identity()
+                .await
+                .map(|rec| Self::anchor_identity_to_generated(&rec))
+        };
+
         debug!(
             "[BLE_HANDLER] Including sender_signing_public_key (len={}) and sender_chain_tip={} in PrepareRequest",
             sender_signing_public_key.len(),
@@ -1727,6 +1714,7 @@ impl BilateralBleHandler {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            sender_anchor_identity,
         };
 
         let tip_override = {
@@ -2016,6 +2004,38 @@ impl BilateralBleHandler {
         // Deserialize operation
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
+
+        // Offline-bearer admission (authority path = relationship establishment): the first time an
+        // OFFLINE_BEARER_REQUIRED offer arrives from a counterparty, PIN the anchor identity it
+        // carries. Idempotent — never resets the tracked frontier — so a later confirm verifies
+        // against this exact identity + enrolled firmware hash, and a clone/reflash presenting a
+        // different identity is rejected. No identity carried -> nothing pinned -> the confirm
+        // rejects fail-closed.
+        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(&operation) {
+            if let (
+                Some(ai),
+                dsm::types::operations::Operation::Transfer {
+                    authority_policy: Some(ap),
+                    ..
+                },
+            ) = (prepare_request.sender_anchor_identity.as_ref(), &operation)
+            {
+                let rec = Self::anchor_identity_from_generated(ai)?;
+                let policy_hash = dsm::attestation::dsm_policy_hash(
+                    &ap.policy_id,
+                    &dsm::attestation::compute_anchor_set_id(&[rec.id_anchor]),
+                );
+                let manager = self.bilateral_tx_manager.read().await;
+                let admitted =
+                    manager.admit_anchor_if_absent(sender_device_id, rec, policy_hash, [0u8; 32], 0)?;
+                if admitted {
+                    info!(
+                        "[BILATERAL] pinned offline-bearer anchor for sender={}",
+                        bytes_to_base32(&sender_device_id[..8])
+                    );
+                }
+            }
+        }
 
         // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
@@ -3905,6 +3925,39 @@ impl BilateralBleHandler {
         }
     }
 
+    /// Convert this device's anchor identity to the wire proto for the prepare request.
+    fn anchor_identity_to_generated(
+        rec: &dsm::crypto::anchor_transport::AnchorIdentityRecord,
+    ) -> generated::AnchorIdentityProto {
+        generated::AnchorIdentityProto {
+            id_anchor: rec.id_anchor.to_vec(),
+            commitment_c: rec.commitment_c.to_vec(),
+            leaf_spki: rec.leaf_spki.clone(),
+            firmware_id: rec.firmware_id.to_vec(),
+            screen_template_id: rec.screen_template_id,
+            firmware_hash: rec.firmware_hash.to_vec(),
+        }
+    }
+
+    /// Convert a peer's wire anchor identity (from the prepare request) to the core record to pin.
+    fn anchor_identity_from_generated(
+        p: &generated::AnchorIdentityProto,
+    ) -> Result<dsm::crypto::anchor_transport::AnchorIdentityRecord, DsmError> {
+        fn f32(name: &str, v: &[u8]) -> Result<[u8; 32], DsmError> {
+            <[u8; 32]>::try_from(v).map_err(|_| {
+                DsmError::invalid_operation(format!("anchor_identity.{name} must be 32 bytes"))
+            })
+        }
+        Ok(dsm::crypto::anchor_transport::AnchorIdentityRecord {
+            id_anchor: f32("id_anchor", &p.id_anchor)?,
+            commitment_c: f32("commitment_c", &p.commitment_c)?,
+            leaf_spki: p.leaf_spki.clone(),
+            firmware_id: f32("firmware_id", &p.firmware_id)?,
+            screen_template_id: p.screen_template_id,
+            firmware_hash: f32("firmware_hash", &p.firmware_hash)?,
+        })
+    }
+
     /// 3-step protocol step 3 (receiver side): Handle BilateralConfirmRequest from sender.
     ///
     /// Verifies sender's signature, validates proofs, finalizes the receiver side
@@ -4256,33 +4309,9 @@ impl BilateralBleHandler {
         if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
             &session.operation,
         ) {
-            // mock-anchor: stand in for admission-at-pairing — derive the sender's deterministic mock
-            // anchor identity from its device id and admit it (idempotently, so the tracked frontier
-            // is not reset on later transfers). Real builds admit through the authority path; absent
-            // admission, the verify below rejects fail-closed.
-            #[cfg(feature = "mock-anchor")]
-            {
-                use dsm::crypto::anchor_transport::AnchorTransport;
-                let sender = session.counterparty_device_id;
-                let mock = dsm::crypto::anchor_transport::MockAnchorTransport::from_seed(
-                    crate::bluetooth::mock_anchor_seed(&sender),
-                );
-                let rec = mock.get_identity().await.map_err(|e| {
-                    DsmError::invalid_operation(format!("mock-anchor: derive identity: {e}"))
-                })?;
-                let policy_id = match &session.operation {
-                    dsm::types::operations::Operation::Transfer {
-                        authority_policy: Some(ap),
-                        ..
-                    } => ap.policy_id,
-                    _ => [0u8; 32],
-                };
-                let anchor_set_id = dsm::attestation::compute_anchor_set_id(&[rec.id_anchor]);
-                let policy_hash = dsm::attestation::dsm_policy_hash(&policy_id, &anchor_set_id);
-                let manager = self.bilateral_tx_manager.read().await;
-                manager.admit_anchor_if_absent(sender, rec, policy_hash, [0u8; 32], 0)?;
-            }
-
+            // The sender's anchor was pinned when its OFFLINE_BEARER_REQUIRED offer was first seen
+            // (handle_prepare_request, the relationship-establishment authority path). Verify the
+            // attestation against that pinned enrollment; if none was pinned this rejects fail-closed.
             let att_proto = confirm_request.island_attestation.as_ref().ok_or_else(|| {
                 DsmError::invalid_operation(
                     "OFFLINE_BEARER_REQUIRED confirm missing anchor attestation (fail-closed)",
@@ -5507,10 +5536,9 @@ impl BilateralBleHandler {
                 )
             })?;
 
-        // mock-anchor: force OFFLINE_BEARER_REQUIRED identically to the prepare path, so the sender's
-        // precommit and the receiver's decoded op (from the prepare request) hash the same bytes and
-        // both exercise the anti-clone anchor. No-op in real builds.
-        self.maybe_force_offline_bearer_for_test(&mut operation).await;
+        // Apply the offline-bearer policy identically to the prepare path, so the sender's precommit
+        // and the receiver's decoded op (from the prepare request) hash the same bytes.
+        self.apply_offline_bearer_policy(&mut operation).await;
 
         // Ensure relationship + create a matching pre-commitment in the core manager.
         // This ensures the core has a pending commitment (used during finalization)

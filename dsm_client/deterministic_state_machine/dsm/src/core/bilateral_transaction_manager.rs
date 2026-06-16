@@ -789,6 +789,38 @@ impl BilateralTransactionManager {
             })
     }
 
+    /// This device's published anchor identity, if an anchor transport is admitted. `None` means no
+    /// offline-bearer anchor (no element / no mock) — the device cannot anchor transfers and falls
+    /// back to the online-checked path. The identity is the element's (real Safe 7 transport) or the
+    /// in-process mock's; the exchange + pinning around it are identical either way.
+    pub async fn anchor_identity(
+        &self,
+    ) -> Option<crate::crypto::anchor_transport::AnchorIdentityRecord> {
+        match &self.anchor_transport {
+            Some(t) => t.get_identity().await.ok(),
+            None => None,
+        }
+    }
+
+    /// Production policy: a device that HOLDS an offline-bearer anchor stamps OFFLINE_BEARER_REQUIRED
+    /// on its plain offline transfers, pinning its own anchor set. A device with no anchor leaves the
+    /// transfer plain (online-checked fallback). Not a test hook — the only thing the mock supplies is
+    /// the anchor transport; this policy logic is identical with a real element.
+    pub async fn apply_offline_bearer_policy(&self, op: &mut crate::types::operations::Operation) {
+        use crate::types::operations::{AuthorityMode, AuthorityPolicy, Operation};
+        if let Operation::Transfer { authority_policy, .. } = op {
+            if authority_policy.is_none() {
+                if let Some(rec) = self.anchor_identity().await {
+                    *authority_policy = Some(AuthorityPolicy {
+                        mode: AuthorityMode::OfflineBearerRequired,
+                        policy_id: crate::attestation::dsm_offline_bearer_policy_id(),
+                        anchor_set_id: crate::attestation::compute_anchor_set_id(&[rec.id_anchor]),
+                    });
+                }
+            }
+        }
+    }
+
     /// Admit a counterparty's anchor only if it is not already admitted (idempotent). Returns
     /// whether an admission was performed. Used so re-seeing a counterparty does not reset its
     /// tracked monotonic frontier back to genesis.
