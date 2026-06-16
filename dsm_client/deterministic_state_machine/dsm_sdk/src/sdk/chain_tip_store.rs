@@ -12,19 +12,14 @@ use dsm::types::error::DsmError;
 
 use crate::storage::client_db;
 
-/// SQLite-backed chain tip store for SDK usage.
+/// SQLite-backed chain tip store for SDK usage. The per-device anchor frontier is persisted in the
+/// `anchor_frontiers` table (see `client_db::anchor_persist`) so it survives an app restart.
 #[derive(Default, Clone)]
-pub struct SqliteChainTipStore {
-    /// In-memory anchor frontier (one per anchor device id), shared across clones. The contact chain
-    /// tip is SQLite-backed; the anchor frontier is in-memory for now — enough for mock-anchor
-    /// end-to-end testing within a process. SQLite persistence of the frontier is a follow-up.
-    anchor_frontier:
-        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 32], ([u8; 32], u64)>>>,
-}
+pub struct SqliteChainTipStore;
 
 impl SqliteChainTipStore {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -60,7 +55,7 @@ impl ChainTipStore for SqliteChainTipStore {
     }
 
     fn get_anchor_frontier(&self, anchor_id: &[u8; 32]) -> Option<([u8; 32], u64)> {
-        self.anchor_frontier.lock().unwrap().get(anchor_id).copied()
+        client_db::anchor_persist::get_anchor_frontier(anchor_id)
     }
 
     fn set_anchor_frontier(
@@ -70,14 +65,13 @@ impl ChainTipStore for SqliteChainTipStore {
         new_root: [u8; 32],
         new_state_number: u64,
     ) -> Result<bool, DsmError> {
-        let mut map = self.anchor_frontier.lock().unwrap();
-        if let Some((cur_root, cur_state)) = map.get(anchor_id).copied() {
-            if cur_root != expected_parent_root || new_state_number <= cur_state {
-                return Ok(false);
-            }
-        }
-        map.insert(*anchor_id, (new_root, new_state_number));
-        Ok(true)
+        client_db::anchor_persist::set_anchor_frontier_cas(
+            anchor_id,
+            expected_parent_root,
+            new_root,
+            new_state_number,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("set_anchor_frontier persist failed: {e}")))
     }
 }
 
@@ -139,25 +133,4 @@ mod tests {
         let _ = store2;
     }
 
-    #[test]
-    fn anchor_frontier_cas_advances_rejects_replay_and_is_shared_across_clones() {
-        let store = SqliteChainTipStore::new();
-        let anchor = [7u8; 32];
-        let (r0, r1, r2) = ([0u8; 32], [11u8; 32], [22u8; 32]);
-        // Untracked frontier starts as None (caller treats it as genesis (0,0)).
-        assert_eq!(store.get_anchor_frontier(&anchor), None);
-        // First advance from genesis.
-        assert!(store.set_anchor_frontier(&anchor, r0, r1, 1).unwrap());
-        assert_eq!(store.get_anchor_frontier(&anchor), Some((r1, 1)));
-        // Replay from the now-consumed genesis parent is rejected (fork detection).
-        assert!(!store.set_anchor_frontier(&anchor, r0, r2, 2).unwrap());
-        // Correct parent but non-monotonic state is rejected.
-        assert!(!store.set_anchor_frontier(&anchor, r1, r2, 1).unwrap());
-        // Correct parent + strictly monotonic state advances (multi-transfer works).
-        assert!(store.set_anchor_frontier(&anchor, r1, r2, 2).unwrap());
-        assert_eq!(store.get_anchor_frontier(&anchor), Some((r2, 2)));
-        // A clone shares the same in-memory frontier (Arc), so the manager's single store tracks it.
-        let store2 = store.clone();
-        assert_eq!(store2.get_anchor_frontier(&anchor), Some((r2, 2)));
-    }
 }

@@ -546,7 +546,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             dev_fixed,
             gen_fixed,
             chain_tip_store,
-        );
+        )
+        .with_enrollment_store(std::sync::Arc::new(
+            crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
+        ));
         // mock-anchor: stand in for the Safe 7 element with an in-process MockAnchorTransport so the
         // sender produces offline-bearer attestations and the whole anti-clone path runs end-to-end
         // without hardware. OFF in production (no transport -> OFFLINE_BEARER_REQUIRED fails closed).

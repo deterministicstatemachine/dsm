@@ -336,7 +336,10 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
         dev_fixed,
         gen_fixed,
         chain_tip_store,
-    );
+    )
+    .with_enrollment_store(Arc::new(
+        crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
+    ));
     // mock-anchor: same in-process MockAnchorTransport as the primary init path, so the offline-bearer
     // path works end-to-end on this late/fallback manager too. OFF in production.
     #[cfg(feature = "mock-anchor")]

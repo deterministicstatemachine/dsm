@@ -15,6 +15,7 @@ pub use crate::storage::codecs::{
 
 // --- Submodules (domain-specific) ---
 
+pub mod anchor_persist;
 mod auth_tokens;
 mod bcr;
 mod bilateral_sessions;
@@ -697,6 +698,32 @@ fn create_schema(conn: &Connection) -> Result<()> {
             step_count              INTEGER NOT NULL DEFAULT 0,
             updated_at              INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, side)
+        );
+
+        -- Offline-bearer anti-clone: the SENDER's single per-device anchor monotonic frontier,
+        -- keyed by the anchor identity (id_anchor). Advanced by the offline-bearer gate; must persist
+        -- so a restart cannot replay a consumed frontier state.
+        CREATE TABLE IF NOT EXISTS anchor_frontiers(
+            anchor_id     BLOB NOT NULL PRIMARY KEY,
+            frontier_root BLOB NOT NULL,
+            state_number  INTEGER NOT NULL
+        );
+
+        -- Offline-bearer anti-clone: the RECEIVER's pinned admission of a counterparty's anchor
+        -- (identity + enrolled firmware hash + policy + its monotonic frontier), keyed by the
+        -- counterparty device id. Must persist so a restart cannot reset the frontier (which would
+        -- let a consumed-parent replay through) nor drop the pinned identity.
+        CREATE TABLE IF NOT EXISTS anchor_enrollments(
+            device_id          BLOB NOT NULL PRIMARY KEY,
+            id_anchor          BLOB NOT NULL,
+            commitment_c       BLOB NOT NULL,
+            leaf_spki          BLOB NOT NULL,
+            firmware_id        BLOB NOT NULL,
+            screen_template_id INTEGER NOT NULL,
+            firmware_hash      BLOB NOT NULL,
+            policy_hash        BLOB NOT NULL,
+            frontier_root      BLOB NOT NULL,
+            frontier_state     INTEGER NOT NULL
         );
         "#,
         );
