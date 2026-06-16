@@ -60,7 +60,7 @@ kept out of the default suite to avoid slowing down the standard regression gate
 ## What this model *does NOT* cover
 
 - Canonical protobuf encodings, Base32, b0x addressing, replica placement.
-- SPHINCS+/Kyber algorithms, signature validation, proof objects, HKDF/DBRW.
+- SPHINCS+/Kyber algorithms, signature validation, proof objects, HKDF.
 - Explicit quantum attack simulation or Shor-style crypto-break modeling.
 - Per-device SMT replace semantics, tripwire consumption tracking.
   (See `DSM_Tripwire.tla` for a focused model of these invariants).

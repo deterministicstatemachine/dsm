@@ -28,8 +28,11 @@
     commit is signed by valid SPHINCS+ keys) is implemented in the
     codebase via the per-step ephemeral key chain:
       EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre || k_step
-                                       || K_DBRW))
+                                       || AttA))
       cert_{n+1} = Sign_{SK_n}(BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n))
+    where AttA is the deterministic device-birth binding folded into the
+    derivation (an install/device-lineage value; it replaced the removed
+    silicon C-DBRW binding and carries no anti-clone claim).
     Each receipt body is signed by EK_{n+1}; the cert chain anchors back
     to AK_pk via prior step keys (AK at step 0).
     The Tripwire / chain-tip-monotonicity proofs in this file are
@@ -38,6 +41,17 @@
     independent of which signing key produces the signature.
     Code: dsm_sdk::sdk::receipts::sign_receipt_with_per_step_ek
     Tests: per_step_signing_end_to_end_two_steps proves AK → EK_0 → EK_1.
+
+  Scope boundary (what this file does NOT prove):
+    These proofs cover the ABSTRACT Tripwire / parent-tip finality
+    mechanism only — a successor tip is always distinct from its parent,
+    so the chain-tip guard excludes double-commit. They do NOT prove the
+    offline-bearer secure-element (Safe 7 / stateful-root) anchor rule
+      parent_root == stored_root  and  stored_root -> successor_root,
+    which is a SEPARATE hardware-anchored mechanism (the only anti-clone
+    authority, offline-bearer only). Online safety here rests solely on
+    Tripwire + parent-consumption + the SPHINCS+/BLAKE3 assumptions, with
+    no DBRW, no secure element, and no storage-node trust.
 -/
 
 -- ============================================================

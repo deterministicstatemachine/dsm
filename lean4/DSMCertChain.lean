@@ -48,9 +48,12 @@
     implementation `k_step` is derived from a fresh per-step Kyber-768
     encapsulation between the bilateral parties:
       coins  = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-                          || DevID_sender || K_DBRW)
+                          || DevID_sender || AttA)
       (ct, ss) = KyberEncDet(recipient_kyber_pk, coins)
       k_step = BLAKE3-256("DSM/kyber-ss\0" || ss)
+    (AttA is the deterministic device-birth binding that replaced the
+    removed silicon C-DBRW binding — an install/lineage value, not an
+    anti-clone proof.)
     The recipient decapsulates `ct` with their Kyber sk to recover the
     same `ss` and `k_step`. The Kyber ciphertext travels in the receipt's
     `kyber_ct_a/b` envelope fields (proto 18/19). Code helpers:
@@ -168,7 +171,7 @@ structure ChainStep where
   hN   : Nat
   cert : Nat
 
-/-- A cert chain: an attestation root pubkey AK_pk plus an ordered list
+/-- A cert chain: a cert-chain root pubkey AK_pk plus an ordered list
     of steps. Step 0's cert is signed by AK_sk; step i+1's cert is signed
     by step i's EK_sk. -/
 structure CertChain where

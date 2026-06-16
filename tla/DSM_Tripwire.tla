@@ -20,6 +20,13 @@ Vars == <<deviceRoots, smtState, ledger>>
 \* DSM_OfflineFinality.tla; this module assumes no unresolved pending online
 \* projection for the relationship being advanced.
 \*
+\* Scope boundary: online fork exclusion here uses ONLY Tripwire +
+\* parent-consumption + the abstract SPHINCS+/BLAKE3 acceptance guards. It
+\* uses no DBRW and no secure element, and storage nodes are dumb mirrors
+\* (no DBRW, no secure element, no acceptance authority). The offline-bearer
+\* Safe 7 / stateful-root anchor (parent_root == stored_root, stored_root ->
+\* successor_root) is a SEPARATE hardware mechanism, NOT modelled or proved here.
+\*
 \* Refinement note (whitepaper §11.1 per-step EK signing):
 \* The CountersignedByBoth predicate below is satisfied in the
 \* implementation by a per-step ephemeral SPHINCS+ key chain that BOTH
@@ -27,16 +34,16 @@ Vars == <<deviceRoots, smtState, ledger>>
 \*
 \*   (1) Each receipt's sig_a / sig_b is produced by a freshly-derived
 \*       EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre ||
-\*                                       k_step || K_DBRW)).
+\*                                       k_step || AttA)).
 \*       k_step is recovered via Kyber-768 deterministic encapsulation
 \*       against the recipient's contact-bound Kyber pubkey
 \*       (no stubs, recipient_kyber_pk mandatory).
 \*
 \*   (2) Each EK_{n+1} carries a cert cert_{n+1} = Sign_{SK_n}(BLAKE3(
 \*       "DSM/ek-cert\0" || EK_pk_{n+1} || h_n)) chaining it back to
-\*       the device's attested AK_pk via prior step keys. Per-relationship
+\*       the device's AK_pk via prior step keys. Per-relationship
 \*       chain heads + encrypted SK material live in cert_chain_heads
-\*       (XChaCha20-Poly1305 with K_DBRW-derived AEAD key).
+\*       (XChaCha20-Poly1305 with a device-binding-derived AEAD key).
 \*
 \*   (3) Bilateral both-side stamping. In every accepted bilateral
 \*       transition the sender stamps {ek_pk_a, ek_cert_a, kyber_ct_a,
