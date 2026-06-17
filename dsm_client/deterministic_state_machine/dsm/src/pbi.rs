@@ -17,8 +17,9 @@
 //!
 //! - No raw `Vec<u8>` or `String` inputs allowed deep in the core.
 //! - All inputs must be length-checked and domain-separated immediately.
-//! - The device-birth binding `AttA` is computed by the SDK from the canonical
-//!   `DeviceBirthRecordV1` and passed in pre-derived; PBI only validates it.
+//! - The device-birth binding `AttA` is computed by the SDK from the
+//!   device-birth nonce commitment and passed in pre-derived; PBI only
+//!   validates it.
 
 use crate::types::error::DsmError;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -32,12 +33,14 @@ pub struct PlatformContext {
     /// Canonical Genesis Hash (32 bytes)
     pub genesis_hash: [u8; 32],
     /// Deterministic device-birth binding `AttA` (32 bytes), computed by the
-    /// SDK from the canonical `DeviceBirthRecordV1`
-    /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(record))`) and
+    /// SDK from the device-birth nonce commitment
+    /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment) ||
+    /// LP(creation_mode) || LP(schema_version) || LP(protocol_version))`) and
     /// folded into `S_master` IKM (whitepaper §11.1) in place of the removed
     /// silicon C-DBRW binding. Deterministic per install/device lineage;
-    /// recoverable by replaying the persisted record. NOT an anti-clone proof
-    /// (online safety is tripwire + parent-consumption uniqueness).
+    /// recoverable by re-deriving from the persisted commitment. NOT an
+    /// anti-clone proof (online safety is tripwire + parent-consumption
+    /// uniqueness).
     pub device_birth_att: [u8; 32],
 }
 
@@ -63,7 +66,7 @@ impl PlatformContext {
         let genesis_hash = Self::canonize_identifier(&inputs.genesis_hash_raw, "DSM/genesis\0")?;
 
         // 3. Validate the pre-derived device-birth binding (strict length only;
-        //    the SDK owns the canonical `ProtoDet(DeviceBirthRecordV1)` hashing).
+        //    the SDK owns the canonical `AttA` derivation from the nonce commitment).
         let device_birth_att =
             Self::canonize_identifier(&inputs.device_birth_att_raw, "DSM/device-birth-att\0")?;
 

@@ -236,17 +236,17 @@ pub async fn fetch_genesis_state(
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
     // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
-    // Device-birth binding `AttA` is folded into the MPC keypair derivation in
-    // place of the removed silicon C-DBRW binding; the birth nonce is seeded
-    // from the platform's per-device entropy slot.
-    let entropy =
-        crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
+    // Device-birth binding `AttA` is folded into the MPC keypair derivation;
+    // the birth nonce commitment comes from the platform slot and is used
+    // VERBATIM.
+    let staged = crate::sdk::app_state::AppState::take_device_birth_nonce_commitment()
+        .ok_or_else(|| {
             dsm::types::error::DsmError::invalid_operation(
-                "counterparty_genesis_helpers: platform device-birth entropy required",
+                "counterparty_genesis_helpers: device-birth nonce commitment required",
             )
         })?;
     let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
-        &entropy.hw_entropy,
+        &staged.device_birth_nonce_commitment,
         dsm::crypto::device_birth::CreationMode::Genesis,
     )
     .derive_att();

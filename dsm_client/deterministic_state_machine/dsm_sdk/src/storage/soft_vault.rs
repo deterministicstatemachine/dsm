@@ -96,22 +96,22 @@ impl BindingKeyProvider for TestBindingKeyProvider {
     }
 }
 
-/// DBRW-backed binder intended to be deterministic across processes/devices of the same identity.
+/// Device-birth-backed binder, deterministic across processes/devices of the same identity.
 /// This default implementation is **stable**: it derives the binding key from a domain-separated
-/// hash of the provided device_id_hint. Replace with a platform DBRW that returns the same 32B
-/// across runs on the same device (no clocks, no randomness).
+/// hash of the provided device_id_hint, returning the same 32B across runs on the same device
+/// (no clocks, no randomness).
 #[derive(Clone)]
-pub struct DbrwBindingKeyProvider {
+pub struct DeviceBirthBindingKeyProvider {
     device_id_hint: String,
 }
 
-impl DbrwBindingKeyProvider {
+impl DeviceBirthBindingKeyProvider {
     pub fn new(device_id_hint: String) -> Self {
         Self { device_id_hint }
     }
 }
 
-impl BindingKeyProvider for DbrwBindingKeyProvider {
+impl BindingKeyProvider for DeviceBirthBindingKeyProvider {
     fn device_binding_key(&self) -> Result<[u8; 32], DsmError> {
         let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SOFT_VAULT_BINDING);
         hasher.update(self.device_id_hint.as_bytes());
@@ -893,10 +893,10 @@ mod tests {
 
     #[test]
     fn export_import_roundtrip_dbrw() {
-        // Validate that DbrwBindingKeyProvider is deterministic and importable.
+        // Validate that DeviceBirthBindingKeyProvider is deterministic and importable.
         let dir = tempfile::tempdir().unwrap();
         let device_id = "dev-dbrw-1".to_string();
-        let binder = DbrwBindingKeyProvider::new(device_id.clone());
+        let binder = DeviceBirthBindingKeyProvider::new(device_id.clone());
         let vault =
             SoftVaultKeyStorage::new(dir.path(), device_id.clone(), binder, Some("pw")).unwrap();
 
@@ -905,7 +905,7 @@ mod tests {
         let env = vault.export_envelope("alias", KeyType::PeerKey).unwrap();
 
         // Recreate with a fresh instance and same binder hint/passphrase
-        let binder2 = DbrwBindingKeyProvider::new(device_id.clone());
+        let binder2 = DeviceBirthBindingKeyProvider::new(device_id.clone());
         let vault2 =
             SoftVaultKeyStorage::new(dir.path(), device_id.clone(), binder2, Some("pw")).unwrap();
         let _addr = vault2
@@ -925,9 +925,9 @@ mod tests {
     }
 
     #[test]
-    fn dbrw_binding_key_deterministic() {
-        let b1 = DbrwBindingKeyProvider::new("device-A".into());
-        let b2 = DbrwBindingKeyProvider::new("device-A".into());
+    fn device_birth_binding_key_deterministic() {
+        let b1 = DeviceBirthBindingKeyProvider::new("device-A".into());
+        let b2 = DeviceBirthBindingKeyProvider::new("device-A".into());
         assert_eq!(
             b1.device_binding_key().unwrap(),
             b2.device_binding_key().unwrap(),
@@ -936,11 +936,11 @@ mod tests {
     }
 
     #[test]
-    fn dbrw_binding_key_varies_with_hint() {
-        let k1 = DbrwBindingKeyProvider::new("dev-1".into())
+    fn device_birth_binding_key_varies_with_hint() {
+        let k1 = DeviceBirthBindingKeyProvider::new("dev-1".into())
             .device_binding_key()
             .unwrap();
-        let k2 = DbrwBindingKeyProvider::new("dev-2".into())
+        let k2 = DeviceBirthBindingKeyProvider::new("dev-2".into())
             .device_binding_key()
             .unwrap();
         assert_ne!(k1, k2);

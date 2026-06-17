@@ -392,7 +392,7 @@ impl RecoverySDK {
             "genesis_hash",
         )?;
 
-        let dbrw = crate::fetch_dbrw_binding_key().map_err(|e| {
+        let dbrw = crate::fetch_device_birth_binding_key().map_err(|e| {
             DsmError::InvalidState(format!("recovery anchor: K_DBRW unavailable: {e}"))
         })?;
         let k_dbrw = <[u8; 32]>::try_from(dbrw.as_slice()).map_err(|_| {

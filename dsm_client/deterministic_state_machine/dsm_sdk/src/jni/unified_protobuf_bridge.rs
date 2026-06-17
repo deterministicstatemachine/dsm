@@ -315,7 +315,7 @@ fn ensure_bootstrap() {
     // C-DBRW check: only enforce after genesis. Pre-genesis the binding key does not
     // exist yet — that is expected. Post-genesis a missing key indicates an attack.
     if SDK_READY.load(Ordering::SeqCst) && crate::sdk::app_state::AppState::get_has_identity() {
-        let dbrw_ok = crate::fetch_dbrw_binding_key()
+        let dbrw_ok = crate::fetch_device_birth_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
         if !dbrw_ok {
@@ -4593,7 +4593,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
             );
 
             let has_device_identity = crate::sdk::app_state::AppState::get_device_id().is_some();
-            let has_binding_key = crate::fetch_dbrw_binding_key().is_ok();
+            let has_binding_key = crate::fetch_device_birth_binding_key().is_ok();
 
             if has_device_identity && has_binding_key {
                 log::info!(

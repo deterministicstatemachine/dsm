@@ -30,26 +30,21 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
     if entropy.len() != 32 {
         return err("system.genesis: device_entropy must be 32 bytes".into());
     }
-    if req.cdbrw_hw_entropy.is_empty() {
-        return err("system.genesis: cdbrw_hw_entropy is required".into());
-    }
-    if req.cdbrw_env_fingerprint.is_empty() {
-        return err("system.genesis: cdbrw_env_fingerprint is required".into());
-    }
-    // Stage the silicon-binding inputs in the platform-entropy slot so the
-    // inner MPC genesis path (StorageNodeSDK::create_genesis_with_mpc →
-    // core_sdk::create_genesis_with_passive_contributors) can derive the
-    // canonical K_DBRW post-MPC from
-    //   `derive_cdbrw_binding_key(genesis_hash, device_id = genesis_hash, hw, env)`
-    // and stash it via `binding_key::install_binding_key`. We DO NOT pre-derive
-    // K_DBRW here — the canonical preimage requires `genesis_hash` which is an
-    // MPC output, not an input.
-    if let Err(e) = crate::sdk::app_state::AppState::set_platform_entropy_inputs(
-        req.cdbrw_hw_entropy.clone(),
-        req.cdbrw_env_fingerprint.clone(),
+    // Rust owns the device-birth nonce (rules.instructions.md: Rust is the sole
+    // crypto authority, the host supplies no binding material).  Generate the
+    // commitment here, stage it so the inner MPC genesis path
+    // (StorageNodeSDK::create_genesis_with_mpc →
+    // core_sdk::create_genesis_with_passive_contributors) folds it VERBATIM into
+    // `AttA` via `DeviceBirthInputs::from_platform_nonce`, and keep a copy so we
+    // can persist it in the GenesisRecord — finalize/restore re-derive an
+    // identical `AttA` from that persisted commitment.
+    let device_birth_nonce_commitment =
+        dsm::crypto::device_birth::random_device_birth_nonce_commitment().to_vec();
+    if let Err(e) = crate::sdk::app_state::AppState::set_device_birth_nonce_commitment(
+        device_birth_nonce_commitment.clone(),
     ) {
         return err(format!(
-            "system.genesis: failed to stage platform entropy inputs: {e}"
+            "system.genesis: failed to stage device-birth nonce commitment: {e}"
         ));
     }
 
@@ -76,10 +71,11 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                 genesis_hash.len()
             ));
         }
-        // K_DBRW is installed by `core_sdk::create_genesis_with_passive_contributors`
-        // post-MPC. Pull the device-birth binding `AttA` back out of the
-        // binding-key slot to stamp a record digest into the persisted
-        // GenesisRecord.
+        // `core_sdk::create_genesis_with_passive_contributors` installed the
+        // device-birth binding `AttA` post-MPC. Confirm it landed (fail-closed),
+        // then persist the device-birth nonce *commitment* (not AttA) into the
+        // GenesisRecord so finalize/restore can re-derive an identical AttA from
+        // durable SDK storage without any host-supplied material.
         let binding_vec = crate::binding_key::get_binding_key().ok_or_else(|| {
             "system.genesis: device-birth binding slot empty after MPC genesis".to_string()
         })?;
@@ -89,15 +85,8 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                 binding_vec.len()
             ));
         }
-        let mut binding_arr = [0u8; 32];
-        binding_arr.copy_from_slice(&binding_vec);
-        let binding_record = crate::util::text_id::encode_base32_crockford(
-            dsm::crypto::blake3::domain_hash(
-                dsm::common::domain_tags::TAG_DSM_DEVICE_BIRTH_ATT,
-                &binding_arr,
-            )
-            .as_bytes(),
-        );
+        let device_birth_binding =
+            crate::util::text_id::encode_base32_crockford(&device_birth_nonce_commitment);
         let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
@@ -113,7 +102,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             genesis_id: genesis_id_b32.clone(),
             device_id: device_id_b32.clone(),
             mpc_proof: res.session_id.clone(),
-            dbrw_binding: binding_record,
+            device_birth_binding,
             merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
             participant_count: res.participating_nodes.len() as u32,
             progress_marker: "genesis".to_string(),

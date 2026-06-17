@@ -235,7 +235,7 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
                     gen.len()
                 );
                 if dev.len() == 32 && gen.len() == 32 {
-                    match fetch_dbrw_binding_key() {
+                    match fetch_device_birth_binding_key() {
                         Ok(dbrw) => {
                             log::info!("Initializing SDK context from persisted AppState");
                             let entropy = derive_production_entropy(&dev, &gen, &dbrw);
@@ -294,30 +294,30 @@ pub fn initialize_sdk_context(
     get_sdk_context().initialize(device_id, genesis_hash, initial_entropy)
 }
 
-/// Production entropy derivation (deterministic, DBRW-bound).
+/// Production entropy derivation (deterministic, device-birth-bound).
 ///
 /// This replaces the previous placeholder of reusing the genesis hash as entropy.
 ///
 /// Domain: "DSM/SDK/ENTROPY/v2".
 ///
-/// Inputs are expected to be 32 bytes for `device_id` and `genesis_hash`. `dbrw_binding`
-/// Derive production entropy from device identity + C-DBRW binding.
+/// Inputs are expected to be 32 bytes for `device_id`, `genesis_hash`, and
+/// `device_birth_binding` (the installed device-birth `AttA`).
 pub(crate) fn derive_production_entropy(
     device_id: &[u8],
     genesis_hash: &[u8],
-    cdbrw_binding: &[u8],
+    device_birth_binding: &[u8],
 ) -> Vec<u8> {
     let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SDK_HASH);
     h.update(device_id);
     h.update(genesis_hash);
-    h.update(cdbrw_binding);
+    h.update(device_birth_binding);
     h.finalize().as_bytes().to_vec()
 }
 
-pub(crate) fn fetch_dbrw_binding_key() -> Result<Vec<u8>, dsm::types::error::DsmError> {
+pub(crate) fn fetch_device_birth_binding_key() -> Result<Vec<u8>, dsm::types::error::DsmError> {
     crate::binding_key::get_binding_key().ok_or_else(|| {
         dsm::types::error::DsmError::invalid_parameter(
-            "C-DBRW binding key unavailable; initialize startup/bootstrap before SDK context",
+            "device-birth binding unavailable; initialize startup/bootstrap before SDK context",
         )
     })
 }
@@ -329,7 +329,7 @@ pub(crate) fn install_canonical_binding_key(
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn set_cdbrw_binding_key_for_testing(key: Vec<u8>) {
+pub fn set_device_birth_binding_key_for_testing(key: Vec<u8>) {
     let _ = crate::binding_key::install_binding_key(key);
 }
 
@@ -359,7 +359,7 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
             crate::sdk::app_state::AppState::get_genesis_hash(),
         ) {
             if dev.len() == 32 && gen.len() == 32 {
-                let dbrw = fetch_dbrw_binding_key()?;
+                let dbrw = fetch_device_birth_binding_key()?;
                 let entropy = derive_production_entropy(&dev, &gen, &dbrw);
                 initialize_sdk_context(dev, gen.clone(), entropy)?;
             }

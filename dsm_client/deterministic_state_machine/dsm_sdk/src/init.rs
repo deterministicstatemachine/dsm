@@ -335,7 +335,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // full router when identity is available, even if a MinimalBootstrapRouter was installed
     // earlier.
     let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
-        && crate::fetch_dbrw_binding_key().is_ok();
+        && crate::fetch_device_birth_binding_key().is_ok();
 
     if canonical_identity_ready {
         let app_router = Arc::new(
@@ -487,7 +487,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // The live path concatenates `genesis || device_id || K_DBRW`, then
         // `SignatureKeyPair::generate_from_entropy()` compresses that material with
         // `domain_hash(dsm::common::domain_tags::TAG_DSM_SPHINCS_SEED, ...)` before deterministic SPHINCS keygen.
-        let dbrw_key = crate::fetch_dbrw_binding_key().map_err(|e| {
+        let dbrw_key = crate::fetch_device_birth_binding_key().map_err(|e| {
             format!(
                 "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
             )

@@ -1137,20 +1137,21 @@ impl CoreSDK {
         }
 
         let device_entropy = generate_device_entropy(&device_id_arr);
-        // Peek (don't take) the platform entropy slot so it stays alive for any
+        // Peek (don't take) the device-birth slot so it stays alive for any
         // later restore-path probes. The slot is cleared only AFTER the
         // publisher succeeds and the device-birth binding is installed below —
         // see the "fail-closed before install" contract in the doc comment.
-        let entropy =
-            crate::sdk::app_state::AppState::peek_platform_entropy_inputs().ok_or_else(|| {
+        let staged = crate::sdk::app_state::AppState::peek_device_birth_nonce_commitment()
+            .ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(
-                    "core_sdk: platform device-birth entropy required for genesis",
+                    "core_sdk: device-birth nonce commitment required for genesis",
                 )
             })?;
-        // Device-birth binding `AttA` replaces the silicon C-DBRW binding; the
-        // birth nonce is seeded from the platform's per-device entropy.
+        // Fold the SDK-generated device-birth nonce commitment VERBATIM into
+        // `AttA`.  The same commitment is persisted in the `GenesisRecord`, so
+        // the restore and finalize paths re-derive an identical AttA.
         let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
-            &entropy.hw_entropy,
+            &staged.device_birth_nonce_commitment,
             dsm::crypto::device_birth::CreationMode::Genesis,
         )
         .derive_att();
@@ -1188,7 +1189,7 @@ impl CoreSDK {
                 "core_sdk: install device-birth binding failed: {e}"
             ))
         })?;
-        let _ = crate::sdk::app_state::AppState::take_platform_entropy_inputs();
+        let _ = crate::sdk::app_state::AppState::take_device_birth_nonce_commitment();
         let public_key = genesis_state.signing_key.public_key.clone();
         let smt_root = genesis_state.merkle_root.unwrap_or(genesis_state.hash);
 

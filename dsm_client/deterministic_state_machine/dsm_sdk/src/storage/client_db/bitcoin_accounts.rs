@@ -3,7 +3,7 @@
 //!
 //! `secret_material` is encrypted with XChaCha20-Poly1305 using a key derived
 //! from the DBRW binding key via BLAKE3 domain separation:
-//!   enc_key = BLAKE3("DSM/btc-key-enc\0" || dbrw_binding_key)
+//!   enc_key = BLAKE3("DSM/btc-key-enc\0" || device_birth_binding_key)
 //!
 //! Storage format: `[24-byte nonce][ciphertext + 16-byte Poly1305 tag]`
 
@@ -23,10 +23,10 @@ const TAG_LEN: usize = 16;
 const MIN_ENCRYPTED_LEN: usize = NONCE_LEN + 1 + TAG_LEN;
 
 /// Derive a 32-byte encryption key from the DBRW binding key.
-fn derive_enc_key(dbrw_binding_key: &[u8]) -> [u8; 32] {
+fn derive_enc_key(device_birth_binding_key: &[u8]) -> [u8; 32] {
     *dsm::crypto::blake3::domain_hash(
         dsm::common::domain_tags::TAG_DSM_BTC_KEY_ENC,
-        dbrw_binding_key,
+        device_birth_binding_key,
     )
     .as_bytes()
 }
@@ -75,7 +75,7 @@ fn decrypt_secret(enc_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
 
 /// Get the DBRW-derived encryption key.
 fn get_enc_key() -> Result<[u8; 32]> {
-    let dbrw = crate::fetch_dbrw_binding_key()
+    let dbrw = crate::fetch_device_birth_binding_key()
         .map_err(|e| anyhow::anyhow!("DBRW binding key unavailable: {e}"))?;
     Ok(derive_enc_key(&dbrw))
 }

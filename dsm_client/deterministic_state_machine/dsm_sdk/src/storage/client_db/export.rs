@@ -45,7 +45,7 @@ pub fn export_state_blob() -> Result<Vec<u8>> {
         put_str(&mut g, &gen.genesis_id);
         put_str(&mut g, &gen.device_id);
         put_str(&mut g, &gen.mpc_proof);
-        put_str(&mut g, &gen.dbrw_binding);
+        put_str(&mut g, &gen.device_birth_binding);
         put_str(&mut g, &gen.merkle_root);
         put_u32(&mut g, gen.participant_count);
         put_str(&mut g, &gen.progress_marker);
@@ -369,7 +369,7 @@ mod tests {
             genesis_id: "gid-import".into(),
             device_id: "did-import".into(),
             mpc_proof: "mpc".into(),
-            dbrw_binding: "bind".into(),
+            device_birth_binding: "bind".into(),
             merkle_root: "root".into(),
             participant_count: 2,
             progress_marker: "P".into(),

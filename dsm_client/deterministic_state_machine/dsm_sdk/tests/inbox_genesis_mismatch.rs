@@ -40,7 +40,7 @@ fn store_verified_genesis(device_id_b32: &str, genesis_bytes: [u8; 32]) {
         genesis_id: genesis_b32.clone(),
         device_id: device_id_b32.to_string(),
         mpc_proof: "mpc-proof".to_string(),
-        dbrw_binding: "binding".to_string(),
+        device_birth_binding: "binding".to_string(),
         merkle_root: genesis_b32.clone(),
         participant_count: 3,
         progress_marker: "t".to_string(),

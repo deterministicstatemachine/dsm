@@ -214,7 +214,7 @@ impl BilateralBleHandler {
                 }
             };
 
-        let k_dbrw_vec = crate::fetch_dbrw_binding_key()?;
+        let k_dbrw_vec = crate::fetch_device_birth_binding_key()?;
         if k_dbrw_vec.len() < 32 {
             return Err(DsmError::invalid_operation(format!(
                 "bilateral receipt: K_DBRW too short ({} bytes)",

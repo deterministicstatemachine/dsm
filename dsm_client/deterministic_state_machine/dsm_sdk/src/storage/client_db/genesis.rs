@@ -28,7 +28,7 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
 
     conn.execute(
         "INSERT OR REPLACE INTO genesis_records(
-             genesis_id,device_id,mpc_proof,dbrw_binding,merkle_root,
+             genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
              participant_count,chain_tip,publication_hash,storage_nodes,
              entropy_hash,protocol_version,hash_chain_proof,smt_proof,
              verification_step,created_at)
@@ -37,7 +37,7 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
             record.genesis_id,
             record.device_id,
             record.mpc_proof,
-            record.dbrw_binding,
+            record.device_birth_binding,
             record.merkle_root,
             record.participant_count as i32,
             record.progress_marker,
@@ -78,7 +78,7 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
         Option<i64>,
     )> = conn
         .query_row(
-            "SELECT genesis_id,device_id,mpc_proof,dbrw_binding,merkle_root,
+            "SELECT genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
                     participant_count,chain_tip,publication_hash,storage_nodes,
                     entropy_hash,protocol_version,hash_chain_proof,smt_proof,
                     verification_step
@@ -134,7 +134,7 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
             genesis_id: id.clone(),
             device_id: dev,
             mpc_proof: mpc,
-            dbrw_binding: bind,
+            device_birth_binding: bind,
             merkle_root: root.clone(),
             participant_count: parts as u32,
             progress_marker: ts,
@@ -175,7 +175,7 @@ mod tests {
             genesis_id: "gen-test-001".into(),
             device_id: "dev-test-001".into(),
             mpc_proof: "mpc-proof-data".into(),
-            dbrw_binding: "binding-data".into(),
+            device_birth_binding: "binding-data".into(),
             merkle_root: "merkle-root-hash".into(),
             participant_count: 5,
             progress_marker: "PM".into(),

@@ -511,7 +511,7 @@ impl B0xSDK {
         // §16.4: saltG/saltD MUST be derived from Smaster (secret), not public inputs.
         // Spec: saltG := HKDF-BLAKE3("DSM/b0x-salt-G\0", Smaster)
         //       saltD := HKDF-BLAKE3("DSM/b0x-salt-D\0", Smaster)
-        // KDBRW (cdbrw_binding) is the hardware-bound secret that approximates Smaster here:
+        // KDBRW (device_birth_binding) is the hardware-bound secret that approximates Smaster here:
         // it is never serialized or externalized per §12 Privacy Rule.
         // Without KDBRW (e.g. unit tests), falls back to genesis+device_id (public, weaker privacy).
         let tag_str = std::str::from_utf8(domain_tag).unwrap_or("DSM/b0x-salt");

@@ -126,8 +126,9 @@ pub struct GenesisSession {
     /// Deterministic device-birth binding `AttA` (32B): the install /
     /// device-lineage material folded into `S_master` IKM (whitepaper
     /// §11.1) in place of the removed silicon C-DBRW binding.  Computed by
-    /// the SDK from the canonical `DeviceBirthRecordV1`:
-    ///   `AttA = BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(record))`
+    /// the SDK from the device-birth nonce commitment:
+    ///   `AttA = BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment)
+    ///           || LP(creation_mode) || LP(schema_version) || LP(protocol_version))`
     /// and supplied to the session via `set_device_birth_att`.  NOT an
     /// anti-clone proof and NOT part of the genesis hash `G` (which
     /// whitepaper §2.5 keeps publicly recomputable).  Zeroised on drop.
@@ -184,10 +185,10 @@ impl GenesisSession {
 
     /// Stage the deterministic device-birth binding `AttA` that gets folded
     /// into `S_master` IKM (whitepaper §11.1) in place of the removed silicon
-    /// C-DBRW binding.  `AttA` is computed by the SDK from the canonical
-    /// `DeviceBirthRecordV1`
-    /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(record))`) and
-    /// supplied here.  Required before `validate_session()` and
+    /// C-DBRW binding.  `AttA` is computed by the SDK from the device-birth
+    /// nonce commitment
+    /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment) || …)`)
+    /// and supplied here.  Required before `validate_session()` and
     /// `derive_device_bound_keypair()`.  This is an install/device-lineage
     /// binding, NOT an anti-clone proof.
     pub fn set_device_birth_att(&mut self, device_birth_att: [u8; 32]) -> Result<(), DsmError> {

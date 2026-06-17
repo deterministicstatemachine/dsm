@@ -63,7 +63,6 @@ import com.dsm.wallet.bridge.Unified
 import com.dsm.wallet.bridge.ble.BleCoordinator
 import com.dsm.wallet.mcp.McpService
 import com.dsm.wallet.permissions.BluetoothPermissionHelper
-import com.dsm.wallet.security.AccessLevel
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
 import dsm.types.proto.BiometricAuthorizeResult
@@ -84,9 +83,9 @@ import java.util.Locale
 class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var mcpStarted = false
 
-    // Dedicated single-thread executor for long-running genesis/enrollment work.
-    // This keeps the main thread free during the ~60s C-DBRW silicon fingerprint
-    // enrollment that happens on first boot, preventing ANR.
+    // Dedicated single-thread executor for genesis/bootstrap work.
+    // Keeps the main thread free during genesis + SDK context setup,
+    // preventing ANR. (Genesis is sub-second — there is no device enrollment.)
     private val genesisExecutor: java.util.concurrent.ExecutorService =
         java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "dsm-genesis-worker").also { it.isDaemon = true }
@@ -997,8 +996,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             val isLongRunningGenesisRequest = method == "createGenesis"
 
-            // C-DBRW genesis can include silicon fingerprint enrollment (~60s on first boot).
-            // Run it on the dedicated executor to avoid starving the general bridge worker pool.
+            // Run genesis on the dedicated executor to avoid starving the
+            // general bridge worker pool while the SDK sets up the context.
             if (isLongRunningGenesisRequest) {
                 genesisExecutor.execute {
                     val respBytes: ByteArray = try {
@@ -1015,7 +1014,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
                         port.postMessage(WebMessageCompat(responseWithId))
                     }
-                    // After C-DBRW genesis finalizes, Rust SDK_READY flips to true and
+                    // After genesis finalizes, Rust SDK_READY flips to true and
                     // BOOTSTRAP_SECURING flips to false. Publish a fresh session snapshot
                     // so React can transition securing_device -> wallet_ready immediately.
                     runOnUiThread { publishSessionState("createGenesis") }
@@ -1750,8 +1749,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     Log.w(tag, "initDsmAndSignalReady: computeB0xAddress failed", t)
                 }
 
-                // CRITICAL: Bootstrap FIRST (background thread) — sets up DBRW +
-                // SDK context that bilateral SDK init depends on.
+                // CRITICAL: Bootstrap FIRST (background thread) — sets up the
+                // device-birth binding + SDK context that bilateral SDK init depends on.
                 // All heavy JNI calls stay here; only lightweight signals go to UI thread.
                 var bootstrapped = false
                 try {
@@ -1765,7 +1764,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 // Bilateral SDK init runs calibrate_device_performance() which is
                 // CPU-bound (adaptive BLAKE3 loop, 500-2000ms on slow devices).
                 // Keep it on this background thread — never on the UI thread.
-                // Runs AFTER bootstrap so DBRW is initialized.
+                // Runs AFTER bootstrap so the SDK context is initialized.
                 if (bootstrapped) {
                     try {
                         Log.i(tag, "initDsmAndSignalReady: Initializing bilateral SDK (background thread)...")

@@ -48,7 +48,7 @@ fn persist_live_genesis_record(
         genesis_id: dsm_sdk::util::text_id::encode_base32_crockford(genesis_hash),
         device_id: dsm_sdk::util::text_id::encode_base32_crockford(genesis_device_id),
         mpc_proof: session_id.to_string(),
-        dbrw_binding: dsm_sdk::util::text_id::encode_base32_crockford(entropy),
+        device_birth_binding: dsm_sdk::util::text_id::encode_base32_crockford(entropy),
         merkle_root: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
         participant_count: 3,
         progress_marker: "genesis".to_string(),

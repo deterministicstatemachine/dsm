@@ -11625,16 +11625,6 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
    */
   deviceEntropy = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes cdbrw_hw_entropy = 4;
-   */
-  cdbrwHwEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes cdbrw_env_fingerprint = 5;
-   */
-  cdbrwEnvFingerprint = new Uint8Array(0);
-
   constructor(data?: PartialMessage<SystemGenesisRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11646,8 +11636,6 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
     { no: 1, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SystemGenesisRequest {
@@ -12377,6 +12365,14 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    */
   transferAmountDisplay = "";
 
+  /**
+   * Present iff the sender holds an offline-bearer anchor. The receiver pins it (admit) at
+   * relationship establishment, then verifies every offline-bearer receipt against it.
+   *
+   * @generated from field: dsm.AnchorIdentityProto sender_anchor_identity = 15;
+   */
+  senderAnchorIdentity?: AnchorIdentityProto;
+
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12399,6 +12395,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 12, name: "token_id_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 15, name: "sender_anchor_identity", kind: "message", T: AnchorIdentityProto },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {
@@ -13166,6 +13163,23 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
    */
   senderSmtRootBefore = new Uint8Array(0);
 
+  /**
+   * Offline-bearer (OFFLINE_BEARER_REQUIRED) only: the anchor attestation + the signed expiry tick
+   * the receiver needs to reconstruct + verify the anchor signature against its PINNED enrollment
+   * (anchor pubkey, firmware_hash, policy, frontier). Absent for ordinary transfers. The receiver
+   * rejects an OFFLINE_BEARER_REQUIRED confirm that lacks a valid, admitted attestation (fail-closed).
+   *
+   * @generated from field: dsm.IslandAttestationProto island_attestation = 10;
+   */
+  islandAttestation?: IslandAttestationProto;
+
+  /**
+   * == the transition target state the gate signed as expiry_tick
+   *
+   * @generated from field: uint64 anchor_expiry_tick = 11;
+   */
+  anchorExpiryTick = protoInt64.zero;
+
   constructor(data?: PartialMessage<BilateralConfirmRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13183,6 +13197,8 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
     { no: 7, name: "shared_chain_tip_new", kind: "message", T: Hash32 },
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "sender_smt_root_before", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "island_attestation", kind: "message", T: IslandAttestationProto },
+    { no: 11, name: "anchor_expiry_tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralConfirmRequest {
@@ -14725,7 +14741,10 @@ proto3.util.setEnumType(GenesisLifecycleEvent_Kind, "dsm.GenesisLifecycleEvent.K
 ]);
 
 /**
- * Host-side measurement report forwarded into Rust bootstrap control.
+ * Host-side bootstrap-control signal forwarded into Rust.  Carries NO crypto
+ * material: the SDK owns the device-birth nonce/commitment and persists it, so
+ * finalize/resume re-derive `AttA` from SDK storage (keyed by device_id +
+ * genesis_hash), not from a host-supplied record.
  *
  * @generated from message dsm.BootstrapMeasurementReport
  */
@@ -14751,23 +14770,8 @@ export class BootstrapMeasurementReport extends Message<BootstrapMeasurementRepo
   progressPercent = 0;
 
   /**
-   * @generated from field: bytes cdbrw_hw_entropy = 5;
-   */
-  cdbrwHwEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes cdbrw_env_fingerprint = 6;
-   */
-  cdbrwEnvFingerprint = new Uint8Array(0);
-
-  /**
-   * from K_DBRW preimage.  See SystemGenesisRequest.
+   * cdbrw_salt, trust_level.
    *
-   * @generated from field: dsm.BootstrapMeasurementReport.TrustLevel trust_level = 8;
-   */
-  trustLevel = BootstrapMeasurementReport_TrustLevel.BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED;
-
-  /**
    * @generated from field: string error_message = 9;
    */
   errorMessage = "";
@@ -14784,9 +14788,6 @@ export class BootstrapMeasurementReport extends Message<BootstrapMeasurementRepo
     { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "progress_percent", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 5, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "trust_level", kind: "enum", T: proto3.getEnumType(BootstrapMeasurementReport_TrustLevel) },
     { no: 9, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
@@ -14855,44 +14856,6 @@ proto3.util.setEnumType(BootstrapMeasurementReport_Phase, "dsm.BootstrapMeasurem
   { no: 4, name: "BOOTSTRAP_PHASE_ABORTED" },
   { no: 5, name: "BOOTSTRAP_PHASE_ERROR" },
   { no: 6, name: "BOOTSTRAP_PHASE_RESUME_FINALIZE" },
-]);
-
-/**
- * @generated from enum dsm.BootstrapMeasurementReport.TrustLevel
- */
-export enum BootstrapMeasurementReport_TrustLevel {
-  /**
-   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0;
-   */
-  BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1;
-   */
-  BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1,
-
-  /**
-   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2;
-   */
-  BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2,
-
-  /**
-   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3;
-   */
-  BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3,
-
-  /**
-   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4;
-   */
-  BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4,
-}
-// Retrieve enum metadata with: proto3.getEnumType(BootstrapMeasurementReport_TrustLevel)
-proto3.util.setEnumType(BootstrapMeasurementReport_TrustLevel, "dsm.BootstrapMeasurementReport.TrustLevel", [
-  { no: 0, name: "BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED" },
-  { no: 1, name: "BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS" },
-  { no: 2, name: "BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED" },
-  { no: 3, name: "BOOTSTRAP_TRUST_LEVEL_READ_ONLY" },
-  { no: 4, name: "BOOTSTRAP_TRUST_LEVEL_BLOCKED" },
 ]);
 
 /**
@@ -20147,6 +20110,73 @@ export class IslandAttestationProto extends Message<IslandAttestationProto> {
    */
   policyId = new Uint8Array(0);
 
+  /**
+   * canonical anchor-set id (compute_anchor_set_id)
+   *
+   * @generated from field: bytes id_anchor_set = 4;
+   */
+  idAnchorSet = new Uint8Array(0);
+
+  /**
+   * UI transcript hash the island signed over
+   *
+   * @generated from field: bytes ui_transcript_hash = 5;
+   */
+  uiTranscriptHash = new Uint8Array(0);
+
+  /**
+   * Stateful-receipt fields (anchor monotonic frontier + firmware/policy binding). Append-only;
+   * NOT folded into compute_chain_tip (only id_island/signature/policy_id are), so tip bytes are
+   * unchanged. genesis/device_id are already on StitchedReceiptV2 and not duplicated here.
+   *
+   * dsm_anchor_pubkey_hash(leaf_spki)
+   *
+   * @generated from field: bytes anchor_pubkey_hash = 6;
+   */
+  anchorPubkeyHash = new Uint8Array(0);
+
+  /**
+   * device-measured firmware hash (secmon-gate enforced)
+   *
+   * @generated from field: bytes firmware_hash = 7;
+   */
+  firmwareHash = new Uint8Array(0);
+
+  /**
+   * dsm_policy_hash(policy_id, id_anchor_set)
+   *
+   * @generated from field: bytes policy_hash = 8;
+   */
+  policyHash = new Uint8Array(0);
+
+  /**
+   * anchor frontier root this advance consumes
+   *
+   * @generated from field: bytes parent_root = 9;
+   */
+  parentRoot = new Uint8Array(0);
+
+  /**
+   * anchor frontier root this advance produces
+   *
+   * @generated from field: bytes successor_root = 10;
+   */
+  successorRoot = new Uint8Array(0);
+
+  /**
+   * == payload_hash of the transition
+   *
+   * @generated from field: bytes operation_hash = 11;
+   */
+  operationHash = new Uint8Array(0);
+
+  /**
+   * monotonic anchor frontier counter
+   *
+   * @generated from field: uint64 state_number = 12;
+   */
+  stateNumber = protoInt64.zero;
+
   constructor(data?: PartialMessage<IslandAttestationProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20158,6 +20188,15 @@ export class IslandAttestationProto extends Message<IslandAttestationProto> {
     { no: 1, name: "id_island", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "policy_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "id_anchor_set", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "ui_transcript_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "anchor_pubkey_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "firmware_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "policy_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "parent_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "successor_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "operation_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IslandAttestationProto {
@@ -20174,6 +20213,90 @@ export class IslandAttestationProto extends Message<IslandAttestationProto> {
 
   static equals(a: IslandAttestationProto | PlainMessage<IslandAttestationProto> | undefined, b: IslandAttestationProto | PlainMessage<IslandAttestationProto> | undefined): boolean {
     return proto3.util.equals(IslandAttestationProto, a, b);
+  }
+}
+
+/**
+ * The sender's published offline-bearer anchor identity, exchanged so the receiver can PIN it
+ * (admit it through the relationship-establishment authority path) and thereafter verify every
+ * offline-bearer receipt against this exact identity + enrolled firmware hash. Comes from the
+ * element (real Safe 7 transport) or the in-process mock; the exchange + pinning are identical.
+ *
+ * @generated from message dsm.AnchorIdentityProto
+ */
+export class AnchorIdentityProto extends Message<AnchorIdentityProto> {
+  /**
+   * anchor id (from birth commitment + key)
+   *
+   * @generated from field: bytes id_anchor = 1;
+   */
+  idAnchor = new Uint8Array(0);
+
+  /**
+   * birth commitment C
+   *
+   * @generated from field: bytes commitment_c = 2;
+   */
+  commitmentC = new Uint8Array(0);
+
+  /**
+   * SubjectPublicKeyInfo DER of the signing key
+   *
+   * @generated from field: bytes leaf_spki = 3;
+   */
+  leafSpki = new Uint8Array(0);
+
+  /**
+   * display-bound firmware id
+   *
+   * @generated from field: bytes firmware_id = 4;
+   */
+  firmwareId = new Uint8Array(0);
+
+  /**
+   * consent screen layout version
+   *
+   * @generated from field: uint32 screen_template_id = 5;
+   */
+  screenTemplateId = 0;
+
+  /**
+   * measured firmware hash enrolled at provisioning
+   *
+   * @generated from field: bytes firmware_hash = 6;
+   */
+  firmwareHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AnchorIdentityProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorIdentityProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "id_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "commitment_c", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "leaf_spki", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "firmware_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "screen_template_id", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "firmware_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorIdentityProto {
+    return new AnchorIdentityProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorIdentityProto {
+    return new AnchorIdentityProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorIdentityProto {
+    return new AnchorIdentityProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorIdentityProto | PlainMessage<AnchorIdentityProto> | undefined, b: AnchorIdentityProto | PlainMessage<AnchorIdentityProto> | undefined): boolean {
+    return proto3.util.equals(AnchorIdentityProto, a, b);
   }
 }
 
@@ -26880,9 +27003,10 @@ export class InitializeIdentityContextOp extends Message<InitializeIdentityConte
 }
 
 /**
- * Restore canonical identity context by re-deriving the binding key from
- * persisted deterministic C-DBRW inputs. This is the fast cold-start path
- * after a successful first bootstrap / enrollment.
+ * Restore canonical identity context by recomputing the device-birth binding
+ * `AttA`.  The SDK re-derives `AttA` from the device-birth nonce commitment it
+ * persisted at genesis (looked up by device_id + genesis_hash), so this op
+ * carries only the identity keys — no host-supplied binding material.
  *
  * @generated from message dsm.RestoreIdentityContextOp
  */
@@ -26897,16 +27021,6 @@ export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> 
    */
   genesisHash = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes cdbrw_hw_entropy = 3;
-   */
-  cdbrwHwEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes cdbrw_env_fingerprint = 4;
-   */
-  cdbrwEnvFingerprint = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RestoreIdentityContextOp>) {
     super();
     proto3.util.initPartial(data, this);
@@ -26917,8 +27031,6 @@ export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> 
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RestoreIdentityContextOp {

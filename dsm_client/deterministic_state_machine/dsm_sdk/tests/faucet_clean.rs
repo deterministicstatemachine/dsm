@@ -19,9 +19,9 @@ fn init_test_storage() {
         vec![0xCC; 32],
         vec![0xDD; 32],
     );
-    // Install a deterministic 32-byte C-DBRW binding key so the canonical
+    // Install a deterministic 32-byte device-birth binding so the canonical
     // signing authority can derive a keypair during AppRouter::new().
-    dsm_sdk::set_cdbrw_binding_key_for_testing(vec![0xEE; 32]);
+    dsm_sdk::set_device_birth_binding_key_for_testing(vec![0xEE; 32]);
 }
 
 #[test]

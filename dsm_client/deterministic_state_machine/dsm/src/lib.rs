@@ -162,9 +162,10 @@ fn get_enabled_features() -> Vec<String> {
 ///
 /// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
 /// `device_birth_att` is the deterministic device-birth binding `AttA`
-/// (`BLAKE3("DSM/device-birth-att/v1\0" || ProtoDet(DeviceBirthRecordV1))`),
-/// computed by the SDK and folded into the per-device key derivation
-/// (whitepaper §11.1) in place of the removed silicon C-DBRW binding.
+/// (`BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment) ||
+/// LP(creation_mode) || LP(schema_version) || LP(protocol_version))`), computed
+/// by the SDK and folded into the per-device key derivation (whitepaper §11.1)
+/// in place of the removed silicon C-DBRW binding.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
 >(

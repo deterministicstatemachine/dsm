@@ -128,28 +128,62 @@ fn startup_initialize_identity_context(
     }
 }
 
-/// Compute the device-birth binding `AttA` from a `DeviceBirthRecordV1`
-/// (install/device-lineage binding folded into the per-device key derivation).
-fn device_birth_att_from_record(
-    record: &pb::DeviceBirthRecordV1,
+/// Re-derive the device-birth binding `AttA` from the commitment the SDK
+/// persisted at genesis.
+///
+/// rules.instructions.md makes Rust the sole crypto authority: the host supplies
+/// no binding material, so finalize/restore look the device-birth nonce
+/// commitment up from durable SDK storage (the `GenesisRecord`) keyed by the
+/// requested `device_id` + `genesis_hash`, then fold it VERBATIM into `AttA`
+/// exactly as genesis did (`CreationMode::Genesis`, schema/protocol v1).  This
+/// is what makes the re-derived signing key match the published genesis AK.
+fn device_birth_att_from_persisted(
+    device_id: &[u8],
+    genesis_hash: &[u8],
 ) -> Result<[u8; 32], pb::Error> {
-    if record.device_birth_nonce_commitment.len() != 32 {
+    let record = crate::storage::client_db::get_verified_genesis_record()
+        .map_err(|e| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                format!("device-birth: failed to load genesis record: {e}"),
+            )
+        })?
+        .ok_or_else(|| {
+            ingress_error(
+                ERROR_CODE_INVALID_INPUT,
+                "device-birth: no persisted genesis record to re-derive AttA from",
+            )
+        })?;
+
+    // Fail closed if the persisted record is not the identity we were asked to
+    // restore (the commitment is identity-scoped; a mismatch would derive a
+    // wrong AttA and silently break signing).
+    let want_genesis = crate::util::text_id::encode_base32_crockford(genesis_hash);
+    let want_device = crate::util::text_id::encode_base32_crockford(device_id);
+    if record.genesis_id != want_genesis || record.device_id != want_device {
         return Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
-            "device-birth: nonce_commitment must be 32 bytes",
+            "device-birth: persisted genesis record does not match requested identity",
         ));
     }
-    let mut nonce_commitment = [0u8; 32];
-    nonce_commitment.copy_from_slice(&record.device_birth_nonce_commitment);
-    let creation_mode = dsm::crypto::device_birth::CreationMode::from_u8(record.creation_mode as u8)
+
+    let commitment = crate::util::text_id::decode_base32_crockford(&record.device_birth_binding)
         .ok_or_else(|| {
-            ingress_error(ERROR_CODE_INVALID_INPUT, "device-birth: unknown creation_mode")
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                "device-birth: malformed persisted nonce commitment",
+            )
         })?;
-    Ok(dsm::crypto::device_birth::DeviceBirthInputs::new(
-        nonce_commitment,
-        creation_mode,
-        record.schema_version,
-        record.protocol_version,
+    if commitment.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            "device-birth: persisted nonce commitment must be 32 bytes",
+        ));
+    }
+
+    Ok(dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
+        &commitment,
+        dsm::crypto::device_birth::CreationMode::Genesis,
     )
     .derive_att())
 }
@@ -203,15 +237,10 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
 
     // Online safety is tripwire + parent-consumption uniqueness, so genesis is
     // NOT gated on any device anti-clone measurement (the silicon C-DBRW gate is
-    // removed). The device-birth record deterministically fixes `AttA` — an
-    // install/device-lineage binding folded into the per-device key derivation.
-    let record = report.device_birth.as_ref().ok_or_else(|| {
-        ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            "bootstrap_finalize: device_birth record required",
-        )
-    })?;
-    let device_birth_att = device_birth_att_from_record(record)?;
+    // removed). The device-birth nonce commitment deterministically fixes `AttA`
+    // — an install/device-lineage binding folded into the per-device key
+    // derivation. The SDK persisted it at genesis; re-derive from storage.
+    let device_birth_att = device_birth_att_from_persisted(&device_id, &genesis_hash)?;
 
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id.clone(),
@@ -859,15 +888,10 @@ fn initialize_identity_context_core(
 fn restore_identity_context_core(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
-    device_birth: Option<pb::DeviceBirthRecordV1>,
 ) -> Result<Vec<u8>, pb::Error> {
-    let record = device_birth.ok_or_else(|| {
-        ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            "startup: restore_identity_context requires device_birth record",
-        )
-    })?;
-    let device_birth_att = device_birth_att_from_record(&record)?;
+    // Re-derive AttA from the device-birth nonce commitment the SDK persisted at
+    // genesis (keyed by device_id + genesis_hash) — no host-supplied material.
+    let device_birth_att = device_birth_att_from_persisted(&device_id, &genesis_hash)?;
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id,
         genesis_hash_raw: genesis_hash,
@@ -984,7 +1008,7 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
             initialize_identity_context_core(op.device_id, op.genesis_hash, op.binding_key)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
-            restore_identity_context_core(op.device_id, op.genesis_hash, op.device_birth)
+            restore_identity_context_core(op.device_id, op.genesis_hash)
         }
         None => Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
@@ -1395,8 +1419,6 @@ endpoint = "http://127.0.0.1:8080"
                 locale: "en-US".to_string(),
                 network_id: "testnet".to_string(),
                 device_entropy: vec![0x42; 8],
-                cdbrw_hw_entropy: Vec::new(),
-                cdbrw_env_fingerprint: Vec::new(),
             }
             .encode_to_vec(),
         }
@@ -1421,7 +1443,7 @@ endpoint = "http://127.0.0.1:8080"
         install_identity_context_core(vec![0x11; 32], vec![0x22; 32], vec![0x33; 32])
             .expect("identity context install should succeed");
         assert_eq!(
-            crate::fetch_dbrw_binding_key().expect("binding key"),
+            crate::fetch_device_birth_binding_key().expect("binding key"),
             vec![0x33; 32]
         );
         assert!(crate::is_sdk_context_initialized());
@@ -1459,27 +1481,39 @@ endpoint = "http://127.0.0.1:8080"
         assert!(error.message.contains("binding_key must be 32 bytes"));
     }
 
-    fn test_device_birth_record() -> pb::DeviceBirthRecordV1 {
-        pb::DeviceBirthRecordV1 {
-            genesis_hash: vec![0x22; 32],
-            device_public_key: Vec::new(),
-            device_birth_nonce_commitment: vec![0x33; 32],
-            creation_mode:
-                pb::device_birth_record_v1::CreationMode::DeviceBirthCreationModeGenesis as i32,
-            schema_version: 1,
-            protocol_version: 1,
-        }
+    /// Persist a genesis record so the restore path can re-derive `AttA` from
+    /// the SDK-owned device-birth nonce commitment (stored in
+    /// `GenesisRecord.device_birth_binding`).
+    fn persist_genesis_for_restore(device_id: &[u8], genesis_hash: &[u8], commitment: &[u8]) {
+        let rec = crate::storage::client_db::GenesisRecord {
+            genesis_id: crate::util::text_id::encode_base32_crockford(genesis_hash),
+            device_id: crate::util::text_id::encode_base32_crockford(device_id),
+            mpc_proof: "test-mpc".to_string(),
+            device_birth_binding: crate::util::text_id::encode_base32_crockford(commitment),
+            merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+            participant_count: 3,
+            progress_marker: "genesis".to_string(),
+            publication_hash: crate::util::text_id::encode_base32_crockford(genesis_hash),
+            storage_nodes: Vec::new(),
+            entropy_hash: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+            protocol_version: "v3".to_string(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+        };
+        crate::storage::client_db::store_genesis_record_with_verification(&rec)
+            .expect("persist test genesis record");
     }
 
     #[test]
     #[serial]
     fn startup_restore_identity_context_derives_binding_key_and_router() {
         let _guard = setup_test_env();
-        let expected_att = dsm::crypto::device_birth::DeviceBirthInputs::new(
-            [0x33; 32],
+        let commitment = [0x33u8; 32];
+        persist_genesis_for_restore(&[0x11; 32], &[0x22; 32], &commitment);
+        let expected_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
+            &commitment,
             dsm::crypto::device_birth::CreationMode::Genesis,
-            1,
-            1,
         )
         .derive_att();
 
@@ -1488,7 +1522,6 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1499,7 +1532,7 @@ endpoint = "http://127.0.0.1:8080"
         }
 
         assert_eq!(
-            crate::fetch_dbrw_binding_key().expect("binding key"),
+            crate::fetch_device_birth_binding_key().expect("binding key"),
             expected_att.to_vec()
         );
         assert!(crate::is_sdk_context_initialized());
@@ -1509,13 +1542,13 @@ endpoint = "http://127.0.0.1:8080"
     #[serial]
     fn startup_restore_identity_context_is_idempotent_for_same_identity() {
         let _guard = setup_test_env();
+        persist_genesis_for_restore(&[0x11; 32], &[0x22; 32], &[0x33; 32]);
 
         let first = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1529,7 +1562,6 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
@@ -1543,32 +1575,20 @@ endpoint = "http://127.0.0.1:8080"
     #[serial]
     fn startup_restore_identity_context_rejects_mismatched_identity() {
         let _guard = setup_test_env();
+        // Persisted genesis is for device 0x11; restoring 0x99 must fail closed
+        // (the persisted commitment is identity-scoped).
+        persist_genesis_for_restore(&[0x11; 32], &[0x22; 32], &[0x33; 32]);
 
-        let first = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::RestoreIdentityContext(
-                pb::RestoreIdentityContextOp {
-                    device_id: vec![0x11; 32],
-                    genesis_hash: vec![0x22; 32],
-                    device_birth: Some(test_device_birth_record()),
-                },
-            )),
-        });
-        match first.result {
-            Some(startup_response::Result::OkBytes(_)) => {}
-            other => panic!("expected OkBytes, got {other:?}"),
-        }
-
-        let second = dispatch_startup(StartupRequest {
+        let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x99; 32],
                     genesis_hash: vec![0x22; 32],
-                    device_birth: Some(test_device_birth_record()),
                 },
             )),
         });
-        let error = expect_startup_error(second);
+        let error = expect_startup_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
-        assert!(error.message.contains("different device_id"));
+        assert!(error.message.contains("does not match requested identity"));
     }
 }

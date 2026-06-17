@@ -79,13 +79,6 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
-
-        // CMake build flags for Silicon Fingerprint NDK library
-        externalNativeBuild {
-            cmake {
-                cppFlags += "-std=c++17"
-            }
-        }
     }
 
     buildFeatures {
@@ -191,14 +184,6 @@ android {
             proto {
                 srcDir("../../../proto")
             }
-        }
-    }
-
-    // NDK C++ build for Silicon Fingerprint (hardware PUF for DBRW)
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
         }
     }
 }

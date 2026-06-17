@@ -73,12 +73,10 @@ describe("protobuf-only bridge payloads", () => {
     expect(decoded.locale).toBe("en-US");
     expect(decoded.networkId).toBe("testnet");
     expect(decoded.deviceEntropy).toEqual(entropy);
-    expect(decoded.cdbrwHwEntropy.length).toBe(0);
-    expect(decoded.cdbrwEnvFingerprint.length).toBe(0);
-    // Phase 13: `cdbrwSalt` (tag 6) is `reserved` in proto — accessor no
-    // longer generated.  Pair with cdbrwHwEntropy / cdbrwEnvFingerprint
-    // being empty (legacy createGenesisViaRouter doesn't populate them
-    // either) to lock the createGenesis-with-no-platform-entropy shape.
+    // SystemGenesisRequest carries no device-birth / cdbrw binding fields: the
+    // SDK (Rust) owns the device-birth nonce/commitment end-to-end
+    // (rules.instructions.md — Rust is the sole crypto authority). The genesis
+    // request is just locale + network_id + device_entropy.
   });
 
   test("setBleIdentityForAdvertising sends BleIdentityPayload", async () => {

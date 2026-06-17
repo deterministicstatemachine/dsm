@@ -22,9 +22,25 @@
 //! lineage-distinctive material is the device-birth nonce commitment and the
 //! creation mode (`genesis | secondary_device | recovery_successor`).
 
-use crate::common::domain_tags::TAG_DSM_DEVICE_BIRTH_ATT;
+use crate::common::domain_tags::{TAG_DSM_DEVICE_BIRTH_ATT, TAG_DSM_DEVICE_BIRTH_NONCE};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::canonical_lp;
+
+/// Generate a fresh device-birth nonce commitment.
+///
+/// Draws 32 CSPRNG bytes as the birth nonce and returns
+/// `commitment = BLAKE3("DSM/device-birth-nonce/v1\0" || birth_nonce)`.  The
+/// nonce itself is never returned or persisted — only the commitment is, and
+/// it is folded VERBATIM into `AttA` via [`DeviceBirthInputs::from_platform_nonce`]
+/// so finalize/restore re-derive an identical `AttA`.  Rust owns this entirely;
+/// the host never computes or supplies it (rules.instructions.md: Rust is the
+/// sole crypto authority, Kotlin is transport-only).
+pub fn random_device_birth_nonce_commitment() -> [u8; 32] {
+    let birth_nonce = crate::crypto::rng::random_bytes(32);
+    let mut h = dsm_domain_hasher(TAG_DSM_DEVICE_BIRTH_NONCE);
+    h.update(&birth_nonce);
+    *h.finalize().as_bytes()
+}
 
 /// How a device identity was born.  Canonical small-int matched 1:1 with the
 /// frontend setup buttons (`INITIALIZE` / `ADDITIONAL DEVICE` / `DEVICE
@@ -81,13 +97,13 @@ impl DeviceBirthInputs {
         }
     }
 
-    /// Build schema/protocol-v1 birth inputs from the platform-supplied 32-byte
-    /// device-birth nonce commitment — the SAME persisted per-install value the
-    /// host also carries in `DeviceBirthRecordV1.device_birth_nonce_commitment`.
-    /// Using it verbatim (no second hash) is what makes the MPC-genesis path and
-    /// the bootstrap-finalize path derive an IDENTICAL AttA, so the device's
-    /// re-derived signing key matches its published genesis AK.  NOT a silicon
-    /// attestation (no orbit probe, trust gate, or K_DBRW).
+    /// Build schema/protocol-v1 birth inputs from a 32-byte device-birth nonce
+    /// commitment.  The SDK generates the commitment once at genesis
+    /// ([`random_device_birth_nonce_commitment`]) and persists it; genesis,
+    /// bootstrap-finalize, and restore all fold the SAME commitment in VERBATIM
+    /// (no second hash), so they derive an IDENTICAL AttA and the re-derived
+    /// signing key matches the published genesis AK.  NOT a silicon attestation
+    /// (no orbit probe, trust gate, or K_DBRW).
     pub fn from_platform_nonce(
         nonce_commitment_bytes: &[u8],
         creation_mode: CreationMode,
@@ -150,5 +166,23 @@ mod tests {
         assert_eq!(CreationMode::from_u8(3), Some(CreationMode::RecoverySuccessor));
         assert_eq!(CreationMode::from_u8(0), None);
         assert_eq!(CreationMode::from_u8(4), None);
+    }
+
+    #[test]
+    fn generated_commitment_is_32_bytes_and_nonzero() {
+        let c = random_device_birth_nonce_commitment();
+        assert_eq!(c.len(), 32);
+        assert_ne!(c, [0u8; 32]);
+    }
+
+    #[test]
+    fn generated_commitment_drives_a_stable_att() {
+        // A generated commitment used verbatim must yield a deterministic AttA:
+        // this is the property finalize/restore rely on to match genesis.
+        let c = random_device_birth_nonce_commitment();
+        let att_a = DeviceBirthInputs::from_platform_nonce(&c, CreationMode::Genesis).derive_att();
+        let att_b = DeviceBirthInputs::from_platform_nonce(&c, CreationMode::Genesis).derive_att();
+        assert_eq!(att_a, att_b);
+        assert_ne!(att_a, [0u8; 32]);
     }
 }

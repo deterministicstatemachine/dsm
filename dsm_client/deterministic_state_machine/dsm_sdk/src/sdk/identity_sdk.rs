@@ -530,18 +530,17 @@ impl IdentitySDK {
             "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
-        // Device-birth binding: AttA is folded into the MPC keypair derivation
-        // in place of the removed silicon C-DBRW binding.  We seed the birth
-        // nonce from the platform's per-device entropy slot (no orbit probe,
-        // trust gate, or K_DBRW).
-        let entropy =
-            crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
+        // Device-birth binding: AttA is folded into the MPC keypair derivation.
+        // The birth nonce commitment comes from the platform slot and is used
+        // VERBATIM (no orbit probe, trust gate, or K_DBRW).
+        let staged = crate::sdk::app_state::AppState::take_device_birth_nonce_commitment()
+            .ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(
-                    "identity_sdk: platform device-birth entropy required for genesis",
+                    "identity_sdk: device-birth nonce commitment required for genesis",
                 )
             })?;
         let device_birth_att = dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
-            &entropy.hw_entropy,
+            &staged.device_birth_nonce_commitment,
             dsm::crypto::device_birth::CreationMode::Genesis,
         )
         .derive_att();

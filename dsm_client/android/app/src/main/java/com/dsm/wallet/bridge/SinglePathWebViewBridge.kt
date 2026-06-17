@@ -67,7 +67,6 @@ class SinglePathWebViewBridge(private val context: Context) {
         private const val KEY_DEVICE_ID = "device_id_bytes"
         private const val KEY_GENESIS_HASH = "genesis_hash_bytes"
         private const val KEY_GENESIS_ENVELOPE = "genesis_envelope_bytes"
-        private const val KEY_DBRW_SALT = "dbrw_salt_bytes"
 
 
 
@@ -344,7 +343,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                         keyDeviceId = KEY_DEVICE_ID,
                         keyGenesisHash = KEY_GENESIS_HASH,
                         keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-                        keyDbrwSalt = KEY_DBRW_SALT,
                         locale = req.locale,
                         networkId = req.networkId,
                         entropyBytes = req.deviceEntropy.toByteArray(),
@@ -449,7 +447,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                         keyDeviceId = KEY_DEVICE_ID,
                         keyGenesisHash = KEY_GENESIS_HASH,
                         keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-                        keyDbrwSalt = KEY_DBRW_SALT,
                         requestBytes = payload,
                     )
                 }
@@ -608,47 +605,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                "captureCdbrwOrbitTimings" -> {
-                    try {
-                        val envBytes = com.dsm.wallet.security.AntiCloneGate.buildEnvironmentBytes()
-                        // Per Alg 1 step 1, the orbit seed needs a CSPRNG
-                        // challenge. The frontend never holds business state,
-                        // so we mint the challenge here on every probe.
-                        val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-                        // Thermal HAL snapshot — Android-sanctioned path
-                        // because direct sysfs reads are SELinux-blocked on
-                        // most OEMs. Kotlin layer is doing transport only;
-                        // PowerManager reads are not business logic.
-                        val thermalBytes = com.dsm.wallet.security.AntiCloneGate.sampleThermalBytesForBridge(inst.context)
-                        val timings = com.dsm.wallet.security.SiliconFingerprintNative.captureOrbitDensity(
-                            envBytes,
-                            challenge,
-                            thermalBytes,
-                            1024 * 1024, // 1MB arena
-                            8,           // probes (must be divisible by 8)
-                            1000,        // 1000 steps per probe
-                            1,           // 1 warmup round
-                            7            // rotation bits
-                        )
-                        if (timings == null) {
-                            Log.w(TAG, "captureCdbrwOrbitTimings: silicon PUF returned null")
-                            return ByteArray(0)
-                        }
-                        // Convert LongArray to ByteArray (little-endian i64)
-                        val result = ByteArray(timings.size * 8)
-                        for (i in timings.indices) {
-                            val value = timings[i]
-                            for (j in 0..7) {
-                                result[i * 8 + j] = (value shr (j * 8)).toByte()
-                            }
-                        }
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "captureCdbrwOrbitTimings failed", t)
-                        ByteArray(0)
-                    }
-                }
-
                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }
@@ -717,7 +673,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             logTag = TAG,
             keyDeviceId = KEY_DEVICE_ID,
             keyGenesisHash = KEY_GENESIS_HASH,
-            keyDbrwSalt = KEY_DBRW_SALT
         )
     }
     
@@ -739,7 +694,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             keyDeviceId = KEY_DEVICE_ID,
             keyGenesisHash = KEY_GENESIS_HASH,
             keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-            keyDbrwSalt = KEY_DBRW_SALT,
             locale = locale,
             networkId = networkId,
             entropyBytes = entropyBytes

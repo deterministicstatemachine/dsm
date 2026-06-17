@@ -1382,7 +1382,7 @@ impl AppRouterImpl {
                 Ok(mut receipt) => match receipt.compute_commitment() {
                     Ok(commitment) => {
                         // Resolve K_DBRW + root AK keypair.
-                        let k_dbrw_vec = match crate::fetch_dbrw_binding_key() {
+                        let k_dbrw_vec = match crate::fetch_device_birth_binding_key() {
                             Ok(k) => k,
                             Err(e) => {
                                 let rollback_error = self

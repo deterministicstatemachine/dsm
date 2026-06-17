@@ -12,7 +12,7 @@ fn binding_key_slot() -> &'static Mutex<Option<Vec<u8>>> {
 pub(crate) fn install_binding_key(binding_key: Vec<u8>) -> Result<(), DsmError> {
     if binding_key.len() != 32 {
         return Err(DsmError::invalid_parameter(format!(
-            "C-DBRW binding key must be 32 bytes, got {}",
+            "device-birth binding must be 32 bytes, got {}",
             binding_key.len()
         )));
     }

@@ -68,7 +68,7 @@ impl DeviceAdmissionSDK {
                 "admission request: entropy must be 32 bytes",
             ));
         }
-        let dbrw = crate::fetch_dbrw_binding_key()?;
+        let dbrw = crate::fetch_device_birth_binding_key()?;
         let new_device_id = derive_secondary_device_id(entropy, &genesis_hash, &dbrw);
         let new_signing_pubkey = AppState::get_public_key().ok_or_else(|| {
             DsmError::InvalidState("admission request: no device signing pubkey".into())
