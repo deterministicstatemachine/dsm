@@ -68,7 +68,7 @@ pub trait KeyStorage: Send + Sync {
     fn delete_key(&self, alias: &str, key_type: KeyType) -> Result<(), DsmError>;
 }
 
-/// Source for a 32-byte device binding key (DBRW-derived). Plug in your real implementation.
+/// Source for a 32-byte device binding key (device-birth-derived). Plug in your real implementation.
 pub trait BindingKeyProvider: Send + Sync {
     fn device_binding_key(&self) -> Result<[u8; 32], DsmError>;
 }
@@ -892,10 +892,10 @@ mod tests {
     }
 
     #[test]
-    fn export_import_roundtrip_dbrw() {
+    fn export_import_roundtrip_device_birth() {
         // Validate that DeviceBirthBindingKeyProvider is deterministic and importable.
         let dir = tempfile::tempdir().unwrap();
-        let device_id = "dev-dbrw-1".to_string();
+        let device_id = "dev-device_birth_att-1".to_string();
         let binder = DeviceBirthBindingKeyProvider::new(device_id.clone());
         let vault =
             SoftVaultKeyStorage::new(dir.path(), device_id.clone(), binder, Some("pw")).unwrap();

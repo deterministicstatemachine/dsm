@@ -379,7 +379,7 @@ impl RecoverySDK {
     /// is the SOLE canonical derivation), uses the cached mnemonic-derived authority
     /// keypair, and produces the doubly-signed declaration committing `H(K_A_pub)`.
     ///
-    /// Fail-closed: requires AppState identity (device_id + genesis_hash), K_DBRW, and a
+    /// Fail-closed: requires AppState identity (device_id + genesis_hash), AttA, and a
     /// cached authority keypair — i.e. the mnemonic must already be cached (call
     /// `derive_and_cache_key` first, as `recovery.enable` does).
     pub fn build_authority_anchor() -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
@@ -392,20 +392,20 @@ impl RecoverySDK {
             "genesis_hash",
         )?;
 
-        let dbrw = crate::fetch_device_birth_binding_key().map_err(|e| {
-            DsmError::InvalidState(format!("recovery anchor: K_DBRW unavailable: {e}"))
+        let device_birth_att = crate::fetch_device_birth_binding_key().map_err(|e| {
+            DsmError::InvalidState(format!("recovery anchor: AttA unavailable: {e}"))
         })?;
-        let k_dbrw = <[u8; 32]>::try_from(dbrw.as_slice()).map_err(|_| {
+        let device_birth_att = <[u8; 32]>::try_from(device_birth_att.as_slice()).map_err(|_| {
             DsmError::InvalidState(format!(
-                "recovery anchor: K_DBRW must be 32 bytes, got {}",
-                dbrw.len()
+                "recovery anchor: AttA must be 32 bytes, got {}",
+                device_birth_att.len()
             ))
         })?;
 
         // Re-derive the device signing keypair — byte-identical to the one in the
         // device tree (the genesis-binding signer for the anchor).
         let device_kp =
-            crate::init::derive_device_signing_keypair(&genesis_id, &device_id, &k_dbrw)?;
+            crate::init::derive_device_signing_keypair(&genesis_id, &device_id, &device_birth_att)?;
 
         let (authority_pk, authority_sk) =
             Self::get_cached_authority_keypair().ok_or_else(|| {

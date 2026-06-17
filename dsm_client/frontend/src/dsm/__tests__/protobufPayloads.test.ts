@@ -73,7 +73,7 @@ describe("protobuf-only bridge payloads", () => {
     expect(decoded.locale).toBe("en-US");
     expect(decoded.networkId).toBe("testnet");
     expect(decoded.deviceEntropy).toEqual(entropy);
-    // SystemGenesisRequest carries no device-birth / cdbrw binding fields: the
+    // SystemGenesisRequest carries no device-birth binding fields: the
     // SDK (Rust) owns the device-birth nonce/commitment end-to-end
     // (rules.instructions.md — Rust is the sole crypto authority). The genesis
     // request is just locale + network_id + device_entropy.

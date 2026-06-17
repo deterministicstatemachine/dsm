@@ -37,7 +37,7 @@ pub struct PlatformContext {
     /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment) ||
     /// LP(creation_mode) || LP(schema_version) || LP(protocol_version))`) and
     /// folded into `S_master` IKM (whitepaper §11.1) in place of the removed
-    /// silicon C-DBRW binding. Deterministic per install/device lineage;
+    /// silicon device-birth binding. Deterministic per install/device lineage;
     /// recoverable by re-deriving from the persisted commitment. NOT an
     /// anti-clone proof (online safety is tripwire + parent-consumption
     /// uniqueness).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Device-birth binding `AttA` — a deterministic install / device-lineage
-//! binding that replaces the removed silicon C-DBRW binding (whitepaper §11.1).
+//! binding that replaces the removed silicon anti-clone binding (whitepaper §11.1).
 //!
 //! `AttA` is folded into the per-device key-derivation IKM (`S_master`) so the
 //! keypair is canonical to this device install.  It is **NOT** an anti-clone
@@ -103,7 +103,7 @@ impl DeviceBirthInputs {
     /// bootstrap-finalize, and restore all fold the SAME commitment in VERBATIM
     /// (no second hash), so they derive an IDENTICAL AttA and the re-derived
     /// signing key matches the published genesis AK.  NOT a silicon attestation
-    /// (no orbit probe, trust gate, or K_DBRW).
+    /// (no orbit probe, trust gate, or AttA).
     pub fn from_platform_nonce(
         nonce_commitment_bytes: &[u8],
         creation_mode: CreationMode,

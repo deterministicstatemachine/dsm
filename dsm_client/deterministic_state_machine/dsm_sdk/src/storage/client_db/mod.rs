@@ -684,7 +684,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         --
         -- chain_head_sk_encrypted is the ChaCha20-Poly1305 ciphertext of
         -- the corresponding SECRET key (for Local rows only; NULL for
-        -- Counterparty), encrypted under a key derived from K_DBRW so
+        -- Counterparty), encrypted under a key derived from AttA so
         -- extracted ciphertext cannot be used on a different device.
         -- Used at receipt creation time to sign cert_{n+1}; wiped after
         -- consumption when chain_head advances.

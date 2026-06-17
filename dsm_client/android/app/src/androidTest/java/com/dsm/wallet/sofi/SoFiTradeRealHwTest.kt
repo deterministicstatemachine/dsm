@@ -59,7 +59,7 @@ import java.security.SecureRandom
  *     If the wallet was just installed, open it once interactively
  *     and tap through the genesis flow before running this test.
  *     `Unified.ensureAppRouterInstalled()` returns false until genesis
- *     + DBRW binding-key derivation finish (~30s after first launch).
+ *     + device-birth binding-key derivation finish (~30s after first launch).
  *  3. ERA balance >= MIN_ERA_BALANCE on this device. Use the wallet's
  *     faucet screen to claim if missing.
  *
@@ -120,9 +120,9 @@ class SoFiTradeRealHwTest {
             installed,
         )
 
-        // The C-DBRW access gate refuses route reads until the resume
+        // The device-birth access gate refuses route reads until the resume
         // flow has published a fresh trust snapshot via
-        // `BridgeIdentityHandler.resumeCdbrwTrust`. AppRouter being
+        // the resume path. AppRouter being
         // installed isn't enough — the trust snapshot publish runs in
         // the background after AppRouter installation and takes 5-15s
         // for the measure_trust orbit. Poll `balance.get` until it

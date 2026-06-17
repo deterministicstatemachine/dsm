@@ -24,7 +24,7 @@ import androidx.annotation.Keep
 //   - All payloads are protobuf ByteArray. No serialization libraries.
 //   - All responses carry 0x03 framing prefix + Envelope v3 protobuf.
 //   - DO NOT use wall-clock APIs in protocol logic -- clockless.
-//   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
+//   - All crypto (SPHINCS+, ML-KEM-768) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
 //   Identity:  extractGenesisIdentity, recordPeerIdentity
@@ -135,7 +135,7 @@ object Unified {
     /**
      * Get a compact AppRouter status code (native):
      * 0 = NOT_READY_NO_GENESIS
-     * 1 = DBRW_NOT_READY
+     * 1 = BINDING_NOT_READY
      * 2 = INSTALLED
      */
     @Keep @JvmStatic fun getAppRouterStatus(): Int = UnifiedNativeApi.getAppRouterStatus()
@@ -585,10 +585,8 @@ object Unified {
         return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
     }
 
-    // getCdbrwRuntimeSnapshot() and the whole C-DBRW runtime trust protocol
-    // (responder/verifier/enrollment, the `cdbrw.*` routes, and the
-    // CdbrwTrustSnapshot payload) have been removed. Online safety is the
-    // Tripwire; there is no device trust snapshot to fetch.
+    // There is no per-device trust snapshot to fetch — online safety is the
+    // Tripwire, not any device trust/anti-clone measurement.
 
     // ---------- BLE pairing orchestration (Rust-driven loop) ----------
 

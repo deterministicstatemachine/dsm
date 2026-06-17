@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 /// to determine the appropriate recovery action.
 #[derive(Debug)]
 pub enum UnifiedDsmError {
-    /// Cryptographic operation failure (BLAKE3, SPHINCS+, ML-KEM, DBRW).
+    /// Cryptographic operation failure (BLAKE3, SPHINCS+, ML-KEM).
     Crypto {
         /// Description of the failed operation.
         context: String,

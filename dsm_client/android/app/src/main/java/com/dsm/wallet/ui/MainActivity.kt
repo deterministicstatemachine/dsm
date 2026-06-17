@@ -1212,7 +1212,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             // Continue anyway - don't block on checker failure
         }
         
-        // DBRW validation removed from onCreate — bootstrapFromPrefs() now handles
+        // binding validation removed from onCreate — bootstrapFromPrefs() now handles
         // anchor computation using fast mode (no hardware probing). The heavy enrollment
         // runs once during genesis setup with a dedicated progress screen.
 
@@ -1333,7 +1333,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         if (hasIdentityViaRust()) {
             invokeNativeRouterInvoke("inbox.resume")
         }
-        // Only restart BLE after genesis — during genesis/DBRW the hardware is
+        // Only restart BLE after genesis — during genesis the hardware is
         // busy and BLE scanning/advertising wastes resources and causes errors.
         if (hasIdentityViaRust()) {
             try {

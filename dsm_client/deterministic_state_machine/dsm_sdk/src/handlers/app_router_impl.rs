@@ -951,11 +951,11 @@ impl AppRouterImpl {
         let seq = transfer_req.seq;
 
         // §4.1: Nonce = "fresh entropy e" — generated deterministically by the SDK.
-        // Formula: BLAKE3("DSM/nonce\0" || KDBRW || h_n || seq || amount || token_id || recipient)
+        // Formula: BLAKE3("DSM/nonce\0" || AttA || h_n || seq || amount || token_id || recipient)
         // transfer_req.nonce from the frontend is ignored (reserved/ignored per proto comment).
         // The nonce is embedded in the Operation payload and transmitted to the receiver via the
         // b0x envelope, so both sides use identical bytes for compute_precommit. Clockless: no
-        // wall-clock, no OS randomness — uniqueness is guaranteed by KDBRW ⊕ h_n ⊕ seq ⊕ payload.
+        // wall-clock, no OS randomness — uniqueness is guaranteed by AttA ⊕ h_n ⊕ seq ⊕ payload.
         let nonce: Vec<u8> = {
             let mut hasher =
                 dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
@@ -1375,14 +1375,14 @@ impl AppRouterImpl {
             // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
             //
             // The receipt challenge is signed by a per-step EK derived from
-            // canonical C_pre, fresh Kyber k_step material, and K_DBRW.
+            // canonical C_pre, fresh Kyber k_step material, and AttA.
             let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 &rc_canonical,
             ) {
                 Ok(mut receipt) => match receipt.compute_commitment() {
                     Ok(commitment) => {
-                        // Resolve K_DBRW + root AK keypair.
-                        let k_dbrw_vec = match crate::fetch_device_birth_binding_key() {
+                        // Resolve AttA + root AK keypair.
+                        let device_birth_att_vec = match crate::fetch_device_birth_binding_key() {
                             Ok(k) => k,
                             Err(e) => {
                                 let rollback_error = self
@@ -1392,18 +1392,18 @@ impl AppRouterImpl {
                                     .map(|rb| format!("; rollback failed: {rb}"))
                                     .unwrap_or_default();
                                 return err(format!(
-                                    "wallet.send: K_DBRW unavailable for cert chain: {e}{rollback_error}"
+                                    "wallet.send: AttA unavailable for cert chain: {e}{rollback_error}"
                                 ));
                             }
                         };
-                        if k_dbrw_vec.len() < 32 {
+                        if device_birth_att_vec.len() < 32 {
                             return err(format!(
-                                "wallet.send: K_DBRW too short ({} bytes, need 32)",
-                                k_dbrw_vec.len()
+                                "wallet.send: AttA too short ({} bytes, need 32)",
+                                device_birth_att_vec.len()
                             ));
                         }
-                        let mut k_dbrw_arr = [0u8; 32];
-                        k_dbrw_arr.copy_from_slice(&k_dbrw_vec[..32]);
+                        let mut device_birth_att_arr = [0u8; 32];
+                        device_birth_att_arr.copy_from_slice(&device_birth_att_vec[..32]);
                         let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                             Ok(kp) => kp,
                             Err(e) => {
@@ -1463,7 +1463,7 @@ impl AppRouterImpl {
                             c_pre: receipt_sigma,
                             devid_sender: receipt.devid_a,
                             relationship_key: rel_key,
-                            k_dbrw: &k_dbrw_arr,
+                            device_birth_att: &device_birth_att_arr,
                             root_ak_keypair: Some((&ak_pk, &ak_sk)),
                             recipient_kyber_pk: &recipient_kyber_pk,
                             // §11.1 Item 7: bind the per-step EK response
@@ -1496,7 +1496,7 @@ impl AppRouterImpl {
                                         &rel_key,
                                         &out.ek_pk,
                                         &out.ek_sk,
-                                        &k_dbrw_arr,
+                                        &device_birth_att_arr,
                                         out.used_root_ak,
                                     )
                                 {

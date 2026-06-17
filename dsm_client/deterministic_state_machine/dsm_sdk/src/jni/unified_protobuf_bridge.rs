@@ -937,7 +937,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
             // Three-state readiness gate for UI:
             // 0 = NO_IDENTITY (no persisted device_id/genesis)
             // 1 = RUNTIME_NOT_READY (identity present, but runtime not fully ready yet)
-            // 3 = READY (DBRW + SDK fully ready)
+            // 3 = READY (device-birth + SDK fully ready)
             let has_identity = crate::sdk::app_state::AppState::get_device_id()
                 .map(|v| v.len() == 32)
                 .unwrap_or(false)
@@ -971,7 +971,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
                 None => return std::ptr::null_mut(),
             };
             ensure_bootstrap();
-            // Do not gate header fetch on DBRW/SDK_READY. Headers may be required immediately
+            // Do not gate header fetch on device-birth/SDK_READY. Headers may be required immediately
             // after genesis to avoid "identity not initialized" UI states. If the SDK context
             // isn't initialized yet, crate::get_transport_headers_v3_bytes will attempt to
             // bootstrap it from persisted AppState.
@@ -4658,7 +4658,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
 /// Return an integer status code describing why AppRouter may not be available.
 /// Codes:
 /// 0 = NOT_READY_NO_GENESIS
-/// 1 = DBRW_NOT_READY
+/// 1 = BINDING_NOT_READY
 /// 2 = INSTALLED
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterStatus(

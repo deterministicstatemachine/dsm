@@ -22,8 +22,8 @@ Vars == <<deviceRoots, smtState, ledger>>
 \*
 \* Scope boundary: online fork exclusion here uses ONLY Tripwire +
 \* parent-consumption + the abstract SPHINCS+/BLAKE3 acceptance guards. It
-\* uses no DBRW and no secure element, and storage nodes are dumb mirrors
-\* (no DBRW, no secure element, no acceptance authority). The offline-bearer
+\* uses no device anti-clone binding and no secure element, and storage nodes are dumb mirrors
+\* (no device anti-clone, no secure element, no acceptance authority). The offline-bearer
 \* Safe 7 / stateful-root anchor (parent_root == stored_root, stored_root ->
 \* successor_root) is a SEPARATE hardware mechanism, NOT modelled or proved here.
 \*

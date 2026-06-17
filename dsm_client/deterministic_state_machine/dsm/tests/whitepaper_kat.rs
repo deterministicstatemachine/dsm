@@ -158,8 +158,8 @@ fn kat_dsm_kyber_coins() {
     let h_n = [1u8; 32];
     let c_pre = [2u8; 32];
     let dev_id = [3u8; 32];
-    let k_dbrw = [4u8; 32];
-    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &dev_id, &k_dbrw);
+    let device_birth_att = [4u8; 32];
+    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &dev_id, &device_birth_att);
     assert_pin(
         "DSM/kyber-coins",
         from_code,
@@ -183,18 +183,18 @@ fn kat_dsm_kyber_ss() {
 // =============================================================================
 
 /// Pins the canonical kyber_coins preimage form per spec:
-///   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || K_DBRW)
+///   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || AttA)
 /// This is what the sender feeds into the deterministic Kyber encapsulation
 /// to derive `k_step`, which then mixes into the per-step EK derivation
-/// alongside K_DBRW. (Phase F real-Kyber migration.)
+/// alongside AttA. (Phase F real-Kyber migration.)
 #[test]
 fn kat_dsm_kyber_coins_per_step() {
     let h_n = [0x11u8; 32];
     let c_pre = [0x22u8; 32];
     let devid_sender = [0x33u8; 32];
-    let k_dbrw = [0x44u8; 32];
+    let device_birth_att = [0x44u8; 32];
     let from_code =
-        dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &devid_sender, &k_dbrw);
+        dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &devid_sender, &device_birth_att);
     assert_pin(
         "DSM/kyber-coins per-step",
         from_code,
@@ -261,15 +261,15 @@ fn kat_recovery_capsule_aad_format() {
 
 #[test]
 fn kat_dsm_ek_derivation_seed() {
-    // E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)
+    // E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || AttA)
     // The dsm crate exposes the underlying derive_ephemeral_seed primitive;
     // sdk's PerStepEkContext + derive_per_step_ek wrap it.
     let h_n = [0x11; 32];
     let c_pre = [0x22; 32];
     let k_step = [0x33; 32];
-    let k_dbrw = [0x44; 32];
+    let device_birth_att = [0x44; 32];
 
-    let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(&h_n, &c_pre, &k_step, &k_dbrw);
+    let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(&h_n, &c_pre, &k_step, &device_birth_att);
     assert_pin(
         "DSM/ek (per-step EK derivation seed)",
         seed,
@@ -316,7 +316,7 @@ fn kat_dsm_dev_tree_pad() {
 }
 
 // =============================================================================
-// §11.1 — Device-birth binding AttA (replaces the removed §12 DBRW binding)
+// §11.1 — Device-birth binding AttA (whitepaper §11.1)
 // =============================================================================
 
 #[test]

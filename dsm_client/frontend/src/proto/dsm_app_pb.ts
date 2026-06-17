@@ -6767,7 +6767,7 @@ export class SoftVaultExportV1 extends Message<SoftVaultExportV1> {
   deviceId = new Uint8Array(0);
 
   /**
-   * C-DBRW device binding fingerprint
+   * device-birth device binding fingerprint
    *
    * @generated from field: bytes binder_hash32 = 4;
    */
@@ -8380,7 +8380,7 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
  * unlock gate re-verifies before emitting Operation::DlvUnlock.
  *
  * Strictly stronger than VaultStateAnchorV1: the anchor only signs
- * (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
+ * (vault_id, sequence, reserves_digest), so a compromised AttA could
  * forge a signed anchor.  The inclusion proof additionally commits the
  * device's PD-SMT root + a 256-sibling Merkle path that
  * dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
@@ -8441,7 +8441,7 @@ export class VaultStateInclusionProofV1 extends Message<VaultStateInclusionProof
   /**
    * SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
    * vault_id || sequence_be || reserves_digest || smt_root).  Binds
-   * the SMT root into the signature so a compromised K_DBRW cannot
+   * the SMT root into the signature so a compromised AttA cannot
    * forge a proof against a different root.
    *
    * @generated from field: bytes owner_signature = 7;
@@ -11812,8 +11812,8 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
  * Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
  * device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
  * device signing key (the gate — only a key already in the tree can authorize the insert). The new
- * device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
- * bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+ * device co-signs with its own device-birth-bound device key to prove physical possession (device-birth is silicon-
+ * bound and cannot be faked) WITHOUT revealing the raw device-birth. The gate signer's pubkey comes from
  * the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
  * Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
  * (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
@@ -11864,7 +11864,7 @@ export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
   signatureBySignerDevice = new Uint8Array(0);
 
   /**
-   * new device — DBRW-bound possession
+   * new device — device-birth-bound possession
    *
    * @generated from field: bytes signature_by_new_device = 8;
    */
@@ -11930,7 +11930,7 @@ export class AddDeviceAdmissionRequestV1 extends Message<AddDeviceAdmissionReque
   newDeviceSigningPubkey = new Uint8Array(0);
 
   /**
-   * DBRW-bound self-attestation
+   * device-birth-bound self-attestation
    *
    * @generated from field: bytes signature_by_new_device = 4;
    */
@@ -12353,7 +12353,7 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
    * CRITICAL: This allows the sender to update their contact's signing key
    * when receiving the accept response, enabling session registration for future transfers.
    *
-   * Field 7 reserved (removed: old DBRW warning)
+   * Field 7 reserved (removed: old device-birth warning)
    *
    * @generated from field: bytes responder_signing_public_key = 6;
    */
@@ -13212,7 +13212,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    * Dual SPHINCS+ signatures. These are the receipt challenge responses.
    * The challenge is the proposed transition context carried by fields 1-11
    * plus the bilateral session binding. Each response signs that context with
-   * the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+   * the fresh EK key derived from h_n, C_pre, k_step, and AttA.
    * NOT part of canonical commit preimage.
    * Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
    *
@@ -13249,12 +13249,12 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   /**
    * Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
    * is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
-   * where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+   * where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || AttA).
    * The verifier uses these to verify sig_a/sig_b without needing them
    * out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
    * same placement rationale as ek_cert_a/b.
    * A copied database can carry old public EK material, but cannot derive the
-   * next EK on different hardware because K_DBRW is not serialized.
+   * next EK on different hardware because AttA is not serialized.
    *
    * @generated from field: bytes ek_pk_a = 16;
    */
@@ -13269,13 +13269,13 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
    * deterministic Kyber coins from
    *   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-   *                       || DevID_sender || K_DBRW)
+   *                       || DevID_sender || AttA)
    * encapsulates against the recipient's Kyber public key, and the
    * resulting ciphertext travels here. The recipient decapsulates with
    * their local Kyber secret key to recover the same shared secret `ss`,
    * then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
    * arrive at identical k_step, which is then mixed into the per-step
-   * EK derivation alongside K_DBRW. Wire-only — not part of canonical
+   * EK derivation alongside AttA. Wire-only — not part of canonical
    * commit form (§4.2.1).
    *
    * @generated from field: bytes kyber_ct_a = 18;
@@ -13547,7 +13547,7 @@ export class BilateralEventNotification extends Message<BilateralEventNotificati
   senderBleAddress?: string;
 
   /**
-   * Field 11 reserved (removed: old DBRW warning)
+   * Field 11 reserved (removed: old device-birth warning)
    *
    * @generated from field: optional dsm.BilateralFailureReason failure_reason = 10;
    */
@@ -17056,7 +17056,7 @@ export class UniversalOp extends Message<UniversalOp> {
     case: "query";
   } | {
     /**
-     * Field numbers 20, 21, 30 reserved (removed: old DBRW ops)
+     * Field numbers 20, 21, 30 reserved (removed: old device-birth ops)
      *
      * @generated from field: dsm.RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
      */
@@ -17602,7 +17602,7 @@ export class Envelope extends Message<Envelope> {
     case: "batchEnvelope";
   } | {
     /**
-     * Field numbers 13, 14, 33 reserved (removed: old DBRW responses)
+     * Field numbers 13, 14, 33 reserved (removed: old device-birth responses)
      *
      * @generated from field: dsm.RecoveryCapsuleDecryptResponse recovery_capsule_decrypt_response = 15;
      */
@@ -18066,7 +18066,7 @@ export class Envelope extends Message<Envelope> {
     case: "storageNodeManageResponse";
   } | {
     /**
-     * 90 = was DbrwStatusResponse (C-DBRW runtime trust removed; reserved below)
+     * 90 = was a removed runtime-trust response (reserved below)
      *
      * @generated from field: dsm.BitcoinWithdrawalPlanRequest bitcoin_withdrawal_plan_request = 91;
      */
@@ -18288,7 +18288,7 @@ export class Envelope extends Message<Envelope> {
 /**
  * ===================== SDK INIT / STATUS =====================
  * Returned when the app attempts to mark the SDK/wallet "initialized" but a
- * mandatory prerequisite is missing (e.g., C-DBRW not bootstrapped yet).
+ * mandatory prerequisite is missing (e.g., device-birth not bootstrapped yet).
  *
  * @generated from message dsm.InitFailed
  */
@@ -19840,7 +19840,7 @@ export class BalanceWitnessEntryProto extends Message<BalanceWitnessEntryProto> 
  * Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
  * EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
  * canonical operation bytes, entropy, optional encapsulated_entropy, optional
- * dbrw_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
+ * ext_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
  * they sign the digest). proto3 `optional` distinguishes None from an empty Some, which the
  * chain-tip hash treats differently; a faithful round-trip is REQUIRED so a decoder can
  * recompute the tip and assert equality.
@@ -19883,9 +19883,9 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
   encapsulatedEntropy?: Uint8Array;
 
   /**
-   * @generated from field: optional bytes dbrw_summary_hash = 7;
+   * @generated from field: optional bytes ext_summary_hash = 7;
    */
-  dbrwSummaryHash?: Uint8Array;
+  extSummaryHash?: Uint8Array;
 
   /**
    * @generated from field: repeated dsm.BalanceWitnessEntryProto balance_witness = 8;
@@ -19929,7 +19929,7 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
     { no: 4, name: "operation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "encapsulated_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 7, name: "dbrw_summary_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 7, name: "ext_summary_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
     { no: 8, name: "balance_witness", kind: "message", T: BalanceWitnessEntryProto, repeated: true },
     { no: 9, name: "entity_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
     { no: 10, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
@@ -21706,7 +21706,7 @@ export class ContactsListResponse extends Message<ContactsListResponse> {
 /**
  * ========================= Geo Emissions (transport only) =========================
  * Transport messages for clockless geo-claim submission and acknowledgment.
- * Verification (spawn proof, C-DBRW witness, SPHINCS+ signature over canonical bytes)
+ * Verification (spawn proof, device-birth witness, SPHINCS+ signature over canonical bytes)
  * is implemented in the Rust core; these are I/O envelopes only.
  *
  * @generated from message dsm.MerkleInclusionProof
@@ -27337,7 +27337,7 @@ export class RegistryV3 extends Message<RegistryV3> {
  */
 export class ApplicantV3 extends Message<ApplicantV3> {
   /**
-   * C-DBRW hardware binding
+   * device-birth hardware binding
    *
    * @generated from field: bytes hw_bind = 1;
    */

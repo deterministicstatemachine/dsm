@@ -18,14 +18,18 @@
 //!          ∥ ( "DSM/genesis/mpc\0" ∥ H(m_i)  for each contribution, sorted ))
 //! ```
 //!
-//! The public-key bundle and the K_DBRW anti-cloning binding are deliberately
-//! EXCLUDED from `G`: keys and K_DBRW are *derived from* `G`
-//! (`keys ← S_master ← K_DBRW ← G`), so folding them back into the preimage
-//! would be circular. They bind to genesis by derivation, not by inclusion;
-//! anti-cloning is enforced downstream by K_DBRW (a clone derives a different
-//! K_DBRW, hence different keys). Wall-clock and mutable metadata are likewise
-//! excluded, keeping `G` clockless and publicly recomputable from the public
-//! `device_id` plus the revealed contributions. No hex/json/base64/serde here.
+//! The public-key bundle and the device-birth binding `AttA` are deliberately
+//! EXCLUDED from `G`. The keys are *derived from* `S_master`
+//! (`IKM = G ‖ DevID ‖ AttA ‖ s_0`), so folding them back into `G` would be
+//! circular; they bind to genesis through that derivation, not by inclusion.
+//! `AttA` is device-local install/lineage material (not public contribution
+//! data), so it is kept out of `G` to leave `G` publicly recomputable from
+//! `device_id` plus the revealed contributions; it binds via the `S_master`
+//! IKM. `AttA` is an install/lineage binding, NOT an anti-clone proof — online
+//! double-spend safety is the Tripwire + parent-consumption uniqueness, and
+//! offline-bearer anti-clone is the separate secure-element anchor. Wall-clock
+//! and mutable metadata are likewise excluded, keeping `G` clockless and
+//! publicly recomputable. No hex/json/base64/serde here.
 
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
 
@@ -94,7 +98,7 @@ pub fn hash_contribution(material: &[u8]) -> Digest32 {
 ///
 /// `G` is acyclic and publicly recomputable: it depends only on `device_id`
 /// and the revealed contributions, never on values derived from `G` (keys,
-/// K_DBRW), which bind to genesis by being derived from it.
+/// AttA), which bind to genesis by being derived from it.
 pub fn compute_genesis_hash(device_id: &[u8; 32], contributions: &[MPCContribution]) -> Digest32 {
     let mut h = dsm_domain_hasher("DSM/genesis");
     h.update(device_id);

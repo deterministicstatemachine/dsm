@@ -320,7 +320,7 @@ pub extern "C" fn dsm_init_dsm_sdk(config_path_utf8: *const c_char) -> bool {
     dsm_initialize_sdk()
 }
 
-/// Install canonical identity context using the validated C-DBRW binding key.
+/// Install canonical identity context using the validated device-birth binding key.
 #[no_mangle]
 pub extern "C" fn dsm_initialize_sdk_context(
     device_id: *const u8,

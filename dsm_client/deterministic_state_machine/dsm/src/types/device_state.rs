@@ -336,9 +336,9 @@ pub struct RelationshipChainState {
     /// Counterparty SPHINCS+ signature (bilateral mode).
     pub counterparty_sig: Option<Vec<u8>>,
 
-    /// Optional DBRW health summary commitment (§12). Advisory only —
+    /// Optional reserved optional per-transition summary commitment (§12). Advisory only —
     /// included in the hash iff present on the advancing device.
-    pub dbrw_summary_hash: Option<[u8; 32]>,
+    pub ext_summary_hash: Option<[u8; 32]>,
 
     /// Optional offline-bearer secure-element island attestation (anti-clone, see
     /// [`crate::attestation`]). Folded into the chain tip iff present; absent on every
@@ -354,7 +354,7 @@ impl RelationshipChainState {
     /// and any counter-like metadata per §4.3. Ordering of fields is:
     ///
     /// `rel_key ‖ embedded_parent ‖ counterparty_devid ‖ op ‖ entropy
-    /// ‖ encap_flag ‖ encap? ‖ dbrw_flag ‖ dbrw? ‖ witness_len
+    /// ‖ encap_flag ‖ encap? ‖ ext_flag ‖ device_birth_att? ‖ witness_len
     /// ‖ (policy_commit ‖ value)* sorted_by_policy_commit`
     ///
     /// Signatures are NOT hashed — they sign this digest, not the other
@@ -384,10 +384,10 @@ impl RelationshipChainState {
             }
         }
 
-        match &self.dbrw_summary_hash {
-            Some(dbrw) => {
+        match &self.ext_summary_hash {
+            Some(device_birth_att) => {
                 hasher.update(&[1u8]);
-                hasher.update(dbrw);
+                hasher.update(device_birth_att);
             }
             None => {
                 hasher.update(&[0u8]);
@@ -750,7 +750,7 @@ impl DeviceState {
     /// - `deltas` — balance mutations to apply to device-level `B^T`
     /// - `initial_chain_tip` — spec-canonical initial tip, used ONLY if
     ///   `rel_key` has no prior entry in the SMT (first-ever tx)
-    /// - `dbrw_summary_hash` — optional DBRW health commitment (§12)
+    /// - `ext_summary_hash` — optional reserved optional per-transition summary commitment (§12)
     ///
     /// # Errors
     ///
@@ -774,7 +774,7 @@ impl DeviceState {
         encapsulated_entropy: Option<Vec<u8>>,
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
-        dbrw_summary_hash: Option<[u8; 32]>,
+        ext_summary_hash: Option<[u8; 32]>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -837,7 +837,7 @@ impl DeviceState {
             balance_witness: new_balances.clone(),
             entity_sig: None,
             counterparty_sig: None,
-            dbrw_summary_hash,
+            ext_summary_hash,
             island_attestation: None,
         };
 

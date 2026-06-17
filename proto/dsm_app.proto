@@ -770,7 +770,7 @@ message SoftVaultExportV1 {
   uint32 version        = 1; // MUST be 1
   bytes  vault_id       = 2; // canonical vault id (binary)
   bytes  device_id      = 3; // binary device id used in KDF
-  bytes  binder_hash32  = 4 [(dsm_fixed_len)=32]; // C-DBRW device binding fingerprint
+  bytes  binder_hash32  = 4 [(dsm_fixed_len)=32]; // device-birth device binding fingerprint
   uint32 export_seqno   = 5; // deterministic counter, not time
   bytes  nonce          = 6 [(dsm_fixed_len)=24]; // XChaCha20-Poly1305 nonce
   bytes  ciphertext     = 7; // AEAD(ct || tag), AAD = vault_id
@@ -1165,7 +1165,7 @@ message VaultPendingPointerV1 {
 // unlock gate re-verifies before emitting Operation::DlvUnlock.
 //
 // Strictly stronger than VaultStateAnchorV1: the anchor only signs
-// (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
+// (vault_id, sequence, reserves_digest), so a compromised AttA could
 // forge a signed anchor.  The inclusion proof additionally commits the
 // device's PD-SMT root + a 256-sibling Merkle path that
 // dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
@@ -1192,7 +1192,7 @@ message VaultStateInclusionProofV1 {
   bytes  owner_public_key      = 6 [(dsm_max_len)=65535];
   // SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
   // vault_id || sequence_be || reserves_digest || smt_root).  Binds
-  // the SMT root into the signature so a compromised K_DBRW cannot
+  // the SMT root into the signature so a compromised AttA cannot
   // forge a proof against a different root.
   bytes  owner_signature       = 7 [(dsm_max_len)=65535];
 }
@@ -1654,8 +1654,8 @@ message SecondaryDeviceResponse {
 // Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
 // device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
 // device signing key (the gate — only a key already in the tree can authorize the insert). The new
-// device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
-// bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+// device co-signs with its own device-birth-bound device key to prove physical possession (device-birth is silicon-
+// bound and cannot be faked) WITHOUT revealing the raw device-birth. The gate signer's pubkey comes from
 // the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
 // Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
 // (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
@@ -1670,7 +1670,7 @@ message AddDeviceAdmissionV1 {
   bytes  parent_device_tree_root    = 5 [(dsm_fixed_len)=32];
   uint64 parent_device_tree_version = 6;
   bytes  signature_by_signer_device = 7 [(dsm_max_len)=65535]; // existing device — the gate
-  bytes  signature_by_new_device    = 8 [(dsm_max_len)=65535]; // new device — DBRW-bound possession
+  bytes  signature_by_new_device    = 8 [(dsm_max_len)=65535]; // new device — device-birth-bound possession
 }
 
 // The new (joining) device's half of an admission, sent to the existing authorized device over the
@@ -1681,7 +1681,7 @@ message AddDeviceAdmissionRequestV1 {
   bytes genesis_hash              = 1 [(dsm_fixed_len)=32];
   bytes new_device_id             = 2 [(dsm_fixed_len)=32];
   bytes new_device_signing_pubkey = 3 [(dsm_max_len)=4096];
-  bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // DBRW-bound self-attestation
+  bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // device-birth-bound self-attestation
 }
 
 // NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
@@ -1749,7 +1749,7 @@ message BilateralPrepareResponse {
   // CRITICAL: This allows the sender to update their contact's signing key
   // when receiving the accept response, enabling session registration for future transfers.
   bytes  responder_signing_public_key = 6 [(dsm_fixed_len)=64];
-  // Field 7 reserved (removed: old DBRW warning)
+  // Field 7 reserved (removed: old device-birth warning)
 }
 
 enum RelationshipSendCheckState {
@@ -1884,7 +1884,7 @@ message ReceiptCommit {
   // Dual SPHINCS+ signatures. These are the receipt challenge responses.
   // The challenge is the proposed transition context carried by fields 1-11
   // plus the bilateral session binding. Each response signs that context with
-  // the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+  // the fresh EK key derived from h_n, C_pre, k_step, and AttA.
   // NOT part of canonical commit preimage.
   // Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
   bytes sig_a = 12 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
@@ -1899,24 +1899,24 @@ message ReceiptCommit {
   bytes ek_cert_b = 15 [(dsm_max_len)=65535];
   // Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
   // is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
-  // where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+  // where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || AttA).
   // The verifier uses these to verify sig_a/sig_b without needing them
   // out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
   // same placement rationale as ek_cert_a/b.
   // A copied database can carry old public EK material, but cannot derive the
-  // next EK on different hardware because K_DBRW is not serialized.
+  // next EK on different hardware because AttA is not serialized.
   bytes ek_pk_a = 16 [(dsm_max_len)=65535];
   bytes ek_pk_b = 17 [(dsm_max_len)=65535];
   // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
   // deterministic Kyber coins from
   //   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-  //                       || DevID_sender || K_DBRW)
+  //                       || DevID_sender || AttA)
   // encapsulates against the recipient's Kyber public key, and the
   // resulting ciphertext travels here. The recipient decapsulates with
   // their local Kyber secret key to recover the same shared secret `ss`,
   // then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
   // arrive at identical k_step, which is then mixed into the per-step
-  // EK derivation alongside K_DBRW. Wire-only — not part of canonical
+  // EK derivation alongside AttA. Wire-only — not part of canonical
   // commit form (§4.2.1).
   bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
   bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
@@ -2006,7 +2006,7 @@ message BilateralEventNotification {
   string             message                = 8; // optional details
   optional string    sender_ble_address     = 9;  // BLE MAC address for response routing
   optional BilateralFailureReason failure_reason = 10;
-  // Field 11 reserved (removed: old DBRW warning)
+  // Field 11 reserved (removed: old device-birth warning)
 }
 
 // =========================== Bluetooth Transport ====================
@@ -2137,7 +2137,7 @@ message BootstrapMeasurementReport {
   bytes device_id = 2 [(dsm_fixed_len)=32];
   bytes genesis_hash = 3 [(dsm_fixed_len)=32];
   uint32 progress_percent = 4;
-  reserved 5, 6, 7, 8; // removed C-DBRW: cdbrw_hw_entropy, cdbrw_env_fingerprint,
+  reserved 5, 6, 7, 8; // removed device-birth: cdbrw_hw_entropy, cdbrw_env_fingerprint,
                        // cdbrw_salt, trust_level.
   string error_message = 9;
   reserved 10; // was `DeviceBirthRecordV1 device_birth` — the SDK owns the
@@ -2429,7 +2429,7 @@ message UniversalOp {
     AttestedAction          attested_action        = 15;
     VaultOp                 vault                  = 16;
     QueryOp                 query                  = 17;
-    // Field numbers 20, 21, 30 reserved (removed: old DBRW ops)
+    // Field numbers 20, 21, 30 reserved (removed: old device-birth ops)
     RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
     RecoveryTombstoneRequest     recovery_tombstone       = 23;
     RecoverySuccessionRequest    recovery_succession      = 24;
@@ -2489,7 +2489,7 @@ message Envelope {
     UniversalRx  universal_rx    = 11;
     BatchEnvelope batch_envelope = 12;
 
-    // Field numbers 13, 14, 33 reserved (removed: old DBRW responses)
+    // Field numbers 13, 14, 33 reserved (removed: old device-birth responses)
     RecoveryCapsuleDecryptResponse   recovery_capsule_decrypt_response = 15;
     RecoveryTombstoneResponse        recovery_tombstone_response       = 16;
     RecoverySuccessionResponse       recovery_succession_response      = 17;
@@ -2593,7 +2593,7 @@ message Envelope {
     // Storage node health & management
     StorageNodeStatsResponse          storage_node_stats_response      = 88;
     StorageNodeManageResponse         storage_node_manage_response     = 89;
-    // 90 = was DbrwStatusResponse (C-DBRW runtime trust removed; reserved below)
+    // 90 = was a removed runtime-trust response (reserved below)
     BitcoinWithdrawalPlanRequest      bitcoin_withdrawal_plan_request  = 91;
     BitcoinWithdrawalPlanResponse     bitcoin_withdrawal_plan_response = 92;
     BitcoinWithdrawalExecuteRequest   bitcoin_withdrawal_execute_request = 93;
@@ -2610,7 +2610,7 @@ message Envelope {
     BootstrapMeasurementReport        bootstrap_measurement_report     = 101;
     BootstrapFinalizeResponse         bootstrap_finalize_response      = 102;
 
-    // 103-106 = was C-DBRW Protocol 6.2 runtime-trust payloads (removed; reserved below)
+    // 103-106 = was device-birth Protocol 6.2 runtime-trust payloads (removed; reserved below)
 
     // Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
     DeviceTreeSnapshotResponse        device_tree_snapshot_response    = 107;
@@ -2620,7 +2620,7 @@ message Envelope {
     AddDeviceAdmissionRequestV1       device_admission_request         = 108;
     AddDeviceAdmissionV1              device_admission                 = 109;
   }
-  // Removed C-DBRW Protocol 6.2 runtime-trust payloads — the responder/verifier/
+  // Removed device-birth Protocol 6.2 runtime-trust payloads — the responder/verifier/
   // enrollment protocol was deleted (device-birth binding + online Tripwire + the
   // separate secure-element anchor replace it).  Reserve the freed numbers + names.
   reserved 90, 103, 104, 105, 106;
@@ -2629,7 +2629,7 @@ message Envelope {
 
 // ===================== SDK INIT / STATUS =====================
 // Returned when the app attempts to mark the SDK/wallet "initialized" but a
-// mandatory prerequisite is missing (e.g., C-DBRW not bootstrapped yet).
+// mandatory prerequisite is missing (e.g., device-birth not bootstrapped yet).
 message InitFailed {
   enum Reason {
     REASON_UNSPECIFIED = 0;
@@ -2826,7 +2826,7 @@ message BalanceWitnessEntryProto {
 // Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
 // EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
 // canonical operation bytes, entropy, optional encapsulated_entropy, optional
-// dbrw_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
+// ext_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
 // they sign the digest). proto3 `optional` distinguishes None from an empty Some, which the
 // chain-tip hash treats differently; a faithful round-trip is REQUIRED so a decoder can
 // recompute the tip and assert equality.
@@ -2837,7 +2837,7 @@ message RelationshipChainStateProto {
   bytes  operation           = 4 [(dsm_max_len)=1048576]; // Operation::to_bytes (canonical)
   bytes  entropy             = 5 [(dsm_max_len)=65535];
   optional bytes encapsulated_entropy = 6 [(dsm_max_len)=65535]; // None vs Some(empty) preserved
-  optional bytes dbrw_summary_hash    = 7 [(dsm_fixed_len)=32];
+  optional bytes ext_summary_hash    = 7 [(dsm_fixed_len)=32];
   repeated BalanceWitnessEntryProto balance_witness = 8;
   optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
   optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
@@ -3078,7 +3078,7 @@ message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }
 
 // ========================= Geo Emissions (transport only) =========================
 // Transport messages for clockless geo-claim submission and acknowledgment.
-// Verification (spawn proof, C-DBRW witness, SPHINCS+ signature over canonical bytes)
+// Verification (spawn proof, device-birth witness, SPHINCS+ signature over canonical bytes)
 // is implemented in the Rust core; these are I/O envelopes only.
 message MerkleInclusionProof {
   Hash32 root         = 1; // 32B Merkle root
@@ -3337,11 +3337,8 @@ message StorageStatusResponse {
   string backup_status = 5;
 }
 
-// (Removed: the C-DBRW Status + Protocol 6.2 runtime-trust messages/enums —
-//  DbrwStatusResponse and Cdbrw{AccessLevel,ResonantStatus,OrbitTrial,
-//  MeasureTrustRequest,RespondRequest,VerifyRequest,EnrollRequest,TrustSnapshot,
-//  RespondResponse,VerifyResponse,EnrollResponse}. The phone C-DBRW trust
-//  protocol is gone; device-birth binding + online Tripwire + the separate
+// (Removed: the phone device-trust runtime messages/enums. That protocol is
+//  gone — the device-birth binding + online Tripwire + the separate
 //  secure-element anchor replace it. Envelope tags 90 + 103-106 reserved above.)
 
 // ========================= Storage Node Stats =========================
@@ -3747,7 +3744,7 @@ message InitializeIdentityContextOp {
 message RestoreIdentityContextOp {
   bytes device_id             = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
-  reserved 3, 4, 5; // removed C-DBRW: cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt.
+  reserved 3, 4, 5; // removed device-birth: cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt.
   reserved 6; // was `DeviceBirthRecordV1 device_birth` — SDK re-derives AttA from storage.
   reserved "device_birth";
 }
@@ -3953,7 +3950,7 @@ message RegistryV3 {
 // Applicant pack for joining the active storage-node set.
 // Domain: "DSM/apply\0"
 message ApplicantV3 {
-  bytes hw_bind   = 1; // C-DBRW hardware binding
+  bytes hw_bind   = 1; // device-birth hardware binding
   bytes env_fp    = 2; // environment fingerprint
   uint64 capacity = 3; // declared capacity C
   bytes stake_dlv = 4; // StakeDLV address

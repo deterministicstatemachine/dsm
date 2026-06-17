@@ -151,7 +151,7 @@ internal fun appStateValue(env: Envelope, methodForError: String): String {
 // ─────────────────────────────────────────────────────────────────
 
 /** Poll [Unified.ensureAppRouterInstalled] until the full AppRouter is
- *  installed, returning false on timeout.  C-DBRW derivation + bridge
+ *  installed, returning false on timeout.  device-birth derivation + bridge
  *  install can take ~30s on first run when the wallet was just installed.
  *
  *  Test plumbing uses [android.os.SystemClock.sleep]; the clockless rule
@@ -174,7 +174,7 @@ internal fun waitForAppRouter(maxPollAttempts: Int = 600, pollMs: Long = 100L): 
 }
 
 /** Bounded poll for `balance.get` until the full AppRouter is up AND
- *  the C-DBRW trust snapshot has been published by the resume path.
+ *  the device-birth trust snapshot has been published by the resume path.
  *  [Unified.ensureAppRouterInstalled] returns true for the
  *  MinimalBootstrapRouter stub too — that router rejects `balance.get`
  *  with "requires genesis" until the full router takes over.  The trust

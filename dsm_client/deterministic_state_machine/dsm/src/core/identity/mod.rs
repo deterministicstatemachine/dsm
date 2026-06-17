@@ -106,9 +106,9 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
 pub fn convert_session_to_genesis_state(
     session: &GenesisSession,
 ) -> Result<GenesisState, IdentityError> {
-    // DBRW is an optional, local anti-cloning signal and must NOT be required to
+    // device-birth is an optional, local anti-cloning signal and must NOT be required to
     // create or represent genesis / identity. Genesis must remain derivable and
-    // recoverable without DBRW present.
+    // recoverable without device-birth present.
 
     if session.storage_nodes.len() < 3 {
         return Err(IdentityError::InvalidParameter(

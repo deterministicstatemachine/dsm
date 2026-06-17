@@ -69,7 +69,7 @@ static STORAGE: Mutex<Option<AppStateStorage>> = Mutex::new(None);
 //
 // Genesis call sites read this slot and fold the commitment VERBATIM into
 // `AttA` via `dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce`
-// (whitepaper §11.1).  There is no silicon/orbit/K_DBRW derivation: the SDK also
+// (whitepaper §11.1).  There is no silicon/orbit/trust-gate derivation: the SDK also
 // persists the commitment in the `GenesisRecord`, so finalize/restore re-derive
 // an identical AttA from storage.
 // —————————————————————————–

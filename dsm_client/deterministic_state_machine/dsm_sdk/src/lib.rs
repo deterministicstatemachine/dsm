@@ -53,7 +53,7 @@
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
 //! | [`envelope`] | Envelope v3 construction, framing (`0x03` prefix), guard rails |
-//! | [`security`] | DBRW clone-detection validation at the SDK boundary |
+//! | [`security`] | device-birth binding validation at the SDK boundary |
 //! | [`storage`] | SQLite-backed client database for contacts, chain tips, bilateral state |
 //! | [`network`] | Multi-node storage endpoint registry and env-config loader |
 //! | [`recovery`] | Capsule, tombstone, and rollup recovery flows |
@@ -65,7 +65,7 @@
 //!
 //! 1. **Core ready** (`SDK_READY` in `unified_protobuf_bridge`) — set after
 //!    `sdkBootstrap` completes PBI (Platform Boundary Interface) initialization
-//!    with device_id, genesis_hash, and DBRW entropy.
+//!    with device_id, genesis_hash, and the device-birth binding.
 //! 2. **Bilateral ready** (`BILATERAL_READY`) — set after
 //!    [`initialize_bilateral_sdk`] verifies that the SDK context and bilateral
 //!    handler are installed, and device performance calibration succeeds.
@@ -236,14 +236,14 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
                 );
                 if dev.len() == 32 && gen.len() == 32 {
                     match fetch_device_birth_binding_key() {
-                        Ok(dbrw) => {
+                        Ok(device_birth_att) => {
                             log::info!("Initializing SDK context from persisted AppState");
-                            let entropy = derive_production_entropy(&dev, &gen, &dbrw);
+                            let entropy = derive_production_entropy(&dev, &gen, &device_birth_att);
                             initialize_sdk_context(dev, gen.clone(), entropy)?;
                         }
                         Err(_) => {
                             log::info!(
-                                "Persisted identity found without C-DBRW binding key; deferring SDK context initialization"
+                                "Persisted identity found without device-birth binding key; deferring SDK context initialization"
                             );
                         }
                     }
@@ -359,8 +359,8 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
             crate::sdk::app_state::AppState::get_genesis_hash(),
         ) {
             if dev.len() == 32 && gen.len() == 32 {
-                let dbrw = fetch_device_birth_binding_key()?;
-                let entropy = derive_production_entropy(&dev, &gen, &dbrw);
+                let device_birth_att = fetch_device_birth_binding_key()?;
+                let entropy = derive_production_entropy(&dev, &gen, &device_birth_att);
                 initialize_sdk_context(dev, gen.clone(), entropy)?;
             }
         }

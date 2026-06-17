@@ -532,7 +532,7 @@ impl IdentitySDK {
         );
         // Device-birth binding: AttA is folded into the MPC keypair derivation.
         // The birth nonce commitment comes from the platform slot and is used
-        // VERBATIM (no orbit probe, trust gate, or K_DBRW).
+        // VERBATIM (no orbit probe, trust gate, or AttA).
         let staged = crate::sdk::app_state::AppState::take_device_birth_nonce_commitment()
             .ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(
@@ -967,7 +967,7 @@ impl IdentitySDK {
 
         // Get signing public key for bilateral verification.
         // If the key is missing or empty (e.g. pre-existing genesis, failed derivation),
-        // re-derive it deterministically from genesis + device_id + DBRW binding key.
+        // re-derive it deterministically from genesis + device_id + device-birth binding key.
         let signing_public_key = {
             let stored = AppState::get_public_key().unwrap_or_default();
             if stored.len() == 64 {
@@ -977,12 +977,12 @@ impl IdentitySDK {
                     "pairing_qr_v3: signing key missing/invalid (len={}), attempting re-derivation",
                     stored.len()
                 );
-                // DBRW binding key is only available on Android via JNI
+                // device-birth binding key is only available on Android via JNI
                 #[cfg(all(target_os = "android", feature = "jni"))]
                 {
-                    let dbrw = crate::binding_key::get_binding_key().ok_or_else(|| {
+                    let device_birth_att = crate::binding_key::get_binding_key().ok_or_else(|| {
                         DsmError::InvalidState(
-                            "Signing key not in AppState and DBRW unavailable for re-derivation. Restart the app.".into()
+                            "Signing key not in AppState and device-birth unavailable for re-derivation. Restart the app.".into()
                         )
                     })?;
                     let did_raw = AppState::get_device_id().ok_or_else(|| {
@@ -998,7 +998,7 @@ impl IdentitySDK {
                     let mut entropy = Vec::with_capacity(96);
                     entropy.extend_from_slice(&gh_raw);
                     entropy.extend_from_slice(&did_raw);
-                    entropy.extend_from_slice(&dbrw);
+                    entropy.extend_from_slice(&device_birth_att);
                     let kp = SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| {
                         DsmError::InvalidState(format!("signing key re-derivation failed: {e}"))
                     })?;
@@ -1015,7 +1015,7 @@ impl IdentitySDK {
                 #[cfg(not(all(target_os = "android", feature = "jni")))]
                 {
                     return Err(DsmError::InvalidState(
-                        "Signing key not in AppState; DBRW re-derivation not available on this platform.".into()
+                        "Signing key not in AppState; device-birth re-derivation not available on this platform.".into()
                     ));
                 }
             }

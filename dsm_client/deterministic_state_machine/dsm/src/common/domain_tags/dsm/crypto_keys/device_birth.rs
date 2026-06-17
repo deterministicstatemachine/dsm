@@ -5,7 +5,7 @@
 /// Domain tag for the deterministic device-birth attestation digest `AttA`:
 /// `AttA = BLAKE3(TAG || LP(nonce_commitment) || LP(creation_mode) || ...)`.
 /// Folded into the per-device key derivation (whitepaper §11.1) in place of the
-/// removed silicon C-DBRW binding.  Install/device-lineage binding only — NOT an
+/// removed silicon anti-clone binding.  Install/device-lineage binding only — NOT an
 /// anti-clone proof.
 pub const TAG_DSM_DEVICE_BIRTH_ATT: &str = "DSM/device-birth-att/v1";
 

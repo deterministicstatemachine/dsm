@@ -11,7 +11,7 @@
 //! No quorum, no external verifier: the new device gets the existing device's signing pubkey from
 //! the QR it scanned in person; the existing device's gate signature is the authorization (only a
 //! key already in the tree can produce a verifying admission). The new device co-signs with its
-//! DBRW-bound key to prove physical possession without revealing the raw DBRW.
+//! device-birth-bound key to prove physical possession without revealing the raw device-birth.
 
 use dsm::common::device_admission::{
     derive_secondary_device_id, self_attest_digest, verify_self_attestation_sig, AddDeviceAdmission,
@@ -58,7 +58,7 @@ impl DeviceAdmissionSDK {
     /// NEW device: build the admission request to send to the existing device. `entropy` is 32 bytes
     /// generated at the platform boundary (as in the genesis/secondary setup, which is untouched).
     /// `genesis_hash` comes from the existing device's scanned QR. Derives `DevID_new` (unchanged
-    /// derivation) and self-attests with the new device's DBRW-bound signing key.
+    /// derivation) and self-attests with the new device's device-birth-bound signing key.
     pub async fn build_admission_request(
         genesis_hash: [u8; 32],
         entropy: &[u8],
@@ -68,8 +68,8 @@ impl DeviceAdmissionSDK {
                 "admission request: entropy must be 32 bytes",
             ));
         }
-        let dbrw = crate::fetch_device_birth_binding_key()?;
-        let new_device_id = derive_secondary_device_id(entropy, &genesis_hash, &dbrw);
+        let device_birth_att = crate::fetch_device_birth_binding_key()?;
+        let new_device_id = derive_secondary_device_id(entropy, &genesis_hash, &device_birth_att);
         let new_signing_pubkey = AppState::get_public_key().ok_or_else(|| {
             DsmError::InvalidState("admission request: no device signing pubkey".into())
         })?;
@@ -114,7 +114,7 @@ impl DeviceAdmissionSDK {
                 "admission request: genesis != this device's genesis",
             ));
         }
-        // Verify the new device's DBRW-bound self-attestation (proof of physical possession).
+        // Verify the new device's device-birth-bound self-attestation (proof of physical possession).
         if !verify_self_attestation_sig(
             &genesis,
             &new_device_id,

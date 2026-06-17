@@ -52,7 +52,7 @@
       (ct, ss) = KyberEncDet(recipient_kyber_pk, coins)
       k_step = BLAKE3-256("DSM/kyber-ss\0" || ss)
     (AttA is the deterministic device-birth binding that replaced the
-    removed silicon C-DBRW binding — an install/lineage value, not an
+    removed silicon binding — an install/lineage value, not an
     anti-clone proof.)
     The recipient decapsulates `ct` with their Kyber sk to recover the
     same `ss` and `k_step`. The Kyber ciphertext travels in the receipt's

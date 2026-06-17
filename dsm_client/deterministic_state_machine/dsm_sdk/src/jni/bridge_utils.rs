@@ -207,13 +207,13 @@ pub fn ensure_bootstrap() {
     }
 
     if SDK_READY.load(Ordering::SeqCst) {
-        let dbrw_ok = crate::binding_key::get_binding_key()
+        let binding_ok = crate::binding_key::get_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
-        if !dbrw_ok {
+        if !binding_ok {
             SDK_READY.store(false, Ordering::SeqCst);
             log::warn!(
-                "ensure_bootstrap: C-DBRW binding key missing or invalid after readiness; failing closed."
+                "ensure_bootstrap: device-birth binding key missing or invalid after readiness; failing closed."
             );
         }
     }

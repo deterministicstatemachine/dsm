@@ -409,7 +409,7 @@ pub enum Operation {
         new_state_hash: Vec<u8>,
         /// Entropy of the replacement state.
         new_state_entropy: Vec<u8>,
-        /// Proof of key compromise (e.g., DBRW anomaly evidence).
+        /// Proof of key compromise (e.g., device-birth anomaly evidence).
         compromise_proof: Vec<u8>,
         /// Signatures from recovery authorities (multi-party threshold).
         authority_sigs: Vec<Vec<u8>>,

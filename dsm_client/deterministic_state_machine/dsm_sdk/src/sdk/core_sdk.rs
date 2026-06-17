@@ -1086,9 +1086,9 @@ impl CoreSDK {
     /// initial `DeviceTreeStateV1` to a quorum of storage nodes here.
     /// If the publisher returns `Err`, the genesis aborts:
     ///
-    /// * K_DBRW is NOT installed into the binding-key slot.
+    /// * AttA is NOT installed into the binding-key slot.
     /// * Platform silicon inputs (hw, env) are NOT zeroized — so the
-    ///   user can retry without re-running CDBRW enrollment.
+    ///   user can retry without re-running device-birth enrollment.
     /// * No state-machine state or BCR device-head row is written.
     /// * No partial-genesis residue is left behind.
     ///

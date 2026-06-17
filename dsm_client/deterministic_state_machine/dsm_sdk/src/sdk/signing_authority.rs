@@ -28,7 +28,7 @@ fn derive_signing_keypair_from(
     }
     if binding_key.len() != 32 {
         return Err(DsmError::invalid_parameter(format!(
-            "C-DBRW binding key must be 32 bytes, got {}",
+            "device-birth binding key must be 32 bytes, got {}",
             binding_key.len()
         )));
     }
@@ -57,7 +57,7 @@ pub(crate) fn derive_current_signing_keypair() -> Result<SignatureKeyPair, DsmEr
     })?;
     let binding_key = get_binding_key().ok_or_else(|| {
         DsmError::InvalidState(
-            "C-DBRW binding key unavailable for canonical signing authority".into(),
+            "device-birth binding key unavailable for canonical signing authority".into(),
         )
     })?;
 

@@ -114,8 +114,8 @@ fn sanitize_generated_prost(out_dir: &std::path::Path) {
     }
 }
 
-// No build-time C step: the former C-DBRW native C sources were removed with
-// the C-DBRW collapse, and the whole C-DBRW trust protocol has since been
+// No build-time C step: the former native C sources were removed with
+// the protocol collapse, and the whole device trust protocol has since been
 // deleted. This crate compiles as pure Rust.
 
 fn main() {

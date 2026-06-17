@@ -282,7 +282,7 @@ internal object BridgeIdentityHandler {
             .setCodec(Codec.CODEC_PROTO)
             .setBody(
                 ByteString.copyFrom(
-                    // No device-birth / cdbrw binding fields: the SDK generates
+                    // No device-birth binding fields: the SDK generates
                     // and persists the device-birth nonce commitment itself.
                     SystemGenesisRequest.newBuilder()
                         .setLocale(locale)

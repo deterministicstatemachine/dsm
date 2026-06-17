@@ -9,8 +9,10 @@
 //!
 //! Gate-only, two-signature, co-present. The only control added over a plain insert is a
 //! **signature gate**: only a device key already in the tree may authorize the insert. The new
-//! device co-signs with its own DBRW-bound key to prove physical possession (DBRW is silicon-bound
-//! and cannot be cloned) WITHOUT revealing the raw DBRW. The gate signer's pubkey is obtained from
+//! device co-signs with its own device-birth-bound signing key to prove control of the identity it
+//! is claiming. (The device-birth binding is an install/lineage value, NOT an anti-clone proof —
+//! what bounds admission is co-presence + the requirement that an existing in-tree device key
+//! gate-signs, not any silicon unclonability.) The gate signer's pubkey is obtained from
 //! the QR the new device scanned in person — there is **no storage-node quorum and no external
 //! verifier** (that is only needed by the recovery flow, where a remote party authenticates a
 //! device it never met). Replay is prevented by the monotonic `parent_device_tree_version`: an
@@ -26,22 +28,22 @@ use crate::types::error::DsmError;
 use crate::types::proto::{AddDeviceAdmissionV1, Message as _};
 
 /// Canonical derivation of a secondary/Nth device id — `H("DSM/device\0" || client_entropy ||
-/// genesis_hash || DBRW)`. Byte-identical to the SDK's secondary-device derivation; the new device
+/// genesis_hash || device-birth)`. Byte-identical to the SDK's secondary-device derivation; the new device
 /// uses it to compute its own `DevID` (the verifier does NOT recompute it — the new device's
 /// self-attestation proves possession instead).
 pub fn derive_secondary_device_id(
     client_entropy: &[u8],
     genesis_hash: &[u8; 32],
-    dbrw_binding: &[u8],
+    device_birth_binding: &[u8],
 ) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_DEVICE);
     h.update(client_entropy);
     h.update(genesis_hash);
-    h.update(dbrw_binding);
+    h.update(device_birth_binding);
     *h.finalize().as_bytes()
 }
 
-/// Sign the NEW-DEVICE self-attestation half: proof, by the joining device's DBRW-bound signing
+/// Sign the NEW-DEVICE self-attestation half: proof, by the joining device's device-birth-bound signing
 /// key, that it owns `new_device_id`/`new_signing_pubkey` under `genesis_hash`.
 pub fn sign_self_attestation(
     genesis_hash: &[u8; 32],
@@ -96,7 +98,7 @@ pub struct AddDeviceAdmission {
     pub parent_device_tree_version: u64,
     /// SPHINCS+ by `signer_device_id` (the existing device) — the authorization gate.
     pub signature_by_signer_device: Vec<u8>,
-    /// SPHINCS+ by the new device's DBRW-bound key — proof of physical possession.
+    /// SPHINCS+ by the new device's device-birth-bound key.
     pub signature_by_new_device: Vec<u8>,
 }
 
@@ -284,10 +286,10 @@ mod tests {
     fn fixture() -> (AddDeviceAdmission, Vec<u8>, [u8; 32], Vec<[u8; 32]>, u64) {
         let genesis = [0x6E; 32]; // root device id == genesis
         let (signer_pk, signer_sk) = kp(0x11); // existing (root) device signing key
-        let (new_pk, new_sk) = kp(0x22); // new device signing key (DBRW-bound)
+        let (new_pk, new_sk) = kp(0x22); // new device signing key (device-birth-bound)
         let entropy = vec![0xAB; 32];
-        let dbrw = vec![0xCD; 48];
-        let new_id = derive_secondary_device_id(&entropy, &genesis, &dbrw);
+        let device_birth_att = vec![0xCD; 48];
+        let new_id = derive_secondary_device_id(&entropy, &genesis, &device_birth_att);
         let current: Vec<[u8; 32]> = vec![genesis];
         let version = 1u64;
         let parent_root = DeviceTree::new(current.clone()).root();

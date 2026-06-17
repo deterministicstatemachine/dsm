@@ -20,8 +20,7 @@ import androidx.annotation.Keep
 //
 // VERIFICATION:
 //   nm -gU libdsm_sdk.so | grep -c Java_   -> must match `external fun` count
-//   nm -gU libdsm_sdk.so | grep -c cdbrw    -> must be 0 (C-DBRW fully removed)
-//   If either check fails after a Rust rebuild, a symbol was accidentally
+//   If this check fails after a Rust rebuild, a symbol was accidentally
 //   added or removed without updating the Kotlin side.
 //
 // ALL METHODS:
@@ -66,10 +65,8 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
     @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String
-    // The C-DBRW JNI surface was removed and the whole C-DBRW runtime trust
-    // protocol (enrollment / challenge-response / entropy health / `cdbrw.*`
-    // routes) has since been deleted. Kotlin is transport-only; do not re-add
-    // any `external fun cdbrw*` declarations here.
+    // Kotlin is transport-only — do NOT add native crypto/trust JNI exports
+    // here; all crypto and protocol state lives in the Rust SDK.
     @Keep @JvmStatic external fun bleNotifyConnectionState(address: String, connected: Boolean)
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean

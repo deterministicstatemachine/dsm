@@ -28,7 +28,7 @@ use prost::Message;
 
 /// Deterministically derive the device's identity signing keypair (SPHINCS+).
 ///
-/// CANONICAL derivation — `genesis_hash || device_id || K_DBRW`, compressed by
+/// CANONICAL derivation — `genesis_hash || device_id || AttA`, compressed by
 /// `SignatureKeyPair::generate_from_entropy` (domain tag `DSM/sphincs-seed`). This is
 /// the SOLE definition: both wallet init (below) and recovery-authority anchoring
 /// (`RecoverySDK`) MUST call it, so the re-derived keypair is byte-identical to the one
@@ -38,12 +38,12 @@ use prost::Message;
 pub fn derive_device_signing_keypair(
     genesis_hash: &[u8; 32],
     device_id: &[u8; 32],
-    k_dbrw: &[u8; 32],
+    device_birth_att: &[u8; 32],
 ) -> Result<dsm::crypto::signatures::SignatureKeyPair, dsm::types::error::DsmError> {
     let mut key_entropy = Vec::with_capacity(96);
     key_entropy.extend_from_slice(genesis_hash);
     key_entropy.extend_from_slice(device_id);
-    key_entropy.extend_from_slice(k_dbrw);
+    key_entropy.extend_from_slice(device_birth_att);
     dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&key_entropy)
 }
 
@@ -480,31 +480,31 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         let contact_manager =
             DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
 
-        // CRITICAL: Derive signing keypair deterministically from genesis + device_id + DBRW.
-        // DBRW is mandatory for wallet initialization/signing availability, but it must NOT
+        // CRITICAL: Derive signing keypair deterministically from genesis + device_id + device-birth.
+        // device-birth is mandatory for wallet initialization/signing availability, but it must NOT
         // participate in genesis creation.
         //
-        // The live path concatenates `genesis || device_id || K_DBRW`, then
+        // The live path concatenates `genesis || device_id || AttA`, then
         // `SignatureKeyPair::generate_from_entropy()` compresses that material with
         // `domain_hash(dsm::common::domain_tags::TAG_DSM_SPHINCS_SEED, ...)` before deterministic SPHINCS keygen.
-        let dbrw_key = crate::fetch_device_birth_binding_key().map_err(|e| {
+        let device_birth_att_vec = crate::fetch_device_birth_binding_key().map_err(|e| {
             format!(
-                "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
+                "device-birth not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
             )
         })?;
-        if dbrw_key.len() != 32 {
+        if device_birth_att_vec.len() != 32 {
             return Err(format!(
-                "DBRW binding key must be 32 bytes, got {}",
-                dbrw_key.len()
+                "device-birth binding key must be 32 bytes, got {}",
+                device_birth_att_vec.len()
             ));
         }
-        let mut dbrw_fixed = [0u8; 32];
-        dbrw_fixed.copy_from_slice(&dbrw_key);
+        let mut device_birth_att = [0u8; 32];
+        device_birth_att.copy_from_slice(&device_birth_att_vec);
 
-        // Get DBRW binding key for bilateral transaction gating (Canon 1)
+        // Get device-birth binding key for bilateral transaction gating (Canon 1)
         // Note: Health state tracking removed - always proceed
 
-        let keypair = derive_device_signing_keypair(&gen_fixed, &dev_fixed, &dbrw_fixed)
+        let keypair = derive_device_signing_keypair(&gen_fixed, &dev_fixed, &device_birth_att)
             .map_err(|e| format!("deterministic keypair derivation failed: {e}"))?;
         log::info!(
             "[SDK Init] Derived signing keypair, pubkey_len={}",

@@ -236,7 +236,7 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     let genesis_hash = report.genesis_hash.clone();
 
     // Online safety is tripwire + parent-consumption uniqueness, so genesis is
-    // NOT gated on any device anti-clone measurement (the silicon C-DBRW gate is
+    // NOT gated on any device anti-clone measurement (the silicon device-birth gate is
     // removed). The device-birth nonce commitment deterministically fixes `AttA`
     // — an install/device-lineage binding folded into the per-device key
     // derivation. The SDK persisted it at genesis; re-derive from storage.

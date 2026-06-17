@@ -1140,7 +1140,7 @@ fn dlv_unlock_routed_advances_sequence_and_republishes_anchor_on_settle() {
 /// vault the local wallet owns MUST also publish a
 /// `VaultStateInclusionProofV1`, not just the legacy anchor.  The
 /// inclusion proof is what makes vault state forgery-resistant
-/// against K_DBRW compromise — without it, an attacker with the
+/// against AttA compromise — without it, an attacker with the
 /// owner's key can fabricate a signed anchor against arbitrary
 /// (sequence, reserves_digest).  This guard fails if either of the
 /// two call sites is removed or stops calling the inclusion-proof
@@ -1187,7 +1187,7 @@ fn dlv_create_and_unlock_routed_publish_vault_state_inclusion_proof() {
 /// `vault_state_composition::compose_vault_state` MUST fetch and
 /// verify a `VaultStateInclusionProofV1` for the baseline before
 /// folding pending pointers.  If this check is removed, off-device
-/// quote-time verification reverts to anchor-only — the K_DBRW
+/// quote-time verification reverts to anchor-only — the AttA
 /// forgery hole reopens.  This guard fails if the strict-mode
 /// fetch, the cross-bind to baseline, or the inclusion-proof
 /// verification is removed.

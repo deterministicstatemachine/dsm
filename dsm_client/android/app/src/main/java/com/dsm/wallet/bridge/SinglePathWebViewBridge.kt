@@ -591,7 +591,7 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
+                // Generic Envelope v3 processing (online transfers, etc.)
                 "processEnvelopeV3" -> {
                     try {
                         val result = Unified.processEnvelopeV3(payload)

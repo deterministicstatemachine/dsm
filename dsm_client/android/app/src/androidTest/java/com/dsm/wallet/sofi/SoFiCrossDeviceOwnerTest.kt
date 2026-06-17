@@ -102,7 +102,7 @@ class SoFiCrossDeviceOwnerTest {
         Log.i(TAG, "owner setUp: ERA balance = $balance (any value OK for owner role)")
         Assume.assumeTrue(
             "Owner device has no published trust snapshot (balance.get returned $balance). " +
-                "Ensure genesis + C-DBRW resume completed before the test runs.",
+                "Ensure genesis + device-birth resume completed before the test runs.",
             balance >= 0L,
         )
     }

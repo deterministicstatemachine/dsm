@@ -511,12 +511,12 @@ impl B0xSDK {
         // §16.4: saltG/saltD MUST be derived from Smaster (secret), not public inputs.
         // Spec: saltG := HKDF-BLAKE3("DSM/b0x-salt-G\0", Smaster)
         //       saltD := HKDF-BLAKE3("DSM/b0x-salt-D\0", Smaster)
-        // KDBRW (device_birth_binding) is the hardware-bound secret that approximates Smaster here:
+        // AttA (device_birth_binding) is the hardware-bound secret that approximates Smaster here:
         // it is never serialized or externalized per §12 Privacy Rule.
-        // Without KDBRW (e.g. unit tests), falls back to genesis+device_id (public, weaker privacy).
+        // Without AttA (e.g. unit tests), falls back to genesis+device_id (public, weaker privacy).
         let tag_str = std::str::from_utf8(domain_tag).unwrap_or("DSM/b0x-salt");
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag_str);
-        // Primary IKM: KDBRW — the secret hardware-bound entropy source
+        // Primary IKM: AttA — the secret hardware-bound entropy source
         #[cfg(all(target_os = "android", feature = "jni"))]
         if let Some(k) = crate::binding_key::get_binding_key() {
             hasher.update(&k);
@@ -1476,7 +1476,7 @@ impl B0xSDK {
         // Keep only oracle_key in evidence so receivers can still verify without extra lookups.
         //
         // Source of truth: signing_authority derives the pk deterministically from
-        // (genesis_hash, device_id, C-DBRW binding key) — the SAME derivation that
+        // (genesis_hash, device_id, device-birth binding key) — the SAME derivation that
         // produces the secret key used by `wallet.sign_operation_bytes`. Embedding
         // this pk guarantees the receiver's sphincs_verify uses the same pk that
         // produced the signature; using `state.device_info.public_key` or
@@ -2712,7 +2712,7 @@ impl B0xSDK {
             .local_chain_tip()
             .await
             .map(|v| text_id::encode_base32_crockford(&v))?;
-        // Use signing_authority (C-DBRW-derived) to match the key used by
+        // Use signing_authority (device-birth-derived) to match the key used by
         // wallet.sign_operation_bytes — see submit_to_b0x for rationale.
         let sender_signing_public_key = crate::sdk::signing_authority::current_public_key()
             .unwrap_or_else(|_| core_sdk.get_device_identity().public_key);

@@ -32,7 +32,7 @@
       cert_{n+1} = Sign_{SK_n}(BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n))
     where AttA is the deterministic device-birth binding folded into the
     derivation (an install/device-lineage value; it replaced the removed
-    silicon C-DBRW binding and carries no anti-clone claim).
+    silicon binding and carries no anti-clone claim).
     Each receipt body is signed by EK_{n+1}; the cert chain anchors back
     to AK_pk via prior step keys (AK at step 0).
     The Tripwire / chain-tip-monotonicity proofs in this file are
@@ -51,7 +51,7 @@
     which is a SEPARATE hardware-anchored mechanism (the only anti-clone
     authority, offline-bearer only). Online safety here rests solely on
     Tripwire + parent-consumption + the SPHINCS+/BLAKE3 assumptions, with
-    no DBRW, no secure element, and no storage-node trust.
+    no device anti-clone, no secure element, and no storage-node trust.
 -/
 
 -- ============================================================

@@ -58,7 +58,7 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
 // These codecs are byte-exact for the real types in
 // `dsm/src/types/device_state.rs`. The hashed prefix of a RelationshipChainState
 // matches `compute_chain_tip()` (rel_key ‖ embedded_parent ‖ counterparty_devid
-// ‖ op(len+bytes) ‖ entropy(len+bytes) ‖ encap_flag+optional ‖ dbrw_flag+
+// ‖ op(len+bytes) ‖ entropy(len+bytes) ‖ encap_flag+optional ‖ ext_flag+
 // optional fixed 32B (NO length prefix) ‖ witness count + (policy_commit ‖
 // value u64 le) sorted). Sigs are appended outside the hashed prefix.
 // ──────────────────────────────────────────────────────────────────────────
@@ -109,7 +109,7 @@ pub fn encode_rel_chain_state(state: &RelationshipChainState) -> Vec<u8> {
         None => out.push(0u8),
     }
 
-    match &state.dbrw_summary_hash {
+    match &state.ext_summary_hash {
         Some(d) => {
             out.push(1u8);
             // Fixed 32 bytes, NO length prefix — mirrors compute_chain_tip().
@@ -177,11 +177,11 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         other => return Err(anyhow!("encap_flag invalid: {other}")),
     };
 
-    let dbrw_flag = read_u8(&mut cursor).map_err(|e| anyhow!("dbrw_flag: {e}"))?;
-    let dbrw_summary_hash = match dbrw_flag {
+    let ext_flag = read_u8(&mut cursor).map_err(|e| anyhow!("ext_flag: {e}"))?;
+    let ext_summary_hash = match ext_flag {
         0 => None,
-        1 => Some(take::<32>(&mut cursor).map_err(|e| anyhow!("dbrw summary: {e}"))?),
-        other => return Err(anyhow!("dbrw_flag invalid: {other}")),
+        1 => Some(take::<32>(&mut cursor).map_err(|e| anyhow!("device_birth_att summary: {e}"))?),
+        other => return Err(anyhow!("ext_flag invalid: {other}")),
     };
 
     let witness_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("witness count: {e}"))?;
@@ -217,7 +217,7 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         balance_witness,
         entity_sig,
         counterparty_sig,
-        dbrw_summary_hash,
+        ext_summary_hash,
         island_attestation: None,
     };
     let chain_tip = state.compute_chain_tip();
@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(decoded.balance_witness, rel.balance_witness);
         assert_eq!(decoded.entity_sig, rel.entity_sig);
         assert_eq!(decoded.counterparty_sig, rel.counterparty_sig);
-        assert_eq!(decoded.dbrw_summary_hash, rel.dbrw_summary_hash);
+        assert_eq!(decoded.ext_summary_hash, rel.ext_summary_hash);
     }
 
     #[test]

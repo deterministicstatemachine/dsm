@@ -37,7 +37,7 @@
 //! ## Module Organization
 //!
 //! - [`core`] — State machine, bridge traits, bilateral management, identity, token subsystem
-//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, DBRW, ChaCha20-Poly1305 (salted-BLAKE3 commitments via `dsm_domain_hasher`)
+//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, ChaCha20-Poly1305 (salted-BLAKE3 commitments via `dsm_domain_hasher`)
 //! - [`types`] — All protocol types: [`types::state_types::State`], [`types::error::DsmError`], identifiers, tokens
 //! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees
@@ -80,10 +80,9 @@ pub mod crypto;
 // (Issue #185 — all 4 findings). It exported types with zero
 // production callers anywhere in `dsm/` or `dsm_sdk/` (verified by
 // source inspection); the audit findings were all on a never-
-// executed path. Module removed entirely. If a real hardware-bound
-// attestation surface is later needed, the C-DBRW infrastructure in
-// `crypto::cdbrw_binding` is already wired through the SDK and is
-// the canonical entry point — see Issue #213.
+// executed path. Module removed entirely. The hardware-bound
+// attestation surface, where needed, is the secure-element anchor
+// (`crypto::device_anchor`), not a device-local binding.
 pub mod dlv;
 pub mod emissions;
 pub mod envelope;
@@ -165,7 +164,7 @@ fn get_enabled_features() -> Vec<String> {
 /// (`BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment) ||
 /// LP(creation_mode) || LP(schema_version) || LP(protocol_version))`), computed
 /// by the SDK and folded into the per-device key derivation (whitepaper §11.1)
-/// in place of the removed silicon C-DBRW binding.
+/// in place of the removed silicon anti-clone binding.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
 >(

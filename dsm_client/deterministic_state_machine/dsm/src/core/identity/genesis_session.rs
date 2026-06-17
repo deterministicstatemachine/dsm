@@ -13,8 +13,8 @@
 //!
 //! This module drives the genesis session: per-participant commitment–reveal,
 //! the canonical genesis hash `G` (computed by `crate::types::genesis_types`),
-//! the post-genesis K_DBRW binding (record-only; not part of `G`), and the
-//! silicon-bound SPHINCS+/Kyber keypair derivation (whitepaper §11.1).
+//! the post-genesis AttA binding (record-only; not part of `G`), and the
+//! device-birth-bound SPHINCS+/Kyber keypair derivation (whitepaper §11.1).
 
 use crate::crypto::blake3::dsm_domain_hasher;
 
@@ -125,7 +125,7 @@ pub struct GenesisSession {
     pub device_entropy: [u8; 32],
     /// Deterministic device-birth binding `AttA` (32B): the install /
     /// device-lineage material folded into `S_master` IKM (whitepaper
-    /// §11.1) in place of the removed silicon C-DBRW binding.  Computed by
+    /// §11.1) in place of the removed silicon anti-clone binding.  Computed by
     /// the SDK from the device-birth nonce commitment:
     ///   `AttA = BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment)
     ///           || LP(creation_mode) || LP(schema_version) || LP(protocol_version))`
@@ -148,9 +148,9 @@ pub struct GenesisSession {
     /// Participants
     pub storage_nodes: Vec<NodeId>,
     /// Device id (32B). For the root device the canonical invariant is
-    /// `device_id = genesis_id`; `compute_dbrw_binding` enforces this
-    /// promotion before deriving K_DBRW so the binding key reflects the
-    /// final protocol identity.
+    /// `device_id = genesis_id`; this promotion is enforced before the
+    /// binding is folded into key derivation so the keys reflect the final
+    /// protocol identity.
     pub device_id: [u8; 32],
     /// Deterministic ticks
     pub created_at_ticks: u64,
@@ -158,8 +158,8 @@ pub struct GenesisSession {
 
 impl GenesisSession {
     /// Create a new session with random session_id; other fields zero/empty.
-    /// `dbrw_binding` MUST be set via `set_dbrw_binding` before
-    /// `compute_genesis_id` finalises (or, for end-to-end production,
+    /// The device-birth binding `AttA` MUST be set via `set_device_birth_att`
+    /// before `compute_genesis_id` finalises (or, for end-to-end production,
     /// is supplied to `create_genesis*` and routed through here).
     pub fn new(metadata: Vec<u8>) -> Result<Self, DsmError> {
         let mut sid = [0u8; 32];
@@ -185,7 +185,7 @@ impl GenesisSession {
 
     /// Stage the deterministic device-birth binding `AttA` that gets folded
     /// into `S_master` IKM (whitepaper §11.1) in place of the removed silicon
-    /// C-DBRW binding.  `AttA` is computed by the SDK from the device-birth
+    /// device-birth binding.  `AttA` is computed by the SDK from the device-birth
     /// nonce commitment
     /// (`AttA = BLAKE3("DSM/device-birth-att/v1\0" || LP(nonce_commitment) || …)`)
     /// and supplied here.  Required before `validate_session()` and
@@ -216,7 +216,7 @@ impl GenesisSession {
         Ok(())
     }
 
-    /// Set device + MPC entropies (bytes-only). DBRW binding is set separately.
+    /// Set device + MPC entropies (bytes-only). device-birth binding is set separately.
     pub fn set_entropies(
         &mut self,
         device_entropy: [u8; 32],
@@ -237,7 +237,7 @@ impl GenesisSession {
     pub fn compute_commitments(&mut self) {
         let mut contributions: Vec<Vec<u8>> = Vec::new();
 
-        // Device contribution (DBRW is not part of genesis binding)
+        // Device contribution (device-birth is not part of genesis binding)
         contributions.push(self.device_entropy.to_vec());
 
         // MPC contributions
@@ -336,15 +336,15 @@ impl GenesisSession {
     ///
     /// Contributions are `[device_id ∥ device_entropy, b_1, …, b_n]`, sorted by
     /// contribution hash so transport-time order cannot change `G`.  The
-    /// public-key bundle and `K_DBRW` are NOT folded in: they bind to genesis
-    /// by being *derived from* `G` (`keys ← S_master ← K_DBRW ← G`); folding
+    /// public-key bundle and `AttA` are NOT folded in: they bind to genesis
+    /// by being *derived from* `G` (`keys ← S_master ← AttA ← G`); folding
     /// them back would be circular.  Silicon binding happens one layer down at
     /// master-seed derivation (whitepaper §11.1 eq.13), not at the genesis hash.
     pub fn compute_genesis_id(&mut self) {
         self.genesis_id = compute_genesis_hash(&self.device_id, &self.canonical_contributions());
     }
 
-    /// Validate full session.  Requires DBRW binding (K_DBRW) to be set
+    /// Validate full session.  Requires device-birth binding (AttA) to be set
     /// per whitepaper §11.1 eq.13 prerequisite for master-seed derivation.
     pub fn validate_session(&self) -> Result<(), DsmError> {
         if self.storage_nodes.len() < 3 {
@@ -371,28 +371,28 @@ impl GenesisSession {
         Ok(())
     }
 
-    /// Derive the silicon-bound SPHINCS+ and Kyber keypairs from this
+    /// Derive the device-birth-bound SPHINCS+ and Kyber keypairs from this
     /// session's `S_master` per whitepaper §11.1 eq.13:
     ///
     /// ```text
     /// s_0           = BLAKE3("DSM/step-salt\0" ‖ G)
     /// S_master      = HKDF-Extract(salt = "DSM/dev\0",
-    ///                              IKM  = G ‖ DevID ‖ K_DBRW ‖ s_0)
+    ///                              IKM  = G ‖ DevID ‖ AttA ‖ s_0)
     /// sphincs_seed  = HKDF-Expand(S_master, "DSM/sphincs-plus-seed\0", 32)
     /// (AK_sk, AK_pk)= SPHINCS+.KeyGen(sphincs_seed)
     /// (KEM_sk, KEM_pk)= ML-KEM.KeyGen(BLAKE3-derive(S_master, "DSM/kyber\0"))
     /// ```
     ///
-    /// Both keypairs are silicon-bound: differing `K_DBRW` produces
+    /// Both keypairs are device-birth-bound: differing `AttA` produces
     /// different keys even with identical public inputs (`device_id`,
-    /// `participants`, `metadata`, contributions).  `K_DBRW` flows only
+    /// `participants`, `metadata`, contributions).  `AttA` flows only
     /// through the local IKM buffer in `derive_master_seed`, which is
     /// zeroised before this function returns; it is never serialised,
     /// logged, or committed.
     ///
     /// Preconditions:
     /// - `compute_genesis_id` has been called (`genesis_id != [0u8; 32]`)
-    /// - `dbrw_binding` is a non-zero `K_DBRW`
+    /// - the device-birth binding `AttA` is non-zero (set via `set_device_birth_att`)
     pub fn derive_device_bound_keypair(&self) -> Result<GenesisMasterKeypair, DsmError> {
         use zeroize::Zeroize;
 
@@ -412,8 +412,8 @@ impl GenesisSession {
         //
         // Root-device invariant `device_id = genesis_id` (whitepaper §2.5)
         // is enforced at the IKM site: the DevID slot of the §11.1 eq.13
-        // preimage is bound to `genesis_id`, matching the K_DBRW preimage
-        // that `compute_dbrw_binding()` already used.
+        // preimage is bound to `genesis_id`, matching the AttA preimage
+        // that the binding derivation already used.
         let mut s_master =
             derive_master_seed(&self.genesis_id, &self.genesis_id, &self.device_birth_att);
 
@@ -446,7 +446,7 @@ impl GenesisSession {
 }
 
 impl zeroize::Zeroize for GenesisSession {
-    /// Zeroize sensitive material on drop.  K_DBRW MUST NEVER outlive
+    /// Zeroize sensitive material on drop.  AttA MUST NEVER outlive
     /// the session in serialised or in-memory form (whitepaper §11.1
     /// + §12 normative rule).
     fn zeroize(&mut self) {
@@ -483,10 +483,10 @@ pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
 /// ```text
 /// s_0      = BLAKE3("DSM/step-salt\0" ‖ G)
 /// S_master = HKDF-Extract(salt = "DSM/dev\0",
-///                         IKM  = G ‖ DevID ‖ K_DBRW ‖ s_0)
+///                         IKM  = G ‖ DevID ‖ AttA ‖ s_0)
 /// ```
 ///
-/// `K_DBRW` enters the master seed only through the local `ikm` buffer,
+/// `AttA` enters the master seed only through the local `ikm` buffer,
 /// which is zeroised before this function returns.  The output
 /// `S_master` is the only place the binding survives — and it must be
 /// expanded into per-purpose seeds (SPHINCS+, Kyber, etc.) and then
@@ -494,7 +494,7 @@ pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
 ///
 /// Pulled out as a free function so external verifiers (and the
 /// determinism property tests) can recompute it byte-for-byte from the
-/// public inputs (`g`, `device_id`) plus the held-on-device `K_DBRW`.
+/// public inputs (`g`, `device_id`) plus the held-on-device `AttA`.
 pub fn derive_master_seed(
     g: &[u8; 32],
     device_id: &[u8; 32],
@@ -517,7 +517,7 @@ pub fn derive_master_seed(
     s_master
 }
 
-/// Outputs of the silicon-bound master-keypair derivation
+/// Outputs of the device-birth-bound master-keypair derivation
 /// (whitepaper §11.1).  Both keypairs are `ZeroizeOnDrop` because they
 /// embody long-lived device secrets.
 #[derive(Debug, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     /// Independent recomputation of S_master from public inputs +
-    /// the session-derived K_DBRW must match the value the session
+    /// the session-derived AttA must match the value the session
     /// derives, end-to-end.  This pins the §11.1 IKM ordering.
     #[test]
     fn master_seed_matches_independent_recomputation() {

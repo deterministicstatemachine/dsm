@@ -171,7 +171,7 @@ impl BilateralBleHandler {
     /// Apply per-step EK signing (whitepaper §11.1) to an unsigned bilateral
     /// receipt. Looks up the counterparty's Kyber pubkey from the contact
     /// record, fetches the local AK keypair from the bilateral transaction
-    /// manager, fetches K_DBRW for SK encryption and EK derivation, runs the
+    /// manager, fetches AttA for SK encryption and EK derivation, runs the
     /// per-step signing helper, stamps the artifacts on the receipt's local
     /// side (A for sender, B for receiver), and advances the local chain
     /// head. Returns the full-protobuf bytes of the signed receipt.
@@ -214,15 +214,15 @@ impl BilateralBleHandler {
                 }
             };
 
-        let k_dbrw_vec = crate::fetch_device_birth_binding_key()?;
-        if k_dbrw_vec.len() < 32 {
+        let device_birth_att_vec = crate::fetch_device_birth_binding_key()?;
+        if device_birth_att_vec.len() < 32 {
             return Err(DsmError::invalid_operation(format!(
-                "bilateral receipt: K_DBRW too short ({} bytes)",
-                k_dbrw_vec.len()
+                "bilateral receipt: AttA too short ({} bytes)",
+                device_birth_att_vec.len()
             )));
         }
-        let mut k_dbrw_arr = [0u8; 32];
-        k_dbrw_arr.copy_from_slice(&k_dbrw_vec[..32]);
+        let mut device_birth_att_arr = [0u8; 32];
+        device_birth_att_arr.copy_from_slice(&device_birth_att_vec[..32]);
 
         let (ak_pk, ak_sk) = {
             let mgr = self.bilateral_tx_manager.read().await;
@@ -244,7 +244,7 @@ impl BilateralBleHandler {
             c_pre: commitment_hash,
             devid_sender: self.device_id,
             relationship_key: rel_key,
-            k_dbrw: &k_dbrw_arr,
+            device_birth_att: &device_birth_att_arr,
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &recipient_kyber_pk,
             // §11.1 Item 7: bind the per-step EK response to this
@@ -275,7 +275,7 @@ impl BilateralBleHandler {
             &rel_key,
             &signing_out.ek_pk,
             &signing_out.ek_sk,
-            &k_dbrw_arr,
+            &device_birth_att_arr,
             signing_out.used_root_ak,
         )?;
 
