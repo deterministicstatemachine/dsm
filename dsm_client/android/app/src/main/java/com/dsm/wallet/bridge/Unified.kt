@@ -585,10 +585,10 @@ object Unified {
         return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
     }
 
-    // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.
-    // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
-    // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
-    // with the same data, and frontend/UI consume that directly.
+    // getCdbrwRuntimeSnapshot() and the whole C-DBRW runtime trust protocol
+    // (responder/verifier/enrollment, the `cdbrw.*` routes, and the
+    // CdbrwTrustSnapshot payload) have been removed. Online safety is the
+    // Tripwire; there is no device trust snapshot to fetch.
 
     // ---------- BLE pairing orchestration (Rust-driven loop) ----------
 

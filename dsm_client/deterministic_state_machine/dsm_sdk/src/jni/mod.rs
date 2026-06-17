@@ -105,10 +105,10 @@ pub extern "system" fn JNI_OnLoad(
     let _ =
         unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearSessionFatalError
             as *const ();
-    // The six `cdbrw*` JNI exports were removed when Protocol 6.2 collapsed
-    // into the single-path router. Kotlin only reaches C-DBRW through the
-    // `cdbrw.*` router-query family in `misc_routes.rs` now; there is no
-    // JNI surface left to keep alive here.
+    // The `cdbrw*` JNI exports were removed when the C-DBRW protocol collapsed
+    // into the single-path router, and the whole C-DBRW runtime trust protocol
+    // (responder/verifier/enrollment + `cdbrw.*` routes) has since been deleted.
+    // There is no C-DBRW JNI surface left to keep alive here.
 
     // Initialize Rust logging early so all JNI functions produce logcat output.
     crate::logging::init_android_device_logging();

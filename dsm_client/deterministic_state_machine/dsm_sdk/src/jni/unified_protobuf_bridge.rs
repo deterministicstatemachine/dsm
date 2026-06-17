@@ -312,16 +312,17 @@ fn ensure_bootstrap() {
         log::info!("ensure_bootstrap: SDK context not initialized (bootstrap is platform-managed)");
     }
 
-    // C-DBRW check: only enforce after genesis. Pre-genesis the binding key does not
-    // exist yet — that is expected. Post-genesis a missing key indicates an attack.
+    // Binding check: only enforce after genesis. Pre-genesis the device-birth
+    // binding does not exist yet — that is expected. Post-genesis a missing
+    // binding indicates an attack.
     if SDK_READY.load(Ordering::SeqCst) && crate::sdk::app_state::AppState::get_has_identity() {
-        let dbrw_ok = crate::fetch_device_birth_binding_key()
+        let binding_ok = crate::fetch_device_birth_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
-        if !dbrw_ok {
+        if !binding_ok {
             SDK_READY.store(false, Ordering::SeqCst);
             log::warn!(
-                "ensure_bootstrap: C-DBRW binding key missing or invalid after readiness; failing closed."
+                "ensure_bootstrap: device-birth binding missing or invalid after readiness; failing closed."
             );
         }
     }
@@ -579,15 +580,15 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
                 );
             }
 
-            let dbrw_ok = crate::binding_key::get_binding_key()
+            let binding_ok = crate::binding_key::get_binding_key()
                 .map(|k| k.len() == 32)
                 .unwrap_or(false);
-            if !dbrw_ok {
+            if !binding_ok {
                 SDK_READY.store(false, Ordering::SeqCst);
                 return respond(
                     pb::envelope::Payload::InitFailed(pb::InitFailed {
-                        reason: pb::init_failed::Reason::CdbrwNotReady as i32,
-                        message: "C-DBRW not initialized (or invalid). Call sdkBootstrap first."
+                        reason: pb::init_failed::Reason::BindingNotReady as i32,
+                        message: "device-birth binding not installed (or invalid). Call sdkBootstrap first."
                             .to_string(),
                     }),
                     &mut env,
@@ -4646,7 +4647,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
                 );
             } else {
                 log::error!(
-                    "ensureAppRouterInstalled: Cannot install AppRouter - canonical C-DBRW binding key missing or invalid"
+                    "ensureAppRouterInstalled: Cannot install AppRouter - device-birth binding missing or invalid"
                 );
             }
             0 // false
@@ -4685,22 +4686,22 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
                 return 0;
             }
 
-            // Genesis exists, check C-DBRW binding key; if C-DBRW does not have a usable binding key,
-            // signal CDBRW_NOT_READY. Otherwise, conservatively report CDBRW_NOT_READY as well
-            // (SDK init step still outstanding).
+            // Genesis exists, check the device-birth binding; if there is no usable
+            // binding, signal BINDING_NOT_READY. Otherwise, conservatively report
+            // BINDING_NOT_READY as well (SDK init step still outstanding).
             let has_binding_key = crate::binding_key::get_binding_key()
                 .map(|k| k.len() == 32)
                 .unwrap_or(false);
             if !has_binding_key {
-                log::info!("getAppRouterStatus: CDBRW_NOT_READY - no binding key");
+                log::info!("getAppRouterStatus: BINDING_NOT_READY - no binding key");
                 return 1;
             }
 
-            // Conservative status: genesis and canonical binding are ready, but AppRouter still
-            // is not installed. Return DBRW_NOT_READY to indicate startup/router initialization is
-            // still incomplete.
+            // Conservative status: genesis and the device-birth binding are ready, but
+            // AppRouter still is not installed. Return BINDING_NOT_READY to indicate
+            // startup/router initialization is still incomplete.
             log::warn!(
-                "getAppRouterStatus: genesis present and canonical C-DBRW binding ready but AppRouter missing; returning DBRW_NOT_READY"
+                "getAppRouterStatus: genesis present and device-birth binding ready but AppRouter missing; returning BINDING_NOT_READY"
             );
             1
         }),

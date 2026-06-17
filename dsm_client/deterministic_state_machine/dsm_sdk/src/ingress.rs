@@ -363,7 +363,7 @@ fn handle_bootstrap_measurement_report_core(
 ) -> Result<Envelope, pb::Error> {
     match report.phase {
         x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseStarted as i32 => {
-            // Mark that C-DBRW securing is in progress — session manager returns
+            // Mark that device securing is in progress — session manager returns
             // "securing_device" phase until finalization completes.
             crate::sdk::session_manager::BOOTSTRAP_SECURING
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1058,7 +1058,7 @@ mod tests {
     // `#[serial]` to every test so they cooperate with the global
     // `serial_test` mutex used by other modules (notably
     // `handlers::bitcoin_invoke_routes::tests`) which mutate the same global
-    // C-DBRW binding-key slot. Without the global serialization, a parallel
+    // device-birth binding-key slot. Without the global serialization, a parallel
     // bitcoin test calling `install_test_identity(.., vec![0xD1; 32])` could
     // overwrite the binding key between this module's `setup_test_env()` (which
     // clears it) and its `install_identity_context_core(...)` reading it back.

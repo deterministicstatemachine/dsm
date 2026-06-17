@@ -274,8 +274,8 @@ export default function AppContent({
           <StatusText
             lines={[
               'SECURING YOUR DEVICE',
-              'SILICON FINGERPRINT ENROLLMENT',
-              'DBRW SALT INITIALIZATION',
+              'ESTABLISHING DEVICE IDENTITY',
+              'FINALIZING SECURE STATE',
             ]}
             style={securingStatusTextStyle}
           />

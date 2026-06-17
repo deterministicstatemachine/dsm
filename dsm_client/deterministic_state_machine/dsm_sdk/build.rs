@@ -114,11 +114,9 @@ fn sanitize_generated_prost(out_dir: &std::path::Path) {
     }
 }
 
-// `compile_cdbrw_entropy_health` used to build `cdbrw_entropy_health.c` into
-// `libdsm_sdk.so` via the `cc` crate. The C sources were removed with the
-// Protocol 6.2 single-path collapse — histogram / entropy / autocorrelation /
-// LZ78 / manufacturing-gate math now lives entirely in `security::cdbrw_ffi`
-// as pure Rust. No build-time C step is needed.
+// No build-time C step: the former C-DBRW native C sources were removed with
+// the C-DBRW collapse, and the whole C-DBRW trust protocol has since been
+// deleted. This crate compiles as pure Rust.
 
 fn main() {
     // Safety check: prevent release builds with test-only flags
@@ -132,8 +130,8 @@ fn main() {
         }
     }
 
-    // Emit DT_SONAME on the Android cdylib so consumers (e.g. libsiliconfp.so)
-    // record `libdsm_sdk.so` as DT_NEEDED instead of the absolute build-time path.
+    // Emit DT_SONAME on the Android cdylib so any consumer records
+    // `libdsm_sdk.so` as DT_NEEDED instead of the absolute build-time path.
     // Without this, the NDK linker bakes the host filesystem path into the
     // dependent .so and dlopen fails on-device with "library ... not found".
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {

@@ -22,12 +22,13 @@ pub struct KeyPair {
     /// Public key
     pub public_key: Vec<u8>,
 
-    /// Private key — held in plain memory; protect via the C-DBRW anti-clone
-    /// mechanism (`dsm_sdk::security::cdbrw_reprove`), not by a sealed-module
-    /// TEE/Keystore/StrongBox/Secure Enclave. The whole DSM design is
-    /// deliberately enclave-free: silicon binding is established by C-DBRW's
-    /// observed statistical signature (`AC_D` attractor commitment), and the
-    /// in-memory K_DBRW slot is zeroed on every drift-detection failure.
+    /// Private key — held in plain memory; the DSM design is deliberately
+    /// enclave-free (no sealed-module TEE/Keystore/StrongBox/Secure Enclave on
+    /// the canonical path). Online double-spend safety is the Tripwire +
+    /// parent-consumption uniqueness, NOT a device anti-clone measurement; the
+    /// per-device key derivation folds in the deterministic device-birth binding
+    /// (`AttA`). Offline-bearer anti-clone, where required, rests on the separate
+    /// secure-element anchor (Trezor Safe 7 / TROPIC01), not on this key.
     pub private_key: Vec<u8>,
 }
 impl fmt::Debug for KeyPair {
