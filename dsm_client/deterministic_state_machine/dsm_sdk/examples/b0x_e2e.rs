@@ -63,6 +63,7 @@ async fn main() {
         to: to_device_b32.clone().into_bytes(),
         message: "e2e".to_string(),
         signature: vec![],
+        authority_policy: None,
     };
 
     let params = B0xSubmissionParams {
