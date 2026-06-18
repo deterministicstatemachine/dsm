@@ -1440,6 +1440,7 @@ fn build_direct_signed_transfer(
         to: b"tla-direct-recipient".to_vec(),
         message: format!("direct TLC replay {}", payload.display()),
         signature: Vec::new(),
+        authority_policy: None,
     };
     let signable = operation.with_cleared_signature();
     let signature = sphincs_sign(secret_key, &signable.to_bytes())

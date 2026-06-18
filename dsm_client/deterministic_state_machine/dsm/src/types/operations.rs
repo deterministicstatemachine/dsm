@@ -193,6 +193,14 @@ impl AuthorityPolicy {
 /// Each variant represents a distinct kind of state transition in the DSM
 /// protocol. All variants support canonical, deterministic byte encoding
 /// via [`Operation::to_bytes`] for inclusion in state hashes and wire payloads.
+///
+/// `large_enum_variant` is allowed deliberately: this is a flat protocol
+/// operation enum whose `Transfer`/`Recovery` variants are intentionally
+/// inline (no heap indirection on the hot transition path), and it is
+/// constructed/matched at ~190 call sites. Boxing fields to equalize variant
+/// size would impose a heap allocation per operation and ripple across every
+/// site for no protocol benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Operation {
     /// Genesis operation -- the initial state in a hash chain (state number 0).
@@ -1504,7 +1512,9 @@ impl Operation {
                     };
                     let policy_id: [u8; 32] =
                         get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
-                            DsmError::invalid_operation("authority_policy policy_id must be 32 bytes")
+                            DsmError::invalid_operation(
+                                "authority_policy policy_id must be 32 bytes",
+                            )
                         })?;
                     let anchor_set_id: [u8; 32] =
                         get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {

@@ -82,20 +82,23 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
             .collect(),
         entity_sig: s.entity_sig.clone(),
         counterparty_sig: s.counterparty_sig.clone(),
-        island_attestation: s.island_attestation.as_ref().map(|a| IslandAttestationProto {
-            id_island: a.id_island.to_vec(),
-            signature: a.signature.clone(),
-            policy_id: a.policy_id.to_vec(),
-            id_anchor_set: a.id_anchor_set.to_vec(),
-            ui_transcript_hash: a.ui_transcript_hash.to_vec(),
-            anchor_pubkey_hash: a.anchor_pubkey_hash.to_vec(),
-            firmware_hash: a.firmware_hash.to_vec(),
-            policy_hash: a.policy_hash.to_vec(),
-            parent_root: a.parent_root.to_vec(),
-            successor_root: a.successor_root.to_vec(),
-            operation_hash: a.operation_hash.to_vec(),
-            state_number: a.state_number,
-        }),
+        island_attestation: s
+            .island_attestation
+            .as_ref()
+            .map(|a| IslandAttestationProto {
+                id_island: a.id_island.to_vec(),
+                signature: a.signature.clone(),
+                policy_id: a.policy_id.to_vec(),
+                id_anchor_set: a.id_anchor_set.to_vec(),
+                ui_transcript_hash: a.ui_transcript_hash.to_vec(),
+                anchor_pubkey_hash: a.anchor_pubkey_hash.to_vec(),
+                firmware_hash: a.firmware_hash.to_vec(),
+                policy_hash: a.policy_hash.to_vec(),
+                parent_root: a.parent_root.to_vec(),
+                successor_root: a.successor_root.to_vec(),
+                operation_hash: a.operation_hash.to_vec(),
+                state_number: a.state_number,
+            }),
     }
 }
 

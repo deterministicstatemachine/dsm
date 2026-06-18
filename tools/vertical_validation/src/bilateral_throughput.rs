@@ -196,6 +196,7 @@ fn benchmark_with_signing(
             to: "b32bench".into(),
             message: String::new(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         let bytes = op.to_bytes();
         let sig = sphincs_sign(sk, &bytes).expect("sign");

@@ -172,8 +172,8 @@ pub fn advance_enrollment_frontier_cas(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .ok();
-    let (cur_root, cur_state) = current
-        .ok_or_else(|| anyhow!("advance_enrollment_frontier_cas: device not admitted"))?;
+    let (cur_root, cur_state) =
+        current.ok_or_else(|| anyhow!("advance_enrollment_frontier_cas: device not admitted"))?;
     if cur_root.as_slice() != expected_parent_root.as_slice()
         || new_state_number <= cur_state as u64
     {
