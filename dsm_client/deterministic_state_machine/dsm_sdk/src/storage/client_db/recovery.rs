@@ -1709,6 +1709,7 @@ mod tests {
             to: vec![],
             message: String::new(),
             signature: vec![],
+            authority_policy: None,
         }
     }
 

@@ -136,11 +136,71 @@ pub enum VerificationType {
     Custom(Vec<u8>),
 }
 
+/// The authority-proof requirement for a value operation — WHAT proof of authority a transition
+/// must carry. A distinct semantic layer from `pre_commit` (settlement / commitment material) and
+/// from `value_capability` (whether the operation may carry value at all). Present on a `Transfer`
+/// only when the operation opts into the optional offline-bearer tier; absent means the ordinary
+/// online-checked path, encoded byte-identically to before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityPolicy {
+    /// Which authority mode this operation requires.
+    pub mode: AuthorityMode,
+    /// Identifier of the pinning policy the offline-bearer proof must satisfy.
+    pub policy_id: [u8; 32],
+    /// Identifier of the admitted anchor set (single island in cut-1; dual-island later).
+    pub anchor_set_id: [u8; 32],
+}
+
+/// The authority mode an operation declares (see [`AuthorityPolicy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityMode {
+    /// Ordinary online-checked settlement — no hardware anchor proof required.
+    OnlineChecked,
+    /// Optional offline-bearer tier: a hardware island MUST sign this transition's intent and the
+    /// proof is folded into the successor tip. Fail-closed — if the proof cannot be produced or
+    /// verified the transition is rejected, never silently downgraded.
+    OfflineBearerRequired,
+}
+
+impl AuthorityMode {
+    /// Canonical 1-byte tag for byte encoding.
+    pub fn tag(self) -> u8 {
+        match self {
+            AuthorityMode::OnlineChecked => 0,
+            AuthorityMode::OfflineBearerRequired => 1,
+        }
+    }
+}
+
+/// Version tag for the canonical authority-policy tail appended to `Operation::Transfer::to_bytes`.
+pub const AUTHORITY_POLICY_TAG_V1: u8 = 1;
+
+impl AuthorityPolicy {
+    /// Append this policy's canonical, versioned bytes to an operation encoding. Called by
+    /// `Operation::Transfer::to_bytes` ONLY when the policy is present; when absent, NOTHING is
+    /// appended, so existing operation encodings — and every historical state hash — are unchanged.
+    pub fn append_canonical(&self, out: &mut Vec<u8>) {
+        use crate::types::serialization::{put_bytes, put_u8};
+        put_u8(out, AUTHORITY_POLICY_TAG_V1);
+        put_u8(out, self.mode.tag());
+        put_bytes(out, &self.policy_id);
+        put_bytes(out, &self.anchor_set_id);
+    }
+}
+
 /// Primary state transition operation enum (no Serde in canonical path).
 ///
 /// Each variant represents a distinct kind of state transition in the DSM
 /// protocol. All variants support canonical, deterministic byte encoding
 /// via [`Operation::to_bytes`] for inclusion in state hashes and wire payloads.
+///
+/// `large_enum_variant` is allowed deliberately: this is a flat protocol
+/// operation enum whose `Transfer`/`Recovery` variants are intentionally
+/// inline (no heap indirection on the hot transition path), and it is
+/// constructed/matched at ~190 call sites. Boxing fields to equalize variant
+/// size would impose a heap allocation per operation and ripple across every
+/// site for no protocol benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Operation {
     /// Genesis operation -- the initial state in a hash chain (state number 0).
@@ -205,6 +265,12 @@ pub enum Operation {
         message: String,
         /// Sender's SPHINCS+ signature authorizing this transfer.
         signature: Vec<u8>,
+        /// Authority-proof requirement for this transfer. `Some` opts into the offline-bearer
+        /// tier (a hardware island must sign and the proof folds into the tip); `None` is the
+        /// ordinary online-checked path and encodes byte-identically to before. Must be set on
+        /// the operation BEFORE challenge/UI-transcript/signing/tip computation. See
+        /// [`AuthorityPolicy`].
+        authority_policy: Option<AuthorityPolicy>,
     },
     /// Mint new tokens into existence (requires authorization proof).
     Mint {
@@ -816,6 +882,7 @@ impl Operation {
                 to,
                 message,
                 signature,
+                authority_policy,
             } => {
                 put_u8(&mut out, 3);
                 put_bytes(&mut out, to_device_id);
@@ -840,6 +907,13 @@ impl Operation {
                 put_str(&mut out, message.as_str());
                 // Sender signature (online) or empty for bilateral (signatures in receipt)
                 put_bytes(&mut out, signature);
+                // Append-only authority-policy tail: None emits NOTHING (byte-identical to every
+                // prior encoding / state hash); Some appends the versioned canonical policy. This
+                // binds the offline-bearer requirement into op_bytes -> the successor tip, BEFORE
+                // the intent challenge, UI transcript, signing, and tip computation.
+                if let Some(ap) = authority_policy {
+                    ap.append_canonical(&mut out);
+                }
             }
             Mint {
                 amount,
@@ -1420,6 +1494,40 @@ impl Operation {
                 } else {
                     get_bytes(&mut input)?
                 };
+                // Append-only authority-policy tail (symmetric with
+                // `AuthorityPolicy::append_canonical`). Absent (no remaining bytes) => None, so
+                // every pre-existing transfer round-trips byte-identically; present => the
+                // versioned policy.
+                let authority_policy = if input.is_empty() {
+                    None
+                } else {
+                    let tag = get_u8(&mut input)?;
+                    if tag != AUTHORITY_POLICY_TAG_V1 {
+                        return Err(DsmError::invalid_operation("unknown authority_policy tag"));
+                    }
+                    let mode = match get_u8(&mut input)? {
+                        0 => AuthorityMode::OnlineChecked,
+                        1 => AuthorityMode::OfflineBearerRequired,
+                        _ => return Err(DsmError::invalid_operation("bad authority_policy mode")),
+                    };
+                    let policy_id: [u8; 32] =
+                        get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                            DsmError::invalid_operation(
+                                "authority_policy policy_id must be 32 bytes",
+                            )
+                        })?;
+                    let anchor_set_id: [u8; 32] =
+                        get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                            DsmError::invalid_operation(
+                                "authority_policy anchor_set_id must be 32 bytes",
+                            )
+                        })?;
+                    Some(AuthorityPolicy {
+                        mode,
+                        policy_id,
+                        anchor_set_id,
+                    })
+                };
                 Transfer {
                     to_device_id,
                     amount,
@@ -1433,6 +1541,7 @@ impl Operation {
                     to,
                     message,
                     signature,
+                    authority_policy,
                 }
             }
             4 => {
@@ -2328,6 +2437,51 @@ mod tests {
         Balance::from_parts(value, 0, Some([0xAB; 32]))
     }
 
+    #[test]
+    fn transfer_authority_policy_is_append_only_and_round_trips() {
+        let make = |ap: Option<AuthorityPolicy>| Operation::Transfer {
+            to_device_id: b"rcpt".to_vec(),
+            amount: test_balance(100),
+            token_id: b"ERA".to_vec(),
+            policy_commit: [7u8; 32],
+            mode: TransactionMode::Bilateral,
+            nonce: vec![1, 2, 3],
+            verification: VerificationType::Bilateral,
+            pre_commit: None,
+            recipient: b"rcpt".to_vec(),
+            to: b"rcpt".to_vec(),
+            message: "m".to_string(),
+            signature: vec![9, 9, 9],
+            authority_policy: ap,
+        };
+        let none_op = make(None);
+        let some_op = make(Some(AuthorityPolicy {
+            mode: AuthorityMode::OfflineBearerRequired,
+            policy_id: [3u8; 32],
+            anchor_set_id: [4u8; 32],
+        }));
+        let none_bytes = none_op.to_bytes();
+        let some_bytes = some_op.to_bytes();
+
+        // Append-only: the None encoding is a strict PREFIX of the Some encoding — the policy is a
+        // pure tail, so absent => no bytes => every pre-existing transfer encoding (and state hash)
+        // is byte-identical to before this field existed.
+        assert!(some_bytes.starts_with(&none_bytes));
+        assert!(some_bytes.len() > none_bytes.len());
+        // The offline-bearer policy changes the canonical op bytes (Decision 2 #2).
+        assert_ne!(none_bytes, some_bytes);
+        // Both round-trip through the canonical decoder (the appended tail is read back exactly).
+        assert_eq!(Operation::from_bytes(&none_bytes).unwrap(), none_op);
+        assert_eq!(Operation::from_bytes(&some_bytes).unwrap(), some_op);
+        // The mode is bound: OnlineChecked vs OfflineBearerRequired differ in the bytes.
+        let online_op = make(Some(AuthorityPolicy {
+            mode: AuthorityMode::OnlineChecked,
+            policy_id: [3u8; 32],
+            anchor_set_id: [4u8; 32],
+        }));
+        assert_ne!(online_op.to_bytes(), some_bytes);
+    }
+
     fn roundtrip(op: &Operation) -> Operation {
         let bytes = op.to_bytes();
         let decoded = Operation::from_bytes(&bytes).expect("from_bytes failed");
@@ -2564,6 +2718,7 @@ mod tests {
                 to: vec![0x03; 32],
                 message: "send tokens".into(),
                 signature: vec![0xAA; 64],
+                authority_policy: None,
             });
         }
 
@@ -2590,6 +2745,7 @@ mod tests {
                 to: vec![0x03; 32],
                 message: "pre-committed transfer".into(),
                 signature: vec![0xBB; 48],
+                authority_policy: None,
             });
         }
 
@@ -2608,6 +2764,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             });
         }
 
@@ -2926,6 +3083,7 @@ mod tests {
                     to: vec![],
                     message: String::new(),
                     signature: vec![],
+                    authority_policy: None,
                 });
             }
         }
@@ -2952,6 +3110,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             };
             assert!(!Ops::validate(&op).unwrap());
         }
@@ -2971,6 +3130,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             };
             assert!(Ops::validate(&op).unwrap());
         }
@@ -3090,6 +3250,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             };
             assert_eq!(transfer.get_operation_type(), "transfer");
 
@@ -3193,6 +3354,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![0xAA; 64],
+                authority_policy: None,
             };
             let cleared = op.with_cleared_signature();
             assert_eq!(cleared.get_signature(), None);
@@ -3318,6 +3480,7 @@ mod tests {
                 to: vec![0x03; 32],
                 message: "x".into(),
                 signature: vec![0xAA; 32],
+                authority_policy: None,
             }
             .to_bytes();
             // Exact bytes decode fine; one trailing byte is non-canonical.
@@ -3371,6 +3534,7 @@ mod tests {
                 to: vec![0x33; 32],
                 message: "unit".into(),
                 signature: Vec::new(),
+                authority_policy: None,
             };
             let canonical = signing_op.to_bytes();
             let sig = sphincs_sign(&kp.secret_key, &canonical).expect("sign");
@@ -3455,6 +3619,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             };
             assert!(TokenOps::is_valid(&op));
         }
@@ -3474,6 +3639,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             };
             assert!(!TokenOps::is_valid(&op));
         }
@@ -3529,6 +3695,7 @@ mod tests {
                 to: vec![],
                 message: String::new(),
                 signature: vec![],
+                authority_policy: None,
             };
             assert!(!TokenOps::has_expired(&transfer));
         }
@@ -3672,6 +3839,7 @@ mod tests {
                 to: vec![0x03; 32],
                 message: "test".into(),
                 signature: vec![0xBB; 64],
+                authority_policy: None,
             };
             let b1 = op.to_bytes();
             let b2 = op.to_bytes();
@@ -3702,6 +3870,7 @@ mod tests {
                     to: vec![],
                     message: String::new(),
                     signature: vec![],
+                    authority_policy: None,
                 }
             };
             let a = make_op(&[("alpha", vec![1]), ("beta", vec![2])]);

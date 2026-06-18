@@ -266,10 +266,31 @@ pub struct RelChainTip {
 pub struct IslandAttestation {
     /// Pinned per-device island identity = SHA-256(leaf SubjectPublicKeyInfo).
     pub id_island: [u8; 32],
+    /// Canonical anchor-set identifier this attestation was produced under
+    /// (`crate::attestation::compute_anchor_set_id`). A receipt input so a re-verifier can
+    /// reconstruct `anchor_proof_hash` (the digest the §16.6 successor tip folds).
+    pub id_anchor_set: [u8; 32],
+    /// The on-device UI transcript hash the island signed over (consent-oracle binding). A receipt
+    /// input for reconstructing `anchor_proof_hash`.
+    pub ui_transcript_hash: [u8; 32],
     /// The island's signature over the framed canonical intent challenge.
     pub signature: Vec<u8>,
     /// Identifier of the pinning policy under which the island was admitted.
     pub policy_id: [u8; 32],
+    /// Domain-separated hash of the anchor's signing-key SPKI (which key signed this receipt).
+    pub anchor_pubkey_hash: [u8; 32],
+    /// Device-measured firmware hash the secmon gate enforced for this signature.
+    pub firmware_hash: [u8; 32],
+    /// Hash of the pinning policy's canonical contents (distinct from `policy_id`).
+    pub policy_hash: [u8; 32],
+    /// Anchor monotonic-frontier root this advance consumed (must equal the device's `stored_root`).
+    pub parent_root: [u8; 32],
+    /// Anchor monotonic-frontier root this advance produced (`stored_root` after the atomic advance).
+    pub successor_root: [u8; 32],
+    /// Operation payload hash this advance committed to (== the transition `payload_hash`).
+    pub operation_hash: [u8; 32],
+    /// Monotonic anchor-frontier counter for this advance.
+    pub state_number: u64,
 }
 
 /// One accepted state in a per-relationship straight hash chain (§2.1).
@@ -1106,6 +1127,7 @@ mod tests {
             to: vec![],
             message: String::new(),
             signature: vec![],
+            authority_policy: None,
         };
         let credit = |amt: u64, pcv: [u8; 32]| BalanceDelta {
             policy_commit: pcv,

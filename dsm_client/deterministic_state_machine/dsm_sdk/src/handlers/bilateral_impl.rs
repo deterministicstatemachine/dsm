@@ -19,6 +19,9 @@
 use async_trait::async_trait;
 use prost::Message;
 use std::sync::Arc;
+// Used only by the Android BLE chunk-send error path below (restores the android+bluetooth build).
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+use dsm::types::error::DsmError;
 
 use crate::bridge::{BiAccept, BiCommit, BiPrepare, BiResult, BiTransfer, BilateralHandler};
 use crate::init::SdkConfig;

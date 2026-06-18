@@ -30,6 +30,11 @@ bluetooth = ["tokio-stream"]
 diagnostics = []
 mdns = ["dep:mdns-sd"]
 test-mock = []
+# Wire an in-process MOCK secure-element anchor (no Safe 7 hardware) into the bilateral manager so
+# the full offline-bearer flow runs end-to-end: the sender mock-signs an attestation, the receiver
+# auto-admits the sender's deterministic mock identity and verifies it. For on-device testing of the
+# anti-clone path without the element. Production builds leave this OFF (no transport -> fail-closed).
+mock-anchor = ["dsm/test-mock"]
 # Use mock/local MPC for token creation (dummy participants + dummy entropy).
 # Default OFF: real HTTP calls to storage nodes for beta builds.
 # Enable for dev/test builds without local storage nodes running.

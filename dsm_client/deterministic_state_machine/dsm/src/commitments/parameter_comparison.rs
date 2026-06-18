@@ -625,6 +625,7 @@ mod tests {
             recipient: b"recipient".to_vec(),
             to: b"to".to_vec(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         let sig = sphincs_sign(&sk, &op.to_bytes()).expect("sign transfer");
         if let Operation::Transfer { signature, .. } = &mut op {

@@ -101,6 +101,7 @@ async fn test_b0x_integration_full_flow() {
         to: b"recipient_alias".to_vec(),
         message: "hello b0x self".to_string(),
         signature: vec![0; 64],
+        authority_policy: None,
     };
 
     // 4. Construct B0xSubmissionParams
@@ -302,6 +303,7 @@ async fn test_b0x_live_recipient_roundtrip() {
         to: receiver_b32.as_bytes().to_vec(),
         message: "live recipient route test".to_string(),
         signature: vec![0x5Au8; 64],
+        authority_policy: None,
     };
 
     let submission = B0xSubmissionParams {

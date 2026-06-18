@@ -1320,13 +1320,24 @@ impl BilateralBleHandler {
         Ok(())
     }
 
+    /// Stamp OFFLINE_BEARER_REQUIRED on a plain transfer iff this device holds an anchor (production
+    /// policy — the manager decides based on whether an anchor transport is admitted; the ONLY mocked
+    /// piece is the transport itself). MUST be applied identically wherever the sender's operation is
+    /// built — the prepare request the receiver decodes AND the precommit — so both parties hash the
+    /// same op. A device with no anchor leaves the transfer plain (online-checked fallback).
+    async fn apply_offline_bearer_policy(&self, op: &mut Operation) {
+        let m = self.bilateral_tx_manager.read().await;
+        m.apply_offline_bearer_policy(op).await;
+    }
+
     pub async fn prepare_bilateral_transaction(
         &self,
         counterparty_device_id: [u8; 32],
-        operation: Operation,
+        mut operation: Operation,
         validity_iterations: u64,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
+        self.apply_offline_bearer_policy(&mut operation).await;
 
         self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
             .await?;
@@ -1660,6 +1671,16 @@ impl BilateralBleHandler {
                 .unwrap_or([0u8; 32]) // use zero if no relationship established yet
         };
 
+        // The sender's published anchor identity, so the receiver can PIN it at relationship
+        // establishment and verify every offline-bearer receipt against it. None when this device
+        // holds no anchor (the transfer is then not offline-bearer and the receiver does not pin).
+        let sender_anchor_identity = {
+            let m = self.bilateral_tx_manager.read().await;
+            m.anchor_identity()
+                .await
+                .map(|rec| Self::anchor_identity_to_generated(&rec))
+        };
+
         debug!(
             "[BLE_HANDLER] Including sender_signing_public_key (len={}) and sender_chain_tip={} in PrepareRequest",
             sender_signing_public_key.len(),
@@ -1693,6 +1714,7 @@ impl BilateralBleHandler {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            sender_anchor_identity,
         };
 
         let tip_override = {
@@ -1982,6 +2004,43 @@ impl BilateralBleHandler {
         // Deserialize operation
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
+
+        // Offline-bearer admission (authority path = relationship establishment): the first time an
+        // OFFLINE_BEARER_REQUIRED offer arrives from a counterparty, PIN the anchor identity it
+        // carries. Idempotent — never resets the tracked frontier — so a later confirm verifies
+        // against this exact identity + enrolled firmware hash, and a clone/reflash presenting a
+        // different identity is rejected. No identity carried -> nothing pinned -> the confirm
+        // rejects fail-closed.
+        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(&operation) {
+            if let (
+                Some(ai),
+                dsm::types::operations::Operation::Transfer {
+                    authority_policy: Some(ap),
+                    ..
+                },
+            ) = (prepare_request.sender_anchor_identity.as_ref(), &operation)
+            {
+                let rec = Self::anchor_identity_from_generated(ai)?;
+                let policy_hash = dsm::attestation::dsm_policy_hash(
+                    &ap.policy_id,
+                    &dsm::attestation::compute_anchor_set_id(&[rec.id_anchor]),
+                );
+                let manager = self.bilateral_tx_manager.read().await;
+                let admitted = manager.admit_anchor_if_absent(
+                    sender_device_id,
+                    rec,
+                    policy_hash,
+                    [0u8; 32],
+                    0,
+                )?;
+                if admitted {
+                    info!(
+                        "[BILATERAL] pinned offline-bearer anchor for sender={}",
+                        bytes_to_base32(&sender_device_id[..8])
+                    );
+                }
+            }
+        }
 
         // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
@@ -3246,6 +3305,27 @@ impl BilateralBleHandler {
             &receipt_digest,
         );
 
+        // Offline-bearer: the sender's anchor (mock element under mock-anchor, real Safe 7 otherwise)
+        // signs an attestation over this transition, carried in the confirm for the receiver to
+        // verify against its pinned enrollment. None when no transport is admitted -> the receiver
+        // rejects an OFFLINE_BEARER_REQUIRED transfer fail-closed. Verified as a side artifact; it is
+        // not (yet) folded into the shared tip, so the §C1 h_{n+1} check above is unaffected.
+        let (offline_att_proto, offline_expiry_tick) = {
+            let m = self.bilateral_tx_manager.read().await;
+            match m
+                .attest_offline_bearer_for_commitment(
+                    &commitment_hash,
+                    &h_n,
+                    &pre_entropy,
+                    dsm::types::device_state::ValueCapability::Yes,
+                )
+                .await?
+            {
+                Some((att, expiry)) => (Some(Self::island_attestation_to_generated(&att)), expiry),
+                None => (None, 0u64),
+            }
+        };
+
         // 5. Build sender SMT proofs via a prepare-only simulation of the
         // canonical advance (§2.2). No canonical state mutation yet — that
         // happens after the receiver ACKs, inside
@@ -3441,6 +3521,11 @@ impl BilateralBleHandler {
             // §4.3: transmit pre-update SMT root (r_A) so receiver can fully verify
             // π_rel_parent (h_n ∈ r_A) per whitepaper §4.3 acceptance predicate #2.
             sender_smt_root_before: pre_root.to_vec(),
+            // Offline-bearer anchor attestation (Some iff an anchor transport produced one for an
+            // OFFLINE_BEARER_REQUIRED transfer). The receiver verifies it against its pinned
+            // enrollment; absent for ordinary transfers and rejected fail-closed for bearer ones.
+            island_attestation: offline_att_proto,
+            anchor_expiry_tick: offline_expiry_tick,
         };
 
         // 8. Wrap in envelope
@@ -3798,6 +3883,86 @@ impl BilateralBleHandler {
         Ok(())
     }
 
+    /// Convert the SDK's generated IslandAttestationProto into the core domain type. The SDK and
+    /// core have distinct generated proto modules, so this bridges the two.
+    fn island_attestation_from_generated(
+        p: &generated::IslandAttestationProto,
+    ) -> Result<dsm::types::device_state::IslandAttestation, DsmError> {
+        fn f32(name: &str, v: &[u8]) -> Result<[u8; 32], DsmError> {
+            <[u8; 32]>::try_from(v).map_err(|_| {
+                DsmError::invalid_operation(format!("island_attestation.{name} must be 32 bytes"))
+            })
+        }
+        Ok(dsm::types::device_state::IslandAttestation {
+            id_island: f32("id_island", &p.id_island)?,
+            id_anchor_set: f32("id_anchor_set", &p.id_anchor_set)?,
+            ui_transcript_hash: f32("ui_transcript_hash", &p.ui_transcript_hash)?,
+            signature: p.signature.clone(),
+            policy_id: f32("policy_id", &p.policy_id)?,
+            anchor_pubkey_hash: f32("anchor_pubkey_hash", &p.anchor_pubkey_hash)?,
+            firmware_hash: f32("firmware_hash", &p.firmware_hash)?,
+            policy_hash: f32("policy_hash", &p.policy_hash)?,
+            parent_root: f32("parent_root", &p.parent_root)?,
+            successor_root: f32("successor_root", &p.successor_root)?,
+            operation_hash: f32("operation_hash", &p.operation_hash)?,
+            state_number: p.state_number,
+        })
+    }
+
+    /// Convert a core IslandAttestation into the SDK's generated proto type (reverse of
+    /// island_attestation_from_generated), for the sender to carry in the confirm.
+    fn island_attestation_to_generated(
+        a: &dsm::types::device_state::IslandAttestation,
+    ) -> generated::IslandAttestationProto {
+        generated::IslandAttestationProto {
+            id_island: a.id_island.to_vec(),
+            signature: a.signature.clone(),
+            policy_id: a.policy_id.to_vec(),
+            id_anchor_set: a.id_anchor_set.to_vec(),
+            ui_transcript_hash: a.ui_transcript_hash.to_vec(),
+            anchor_pubkey_hash: a.anchor_pubkey_hash.to_vec(),
+            firmware_hash: a.firmware_hash.to_vec(),
+            policy_hash: a.policy_hash.to_vec(),
+            parent_root: a.parent_root.to_vec(),
+            successor_root: a.successor_root.to_vec(),
+            operation_hash: a.operation_hash.to_vec(),
+            state_number: a.state_number,
+        }
+    }
+
+    /// Convert this device's anchor identity to the wire proto for the prepare request.
+    fn anchor_identity_to_generated(
+        rec: &dsm::crypto::anchor_transport::AnchorIdentityRecord,
+    ) -> generated::AnchorIdentityProto {
+        generated::AnchorIdentityProto {
+            id_anchor: rec.id_anchor.to_vec(),
+            commitment_c: rec.commitment_c.to_vec(),
+            leaf_spki: rec.leaf_spki.clone(),
+            firmware_id: rec.firmware_id.to_vec(),
+            screen_template_id: rec.screen_template_id,
+            firmware_hash: rec.firmware_hash.to_vec(),
+        }
+    }
+
+    /// Convert a peer's wire anchor identity (from the prepare request) to the core record to pin.
+    fn anchor_identity_from_generated(
+        p: &generated::AnchorIdentityProto,
+    ) -> Result<dsm::crypto::anchor_transport::AnchorIdentityRecord, DsmError> {
+        fn f32(name: &str, v: &[u8]) -> Result<[u8; 32], DsmError> {
+            <[u8; 32]>::try_from(v).map_err(|_| {
+                DsmError::invalid_operation(format!("anchor_identity.{name} must be 32 bytes"))
+            })
+        }
+        Ok(dsm::crypto::anchor_transport::AnchorIdentityRecord {
+            id_anchor: f32("id_anchor", &p.id_anchor)?,
+            commitment_c: f32("commitment_c", &p.commitment_c)?,
+            leaf_spki: p.leaf_spki.clone(),
+            firmware_id: f32("firmware_id", &p.firmware_id)?,
+            screen_template_id: p.screen_template_id,
+            firmware_hash: f32("firmware_hash", &p.firmware_hash)?,
+        })
+    }
+
     /// 3-step protocol step 3 (receiver side): Handle BilateralConfirmRequest from sender.
     ///
     /// Verifies sender's signature, validates proofs, finalizes the receiver side
@@ -4135,6 +4300,42 @@ impl BilateralBleHandler {
             return Err(DsmError::invalid_operation(
                 "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
             ));
+        }
+
+        // Offline-bearer anchor enforcement (OFFLINE_BEARER_REQUIRED transfers only). The receiver
+        // releases value only if the sender's anchor attestation verifies against the PINNED
+        // enrollment for this counterparty (anchor pubkey + measured firmware hash + policy) and
+        // validly advances the pinned monotonic frontier. Fail-closed: a missing attestation, an
+        // un-admitted / fresh self-provisioned identity, a non-enrolled firmware, or a forked /
+        // replayed frontier rejects the transfer. `h_n` above is the shared relationship tip the gate
+        // signed as the transition input; the device's on-chip frontier is the primary serializer,
+        // this is the receiver-side identity pin + cross-receiver fork detector. Ordinary transfers
+        // are unaffected (the gate predicate is false for them).
+        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+            &session.operation,
+        ) {
+            // The sender's anchor was pinned when its OFFLINE_BEARER_REQUIRED offer was first seen
+            // (handle_prepare_request, the relationship-establishment authority path). Verify the
+            // attestation against that pinned enrollment; if none was pinned this rejects fail-closed.
+            let att_proto = confirm_request.island_attestation.as_ref().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "OFFLINE_BEARER_REQUIRED confirm missing anchor attestation (fail-closed)",
+                )
+            })?;
+            let att = Self::island_attestation_from_generated(att_proto)?;
+            let manager = self.bilateral_tx_manager.read().await;
+            manager.verify_incoming_offline_bearer_commit(
+                &session.counterparty_device_id,
+                &session.operation,
+                &h_n,
+                confirm_request.anchor_expiry_tick,
+                &pre_entropy,
+                &att,
+            )?;
+            info!(
+                "[BILATERAL] offline-bearer anchor verified against pinned enrollment for commitment {}",
+                bytes_to_base32(&commitment_hash[..8])
+            );
         }
 
         // Derive receiver-side credit deltas from the session operation.
@@ -5329,7 +5530,8 @@ impl BilateralBleHandler {
         validity_ticks: u64,
     ) -> Result<[u8; 32], DsmError> {
         // Deserialize operation from bytes
-        let operation =
+        #[allow(unused_mut)]
+        let mut operation =
             dsm::types::operations::Operation::from_bytes(operation_data).map_err(|e| {
                 DsmError::serialization_error(
                     "register_sender_session",
@@ -5338,6 +5540,10 @@ impl BilateralBleHandler {
                     None::<std::io::Error>,
                 )
             })?;
+
+        // Apply the offline-bearer policy identically to the prepare path, so the sender's precommit
+        // and the receiver's decoded op (from the prepare request) hash the same bytes.
+        self.apply_offline_bearer_policy(&mut operation).await;
 
         // Ensure relationship + create a matching pre-commitment in the core manager.
         // This ensures the core has a pending commitment (used during finalization)
@@ -5741,6 +5947,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "stale".to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
         let next_op = Operation::Transfer {
             policy_commit: [0u8; 32],
@@ -5755,6 +5962,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "fresh".to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let local_pending_hash = {
@@ -5861,6 +6069,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "accepted".to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let local_pending_hash = {

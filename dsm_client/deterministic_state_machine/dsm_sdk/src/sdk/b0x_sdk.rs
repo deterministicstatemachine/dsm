@@ -2527,6 +2527,7 @@ impl B0xSDK {
                                     to: recipient_id.clone().into_bytes(),
                                     message: transfer_req.memo.clone(),
                                     signature: sig.clone(),
+                                    authority_policy: None,
                                 };
 
                                 // Capture sender signing public key from Evidence.oracle.oracle_key if present

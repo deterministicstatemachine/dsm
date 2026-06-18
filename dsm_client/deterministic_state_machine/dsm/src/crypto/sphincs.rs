@@ -1337,7 +1337,10 @@ mod postfix_malleability_scan {
         let sig = sign(v, &kp.secret_key, &msg).unwrap();
 
         // Happy path must still hold after the l_tree fix.
-        assert!(verify(v, &kp.public_key, &msg, &sig).unwrap(), "honest signature must verify after fix");
+        assert!(
+            verify(v, &kp.public_key, &msg, &sig).unwrap(),
+            "honest signature must verify after fix"
+        );
 
         let valid_after_flip = |pos: usize, bit: u8| -> bool {
             let mut s = sig.clone();
@@ -1374,8 +1377,16 @@ mod postfix_malleability_scan {
         }
         println!("POSTFIX el59_all_layers_still_malleable={:?}", el59_still);
 
-        assert!(weak.is_empty(), "malleable byte positions remain: {}", weak.len());
-        assert!(el59_still.is_empty(), "element59 offsets still malleable: {:?}", el59_still);
+        assert!(
+            weak.is_empty(),
+            "malleable byte positions remain: {}",
+            weak.len()
+        );
+        assert!(
+            el59_still.is_empty(),
+            "element59 offsets still malleable: {:?}",
+            el59_still
+        );
     }
 }
 // __POSTFIX_SCAN_END__

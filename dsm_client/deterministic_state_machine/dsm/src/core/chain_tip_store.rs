@@ -29,6 +29,32 @@ pub trait ChainTipStore: Send + Sync {
         expected_parent_tip: [u8; 32],
         new_tip: [u8; 32],
     ) -> Result<bool, DsmError>;
+
+    /// Get an anchor DEVICE's single monotonic frontier `(stored_root, state_number)`, if tracked.
+    ///
+    /// The anchor frontier is ONE per device — keyed by the anchor identity `id_anchor`, NOT per
+    /// relationship. Every offline-bearer transition the device makes (to ANY counterparty) advances
+    /// this one frontier (`dsm_anchor_frontier_successor`); that single serialization is what makes
+    /// a clone detectable (it must fork the one counter). Default: untracked (`None`).
+    fn get_anchor_frontier(&self, _anchor_id: &[u8; 32]) -> Option<([u8; 32], u64)> {
+        None
+    }
+
+    /// CAS-advance an anchor device's single frontier: apply only if the stored root still equals
+    /// `expected_parent_root` AND `new_state_number` strictly exceeds the stored one (or none is
+    /// stored). Returns `Ok(false)` on a stale parent or non-monotonic state — detection of a fork
+    /// (a second advance from an already-consumed `parent_root`: a clone or concurrent signer).
+    /// Default: a no-op accept for core-only contexts (the device firmware is the primary enforcer;
+    /// this is the host-side mirror/detector).
+    fn set_anchor_frontier(
+        &self,
+        _anchor_id: &[u8; 32],
+        _expected_parent_root: [u8; 32],
+        _new_root: [u8; 32],
+        _new_state_number: u64,
+    ) -> Result<bool, DsmError> {
+        Ok(true)
+    }
 }
 
 impl std::fmt::Debug for dyn ChainTipStore {
@@ -100,14 +126,19 @@ mod tests {
         assert!(dbg.contains("ChainTipStore(..)"));
     }
 
+    /// `(root, state_number)` recorded per device id.
+    type RootEntry = ([u8; 32], u64);
+
     struct InMemoryChainTipStore {
         tips: Mutex<HashMap<[u8; 32], [u8; 32]>>,
+        roots: Mutex<HashMap<[u8; 32], RootEntry>>,
     }
 
     impl InMemoryChainTipStore {
         fn new() -> Self {
             Self {
                 tips: Mutex::new(HashMap::new()),
+                roots: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -129,6 +160,27 @@ mod tests {
                 return Ok(false);
             }
             tips.insert(*device_id, new_tip);
+            Ok(true)
+        }
+
+        fn get_anchor_frontier(&self, anchor_id: &[u8; 32]) -> Option<([u8; 32], u64)> {
+            self.roots.lock().unwrap().get(anchor_id).copied()
+        }
+
+        fn set_anchor_frontier(
+            &self,
+            anchor_id: &[u8; 32],
+            expected_parent_root: [u8; 32],
+            new_root: [u8; 32],
+            new_state_number: u64,
+        ) -> Result<bool, DsmError> {
+            let mut roots = self.roots.lock().unwrap();
+            if let Some((cur_root, cur_state)) = roots.get(anchor_id).copied() {
+                if cur_root != expected_parent_root || new_state_number <= cur_state {
+                    return Ok(false);
+                }
+            }
+            roots.insert(*anchor_id, (new_root, new_state_number));
             Ok(true)
         }
     }
@@ -169,5 +221,22 @@ mod tests {
         let applied = store.set_contact_chain_tip(&id, tip1, tip2).unwrap();
         assert!(applied);
         assert_eq!(store.get_contact_chain_tip(&id), Some(tip2));
+    }
+
+    #[test]
+    fn anchor_frontier_cas_rejects_double_advance_and_non_monotonic_state() {
+        let store = InMemoryChainTipStore::new();
+        let anchor = [7u8; 32]; // ONE frontier per anchor device, keyed by id_anchor.
+        let (r0, r1, r2) = ([0u8; 32], [11u8; 32], [22u8; 32]);
+        // First advance from the empty frontier.
+        assert!(store.set_anchor_frontier(&anchor, r0, r1, 1).unwrap());
+        assert_eq!(store.get_anchor_frontier(&anchor), Some((r1, 1)));
+        // Double-advance from the SAME (now-consumed) parent root is rejected — fork detection.
+        assert!(!store.set_anchor_frontier(&anchor, r0, r2, 2).unwrap());
+        // Correct parent but non-monotonic state is rejected.
+        assert!(!store.set_anchor_frontier(&anchor, r1, r2, 1).unwrap());
+        // Correct parent + strictly monotonic state advances.
+        assert!(store.set_anchor_frontier(&anchor, r1, r2, 2).unwrap());
+        assert_eq!(store.get_anchor_frontier(&anchor), Some((r2, 2)));
     }
 }

@@ -19,8 +19,9 @@ use p256::pkcs8::DecodePublicKey as _;
 
 /// Fixed-format Ed25519 SubjectPublicKeyInfo prefix (RFC 8410); the 32-byte raw key
 /// follows immediately, for a total SPKI length of 44 bytes.
-const ED25519_SPKI_PREFIX: [u8; 12] =
-    [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 /// Extract the raw 32-byte Ed25519 public key from a SubjectPublicKeyInfo DER.
 pub fn ed25519_pubkey_from_spki(spki_der: &[u8]) -> Result<[u8; 32], DsmError> {
@@ -59,9 +60,8 @@ pub fn verify_ecdsa_p256_sha256(
     message: &[u8],
     der_signature: &[u8],
 ) -> Result<(), DsmError> {
-    let verifying_key = P256VerifyingKey::from_public_key_der(spki_der).map_err(|_| {
-        DsmError::verification("attestation: malformed P-256 SubjectPublicKeyInfo")
-    })?;
+    let verifying_key = P256VerifyingKey::from_public_key_der(spki_der)
+        .map_err(|_| DsmError::verification("attestation: malformed P-256 SubjectPublicKeyInfo"))?;
     verify_ecdsa_p256_sha256_inner(&verifying_key, message, der_signature)
 }
 

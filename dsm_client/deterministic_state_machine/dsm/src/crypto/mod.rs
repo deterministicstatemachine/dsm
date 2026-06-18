@@ -55,12 +55,14 @@ use crate::common::domain_tags::TAG_HASH_DATA;
 
 // Re-export the main crypto modules
 pub mod aead;
+pub mod anchor_enrollment;
+pub mod anchor_transport;
 pub mod blake3;
 pub mod canonical_lp;
 pub mod cdbrw_binding;
 pub mod cdbrw_moments;
-pub mod device_anchor;
 pub mod classical_verify;
+pub mod device_anchor;
 pub mod ephemeral_key;
 pub mod hash;
 pub mod hkdf;

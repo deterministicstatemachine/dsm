@@ -49,6 +49,7 @@ pub fn serialize_operation(op: &Operation) -> Vec<u8> {
             to,
             message,
             signature: _,
+            authority_policy: _, // NOTE: storage codec does not yet persist authority_policy
         } => {
             bytes.push(1u8); // Transfer tag
 
@@ -236,6 +237,7 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
                 to,
                 message,
                 signature: Vec::new(),
+                authority_policy: None,
             })
         }
         255 => Ok(Operation::Noop),
@@ -506,6 +508,7 @@ mod tests {
             to: vec![0xDDu8; 32],
             message: "test transfer".to_string(),
             signature: vec![0xEEu8; 64],
+            authority_policy: None,
         };
         let bytes = serialize_operation(&op);
         let back = deserialize_operation(&bytes).expect("deserialize transfer");

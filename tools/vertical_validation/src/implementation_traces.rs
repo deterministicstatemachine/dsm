@@ -431,6 +431,7 @@ fn trace_bilateral_precommit_tripwire(
                 &first_pre.bilateral_commitment_hash,
                 b"accept",
                 &mut smt,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -528,6 +529,7 @@ fn trace_bilateral_precommit_tripwire(
                 &second_pre.bilateral_commitment_hash,
                 b"accept",
                 &mut smt,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -627,6 +629,7 @@ fn trace_bilateral_precomputed_finalize_hash(
                 b"accept",
                 Some(entropy),
                 &mut smt,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -1559,6 +1562,7 @@ fn trace_bilateral_full_offline_finality(
                 &pre1.bilateral_commitment_hash,
                 b"accept-1",
                 &mut smt,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -1610,6 +1614,7 @@ fn trace_bilateral_full_offline_finality(
                 &pre2.bilateral_commitment_hash,
                 b"accept-2",
                 &mut smt,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -1678,6 +1683,7 @@ fn trace_bilateral_full_offline_finality(
                 &pre3.bilateral_commitment_hash,
                 b"accept-3",
                 &mut smt,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -1770,6 +1776,7 @@ fn trace_bilateral_pair_non_interference(
                 &pre1.bilateral_commitment_hash,
                 b"accept-ni-1",
                 &mut smt1,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -1825,6 +1832,7 @@ fn trace_bilateral_pair_non_interference(
                 &pre2.bilateral_commitment_hash,
                 b"accept-ni-2",
                 &mut smt2,
+                dsm::types::device_state::ValueCapability::Yes,
             )
             .await
         {
@@ -1901,6 +1909,7 @@ fn build_signed_transfer(
         to: b"trace-recipient".to_vec(),
         message: "implementation trace".into(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     let signable = op.with_cleared_signature();
@@ -1934,6 +1943,7 @@ fn build_signed_transfer_to_owner(
         to: b"trace-recipient".to_vec(),
         message: "implementation trace".into(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     let signable = op.with_cleared_signature();
@@ -1964,6 +1974,7 @@ fn build_signed_bilateral_transfer(
         to: b"trace-bilateral-recipient".to_vec(),
         message: message.into(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     let sig = kp.sign(&op.to_bytes()).expect("bilateral trace sign");

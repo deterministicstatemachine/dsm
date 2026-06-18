@@ -417,6 +417,7 @@ mod state_machine_tests {
             to: b"b32recipient".to_vec(),
             message: message.to_string(),
             signature: Vec::new(),
+            authority_policy: None,
         };
 
         let bytes = op.to_bytes();

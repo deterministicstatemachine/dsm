@@ -147,6 +147,7 @@ fn test_operation_serialization() {
         to: b"recipient_123".to_vec(),
         message: "Test transfer".to_string(),
         signature: vec![],
+        authority_policy: None,
     };
 
     assert_eq!(op.get_operation_type(), "transfer");

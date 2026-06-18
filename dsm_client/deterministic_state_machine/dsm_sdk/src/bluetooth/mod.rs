@@ -37,6 +37,17 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+/// Deterministic mock-anchor seed from a device id (mock-anchor feature only). Both the sender
+/// (wiring its own transport) and the receiver (deriving a counterparty's mock identity) derive the
+/// SAME seed, so a device's mock anchor identity is reproducible from its device id with no hardware
+/// and no pairing exchange — the test shortcut that stands in for the Safe 7 element + admission.
+#[cfg(feature = "mock-anchor")]
+pub fn mock_anchor_seed(device_id: &[u8; 32]) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/mock-anchor-seed/v1");
+    h.update(device_id);
+    *h.finalize().as_bytes()
+}
+
 /// Global pairing orchestrator
 static PAIRING_ORCHESTRATOR: RwLock<Option<Arc<pairing_orchestrator::PairingOrchestrator>>> =
     RwLock::new(None);
@@ -318,15 +329,28 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     let contact_manager = DsmContactManager::new(dev_fixed, storage_nodes);
     let keypair = SignatureKeyPair::new().map_err(|e| format!("keypair generation failed: {e}"))?;
     let chain_tip_store = Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-    let btx = Arc::new(TokioRwLock::new(
-        BilateralTransactionManager::new_with_chain_tip_store(
-            contact_manager,
-            keypair,
-            dev_fixed,
-            gen_fixed,
-            chain_tip_store,
-        ),
+    #[allow(unused_mut)]
+    let mut manager = BilateralTransactionManager::new_with_chain_tip_store(
+        contact_manager,
+        keypair,
+        dev_fixed,
+        gen_fixed,
+        chain_tip_store,
+    )
+    .with_enrollment_store(Arc::new(
+        crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
     ));
+    // mock-anchor: same in-process MockAnchorTransport as the primary init path, so the offline-bearer
+    // path works end-to-end on this late/fallback manager too. OFF in production.
+    #[cfg(feature = "mock-anchor")]
+    {
+        manager = manager.with_anchor_transport(Arc::new(
+            dsm::crypto::anchor_transport::MockAnchorTransport::from_seed(mock_anchor_seed(
+                &dev_fixed,
+            )),
+        ));
+    }
+    let btx = Arc::new(TokioRwLock::new(manager));
     let mgr = BluetoothManager::new(dev_fixed, btx);
     let mgr_arc = Arc::new(mgr);
 

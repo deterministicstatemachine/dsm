@@ -43,6 +43,7 @@ pub use bootstrap::SdkBootstrap;
 
 // Core SDK modules - fundamental building blocks
 
+pub mod anchor_enrollment_store;
 pub mod app_state; // Shared application state management
 pub mod b0x_sdk;
 pub mod chain_tip_store;

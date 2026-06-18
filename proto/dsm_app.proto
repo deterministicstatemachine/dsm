@@ -1731,6 +1731,9 @@ message BilateralPrepareRequest {
   string token_id_hint           = 12; // token ID (e.g. "ERA")
   string memo_hint               = 13; // optional transfer memo
   string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
+  // Present iff the sender holds an offline-bearer anchor. The receiver pins it (admit) at
+  // relationship establishment, then verifies every offline-bearer receipt against it.
+  AnchorIdentityProto sender_anchor_identity = 15;
 }
 message BilateralPrepareResponse {
   Hash32 commitment_hash        = 1;
@@ -1850,6 +1853,12 @@ message BilateralConfirmRequest {
   Hash32 shared_chain_tip_new        = 7; // h_{n+1}
   bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
   bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
+  // Offline-bearer (OFFLINE_BEARER_REQUIRED) only: the anchor attestation + the signed expiry tick
+  // the receiver needs to reconstruct + verify the anchor signature against its PINNED enrollment
+  // (anchor pubkey, firmware_hash, policy, frontier). Absent for ordinary transfers. The receiver
+  // rejects an OFFLINE_BEARER_REQUIRED confirm that lacks a valid, admitted attestation (fail-closed).
+  IslandAttestationProto island_attestation = 10;
+  uint64 anchor_expiry_tick                 = 11; // == the transition target state the gate signed as expiry_tick
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
@@ -2842,6 +2851,31 @@ message IslandAttestationProto {
   bytes id_island = 1 [(dsm_fixed_len)=32];   // SHA-256(leaf SubjectPublicKeyInfo)
   bytes signature = 2 [(dsm_max_len)=65535];  // island signature over the framed intent challenge
   bytes policy_id = 3 [(dsm_fixed_len)=32];   // pinning policy id under which the island was admitted
+  bytes id_anchor_set = 4 [(dsm_fixed_len)=32];      // canonical anchor-set id (compute_anchor_set_id)
+  bytes ui_transcript_hash = 5 [(dsm_fixed_len)=32]; // UI transcript hash the island signed over
+  // Stateful-receipt fields (anchor monotonic frontier + firmware/policy binding). Append-only;
+  // NOT folded into compute_chain_tip (only id_island/signature/policy_id are), so tip bytes are
+  // unchanged. genesis/device_id are already on StitchedReceiptV2 and not duplicated here.
+  bytes anchor_pubkey_hash = 6 [(dsm_fixed_len)=32]; // dsm_anchor_pubkey_hash(leaf_spki)
+  bytes firmware_hash = 7 [(dsm_fixed_len)=32];      // device-measured firmware hash (secmon-gate enforced)
+  bytes policy_hash = 8 [(dsm_fixed_len)=32];        // dsm_policy_hash(policy_id, id_anchor_set)
+  bytes parent_root = 9 [(dsm_fixed_len)=32];        // anchor frontier root this advance consumes
+  bytes successor_root = 10 [(dsm_fixed_len)=32];    // anchor frontier root this advance produces
+  bytes operation_hash = 11 [(dsm_fixed_len)=32];    // == payload_hash of the transition
+  uint64 state_number = 12;                          // monotonic anchor frontier counter
+}
+
+// The sender's published offline-bearer anchor identity, exchanged so the receiver can PIN it
+// (admit it through the relationship-establishment authority path) and thereafter verify every
+// offline-bearer receipt against this exact identity + enrolled firmware hash. Comes from the
+// element (real Safe 7 transport) or the in-process mock; the exchange + pinning are identical.
+message AnchorIdentityProto {
+  bytes  id_anchor          = 1 [(dsm_fixed_len)=32]; // anchor id (from birth commitment + key)
+  bytes  commitment_c       = 2 [(dsm_fixed_len)=32]; // birth commitment C
+  bytes  leaf_spki          = 3 [(dsm_max_len)=2048]; // SubjectPublicKeyInfo DER of the signing key
+  bytes  firmware_id        = 4 [(dsm_fixed_len)=32]; // display-bound firmware id
+  uint32 screen_template_id = 5;                      // consent screen layout version
+  bytes  firmware_hash      = 6 [(dsm_fixed_len)=32]; // measured firmware hash enrolled at provisioning
 }
 
 // A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a

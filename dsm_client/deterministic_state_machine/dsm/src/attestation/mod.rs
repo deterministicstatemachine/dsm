@@ -81,6 +81,45 @@ pub fn id_island_from_spki(spki_der: &[u8]) -> [u8; 32] {
 /// Domain tag for the offline-bearer island attestation intent challenge.
 pub const ISLAND_ATTESTATION_DOMAIN: &str = "DSM/offline-bearer/island-attestation/v1";
 
+/// Domain tag for the on-device UI transcript hash (the consent-oracle binding).
+pub const UI_TRANSCRIPT_DOMAIN: &str = "DSM/ui/v1";
+
+/// Build the on-device UI transcript hash: a commitment to exactly what the Safe 7 screen
+/// rendered and the human confirmed before the island signed. This is the consent-oracle
+/// layer — a different security job from the anti-clone island authority. The element signs a
+/// challenge that folds this transcript ([`dsm_island_challenge`]), so a hostile host cannot
+/// get the device to sign a transition different from the one the human approved on the device
+/// screen ("no matching UI transcript, verifier rejects").
+///
+/// `firmware_id` is the DSM custom-firmware identity: Track B intentionally discards the Trezor
+/// factory attestation (bootloader unlock destroys the factory key), and the firmware identity
+/// replaces it. `screen_template_id` pins the exact screen layout version that rendered the
+/// fields. Variable-length fields are length-prefixed to forbid concatenation ambiguity. The
+/// verifier recomputes this from the canonical transition fields and rejects on mismatch.
+#[allow(clippy::too_many_arguments)]
+pub fn dsm_ui_transcript(
+    amount: u64,
+    asset: &[u8],
+    counterparty_id: &[u8; 32],
+    h_n: &[u8; 32],
+    payload_hash: &[u8; 32],
+    policy_id: &[u8; 32],
+    firmware_id: &[u8; 32],
+    screen_template_id: u32,
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(UI_TRANSCRIPT_DOMAIN);
+    hasher.update(&amount.to_le_bytes());
+    hasher.update(&(asset.len() as u32).to_le_bytes());
+    hasher.update(asset);
+    hasher.update(counterparty_id);
+    hasher.update(h_n);
+    hasher.update(payload_hash);
+    hasher.update(policy_id);
+    hasher.update(firmware_id);
+    hasher.update(&screen_template_id.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
 /// Build the canonical intent challenge the island signs for an offline-bearer transition.
 ///
 /// Binding the full intent (not just `h_n`) is what prevents a hostile host reusing one
@@ -88,6 +127,12 @@ pub const ISLAND_ATTESTATION_DOMAIN: &str = "DSM/offline-bearer/island-attestati
 /// device's AuthenticateDevice operation as the challenge (the device then wraps it with
 /// [`frame_authenticate_device`]). `expiry_tick` is a DETERMINISTIC tick / state-index bound,
 /// never wall-clock: DSM is clockless and this value folds into a signed commitment.
+///
+/// `ui_transcript` binds the on-device consent ceremony ([`dsm_ui_transcript`]): the element
+/// signs only what the human approved on the Safe 7 screen, not merely what the host
+/// requested. It is APPENDED to the existing intent binding (rather than replacing it), so the
+/// consent-oracle layer is gained without losing the relay/replay protection that `nonce` and
+/// `expiry_tick` provide.
 #[allow(clippy::too_many_arguments)]
 pub fn dsm_island_challenge(
     h_n: &[u8; 32],
@@ -98,6 +143,8 @@ pub fn dsm_island_challenge(
     offline_bearer_mode: u8,
     nonce: &[u8],
     expiry_tick: u64,
+    ui_transcript: &[u8; 32],
+    receipt_commit: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = dsm_domain_hasher(ISLAND_ATTESTATION_DOMAIN);
     hasher.update(h_n);
@@ -108,7 +155,191 @@ pub fn dsm_island_challenge(
     hasher.update(&(nonce.len() as u32).to_le_bytes());
     hasher.update(nonce);
     hasher.update(&expiry_tick.to_le_bytes());
+    hasher.update(ui_transcript);
+    hasher.update(receipt_commit);
     *hasher.finalize().as_bytes()
+}
+
+/// Domain tag for the offline-bearer anchor-proof digest folded into the chain tip.
+pub const ANCHOR_PROOF_DOMAIN: &str = "DSM/offline-bearer/anchor-proof/v1";
+
+/// Canonical signature bundle for an attested transition: `count || (len-prefixed signature)*`,
+/// signatures sorted so the bundle is independent of the order the caller supplies them in. For a
+/// single-island anchor this is the one signature; dual-island carries both. Folded as a whole into
+/// [`compute_anchor_proof_hash`], and carried on the receipt so the digest is reconstructable.
+pub fn canonical_signature_bundle(signatures: &[Vec<u8>]) -> Vec<u8> {
+    let mut sigs: Vec<&[u8]> = signatures.iter().map(|s| s.as_slice()).collect();
+    sigs.sort_unstable();
+    let mut out = Vec::new();
+    out.extend_from_slice(&(sigs.len() as u32).to_le_bytes());
+    for s in sigs {
+        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        out.extend_from_slice(s);
+    }
+    out
+}
+
+/// Canonical anchor-proof digest folded into the attested successor tip:
+/// `BLAKE3("DSM/offline-bearer/anchor-proof/v1" || policy_id || id_anchor_set || ui_transcript_hash
+/// || canonical_signature_bundle)`.
+///
+/// Only this 32-byte digest is folded into the tip — never a brittle `id_anchor || s_n || policy_id`
+/// concatenation — giving stable tip bytes and room for dual-island sets, UI transcripts, policy
+/// versions, and future anchor formats without changing the tip formula again. Crucially ALL four
+/// inputs are carried on the receipt's `IslandAttestation` (`policy_id`, `id_anchor_set`,
+/// `ui_transcript_hash`, and the signature(s) → `canonical_signature_bundle`), so a re-verifier can
+/// reconstruct this digest from the receipt and match it to the folded tip.
+///
+/// `id_anchor_set` is the canonical set-id digest from [`compute_anchor_set_id`], NOT the raw ids.
+pub fn compute_anchor_proof_hash(
+    policy_id: &[u8; 32],
+    id_anchor_set: &[u8; 32],
+    ui_transcript_hash: &[u8; 32],
+    canonical_signature_bundle: &[u8],
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(ANCHOR_PROOF_DOMAIN);
+    hasher.update(policy_id);
+    hasher.update(id_anchor_set);
+    hasher.update(ui_transcript_hash);
+    hasher.update(canonical_signature_bundle);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain tag for the anchor's own monotonic root frontier (separate from the Per-Device SMT root,
+/// which folds `anchor_proof_hash` and would be circular to sign over).
+pub const ANCHOR_FRONTIER_DOMAIN: &str = "DSM/anchor-frontier/v1";
+
+/// Deterministically advance the anchor's monotonic frontier:
+/// `successor_root = BLAKE3("DSM/anchor-frontier/v1" || parent_root || operation_hash || state_number)`.
+/// No signature dependency, so the receipt can both bind and advance it without circularity. The
+/// device requires `parent_root == stored_root`, recomputes this, and atomically advances.
+pub fn dsm_anchor_frontier_successor(
+    parent_root: &[u8; 32],
+    operation_hash: &[u8; 32],
+    state_number: u64,
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(ANCHOR_FRONTIER_DOMAIN);
+    hasher.update(parent_root);
+    hasher.update(operation_hash);
+    hasher.update(&state_number.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain-separated hash of the anchor's SubjectPublicKeyInfo, carried on the receipt so a verifier
+/// pins exactly which key signed (length-prefixed to forbid concatenation ambiguity).
+pub const ANCHOR_PUBKEY_HASH_DOMAIN: &str = "DSM/anchor-pubkey/v1";
+
+/// `BLAKE3("DSM/anchor-pubkey/v1" || len(spki) || spki)`.
+pub fn dsm_anchor_pubkey_hash(leaf_spki: &[u8]) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(ANCHOR_PUBKEY_HASH_DOMAIN);
+    hasher.update(&(leaf_spki.len() as u32).to_le_bytes());
+    hasher.update(leaf_spki);
+    *hasher.finalize().as_bytes()
+}
+
+/// Domain tag for the policy-content hash the receipt binds (distinct from the policy id).
+pub const POLICY_HASH_DOMAIN: &str = "DSM/policy-hash/v1";
+
+/// `BLAKE3("DSM/policy-hash/v1" || policy_id || anchor_set_id)` — a hash of the pinning policy's
+/// canonical contents the verifier checks against the enrolled value.
+pub fn dsm_policy_hash(policy_id: &[u8; 32], anchor_set_id: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(POLICY_HASH_DOMAIN);
+    hasher.update(policy_id);
+    hasher.update(anchor_set_id);
+    *hasher.finalize().as_bytes()
+}
+
+/// Canonical policy id for the default offline-bearer authority policy. A device that holds an anchor
+/// stamps this id on its OFFLINE_BEARER_REQUIRED transfers; the sender and receiver agree on it by
+/// construction (it travels in the operation and is folded, via `dsm_policy_hash`, into the signed
+/// receipt). A richer policy registry can replace this single default later.
+pub fn dsm_offline_bearer_policy_id() -> [u8; 32] {
+    *dsm_domain_hasher("DSM/offline-bearer/policy-id/v1")
+        .finalize()
+        .as_bytes()
+}
+
+/// Domain tag for the stateful-receipt commitment appended to the island intent challenge.
+pub const OFFLINE_BEARER_RECEIPT_DOMAIN: &str = "DSM/offline-bearer/receipt/v1";
+
+/// Stateful-receipt commitment folded into the island challenge:
+/// `BLAKE3("DSM/offline-bearer/receipt/v1" || anchor_pubkey_hash || firmware_hash || policy_hash ||
+/// parent_root || successor_root || state_number)`. Binds the fields not already in
+/// [`dsm_island_challenge`] (operation_hash==payload_hash and device_id are already folded there;
+/// `h_n` there is the relationship chain tip, SEPARATE from the anchor `parent_root` bound here — the
+/// device's single monotonic frontier root). Host and device compute this identically; the verifier
+/// reconstructs it from the receipt.
+pub fn dsm_offline_bearer_receipt_commit(
+    anchor_pubkey_hash: &[u8; 32],
+    firmware_hash: &[u8; 32],
+    policy_hash: &[u8; 32],
+    parent_root: &[u8; 32],
+    successor_root: &[u8; 32],
+    state_number: u64,
+) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher(OFFLINE_BEARER_RECEIPT_DOMAIN);
+    hasher.update(anchor_pubkey_hash);
+    hasher.update(firmware_hash);
+    hasher.update(policy_hash);
+    hasher.update(parent_root);
+    hasher.update(successor_root);
+    hasher.update(&state_number.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Canonical offline-bearer mode tag bound into the island intent challenge. Explicit enum — no
+/// magic naked constant at call sites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfflineBearerMode {
+    /// Offline-bearer authority is required for this transition.
+    Required,
+}
+
+impl OfflineBearerMode {
+    /// Canonical 1-byte tag for the `offline_bearer_mode` intent field.
+    pub fn tag(self) -> u8 {
+        match self {
+            OfflineBearerMode::Required => 1,
+        }
+    }
+}
+
+/// Domain for the offline-bearer transition payload hash bound into the intent challenge.
+pub const OFFLINE_BEARER_PAYLOAD_DOMAIN: &str = "DSM/offline-bearer/payload/v1";
+
+/// Hash of the transition's operation payload, bound into the island intent challenge as
+/// `payload_hash`. Deterministic over the canonical operation bytes.
+pub fn dsm_offline_bearer_payload_hash(op_bytes: &[u8]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(OFFLINE_BEARER_PAYLOAD_DOMAIN);
+    h.update(op_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// Domain for the canonical anchor-set identifier.
+pub const ANCHOR_SET_DOMAIN: &str = "DSM/anchor-set/v1";
+
+/// Canonical encoding of an anchor set: `count || sorted ids`. Order-independent (set semantics),
+/// length-prefixed.
+pub fn canonical_anchor_set(anchor_ids: &[[u8; 32]]) -> Vec<u8> {
+    let mut ids: Vec<&[u8; 32]> = anchor_ids.iter().collect();
+    ids.sort();
+    let mut out = Vec::with_capacity(4 + ids.len() * 32);
+    out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+    for id in ids {
+        out.extend_from_slice(id);
+    }
+    out
+}
+
+/// The canonical anchor-set identifier: `H("DSM/anchor-set/v1\0" || CanonicalAnchorSet(ids))`.
+///
+/// The gate recomputes this from the transport's ACTUAL anchor identities and requires it to equal
+/// the operation's declared `authority_policy.anchor_set_id` — so a policy cannot name one anchor
+/// set while the device signs with a different concrete identity set.
+pub fn compute_anchor_set_id(anchor_ids: &[[u8; 32]]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(ANCHOR_SET_DOMAIN);
+    h.update(&canonical_anchor_set(anchor_ids));
+    *h.finalize().as_bytes()
 }
 
 fn parse_cert(der: &[u8]) -> Result<X509Certificate<'_>, DsmError> {
@@ -157,19 +388,19 @@ fn check_ca(issuer: &X509Certificate, path_len: usize) -> Result<(), DsmError> {
             "attestation: issuer certificate lacks keyCertSign",
         ));
     }
-    let bc = issuer
-        .basic_constraints()
-        .ok()
-        .flatten()
-        .ok_or_else(|| DsmError::verification("attestation: issuer missing BasicConstraints"))?;
+    let bc =
+        issuer.basic_constraints().ok().flatten().ok_or_else(|| {
+            DsmError::verification("attestation: issuer missing BasicConstraints")
+        })?;
     if !bc.value.ca {
         return Err(DsmError::verification(
             "attestation: issuer is not a CA (cA flag unset)",
         ));
     }
-    let plc = bc.value.path_len_constraint.ok_or_else(|| {
-        DsmError::verification("attestation: issuer missing pathLenConstraint")
-    })?;
+    let plc = bc
+        .value
+        .path_len_constraint
+        .ok_or_else(|| DsmError::verification("attestation: issuer missing pathLenConstraint"))?;
     if (plc as usize) < path_len {
         return Err(DsmError::verification(
             "attestation: issuer pathLenConstraint exceeded",
@@ -222,7 +453,9 @@ pub fn verify_island_attestation(
     cert_chain: &[&[u8]],
 ) -> Result<[u8; 32], DsmError> {
     if cert_chain.is_empty() {
-        return Err(DsmError::verification("attestation: empty certificate chain"));
+        return Err(DsmError::verification(
+            "attestation: empty certificate chain",
+        ));
     }
     let framed = frame_authenticate_device(challenge)?;
 
@@ -237,7 +470,9 @@ pub fn verify_island_attestation(
     } else if *leaf_key_alg == OID_KEY_TYPE_EC_PUBLIC_KEY {
         verify_ecdsa_p256_sha256(leaf_spki, &framed, signature)?;
     } else {
-        return Err(DsmError::verification("attestation: unsupported leaf key type"));
+        return Err(DsmError::verification(
+            "attestation: unsupported leaf key type",
+        ));
     }
 
     let id_island = id_island_from_spki(leaf_spki);
@@ -289,6 +524,14 @@ pub struct IslandIntent<'a> {
     pub nonce: &'a [u8],
     /// Deterministic expiry tick (clockless), never wall-clock.
     pub expiry_tick: u64,
+    /// On-device UI transcript hash ([`dsm_ui_transcript`]): the consent-oracle binding to
+    /// exactly what the Safe 7 screen displayed and the human confirmed.
+    pub ui_transcript: &'a [u8; 32],
+    /// Stateful-receipt commitment ([`dsm_offline_bearer_receipt_commit`]): binds the anchor pubkey
+    /// hash, measured firmware hash, policy hash, frontier successor root, and state number into the
+    /// signed challenge so the island authority cannot be replayed across firmware, policy, or
+    /// frontier position.
+    pub receipt_commit: &'a [u8; 32],
 }
 
 impl IslandIntent<'_> {
@@ -303,6 +546,8 @@ impl IslandIntent<'_> {
             self.offline_bearer_mode,
             self.nonce,
             self.expiry_tick,
+            self.ui_transcript,
+            self.receipt_commit,
         )
     }
 }
@@ -429,14 +674,17 @@ mod tests {
     fn tampered_challenge_fails_full_chain() {
         let mut bad = CHALLENGE.to_vec();
         bad[0] ^= 0xff;
-        assert!(verify_island_attestation(&bad, TROPIC_SIG, &[TROPIC_CERT0, TROPIC_CERT1]).is_err());
+        assert!(
+            verify_island_attestation(&bad, TROPIC_SIG, &[TROPIC_CERT0, TROPIC_CERT1]).is_err()
+        );
     }
 
     #[test]
     fn wrong_leaf_signature_fails_full_chain() {
         // OPTIGA's signature with TROPIC01's chain: leaf challenge check must fail.
         assert!(
-            verify_island_attestation(CHALLENGE, OPTIGA_SIG, &[TROPIC_CERT0, TROPIC_CERT1]).is_err()
+            verify_island_attestation(CHALLENGE, OPTIGA_SIG, &[TROPIC_CERT0, TROPIC_CERT1])
+                .is_err()
         );
     }
 
@@ -446,18 +694,187 @@ mod tests {
         let payload = [2u8; 32];
         let rel = [3u8; 32];
         let dev = [4u8; 32];
-        let base = dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7);
+        let ui = [5u8; 32];
+        let rc = [0xABu8; 32];
+        let base = dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc);
         // Deterministic: identical inputs -> identical challenge.
-        assert_eq!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7));
+        assert_eq!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
         // Every intent field is bound: flipping any one changes the challenge.
-        assert_ne!(base, dsm_island_challenge(&[9u8; 32], &payload, &rel, &dev, 1, 1, b"nonce", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &[9u8; 32], &rel, &dev, 1, 1, b"nonce", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &[9u8; 32], &dev, 1, 1, b"nonce", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &[9u8; 32], 1, 1, b"nonce", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 2, 1, b"nonce", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 2, b"nonce", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"other", 7));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 8));
+        assert_ne!(
+            base,
+            dsm_island_challenge(&[9u8; 32], &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &[9u8; 32], &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &[9u8; 32], &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &[9u8; 32], 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 2, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 2, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"other", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 8, &ui, &rc)
+        );
+        // The UI transcript is bound: a different on-device consent transcript (the human saw a
+        // different action) changes the challenge, so the same signature cannot carry over.
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &[6u8; 32], &rc)
+        );
+        // The stateful-receipt commitment is bound: a different receipt_commit changes the challenge.
+        assert_ne!(
+            base,
+            dsm_island_challenge(
+                &h_n,
+                &payload,
+                &rel,
+                &dev,
+                1,
+                1,
+                b"nonce",
+                7,
+                &ui,
+                &[0xCDu8; 32]
+            )
+        );
+    }
+
+    #[test]
+    fn ui_transcript_binds_every_displayed_field() {
+        let cp = [1u8; 32];
+        let h_n = [2u8; 32];
+        let payload = [3u8; 32];
+        let policy = [4u8; 32];
+        let fw = [5u8; 32];
+        let base = dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1);
+        // Deterministic.
+        assert_eq!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1)
+        );
+        // Every displayed field is bound: flipping any one changes the transcript.
+        assert_ne!(
+            base,
+            dsm_ui_transcript(11, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1)
+        ); // amount
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"DBTC", &cp, &h_n, &payload, &policy, &fw, 1)
+        ); // asset
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &[9u8; 32], &h_n, &payload, &policy, &fw, 1)
+        ); // counterparty
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &[9u8; 32], &payload, &policy, &fw, 1)
+        ); // h_n
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &[9u8; 32], &policy, &fw, 1)
+        ); // payload
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &[9u8; 32], &fw, 1)
+        ); // policy
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &[9u8; 32], 1)
+        ); // firmware_id
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 2)
+        ); // screen_template
+    }
+
+    #[test]
+    fn anchor_proof_hash_is_canonical_and_binds_each_component() {
+        let policy = [1u8; 32];
+        let ui = [2u8; 32];
+        let id_a = [3u8; 32];
+        let id_b = [4u8; 32];
+        let sig_a = vec![10u8; 64];
+        let sig_b = vec![11u8; 64];
+
+        let set = compute_anchor_set_id(&[id_a, id_b]);
+        let bundle = canonical_signature_bundle(&[sig_a.clone(), sig_b.clone()]);
+        let base = compute_anchor_proof_hash(&policy, &set, &ui, &bundle);
+        // Deterministic.
+        assert_eq!(base, compute_anchor_proof_hash(&policy, &set, &ui, &bundle));
+        // Set semantics: supplying the set / signatures in the other order yields the same set-id
+        // digest and the same bundle, hence the same proof hash.
+        let set2 = compute_anchor_set_id(&[id_b, id_a]);
+        let bundle2 = canonical_signature_bundle(&[sig_b.clone(), sig_a.clone()]);
+        assert_eq!(
+            base,
+            compute_anchor_proof_hash(&policy, &set2, &ui, &bundle2)
+        );
+        // Every component is bound.
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&[9u8; 32], &set, &ui, &bundle)
+        ); // policy_id
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &[9u8; 32], &ui, &bundle)
+        ); // anchor-set id
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &set, &[9u8; 32], &bundle)
+        ); // ui transcript
+        let bundle_diff = canonical_signature_bundle(&[sig_a.clone(), vec![12u8; 64]]);
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &set, &ui, &bundle_diff)
+        ); // a signature
+           // Single-island vs dual-island differ (set-id digest + bundle both change).
+        let set_one = compute_anchor_set_id(&[id_a]);
+        let bundle_one = canonical_signature_bundle(std::slice::from_ref(&sig_a));
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &set_one, &ui, &bundle_one)
+        );
+    }
+
+    #[test]
+    fn anchor_set_id_is_order_independent_and_binds_membership() {
+        let a = [3u8; 32];
+        let b = [4u8; 32];
+        let base = compute_anchor_set_id(&[a, b]);
+        assert_eq!(base, compute_anchor_set_id(&[a, b]));
+        // Set semantics: order-independent.
+        assert_eq!(base, compute_anchor_set_id(&[b, a]));
+        // Membership / cardinality bound: a different member or a smaller set => different id.
+        assert_ne!(base, compute_anchor_set_id(&[a, [9u8; 32]]));
+        assert_ne!(base, compute_anchor_set_id(&[a]));
+    }
+
+    #[test]
+    fn offline_bearer_payload_hash_and_mode_tag() {
+        let p1 = dsm_offline_bearer_payload_hash(b"op-1");
+        assert_eq!(p1, dsm_offline_bearer_payload_hash(b"op-1"));
+        assert_ne!(p1, dsm_offline_bearer_payload_hash(b"op-2"));
+        assert_eq!(OfflineBearerMode::Required.tag(), 1);
     }
 
     /// Minimal Ed25519 SubjectPublicKeyInfo DER wrapping a raw 32-byte public key.
@@ -479,6 +896,8 @@ mod tests {
         let payload = [2u8; 32];
         let rel = [3u8; 32];
         let dev = [4u8; 32];
+        let ui = [5u8; 32];
+        let rc = [6u8; 32];
         let intent = IslandIntent {
             h_n: &h_n,
             payload_hash: &payload,
@@ -488,6 +907,8 @@ mod tests {
             offline_bearer_mode: 1,
             nonce: b"n0",
             expiry_tick: 9,
+            ui_transcript: &ui,
+            receipt_commit: &rc,
         };
         let framed = frame_authenticate_device(&intent.challenge()).expect("frame");
         let sig = sk.sign(&framed).to_bytes();
@@ -497,8 +918,21 @@ mod tests {
         assert_eq!(id, id_island_from_spki(&spki));
 
         // Tampered intent (different nonce) -> recomputed challenge differs -> fails.
-        let tampered = IslandIntent { nonce: b"n1", ..intent };
+        let tampered = IslandIntent {
+            nonce: b"n1",
+            ..intent
+        };
         assert!(verify_island_intent_signature(&spki, &tampered, &sig).is_err());
+
+        // Tampered UI transcript: the host displayed/relayed a different action than the one
+        // the island signed over. The consent-oracle binding makes the recomputed challenge
+        // differ, so the signature is rejected ("no matching UI transcript, verifier rejects").
+        let other_ui = [6u8; 32];
+        let tampered_ui = IslandIntent {
+            ui_transcript: &other_ui,
+            ..intent
+        };
+        assert!(verify_island_intent_signature(&spki, &tampered_ui, &sig).is_err());
 
         // Wrong island key -> fails (a clone with a different key cannot reuse the sig).
         let other = SigningKey::from_bytes(&[8u8; 32]);
