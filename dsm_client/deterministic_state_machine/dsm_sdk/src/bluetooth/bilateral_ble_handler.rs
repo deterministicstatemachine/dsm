@@ -2026,8 +2026,13 @@ impl BilateralBleHandler {
                     &dsm::attestation::compute_anchor_set_id(&[rec.id_anchor]),
                 );
                 let manager = self.bilateral_tx_manager.read().await;
-                let admitted =
-                    manager.admit_anchor_if_absent(sender_device_id, rec, policy_hash, [0u8; 32], 0)?;
+                let admitted = manager.admit_anchor_if_absent(
+                    sender_device_id,
+                    rec,
+                    policy_hash,
+                    [0u8; 32],
+                    0,
+                )?;
                 if admitted {
                     info!(
                         "[BILATERAL] pinned offline-bearer anchor for sender={}",

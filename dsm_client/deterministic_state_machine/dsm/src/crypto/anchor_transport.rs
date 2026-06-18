@@ -193,13 +193,22 @@ impl MockAnchorTransport {
             h.update(&seed);
             *h.finalize().as_bytes()
         };
-        Self { signing_key, firmware_id, screen_template_id: 1, commitment_c, reject: false }
+        Self {
+            signing_key,
+            firmware_id,
+            screen_template_id: 1,
+            commitment_c,
+            reject: false,
+        }
     }
 
     /// A mock whose `sign` always errors, modelling a human rejection or an unreachable device.
     /// Used to prove the gate's fail-closed fallback to the online-checked path.
     pub fn rejecting(seed: [u8; 32]) -> Self {
-        Self { reject: true, ..Self::from_seed(seed) }
+        Self {
+            reject: true,
+            ..Self::from_seed(seed)
+        }
     }
 
     fn leaf_spki(&self) -> Vec<u8> {
@@ -252,7 +261,9 @@ impl AnchorTransport for MockAnchorTransport {
     async fn sign(&self, req: &AnchorSignRequest<'_>) -> Result<Vec<u8>, DsmError> {
         use ed25519_dalek::Signer;
         if self.reject {
-            return Err(DsmError::verification("mock anchor: human rejected / device unreachable"));
+            return Err(DsmError::verification(
+                "mock anchor: human rejected / device unreachable",
+            ));
         }
         // Mirror the device: compute the UI transcript and challenge over the DISPLAYED fields,
         // using this device's own firmware_id / screen_template_id, then sign the framed challenge.
@@ -330,8 +341,9 @@ mod tests {
     async fn mock_anchor_round_trips_through_the_gate() {
         let anchor = MockAnchorTransport::from_seed([7u8; 32]);
         let rec = anchor.birth(b"ctx").await.expect("birth");
-        let (h_n, payload, rel, dev, cp, policy) =
-            ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
+        let (h_n, payload, rel, dev, cp, policy) = (
+            [1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32],
+        );
         let req = sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10);
 
         let sig = anchor.sign(&req).await.expect("sign");
@@ -348,8 +360,9 @@ mod tests {
         let genuine = MockAnchorTransport::from_seed([7u8; 32]);
         let clone = MockAnchorTransport::from_seed([8u8; 32]);
         let genuine_rec = genuine.get_identity().await.expect("id");
-        let (h_n, payload, rel, dev, cp, policy) =
-            ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
+        let (h_n, payload, rel, dev, cp, policy) = (
+            [1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32],
+        );
         let req = sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10);
 
         // The clone signs the same transition, but under the GENUINE device's pinned identity its
@@ -364,8 +377,9 @@ mod tests {
         // claims the transition was amount=11 fails verification.
         let anchor = MockAnchorTransport::from_seed([7u8; 32]);
         let rec = anchor.get_identity().await.expect("id");
-        let (h_n, payload, rel, dev, cp, policy) =
-            ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
+        let (h_n, payload, rel, dev, cp, policy) = (
+            [1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32],
+        );
         let signed = sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10);
         let claimed = sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 11);
 
@@ -377,8 +391,9 @@ mod tests {
     #[tokio::test]
     async fn rejecting_anchor_errors_so_the_gate_can_fall_back() {
         let anchor = MockAnchorTransport::rejecting([7u8; 32]);
-        let (h_n, payload, rel, dev, cp, policy) =
-            ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
+        let (h_n, payload, rel, dev, cp, policy) = (
+            [1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32],
+        );
         let req = sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10);
         assert!(anchor.sign(&req).await.is_err());
     }
@@ -389,13 +404,17 @@ mod tests {
         // state_number=5 must NOT verify when re-presented as state_number=6.
         let anchor = MockAnchorTransport::from_seed([7u8; 32]);
         let rec = anchor.get_identity().await.expect("id");
-        let (h_n, payload, rel, dev, cp, policy) =
-            ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32]);
+        let (h_n, payload, rel, dev, cp, policy) = (
+            [1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [5u8; 32], [6u8; 32],
+        );
         let signed = AnchorSignRequest {
             state_number: 5,
             ..sample_request(&h_n, &payload, &rel, &dev, &cp, &policy, 10)
         };
-        let claimed = AnchorSignRequest { state_number: 6, ..signed };
+        let claimed = AnchorSignRequest {
+            state_number: 6,
+            ..signed
+        };
         let sig = anchor.sign(&signed).await.expect("sign");
         assert!(verify_anchor_signature(&rec, &signed, &sig).is_ok());
         assert!(verify_anchor_signature(&rec, &claimed, &sig).is_err());

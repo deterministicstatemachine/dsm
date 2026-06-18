@@ -140,6 +140,7 @@ fn build_signed_token_transfer(
         to: b"vv-recipient".to_vec(),
         message: String::new(),
         signature: Vec::new(),
+        authority_policy: None,
     };
 
     // Sign the operation bytes, then embed the signature

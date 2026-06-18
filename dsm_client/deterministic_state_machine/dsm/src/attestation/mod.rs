@@ -388,19 +388,19 @@ fn check_ca(issuer: &X509Certificate, path_len: usize) -> Result<(), DsmError> {
             "attestation: issuer certificate lacks keyCertSign",
         ));
     }
-    let bc = issuer
-        .basic_constraints()
-        .ok()
-        .flatten()
-        .ok_or_else(|| DsmError::verification("attestation: issuer missing BasicConstraints"))?;
+    let bc =
+        issuer.basic_constraints().ok().flatten().ok_or_else(|| {
+            DsmError::verification("attestation: issuer missing BasicConstraints")
+        })?;
     if !bc.value.ca {
         return Err(DsmError::verification(
             "attestation: issuer is not a CA (cA flag unset)",
         ));
     }
-    let plc = bc.value.path_len_constraint.ok_or_else(|| {
-        DsmError::verification("attestation: issuer missing pathLenConstraint")
-    })?;
+    let plc = bc
+        .value
+        .path_len_constraint
+        .ok_or_else(|| DsmError::verification("attestation: issuer missing pathLenConstraint"))?;
     if (plc as usize) < path_len {
         return Err(DsmError::verification(
             "attestation: issuer pathLenConstraint exceeded",
@@ -453,7 +453,9 @@ pub fn verify_island_attestation(
     cert_chain: &[&[u8]],
 ) -> Result<[u8; 32], DsmError> {
     if cert_chain.is_empty() {
-        return Err(DsmError::verification("attestation: empty certificate chain"));
+        return Err(DsmError::verification(
+            "attestation: empty certificate chain",
+        ));
     }
     let framed = frame_authenticate_device(challenge)?;
 
@@ -468,7 +470,9 @@ pub fn verify_island_attestation(
     } else if *leaf_key_alg == OID_KEY_TYPE_EC_PUBLIC_KEY {
         verify_ecdsa_p256_sha256(leaf_spki, &framed, signature)?;
     } else {
-        return Err(DsmError::verification("attestation: unsupported leaf key type"));
+        return Err(DsmError::verification(
+            "attestation: unsupported leaf key type",
+        ));
     }
 
     let id_island = id_island_from_spki(leaf_spki);
@@ -670,14 +674,17 @@ mod tests {
     fn tampered_challenge_fails_full_chain() {
         let mut bad = CHALLENGE.to_vec();
         bad[0] ^= 0xff;
-        assert!(verify_island_attestation(&bad, TROPIC_SIG, &[TROPIC_CERT0, TROPIC_CERT1]).is_err());
+        assert!(
+            verify_island_attestation(&bad, TROPIC_SIG, &[TROPIC_CERT0, TROPIC_CERT1]).is_err()
+        );
     }
 
     #[test]
     fn wrong_leaf_signature_fails_full_chain() {
         // OPTIGA's signature with TROPIC01's chain: leaf challenge check must fail.
         assert!(
-            verify_island_attestation(CHALLENGE, OPTIGA_SIG, &[TROPIC_CERT0, TROPIC_CERT1]).is_err()
+            verify_island_attestation(CHALLENGE, OPTIGA_SIG, &[TROPIC_CERT0, TROPIC_CERT1])
+                .is_err()
         );
     }
 
@@ -691,21 +698,65 @@ mod tests {
         let rc = [0xABu8; 32];
         let base = dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc);
         // Deterministic: identical inputs -> identical challenge.
-        assert_eq!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc));
+        assert_eq!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
         // Every intent field is bound: flipping any one changes the challenge.
-        assert_ne!(base, dsm_island_challenge(&[9u8; 32], &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &[9u8; 32], &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &[9u8; 32], &dev, 1, 1, b"nonce", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &[9u8; 32], 1, 1, b"nonce", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 2, 1, b"nonce", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 2, b"nonce", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"other", 7, &ui, &rc));
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 8, &ui, &rc));
+        assert_ne!(
+            base,
+            dsm_island_challenge(&[9u8; 32], &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &[9u8; 32], &rel, &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &[9u8; 32], &dev, 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &[9u8; 32], 1, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 2, 1, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 2, b"nonce", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"other", 7, &ui, &rc)
+        );
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 8, &ui, &rc)
+        );
         // The UI transcript is bound: a different on-device consent transcript (the human saw a
         // different action) changes the challenge, so the same signature cannot carry over.
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &[6u8; 32], &rc));
+        assert_ne!(
+            base,
+            dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &[6u8; 32], &rc)
+        );
         // The stateful-receipt commitment is bound: a different receipt_commit changes the challenge.
-        assert_ne!(base, dsm_island_challenge(&h_n, &payload, &rel, &dev, 1, 1, b"nonce", 7, &ui, &[0xCDu8; 32]));
+        assert_ne!(
+            base,
+            dsm_island_challenge(
+                &h_n,
+                &payload,
+                &rel,
+                &dev,
+                1,
+                1,
+                b"nonce",
+                7,
+                &ui,
+                &[0xCDu8; 32]
+            )
+        );
     }
 
     #[test]
@@ -717,16 +768,43 @@ mod tests {
         let fw = [5u8; 32];
         let base = dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1);
         // Deterministic.
-        assert_eq!(base, dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1));
+        assert_eq!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1)
+        );
         // Every displayed field is bound: flipping any one changes the transcript.
-        assert_ne!(base, dsm_ui_transcript(11, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1)); // amount
-        assert_ne!(base, dsm_ui_transcript(10, b"DBTC", &cp, &h_n, &payload, &policy, &fw, 1)); // asset
-        assert_ne!(base, dsm_ui_transcript(10, b"ERA", &[9u8; 32], &h_n, &payload, &policy, &fw, 1)); // counterparty
-        assert_ne!(base, dsm_ui_transcript(10, b"ERA", &cp, &[9u8; 32], &payload, &policy, &fw, 1)); // h_n
-        assert_ne!(base, dsm_ui_transcript(10, b"ERA", &cp, &h_n, &[9u8; 32], &policy, &fw, 1)); // payload
-        assert_ne!(base, dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &[9u8; 32], &fw, 1)); // policy
-        assert_ne!(base, dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &[9u8; 32], 1)); // firmware_id
-        assert_ne!(base, dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 2)); // screen_template
+        assert_ne!(
+            base,
+            dsm_ui_transcript(11, b"ERA", &cp, &h_n, &payload, &policy, &fw, 1)
+        ); // amount
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"DBTC", &cp, &h_n, &payload, &policy, &fw, 1)
+        ); // asset
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &[9u8; 32], &h_n, &payload, &policy, &fw, 1)
+        ); // counterparty
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &[9u8; 32], &payload, &policy, &fw, 1)
+        ); // h_n
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &[9u8; 32], &policy, &fw, 1)
+        ); // payload
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &[9u8; 32], &fw, 1)
+        ); // policy
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &[9u8; 32], 1)
+        ); // firmware_id
+        assert_ne!(
+            base,
+            dsm_ui_transcript(10, b"ERA", &cp, &h_n, &payload, &policy, &fw, 2)
+        ); // screen_template
     }
 
     #[test]
@@ -747,17 +825,35 @@ mod tests {
         // digest and the same bundle, hence the same proof hash.
         let set2 = compute_anchor_set_id(&[id_b, id_a]);
         let bundle2 = canonical_signature_bundle(&[sig_b.clone(), sig_a.clone()]);
-        assert_eq!(base, compute_anchor_proof_hash(&policy, &set2, &ui, &bundle2));
+        assert_eq!(
+            base,
+            compute_anchor_proof_hash(&policy, &set2, &ui, &bundle2)
+        );
         // Every component is bound.
-        assert_ne!(base, compute_anchor_proof_hash(&[9u8; 32], &set, &ui, &bundle)); // policy_id
-        assert_ne!(base, compute_anchor_proof_hash(&policy, &[9u8; 32], &ui, &bundle)); // anchor-set id
-        assert_ne!(base, compute_anchor_proof_hash(&policy, &set, &[9u8; 32], &bundle)); // ui transcript
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&[9u8; 32], &set, &ui, &bundle)
+        ); // policy_id
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &[9u8; 32], &ui, &bundle)
+        ); // anchor-set id
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &set, &[9u8; 32], &bundle)
+        ); // ui transcript
         let bundle_diff = canonical_signature_bundle(&[sig_a.clone(), vec![12u8; 64]]);
-        assert_ne!(base, compute_anchor_proof_hash(&policy, &set, &ui, &bundle_diff)); // a signature
-        // Single-island vs dual-island differ (set-id digest + bundle both change).
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &set, &ui, &bundle_diff)
+        ); // a signature
+           // Single-island vs dual-island differ (set-id digest + bundle both change).
         let set_one = compute_anchor_set_id(&[id_a]);
-        let bundle_one = canonical_signature_bundle(&[sig_a.clone()]);
-        assert_ne!(base, compute_anchor_proof_hash(&policy, &set_one, &ui, &bundle_one));
+        let bundle_one = canonical_signature_bundle(std::slice::from_ref(&sig_a));
+        assert_ne!(
+            base,
+            compute_anchor_proof_hash(&policy, &set_one, &ui, &bundle_one)
+        );
     }
 
     #[test]
@@ -822,14 +918,20 @@ mod tests {
         assert_eq!(id, id_island_from_spki(&spki));
 
         // Tampered intent (different nonce) -> recomputed challenge differs -> fails.
-        let tampered = IslandIntent { nonce: b"n1", ..intent };
+        let tampered = IslandIntent {
+            nonce: b"n1",
+            ..intent
+        };
         assert!(verify_island_intent_signature(&spki, &tampered, &sig).is_err());
 
         // Tampered UI transcript: the host displayed/relayed a different action than the one
         // the island signed over. The consent-oracle binding makes the recomputed challenge
         // differ, so the signature is rejected ("no matching UI transcript, verifier rejects").
         let other_ui = [6u8; 32];
-        let tampered_ui = IslandIntent { ui_transcript: &other_ui, ..intent };
+        let tampered_ui = IslandIntent {
+            ui_transcript: &other_ui,
+            ..intent
+        };
         assert!(verify_island_intent_signature(&spki, &tampered_ui, &sig).is_err());
 
         // Wrong island key -> fails (a clone with a different key cannot reuse the sig).

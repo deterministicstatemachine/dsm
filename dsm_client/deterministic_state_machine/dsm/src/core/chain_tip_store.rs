@@ -126,9 +126,12 @@ mod tests {
         assert!(dbg.contains("ChainTipStore(..)"));
     }
 
+    /// `(root, state_number)` recorded per device id.
+    type RootEntry = ([u8; 32], u64);
+
     struct InMemoryChainTipStore {
         tips: Mutex<HashMap<[u8; 32], [u8; 32]>>,
-        roots: Mutex<HashMap<[u8; 32], ([u8; 32], u64)>>,
+        roots: Mutex<HashMap<[u8; 32], RootEntry>>,
     }
 
     impl InMemoryChainTipStore {

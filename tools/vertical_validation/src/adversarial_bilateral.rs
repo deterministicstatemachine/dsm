@@ -81,6 +81,7 @@ fn signed_transfer(sk: &[u8], state: &State, nonce: Vec<u8>, amount: u64) -> Ope
         to: "b32recipient".into(),
         message: String::new(),
         signature: Vec::new(),
+        authority_policy: None,
     };
     let bytes = op.to_bytes();
     let sig = sphincs_sign(sk, &bytes).expect("sign");

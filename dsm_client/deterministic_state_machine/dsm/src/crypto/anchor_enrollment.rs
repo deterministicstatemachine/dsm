@@ -86,7 +86,8 @@ pub fn verify_admitted_offline_bearer(
 ) -> Result<(), DsmError> {
     // (1) Pinned identity / anti-reprovision: the receipt's signing key must be the admitted
     //     one. A fresh self-provisioned or cloned identity has a different pubkey hash.
-    let pinned_pubkey_hash = crate::attestation::dsm_anchor_pubkey_hash(&enrollment.record.leaf_spki);
+    let pinned_pubkey_hash =
+        crate::attestation::dsm_anchor_pubkey_hash(&enrollment.record.leaf_spki);
     if att.anchor_pubkey_hash != pinned_pubkey_hash {
         return Err(DsmError::verification(
             "offline-bearer receiver: anchor pubkey is not the admitted identity (fail-closed)",
@@ -191,13 +192,13 @@ impl std::fmt::Debug for InMemoryAnchorEnrollmentStore {
 
 impl AnchorEnrollmentStore for InMemoryAnchorEnrollmentStore {
     fn get(&self, device_id: &[u8; 32]) -> Option<AnchorEnrollment> {
-        self.enrollments.lock().unwrap().get(device_id).cloned()
+        self.enrollments.lock().ok()?.get(device_id).cloned()
     }
 
     fn admit(&self, enrollment: AnchorEnrollment) -> Result<(), DsmError> {
         self.enrollments
             .lock()
-            .unwrap()
+            .map_err(|_| DsmError::lock_error())?
             .insert(enrollment.device_id, enrollment);
         Ok(())
     }
@@ -209,7 +210,10 @@ impl AnchorEnrollmentStore for InMemoryAnchorEnrollmentStore {
         new_root: [u8; 32],
         new_state_number: u64,
     ) -> Result<bool, DsmError> {
-        let mut map = self.enrollments.lock().unwrap();
+        let mut map = self
+            .enrollments
+            .lock()
+            .map_err(|_| DsmError::lock_error())?;
         let enr = map.get_mut(device_id).ok_or_else(|| {
             DsmError::verification("offline-bearer receiver: device not admitted (fail-closed)")
         })?;
@@ -280,8 +284,11 @@ mod tests {
         let record = mock.get_identity().await.expect("id");
         let payload = [0xB2u8; 32];
         let state_number = frontier_state + 1;
-        let successor_root =
-            crate::attestation::dsm_anchor_frontier_successor(&frontier_root, &payload, state_number);
+        let successor_root = crate::attestation::dsm_anchor_frontier_successor(
+            &frontier_root,
+            &payload,
+            state_number,
+        );
         let mut t = Triple {
             record: record.clone(),
             att: IslandAttestation {
@@ -407,7 +414,12 @@ mod tests {
         let enr1 = store.get(&dev).expect("enrolled");
         verify_admitted_offline_bearer(&enr1, &t1.att, &t1.req()).expect("advance 1 ok");
         assert!(store
-            .advance_frontier(&dev, t1.att.parent_root, t1.att.successor_root, t1.att.state_number)
+            .advance_frontier(
+                &dev,
+                t1.att.parent_root,
+                t1.att.successor_root,
+                t1.att.state_number
+            )
             .expect("cas"));
 
         // Second advance consuming the NEW frontier root (state 1 -> 2) verifies + advances.
@@ -415,13 +427,23 @@ mod tests {
         let enr2 = store.get(&dev).expect("enrolled");
         verify_admitted_offline_bearer(&enr2, &t2.att, &t2.req()).expect("advance 2 ok");
         assert!(store
-            .advance_frontier(&dev, t2.att.parent_root, t2.att.successor_root, t2.att.state_number)
+            .advance_frontier(
+                &dev,
+                t2.att.parent_root,
+                t2.att.successor_root,
+                t2.att.state_number
+            )
             .expect("cas"));
 
         // Replay of the FIRST advance (already-consumed genesis parent) is rejected by the CAS —
         // the cross-receiver fork detector.
         assert!(!store
-            .advance_frontier(&dev, t1.att.parent_root, t1.att.successor_root, t1.att.state_number)
+            .advance_frontier(
+                &dev,
+                t1.att.parent_root,
+                t1.att.successor_root,
+                t1.att.state_number
+            )
             .expect("cas"));
     }
 

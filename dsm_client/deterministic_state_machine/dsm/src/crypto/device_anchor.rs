@@ -148,7 +148,12 @@ pub fn verify_transition(
     sig: &[u8],
 ) -> Result<bool, DsmError> {
     let challenge = transition_challenge(h_n, payload_hash, policy_id);
-    sphincs::verify(ANCHOR_SPHINCS_VARIANT, &identity.sphincs_pk, &challenge, sig)
+    sphincs::verify(
+        ANCHOR_SPHINCS_VARIANT,
+        &identity.sphincs_pk,
+        &challenge,
+        sig,
+    )
 }
 
 /// Identifier for a cross driven anchor set.
@@ -434,8 +439,12 @@ mod tests {
         let payload = [0xB2u8; 32];
         let policy = b"offline-bearer/v1";
 
-        let s1 = anchor.sign_transition(&h_n, &payload, policy).expect("sign");
-        let s2 = anchor.sign_transition(&h_n, &payload, policy).expect("sign");
+        let s1 = anchor
+            .sign_transition(&h_n, &payload, policy)
+            .expect("sign");
+        let s2 = anchor
+            .sign_transition(&h_n, &payload, policy)
+            .expect("sign");
         assert_eq!(s1, s2, "SPHINCS+ signing is deterministic given the key");
 
         let ok = verify_transition(anchor.identity(), &h_n, &payload, policy, &s1).expect("verify");
@@ -451,7 +460,9 @@ mod tests {
         let h_n = [0x01u8; 32];
         let payload = [0x02u8; 32];
         let policy = b"p";
-        let sig = anchor.sign_transition(&h_n, &payload, policy).expect("sign");
+        let sig = anchor
+            .sign_transition(&h_n, &payload, policy)
+            .expect("sign");
 
         let h_other = [0x09u8; 32];
         let ok =
@@ -472,7 +483,9 @@ mod tests {
         let h_n = [0x10u8; 32];
         let payload = [0x20u8; 32];
         let policy = b"p";
-        let sig = original.sign_transition(&h_n, &payload, policy).expect("sign");
+        let sig = original
+            .sign_transition(&h_n, &payload, policy)
+            .expect("sign");
 
         // The genuine signature verifies only under the genuine identity.
         assert!(verify_transition(original.identity(), &h_n, &payload, policy, &sig).unwrap());
@@ -503,12 +516,18 @@ mod tests {
         assert_ne!(sealed, drive_value, "sealed bytes must not equal the drive");
 
         let opened = open_from_peer(&e.kem_sk, &ct, &sealed).expect("open");
-        assert_eq!(opened, drive_value, "the holder of the KEM secret recovers it");
+        assert_eq!(
+            opened, drive_value,
+            "the holder of the KEM secret recovers it"
+        );
 
         // A different element cannot open it to the same value.
         let other = element_init(&[0xC1u8; 32]).expect("init");
         let wrong = open_from_peer(&other.kem_sk, &ct, &sealed).expect("open");
-        assert_ne!(wrong, drive_value, "a wrong secret must not recover the drive");
+        assert_ne!(
+            wrong, drive_value,
+            "a wrong secret must not recover the drive"
+        );
     }
 
     #[test]
@@ -566,11 +585,25 @@ mod tests {
             [0x13u8; 32],
         );
         let s1 = birth_pair(
-            &args.0, &args.1, ctx(), &args.2, &args.3, &args.4, &args.5, &args.6,
+            &args.0,
+            &args.1,
+            ctx(),
+            &args.2,
+            &args.3,
+            &args.4,
+            &args.5,
+            &args.6,
         )
         .expect("pair");
         let s2 = birth_pair(
-            &args.0, &args.1, ctx(), &args.2, &args.3, &args.4, &args.5, &args.6,
+            &args.0,
+            &args.1,
+            ctx(),
+            &args.2,
+            &args.3,
+            &args.4,
+            &args.5,
+            &args.6,
         )
         .expect("pair");
         assert_eq!(
@@ -628,12 +661,12 @@ mod tests {
             .expect("sign");
 
         assert!(
-            !verify_transition(set.anchor_b.identity(), &h_n, &payload, policy, &s_b_clone).unwrap(),
+            !verify_transition(set.anchor_b.identity(), &h_n, &payload, policy, &s_b_clone)
+                .unwrap(),
             "the cloned B must not pass under the original B identity"
         );
     }
 }
-
 
 // ============================ Adversarial tests =============================
 //
@@ -722,7 +755,10 @@ mod adversarial {
         // Positive control: with the real root, the host's own values reproduce
         // sigma exactly. So the only missing input is the root.
         let sigma_real = sigma_from(&r, &k_user, &c, ctx());
-        assert_eq!(sigma_real, victim.sigma, "formula check: root is the only missing input");
+        assert_eq!(
+            sigma_real, victim.sigma,
+            "formula check: root is the only missing input"
+        );
 
         // Attack: lacking the root, the host guesses zero and misses.
         let sigma_guess = sigma_from(&[0u8; 32], &k_user, &c, ctx());
@@ -751,7 +787,10 @@ mod adversarial {
         let (ct_ab, sealed_ab) = seal_to_peer(&eb.kem_pk, &d_a_to_b, &[0x43u8; 32]).unwrap();
 
         // Honest delivery recovers the true drive.
-        assert_eq!(open_from_peer(&eb.kem_sk, &ct_ab, &sealed_ab).unwrap(), d_a_to_b);
+        assert_eq!(
+            open_from_peer(&eb.kem_sk, &ct_ab, &sealed_ab).unwrap(),
+            d_a_to_b
+        );
 
         // Flip a bit in the sealed bytes: victim opens a DIFFERENT value, and
         // not a value the attacker chose.
@@ -760,14 +799,20 @@ mod adversarial {
         let opened_t = open_from_peer(&eb.kem_sk, &ct_ab, &sealed_t).unwrap();
         assert_ne!(opened_t, d_a_to_b, "tamper changes the delivered drive");
         let target = [0x42u8; 32];
-        assert_ne!(opened_t, target, "relay cannot steer the drive to a chosen value");
+        assert_ne!(
+            opened_t, target,
+            "relay cannot steer the drive to a chosen value"
+        );
 
         // Flip a bit in the KEM ciphertext: ML-KEM implicit rejection yields a
         // different shared secret, so a different drive again.
         let mut ct_t = ct_ab.clone();
         ct_t[0] ^= 0x01;
         let opened_ct = open_from_peer(&eb.kem_sk, &ct_t, &sealed_ab).unwrap();
-        assert_ne!(opened_ct, d_a_to_b, "ciphertext tamper changes the delivered drive");
+        assert_ne!(
+            opened_ct, d_a_to_b,
+            "ciphertext tamper changes the delivered drive"
+        );
     }
 
     /// A sealed drive captured from one pair does not open in another element.
@@ -789,7 +834,10 @@ mod adversarial {
         let opened_wrong = open_from_peer(&eb2.kem_sk, &ct, &sealed).unwrap();
         assert_ne!(opened_wrong, d_a_to_b1);
         // The intended element still opens it correctly.
-        assert_eq!(open_from_peer(&eb1.kem_sk, &ct, &sealed).unwrap(), d_a_to_b1);
+        assert_eq!(
+            open_from_peer(&eb1.kem_sk, &ct, &sealed).unwrap(),
+            d_a_to_b1
+        );
     }
 
     /// Signature integrity: a flipped byte, a truncation, or an empty buffer
@@ -830,7 +878,10 @@ mod adversarial {
         }
         let sk_head = &anchor.sphincs_sk[..32];
         for w in public.windows(32) {
-            assert_ne!(w, sk_head, "secret key material leaked into the public record");
+            assert_ne!(
+                w, sk_head,
+                "secret key material leaked into the public record"
+            );
         }
     }
 
@@ -850,7 +901,10 @@ mod adversarial {
             .zip(b.identity().id_anchor.iter())
             .filter(|(x, y)| x != y)
             .count();
-        assert!(diff > 8, "one bit in the root must avalanche the identity, got {diff}");
+        assert!(
+            diff > 8,
+            "one bit in the root must avalanche the identity, got {diff}"
+        );
     }
 
     /// Distinct roots give distinct identities across a batch.
@@ -863,7 +917,10 @@ mod adversarial {
             r[0] = i as u8;
             r[1] = (i >> 8) as u8;
             let a = birth_single(&r, ctx(), &host).unwrap();
-            assert!(ids.insert(a.identity().id_anchor), "identity collision at {i}");
+            assert!(
+                ids.insert(a.identity().id_anchor),
+                "identity collision at {i}"
+            );
         }
     }
 
@@ -873,7 +930,10 @@ mod adversarial {
         let r = [0xA1u8; 32];
         let a = birth_single(&r, ctx(), &[0x01u8; 32]).unwrap();
         let b = birth_single(&r, ctx(), &[0x02u8; 32]).unwrap();
-        assert_ne!(a.sigma, b.sigma, "different host contribution must change the state");
+        assert_ne!(
+            a.sigma, b.sigma,
+            "different host contribution must change the state"
+        );
         assert_ne!(a.identity().id_anchor, b.identity().id_anchor);
     }
 
@@ -882,17 +942,30 @@ mod adversarial {
     #[test]
     fn set_rejects_one_signer_doing_both_legs() {
         let set = birth_pair(
-            &[0xB1u8; 32], &[0xB2u8; 32], ctx(), b"t",
-            &[0x10u8; 32], &[0x11u8; 32], &[0x12u8; 32], &[0x13u8; 32],
-        ).unwrap();
+            &[0xB1u8; 32],
+            &[0xB2u8; 32],
+            ctx(),
+            b"t",
+            &[0x10u8; 32],
+            &[0x11u8; 32],
+            &[0x12u8; 32],
+            &[0x13u8; 32],
+        )
+        .unwrap();
         let h = [0x01; 32];
         let p = [0x02; 32];
         let s_a = set.anchor_a.sign_transition(&h, &p, b"p").unwrap();
         assert!(
             !verify_transition_set(
-                set.anchor_a.identity(), set.anchor_b.identity(),
-                &h, &p, b"p", &s_a, &s_a
-            ).unwrap(),
+                set.anchor_a.identity(),
+                set.anchor_b.identity(),
+                &h,
+                &p,
+                b"p",
+                &s_a,
+                &s_a
+            )
+            .unwrap(),
             "one element cannot satisfy both legs of the set"
         );
     }
@@ -924,7 +997,18 @@ mod adversarial {
         );
         let n = sig.len();
 
-        let probe = [0usize, 16, 31, 32, 100, 5000, n / 2, (n * 3) / 4, n - 100, n - 1];
+        let probe = [
+            0usize,
+            16,
+            31,
+            32,
+            100,
+            5000,
+            n / 2,
+            (n * 3) / 4,
+            n - 100,
+            n - 1,
+        ];
         let mut still_valid = Vec::new();
         for &pos in &probe {
             let mut s = sig.clone();
@@ -946,7 +1030,6 @@ mod adversarial {
             n, still_valid, window_valid
         );
     }
-
 
     /// Diagnostic v2: is the malleable byte a fixed structural offset, or
     /// specific to one signature? Scans a window around 14896 for two messages
@@ -989,7 +1072,6 @@ mod adversarial {
         println!("SPHINCS_MALL_BITS pos=14896 valid_bits={:?}", bits);
     }
 
-
     /// Diagnostic v3: bound the unchecked span within hypertree layer 1, and
     /// probe whether every hypertree layer has the same hole at the element 59
     /// offset. Prints SPHINCS_SPAN and SPHINCS_LAYERS.
@@ -1031,5 +1113,4 @@ mod adversarial {
         }
         println!("SPHINCS_LAYERS element59_offset_malleable={:?}", layers);
     }
-
 }

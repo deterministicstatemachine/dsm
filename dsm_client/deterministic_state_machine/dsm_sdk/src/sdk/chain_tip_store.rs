@@ -86,6 +86,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::default_constructed_unit_structs)] // deliberately exercises the Default impl
     fn default_creates_instance() {
         let store = SqliteChainTipStore::default();
         let store2 = store.clone();
@@ -116,7 +117,7 @@ mod tests {
     #[test]
     fn multiple_instances_independent() {
         let _a = SqliteChainTipStore::new();
-        let _b = SqliteChainTipStore::default();
+        let _b = SqliteChainTipStore::new();
         let _c = SqliteChainTipStore::new();
     }
 
@@ -132,5 +133,4 @@ mod tests {
         let store2 = std::sync::Arc::clone(&store);
         let _ = store2;
     }
-
 }

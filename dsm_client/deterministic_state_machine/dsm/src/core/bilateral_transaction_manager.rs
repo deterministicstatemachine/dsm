@@ -260,7 +260,9 @@ pub async fn run_offline_bearer_gate(
             token_id,
             authority_policy: Some(ap),
             ..
-        } if ap.mode == AuthorityMode::OfflineBearerRequired => (to_device_id, amount, token_id, ap),
+        } if ap.mode == AuthorityMode::OfflineBearerRequired => {
+            (to_device_id, amount, token_id, ap)
+        }
         _ => {
             return Err(DsmError::invalid_operation(
                 "offline-bearer gate: operation is not an OFFLINE_BEARER_REQUIRED transfer",
@@ -456,20 +458,21 @@ pub fn verify_offline_bearer_receipt(
     use crate::types::operations::{AuthorityMode, Operation};
 
     // Must be an OFFLINE_BEARER_REQUIRED transfer (mirror the sender gate's (1a)).
-    let (to_device_id, amount, token_id, ap) = match op {
-        Operation::Transfer {
-            to_device_id,
-            amount,
-            token_id,
-            authority_policy: Some(ap),
-            ..
-        } if ap.mode == AuthorityMode::OfflineBearerRequired => (to_device_id, amount, token_id, ap),
-        _ => {
-            return Err(DsmError::verification(
+    let (to_device_id, amount, token_id, ap) =
+        match op {
+            Operation::Transfer {
+                to_device_id,
+                amount,
+                token_id,
+                authority_policy: Some(ap),
+                ..
+            } if ap.mode == AuthorityMode::OfflineBearerRequired => {
+                (to_device_id, amount, token_id, ap)
+            }
+            _ => return Err(DsmError::verification(
                 "offline-bearer receiver: operation is not OFFLINE_BEARER_REQUIRED (fail-closed)",
-            ))
-        }
-    };
+            )),
+        };
     let counterparty_id: [u8; 32] = to_device_id.as_slice().try_into().map_err(|_| {
         DsmError::invalid_operation("offline-bearer receiver: to_device_id must be 32 bytes")
     })?;
@@ -808,7 +811,10 @@ impl BilateralTransactionManager {
     /// the anchor transport; this policy logic is identical with a real element.
     pub async fn apply_offline_bearer_policy(&self, op: &mut crate::types::operations::Operation) {
         use crate::types::operations::{AuthorityMode, AuthorityPolicy, Operation};
-        if let Operation::Transfer { authority_policy, .. } = op {
+        if let Operation::Transfer {
+            authority_policy, ..
+        } = op
+        {
             if authority_policy.is_none() {
                 if let Some(rec) = self.anchor_identity().await {
                     *authority_policy = Some(AuthorityPolicy {
@@ -835,7 +841,13 @@ impl BilateralTransactionManager {
         if self.enrollment_store.get(&sender_device_id).is_some() {
             return Ok(false);
         }
-        self.admit_anchor(sender_device_id, record, policy_hash, initial_root, initial_state)?;
+        self.admit_anchor(
+            sender_device_id,
+            record,
+            policy_hash,
+            initial_root,
+            initial_state,
+        )?;
         Ok(true)
     }
 
@@ -1990,7 +2002,10 @@ mod tests {
 
         // Non-attested path is byte-identical to the base formula — zero ripple to existing tips.
         let base = compute_successor_tip(&h_n, op, &e, &sigma);
-        assert_eq!(base, compute_successor_tip_attested(&h_n, op, &e, &sigma, None));
+        assert_eq!(
+            base,
+            compute_successor_tip_attested(&h_n, op, &e, &sigma, None)
+        );
         // Pin the bytes: reproduce the original §16.6 formula explicitly.
         let explicit = {
             let mut h = dsm_domain_hasher(TAG_TIP);
@@ -2004,9 +2019,15 @@ mod tests {
         // Attested path appends the anchor-proof digest → different, deterministic tip.
         let attested = compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&proof));
         assert_ne!(attested, base);
-        assert_eq!(attested, compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&proof)));
+        assert_eq!(
+            attested,
+            compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&proof))
+        );
         // A different proof digest → different tip (the attestation is bound into the tip).
-        assert_ne!(attested, compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&[5u8; 32])));
+        assert_ne!(
+            attested,
+            compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&[5u8; 32]))
+        );
     }
 
     #[tokio::test]
@@ -2047,10 +2068,19 @@ mod tests {
         let store = crate::core::chain_tip_store::noop_chain_tip_store();
 
         // (3) Happy path: a valid anchor proof finalizes.
-        let outcome =
-            run_offline_bearer_gate(Some(&anchor), &store, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
-                .await
-                .expect("valid offline-bearer proof must finalize");
+        let outcome = run_offline_bearer_gate(
+            Some(&anchor),
+            &store,
+            &op,
+            &h_n,
+            &rel,
+            &dev,
+            &entropy,
+            42,
+            ValueCapability::Yes,
+        )
+        .await
+        .expect("valid offline-bearer proof must finalize");
         // (6) The receipt reconstructs the exact anchor_proof_hash folded into the tip.
         assert_eq!(
             anchor_proof_hash_from_receipt(&outcome.island_attestation),
@@ -2058,24 +2088,59 @@ mod tests {
         );
         // (1) Attested tip differs from the non-attested tip (and non-attested stays byte-identical).
         let base_tip = compute_successor_tip(&h_n, b"op", &entropy, &[1u8; 32]);
-        let attested_tip =
-            compute_successor_tip_attested(&h_n, b"op", &entropy, &[1u8; 32], Some(&outcome.anchor_proof_hash));
+        let attested_tip = compute_successor_tip_attested(
+            &h_n,
+            b"op",
+            &entropy,
+            &[1u8; 32],
+            Some(&outcome.anchor_proof_hash),
+        );
         assert_ne!(base_tip, attested_tip);
 
         // (4) Fail-closed: no transport present.
-        assert!(run_offline_bearer_gate(None, &store, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
-            .await
-            .is_err());
+        assert!(run_offline_bearer_gate(
+            None,
+            &store,
+            &op,
+            &h_n,
+            &rel,
+            &dev,
+            &entropy,
+            42,
+            ValueCapability::Yes
+        )
+        .await
+        .is_err());
         // (4) Fail-closed: device rejects / signing fails.
         let rej: Arc<dyn AnchorTransport> = Arc::new(MockAnchorTransport::rejecting([7u8; 32]));
-        assert!(run_offline_bearer_gate(Some(&rej), &store, &op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
-            .await
-            .is_err());
+        assert!(run_offline_bearer_gate(
+            Some(&rej),
+            &store,
+            &op,
+            &h_n,
+            &rel,
+            &dev,
+            &entropy,
+            42,
+            ValueCapability::Yes
+        )
+        .await
+        .is_err());
         // (2) Fail-closed: value_capability not Yes.
         for vc in [ValueCapability::No, ValueCapability::Unknown] {
-            assert!(run_offline_bearer_gate(Some(&anchor), &store, &op, &h_n, &rel, &dev, &entropy, 42, vc)
-                .await
-                .is_err());
+            assert!(run_offline_bearer_gate(
+                Some(&anchor),
+                &store,
+                &op,
+                &h_n,
+                &rel,
+                &dev,
+                &entropy,
+                42,
+                vc
+            )
+            .await
+            .is_err());
         }
         // (5) Fail-closed: policy declares a different anchor_set_id than the device's actual set.
         let wrong_op = make_op(Some(AuthorityPolicy {
@@ -2083,19 +2148,42 @@ mod tests {
             policy_id,
             anchor_set_id: [0x99u8; 32],
         }));
-        assert!(run_offline_bearer_gate(Some(&anchor), &store, &wrong_op, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
-            .await
-            .is_err());
+        assert!(run_offline_bearer_gate(
+            Some(&anchor),
+            &store,
+            &wrong_op,
+            &h_n,
+            &rel,
+            &dev,
+            &entropy,
+            42,
+            ValueCapability::Yes
+        )
+        .await
+        .is_err());
         // (1) A non-offline-bearer transfer (no policy) is not gated here.
         let plain = make_op(None);
-        assert!(run_offline_bearer_gate(Some(&anchor), &store, &plain, &h_n, &rel, &dev, &entropy, 42, ValueCapability::Yes)
-            .await
-            .is_err());
+        assert!(run_offline_bearer_gate(
+            Some(&anchor),
+            &store,
+            &plain,
+            &h_n,
+            &rel,
+            &dev,
+            &entropy,
+            42,
+            ValueCapability::Yes
+        )
+        .await
+        .is_err());
 
         // (6, tamper) A tampered signature bundle in the receipt changes the reconstructed digest.
         let mut tampered = outcome.island_attestation.clone();
         tampered.signature[0] ^= 0xff;
-        assert_ne!(anchor_proof_hash_from_receipt(&tampered), outcome.anchor_proof_hash);
+        assert_ne!(
+            anchor_proof_hash_from_receipt(&tampered),
+            outcome.anchor_proof_hash
+        );
     }
 
     #[tokio::test]
@@ -2466,7 +2554,10 @@ mod tests {
         let contact = make_verified_contact("Island", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        manager.establish_relationship(&remote_id).await.expect("establish");
+        manager
+            .establish_relationship(&remote_id)
+            .await
+            .expect("establish");
         let pre = manager
             .prepare_offline_transfer(&remote_id, build_obr_op(&kp), 500)
             .await
@@ -2497,7 +2588,9 @@ mod tests {
         let contact2 = make_verified_contact("NoIsland", true, true);
         let remote2 = contact2.device_id;
         bare.add_verified_contact(contact2).expect("add");
-        bare.establish_relationship(&remote2).await.expect("establish");
+        bare.establish_relationship(&remote2)
+            .await
+            .expect("establish");
         let pre2 = bare
             .prepare_offline_transfer(&remote2, build_obr_op(&kp2), 500)
             .await
