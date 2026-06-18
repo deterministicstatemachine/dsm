@@ -553,8 +553,7 @@ mod tests {
         let device_id = [0xAB; 32];
         let att = [0xCC; 32];
 
-        let res =
-            create_genesis_via_blind_mpc(device_id, nodes, att, Some(b"test".to_vec())).await;
+        let res = create_genesis_via_blind_mpc(device_id, nodes, att, Some(b"test".to_vec())).await;
 
         let genesis = match res {
             Ok(g) => g,

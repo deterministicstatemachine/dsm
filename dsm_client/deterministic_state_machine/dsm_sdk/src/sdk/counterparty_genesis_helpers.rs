@@ -239,8 +239,8 @@ pub async fn fetch_genesis_state(
     // Device-birth binding `AttA` is folded into the MPC keypair derivation;
     // the birth nonce commitment comes from the platform slot and is used
     // VERBATIM.
-    let staged = crate::sdk::app_state::AppState::take_device_birth_nonce_commitment()
-        .ok_or_else(|| {
+    let staged =
+        crate::sdk::app_state::AppState::take_device_birth_nonce_commitment().ok_or_else(|| {
             dsm::types::error::DsmError::invalid_operation(
                 "counterparty_genesis_helpers: device-birth nonce commitment required",
             )

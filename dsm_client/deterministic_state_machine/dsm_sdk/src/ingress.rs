@@ -181,11 +181,13 @@ fn device_birth_att_from_persisted(
         ));
     }
 
-    Ok(dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
-        &commitment,
-        dsm::crypto::device_birth::CreationMode::Genesis,
+    Ok(
+        dsm::crypto::device_birth::DeviceBirthInputs::from_platform_nonce(
+            &commitment,
+            dsm::crypto::device_birth::CreationMode::Genesis,
+        )
+        .derive_att(),
     )
-    .derive_att())
 }
 
 fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Envelope, pb::Error> {

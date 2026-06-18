@@ -925,8 +925,14 @@ mod tests {
         let meta = b"DSMv2|determinism".to_vec();
         let att = [0xCC; 32];
 
-        let s1 =
-            deterministic_session(device_id, nodes.clone(), dev_e, mpc_e.clone(), meta.clone(), att);
+        let s1 = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            att,
+        );
         let s2 = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, att);
 
         // Sanity: the two sessions agree on the public-recomputable G.
@@ -964,8 +970,14 @@ mod tests {
             meta.clone(),
             [0xA0; 32],
         );
-        let s_b =
-            deterministic_session(device_id, nodes.clone(), dev_e, mpc_e.clone(), meta.clone(), [0xB0; 32]);
+        let s_b = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            [0xB0; 32],
+        );
 
         // Public inputs ⇒ G is identical (AttA is not part of G).
         assert_eq!(s_a.genesis_id, s_b.genesis_id);

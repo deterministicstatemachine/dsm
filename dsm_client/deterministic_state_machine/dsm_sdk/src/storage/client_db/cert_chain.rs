@@ -697,7 +697,9 @@ mod tests {
             .unwrap();
         assert_eq!(step1, 1);
 
-        let loaded_sk = load_local_chain_head_sk(&r, &device_birth_att).unwrap().unwrap();
+        let loaded_sk = load_local_chain_head_sk(&r, &device_birth_att)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded_sk, sk1);
         // Old SK is not recoverable post-advance.
         assert_ne!(loaded_sk, sk0);
@@ -720,12 +722,16 @@ mod tests {
         let device_birth_att = [0x66; 32];
 
         init_local_cert_chain_head_with_sk(&r, &pk, &sk, &device_birth_att).unwrap();
-        assert!(load_local_chain_head_sk(&r, &device_birth_att).unwrap().is_some());
+        assert!(load_local_chain_head_sk(&r, &device_birth_att)
+            .unwrap()
+            .is_some());
 
         wipe_local_chain_head_sk(&r).unwrap();
 
         // SK is gone.
-        assert!(load_local_chain_head_sk(&r, &device_birth_att).unwrap().is_none());
+        assert!(load_local_chain_head_sk(&r, &device_birth_att)
+            .unwrap()
+            .is_none());
         // Pubkey is still there.
         let pk_after = load_cert_chain_head_pubkey(&r, CertChainSide::Local)
             .unwrap()

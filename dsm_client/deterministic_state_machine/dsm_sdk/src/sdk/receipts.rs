@@ -126,7 +126,8 @@ pub fn derive_kyber_k_step_for_send(
         ));
     }
     // coins = BLAKE3("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || AttA)
-    let coins = dsm::crypto::ephemeral_key::derive_kyber_coins(h_n, c_pre, devid_sender, device_birth_att);
+    let coins =
+        dsm::crypto::ephemeral_key::derive_kyber_coins(h_n, c_pre, devid_sender, device_birth_att);
     // (ct, ss) = KyberEncDet(recipient_pk, coins)
     let (ss, ct) = dsm::crypto::kyber::kyber_encapsulate_deterministic(recipient_kyber_pk, &coins)?;
     // k_step = BLAKE3("DSM/kyber-ss\0" || ss)
@@ -1137,12 +1138,22 @@ mod tests {
         let devid_sender = [0x33u8; 32];
         let device_birth_att = [0x44u8; 32];
 
-        let to_1 =
-            derive_kyber_k_step_for_send(&h_n, &c_pre, &devid_sender, &device_birth_att, &kp1.public_key)
-                .expect("encap to kp1");
-        let to_2 =
-            derive_kyber_k_step_for_send(&h_n, &c_pre, &devid_sender, &device_birth_att, &kp2.public_key)
-                .expect("encap to kp2");
+        let to_1 = derive_kyber_k_step_for_send(
+            &h_n,
+            &c_pre,
+            &devid_sender,
+            &device_birth_att,
+            &kp1.public_key,
+        )
+        .expect("encap to kp1");
+        let to_2 = derive_kyber_k_step_for_send(
+            &h_n,
+            &c_pre,
+            &devid_sender,
+            &device_birth_att,
+            &kp2.public_key,
+        )
+        .expect("encap to kp2");
         assert_ne!(to_1.k_step, to_2.k_step);
     }
 
@@ -1207,7 +1218,14 @@ mod tests {
         let rel_key = [0xDE; 32];
         let device_birth_att = [0xFF; 32];
 
-        let inputs = signing_inputs(&commitment, &rel_key, &ak_pk, &ak_sk, &device_birth_att, &kyber_pk);
+        let inputs = signing_inputs(
+            &commitment,
+            &rel_key,
+            &ak_pk,
+            &ak_sk,
+            &device_birth_att,
+            &kyber_pk,
+        );
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
         assert!(out.used_root_ak);
@@ -1248,15 +1266,35 @@ mod tests {
 
         // Step 0: root AK path. Sign + advance to record EK_1 as chain head.
         let commit0 = [0xC0; 32];
-        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &device_birth_att, &kyber_pk);
+        let inputs0 = signing_inputs(
+            &commit0,
+            &rel_key,
+            &ak_pk,
+            &ak_sk,
+            &device_birth_att,
+            &kyber_pk,
+        );
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         assert!(out0.used_root_ak);
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &device_birth_att, true)
-            .unwrap();
+        advance_local_chain_head_after_signing(
+            &rel_key,
+            &out0.ek_pk,
+            &out0.ek_sk,
+            &device_birth_att,
+            true,
+        )
+        .unwrap();
 
         // Step 1: chain head is EK_1 — root NOT used.
         let commit1 = [0xC1; 32];
-        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &device_birth_att, &kyber_pk);
+        let mut inputs1 = signing_inputs(
+            &commit1,
+            &rel_key,
+            &ak_pk,
+            &ak_sk,
+            &device_birth_att,
+            &kyber_pk,
+        );
         inputs1.h_n = [0xBB; 32]; // pretend we advanced the chain
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
         assert!(
@@ -1300,7 +1338,14 @@ mod tests {
 
         // ────── Step 0 ──────
         let commit0 = [0xF0; 32];
-        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &device_birth_att, &kyber_pk);
+        let inputs0 = signing_inputs(
+            &commit0,
+            &rel_key,
+            &ak_pk,
+            &ak_sk,
+            &device_birth_att,
+            &kyber_pk,
+        );
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
 
         // Cert step 0 chains EK_0 → AK.
@@ -1310,13 +1355,26 @@ mod tests {
         assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
 
         // Persist EK_0 as new chain head.
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &device_birth_att, true)
-            .unwrap();
+        advance_local_chain_head_after_signing(
+            &rel_key,
+            &out0.ek_pk,
+            &out0.ek_sk,
+            &device_birth_att,
+            true,
+        )
+        .unwrap();
 
         // ────── Step 1 ──────
         let commit1 = [0xF1; 32];
         // Simulate chain advancement: new h_n.
-        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &device_birth_att, &kyber_pk);
+        let mut inputs1 = signing_inputs(
+            &commit1,
+            &rel_key,
+            &ak_pk,
+            &ak_sk,
+            &device_birth_att,
+            &kyber_pk,
+        );
         inputs1.h_n = [0xB1; 32];
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
 
@@ -1332,8 +1390,14 @@ mod tests {
         // Distinct EK at step 1 vs step 0.
         assert_ne!(out0.ek_pk, out1.ek_pk);
 
-        advance_local_chain_head_after_signing(&rel_key, &out1.ek_pk, &out1.ek_sk, &device_birth_att, false)
-            .unwrap();
+        advance_local_chain_head_after_signing(
+            &rel_key,
+            &out1.ek_pk,
+            &out1.ek_sk,
+            &device_birth_att,
+            false,
+        )
+        .unwrap();
     }
 
     /// Property-style test (loop-based, no proptest dependency).

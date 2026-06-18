@@ -261,5 +261,4 @@ mod tests {
         let forged_cert = sign_ek_cert(&attacker_sk, &next_pk, &h_n).expect("sign forged cert");
         assert!(!verify_ek_cert(&real_prev_pk, &next_pk, &h_n, &forged_cert).expect("verify"));
     }
-
 }

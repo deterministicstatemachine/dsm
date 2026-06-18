@@ -159,7 +159,8 @@ fn kat_dsm_kyber_coins() {
     let c_pre = [2u8; 32];
     let dev_id = [3u8; 32];
     let device_birth_att = [4u8; 32];
-    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &dev_id, &device_birth_att);
+    let from_code =
+        dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &dev_id, &device_birth_att);
     assert_pin(
         "DSM/kyber-coins",
         from_code,
@@ -193,8 +194,12 @@ fn kat_dsm_kyber_coins_per_step() {
     let c_pre = [0x22u8; 32];
     let devid_sender = [0x33u8; 32];
     let device_birth_att = [0x44u8; 32];
-    let from_code =
-        dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &devid_sender, &device_birth_att);
+    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(
+        &h_n,
+        &c_pre,
+        &devid_sender,
+        &device_birth_att,
+    );
     assert_pin(
         "DSM/kyber-coins per-step",
         from_code,
@@ -269,7 +274,8 @@ fn kat_dsm_ek_derivation_seed() {
     let k_step = [0x33; 32];
     let device_birth_att = [0x44; 32];
 
-    let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(&h_n, &c_pre, &k_step, &device_birth_att);
+    let seed =
+        dsm::crypto::ephemeral_key::derive_ephemeral_seed(&h_n, &c_pre, &k_step, &device_birth_att);
     assert_pin(
         "DSM/ek (per-step EK derivation seed)",
         seed,
@@ -348,9 +354,13 @@ fn kat_dsm_device_birth_att() {
     let spec = spec_digest("DSM/device-birth-att/v1", &input);
 
     // Must match the production derivation byte-for-byte.
-    let prod =
-        DeviceBirthInputs::new(nonce_commitment, creation_mode, schema_version, protocol_version)
-            .derive_att();
+    let prod = DeviceBirthInputs::new(
+        nonce_commitment,
+        creation_mode,
+        schema_version,
+        protocol_version,
+    )
+    .derive_att();
 
     assert_eq!(
         spec, prod,

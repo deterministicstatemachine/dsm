@@ -104,10 +104,7 @@ impl DeviceBirthInputs {
     /// (no second hash), so they derive an IDENTICAL AttA and the re-derived
     /// signing key matches the published genesis AK.  NOT a silicon attestation
     /// (no orbit probe, trust gate, or AttA).
-    pub fn from_platform_nonce(
-        nonce_commitment_bytes: &[u8],
-        creation_mode: CreationMode,
-    ) -> Self {
+    pub fn from_platform_nonce(nonce_commitment_bytes: &[u8], creation_mode: CreationMode) -> Self {
         let mut nonce_commitment = [0u8; 32];
         let n = nonce_commitment_bytes.len().min(32);
         nonce_commitment[..n].copy_from_slice(&nonce_commitment_bytes[..n]);
@@ -140,12 +137,18 @@ mod tests {
 
     #[test]
     fn att_is_deterministic() {
-        assert_eq!(derive_device_birth_att(&inputs(7)), derive_device_birth_att(&inputs(7)));
+        assert_eq!(
+            derive_device_birth_att(&inputs(7)),
+            derive_device_birth_att(&inputs(7))
+        );
     }
 
     #[test]
     fn att_changes_with_nonce_commitment() {
-        assert_ne!(derive_device_birth_att(&inputs(1)), derive_device_birth_att(&inputs(2)));
+        assert_ne!(
+            derive_device_birth_att(&inputs(1)),
+            derive_device_birth_att(&inputs(2))
+        );
     }
 
     #[test]
@@ -163,7 +166,10 @@ mod tests {
     #[test]
     fn creation_mode_strict_decode() {
         assert_eq!(CreationMode::from_u8(1), Some(CreationMode::Genesis));
-        assert_eq!(CreationMode::from_u8(3), Some(CreationMode::RecoverySuccessor));
+        assert_eq!(
+            CreationMode::from_u8(3),
+            Some(CreationMode::RecoverySuccessor)
+        );
         assert_eq!(CreationMode::from_u8(0), None);
         assert_eq!(CreationMode::from_u8(4), None);
     }
