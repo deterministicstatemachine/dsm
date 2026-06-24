@@ -49,6 +49,8 @@ reason to bind a device identity rather than a wallet seed. Section 6 places the
 the properties web3 cares about. Section 7 instantiates the construction on a Trezor Safe 7 and
 Section 8 reports the live validation. Section 9 is an honest accounting of limits. Section 10
 describes how this fits DSM without becoming a hard dependency for the rest of the protocol.
+Section 11 states the double-spend impossibility the bearer anchor delivers, clone double-spend
+blocked by the uncopyable spend authority and same-device equivocation collapsed by Tripwire.
 2 Threat model
 We grant the adversary as much as is realistic for a device that left the owner’s control.
 Definition 1 (Perfect bit copy). The adversary obtains a complete copy of a participant’s
@@ -311,7 +313,102 @@ This scoping also answers the deployment objection. A mechanism that required ev
 to hold a secure element for any use of DSM would be a non starter. A mechanism that requires
 it only for oﬄine bearer transfers, and degrades gracefully to an online checked path otherwise,
 is something a user opts into for a specific convenience, with a clear and bounded cost.
-11 Conclusion
+
+10.1 Enrollment of the anchor identity
+The anchor identity is the pinned device identity of Appendix A, the hash of the secure element's
+attestation public key. Enrolling it binds that identity to a DSM identity so counterparties can
+require and verify it. DSM supports two onboarding paths, and neither is a precondition for using
+the network.
+
+From genesis. A user who holds the secure element at setup enrolls the anchor identity in the
+genesis record, so the DSM identity carries the bound anchor from its first state.
+
+Acquired later. A user who adopts DSM first and obtains the secure element afterward enrolls
+without re genesis. The user issues an enrollment update, an ordinary signed DSM transition that
+binds the anchor identity to the current frontier and carries a fresh AuthenticateDevice proof
+(Appendix A) over that frontier. Because the enrollment is an ordinary adjacency respecting
+transition, it cannot be forged, reordered, or replayed, and the user's funds and history are
+untouched. The user is anchor enabled from that frontier forward.
+
+10.2 Counterparty pinning and the offline gate
+An offline bearer transfer from A to B is accepted only if B has already pinned A's anchor identity.
+Pinning happens during a verified exchange, an online transfer or an in person bilateral session,
+in which A presents an AuthenticateDevice proof and B records sha256(leaf.spki) as A's pinned
+identity in the A B relationship, together with the frontier at which it was pinned. Until B holds
+a pinned identity for A, B refuses an offline bearer transfer from A and uses the online checked
+path instead. This is what makes the anchor meaningful between two specific parties rather than a
+generic genuineness claim: B accepts offline only against an identity B itself verified, so an attacker
+cannot assert an anchor B never saw.
+
+The gate is two sided and explicit. Offline bearer between A and B requires (i) A enrolled
+(Section 10.1) and (ii) B holding a pinned identity for A (this section). If either is missing the
+transfer is not blocked, it is downgraded to the online checked path, and the downgrade is visible
+to both parties rather than silent.
+
+10.3 Resynchronization
+When A enrolls late, or rotates to a new secure element, each existing relationship is brought
+current before offline bearer resumes on it. A pushes the enrollment update to B as a normal
+bilateral transition; B verifies the AuthenticateDevice proof against the new identity, pins it, and
+advances the relationship to anchor enabled. Resync is per relationship and asynchronous: rela-
+tionships not yet resynced keep operating on the online checked path, so adopting the anchor never
+strands a counterparty or pauses the network, and the absence of a secure element never denies
+access to DSM, only to the offline convenience. Because the resync is a signed adjacent transition
+it inherits Tripwire's fork exclusion: A cannot present two different anchor identities to two coun-
+terparties and have both stand.
+
+11 Double-spend impossibility under the bearer anchor
+Sections 4 and 5 prove anti cloning. Restated in spend terms, they establish that the secure
+element attestation is the spend authority for the lineage: a successor of parent tip hn is well
+formed only if it carries sn = Signisland(frame(hn)), verifiable under the pinned identity idisland.
+The spend authority is an island signature: generated on the island, with no read path, never
+serialized. By Lemma 1 no software derived value can serve as the spend authority, because a
+root adversary forges any such value; sn is produced only by the island's non extractable key,
+which is exactly the non reproducible input the double spend argument needs. The island
+signature sn is the sole spend authority root.
+
+We separate two attacks on a bearer lineage at parent tip hn.
+
+Definition 6 (Clone double-spend). Two agents that can each independently extend the lineage
+from the same parent hn allocate the same spendable balance to two recipients.
+
+Definition 7 (Same-device equivocation). The one genuine device signs two conflicting succes-
+sors of the same parent hn, for example hn → Alice and hn → Bob.
+
+Theorem 3 (No clone double-spend). A clone double-spend requires two independent spend
+authorities over hn. By Theorem 2 the only spend authority is sn, producible solely by the
+island's non extractable key. A perfect bit copy (Definition 1) holds every bit but not that key,
+so it cannot produce sn and cannot author any accepted successor. Two independent extending
+agents therefore cannot exist without cloning the island, which the secure element forbids by
+construction. The classic copied wallet spends twice attack does not arise.
+
+Theorem 4 (Equivocation collapses to one successor). The genuine device, holding the island,
+can sign two conflicting candidates off hn. This is the intentional pre-commit fork, not a defect.
+At most one is an accepted successor: two accepted successors of a single parent under one device
+key would require, by the whitepaper's Tripwire theorem and Double-Spending Impossibility
+theorem, either a SPHINCS+ forgery or a BLAKE3 collision in the chained hash and per device
+SMT path, both negligible. The single non extractable key yields a single forward history; a fork
+cannot carry two accepted branches.
+
+Remark 3 (No interchangeability). Each successor binds its recipient and relationship, so a
+successor minted for Alice is not a well formed successor for Bob. Reuse across recipients is
+therefore not a separate attack; the only same device path is equivocation, settled by Theorem 4.
+
+Corollary 2 (Instant offline finality, no race). Offline acceptance is the bilateral, countersigned
+receipt over (hn, child, sn), complete at the instant of exchange and not contingent on any later
+online step (whitepaper, Offline Bilateral). Since the accepted successor is unique by Theorems 3
+and 4, finality holds at that instant: there is no interval in which two conflicting successors are
+simultaneously acceptable, hence no spend twice now and reconcile later race. Bilateral control
+lets an adversary choose which valid successor finalizes; it never duplicates value.
+
+The two theorems compose into the bearer guarantee. The island blocks a second independent
+spender (Theorem 3); Tripwire blocks a second accepted branch from the lone genuine spender
+(Theorem 4). What is left to any adversary is the choice of which single valid successor to finalize,
+which moves no value and leaves one canonical lineage. The anti clone result and the double
+spend result are the same result viewed twice: an uncopyable per transition spend authority is
+exactly what makes one successor only enforceable offline, with no global ledger and no online
+gatekeeper.
+
+12 Conclusion
 The path from a battery continuity idea to a working anchor was not a series of better physical
 signals. It was the recognition that no software readable physical signal can bind a transition
 on hardware the owner controls, because the lie always has one place to live, the single handoﬀ
