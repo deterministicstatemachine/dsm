@@ -155,15 +155,25 @@ fn kat_dsm_ek_cert() {
 
 #[test]
 fn kat_dsm_kyber_coins() {
+    // coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id ||
+    //         recipient_kem_pub_hash || h_n || C_pre || DevID)  (whitepaper §12)
+    let s_master = [4u8; 32];
+    let recipient_kem_pub_hash = [5u8; 32];
     let h_n = [1u8; 32];
     let c_pre = [2u8; 32];
     let dev_id = [3u8; 32];
-    let k_dbrw = [4u8; 32];
-    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &dev_id, &k_dbrw);
+    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(
+        &s_master,
+        dsm::crypto::ephemeral_key::KYBER_ALG_ID_MLKEM768,
+        &recipient_kem_pub_hash,
+        &h_n,
+        &c_pre,
+        &dev_id,
+    );
     assert_pin(
-        "DSM/kyber-coins",
+        "DSM/kyber-coins/v1",
         from_code,
-        "16664516fc35112089377d7649a97ba2d9bf5a8c2f976071c62441ee0c2a6edf",
+        "3151e83242db26b8d5b99ae04abc9549986207c408acdf8bfe256315b5c072cb",
     );
 }
 
@@ -182,23 +192,31 @@ fn kat_dsm_kyber_ss() {
 // §11 — Kyber coins for per-step EK derivation
 // =============================================================================
 
-/// Pins the canonical kyber_coins preimage form per spec:
-///   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || K_DBRW)
-/// This is what the sender feeds into the deterministic Kyber encapsulation
-/// to derive `k_step`, which then mixes into the per-step EK derivation
-/// alongside K_DBRW. (Phase F real-Kyber migration.)
+/// Pins the canonical kyber_coins form per spec (whitepaper §12):
+///   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id ||
+///           recipient_kem_pub_hash || h_n || C_pre || DevID_sender)
+/// This is what the sender feeds into the deterministic ML-KEM-768 encapsulation
+/// to derive `k_step`, which then mixes into the per-step EK derivation. Coins
+/// are keyed by Smaster (authorship), not by any device-binding secret.
 #[test]
 fn kat_dsm_kyber_coins_per_step() {
+    let s_master = [0x44u8; 32];
+    let recipient_kem_pub_hash = [0x55u8; 32];
     let h_n = [0x11u8; 32];
     let c_pre = [0x22u8; 32];
     let devid_sender = [0x33u8; 32];
-    let k_dbrw = [0x44u8; 32];
-    let from_code =
-        dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &devid_sender, &k_dbrw);
+    let from_code = dsm::crypto::ephemeral_key::derive_kyber_coins(
+        &s_master,
+        dsm::crypto::ephemeral_key::KYBER_ALG_ID_MLKEM768,
+        &recipient_kem_pub_hash,
+        &h_n,
+        &c_pre,
+        &devid_sender,
+    );
     assert_pin(
-        "DSM/kyber-coins per-step",
+        "DSM/kyber-coins/v1 per-step",
         from_code,
-        "65d5b645be1bc2e275e1eaa5358bfaba56611c1f06b6ab985dbe85353b07acc6",
+        "d57db44c1f46124bd4da9be5e3f67155f6ef93bfa97b5a18c728006e485b0c9c",
     );
 }
 
@@ -261,19 +279,28 @@ fn kat_recovery_capsule_aad_format() {
 
 #[test]
 fn kat_dsm_ek_derivation_seed() {
-    // E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)
+    // E_{n+1} = keyed-BLAKE3(Smaster, "DSM/ek/v1\0" || alg_id || chain_id ||
+    //           h_n || C_pre || k_step)  (whitepaper §11.1/§12 Eq.14)
     // The dsm crate exposes the underlying derive_ephemeral_seed primitive;
     // sdk's PerStepEkContext + derive_per_step_ek wrap it.
+    let s_master = [0x44; 32];
+    let chain_id = [0x55; 32];
     let h_n = [0x11; 32];
     let c_pre = [0x22; 32];
     let k_step = [0x33; 32];
-    let k_dbrw = [0x44; 32];
 
-    let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(&h_n, &c_pre, &k_step, &k_dbrw);
+    let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(
+        &s_master,
+        dsm::crypto::ephemeral_key::ALG_ID_SPX256F,
+        &chain_id,
+        &h_n,
+        &c_pre,
+        &k_step,
+    );
     assert_pin(
-        "DSM/ek (per-step EK derivation seed)",
+        "DSM/ek/v1 (per-step EK derivation seed)",
         seed,
-        "1702f92624fed18d753141cce163f3ea3da7645002f82f0f8e2cd466caa2e39b",
+        "7bcb97c3e944781ccb759cf18c9fcc1b059f5b348487c3945bdf74cc34b7c18e",
     );
 }
 
