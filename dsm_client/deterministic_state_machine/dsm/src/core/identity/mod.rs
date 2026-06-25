@@ -200,8 +200,6 @@ pub async fn create_trustless_genesis<
 >(
     device_id: String,
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, IdentityError> {
@@ -226,8 +224,6 @@ pub async fn create_trustless_genesis<
     let session = create_genesis(
         device_id_bytes,
         storage_nodes,
-        hw_entropy,
-        env_fingerprint,
         metadata.map(|s| s.into_bytes()),
     )
     .await
@@ -411,8 +407,6 @@ impl IdentityStore {
         &self,
         name: &str,
         participants: Vec<NodeId>,
-        hw_entropy: Vec<u8>,
-        env_fingerprint: Vec<u8>,
         storage: Option<&S>,
     ) -> Result<Identity, IdentityError> {
         let span = tracing::span!(
@@ -437,8 +431,6 @@ impl IdentityStore {
         let artifacts = create_trustless_genesis(
             device_id.clone(),
             participants.clone(),
-            hw_entropy,
-            env_fingerprint,
             Some(format!("DSM_IDENTITY_{name}")),
             storage,
         )
@@ -494,8 +486,6 @@ impl IdentityStore {
         &self,
         name: &str,
         storage_nodes: Vec<NodeId>,
-        hw_entropy: Vec<u8>,
-        env_fingerprint: Vec<u8>,
         storage: Option<&S>,
     ) -> Result<Identity, IdentityError> {
         if storage_nodes.len() < MIN_PARTICIPANTS {
@@ -505,8 +495,7 @@ impl IdentityStore {
             ));
         }
 
-        self.create_identity(name, storage_nodes, hw_entropy, env_fingerprint, storage)
-            .await
+        self.create_identity(name, storage_nodes, storage).await
     }
 
     /// Get the public key for this identity (binary; not encoded)

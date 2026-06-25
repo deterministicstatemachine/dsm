@@ -9,7 +9,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::crypto::cdbrw_binding;
+    use crate::core::identity::genesis_session::derive_smaster;
     use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
     use crate::crypto::kyber::generate_kyber_keypair_from_entropy;
     use crate::crypto::rng::{generate_deterministic_random, mix_entropy};
@@ -43,23 +43,20 @@ mod tests {
         }
 
         #[test]
-        fn pbt_cdbrw_binding_is_deterministic(
-            genesis_hash in any::<[u8; 32]>(),
+        fn pbt_smaster_is_deterministic_and_secret_bound(
+            s0 in any::<[u8; 32]>(),
+            g in any::<[u8; 32]>(),
             device_id in any::<[u8; 32]>(),
-            hw in proptest::collection::vec(any::<u8>(), 1..=128),
-            env in proptest::collection::vec(any::<u8>(), 1..=128),
+            aph in any::<[u8; 32]>(),
         ) {
-            let b1 = cdbrw_binding::derive_cdbrw_binding_key(
-                &genesis_hash, &device_id, &hw, &env,
-            )
-            .expect("valid inputs");
-            let b2 = cdbrw_binding::derive_cdbrw_binding_key(
-                &genesis_hash, &device_id, &hw, &env,
-            )
-            .expect("valid inputs");
-            prop_assert_eq!(b1.len(), 32);
-            prop_assert_eq!(b2.len(), 32);
+            let b1 = derive_smaster(&s0, &g, &device_id, &aph);
+            let b2 = derive_smaster(&s0, &g, &device_id, &aph);
             prop_assert_eq!(b1, b2);
+            // Flipping the secret root changes Smaster.
+            let mut s0b = s0;
+            s0b[0] ^= 0xFF;
+            let b3 = derive_smaster(&s0b, &g, &device_id, &aph);
+            prop_assert_ne!(b1, b3);
         }
 
         #[test]

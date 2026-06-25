@@ -17,10 +17,8 @@
 //!
 //! - No raw `Vec<u8>` or `String` inputs allowed deep in the core.
 //! - All inputs must be length-checked and domain-separated immediately.
-//! - C-DBRW binding derivation is delegated to `crypto::cdbrw_binding` (single source of truth).
 
 use crate::types::error::DsmError;
-use crate::crypto::cdbrw_binding;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Canonical, immutable platform context.
@@ -31,14 +29,6 @@ pub struct PlatformContext {
     pub device_id: [u8; 32],
     /// Canonical Genesis Hash (32 bytes)
     pub genesis_hash: [u8; 32],
-    /// Canonical C-DBRW Binding Key K_DBRW (32 bytes), derived via
-    /// `cdbrw_binding::derive_cdbrw_binding_key` from the canonical
-    /// four-input preimage `(genesis_hash, device_id, hw_entropy,
-    /// env_fingerprint)`. Deterministic per device + per genesis;
-    /// recoverable across reinstall on the same physical device.
-    /// Cross-device anti-clone is enforced operationally by Layer B
-    /// (`cdbrw_responder::publish_trust_snapshot`).
-    pub cdbrw_binding: [u8; 32],
 }
 
 /// Raw inputs from the platform (JNI/Kotlin/Swift).
@@ -46,8 +36,6 @@ pub struct PlatformContext {
 pub struct RawPlatformInputs {
     pub device_id_raw: Vec<u8>,
     pub genesis_hash_raw: Vec<u8>,
-    pub cdbrw_hw_entropy: Vec<u8>,
-    pub cdbrw_env_fingerprint: Vec<u8>,
 }
 
 impl PlatformContext {
@@ -62,22 +50,9 @@ impl PlatformContext {
         // 2. Canonize Genesis Hash
         let genesis_hash = Self::canonize_identifier(&inputs.genesis_hash_raw, "DSM/genesis\0")?;
 
-        // 3. Delegate C-DBRW binding derivation to the crypto module.
-        // PBI responsibility: strict validation only.
-        // Crypto responsibility: canonical serialization + domain-separated hashing.
-        // Canonical preimage binds K_DBRW to (genesis_hash, device_id, hw, env);
-        // see crypto::cdbrw_binding::derive_cdbrw_binding_key.
-        let cdbrw_binding = cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
-            &inputs.cdbrw_hw_entropy,
-            &inputs.cdbrw_env_fingerprint,
-        )?;
-
         Ok(Self {
             device_id,
             genesis_hash,
-            cdbrw_binding,
         })
     }
 
@@ -108,8 +83,6 @@ mod tests {
         RawPlatformInputs {
             device_id_raw: vec![0xAA; 32],
             genesis_hash_raw: vec![0xBB; 32],
-            cdbrw_hw_entropy: vec![0xCC; 32],
-            cdbrw_env_fingerprint: vec![0xDD; 32],
         }
     }
 
@@ -167,8 +140,6 @@ mod tests {
         let ctx = PlatformContext::bootstrap(valid_inputs()).expect("bootstrap should succeed");
         assert_eq!(ctx.device_id, [0xAA; 32]);
         assert_eq!(ctx.genesis_hash, [0xBB; 32]);
-        assert_eq!(ctx.cdbrw_binding.len(), 32);
-        assert_ne!(ctx.cdbrw_binding, [0u8; 32]);
     }
 
     #[test]
@@ -194,33 +165,13 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_empty_hw_entropy_fails() {
-        let mut inputs = valid_inputs();
-        inputs.cdbrw_hw_entropy = vec![];
-        let result = PlatformContext::bootstrap(inputs);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn bootstrap_empty_env_fingerprint_fails() {
-        let mut inputs = valid_inputs();
-        inputs.cdbrw_env_fingerprint = vec![];
-        let result = PlatformContext::bootstrap(inputs);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn raw_platform_inputs_construction() {
         let raw = RawPlatformInputs {
             device_id_raw: vec![1; 32],
             genesis_hash_raw: vec![2; 32],
-            cdbrw_hw_entropy: vec![3; 16],
-            cdbrw_env_fingerprint: vec![4; 16],
         };
         assert_eq!(raw.device_id_raw.len(), 32);
         assert_eq!(raw.genesis_hash_raw.len(), 32);
-        assert_eq!(raw.cdbrw_hw_entropy.len(), 16);
-        assert_eq!(raw.cdbrw_env_fingerprint.len(), 16);
     }
 
     #[test]
@@ -230,17 +181,6 @@ mod tests {
 
         assert_eq!(ctx.device_id, [0xAA; 32]);
         assert_eq!(ctx.genesis_hash, [0xBB; 32]);
-
-        // cdbrw_binding should match a direct call to derive_cdbrw_binding_key
-        // with the same canonical four-input preimage.
-        let expected_binding = cdbrw_binding::derive_cdbrw_binding_key(
-            &[0xBB; 32],
-            &[0xAA; 32],
-            &[0xCC; 32],
-            &[0xDD; 32],
-        )
-        .unwrap();
-        assert_eq!(ctx.cdbrw_binding, expected_binding);
     }
 
     #[test]
@@ -249,6 +189,5 @@ mod tests {
         let ctx2 = PlatformContext::bootstrap(valid_inputs()).unwrap();
         assert_eq!(ctx1.device_id, ctx2.device_id);
         assert_eq!(ctx1.genesis_hash, ctx2.genesis_hash);
-        assert_eq!(ctx1.cdbrw_binding, ctx2.cdbrw_binding);
     }
 }

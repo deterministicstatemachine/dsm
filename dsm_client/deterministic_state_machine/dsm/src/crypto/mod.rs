@@ -59,8 +59,6 @@ pub mod anchor_enrollment;
 pub mod anchor_transport;
 pub mod blake3;
 pub mod canonical_lp;
-pub mod cdbrw_binding;
-pub mod cdbrw_moments;
 pub mod classical_verify;
 pub mod device_anchor;
 pub mod ephemeral_key;

@@ -343,47 +343,37 @@ fn kat_dsm_dev_tree_pad() {
 }
 
 // =============================================================================
-// §12 — DBRW binding (canonical four-input form, whitepaper Definition 3)
+// §12 — Master seed Smaster (eq.13, rooted in the CSPRNG secret s0)
 // =============================================================================
 
 #[test]
-fn kat_dsm_cdbrw_bind() {
-    let genesis_hash = [0x11u8; 32];
-    let device_id = [0x22u8; 32];
-    let hw_entropy = [0x33u8; 32];
-    let env_fingerprint = [0x44u8; 32];
+fn kat_dsm_smaster() {
+    // Smaster = HKDF-BLAKE3(IKM = s0,
+    //   info = "DSM/Smaster/v1\0" || G || DevID || authority_policy_hash)
+    let s0 = [0x11u8; 32];
+    let g = [0x22u8; 32];
+    let device_id = [0x33u8; 32];
+    let authority_policy_hash = [0x44u8; 32];
 
-    // Spec-side recomputation under the canonical four-input preimage:
-    //   BLAKE3("DSM/cdbrw/bind\0"
-    //          || LP(genesis_hash) || LP(device_id)
-    //          || LP(hw_entropy)   || LP(env_fingerprint))
-    let mut input = Vec::new();
-    for slot in [&genesis_hash, &device_id, &hw_entropy, &env_fingerprint] {
-        input.extend_from_slice(&(slot.len() as u32).to_le_bytes());
-        input.extend_from_slice(slot);
-    }
-    let spec = spec_digest("DSM/cdbrw/bind", &input);
-
-    // Must match the production derivation byte-for-byte.
-    let prod = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-        &genesis_hash,
+    let from_code = dsm::core::identity::genesis_session::derive_smaster(
+        &s0,
+        &g,
         &device_id,
-        &hw_entropy,
-        &env_fingerprint,
-    ) {
-        Ok(k) => k,
-        Err(e) => panic!("derive_cdbrw_binding_key with valid inputs: {e:?}"),
-    };
-
-    assert_eq!(
-        spec, prod,
-        "production derivation must match the spec-side recomputation"
+        &authority_policy_hash,
     );
-
-    // Pin to lock the byte pattern across builds.
     assert_pin(
-        "DSM/cdbrw/bind",
-        spec,
-        "1468dbc710bd6e305c02ca3b81a358b39bf1a5f5f4e8837a14b5ac8c1187e2ac",
+        "DSM/Smaster/v1",
+        from_code,
+        "bfcd787085ccb946a39c5f0834ef300e2552fdf2d4d2aa5b14e89e68adf310b4",
     );
+
+    // The secret root governs the output: a different s0 yields a different
+    // Smaster even with identical public context.
+    let other = dsm::core::identity::genesis_session::derive_smaster(
+        &[0x12u8; 32],
+        &g,
+        &device_id,
+        &authority_policy_hash,
+    );
+    assert_ne!(from_code, other, "Smaster must depend on the secret root s0");
 }
