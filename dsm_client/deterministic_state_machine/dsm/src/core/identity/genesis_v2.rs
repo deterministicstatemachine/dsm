@@ -41,18 +41,13 @@ use crate::types::error::DsmError;
 /// Which entropy profile produced a genesis. `MnemonicV2` is canonical (Layer A);
 /// `CommitRevealMpcV1` is the optional n-of-n storage-node ceremony retained for
 /// high-assurance/legacy use. Ordinary wallet creation MUST NOT require storage nodes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum GenesisEntropyProfile {
     /// Canonical: mnemonic-rooted, deterministic, no storage-node entropy.
+    #[default]
     MnemonicV2,
     /// Optional: n-of-n commit-reveal multipart entropy (legacy / high-assurance).
     CommitRevealMpcV1,
-}
-
-impl Default for GenesisEntropyProfile {
-    fn default() -> Self {
-        Self::MnemonicV2
-    }
 }
 
 /// HKDF-BLAKE3 KDF: `KDF(secret, "<domain>\0" , parts...) -> 32 bytes`. The domain tag
