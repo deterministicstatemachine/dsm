@@ -11,9 +11,17 @@ if [[ ! -f "$canonical" ]]; then
   exit 1
 fi
 
-# Disallow ANY .proto files outside the canonical location, including third_party/vendor
-# Exclude node_modules since they may contain third-party proto files
-violations=$(git ls-files "**/*.proto" | grep -v "^proto/dsm_app.proto$" | grep -v "^node_modules/" || true)
+# Disallow ANY .proto files outside the canonical location, including third_party/vendor.
+# Two exact-path allowances, everything else is rejected:
+#   - proto/dsm_app.proto: the canonical DSM application wire envelope (single source of truth).
+#   - crates/dsm-anchor-core/proto/dsm_anchor.proto: the offline-anchor crate's own self-contained
+#     firmware<->host schema. This is a distinct protocol, not a copy of the app envelope; the crate
+#     builds no_std for the RP2350 target and cannot share the app proto.
+# Exclude node_modules since they may contain third-party proto files.
+violations=$(git ls-files "**/*.proto" \
+  | grep -v "^proto/dsm_app.proto$" \
+  | grep -v "^crates/dsm-anchor-core/proto/dsm_anchor.proto$" \
+  | grep -v "^node_modules/" || true)
 if [[ -n "$violations" ]]; then
   echo "[proto-guard] ERROR: Found additional .proto files in repo (ALL proto files must be removed except canonical):" >&2
   echo "$violations" >&2
