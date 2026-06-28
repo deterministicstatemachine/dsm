@@ -79,9 +79,13 @@ jobs:
         run: cargo build --locked --workspace --all-features
 
       - name: Test
+        # Run single-threaded: parts of the suite exercise process-global singletons
+        # (AppState, the session wallet-seed cache, the storage base dir, the posted-DLV
+        # store) that are one-per-process by design and are not isolated across parallel
+        # test threads. The Coverage job already runs the same suite with --test-threads=1.
         run: |
-          cargo test --locked --workspace --exclude dsm_storage_node -- --nocapture
-          cargo test --locked -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+          cargo test --locked --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
+          cargo test --locked -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture --test-threads=1
 
       - name: Codegen enforcement
         run: |
