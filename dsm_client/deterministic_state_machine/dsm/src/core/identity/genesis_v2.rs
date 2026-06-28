@@ -60,7 +60,10 @@ impl Default for GenesisEntropyProfile {
 /// IKM (any length — `wallet_seed` is the 64-byte BIP39 seed); `parts` are the bound
 /// context. Mirrors the master-seed family's use of `hkdf::extract_and_expand`.
 fn kdf32(secret: &[u8], domain: &str, parts: &[&[u8]]) -> [u8; 32] {
-    debug_assert!(domain.starts_with("DSM/"), "domain tag must start with DSM/");
+    debug_assert!(
+        domain.starts_with("DSM/"),
+        "domain tag must start with DSM/"
+    );
     let mut salt = Vec::with_capacity(domain.len() + 1);
     salt.extend_from_slice(domain.as_bytes());
     salt.push(0u8);
@@ -90,7 +93,11 @@ pub fn derive_genesis_nonce(wallet_seed: &[u8], network_id: &[u8], wallet_index:
 
 /// Genesis digest `G = H("DSM/genesis/v2" || genesis_nonce || network_id || genesis_version)`.
 /// Public + deterministic; folds only public inputs (the secret `wallet_seed`/`s0` are excluded).
-pub fn derive_genesis_g(genesis_nonce: &[u8; 32], network_id: &[u8], genesis_version: u32) -> [u8; 32] {
+pub fn derive_genesis_g(
+    genesis_nonce: &[u8; 32],
+    network_id: &[u8],
+    genesis_version: u32,
+) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_GENESIS_V2);
     h.update(genesis_nonce);
     h.update(network_id);
@@ -117,7 +124,11 @@ pub fn derive_s0(
 /// Roots the device signing (AK) keypair — independent of `DevID` to break the
 /// `DevID = H(... AK_pk ...)` circularity.
 pub fn derive_device_seed(wallet_seed: &[u8], g: &[u8; 32], device_slot: u32) -> [u8; 32] {
-    kdf32(wallet_seed, TAG_DSM_DEVICE_SEED_V2, &[g, &device_slot.to_le_bytes()])
+    kdf32(
+        wallet_seed,
+        TAG_DSM_DEVICE_SEED_V2,
+        &[g, &device_slot.to_le_bytes()],
+    )
 }
 
 /// AK (device signing/attestation) seed `AK_seed = KDF(device_seed, "DSM/device-ak/v2" || authority_policy_hash)`.
@@ -221,7 +232,9 @@ pub fn derive_genesis_v2(
     atta: &[u8; 32],
 ) -> Result<GenesisV2, DsmError> {
     if wallet_seed.is_empty() {
-        return Err(DsmError::invalid_parameter("genesis v2: wallet_seed is empty"));
+        return Err(DsmError::invalid_parameter(
+            "genesis v2: wallet_seed is empty",
+        ));
     }
     let genesis_nonce = derive_genesis_nonce(wallet_seed, network_id, wallet_index);
     let g = derive_genesis_g(&genesis_nonce, network_id, genesis_version);
@@ -267,7 +280,16 @@ mod tests {
     #[test]
     fn genesis_v2_diverges_on_wallet_seed() {
         let a = derive_genesis_v2(SEED, NET, 0, 0, 2, &APH, &ATTA).unwrap();
-        let b = derive_genesis_v2(b"a-different-wallet-seed-of-some-length-................", NET, 0, 0, 2, &APH, &ATTA).unwrap();
+        let b = derive_genesis_v2(
+            b"a-different-wallet-seed-of-some-length-................",
+            NET,
+            0,
+            0,
+            2,
+            &APH,
+            &ATTA,
+        )
+        .unwrap();
         assert_ne!(a.s0, b.s0);
         assert_ne!(a.smaster, b.smaster);
         assert_ne!(a.ak_public, b.ak_public);

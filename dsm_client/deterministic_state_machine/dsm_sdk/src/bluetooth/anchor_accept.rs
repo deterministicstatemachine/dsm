@@ -19,9 +19,7 @@
 //! or ANY failed predicate check rejects before any value is released. There is no
 //! IslandAttestation fallback and no degraded-acceptance path.
 
-use anchor_core::accept::{
-    accept_offline, AcceptError, CounterVerifier, DsmVerifier, VerifierContext,
-};
+use anchor_core::accept::{accept_offline, AcceptError, CounterVerifier, DsmVerifier, VerifierContext};
 use anchor_core::boot::BootTicket;
 use anchor_core::proto::pb;
 use anchor_core::root_advance::{CounterEvidence, Transition};
@@ -370,24 +368,26 @@ mod tests {
         };
         assert!(!v.prev_root_commits_anchor_state(&ZERO, &ZERO, &ZERO, &ZERO, 0));
         assert!(!v.next_root_commits_anchor_state(&ZERO, &ZERO, &ZERO, &ZERO, 1));
-        assert!(!v.verify_transition(&pb::TransitionPackage {
-            relationship_id: z(),
-            object_id: z(),
-            sender_device_id: z(),
-            recipient_device_id: z(),
-            prev_root: z(),
-            next_root: z(),
-            anchor_counter: 0,
-            next_anchor_counter: 1,
-            action_type: 0,
-            action_fields: vec![],
-            payload_hash: z(),
-            old_leaf_proof: vec![],
-            new_leaf_proof: vec![],
-            authority_policy_hash: z(),
-        }
-        .to_owned_transition()
-        .unwrap()
-        .as_transition()));
+        assert!(!v.verify_transition(
+            &pb::TransitionPackage {
+                relationship_id: z(),
+                object_id: z(),
+                sender_device_id: z(),
+                recipient_device_id: z(),
+                prev_root: z(),
+                next_root: z(),
+                anchor_counter: 0,
+                next_anchor_counter: 1,
+                action_type: 0,
+                action_fields: vec![],
+                payload_hash: z(),
+                old_leaf_proof: vec![],
+                new_leaf_proof: vec![],
+                authority_policy_hash: z(),
+            }
+            .to_owned_transition()
+            .unwrap()
+            .as_transition()
+        ));
     }
 }

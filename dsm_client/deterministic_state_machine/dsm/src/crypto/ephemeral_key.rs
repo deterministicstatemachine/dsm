@@ -175,7 +175,10 @@ mod tests {
         let k_step = [3u8; 32];
         let a = derive_ephemeral_seed(&[4u8; 32], ALG_ID_SPX256F, &chain_id, &h_n, &c_pre, &k_step);
         let b = derive_ephemeral_seed(&[5u8; 32], ALG_ID_SPX256F, &chain_id, &h_n, &c_pre, &k_step);
-        assert_ne!(a, b, "EK seed must depend on Smaster (the keyed-BLAKE3 key)");
+        assert_ne!(
+            a, b,
+            "EK seed must depend on Smaster (the keyed-BLAKE3 key)"
+        );
     }
 
     #[test]

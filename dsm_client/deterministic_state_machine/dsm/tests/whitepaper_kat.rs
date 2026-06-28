@@ -375,5 +375,8 @@ fn kat_dsm_smaster() {
         &device_id,
         &authority_policy_hash,
     );
-    assert_ne!(from_code, other, "Smaster must depend on the secret root s0");
+    assert_ne!(
+        from_code, other,
+        "Smaster must depend on the secret root s0"
+    );
 }

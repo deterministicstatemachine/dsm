@@ -908,7 +908,14 @@ mod tests {
         let meta = b"DSMv2|determinism".to_vec();
         let s0 = [0xCC; 32];
 
-        let s1 = deterministic_session(device_id, nodes.clone(), dev_e, mpc_e.clone(), meta.clone(), s0);
+        let s1 = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            s0,
+        );
         let s2 = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, s0);
 
         // Sanity: the two sessions agree on the public-recomputable G.
@@ -938,10 +945,15 @@ mod tests {
         let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
         let meta = b"DSMv2|secret-root".to_vec();
 
-        let s_a =
-            deterministic_session(device_id, nodes.clone(), dev_e, mpc_e.clone(), meta.clone(), [0xA0; 32]);
-        let s_b =
-            deterministic_session(device_id, nodes, dev_e, mpc_e, meta, [0xB0; 32]);
+        let s_a = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            [0xA0; 32],
+        );
+        let s_b = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, [0xB0; 32]);
 
         // Public inputs ⇒ G is identical (s0 is not part of G).
         assert_eq!(s_a.genesis_id, s_b.genesis_id);
@@ -1124,10 +1136,9 @@ mod tests {
             (nodes[4].clone(), id32(0xB5)),
         ];
         let transport = FixedEntropyTransport::new(&map);
-        let session =
-            create_genesis_with_transport(device_id, nodes.clone(), None, &transport)
-                .await
-                .expect("5-node genesis should succeed");
+        let session = create_genesis_with_transport(device_id, nodes.clone(), None, &transport)
+            .await
+            .expect("5-node genesis should succeed");
 
         // All 5 nodes were contacted exactly once each.
         let called = transport.called_nodes();

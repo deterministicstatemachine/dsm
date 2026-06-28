@@ -6,7 +6,7 @@
 use anchor_core::accept::{
     accept_offline, AcceptError, CounterVerifier, DsmVerifier, VerifierContext,
 };
-use anchor_core::appliance::{Appliance, ApplianceError, RecoverOutcome, Record, Status};
+use anchor_core::appliance::{Appliance, ApplianceError, Record, RecoverOutcome, Status};
 use anchor_core::boot::BootTicket;
 use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::proto::{decode_request, decode_response, encode_request, pb};
@@ -38,12 +38,19 @@ struct MockTropic {
 }
 impl MockTropic {
     fn with_h(h: u32) -> Self {
-        Self { h, secret: [0xC0; 32] }
+        Self {
+            h,
+            secret: [0xC0; 32],
+        }
     }
 }
 impl Tropic for MockTropic {
     fn mac_and_destroy(&mut self, q: u16, x: &[u8; 32]) -> Result<[u8; 32], TropicError> {
-        Ok(anchor_core::hash::kdf(&self.secret, "test/macandd", &[&q.to_le_bytes(), x]))
+        Ok(anchor_core::hash::kdf(
+            &self.secret,
+            "test/macandd",
+            &[&q.to_le_bytes(), x],
+        ))
     }
     fn counter_get(&mut self) -> Result<u32, TropicError> {
         Ok(self.h)
@@ -96,7 +103,14 @@ impl Dsm {
     }
 }
 impl DsmVerifier for Dsm {
-    fn prev_root_commits_anchor_state(&self, _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: u64) -> bool {
+    fn prev_root_commits_anchor_state(
+        &self,
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: u64,
+    ) -> bool {
         self.prev_commits
     }
     fn verify_boot_chain(
@@ -109,10 +123,17 @@ impl DsmVerifier for Dsm {
     ) -> bool {
         let mut prev = *committed_boot_head;
         for tk in boot_chain {
-            if &tk.anchor_bundle != bundle || &tk.anchor_head != anchor_head || tk.prev_boot_head != prev {
+            if &tk.anchor_bundle != bundle
+                || &tk.anchor_head != anchor_head
+                || tk.prev_boot_head != prev
+            {
                 return false;
             }
-            if !MockPart::part_verify(&self.part_pk, &tk.cert_message(), &tk.partition_boot_signature) {
+            if !MockPart::part_verify(
+                &self.part_pk,
+                &tk.cert_message(),
+                &tk.partition_boot_signature,
+            ) {
                 return false;
             }
             prev = tk.next_boot_head;
@@ -128,7 +149,14 @@ impl DsmVerifier for Dsm {
     fn delivers_to_receiver(&self, _: &Transition) -> bool {
         self.delivers
     }
-    fn next_root_commits_anchor_state(&self, _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: u64) -> bool {
+    fn next_root_commits_anchor_state(
+        &self,
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: u64,
+    ) -> bool {
         self.next_commits
     }
 }
@@ -159,11 +187,24 @@ fn app(h: u32) -> (App, Vec<u8>, [u8; 32]) {
     });
     let part_pk = b.partition_pk.clone();
     let bundle = b.bundle;
-    let a = Appliance::new(MockTropic::with_h(h), H0, ANCHOR, Q_BOOT, Q_TX, PART_DEV, ROOT0, b);
+    let a = Appliance::new(
+        MockTropic::with_h(h),
+        H0,
+        ANCHOR,
+        Q_BOOT,
+        Q_TX,
+        PART_DEV,
+        ROOT0,
+        b,
+    );
     (a, part_pk, bundle)
 }
 
-fn make_transition(prev_root: [u8; 32], next_root: [u8; 32], anchor_counter: u64) -> OwnedTransition {
+fn make_transition(
+    prev_root: [u8; 32],
+    next_root: [u8; 32],
+    anchor_counter: u64,
+) -> OwnedTransition {
     OwnedTransition {
         relationship_id: [1; 32],
         object_id: [2; 32],
@@ -242,7 +283,10 @@ fn full_lifecycle_boot_prepare_commit_emit_finalize() {
 fn prepare_without_boot_is_rejected() {
     let (mut a, _pk, _b) = app(H0);
     let t = make_transition(ROOT0, ROOT1, 0);
-    assert_eq!(a.prepare(&t.as_transition(), &RCHAL), Err(ApplianceError::NotBooted));
+    assert_eq!(
+        a.prepare(&t.as_transition(), &RCHAL),
+        Err(ApplianceError::NotBooted)
+    );
 }
 
 #[test]
@@ -293,7 +337,10 @@ fn accept_rejects_noncanonical_and_unpinned() {
 fn accept_rejects_bad_boot_chain() {
     let (mut rel, pk, b) = valid_release();
     rel.boot_chain[0].partition_boot_signature[0] ^= 0xFF;
-    assert_eq!(check(&rel, &ctx(&b), &pk), Err(AcceptError::BootChainInvalid));
+    assert_eq!(
+        check(&rel, &ctx(&b), &pk),
+        Err(AcceptError::BootChainInvalid)
+    );
 }
 
 #[test]
@@ -306,11 +353,17 @@ fn accept_rejects_tampered_message_commit_input_pkhash_sig() {
 
     let mut r = rel.clone();
     r.cert.partition_commitment[0] ^= 0xFF;
-    assert_eq!(check(&r, &ctx(&b), &pk), Err(AcceptError::PartitionCommitMismatch));
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::PartitionCommitMismatch)
+    );
 
     let mut r = rel.clone();
     r.cert.tropic_transfer_input[0] ^= 0xFF;
-    assert_eq!(check(&r, &ctx(&b), &pk), Err(AcceptError::WitnessInputMismatch));
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::WitnessInputMismatch)
+    );
 
     let mut r = rel.clone();
     r.cert.pk_hash[0] ^= 0xFF;
@@ -318,7 +371,10 @@ fn accept_rejects_tampered_message_commit_input_pkhash_sig() {
 
     let mut r = rel.clone();
     r.cert.sigma_tropic[0] ^= 0xFF;
-    assert_eq!(check(&r, &ctx(&b), &pk), Err(AcceptError::WitnessSigInvalid));
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::WitnessSigInvalid)
+    );
 }
 
 #[test]
@@ -327,11 +383,17 @@ fn accept_rejects_partition_cert_and_next_anchor_head() {
 
     let mut r = rel.clone();
     r.cert.sigma_partition[0] ^= 0xFF;
-    assert_eq!(check(&r, &ctx(&b), &pk), Err(AcceptError::PartitionCertInvalid));
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::PartitionCertInvalid)
+    );
 
     let mut r = rel.clone();
     r.cert.next_anchor_head[0] ^= 0xFF;
-    assert_eq!(check(&r, &ctx(&b), &pk), Err(AcceptError::NextAnchorHeadMismatch));
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::NextAnchorHeadMismatch)
+    );
 }
 
 #[test]
@@ -371,7 +433,10 @@ fn accept_rejects_counter_problems() {
     // Wrong claimed value -> faithful chip read disagrees with H0 - next.
     let mut r = rel.clone();
     r.counter.live_counter_claim += 1;
-    assert_eq!(check(&r, &ctx(&b), &pk), Err(AcceptError::CounterEvidenceInvalid));
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::CounterEvidenceInvalid)
+    );
 
     // Inauthentic transcript.
     struct FailCounter;
@@ -515,20 +580,36 @@ fn service_handle_full_flow() {
     let r = decode_response(&handle(&mut a, &encode_request(&prep))).unwrap();
     assert!(r.ok, "prepare failed: {}", r.error);
 
-    let commit = pb::ApplianceRequest { op: pb::Op::Commit as i32, ..Default::default() };
-    assert!(decode_response(&handle(&mut a, &encode_request(&commit))).unwrap().ok);
+    let commit = pb::ApplianceRequest {
+        op: pb::Op::Commit as i32,
+        ..Default::default()
+    };
+    assert!(
+        decode_response(&handle(&mut a, &encode_request(&commit)))
+            .unwrap()
+            .ok
+    );
 
-    let emit = pb::ApplianceRequest { op: pb::Op::Emit as i32, ..Default::default() };
+    let emit = pb::ApplianceRequest {
+        op: pb::Op::Emit as i32,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut a, &encode_request(&emit))).unwrap();
     assert!(r.ok);
     let rel = r.release.unwrap().to_release().unwrap();
     check(&rel, &ctx(&b), &pk).unwrap();
 
-    let fin = pb::ApplianceRequest { op: pb::Op::Finalize as i32, ..Default::default() };
+    let fin = pb::ApplianceRequest {
+        op: pb::Op::Finalize as i32,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut a, &encode_request(&fin))).unwrap();
     assert_eq!(r.active_root, ROOT1.to_vec());
 
-    let status = pb::ApplianceRequest { op: pb::Op::Status as i32, ..Default::default() };
+    let status = pb::ApplianceRequest {
+        op: pb::Op::Status as i32,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut a, &encode_request(&status))).unwrap();
     assert_eq!(r.active_anchor_counter, 1);
     assert_eq!(r.status, 0);
@@ -541,9 +622,15 @@ fn service_rejects_host_boot() {
     // host frame carrying it must be rejected as an unknown op — the host can never
     // drive a boot-head advance with an attacker-chosen firmware measurement.
     let (mut a, _pk, _b) = app(H0);
-    let req = pb::ApplianceRequest { op: 1, ..Default::default() };
+    let req = pb::ApplianceRequest {
+        op: 1,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut a, &encode_request(&req))).unwrap();
     assert!(!r.ok);
     assert_eq!(r.error, err::BAD_OP);
-    assert!(!a.active.boot_valid, "rejected host boot must not enable offline mode");
+    assert!(
+        !a.active.boot_valid,
+        "rejected host boot must not enable offline mode"
+    );
 }

@@ -251,13 +251,22 @@ impl pb::OfflineRelease {
         for t in &self.boot_chain {
             boot_chain.push(t.to_ticket()?);
         }
-        let cert = self.cert.as_ref().ok_or(ProtoError::MissingField)?.to_cert()?;
+        let cert = self
+            .cert
+            .as_ref()
+            .ok_or(ProtoError::MissingField)?
+            .to_cert()?;
         let counter = self
             .counter
             .as_ref()
             .ok_or(ProtoError::MissingField)?
             .to_evidence()?;
-        Ok(OfflineRelease { transition, boot_chain, cert, counter })
+        Ok(OfflineRelease {
+            transition,
+            boot_chain,
+            cert,
+            counter,
+        })
     }
 }
 

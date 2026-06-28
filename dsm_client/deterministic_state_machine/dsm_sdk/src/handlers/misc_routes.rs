@@ -10,7 +10,6 @@ use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_bytes_ok, pack_envelope_ok};
 
-
 impl AppRouterImpl {
     /// Dispatch handler for `debug.dump_state` and `debug.trigger_genesis` query routes.
     pub(crate) async fn handle_debug_query(&self, q: AppQuery) -> AppResult {
@@ -109,7 +108,6 @@ impl AppRouterImpl {
             other => err(format!("unknown debug query: {other}")),
         }
     }
-
 }
 
 impl AppRouterImpl {
@@ -145,4 +143,3 @@ impl AppRouterImpl {
         }
     }
 }
-

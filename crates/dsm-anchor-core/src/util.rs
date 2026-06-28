@@ -10,7 +10,10 @@ use alloc::vec::Vec;
 /// boundaries and break the collision/rebinding resistance the transition digest
 /// `D` relies on (Thm 25).
 pub fn push_var(buf: &mut Vec<u8>, field: &[u8]) {
-    debug_assert!(field.len() <= u32::MAX as usize, "field too large to length-prefix");
+    debug_assert!(
+        field.len() <= u32::MAX as usize,
+        "field too large to length-prefix"
+    );
     buf.extend_from_slice(&u32_le(field.len() as u32));
     buf.extend_from_slice(field);
 }

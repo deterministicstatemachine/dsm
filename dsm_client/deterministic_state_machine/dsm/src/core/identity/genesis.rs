@@ -497,7 +497,7 @@ pub fn create_genesis_v2(
     let state = GenesisState {
         hash: v2.g,
         initial_entropy: v2.genesis_nonce, // public, deterministic; no MPC entropy in v2
-        participants: HashSet::new(),       // no storage nodes for MnemonicV2
+        participants: HashSet::new(),      // no storage nodes for MnemonicV2
         merkle_root: None,
         device_id: Some(v2.devid),
         signing_key: SigningKey {
@@ -638,8 +638,7 @@ mod tests {
     async fn test_genesis_state_creation_mpc_only() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
-        let res =
-            create_genesis_via_blind_mpc(device_id, nodes, Some(b"test".to_vec())).await;
+        let res = create_genesis_via_blind_mpc(device_id, nodes, Some(b"test".to_vec())).await;
 
         let genesis = match res {
             Ok(g) => g,
@@ -798,8 +797,14 @@ mod tests {
         assert_eq!(a.genesis_nonce, b.genesis_nonce);
         assert_eq!(a.state.hash, b.state.hash);
         assert_eq!(a.state.device_id, b.state.device_id);
-        assert_eq!(a.state.signing_key.public_key, b.state.signing_key.public_key);
-        assert_eq!(a.state.kyber_keypair.public_key, b.state.kyber_keypair.public_key);
+        assert_eq!(
+            a.state.signing_key.public_key,
+            b.state.signing_key.public_key
+        );
+        assert_eq!(
+            a.state.kyber_keypair.public_key,
+            b.state.kyber_keypair.public_key
+        );
 
         // GenesisState matches the underlying chain (G, DevID, AK pk).
         let v2 = derive_genesis_v2(seed, net, 0, 0, 2, &aph, &atta).expect("chain");
@@ -809,11 +814,22 @@ mod tests {
         assert_eq!(a.genesis_nonce, v2.genesis_nonce);
 
         // A different wallet seed yields a different genesis + identity.
-        let c = create_genesis_v2(b"a-different-wallet-seed-of-some-length-........", net, 0, 0, 2, &aph, &atta)
-            .expect("v2 genesis");
+        let c = create_genesis_v2(
+            b"a-different-wallet-seed-of-some-length-........",
+            net,
+            0,
+            0,
+            2,
+            &aph,
+            &atta,
+        )
+        .expect("v2 genesis");
         assert_ne!(a.state.hash, c.state.hash);
         assert_ne!(a.state.device_id, c.state.device_id);
-        assert_ne!(a.state.signing_key.public_key, c.state.signing_key.public_key);
+        assert_ne!(
+            a.state.signing_key.public_key,
+            c.state.signing_key.public_key
+        );
     }
 
     #[test]
@@ -826,8 +842,10 @@ mod tests {
         let aph = [0x33u8; 32];
 
         // The canonical Android/SDK wallet-creation entry: only the wallet seed is secret.
-        let a = create_genesis_v2_self_attested(seed, net, 0, 0, 2, &aph).expect("self-attested v2");
-        let b = create_genesis_v2_self_attested(seed, net, 0, 0, 2, &aph).expect("self-attested v2");
+        let a =
+            create_genesis_v2_self_attested(seed, net, 0, 0, 2, &aph).expect("self-attested v2");
+        let b =
+            create_genesis_v2_self_attested(seed, net, 0, 0, 2, &aph).expect("self-attested v2");
         assert_eq!(a.profile, GenesisEntropyProfile::MnemonicV2);
         assert_eq!(a.state.hash, b.state.hash);
         assert_eq!(a.state.device_id, b.state.device_id);
@@ -844,8 +862,15 @@ mod tests {
         assert_eq!(a.genesis_nonce, explicit.genesis_nonce);
 
         // A different wallet seed yields a different self-attested identity.
-        let c = create_genesis_v2_self_attested(b"another-self-attested-seed-of-length-....", net, 0, 0, 2, &aph)
-            .expect("self-attested v2");
+        let c = create_genesis_v2_self_attested(
+            b"another-self-attested-seed-of-length-....",
+            net,
+            0,
+            0,
+            2,
+            &aph,
+        )
+        .expect("self-attested v2");
         assert_ne!(a.state.device_id, c.state.device_id);
     }
 }

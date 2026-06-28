@@ -85,11 +85,17 @@ fn base(op: i32) -> pb::ApplianceResponse {
 }
 
 fn ok(op: i32) -> pb::ApplianceResponse {
-    pb::ApplianceResponse { ok: true, ..base(op) }
+    pb::ApplianceResponse {
+        ok: true,
+        ..base(op)
+    }
 }
 
 fn fail(op: i32, code: u32) -> pb::ApplianceResponse {
-    pb::ApplianceResponse { error: code, ..base(op) }
+    pb::ApplianceResponse {
+        error: code,
+        ..base(op)
+    }
 }
 
 /// Dispatch a decoded request against the appliance.
@@ -126,11 +132,19 @@ pub fn dispatch<T: Tropic, S: WitnessSig, P: PartitionSig>(
             Err(e) => fail(op, appliance_code(e)),
         },
         Ok(pb::Op::Emit) => match app.emit() {
-            Ok(rel) => pb::ApplianceResponse { ok: true, release: Some(rel.to_pb()), ..base(op) },
+            Ok(rel) => pb::ApplianceResponse {
+                ok: true,
+                release: Some(rel.to_pb()),
+                ..base(op)
+            },
             Err(e) => fail(op, appliance_code(e)),
         },
         Ok(pb::Op::Finalize) => match app.finalize() {
-            Ok(h) => pb::ApplianceResponse { ok: true, active_root: h.to_vec(), ..base(op) },
+            Ok(h) => pb::ApplianceResponse {
+                ok: true,
+                active_root: h.to_vec(),
+                ..base(op)
+            },
             Err(e) => fail(op, appliance_code(e)),
         },
         Ok(pb::Op::Status) => pb::ApplianceResponse {

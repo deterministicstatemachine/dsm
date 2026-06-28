@@ -1017,5 +1017,4 @@ mod tests {
         let s = AppStateStorage::default();
         assert!(s.contact_device_tree_roots.is_empty());
     }
-
 }

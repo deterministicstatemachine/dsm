@@ -90,13 +90,12 @@ pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
         crate::sdk::app_state::AppState::get_device_id(),
         "device_id (DevID)",
     )?;
-    let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(
-        || {
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
             dsm::types::error::DsmError::InvalidState(
                 "wallet seed unavailable for Smaster re-derivation (wallet locked)".into(),
             )
-        },
-    )?;
+        })?;
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
     let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
     Ok(derive_smaster(&s0, &g, &devid, &aph))
@@ -119,13 +118,12 @@ pub fn current_chain_head_at_rest_key() -> Result<[u8; 32], dsm::types::error::D
         crate::sdk::app_state::AppState::get_device_id(),
         "device_id (DevID)",
     )?;
-    let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(
-        || {
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
             dsm::types::error::DsmError::InvalidState(
                 "wallet seed unavailable for chain-head at-rest key (wallet locked)".into(),
             )
-        },
-    )?;
+        })?;
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
     let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
     let mut hasher = dsm::crypto::blake3::dsm_domain_hasher_keyed(

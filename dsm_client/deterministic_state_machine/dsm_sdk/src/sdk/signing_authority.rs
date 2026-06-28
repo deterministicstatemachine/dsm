@@ -19,7 +19,9 @@ use crate::sdk::app_state::AppState;
 
 fn genesis_from_app_state() -> Result<[u8; 32], DsmError> {
     let genesis_hash = AppState::get_genesis_hash().ok_or_else(|| {
-        DsmError::InvalidState("genesis_hash not initialized for canonical signing authority".into())
+        DsmError::InvalidState(
+            "genesis_hash not initialized for canonical signing authority".into(),
+        )
     })?;
     if genesis_hash.len() != 32 {
         return Err(DsmError::invalid_parameter(format!(
@@ -34,13 +36,12 @@ fn genesis_from_app_state() -> Result<[u8; 32], DsmError> {
 
 pub(crate) fn derive_current_signing_keypair() -> Result<SignatureKeyPair, DsmError> {
     let genesis = genesis_from_app_state()?;
-    let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(
-        || {
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
             DsmError::InvalidState(
                 "wallet seed unavailable for canonical signing authority (wallet locked)".into(),
             )
-        },
-    )?;
+        })?;
 
     crate::init::derive_device_signing_keypair(&wallet_seed, &genesis)
 }

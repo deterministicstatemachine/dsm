@@ -969,7 +969,9 @@ impl IdentitySDK {
                     DsmError::InvalidState("device_id not available for key re-derivation".into())
                 })?;
                 let gh_raw = AppState::get_genesis_hash().ok_or_else(|| {
-                    DsmError::InvalidState("genesis_hash not available for key re-derivation".into())
+                    DsmError::InvalidState(
+                        "genesis_hash not available for key re-derivation".into(),
+                    )
                 })?;
                 if gh_raw.len() != 32 {
                     return Err(DsmError::InvalidState(
@@ -984,9 +986,10 @@ impl IdentitySDK {
                     })?;
                 let mut g = [0u8; 32];
                 g.copy_from_slice(&gh_raw);
-                let kp = crate::init::derive_device_signing_keypair(&wallet_seed, &g).map_err(|e| {
-                    DsmError::InvalidState(format!("signing key re-derivation failed: {e}"))
-                })?;
+                let kp =
+                    crate::init::derive_device_signing_keypair(&wallet_seed, &g).map_err(|e| {
+                        DsmError::InvalidState(format!("signing key re-derivation failed: {e}"))
+                    })?;
                 let public_key = kp.public_key.clone();
                 // Persist the re-derived key so future calls don't need to re-derive
                 let smt = AppState::get_smt_root().unwrap_or_else(|| vec![0u8; 32]);

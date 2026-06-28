@@ -248,7 +248,11 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         &aph,
     ) {
         Ok(o) => o,
-        Err(e) => return err(format!("system.createGenesisV2: genesis derivation failed: {e}")),
+        Err(e) => {
+            return err(format!(
+                "system.createGenesisV2: genesis derivation failed: {e}"
+            ))
+        }
     };
     let genesis_state = &outcome.state;
     let devid = match genesis_state.device_id {
@@ -266,7 +270,9 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         Err(e) => return err(format!("system.createGenesisV2: CoreSDK init failed: {e}")),
     };
     if let Err(e) = core.install_v2_genesis(genesis_state) {
-        return err(format!("system.createGenesisV2: genesis install failed: {e}"));
+        return err(format!(
+            "system.createGenesisV2: genesis install failed: {e}"
+        ));
     }
 
     // 4. Persist the public Genesis v2 record (genesis_nonce + profile + version).
@@ -312,7 +318,9 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     crate::sdk::app_state::AppState::set_has_identity(true);
     let entropy = crate::derive_production_entropy(&devid, &g, &wallet_seed);
     if let Err(e) = crate::initialize_sdk_context(devid.to_vec(), g.to_vec(), entropy) {
-        return err(format!("system.createGenesisV2: SDK context init failed: {e}"));
+        return err(format!(
+            "system.createGenesisV2: SDK context init failed: {e}"
+        ));
     }
 
     // 6. Return the genesis envelope (device_entropy carries the PUBLIC genesis_nonce in v2).

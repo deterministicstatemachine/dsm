@@ -223,7 +223,12 @@ where
     }
 
     // (9) C^P recomputes.
-    let c_p = partition_commit(&cert.anchor_bundle, &cert.prev_anchor_head, &cert.current_boot_head, &m);
+    let c_p = partition_commit(
+        &cert.anchor_bundle,
+        &cert.prev_anchor_head,
+        &cert.current_boot_head,
+        &m,
+    );
     if !ct_eq_32(&c_p, &cert.partition_commitment) {
         return Err(AcceptError::PartitionCommitMismatch);
     }

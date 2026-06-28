@@ -1211,9 +1211,8 @@ mod tests {
     fn setup_signing_identity() -> [u8; 32] {
         // Storage base dir is a process-global set-once; set it idempotently so the helper
         // works regardless of test ordering (AppState::set_identity_info persists to disk).
-        let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
-            "./.dsm_testdata",
-        ));
+        let _ =
+            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
         crate::sdk::app_state::AppState::reset_for_testing();
         crate::sdk::app_state::AppState::set_identity_info(
             vec![0x11; 32], // device_id (DevID)

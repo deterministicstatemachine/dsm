@@ -99,7 +99,10 @@ pub fn anchor_bundle(
 /// the birth fuse preimage**.
 pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Birth {
     // Partition keypair (pre-bundle, so its pubkey can be bound into B).
-    let part_seed = h(domain::PARTITION_KEY_SEED_V1, &[inp.partition_key_seed, inp.partition_device_id]);
+    let part_seed = h(
+        domain::PARTITION_KEY_SEED_V1,
+        &[inp.partition_key_seed, inp.partition_device_id],
+    );
     let (partition_sk, partition_pk) = P::part_keygen(&part_seed);
 
     // One-way birth fuse and its public commitment.

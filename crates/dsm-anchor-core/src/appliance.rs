@@ -19,13 +19,13 @@ use crate::boot::{
     advance_ratchet, boot_cert_message, boot_fuse_input, next_boot_head, BootTicket,
 };
 use crate::enrollment::{commit, Birth};
+use crate::proto::MAX_BOOT_CHAIN;
 use crate::root_advance::{
     next_anchor_head, partition_commit, partition_final_cert_message, pk_hash,
     root_advance_message, transfer_witness_key, transition_digest, tropic_transfer_input,
     tropic_witness_message, Certificate, CounterEvidence, OfflineRelease, OwnedTransition,
     Transition,
 };
-use crate::proto::MAX_BOOT_CHAIN;
 use crate::tropic::{PartitionSig, Tropic, TropicError, WitnessSig};
 use crate::util::{ct_eq_32, zeroize, zeroize_vec};
 
@@ -189,7 +189,10 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
     /// down, so `H ≤ H₀`; a reported `H > H₀` is impossible and is rejected.
     pub fn live_index(&mut self) -> Result<u64, ApplianceError> {
         let h = self.tropic.counter_get().map_err(ApplianceError::Tropic)?;
-        let u = self.h0.checked_sub(h).ok_or(ApplianceError::CounterMismatch)?;
+        let u = self
+            .h0
+            .checked_sub(h)
+            .ok_or(ApplianceError::CounterMismatch)?;
         Ok(u as u64)
     }
 
@@ -303,7 +306,10 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
         if h == 0 {
             return Err(ApplianceError::CounterExhausted);
         }
-        let live_u = self.h0.checked_sub(h).ok_or(ApplianceError::CounterMismatch)? as u64;
+        let live_u = self
+            .h0
+            .checked_sub(h)
+            .ok_or(ApplianceError::CounterMismatch)? as u64;
         if self.active.anchor_counter != live_u {
             return Err(ApplianceError::CounterMismatch);
         }
@@ -320,14 +326,28 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
             .mac_and_destroy(self.q_tx, &x_t)
             .map_err(ApplianceError::Tropic)?;
         let mut k_t = transfer_witness_key(
-            &w_t, &x_t, &m, &self.bundle, &a_i, &j_now, &self.anchor_id, self.q_tx,
+            &w_t,
+            &x_t,
+            &m,
+            &self.bundle,
+            &a_i,
+            &j_now,
+            &self.anchor_id,
+            self.q_tx,
         );
         let (sk_hw, pk_hw) = S::keygen(&k_t);
         let p_hw = pk_hash(&pk_hw);
         let m_t = tropic_witness_message(&m, &c_p, &x_t, &p_hw);
         let sigma_tropic = S::sign(&sk_hw, &m_t);
         let m_p = partition_final_cert_message(
-            &self.bundle, &a_i, &j_now, &m, &c_p, &p_hw, &sigma_tropic, t.next_anchor_counter,
+            &self.bundle,
+            &a_i,
+            &j_now,
+            &m,
+            &c_p,
+            &p_hw,
+            &sigma_tropic,
+            t.next_anchor_counter,
         );
         let sigma_partition = P::part_sign(&self.partition_sk, &m_p);
         // = H₀ − (uᵢ+1); the h==0 guard + counter pin above keep this ≥ 0, the
@@ -336,7 +356,15 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
             .checked_sub(t.next_anchor_counter)
             .ok_or(ApplianceError::CounterExhausted)?;
         let a_next = next_anchor_head(
-            &self.bundle, &a_i, &j_now, &m, &c_p, &sigma_partition, &p_hw, &sigma_tropic, attested,
+            &self.bundle,
+            &a_i,
+            &j_now,
+            &m,
+            &c_p,
+            &sigma_partition,
+            &p_hw,
+            &sigma_tropic,
+            attested,
         );
 
         w_t.iter_mut().for_each(|b| *b = 0);
@@ -399,7 +427,10 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
         if h == 0 {
             return Err(ApplianceError::CounterExhausted);
         }
-        let live_u = self.h0.checked_sub(h).ok_or(ApplianceError::CounterMismatch)? as u64;
+        let live_u = self
+            .h0
+            .checked_sub(h)
+            .ok_or(ApplianceError::CounterMismatch)? as u64;
         if live_u != p.cert.anchor_counter {
             return Err(ApplianceError::CounterMismatch);
         }

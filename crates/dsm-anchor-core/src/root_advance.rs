@@ -120,7 +120,10 @@ pub fn partition_commit(
     current_boot_head: &[u8; 32],
     m: &[u8; 32],
 ) -> [u8; 32] {
-    h(domain::PARTITION_COMMIT_V1, &[bundle, anchor_head, current_boot_head, m])
+    h(
+        domain::PARTITION_COMMIT_V1,
+        &[bundle, anchor_head, current_boot_head, m],
+    )
 }
 
 /// TROPIC01 transfer witness input `X^T` (§17) — binds the partition commitment
@@ -135,7 +138,14 @@ pub fn tropic_transfer_input(
 ) -> [u8; 32] {
     h(
         domain::TROPIC_FUSED_TRANSFER_INPUT_V1,
-        &[bundle, anchor_head, current_boot_head, m, partition_commitment, &u16_le(q_tx)],
+        &[
+            bundle,
+            anchor_head,
+            current_boot_head,
+            m,
+            partition_commitment,
+            &u16_le(q_tx),
+        ],
     )
 }
 
@@ -155,7 +165,15 @@ pub fn transfer_witness_key(
     kdf(
         w_t,
         domain::TROPIC_FUSED_TRANSFER_WITNESS_KEY_V1,
-        &[x_t, m, bundle, anchor_head, current_boot_head, anchor_id, &u16_le(q_tx)],
+        &[
+            x_t,
+            m,
+            bundle,
+            anchor_head,
+            current_boot_head,
+            anchor_id,
+            &u16_le(q_tx),
+        ],
     )
 }
 
