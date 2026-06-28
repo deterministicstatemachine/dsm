@@ -1099,7 +1099,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::SecondaryDeviceResponse(_)
             | gp::envelope::Payload::ContactQrResponse(_)
             | gp::envelope::Payload::StorageStatusResponse(_)
-            | gp::envelope::Payload::DbrwStatusResponse(_)
             | gp::envelope::Payload::TokenCreateRequest(_)
             | gp::envelope::Payload::TokenCreateResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
@@ -1318,13 +1317,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::GenesisLifecycle(_))
         | Some(gp::envelope::Payload::BootstrapMeasurementReport(_))
         | Some(gp::envelope::Payload::BootstrapFinalizeResponse(_))
-        // C-DBRW Protocol 6.2 payloads — owned entirely by the SDK layer
-        // (cdbrw_responder / cdbrw_enrollment_writer / cdbrw_verifier).
-        // The core bridge never constructs or consumes these.
-        | Some(gp::envelope::Payload::CdbrwTrustSnapshot(_))
-        | Some(gp::envelope::Payload::CdbrwRespondResponse(_))
-        | Some(gp::envelope::Payload::CdbrwVerifyResponse(_))
-        | Some(gp::envelope::Payload::CdbrwEnrollResponse(_))
         // Phase B.7 (issue #278) — DeviceTreeViewer payload is owned by
         // the SDK's identity routes (`identity.devtree.snapshot`); the
         // core bridge never constructs or consumes it.

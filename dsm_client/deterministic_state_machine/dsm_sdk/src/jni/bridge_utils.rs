@@ -205,18 +205,10 @@ pub fn ensure_bootstrap() {
     if !crate::is_sdk_context_initialized() {
         log::info!("ensure_bootstrap: SDK context not initialized (bootstrap is platform-managed)");
     }
-
-    if SDK_READY.load(Ordering::SeqCst) {
-        let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
-            .map(|k| k.len() == 32)
-            .unwrap_or(false);
-        if !dbrw_ok {
-            SDK_READY.store(false, Ordering::SeqCst);
-            log::warn!(
-                "ensure_bootstrap: C-DBRW binding key missing or invalid after readiness; failing closed."
-            );
-        }
-    }
+    // Genesis v2 has no persisted device secret to re-check here: SDK readiness is structural
+    // (context initialized + identity present). Operations that need the wallet seed (signing,
+    // EK/coins, at-rest decryption) re-derive it from the unlocked wallet and fail closed
+    // individually when the wallet is locked.
 }
 
 pub fn fetch_transport_headers_bytes() -> Result<Vec<u8>, String> {

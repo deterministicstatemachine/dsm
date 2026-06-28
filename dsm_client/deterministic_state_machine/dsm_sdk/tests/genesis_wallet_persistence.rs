@@ -35,6 +35,8 @@ fn genesis_persists_and_initializes_wallet_metadata() {
         hash_chain_proof: None,
         smt_proof: None,
         verification_step: None,
+        genesis_nonce: String::new(),
+        genesis_profile: String::new(),
     };
 
     // Store genesis record and ensure wallet state

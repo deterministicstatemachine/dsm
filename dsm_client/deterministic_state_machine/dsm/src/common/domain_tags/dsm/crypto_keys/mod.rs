@@ -2,12 +2,10 @@
 
 //! DSM namespace tags: crypto keys
 
-mod cdbrw;
 mod commitments;
 mod key_derivation;
 mod nonce_randomness;
 
-pub use cdbrw::*;
 pub use commitments::*;
 pub use key_derivation::*;
 pub use nonce_randomness::*;
@@ -17,24 +15,18 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_ATTRACTOR_COMMIT,
     TAG_DSM_BALANCE_COMMIT,
     TAG_DSM_BTC_NONCE,
-    TAG_DSM_CDBRW_BIND,
-    TAG_DSM_CDBRW_BINDING_RECORD,
-    TAG_DSM_CDBRW_RESPONSE,
-    TAG_DSM_CDBRW_SEED,
-    TAG_DSM_CDBRW_THERMAL,
     TAG_DSM_CERT_CHAIN_SK_AEAD,
     TAG_DSM_CODEC_HASH,
-    TAG_DSM_DBRW_BINDING_V2,
     TAG_DSM_DETERMINISTIC_NONCE_32,
     TAG_DSM_DETERMINISTIC_NONCE_GCM,
     TAG_DSM_DET_RNG_SEED,
-    TAG_DSM_EK,
     TAG_DSM_EK_CERT,
+    TAG_DSM_EK_V1,
     TAG_DSM_EXTERNAL_COMMIT_HASH,
     TAG_DSM_EXTERNAL_COMMIT_ID,
     TAG_DSM_FLC_HASH_V2,
     TAG_DSM_HASH_MULTIPLE,
-    TAG_DSM_KYBER_COINS,
+    TAG_DSM_KYBER_COINS_V1,
     TAG_DSM_KYBER_SS,
     TAG_DSM_MERKLE_PATH,
     TAG_DSM_ML_KEM_KEYGEN_D,
@@ -61,6 +53,13 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_SMART_COMMIT_ID_V2,
     TAG_DSM_SMART_COMMIT_NONCE_V2,
     TAG_DSM_SMART_COMMIT_PREDICATE,
+    TAG_DSM_S0_V2,
+    TAG_DSM_SMASTER_V2,
+    TAG_DSM_DEVICE_SEED_V2,
+    TAG_DSM_DEVICE_AK_V2,
+    TAG_DSM_ATTA_V2,
+    TAG_DSM_CHAIN_HEAD_AT_REST_V2,
+    TAG_DSM_KYBER_RECIPIENT_PUB_V1,
     TAG_DSM_SPHINCS_KDF,
     TAG_DSM_SPHINCS_SEED,
     TAG_DSM_STEP_SALT,

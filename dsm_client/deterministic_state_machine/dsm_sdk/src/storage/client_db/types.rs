@@ -36,6 +36,10 @@ pub struct GenesisRecord {
     pub hash_chain_proof: Option<Vec<u8>>,
     pub smt_proof: Option<Vec<u8>>,
     pub verification_step: Option<u64>,
+    /// Public Genesis v2 nonce (Base32-Crockford); empty for legacy/MPC records.
+    pub genesis_nonce: String,
+    /// Genesis entropy profile: "MnemonicV2" (canonical) / "CommitRevealMpcV1" (legacy); empty for old rows.
+    pub genesis_profile: String,
 }
 
 #[derive(Debug, Clone)]

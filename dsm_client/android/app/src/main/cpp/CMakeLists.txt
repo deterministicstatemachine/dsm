@@ -15,46 +15,9 @@ set_target_properties(dsm_sdk PROPERTIES
 )
 
 # ------------------------------------------------------------------
-# Silicon Fingerprint: NDK-based hardware PUF for C-DBRW anti-cloning
+# No native C++ wrapper. The silicon-fingerprint PUF library (siliconfp.cpp)
+# was removed with C-DBRW: Genesis v2 is mnemonic-rooted and there is no
+# silicon anti-clone. Anti-clone (offline bearer only) is the Boot Fenced
+# Fused Anchor (separate secure-element firmware). The Rust SDK
+# (libdsm_sdk.so) exports the JNI surface directly — single-path router.
 # ------------------------------------------------------------------
-add_library(
-    siliconfp
-    SHARED
-    siliconfp.cpp
-)
-
-find_library(
-    log-lib
-    log
-)
-
-target_compile_features(siliconfp PRIVATE cxx_std_17)
-
-# Conservative flags: correctness > cleverness
-target_compile_options(siliconfp PRIVATE
-    -O2
-    -fno-exceptions
-    -fno-rtti
-    -Wall
-    -Wextra
-    -Werror
-)
-
-target_link_libraries(
-    siliconfp
-    ${log-lib}
-    dsm_sdk  # for dsm_blake3_keyed, dsm_seed_orbit, dsm_get_cdbrw_binding_key
-)
-
-# ------------------------------------------------------------------
-# C-DBRW native surface (entropy health, moments, BLAKE3 static lib)
-# was removed when Protocol 6.2 collapsed into the single-path router.
-# All histogram math, Wasserstein distance, entropy health, and anchor
-# commitment live in Rust (`dsm_sdk/src/security/cdbrw_*`). The only
-# native library the Kotlin side still loads is `libsiliconfp.so`,
-# which provides the raw NDK orbit-density probe consumed by
-# `SiliconFingerprintNative.captureOrbitDensity`.
-# ------------------------------------------------------------------
-
-# No C++ wrapper needed — Rust library exports JNI functions directly
-# through `libdsm_sdk.so`. Unified JNI surface only.

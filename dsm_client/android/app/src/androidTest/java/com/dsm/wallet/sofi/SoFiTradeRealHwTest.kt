@@ -120,14 +120,11 @@ class SoFiTradeRealHwTest {
             installed,
         )
 
-        // The C-DBRW access gate refuses route reads until the resume
-        // flow has published a fresh trust snapshot via
-        // `BridgeIdentityHandler.resumeCdbrwTrust`. AppRouter being
-        // installed isn't enough — the trust snapshot publish runs in
-        // the background after AppRouter installation and takes 5-15s
-        // for the measure_trust orbit. Poll `balance.get` until it
-        // stops failing with the snapshot-missing error, then read
-        // the actual balance.
+        // The full AppRouter installs only once the wallet is unlocked
+        // (Genesis v2: signing re-derives from the cached wallet seed).
+        // ensureAppRouterInstalled returning true for the bootstrap stub
+        // isn't enough — poll `balance.get` until the real router answers
+        // it, then read the actual balance.
         // 90s budget — covers slow first-boot resume (Minimal → Full
         // router transition + measure_trust orbit + trust snapshot publish).
         val balance = pollBalanceUntilTrustReady("ERA", maxAttempts = 900, pollMs = 100L)

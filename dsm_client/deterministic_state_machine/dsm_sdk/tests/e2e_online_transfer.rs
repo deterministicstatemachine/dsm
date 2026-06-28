@@ -61,6 +61,8 @@ fn persist_live_genesis_record(
         hash_chain_proof: None,
         smt_proof: None,
         verification_step: None,
+        genesis_nonce: String::new(),
+        genesis_profile: String::new(),
     };
     store_genesis_record_with_verification(&genesis_record)
         .unwrap_or_else(|e| panic!("Failed to store genesis record: {e}"));

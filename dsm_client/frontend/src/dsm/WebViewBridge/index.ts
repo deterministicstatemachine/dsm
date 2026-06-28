@@ -66,7 +66,7 @@ export const {
 } = diagnostics;
 
 export const { addDsmEventListener } = events;
-export const { addSecondaryDeviceBin, createGenesisViaRouter } = genesis;
+export const { addSecondaryDeviceBin, createGenesisViaRouter, generateMnemonic } = genesis;
 
 export const { fetchDeviceTreeSnapshot } = devtree;
 export const { getPreference, setPreference } = preferences;

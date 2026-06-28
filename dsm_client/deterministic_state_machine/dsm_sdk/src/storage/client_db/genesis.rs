@@ -31,8 +31,8 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
              genesis_id,device_id,mpc_proof,dbrw_binding,merkle_root,
              participant_count,chain_tip,publication_hash,storage_nodes,
              entropy_hash,protocol_version,hash_chain_proof,smt_proof,
-             verification_step,created_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+             verification_step,created_at,genesis_nonce,genesis_profile)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
             record.genesis_id,
             record.device_id,
@@ -49,6 +49,8 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
             &smt_bytes as &[u8],
             ts as i64,
             ts as i64,
+            record.genesis_nonce,
+            record.genesis_profile,
         ],
     )?;
     Ok(())
@@ -76,12 +78,14 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<i64>,
+        String,
+        String,
     )> = conn
         .query_row(
             "SELECT genesis_id,device_id,mpc_proof,dbrw_binding,merkle_root,
                     participant_count,chain_tip,publication_hash,storage_nodes,
                     entropy_hash,protocol_version,hash_chain_proof,smt_proof,
-                    verification_step
+                    verification_step,genesis_nonce,genesis_profile
                FROM genesis_records
            ORDER BY created_at DESC
               LIMIT 1",
@@ -102,6 +106,8 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
                     r.get(11)?,
                     r.get(12)?,
                     r.get(13)?,
+                    r.get(14)?,
+                    r.get(15)?,
                 ))
             },
         )
@@ -122,6 +128,8 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
         hash_proof,
         smt_proof,
         v_ts,
+        genesis_nonce,
+        genesis_profile,
     )) = row
     {
         let storage_nodes: Vec<String> = if nodes_csv.is_empty() {
@@ -145,6 +153,8 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
             hash_chain_proof: hash_proof.clone(),
             smt_proof,
             verification_step: v_ts.map(|v| v as u64),
+            genesis_nonce,
+            genesis_profile,
         };
 
         if let Some(proof) = hash_proof {
@@ -186,6 +196,8 @@ mod tests {
             hash_chain_proof: None,
             smt_proof: None,
             verification_step: None,
+            genesis_nonce: String::new(),
+            genesis_profile: String::new(),
         }
     }
 

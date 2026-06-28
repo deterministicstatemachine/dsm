@@ -6,6 +6,7 @@
 //! GATT server/client roles, MTU-aware frame chunking, and the 3-phase
 //! bilateral commit protocol over Bluetooth Low Energy.
 
+pub mod anchor_accept;
 pub mod android_ble_bridge;
 pub mod bilateral_ble_handler;
 pub mod bilateral_envelope;

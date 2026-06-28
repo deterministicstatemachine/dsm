@@ -43,7 +43,6 @@ pub mod ble_events;
 
 /// C-DBRW JNI implementation (Android only)
 #[cfg(target_os = "android")]
-pub mod cdbrw;
 
 /// Generic Rust→WebView event dispatch (Android only)
 #[cfg(target_os = "android")]
@@ -70,7 +69,6 @@ pub use crate::sdk::session_manager::set_sdk_ready;
 #[allow(unused_imports)]
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
-pub use self::cdbrw::*;
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
 pub use self::ble_events::*;

@@ -2,6 +2,7 @@
 
 //! DSM namespace tags: commitment and hash domains
 
+pub const TAG_DSM_ATTRACTOR_COMMIT: &str = "DSM/attractor-commit";
 pub const TAG_DSM_BALANCE_COMMIT: &str = "DSM/balance-commit";
 pub const TAG_DSM_CODEC_HASH: &str = "DSM/codec-hash";
 pub const TAG_DSM_EXTERNAL_COMMIT_HASH: &str = "DSM/external-commit-hash";

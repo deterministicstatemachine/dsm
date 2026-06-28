@@ -57,8 +57,9 @@ impl DeviceAdmissionSDK {
 
     /// NEW device: build the admission request to send to the existing device. `entropy` is 32 bytes
     /// generated at the platform boundary (as in the genesis/secondary setup, which is untouched).
-    /// `genesis_hash` comes from the existing device's scanned QR. Derives `DevID_new` (unchanged
-    /// derivation) and self-attests with the new device's DBRW-bound signing key.
+    /// `genesis_hash` comes from the existing device's scanned QR. Derives `DevID_new` (bound to
+    /// the device's wallet-seed-rooted `Smaster`) and self-attests with the new device's Genesis v2
+    /// AK signing key.
     pub async fn build_admission_request(
         genesis_hash: [u8; 32],
         entropy: &[u8],
@@ -68,8 +69,8 @@ impl DeviceAdmissionSDK {
                 "admission request: entropy must be 32 bytes",
             ));
         }
-        let dbrw = crate::fetch_dbrw_binding_key()?;
-        let new_device_id = derive_secondary_device_id(entropy, &genesis_hash, &dbrw);
+        let s_master = crate::init::current_smaster()?;
+        let new_device_id = derive_secondary_device_id(entropy, &genesis_hash, &s_master);
         let new_signing_pubkey = AppState::get_public_key().ok_or_else(|| {
             DsmError::InvalidState("admission request: no device signing pubkey".into())
         })?;

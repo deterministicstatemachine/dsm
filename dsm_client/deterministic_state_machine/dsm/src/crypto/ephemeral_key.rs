@@ -1,102 +1,67 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! SPHINCS+ ephemeral key chain for C-DBRW verification protocol.
+//! SPHINCS+ per-step ephemeral key chain (whitepaper §11.1/§12).
 //!
-//! Implements Alg. 3 steps 6-8 from the C-DBRW paper Rev 2.0:
-//! - Derive ephemeral seed from hash chain state + Kyber shared secret + K_DBRW
-//! - Generate ephemeral SPHINCS+ keypair (SPX256f) from that seed
-//! - Sign the verification response (gamma || ct || challenge)
+//! The per-step seed is keyed BLAKE3 keyed by the device master seed `Smaster`
+//! (NOT HKDF — see §12 note on KDF primitives), over versioned, algorithm- and
+//! chain-bound context. From it a per-step SPHINCS+ (SPX256f) keypair is
+//! generated and certified by the previous signer (AK at step 0, else EK_n).
+//! The per-step EK chain binds AUTHORSHIP only; anti-clone is supplied
+//! separately by the secure-element attestation (see the anti-clone spec).
 //!
 //! # Domain Tags
 //!
 //! | Tag | Usage |
 //! |-----|-------|
-//! | `DSM/ek\0` | Ephemeral key seed derivation |
+//! | `DSM/ek/v1\0` | Per-step ephemeral key seed (keyed by Smaster) |
+//! | `DSM/kyber-coins/v1\0` | Deterministic ML-KEM-768 coins (keyed by Smaster) |
 //! | `DSM/ek-cert\0` | Per-step ephemeral-key certification (whitepaper §11.1) |
 
-use crate::crypto::blake3::dsm_domain_hasher;
+use crate::crypto::blake3::{dsm_domain_hasher, dsm_domain_hasher_keyed};
 use crate::crypto::sphincs::{generate_keypair_from_seed, sign, sphincs_verify, SphincsVariant};
 use crate::types::error::DsmError;
 
-/// Derive the ephemeral key seed E_{n+1}.
+/// Canonical per-step signature suite identifier (SPHINCS+ SPX256f), bound into
+/// the EK seed context as `alg_id` per whitepaper §11.1 Eq.14.
+pub const ALG_ID_SPX256F: &[u8] = b"SPX256f";
+/// Canonical KEM suite identifier (ML-KEM-768), bound into the coins context as
+/// `kyber_alg_id` per whitepaper §12.
+pub const KYBER_ALG_ID_MLKEM768: &[u8] = b"ML-KEM-768";
+
+/// Derive the per-step ephemeral key seed E_{n+1} (whitepaper §11.1/§12 Eq.14).
 ///
-/// `E_{n+1} = BLAKE3("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)`
+/// `E_{n+1} = keyed-BLAKE3(key = Smaster,
+///            "DSM/ek/v1\0" || alg_id || chain_id || h_n || C_pre || k_step)`
 ///
+/// - `s_master`: device master seed Smaster (the keyed-BLAKE3 key; the secret root)
+/// - `alg_id`: per-step signature suite id (e.g. [`ALG_ID_SPX256F`])
+/// - `chain_id`: relationship / chain identifier (32 bytes)
 /// - `h_n`: current hash chain tip (32 bytes)
 /// - `c_pre`: pre-commitment hash (32 bytes)
-/// - `k_step`: Kyber step key derived from shared secret (32 bytes)
-/// - `k_dbrw`: C-DBRW binding key (32 bytes)
+/// - `k_step`: Kyber step key derived from the shared secret (32 bytes)
 pub fn derive_ephemeral_seed(
+    s_master: &[u8; 32],
+    alg_id: &[u8],
+    chain_id: &[u8; 32],
     h_n: &[u8; 32],
     c_pre: &[u8; 32],
     k_step: &[u8; 32],
-    k_dbrw: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_EK);
+    let mut hasher = dsm_domain_hasher_keyed(crate::common::domain_tags::TAG_DSM_EK_V1, s_master);
+    hasher.update(alg_id);
+    hasher.update(chain_id);
     hasher.update(h_n);
     hasher.update(c_pre);
     hasher.update(k_step);
-    hasher.update(k_dbrw);
     *hasher.finalize().as_bytes()
 }
 
 /// Generate an ephemeral SPHINCS+ keypair from a seed.
 ///
-/// Uses SPX256f for fast keygen in the verification protocol.
-/// Returns `(public_key, secret_key)`.
+/// Uses SPX256f for fast keygen. Returns `(public_key, secret_key)`.
 pub fn generate_ephemeral_keypair(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
     let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, seed)?;
     Ok((kp.public_key.clone(), kp.secret_key.clone()))
-}
-
-/// Sign the C-DBRW verification response.
-///
-/// `sigma = SPHINCS+.Sign(EK_sk, gamma || ct || c)`
-///
-/// - `ek_sk`: ephemeral secret key
-/// - `gamma`: verification response hash (32 bytes)
-/// - `ct`: Kyber ciphertext
-/// - `challenge`: verifier challenge bytes
-pub fn sign_cdbrw_response(
-    ek_sk: &[u8],
-    gamma: &[u8; 32],
-    ct: &[u8],
-    challenge: &[u8],
-) -> Result<Vec<u8>, DsmError> {
-    let mut msg = Vec::with_capacity(32 + ct.len() + challenge.len());
-    msg.extend_from_slice(gamma);
-    msg.extend_from_slice(ct);
-    msg.extend_from_slice(challenge);
-    sign(SphincsVariant::SPX256f, ek_sk, &msg)
-}
-
-pub fn sign_cdbrw_response_with_context(
-    h_n: &[u8; 32],
-    c_pre: &[u8; 32],
-    k_step: &[u8; 32],
-    k_dbrw: &[u8; 32],
-    gamma: &[u8; 32],
-    ct: &[u8],
-    challenge: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    let seed = derive_ephemeral_seed(h_n, c_pre, k_step, k_dbrw);
-    let (ek_pk, ek_sk) = generate_ephemeral_keypair(&seed)?;
-    let signature = sign_cdbrw_response(&ek_sk, gamma, ct, challenge)?;
-    Ok((signature, ek_pk))
-}
-
-pub fn verify_cdbrw_response_signature(
-    ek_pk: &[u8],
-    gamma: &[u8; 32],
-    ct: &[u8],
-    challenge: &[u8],
-    signature: &[u8],
-) -> Result<bool, DsmError> {
-    let mut msg = Vec::with_capacity(32 + ct.len() + challenge.len());
-    msg.extend_from_slice(gamma);
-    msg.extend_from_slice(ct);
-    msg.extend_from_slice(challenge);
-    sphincs_verify(ek_pk, &msg, signature)
 }
 
 /// Derive the Kyber step key from the shared secret.
@@ -108,20 +73,31 @@ pub fn derive_kyber_step_key(shared_secret: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-/// Derive deterministic coins for Kyber encapsulation.
+/// Derive deterministic coins for ML-KEM-768 encapsulation (whitepaper §12).
 ///
-/// `coins = BLAKE3("DSM/kyber-coins\0" || h_n || C_pre || DevID || K_DBRW)[0:32]`
+/// `coins = keyed-BLAKE3(key = Smaster,
+///   "DSM/kyber-coins/v1\0" || kyber_alg_id || recipient_kem_pub_hash || h_n || C_pre || DevID)`
+///
+/// - `s_master`: device master seed Smaster (the keyed-BLAKE3 key)
+/// - `kyber_alg_id`: KEM suite id (e.g. [`KYBER_ALG_ID_MLKEM768`])
+/// - `recipient_kem_pub_hash`: BLAKE3 of the recipient's KEM public key (32 bytes)
+/// - `h_n`, `c_pre`: parent tip and pre-commitment (32 bytes each)
+/// - `dev_id`: sender device id (32 bytes)
 pub fn derive_kyber_coins(
+    s_master: &[u8; 32],
+    kyber_alg_id: &[u8],
+    recipient_kem_pub_hash: &[u8; 32],
     h_n: &[u8; 32],
     c_pre: &[u8; 32],
     dev_id: &[u8; 32],
-    k_dbrw: &[u8; 32],
 ) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_KYBER_COINS);
+    let mut hasher =
+        dsm_domain_hasher_keyed(crate::common::domain_tags::TAG_DSM_KYBER_COINS_V1, s_master);
+    hasher.update(kyber_alg_id);
+    hasher.update(recipient_kem_pub_hash);
     hasher.update(h_n);
     hasher.update(c_pre);
     hasher.update(dev_id);
-    hasher.update(k_dbrw);
     *hasher.finalize().as_bytes()
 }
 
@@ -180,14 +156,29 @@ mod tests {
 
     #[test]
     fn ephemeral_seed_deterministic() {
+        let s_master = [4u8; 32];
+        let chain_id = [9u8; 32];
         let h_n = [1u8; 32];
         let c_pre = [2u8; 32];
         let k_step = [3u8; 32];
-        let k_dbrw = [4u8; 32];
-        let s1 = derive_ephemeral_seed(&h_n, &c_pre, &k_step, &k_dbrw);
-        let s2 = derive_ephemeral_seed(&h_n, &c_pre, &k_step, &k_dbrw);
+        let s1 = derive_ephemeral_seed(&s_master, ALG_ID_SPX256F, &chain_id, &h_n, &c_pre, &k_step);
+        let s2 = derive_ephemeral_seed(&s_master, ALG_ID_SPX256F, &chain_id, &h_n, &c_pre, &k_step);
         assert_eq!(s1, s2);
         assert_eq!(s1.len(), 32);
+    }
+
+    #[test]
+    fn ephemeral_seed_diverges_on_master_seed() {
+        let chain_id = [9u8; 32];
+        let h_n = [1u8; 32];
+        let c_pre = [2u8; 32];
+        let k_step = [3u8; 32];
+        let a = derive_ephemeral_seed(&[4u8; 32], ALG_ID_SPX256F, &chain_id, &h_n, &c_pre, &k_step);
+        let b = derive_ephemeral_seed(&[5u8; 32], ALG_ID_SPX256F, &chain_id, &h_n, &c_pre, &k_step);
+        assert_ne!(
+            a, b,
+            "EK seed must depend on Smaster (the keyed-BLAKE3 key)"
+        );
     }
 
     #[test]
@@ -209,12 +200,27 @@ mod tests {
 
     #[test]
     fn kyber_coins_deterministic() {
+        let s_master = [4u8; 32];
+        let recipient_kem_pub_hash = [7u8; 32];
         let h_n = [1u8; 32];
         let c_pre = [2u8; 32];
         let dev_id = [3u8; 32];
-        let k_dbrw = [4u8; 32];
-        let c1 = derive_kyber_coins(&h_n, &c_pre, &dev_id, &k_dbrw);
-        let c2 = derive_kyber_coins(&h_n, &c_pre, &dev_id, &k_dbrw);
+        let c1 = derive_kyber_coins(
+            &s_master,
+            KYBER_ALG_ID_MLKEM768,
+            &recipient_kem_pub_hash,
+            &h_n,
+            &c_pre,
+            &dev_id,
+        );
+        let c2 = derive_kyber_coins(
+            &s_master,
+            KYBER_ALG_ID_MLKEM768,
+            &recipient_kem_pub_hash,
+            &h_n,
+            &c_pre,
+            &dev_id,
+        );
         assert_eq!(c1, c2);
     }
 
@@ -310,46 +316,5 @@ mod tests {
         let h_n = [0x33u8; 32];
         let forged_cert = sign_ek_cert(&attacker_sk, &next_pk, &h_n).expect("sign forged cert");
         assert!(!verify_ek_cert(&real_prev_pk, &next_pk, &h_n, &forged_cert).expect("verify"));
-    }
-
-    #[test]
-    fn sign_and_verify_cdbrw_response_round_trip() {
-        let h_n = [1u8; 32];
-        let c_pre = [2u8; 32];
-        let k_step = [3u8; 32];
-        let k_dbrw = [4u8; 32];
-        let gamma = [5u8; 32];
-        let ciphertext = vec![6u8; 1088];
-        let challenge = vec![7u8; 32];
-
-        let (signature, ephemeral_pk) = sign_cdbrw_response_with_context(
-            &h_n,
-            &c_pre,
-            &k_step,
-            &k_dbrw,
-            &gamma,
-            &ciphertext,
-            &challenge,
-        )
-        .expect("sign");
-
-        assert!(verify_cdbrw_response_signature(
-            &ephemeral_pk,
-            &gamma,
-            &ciphertext,
-            &challenge,
-            &signature
-        )
-        .expect("verify"));
-
-        let bad_challenge = vec![8u8; 32];
-        assert!(!verify_cdbrw_response_signature(
-            &ephemeral_pk,
-            &gamma,
-            &ciphertext,
-            &bad_challenge,
-            &signature
-        )
-        .expect("verify bad challenge"));
     }
 }

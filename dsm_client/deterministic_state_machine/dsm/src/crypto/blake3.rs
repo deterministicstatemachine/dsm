@@ -173,6 +173,28 @@ pub fn dsm_domain_hasher(tag: &str) -> Hasher {
     h
 }
 
+/// Domain-separated **keyed** BLAKE3 hasher: keyed BLAKE3 with `key` as the
+/// 32-byte key, then the domain tag (with the same `tag || 0x00` separation as
+/// [`dsm_domain_hasher`]) folded into the message.
+///
+/// This is the per-step KDF primitive of whitepaper §11.1/§12: "keyed BLAKE3
+/// with the secret as the key (NOT HKDF)". The secret key is the master seed
+/// `Smaster`; the tag plus the caller's subsequent `update()`s form the
+/// versioned, algorithm- and chain-bound context.
+///
+/// # Panics
+/// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
+pub fn dsm_domain_hasher_keyed(tag: &str, key: &[u8; 32]) -> Hasher {
+    assert!(
+        tag.starts_with("DSM/") || tag.starts_with("DJTE."),
+        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {tag}"
+    );
+    let mut h = Hasher::new_keyed(key);
+    h.update(tag.as_bytes());
+    h.update(&[0u8]);
+    h
+}
+
 /// Domain-separated hash function as specified in whitepaper
 /// H(tag || data) where tag includes null terminator
 pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {

@@ -39,7 +39,6 @@ internal object NativeHostBridge {
         keyDeviceId: String,
         keyGenesisHash: String,
         keyGenesisEnvelope: String,
-        keyDbrwSalt: String,
         requestBytes: ByteArray,
     ): ByteArray {
         val request = try {
@@ -57,7 +56,6 @@ internal object NativeHostBridge {
                 keyDeviceId = keyDeviceId,
                 keyGenesisHash = keyGenesisHash,
                 keyGenesisEnvelope = keyGenesisEnvelope,
-                keyDbrwSalt = keyDbrwSalt,
                 request = request,
             )
         } catch (t: Throwable) {
@@ -76,7 +74,6 @@ internal object NativeHostBridge {
         keyDeviceId: String,
         keyGenesisHash: String,
         keyGenesisEnvelope: String,
-        keyDbrwSalt: String,
         request: NativeHostRequest,
     ): NativeHostResponse {
         return when (request.kind) {

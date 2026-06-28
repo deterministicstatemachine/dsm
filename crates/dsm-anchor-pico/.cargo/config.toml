@@ -1,0 +1,24 @@
+# RP2350 has dual Cortex-M33 (ARM) and dual Hazard3 (RISC-V). T1 defaults to
+# ARM (the most-trodden rp235x-hal path); RISC-V is a one-flag swap.
+#   cargo build --release
+#   cargo build --release --target riscv32imac-unknown-none-elf
+# Pure Rust — no C toolchain / newlib / pico-sdk needed.
+
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = [
+  "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.x",
+  "-C", "target-cpu=cortex-m33",
+]
+
+[target.riscv32imac-unknown-none-elf]
+rustflags = [
+  "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.x",
+]
+
+[env]
+DEFMT_LOG = "off"

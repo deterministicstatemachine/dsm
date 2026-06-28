@@ -530,20 +530,11 @@ impl IdentitySDK {
             "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
-        // The MPC session derives the canonical K_DBRW internally from
-        // (genesis_id, device_id = genesis_id, hw, env) — we just supply
-        // the silicon inputs from the platform-entropy slot.
-        let silicon =
-            crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
-                dsm::types::error::DsmError::invalid_operation(
-                    "identity_sdk: platform silicon inputs (hw, env) required for genesis",
-                )
-            })?;
+        // Optional high-assurance / legacy profile: n-of-n commit-reveal MPC genesis.
+        // No silicon binding, no C-DBRW (the canonical wallet path is mnemonic-rooted Genesis v2).
         let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
             device_id_arr,
             test_nodes.clone(),
-            silicon.hw_entropy.clone(),
-            silicon.env_fingerprint.clone(),
             None,
         ))?;
 
@@ -963,7 +954,8 @@ impl IdentitySDK {
 
         // Get signing public key for bilateral verification.
         // If the key is missing or empty (e.g. pre-existing genesis, failed derivation),
-        // re-derive it deterministically from genesis + device_id + DBRW binding key.
+        // re-derive the canonical Genesis v2 AK from the unlocked wallet seed (byte-identical
+        // to the key genesis registered). Works on every platform; fails closed when locked.
         let signing_public_key = {
             let stored = AppState::get_public_key().unwrap_or_default();
             if stored.len() == 64 {
@@ -973,47 +965,40 @@ impl IdentitySDK {
                     "pairing_qr_v3: signing key missing/invalid (len={}), attempting re-derivation",
                     stored.len()
                 );
-                // DBRW binding key is only available on Android via JNI
-                #[cfg(all(target_os = "android", feature = "jni"))]
-                {
-                    let dbrw = crate::jni::cdbrw::get_cdbrw_binding_key().ok_or_else(|| {
-                        DsmError::InvalidState(
-                            "Signing key not in AppState and DBRW unavailable for re-derivation. Restart the app.".into()
-                        )
-                    })?;
-                    let did_raw = AppState::get_device_id().ok_or_else(|| {
-                        DsmError::InvalidState(
-                            "device_id not available for key re-derivation".into(),
-                        )
-                    })?;
-                    let gh_raw = AppState::get_genesis_hash().ok_or_else(|| {
-                        DsmError::InvalidState(
-                            "genesis_hash not available for key re-derivation".into(),
-                        )
-                    })?;
-                    let mut entropy = Vec::with_capacity(96);
-                    entropy.extend_from_slice(&gh_raw);
-                    entropy.extend_from_slice(&did_raw);
-                    entropy.extend_from_slice(&dbrw);
-                    let kp = SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| {
-                        DsmError::InvalidState(format!("signing key re-derivation failed: {e}"))
-                    })?;
-                    let public_key = kp.public_key.clone();
-                    // Persist the re-derived key so future calls don't need to re-derive
-                    let smt = AppState::get_smt_root().unwrap_or_else(|| vec![0u8; 32]);
-                    AppState::set_identity_info(did_raw, public_key.clone(), gh_raw, smt);
-                    log::info!(
-                        "pairing_qr_v3: re-derived and persisted signing key (len={})",
-                        public_key.len()
-                    );
-                    public_key
-                }
-                #[cfg(not(all(target_os = "android", feature = "jni")))]
-                {
+                let did_raw = AppState::get_device_id().ok_or_else(|| {
+                    DsmError::InvalidState("device_id not available for key re-derivation".into())
+                })?;
+                let gh_raw = AppState::get_genesis_hash().ok_or_else(|| {
+                    DsmError::InvalidState(
+                        "genesis_hash not available for key re-derivation".into(),
+                    )
+                })?;
+                if gh_raw.len() != 32 {
                     return Err(DsmError::InvalidState(
-                        "Signing key not in AppState; DBRW re-derivation not available on this platform.".into()
+                        "genesis_hash must be 32 bytes for key re-derivation".into(),
                     ));
                 }
+                let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+                    .ok_or_else(|| {
+                        DsmError::InvalidState(
+                            "Signing key not in AppState and wallet locked for re-derivation. Unlock the wallet.".into(),
+                        )
+                    })?;
+                let mut g = [0u8; 32];
+                g.copy_from_slice(&gh_raw);
+                let kp =
+                    crate::init::derive_device_signing_keypair(&wallet_seed, &g).map_err(|e| {
+                        DsmError::InvalidState(format!("signing key re-derivation failed: {e}"))
+                    })?;
+                let public_key = kp.public_key.clone();
+                // Persist the re-derived key so future calls don't need to re-derive
+                let smt = AppState::get_smt_root().unwrap_or_else(|| vec![0u8; 32]);
+                AppState::set_identity_info(did_raw, public_key.clone(), gh_raw, smt);
+                log::info!(
+                    "pairing_qr_v3: re-derived and persisted signing key (len={})",
+                    public_key.len()
+                );
+                public_key
             }
         };
         log::info!(

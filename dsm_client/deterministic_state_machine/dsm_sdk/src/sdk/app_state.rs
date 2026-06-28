@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use prost::Message;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 use dsm::types::receipt_types::DeviceTreeAcceptanceCommitment;
 
 #[cfg(unix)]
@@ -57,68 +56,6 @@ struct AppStateStorage {
 
 // Global storage slot
 static STORAGE: Mutex<Option<AppStateStorage>> = Mutex::new(None);
-
-// —————————————————————————–
-// Platform entropy inputs (C-DBRW silicon-binding material)
-//
-// Transient, process-lifetime-only slot for the three byte arrays that
-// the platform layer (Android JNI / Kotlin) collects from real hardware
-// sources before genesis. NOT persisted to disk — the secret material
-// must remain ephemeral and zeroized after consumption.
-//
-// Genesis call sites consume this slot via `take_platform_entropy_inputs()`
-// (one-shot Option::take) and feed the values into
-// `dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key` so K_DBRW is
-// silicon-bound per whitepaper §11.1 + §12.
-//
-// See dBTC bearer-fungibility plan + the per-step EK signing §11.1
-// alignment work for the broader context. This slot is the production
-// C-DBRW bootstrap contract.
-// —————————————————————————–
-
-/// Two byte arrays collected by the platform entropy collector
-/// (Android Kotlin: `PlatformEntropyCollector`) and held in a transient
-/// process-lifetime slot for consumption by the genesis create flow and
-/// the restore flow.
-///
-/// Lifecycle:
-///   1. JNI sets the slot at the start of `system.genesis` with
-///      `AppState::set_platform_entropy_inputs(hw, env)`.
-///   2. The genesis create flow calls `AppState::peek_platform_entropy_inputs()`
-///      mid-flow (after MPC returns) so it can derive K_DBRW from the
-///      canonical four-input preimage
-///      `(genesis_hash, device_id, hw, env)` — the slot must remain
-///      readable across the MPC call.
-///   3. After K_DBRW has been staged via `binding_key::set_binding_key`,
-///      the caller invokes `AppState::take_platform_entropy_inputs()` to
-///      consume + zeroize the slot.
-///
-/// Drop zeroizes both vectors. There is no separate "binding-key derive
-/// helper" on this slot: callers must construct the full canonical
-/// four-input preimage themselves via
-/// `dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(genesis_hash,
-/// device_id, hw, env)` once genesis_hash + device_id are known.
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
-pub struct PlatformEntropyInputs {
-    /// Hardware-bound entropy. On the canonical 4-input K_DBRW preimage
-    /// (whitepaper §12 / Phase 13 spec form), this is the 32-byte `AC_D`
-    /// attractor commitment produced by C-DBRW live enrollment
-    /// (`crate::security::cdbrw_enrollment_writer::EnrollOutputs.reference_anchor`).
-    /// `AC_D` binds K_DBRW to the device's silicon via the *observed*
-    /// statistical signature of orbit histograms — no Android Keystore,
-    /// no StrongBox, no Secure Enclave, no sealed-module attestation
-    /// chain is involved. The Phase 13 salt-drop (commits c6c622df,
-    /// ea718d94) removed the previous Keystore-wrapped random salt
-    /// entirely. Must be non-empty; strict mode rejects empty or
-    /// session-derived bytes.
-    pub hw_entropy: Vec<u8>,
-    /// Canonical environment fingerprint: BLAKE3 hash of stable platform
-    /// identifiers (manufacturer, model, hardware, board, bootloader, OS
-    /// API level). Must be non-empty.
-    pub env_fingerprint: Vec<u8>,
-}
-
-static PLATFORM_ENTROPY_INPUTS: Mutex<Option<PlatformEntropyInputs>> = Mutex::new(None);
 
 // —————————————————————————–
 // Public API
@@ -560,81 +497,6 @@ impl AppState {
         Ok(())
     }
 
-    // ----------------- Platform entropy inputs (C-DBRW silicon binding) -----------------
-
-    /// Store the two byte arrays the platform entropy collector
-    /// produced (hw_entropy, env_fingerprint) for consumption by the
-    /// genesis create flow. Idempotent: a second call overwrites the
-    /// prior values (which are zeroized on drop).
-    ///
-    /// Both inputs MUST be non-empty. Empty inputs are rejected here so
-    /// the gate fires at the JNI boundary rather than deep inside
-    /// `derive_cdbrw_binding_key`.
-    ///
-    /// Returns `Ok(())` on success or a structured error if any input is
-    /// empty.
-    pub fn set_platform_entropy_inputs(
-        hw_entropy: Vec<u8>,
-        env_fingerprint: Vec<u8>,
-    ) -> Result<(), String> {
-        if hw_entropy.is_empty() {
-            return Err("platform entropy: hw_entropy must not be empty".to_string());
-        }
-        if env_fingerprint.is_empty() {
-            return Err("platform entropy: env_fingerprint must not be empty".to_string());
-        }
-
-        let inputs = PlatformEntropyInputs {
-            hw_entropy,
-            env_fingerprint,
-        };
-
-        let mut slot = PLATFORM_ENTROPY_INPUTS
-            .lock()
-            .map_err(|e| format!("platform entropy: lock poisoned: {e}"))?;
-        *slot = Some(inputs);
-        Ok(())
-    }
-
-    /// Non-consuming peek of the platform entropy inputs. Returns a
-    /// `Clone` so the genesis create flow can call this AFTER MPC
-    /// produces `genesis_hash` + `device_id` and feed all four inputs
-    /// into the canonical
-    /// `dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key`. The slot
-    /// stays populated until an explicit
-    /// `take_platform_entropy_inputs` call zeroizes it.
-    pub fn peek_platform_entropy_inputs() -> Option<PlatformEntropyInputs> {
-        match PLATFORM_ENTROPY_INPUTS.lock() {
-            Ok(slot) => slot.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    /// One-shot consume the platform entropy inputs. Returns
-    /// `Some(PlatformEntropyInputs)` exactly once after a successful
-    /// `set_platform_entropy_inputs` call; subsequent calls return
-    /// `None` until the platform layer sets fresh inputs.
-    ///
-    /// The returned struct zeroizes its byte vectors on drop, so
-    /// callers MUST drop it within a bounded scope after staging the
-    /// derived K_DBRW.
-    pub fn take_platform_entropy_inputs() -> Option<PlatformEntropyInputs> {
-        match PLATFORM_ENTROPY_INPUTS.lock() {
-            Ok(mut slot) => slot.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        }
-    }
-
-    /// Non-consuming check for whether platform entropy inputs are
-    /// currently set. Used by UI/JNI bootstrap readiness checks without
-    /// consuming the inputs.
-    pub fn has_platform_entropy_inputs() -> bool {
-        match PLATFORM_ENTROPY_INPUTS.lock() {
-            Ok(slot) => slot.is_some(),
-            Err(poisoned) => poisoned.into_inner().is_some(),
-        }
-    }
-
     // ----------------- Test utilities -----------------
     #[cfg(test)]
     pub fn reset_for_testing() {
@@ -644,10 +506,6 @@ impl AppState {
 
         if let Ok(mut storage) = STORAGE.try_lock() {
             *storage = None;
-        }
-
-        if let Ok(mut slot) = PLATFORM_ENTROPY_INPUTS.try_lock() {
-            *slot = None;
         }
 
         let path = Self::get_storage_path();
@@ -662,9 +520,6 @@ impl AppState {
         SDK_INITIALIZED.store(false, Ordering::SeqCst);
         STORAGE_INITIALIZED.store(false, Ordering::SeqCst);
         *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        *PLATFORM_ENTROPY_INPUTS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     #[cfg(test)]
@@ -1161,138 +1016,5 @@ mod tests {
     fn app_state_storage_contact_roots_empty() {
         let s = AppStateStorage::default();
         assert!(s.contact_device_tree_roots.is_empty());
-    }
-
-    // ── platform entropy inputs (C-DBRW silicon binding) ──
-
-    #[test]
-    #[serial]
-    fn platform_entropy_inputs_initial_state_is_none() {
-        setup_test_env();
-        assert!(!AppState::has_platform_entropy_inputs());
-        assert!(AppState::take_platform_entropy_inputs().is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn platform_entropy_inputs_set_then_take_round_trip() {
-        setup_test_env();
-        let hw = vec![0xAAu8; 32];
-        let env = vec![0xBBu8; 32];
-
-        AppState::set_platform_entropy_inputs(hw.clone(), env.clone())
-            .expect("set must succeed for non-empty inputs");
-
-        assert!(AppState::has_platform_entropy_inputs());
-
-        let taken = AppState::take_platform_entropy_inputs()
-            .expect("take must return the inputs we just set");
-        assert_eq!(taken.hw_entropy, hw);
-        assert_eq!(taken.env_fingerprint, env);
-
-        // One-shot semantics: second take returns None.
-        assert!(AppState::take_platform_entropy_inputs().is_none());
-        assert!(!AppState::has_platform_entropy_inputs());
-    }
-
-    #[test]
-    #[serial]
-    fn platform_entropy_inputs_rejects_empty_hw_entropy() {
-        setup_test_env();
-        let err = AppState::set_platform_entropy_inputs(vec![], vec![0xBB; 32])
-            .expect_err("empty hw_entropy must be rejected");
-        assert!(
-            err.contains("hw_entropy"),
-            "error must name the bad field: {err}"
-        );
-        assert!(!AppState::has_platform_entropy_inputs());
-    }
-
-    #[test]
-    #[serial]
-    fn platform_entropy_inputs_rejects_empty_env_fingerprint() {
-        setup_test_env();
-        let err = AppState::set_platform_entropy_inputs(vec![0xAA; 32], vec![])
-            .expect_err("empty env_fingerprint must be rejected");
-        assert!(
-            err.contains("env_fingerprint"),
-            "error must name the bad field: {err}"
-        );
-        assert!(!AppState::has_platform_entropy_inputs());
-    }
-
-    #[test]
-    #[serial]
-    fn platform_entropy_inputs_set_overwrites_prior() {
-        setup_test_env();
-
-        AppState::set_platform_entropy_inputs(vec![0x01; 32], vec![0x02; 32]).expect("first set");
-        AppState::set_platform_entropy_inputs(vec![0x10; 32], vec![0x20; 32])
-            .expect("second set must overwrite, not error");
-
-        let taken = AppState::take_platform_entropy_inputs()
-            .expect("take should return the second-set values");
-        assert_eq!(taken.hw_entropy, vec![0x10; 32]);
-        assert_eq!(taken.env_fingerprint, vec![0x20; 32]);
-    }
-
-    #[test]
-    #[serial]
-    fn platform_entropy_inputs_drives_canonical_k_dbrw() {
-        setup_test_env();
-        // The whole point of the slot: feeding hw + env from the slot
-        // into the canonical four-input derive_cdbrw_binding_key (with
-        // the post-MPC genesis_hash + device_id) must produce the same
-        // K_DBRW as a direct call with the same four arrays.
-        let genesis_hash = [0xAAu8; 32];
-        let device_id = genesis_hash; // root device invariant
-        let hw = b"hw_entropy_test_vector_32_bytes_aaaa".to_vec();
-        let env = b"env_fingerprint_test_vector_aaaa".to_vec();
-
-        AppState::set_platform_entropy_inputs(hw.clone(), env.clone()).expect("set");
-        let taken = AppState::take_platform_entropy_inputs().expect("take");
-
-        let k_via_slot = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
-            &taken.hw_entropy,
-            &taken.env_fingerprint,
-        )
-        .expect("k_dbrw via slot");
-        let k_direct = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
-            &hw,
-            &env,
-        )
-        .expect("k_dbrw direct");
-
-        assert_eq!(
-            k_via_slot, k_direct,
-            "K_DBRW derived from the AppState slot must match a direct canonical call"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn peek_returns_clone_and_does_not_consume() {
-        setup_test_env();
-        let hw = vec![0x33u8; 32];
-        let env = vec![0x44u8; 32];
-        AppState::set_platform_entropy_inputs(hw.clone(), env.clone()).expect("set");
-
-        // Peek must return a clone of the slot.
-        let peeked = AppState::peek_platform_entropy_inputs().expect("peek must see set inputs");
-        assert_eq!(peeked.hw_entropy, hw);
-        assert_eq!(peeked.env_fingerprint, env);
-
-        // Slot is still populated for a subsequent take.
-        let taken =
-            AppState::take_platform_entropy_inputs().expect("take must still see the inputs");
-        assert_eq!(taken.hw_entropy, hw);
-        assert_eq!(taken.env_fingerprint, env);
-
-        // After take, peek returns None.
-        assert!(AppState::peek_platform_entropy_inputs().is_none());
     }
 }

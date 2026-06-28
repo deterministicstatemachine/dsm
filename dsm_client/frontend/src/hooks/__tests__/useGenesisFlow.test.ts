@@ -20,6 +20,9 @@ jest.mock('../../dsm/decoding', () => ({
 type DsmEventHandler = (evt: { topic: string; payload: Uint8Array }) => void;
 let dsmEventListeners: DsmEventHandler[] = [];
 const mockCreateGenesisViaRouter = jest.fn();
+const mockGenerateMnemonic = jest.fn();
+const TEST_MNEMONIC =
+  'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
 jest.mock('../../dsm/WebViewBridge', () => ({
   addDsmEventListener: jest.fn((handler: DsmEventHandler) => {
@@ -29,6 +32,7 @@ jest.mock('../../dsm/WebViewBridge', () => ({
     };
   }),
   createGenesisViaRouter: (...args: any[]) => mockCreateGenesisViaRouter(...args),
+  generateMnemonic: (...args: any[]) => mockGenerateMnemonic(...args),
 }));
 
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
@@ -43,6 +47,8 @@ function emitDsmEvent(topic: string, payload: Uint8Array = new Uint8Array(0)) {
 beforeEach(() => {
   dsmEventListeners = [];
   mockCreateGenesisViaRouter.mockReset();
+  mockGenerateMnemonic.mockReset();
+  mockGenerateMnemonic.mockResolvedValue(TEST_MNEMONIC);
   mockedDecode.mockReset();
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -98,10 +104,11 @@ describe('useGenesisFlow', () => {
       await result.current.handleGenerateGenesis();
     });
 
+    expect(mockGenerateMnemonic).toHaveBeenCalled();
     expect(mockCreateGenesisViaRouter).toHaveBeenCalledWith(
+      TEST_MNEMONIC,
       expect.any(String),
       'mainnet',
-      expect.any(Uint8Array),
     );
     expect(mockedDecode).toHaveBeenCalledWith(fakeEnvelope);
     // No error set on success

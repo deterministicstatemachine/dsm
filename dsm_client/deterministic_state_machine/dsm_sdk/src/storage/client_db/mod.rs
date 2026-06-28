@@ -289,7 +289,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             hash_chain_proof  BLOB,
             smt_proof         BLOB,
             verification_step INTEGER,
-            created_at        INTEGER NOT NULL
+            created_at        INTEGER NOT NULL,
+            genesis_nonce     TEXT NOT NULL DEFAULT '',
+            genesis_profile   TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS contacts(
@@ -747,6 +749,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
             }
         }
     }
+    // Genesis v2 migration: add the public genesis_nonce + genesis_profile columns to
+    // pre-existing DBs (new installs get them from CREATE TABLE above). SQLite ALTER TABLE
+    // ADD COLUMN errors if the column already exists, so ignore that idempotently.
+    for stmt in [
+        "ALTER TABLE genesis_records ADD COLUMN genesis_nonce TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE genesis_records ADD COLUMN genesis_profile TEXT NOT NULL DEFAULT ''",
+    ] {
+        let _ = conn.execute(stmt, []);
+    }
+
     // Now create remaining indices (not part of the retried batch).
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bilateral_sessions_created ON bilateral_sessions(created_at_step DESC);",
@@ -1330,6 +1342,8 @@ mod tests {
             hash_chain_proof: None,
             smt_proof: None,
             verification_step: None,
+            genesis_nonce: String::new(),
+            genesis_profile: String::new(),
         };
 
         if let Err(e) = store_genesis_record_with_verification(&rec) {
@@ -1367,6 +1381,8 @@ mod tests {
             hash_chain_proof: None,
             smt_proof: None,
             verification_step: None,
+            genesis_nonce: String::new(),
+            genesis_profile: String::new(),
         };
 
         if let Err(e) = store_genesis_record_with_verification(&gen) {

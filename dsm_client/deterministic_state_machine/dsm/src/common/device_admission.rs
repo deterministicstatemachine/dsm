@@ -26,23 +26,24 @@ use crate::types::error::DsmError;
 use crate::types::proto::{AddDeviceAdmissionV1, Message as _};
 
 /// Canonical derivation of a secondary/Nth device id — `H("DSM/device\0" || client_entropy ||
-/// genesis_hash || DBRW)`. Byte-identical to the SDK's secondary-device derivation; the new device
-/// uses it to compute its own `DevID` (the verifier does NOT recompute it — the new device's
-/// self-attestation proves possession instead).
+/// genesis_hash || device_secret)`. Byte-identical to the SDK's secondary-device derivation; the
+/// new device uses it to compute its own `DevID` (the verifier does NOT recompute it — the new
+/// device's self-attestation proves possession instead). `device_secret` is the joining device's
+/// wallet-seed-rooted master seed (Genesis v2 `Smaster`); there is no C-DBRW binding.
 pub fn derive_secondary_device_id(
     client_entropy: &[u8],
     genesis_hash: &[u8; 32],
-    dbrw_binding: &[u8],
+    device_secret: &[u8],
 ) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_DEVICE);
     h.update(client_entropy);
     h.update(genesis_hash);
-    h.update(dbrw_binding);
+    h.update(device_secret);
     *h.finalize().as_bytes()
 }
 
-/// Sign the NEW-DEVICE self-attestation half: proof, by the joining device's DBRW-bound signing
-/// key, that it owns `new_device_id`/`new_signing_pubkey` under `genesis_hash`.
+/// Sign the NEW-DEVICE self-attestation half: proof, by the joining device's wallet-seed-rooted
+/// signing key (Genesis v2 AK), that it owns `new_device_id`/`new_signing_pubkey` under `genesis_hash`.
 pub fn sign_self_attestation(
     genesis_hash: &[u8; 32],
     new_device_id: &[u8; 32],

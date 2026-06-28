@@ -19,13 +19,12 @@
 //! - `inbox_routes.rs` — `inbox.*` routes
 //! - `identity_routes.rs` — `identity.*` routes
 //! - `prefs_routes.rs` — `prefs.*` routes
-//! - `misc_routes.rs` — `debug.*`, `ble.*`, `dbrw.*` routes
+//! - `misc_routes.rs` — `debug.*`, `ble.*` routes
 
 use async_trait::async_trait;
 use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter};
-use crate::security::cdbrw_access_gate::{require_access_level, AccessLevel};
 use crate::util::registry_addr::{
     build_root_device_tree_evidence, registry_content_addr_b64url, REGISTRY_QUORUM_THRESHOLD,
 };
@@ -952,19 +951,15 @@ impl AppRouterImpl {
         let seq = transfer_req.seq;
 
         // §4.1: Nonce = "fresh entropy e" — generated deterministically by the SDK.
-        // Formula: BLAKE3("DSM/nonce\0" || KDBRW || h_n || seq || amount || token_id || recipient)
+        // Formula: BLAKE3("DSM/nonce\0" || h_n || seq || amount || token_id || recipient)
         // transfer_req.nonce from the frontend is ignored (reserved/ignored per proto comment).
         // The nonce is embedded in the Operation payload and transmitted to the receiver via the
         // b0x envelope, so both sides use identical bytes for compute_precommit. Clockless: no
-        // wall-clock, no OS randomness — uniqueness is guaranteed by KDBRW ⊕ h_n ⊕ seq ⊕ payload.
+        // wall-clock, no OS randomness — uniqueness is guaranteed by h_n ⊕ seq ⊕ payload (h_n is
+        // the per-relationship bilateral chain tip, so it is already unique per device + step).
         let nonce: Vec<u8> = {
             let mut hasher =
                 dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_NONCE);
-            // KDBRW: hardware-bound secret — prevents cross-device nonce reuse (§12)
-            #[cfg(all(target_os = "android", feature = "jni"))]
-            if let Some(kdbrw) = crate::jni::cdbrw::get_cdbrw_binding_key() {
-                hasher.update(&kdbrw);
-            }
             // h_n: bilateral chain tip — unique per relationship step
             hasher.update(&chain_tip_arr);
             // seq: monotone per-device step counter
@@ -1383,8 +1378,10 @@ impl AppRouterImpl {
             ) {
                 Ok(mut receipt) => match receipt.compute_commitment() {
                     Ok(commitment) => {
-                        // Resolve K_DBRW + root AK keypair.
-                        let k_dbrw_vec = match crate::fetch_dbrw_binding_key() {
+                        // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
+                        // unlocked wallet; no C-DBRW) + root AK keypair. The per-step EK seed +
+                        // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
+                        let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
                             Ok(k) => k,
                             Err(e) => {
                                 let rollback_error = self
@@ -1394,18 +1391,10 @@ impl AppRouterImpl {
                                     .map(|rb| format!("; rollback failed: {rb}"))
                                     .unwrap_or_default();
                                 return err(format!(
-                                    "wallet.send: K_DBRW unavailable for cert chain: {e}{rollback_error}"
+                                    "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}{rollback_error}"
                                 ));
                             }
                         };
-                        if k_dbrw_vec.len() < 32 {
-                            return err(format!(
-                                "wallet.send: K_DBRW too short ({} bytes, need 32)",
-                                k_dbrw_vec.len()
-                            ));
-                        }
-                        let mut k_dbrw_arr = [0u8; 32];
-                        k_dbrw_arr.copy_from_slice(&k_dbrw_vec[..32]);
                         let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                             Ok(kp) => kp,
                             Err(e) => {
@@ -1465,7 +1454,6 @@ impl AppRouterImpl {
                             c_pre: receipt_sigma,
                             devid_sender: receipt.devid_a,
                             relationship_key: rel_key,
-                            k_dbrw: &k_dbrw_arr,
                             root_ak_keypair: Some((&ak_pk, &ak_sk)),
                             recipient_kyber_pk: &recipient_kyber_pk,
                             // §11.1 Item 7: bind the per-step EK response
@@ -1498,7 +1486,7 @@ impl AppRouterImpl {
                                         &rel_key,
                                         &out.ek_pk,
                                         &out.ek_sk,
-                                        &k_dbrw_arr,
+                                        &at_rest_key,
                                         out.used_root_ak,
                                     )
                                 {
@@ -2629,34 +2617,13 @@ impl AppRouter for AppRouterImpl {
             q.params.len()
         );
 
-        // ------------------- C-DBRW access gate -------------------
-        // Fail-closed verdict lookup. Only routes that read the wallet or
-        // touch contacts consult the gate — lifecycle, bootstrap, C-DBRW
-        // itself, and diagnostics stay callable on a fresh/degraded device.
-        // Min level = ReadOnly: caller must have at least a published verdict
-        // with resonant_status != Fail.
-        let gated_read = matches!(
-            q.path.as_str(),
-            "balance.get"
-                | "balance.list"
-                | "wallet.history"
-                | "contacts.list"
-                | "contacts.handle_contact_qr_v3"
-                | "inbox.pull"
-                | "bilateral.pending_list"
-        );
-        if gated_read {
-            if let Err(msg) = require_access_level(AccessLevel::ReadOnly) {
-                log::warn!("[APP_ROUTER] {} rejected by C-DBRW gate: {}", q.path, msg);
-                return err(msg);
-            }
-        }
-
         match q.path.as_str() {
             // State/sys routes
             "state.export" | "state.info" | "sys.tick" => self.handle_state_query(q).await,
-            // System routes
-            "system.genesis" => self.handle_system_query(q).await,
+            // System routes (system.genesis = legacy MPC; v2 = canonical mnemonic-rooted)
+            "system.genesis" | "system.generateMnemonic" | "system.createGenesisV2" => {
+                self.handle_system_query(q).await
+            }
             // Faucet query
             "faucet.check_nearby" => self.handle_faucet_query(q).await,
             // Identity routes
@@ -2691,13 +2658,6 @@ impl AppRouter for AppRouterImpl {
             "debug.dump_state" | "debug.trigger_genesis" => self.handle_debug_query(q).await,
             // Session routes
             "session.status" => self.handle_session_query(q).await,
-            // C-DBRW routes (Protocol 6.2 Algorithm 3 + enrollment + measure + status)
-            "dbrw.status"
-            | "cdbrw.measure_trust"
-            | "cdbrw.reprove"
-            | "cdbrw.respond"
-            | "cdbrw.verify"
-            | "cdbrw.enroll" => self.handle_dbrw_query(q).await,
             // Recovery routes
             p if p.starts_with("recovery.") => self.handle_recovery_query(q).await,
             // Bitcoin query routes
@@ -2718,28 +2678,6 @@ impl AppRouter for AppRouterImpl {
     // ====================== INVOKE ======================
     async fn invoke(&self, i: AppInvoke) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;
-
-        // ------------------- C-DBRW access gate -------------------
-        // Write-path operations require at least PinRequired. Lifecycle +
-        // transport + BLE + recovery paths remain callable on a degraded
-        // device so the user can self-heal or recover keys.
-        let gated_write = matches!(
-            i.method.as_str(),
-            "wallet.send"
-                | "wallet.sendSmart"
-                | "wallet.sendOffline"
-                | "message.send"
-                | "bilateral.reconcile"
-                | "token.create"
-                | "tokens.publishPolicy"
-                | "contacts.addManual"
-        );
-        if gated_write {
-            if let Err(msg) = require_access_level(AccessLevel::PinRequired) {
-                log::warn!("[APP_ROUTER] {} rejected by C-DBRW gate: {}", i.method, msg);
-                return err(msg);
-            }
-        }
 
         match i.method.as_str() {
             // Wallet invoke routes

@@ -368,18 +368,11 @@ pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
 pub async fn create_genesis_via_blind_mpc(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisState, DsmError> {
-    let session = crate::core::identity::genesis_session::create_genesis(
-        device_id,
-        storage_nodes,
-        hw_entropy,
-        env_fingerprint,
-        metadata,
-    )
-    .await?;
+    let session =
+        crate::core::identity::genesis_session::create_genesis(device_id, storage_nodes, metadata)
+            .await?;
 
     let gs = convert_session_to_genesis_state_compat(&session)?;
     if !verify_genesis_state(&gs)? {
@@ -393,8 +386,6 @@ pub async fn create_genesis_via_blind_mpc(
 pub fn create_genesis_via_blind_mpc_with_contributors(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
     device_entropy: [u8; 32],
     mpc_entropies: Vec<[u8; 32]>,
     metadata: Option<Vec<u8>>,
@@ -404,11 +395,8 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     let mut session = crate::core::identity::genesis_session::GenesisSession::new(metadata)?;
     session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
-    session.set_silicon_inputs(hw_entropy, env_fingerprint)?;
     session.compute_commitments();
     session.compute_genesis_id();
-    // Canonical K_DBRW derived from (genesis_id, device_id = genesis_id, hw, env).
-    session.compute_dbrw_binding()?;
     session.validate_session()?;
 
     let gs = convert_session_to_genesis_state_compat(&session)?;
@@ -465,6 +453,100 @@ impl std::fmt::Display for GenesisState {
 
 // -------------------- Session compatibility --------------------
 
+/// Result of canonical Genesis v2 creation: the in-memory [`GenesisState`] plus the PUBLIC
+/// `genesis_nonce` and the [`crate::core::identity::genesis_v2::GenesisEntropyProfile`] the
+/// caller persists into the GenesisRecord (so `G` is recoverable from the mnemonic).
+pub struct GenesisV2Outcome {
+    pub state: GenesisState,
+    pub genesis_nonce: [u8; 32],
+    pub profile: crate::core::identity::genesis_v2::GenesisEntropyProfile,
+}
+
+/// Canonical mnemonic-rooted genesis (whitepaper §2.5 v2; NO storage nodes / NO MPC).
+///
+/// Deterministically derives the full key tree from the BIP39 `wallet_seed` via
+/// [`crate::core::identity::genesis_v2::derive_genesis_v2`] and packages it as a
+/// [`GenesisState`]. The signing key is the AK keypair (rooted in `device_seed`, so it does
+/// not depend on `DevID`); the ML-KEM keypair is derived from `Smaster` under `"DSM/kyber\0"`,
+/// matching the master-keypair derivation. `Smaster`/`s0` are NOT persisted — they are
+/// re-derived from the wallet seed on demand. Anti-clone is NOT established here.
+#[allow(clippy::too_many_arguments)]
+pub fn create_genesis_v2(
+    wallet_seed: &[u8],
+    network_id: &[u8],
+    wallet_index: u32,
+    device_slot: u32,
+    genesis_version: u32,
+    authority_policy_hash: &[u8; 32],
+    atta: &[u8; 32],
+) -> Result<GenesisV2Outcome, DsmError> {
+    let v2 = crate::core::identity::genesis_v2::derive_genesis_v2(
+        wallet_seed,
+        network_id,
+        wallet_index,
+        device_slot,
+        genesis_version,
+        authority_policy_hash,
+        atta,
+    )?;
+
+    // ML-KEM (Kyber) keypair from Smaster — the same context the master-keypair derivation uses.
+    let (kyber_public, kyber_secret) =
+        crate::crypto::kyber::generate_kyber_keypair_from_entropy(&v2.smaster, "DSM/kyber\0")?;
+
+    let state = GenesisState {
+        hash: v2.g,
+        initial_entropy: v2.genesis_nonce, // public, deterministic; no MPC entropy in v2
+        participants: HashSet::new(),      // no storage nodes for MnemonicV2
+        merkle_root: None,
+        device_id: Some(v2.devid),
+        signing_key: SigningKey {
+            public_key: v2.ak_public.clone(),
+            secret_key: v2.ak_secret.clone(),
+        },
+        kyber_keypair: KyberKey {
+            public_key: kyber_public,
+            secret_key: kyber_secret,
+        },
+        contributions: Vec::new(),
+    };
+
+    Ok(GenesisV2Outcome {
+        state,
+        genesis_nonce: v2.genesis_nonce,
+        profile: crate::core::identity::genesis_v2::GenesisEntropyProfile::MnemonicV2,
+    })
+}
+
+/// Canonical mnemonic-rooted genesis with a self-derived (recoverable) device-birth `AttA`.
+///
+/// Computes the public genesis digest `G` first, derives `AttA = derive_atta(wallet_seed, G,
+/// device_slot)` (deterministic, recoverable, no silicon / no random root), then runs
+/// [`create_genesis_v2`]. This is the SDK/Android wallet-creation entry point: the only secret
+/// input is the BIP39 `wallet_seed`. Returns the same [`GenesisV2Outcome`].
+pub fn create_genesis_v2_self_attested(
+    wallet_seed: &[u8],
+    network_id: &[u8],
+    wallet_index: u32,
+    device_slot: u32,
+    genesis_version: u32,
+    authority_policy_hash: &[u8; 32],
+) -> Result<GenesisV2Outcome, DsmError> {
+    use crate::core::identity::genesis_v2::{derive_atta, derive_genesis_g, derive_genesis_nonce};
+    let genesis_nonce = derive_genesis_nonce(wallet_seed, network_id, wallet_index);
+    let g = derive_genesis_g(&genesis_nonce, network_id, genesis_version);
+    let atta = derive_atta(wallet_seed, &g, device_slot);
+    create_genesis_v2(
+        wallet_seed,
+        network_id,
+        wallet_index,
+        device_slot,
+        genesis_version,
+        authority_policy_hash,
+        &atta,
+    )
+}
+
 pub fn convert_session_to_genesis_state_compat(
     session: &crate::core::identity::genesis_session::GenesisSession,
 ) -> Result<GenesisState, DsmError> {
@@ -481,11 +563,11 @@ pub fn convert_session_to_genesis_state_compat(
     let hash = session.genesis_id;
     let initial_entropy = calculate_initial_entropy(&hash, &contribs)?;
 
-    // Silicon-bound master keypair per whitepaper §11.1 eq.13.  K_DBRW
-    // is folded into S_master and both keypairs are deterministic given
-    // (device_id, contributions, K_DBRW).  The genesis_session derivation
-    // zeroises its IKM/seed buffers internally.
-    let mk = session.derive_silicon_bound_keypair()?;
+    // Master keypair per whitepaper §12 eq.13.  The CSPRNG secret root s0 is
+    // folded into Smaster; both keypairs are deterministic given (s0, device_id,
+    // authority_policy_hash).  The genesis_session derivation zeroises its
+    // IKM/seed buffers internally.
+    let mk = session.derive_master_keypair()?;
     let signing_key = SigningKey {
         public_key: mk.sphincs_public.clone(),
         secret_key: mk.sphincs_secret.clone(),
@@ -556,11 +638,7 @@ mod tests {
     async fn test_genesis_state_creation_mpc_only() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
-
-        let res =
-            create_genesis_via_blind_mpc(device_id, nodes, hw, env, Some(b"test".to_vec())).await;
+        let res = create_genesis_via_blind_mpc(device_id, nodes, Some(b"test".to_vec())).await;
 
         let genesis = match res {
             Ok(g) => g,
@@ -609,10 +687,7 @@ mod tests {
     async fn test_verification_mpc() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [7u8; 32];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
-
-        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, hw, env, None).await {
+        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, None).await {
             Ok(g) => g,
             Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
         };
@@ -631,14 +706,9 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let node_entropies = vec![[0x61; 32], [0x62; 32], [0x63; 32]];
         let metadata = b"meta".to_vec();
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
-
         let genesis = create_genesis_via_blind_mpc_with_contributors(
             device_id,
             nodes,
-            hw,
-            env,
             device_entropy,
             node_entropies.clone(),
             Some(metadata.clone()),
@@ -667,10 +737,7 @@ mod tests {
 
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0x11; 32];
-        let hw = vec![0xCC; 32];
-        let env = vec![0xDD; 32];
-
-        let g = match create_genesis_via_blind_mpc(device_id, nodes, hw, env, None).await {
+        let g = match create_genesis_via_blind_mpc(device_id, nodes, None).await {
             Ok(x) => x,
             Err(_) => return,
         };
@@ -708,5 +775,102 @@ mod tests {
             .expect("owner identity must accept its own request"));
         assert!(!process_invalidation(&identity_b, &request)
             .expect("different identities must not accept replayed requests"));
+    }
+
+    #[test]
+    fn create_genesis_v2_is_deterministic_and_mnemonic_rooted() {
+        use crate::core::identity::genesis_v2::{derive_genesis_v2, GenesisEntropyProfile};
+        let seed = b"bip39-wallet-seed-deterministic-test-............................";
+        let net = b"dsm-test";
+        let aph = [0x11u8; 32];
+        let atta = [0x22u8; 32];
+
+        let a = create_genesis_v2(seed, net, 0, 0, 2, &aph, &atta).expect("v2 genesis");
+        let b = create_genesis_v2(seed, net, 0, 0, 2, &aph, &atta).expect("v2 genesis");
+
+        // Canonical profile + no storage nodes / no MPC contributions.
+        assert_eq!(a.profile, GenesisEntropyProfile::MnemonicV2);
+        assert!(a.state.participants.is_empty());
+        assert!(a.state.contributions.is_empty());
+
+        // Fully deterministic from the wallet seed (recovery re-derives identically).
+        assert_eq!(a.genesis_nonce, b.genesis_nonce);
+        assert_eq!(a.state.hash, b.state.hash);
+        assert_eq!(a.state.device_id, b.state.device_id);
+        assert_eq!(
+            a.state.signing_key.public_key,
+            b.state.signing_key.public_key
+        );
+        assert_eq!(
+            a.state.kyber_keypair.public_key,
+            b.state.kyber_keypair.public_key
+        );
+
+        // GenesisState matches the underlying chain (G, DevID, AK pk).
+        let v2 = derive_genesis_v2(seed, net, 0, 0, 2, &aph, &atta).expect("chain");
+        assert_eq!(a.state.hash, v2.g);
+        assert_eq!(a.state.device_id, Some(v2.devid));
+        assert_eq!(a.state.signing_key.public_key, v2.ak_public);
+        assert_eq!(a.genesis_nonce, v2.genesis_nonce);
+
+        // A different wallet seed yields a different genesis + identity.
+        let c = create_genesis_v2(
+            b"a-different-wallet-seed-of-some-length-........",
+            net,
+            0,
+            0,
+            2,
+            &aph,
+            &atta,
+        )
+        .expect("v2 genesis");
+        assert_ne!(a.state.hash, c.state.hash);
+        assert_ne!(a.state.device_id, c.state.device_id);
+        assert_ne!(
+            a.state.signing_key.public_key,
+            c.state.signing_key.public_key
+        );
+    }
+
+    #[test]
+    fn create_genesis_v2_self_attested_is_deterministic_and_recoverable() {
+        use crate::core::identity::genesis_v2::{
+            derive_atta, derive_genesis_g, derive_genesis_nonce, GenesisEntropyProfile,
+        };
+        let seed = b"bip39-wallet-seed-self-attested-test-............................";
+        let net = b"dsm-test";
+        let aph = [0x33u8; 32];
+
+        // The canonical Android/SDK wallet-creation entry: only the wallet seed is secret.
+        let a =
+            create_genesis_v2_self_attested(seed, net, 0, 0, 2, &aph).expect("self-attested v2");
+        let b =
+            create_genesis_v2_self_attested(seed, net, 0, 0, 2, &aph).expect("self-attested v2");
+        assert_eq!(a.profile, GenesisEntropyProfile::MnemonicV2);
+        assert_eq!(a.state.hash, b.state.hash);
+        assert_eq!(a.state.device_id, b.state.device_id);
+        assert_eq!(a.genesis_nonce, b.genesis_nonce);
+
+        // The self-derived AttA reproduces DevID from the mnemonic alone (recovery): the
+        // self-attested DevID equals create_genesis_v2 with the explicitly-derived AttA.
+        let nonce = derive_genesis_nonce(seed, net, 0);
+        let g = derive_genesis_g(&nonce, net, 2);
+        let atta = derive_atta(seed, &g, 0);
+        let explicit = create_genesis_v2(seed, net, 0, 0, 2, &aph, &atta).expect("explicit v2");
+        assert_eq!(a.state.device_id, explicit.state.device_id);
+        assert_eq!(a.state.hash, explicit.state.hash);
+        assert_eq!(a.genesis_nonce, explicit.genesis_nonce);
+
+        // A different wallet seed yields a different self-attested identity.
+        let c = create_genesis_v2_self_attested(
+            b"another-self-attested-seed-of-length-....",
+            net,
+            0,
+            0,
+            2,
+            &aph,
+        )
+        .expect("self-attested v2");
+        assert_ne!(a.state.device_id, c.state.device_id);
     }
 }

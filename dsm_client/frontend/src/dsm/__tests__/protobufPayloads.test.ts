@@ -13,7 +13,7 @@ import {
   Envelope,
   GenesisCreated,
   Hash32,
-  SystemGenesisRequest,
+  WalletCreateGenesisV2Request,
 } from "../../proto/dsm_app_pb";
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
@@ -33,11 +33,12 @@ function setupBridge(onRequest: (req: BridgeRpcRequest) => void): void {
 }
 
 describe("protobuf-only bridge payloads", () => {
-  test("createGenesisViaRouter sends one native platform genesis request", async () => {
+  test("createGenesisViaRouter sends one mnemonic-rooted Genesis v2 request", async () => {
     const seenRequests: BridgeRpcRequest[] = [];
     const deviceId = new Uint8Array(32).fill(0x11);
     const genesisHash = new Uint8Array(32).fill(0x22);
-    const entropy = new Uint8Array(32).fill(7);
+    const mnemonic =
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const genesisEnvelope = new Envelope({
       version: 3,
       payload: {
@@ -45,7 +46,7 @@ describe("protobuf-only bridge payloads", () => {
         value: new GenesisCreated({
           deviceId,
           genesisHash: new Hash32({ v: genesisHash }),
-          deviceEntropy: entropy,
+          deviceEntropy: new Uint8Array(32).fill(0x33), // v2: carries the PUBLIC genesis_nonce
           networkId: "testnet",
           locale: "en-US",
         }),
@@ -57,28 +58,23 @@ describe("protobuf-only bridge payloads", () => {
       __callBin: async (reqBytes: Uint8Array) => {
         const req = BridgeRpcRequest.fromBinary(reqBytes);
         seenRequests.push(req);
-        if (req.method === "createGenesis") {
+        if (req.method === "createGenesisV2") {
           return wrapSuccessEnvelope(framedGenesisEnvelope);
         }
         return wrapSuccessEnvelope(new Uint8Array([1]));
       },
     };
 
-    await createGenesisViaRouter("en-US", "testnet", entropy);
+    await createGenesisViaRouter(mnemonic, "en-US", "testnet");
 
     expect(seenRequests).toHaveLength(1);
-    expect(seenRequests[0].method).toBe("createGenesis");
+    expect(seenRequests[0].method).toBe("createGenesisV2");
     expect(seenRequests[0].payload.case).toBe("bytes");
-    const decoded = SystemGenesisRequest.fromBinary(seenRequests[0].payload.value.data);
+    const decoded = WalletCreateGenesisV2Request.fromBinary(seenRequests[0].payload.value.data);
+    expect(decoded.mnemonic).toBe(mnemonic);
     expect(decoded.locale).toBe("en-US");
     expect(decoded.networkId).toBe("testnet");
-    expect(decoded.deviceEntropy).toEqual(entropy);
-    expect(decoded.cdbrwHwEntropy.length).toBe(0);
-    expect(decoded.cdbrwEnvFingerprint.length).toBe(0);
-    // Phase 13: `cdbrwSalt` (tag 6) is `reserved` in proto — accessor no
-    // longer generated.  Pair with cdbrwHwEntropy / cdbrwEnvFingerprint
-    // being empty (legacy createGenesisViaRouter doesn't populate them
-    // either) to lock the createGenesis-with-no-platform-entropy shape.
+    // No silicon / no random entropy: the mnemonic is the sole genesis root.
   });
 
   test("setBleIdentityForAdvertising sends BleIdentityPayload", async () => {

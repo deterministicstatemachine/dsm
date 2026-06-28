@@ -26,10 +26,9 @@ fn ensure_storage_base_dir() {
         AppState::set_identity_info_if_empty(dev, pk, genesis, smt_root);
         AppState::set_has_identity(true);
 
-        // Install a deterministic 32-byte C-DBRW binding key so the canonical
-        // signing authority can derive a keypair during AppRouter::new().
-        // DBRW enforcement is ON, so without this the router fails to construct.
-        dsm_sdk::set_cdbrw_binding_key_for_testing(vec![0xEE; 32]);
+        // Cache a deterministic wallet seed so the canonical signing authority can
+        // re-derive the device keypair during AppRouter::new().
+        dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
     });
 }
 

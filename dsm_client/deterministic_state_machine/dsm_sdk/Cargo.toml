@@ -65,6 +65,10 @@ glob = "0.3"
 ctor = "1.0"
 # Core dependencies
 dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false }
+# Boot Fenced Fused Anchor offline-bearer acceptance predicate (no_std+alloc, std-compatible).
+# Supplies accept_offline + the WOTS witness scheme + the dsm.anchor wire types; the partition
+# certificate is verified by reusing the existing dsm::crypto::sphincs verifier.
+dsm-anchor-core = { path = "../../../crates/dsm-anchor-core" }
 
 # JNI for Android integration
 jni = { version = "0.21", optional = true }

@@ -23,29 +23,116 @@ use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
     AppRouterImpl, BiImpl, UniImpl, handle_system_genesis_query, install_app_router_adapter,
 };
-use crate::handlers::misc_routes::dispatch_dbrw_query;
 use dsm::types::proto as pb;
 use prost::Message;
 
-/// Deterministically derive the device's identity signing keypair (SPHINCS+).
+/// Deterministically derive the device's identity signing keypair (SPHINCS+), Genesis v2.
 ///
-/// CANONICAL derivation — `genesis_hash || device_id || K_DBRW`, compressed by
-/// `SignatureKeyPair::generate_from_entropy` (domain tag `DSM/sphincs-seed`). This is
-/// the SOLE definition: both wallet init (below) and recovery-authority anchoring
-/// (`RecoverySDK`) MUST call it, so the re-derived keypair is byte-identical to the one
-/// registered in the device tree. A divergent copy would silently break every EK-cert
-/// chain and every recovery-authority anchor signature, so the derivation must never be
-/// duplicated inline.
+/// CANONICAL derivation — the AK keypair rooted in the BIP39 `wallet_seed` (NOT a device
+/// secret): `device_seed = KDF(wallet_seed, "DSM/device-seed/v2" || G || 0)`,
+/// `AK_seed = KDF(device_seed, "DSM/device-ak/v2" || authority_policy_hash)`,
+/// `AK = SPHINCS+.KeyGen(AK_seed)`. Delegates to the SINGLE canonical
+/// `dsm::core::identity::genesis_v2::derive_device_ak_keypair`, so the re-derived keypair is
+/// byte-identical to the one `create_genesis_v2` registered. Both wallet-init and
+/// recovery-authority anchoring MUST call it; a divergent copy would silently break every
+/// EK-cert chain + recovery anchor, so the derivation is never duplicated inline. `device_slot`
+/// is the primary device (0) and the default genesis authority policy is used — matching genesis.
 pub fn derive_device_signing_keypair(
-    genesis_hash: &[u8; 32],
-    device_id: &[u8; 32],
-    k_dbrw: &[u8; 32],
+    wallet_seed: &[u8],
+    genesis: &[u8; 32],
 ) -> Result<dsm::crypto::signatures::SignatureKeyPair, dsm::types::error::DsmError> {
-    let mut key_entropy = Vec::with_capacity(96);
-    key_entropy.extend_from_slice(genesis_hash);
-    key_entropy.extend_from_slice(device_id);
-    key_entropy.extend_from_slice(k_dbrw);
-    dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&key_entropy)
+    dsm::core::identity::genesis_v2::derive_device_ak_keypair(
+        wallet_seed,
+        genesis,
+        0,
+        &dsm::core::identity::genesis_session::genesis_authority_policy_hash(),
+    )
+}
+
+/// Read a persisted 32-byte identity value from `AppState`, failing closed.
+fn app_state_u32_bytes(
+    value: Option<Vec<u8>>,
+    what: &str,
+) -> Result<[u8; 32], dsm::types::error::DsmError> {
+    let v = value.ok_or_else(|| {
+        dsm::types::error::DsmError::InvalidState(format!("{what} not initialized"))
+    })?;
+    if v.len() != 32 {
+        return Err(dsm::types::error::DsmError::invalid_parameter(format!(
+            "{what} must be 32 bytes, got {}",
+            v.len()
+        )));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&v);
+    Ok(out)
+}
+
+/// Re-derive the device master seed `Smaster` for the unlocked wallet.
+///
+/// `s0 = derive_s0(wallet_seed, G, 0, aph)`; `Smaster = derive_smaster(s0, G, DevID, aph)`,
+/// where `G` is the persisted genesis digest (`AppState` genesis_hash, == `GenesisV2.g`) and
+/// `DevID` is the persisted device id (`AppState` device_id, == `GenesisV2.devid`) — both
+/// registered by `create_genesis_v2`. Because `G` and `DevID` are persisted, the only secret
+/// input needed is the session-cached `wallet_seed`; `network_id`/`wallet_index`/`atta`/
+/// `genesis_nonce` are NOT required to reproduce `Smaster`.
+///
+/// `Smaster` roots per-step EK seeds and deterministic ML-KEM coins (authorship). It is NEVER
+/// persisted and re-derives on demand; anti-clone is the Boot Fenced Fused Anchor, not Smaster.
+/// Fails closed when the wallet is locked.
+pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
+    use dsm::core::identity::genesis_v2::{derive_s0, derive_smaster};
+    let g = app_state_u32_bytes(
+        crate::sdk::app_state::AppState::get_genesis_hash(),
+        "genesis_hash (G)",
+    )?;
+    let devid = app_state_u32_bytes(
+        crate::sdk::app_state::AppState::get_device_id(),
+        "device_id (DevID)",
+    )?;
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            dsm::types::error::DsmError::InvalidState(
+                "wallet seed unavailable for Smaster re-derivation (wallet locked)".into(),
+            )
+        })?;
+    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
+    Ok(derive_smaster(&s0, &g, &devid, &aph))
+}
+
+/// Derive the AEAD key for per-relationship chain-head SK storage at rest.
+///
+/// `K_at-rest = keyed-BLAKE3(s0, "DSM/chain-head-at-rest/v2" || G || DevID)`. Rooted in `s0`
+/// (the recovery path) and domain-separated from authorship (`Smaster`): a copied database is
+/// undecryptable without the wallet seed, and a leak of the at-rest key does not expose the
+/// authorship root. Replaces the former C-DBRW binding key for SK-at-rest. Fails closed when
+/// the wallet is locked.
+pub fn current_chain_head_at_rest_key() -> Result<[u8; 32], dsm::types::error::DsmError> {
+    use dsm::core::identity::genesis_v2::derive_s0;
+    let g = app_state_u32_bytes(
+        crate::sdk::app_state::AppState::get_genesis_hash(),
+        "genesis_hash (G)",
+    )?;
+    let devid = app_state_u32_bytes(
+        crate::sdk::app_state::AppState::get_device_id(),
+        "device_id (DevID)",
+    )?;
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            dsm::types::error::DsmError::InvalidState(
+                "wallet seed unavailable for chain-head at-rest key (wallet locked)".into(),
+            )
+        })?;
+    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let s0 = derive_s0(&wallet_seed, &g, 0, &aph);
+    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher_keyed(
+        dsm::common::domain_tags::TAG_DSM_CHAIN_HEAD_AT_REST_V2,
+        &s0,
+    );
+    hasher.update(&g);
+    hasher.update(&devid);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 #[derive(Debug, Clone)]
@@ -336,7 +423,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // full router when identity is available, even if a MinimalBootstrapRouter was installed
     // earlier.
     let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
-        && crate::fetch_dbrw_binding_key().is_ok();
+        && crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
 
     if canonical_identity_ready {
         let app_router = Arc::new(
@@ -380,11 +467,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                         }
                     }
                     "system.genesis" => handle_system_genesis_query(q),
-                    // Bootstrap needs C-DBRW enrollment/trust before the full
-                    // identity context exists. Keep this allowlist narrow.
-                    "cdbrw.enroll" | "cdbrw.measure_trust" | "cdbrw.reprove" => {
-                        dispatch_dbrw_query(q).await
-                    }
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),
@@ -486,32 +568,18 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         let contact_manager =
             DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
 
-        // CRITICAL: Derive signing keypair deterministically from genesis + device_id + DBRW.
-        // DBRW is mandatory for wallet initialization/signing availability, but it must NOT
-        // participate in genesis creation.
-        //
-        // The live path concatenates `genesis || device_id || K_DBRW`, then
-        // `SignatureKeyPair::generate_from_entropy()` compresses that material with
-        // `domain_hash(dsm::common::domain_tags::TAG_DSM_SPHINCS_SEED, ...)` before deterministic SPHINCS keygen.
-        let dbrw_key = crate::fetch_dbrw_binding_key().map_err(|e| {
-            format!(
-                "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
-            )
-        })?;
-        if dbrw_key.len() != 32 {
-            return Err(format!(
-                "DBRW binding key must be 32 bytes, got {}",
-                dbrw_key.len()
-            ));
-        }
-        let mut dbrw_fixed = [0u8; 32];
-        dbrw_fixed.copy_from_slice(&dbrw_key);
-
-        // Get DBRW binding key for bilateral transaction gating (Canon 1)
-        // Note: Health state tracking removed - always proceed
-
-        let keypair = derive_device_signing_keypair(&gen_fixed, &dev_fixed, &dbrw_fixed)
-            .map_err(|e| format!("deterministic keypair derivation failed: {e}"))?;
+        // Genesis v2: the device signing keypair is the AK keypair derived deterministically
+        // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
+        // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
+        // unlocked-session secret; it must be cached (RecoverySDK::derive_and_cache_key) first.
+        let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+            .ok_or_else(|| {
+                "wallet seed not unlocked: cache the mnemonic (RecoverySDK::derive_and_cache_key) \
+                 before initializing wallet/signing"
+                    .to_string()
+            })?;
+        let keypair = derive_device_signing_keypair(&wallet_seed, &gen_fixed)
+            .map_err(|e| format!("device signing keypair derivation failed: {e}"))?;
         log::info!(
             "[SDK Init] Derived signing keypair, pubkey_len={}",
             keypair.public_key.len()
@@ -673,31 +741,26 @@ mod tests {
 
     #[test]
     fn device_signing_keypair_derivation_is_deterministic_and_sensitive() {
+        // Genesis v2: the device signing (AK) keypair derives from (wallet_seed, G).
+        let wallet_seed = [0x33u8; 64];
         let g = [0x11u8; 32];
-        let d = [0x22u8; 32];
-        let k = [0x33u8; 32];
-        let a = derive_device_signing_keypair(&g, &d, &k).expect("derive a");
-        let b = derive_device_signing_keypair(&g, &d, &k).expect("derive b");
+        let a = derive_device_signing_keypair(&wallet_seed, &g).expect("derive a");
+        let b = derive_device_signing_keypair(&wallet_seed, &g).expect("derive b");
         // Deterministic: same inputs → byte-identical keypair (the property that lets
         // recovery re-derive the device key without persisting the secret).
         assert_eq!(a.public_key, b.public_key);
         assert_eq!(a.secret_key, b.secret_key);
-        // Sensitive: changing ANY of the three inputs changes the keypair.
+        // Sensitive: changing the wallet seed changes the keypair.
         assert_ne!(
             a.public_key,
-            derive_device_signing_keypair(&[0x99; 32], &d, &k)
+            derive_device_signing_keypair(&[0x99; 64], &g)
                 .unwrap()
                 .public_key
         );
+        // Sensitive: changing the genesis digest G changes the keypair.
         assert_ne!(
             a.public_key,
-            derive_device_signing_keypair(&g, &[0x99; 32], &k)
-                .unwrap()
-                .public_key
-        );
-        assert_ne!(
-            a.public_key,
-            derive_device_signing_keypair(&g, &d, &[0x99; 32])
+            derive_device_signing_keypair(&wallet_seed, &[0x99; 32])
                 .unwrap()
                 .public_key
         );

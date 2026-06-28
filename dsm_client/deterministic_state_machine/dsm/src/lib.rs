@@ -160,31 +160,21 @@ fn get_enabled_features() -> Vec<String> {
 
 /// Expose core trustless genesis creation to SDK consumers.
 ///
-/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
-/// `hw_entropy` and `env_fingerprint` are the silicon-binding inputs
-/// (whitepaper Definition 3); the canonical K_DBRW is derived inside
-/// the MPC session from `(genesis_id, device_id = genesis_id, hw, env)`
-/// per `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
+/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter. The CSPRNG
+/// secret root `s0` is drawn inside the MPC session and folded into `Smaster`
+/// (whitepaper §12 eq.13); anti-cloning is the secure-element attestation, not
+/// a genesis input.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_session::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    hw_entropy: Vec<u8>,
-    env_fingerprint: Vec<u8>,
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(
-        device_id,
-        storage_nodes,
-        hw_entropy,
-        env_fingerprint,
-        metadata,
-        storage,
-    )
-    .await
-    .map_err(DsmError::from)
+    identity::create_trustless_genesis(device_id, storage_nodes, metadata, storage)
+        .await
+        .map_err(DsmError::from)
 }
 
 // verify_trustless_identity wrapper deleted: zero external callers, and

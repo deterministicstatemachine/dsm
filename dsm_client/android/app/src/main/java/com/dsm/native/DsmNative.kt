@@ -13,7 +13,7 @@ object DsmNative {
         try {
             System.loadLibrary("dsm_sdk")
         } catch (t: Throwable) {
-            // Log and fail fast - in dev we might have issues, but this is critical for DBRW
+            // Log and fail fast — the SDK native library is required for all wallet operations.
             android.util.Log.e("DsmNative", "Failed to load dsm_sdk library", t)
             throw RuntimeException("Failed to load dsm_sdk library", t)
         }

@@ -1,0 +1,22 @@
+[package]
+name = "dsm-anchor-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Hardware-free core of the DSM Root Advance MACANDD offline-bearer anchor: DSM SMT root-advance construction, MAC-And-Destroy hardware-witness flow, the compact 3-state appliance (prepare/commit/emit/finalize), the receiver acceptance predicate with TROPIC01 counter evidence, power-loss recovery, and the protobuf wire protocol."
+
+[lib]
+name = "anchor_core"
+
+# BLAKE3: H = BLAKE3-256 and the domain-separated KDF (derive_key mode).
+# prost (no_std + alloc): the on-device appliance wire protocol, generated from
+# the shared ../proto/dsm_anchor.proto — same tooling/schema family as the DSM
+# backend (prost 0.14, proto/dsm_app.proto). Builds for the RP2350 firmware and
+# unit-tests on the host with `cargo test -p dsm-anchor-core`.
+[dependencies]
+blake3 = { version = "1", default-features = false }
+prost = { version = "0.14", default-features = false, features = ["derive"] }
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"

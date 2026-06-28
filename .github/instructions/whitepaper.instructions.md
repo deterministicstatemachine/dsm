@@ -13,8 +13,8 @@ that replaces consensus, accounts and third-party authorization with determinist
 hash chains and Merkle commitments. This document synthesizes the DSM
 architecture and its recent extensions into a concise, implementable specification.
 It formalizes bilateral state progression without clocks or heights, introduces
-the Tripwire fork-exclusion theorem, incorporates the Dual-Binding Random
-Walk (DBRW) anti-cloning mechanism, details an offline recovery protocol using
+the Tripwire fork-exclusion theorem, scopes offline-bearer anti-cloning to a held secure-element
+attestation anchor, details an offline recovery protocol using
 encrypted NFC capsules, and specifies Deterministic Join-Triggered Emissions
 (DJTE): a capped, halving-scheduled distribution mechanism sourced from a
 CPTA-bound Deterministic Limbo Vault (DLV) and activated only by a spend-
@@ -186,35 +186,63 @@ Device identifier (normative). specific, but deterministic). Then
 Let AttA be the stable device attestation digest (platform-
 DevIDA := BLAKE3-256 "DSM/devid\0" ∥pkA ∥AttA.
 2.5 Genesis State Creation
-Genesis is an n-of-n commit-then-reveal entropy aggregation, NOT threshold cryptography.
-The n ≥ 3 storage-node participants each contribute one entropy value b_i, and the device
-contributes its own b_0 = device_id ∥ device_entropy; the contributions are committed, then
-revealed, then folded into a single deterministic hash. "n-of-n" means all n contributions
-are required — there is no t-of-n DKG or Shamir, and "b_1,...,b_n" is index notation for
-"all n contributions".
+Genesis is mnemonic-rooted and deterministic (Layer A; canonical default,
+GenesisEntropyProfile::MnemonicV2). The entire deterministic key tree derives from the device's
+BIP39 wallet seed; ordinary wallet creation requires NO storage nodes and NO multiparty ceremony.
+Let wallet_seed be the 64-byte BIP39 seed (mnemonic → wallet_seed) and let KDF(secret, context)
+denote HKDF-BLAKE3 (secret as IKM, context as info). With public parameters network_id,
+wallet_index, device_slot, genesis_version, the public authority_policy_hash, and the stable
+device attestation digest AttA:
 
-The genesis hash is computed over a single domain hasher seeded with the parent tag
-"DSM/genesis\0", folding each contribution under the sub-domain separator "DSM/genesis/mpc\0"
-so contribution digests occupy a collision-isolated region of the preimage. Concretely
-(normative; see types/genesis_types.rs::compute_genesis_hash and
-core/identity/genesis_session.rs::compute_genesis_id), with H_g := dsm_domain_hasher("DSM/genesis")
-and H(·) := domain_hash("DSM/genesis/contribution", ·):
+  genesis_nonce = KDF(wallet_seed, "DSM/genesis-public-nonce/v2" ∥ network_id ∥ wallet_index)   [PUBLIC]
+  G            = BLAKE3-256("DSM/genesis/v2" ∥ genesis_nonce ∥ network_id ∥ genesis_version)
+  s0           = KDF(wallet_seed, "DSM/s0/v2" ∥ G ∥ device_slot ∥ authority_policy_hash)         [SECRET]
+  device_seed  = KDF(wallet_seed, "DSM/device-seed/v2" ∥ G ∥ device_slot)                        [SECRET]
+  AK_seed      = KDF(device_seed, "DSM/device-ak/v2" ∥ authority_policy_hash)
+  (AKsk, AKpk) = SPHINCS+.KeyGen(AK_seed)
+  DevID        = BLAKE3-256("DSM/devid\0" ∥ AKpk ∥ AttA)
+  Smaster      = KDF(s0, "DSM/Smaster/v2" ∥ G ∥ DevID ∥ authority_policy_hash)                   [SECRET]
+
+genesis_nonce is PUBLIC (stored in the GenesisRecord) so G is recoverable from the mnemonic
+WITHOUT exposing wallet_seed. The attestation key AK is rooted in device_seed, NOT in Smaster,
+so it does not depend on DevID — DevID folds AKpk, which would otherwise be circular (the
+two-stage device derivation). s0, device_seed, and Smaster are SECRET, are NEVER persisted, and
+are re-derived from the wallet seed on demand (the wallet/recovery unlock path). G, genesis_nonce,
+DevID, and the authority policy are public; secret roots are excluded from public preimages where
+folding back would be circular. The mnemonic-rooted form keeps G clockless and publicly
+recomputable from the public nonce and parameters alone. (normative; see
+core/identity/genesis_v2.rs::derive_genesis_v2 and core/identity/genesis.rs::create_genesis_v2.)
+
+Negative space (normative). There is NO DBRW and NO K_DBRW — and no successor under any name
+(e.g. "K_DBRW2"). There is NO persisted device secret, NO persisted s0, and NO persisted Smaster
+anywhere in the system; both are re-derived from the wallet seed and zeroized after use.
+Anti-cloning is supplied ONLY by the Boot Fenced Fused Anchor (the offline-bearer secure-element
+attestation; Sec. 12 and dsm_anticlone.instructions.md). The seed-derived key tree above
+establishes AUTHORSHIP and recovery continuity, NOT anti-cloning: a seed copy holds Smaster and
+can sign, so Smaster MUST NOT be described as a clone-resistance primitive.
+
+Optional high-assurance / legacy profile (GenesisEntropyProfile::CommitRevealMpcV1). For
+deployments that require multiparty genesis entropy, DSM retains an OPTIONAL n-of-n
+commit-then-reveal aggregation. It is NOT the default and ordinary wallet creation MUST NOT
+require storage nodes. It is NOT threshold cryptography: n ≥ 3 storage-node participants each
+contribute one entropy value b_i and the device contributes b_0 = device_id ∥ device_entropy; the
+contributions are committed, then revealed, then folded into a single deterministic hash. "n-of-n"
+means all n contributions are required — there is no t-of-n DKG or Shamir. The genesis hash is
+computed over a single domain hasher seeded with "DSM/genesis\0", folding each contribution under
+the sub-domain separator "DSM/genesis/mpc\0" (normative; see
+types/genesis_types.rs::compute_genesis_hash and core/identity/genesis_session.rs::compute_genesis_id),
+with H_g := dsm_domain_hasher("DSM/genesis") and H(·) := domain_hash("DSM/genesis/contribution", ·):
 
   G := H_g( device_id
           ∥ ( "DSM/genesis/mpc\0" ∥ H(b_i)  for each contribution b_i, sorted by H(b_i) ) ).
 
-Contributions are folded in deterministic sorted order so transport-time ordering cannot
-change G. The public-key bundle (pk_sign, pk_encap) and the DBRW anti-cloning binding
-K_DBRW (Sec. 12) are deliberately EXCLUDED from G: they are *derived from* G
-(keys ← S_master ← K_DBRW ← G, §11.1), so folding them back into G's preimage would be
-circular. They bind to genesis by derivation, not by inclusion — a clone with identical
-public inputs derives a different K_DBRW and hence different keys (Sec. 12), so inclusion
-buys nothing. Wall-clock and mutable metadata (e.g. created_at) are likewise EXCLUDED,
-keeping G clockless and publicly recomputable from device_id plus the revealed contributions
-alone. K_DBRW is derived post-genesis inside the same session (so G exists before K_DBRW);
-see Sec. 12. The classical flat form G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_n ∥ A)
-(3) is the conceptual presentation; the domain-separated, sorted construction above is the
-implemented normative form, and §12's "n-of-n genesis from §2.5" refers to it.
+Contributions are folded in deterministic sorted order so transport-time ordering cannot change G.
+In this profile s0 is a CSPRNG draw (not wallet-seed-derived) and the master seed uses the
+"DSM/Smaster/v1" context (Eq. 13). The public-key bundle is EXCLUDED from G (folding it back
+would be circular); s0 and wall-clock/mutable metadata are likewise EXCLUDED, keeping G publicly
+recomputable from device_id plus the revealed contributions alone. The classical flat form
+G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_n ∥ A) (3) is the conceptual presentation; the
+domain-separated, sorted construction above is the implemented form for this profile.
 3 Two Merkle Structures: Storage and Replication
 Device Tree (standard Merkle). The Device Tree (leaves = device IDs) is fully replicated
 across storage nodes and across all devices under G. Adding a device is an online event: a
@@ -865,17 +893,14 @@ Evidence records ARE produced and persisted (above), but their binding into a de
 sparse-Merkle root under a "DSM/evidence" leaf tag is, at present, a design target; treat both the
 "DSM/evidence" tag and the R_deny non-inclusion check accordingly until confirmed in code.
 10.1 Hardware-Bound Cryptographic Identity
-Each node derives a non-forgeable identity from a network genesis anchor and DBRW
-binding:
-nodeID = BLAKE3-256 "DSM/node-id\0" ∥Gnet ∥K(node)
-DBRW ,
-where Gnet is the network genesis commitment and K(node)
-DBRW is the dual-binding materialized
-from the node’s hardware entropy and execution environment. This makes Sybil creation
-economicallycostly: duplicatingdistinct nodeIDsrequiresdistincthardwareandenvironments.
-Privacy: K(node)
-DBRW MUST NEVER be serialized, logged, or included in any commitment or
-envelope; it is used only as internal key material.
+Each node derives an identity from a network genesis anchor and its attestation key:
+nodeID = BLAKE3-256 "DSM/node-id\0" ∥Gnet ∥H(pk_node),
+where Gnet is the network genesis commitment and pk_node is the node's attestation public key
+derived from its master seed (Sec. 12). This establishes authorship of node operations; it is not a
+clone-resistance claim, and no software-read hardware fingerprint is treated as one. Sybil
+resistance is economic, via admission and staking (Sec. 10.2), not via hardware binding.
+Privacy: the node's secret seed material MUST NEVER be serialized, logged, or included in any
+commitment or envelope; it is used only as internal key material.
 10.2 Admission, Staking, and Service Commitments
 To participate, a node presents:
 1. an inclusion proof in the Node Registry SMT root Rnodes,
@@ -999,7 +1024,7 @@ crypto/kyber.rs. Real KEM seed tags are "DSM/ml-kem-seed", "DSM/ml-kem-keygen-d"
 "DSM/ml-kem-keygen-z".)
 Deterministic ML-KEM-768 encapsulation (normative). from public and local secret inputs:
 Let coins be deterministically derived
-coins := BLAKE3-256 "DSM/kyber-coins\0" ∥hn ∥Cpre ∥DevIDsender ∥KDBRW.
+coins := KDF(secret= Smaster, context= "DSM/kyber-coins/v1" ∥kyber_alg_id ∥recipient_kem_pub_hash ∥hn ∥Cpre ∥DevID).
 Encapsulation uses a deterministic coins interface (equivalently, a seeded KEM):
 (ct,ss) = MlKem768EncDet(pkrecipient,coins), kstep = BLAKE3-256 "DSM/kyber-ss\0" ∥ss ,
 (12)
@@ -1023,15 +1048,29 @@ Planned / not in current implementation (Layer B). Migration to a certified, aud
 SLH-DSA (FIPS 205) signer — replacing the custom BLAKE3 SPHINCS+ above with a standardized
 SHA2/SHAKE parameter set carrying an actual NIST security category — is an architecture target,
 not shipped.
-Key derivation (normative). Let KDBRW be the DBRW binding (Sec. 12). KDBRW MUST
-NEVER be serialized, logged, or included in any commitment. Derive a master seed using
-HKDF-BLAKE3:
-Smaster = HKDF-ExtractBLAKE3(salt= "DSM/dev\0", IKM= G∥DevID ∥KDBRW ∥s0),
+Key derivation (normative). Under the canonical mnemonic-rooted genesis (§2.5), the secret roots
+are derived deterministically from the BIP39 wallet seed — NOT from a standalone CSPRNG draw.
+The secret root for authorship/recovery is s0 = KDF(wallet_seed, "DSM/s0/v2" ∥ G ∥ device_slot ∥
+authority_policy_hash). The attestation key is rooted in a SEPARATE branch:
+device_seed = KDF(wallet_seed, "DSM/device-seed/v2" ∥ G ∥ device_slot),
+AK_seed = KDF(device_seed, "DSM/device-ak/v2" ∥ authority_policy_hash),
+(AKsk,AKpk) ← SPHINCS+.KeyGen(AK_seed). Rooting AK in device_seed rather than Smaster is required
+because DevID = BLAKE3-256("DSM/devid\0" ∥ AKpk ∥ AttA) folds AKpk; deriving AK from Smaster (which
+folds DevID) would be circular. s0, device_seed, and Smaster are SECRET, MUST NEVER be serialized,
+logged, or included in any commitment, and are re-derived from the wallet seed on demand (never
+persisted). G, DevID, and the authority policy are public context, not secrets. The master seed
+binds the secret root to public context:
+Smaster = KDF(secret= s0, context= "DSM/Smaster/v2" ∥ G ∥ DevID ∥ authority_policy_hash),
 (13)
-and an attestation key (AKsk,AKpk) ←SPHINCS+.KeyGen(Smaster).
-Given parent hn and precommit Cpre, derive the per-step seed using plain domain-separated
-keyed BLAKE3 (NOT HKDF; see ephemeral_key.rs::derive_ephemeral_seed, lines 29–41):
-En+1 = BLAKE3-256("DSM/ek\0" ∥ hn ∥ Cpre ∥ kstep ∥ KDBRW), (14)
+which roots the per-step ephemeral keys and the deterministic ML-KEM-768 coins (Eq. 14 below). Here
+KDF(secret, context) is HKDF-BLAKE3 with the secret as IKM and the context as info; for the per-step
+derivations it is keyed BLAKE3 with the secret as the key (NOT HKDF; see
+ephemeral_key.rs::derive_ephemeral_seed). (In the optional CommitRevealMpcV1 profile of §2.5, s0 is a
+CSPRNG draw and the master seed uses the "DSM/Smaster/v1" context; the per-step EK chain of Eq. 14 is
+identical in both profiles.)
+Given parent hn and precommit Cpre, derive the per-step seed over versioned, algorithm- and
+chain-bound context:
+En+1 = KDF(secret= Smaster, context= "DSM/ek/v1" ∥ alg_id ∥ chain_id ∥ hn ∥ Cpre ∥ kstep), (14)
 then generate the ephemeral keypair (EKsk
 n+1,EKpk
 n+1). (Only the master seed Smaster of (13) uses
@@ -1057,14 +1096,18 @@ the proposed transition context:
 The response is the side signature under the freshly derived EK key for that
 same transition:
 
-  E_{n+1} = BLAKE3-256("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)   (plain keyed BLAKE3)
+  E_{n+1} = KDF(secret=Smaster, context="DSM/ek/v1" || alg_id || chain_id || h_n || C_pre || k_step)
   EK_{n+1} = SPHINCS+.KeyGen(E_{n+1})
   sig_side = Sign_{EKsk_{n+1}}(receipt_commit or session-bound target)
 
-K_DBRW is never serialized. A copied wallet database may contain public
-receipts, encrypted chain-head records, and prior public keys, but it does not
-contain the live device binding needed to decrypt the next signer or derive the
-next EK. A second physical device therefore cannot answer the receipt challenge
+Smaster is never serialized in cleartext; it is recoverable only from the seed.
+The per-step EK chain therefore binds AUTHORSHIP — only a holder of Smaster
+derives the next signer — but it does not by itself exclude a seed copy, which
+holds Smaster and can sign. Anti-clone is supplied separately, and only for the
+offline-bearer feature, by the secure-element attestation: the offline spend
+authority is the island signature over the transition (see the anti-clone anchor
+specification), which a copy on other hardware cannot produce. That island
+signature, not the EK derivation, is what a second physical device cannot answer
 for the same parent h_n. The next key is different every transition, and the
 keys remain connected by cert_{n+1}, which is signed by AK at step 0 or by the
 previous EK on later steps.
@@ -1072,81 +1115,52 @@ previous EK on later steps.
 Verification (normative). Verification checks inclusion proofs (Sec. 4.2),
 recomputes the parent-to-child SMT replace, verifies sig_side under EKpk_{n+1},
 and replays cert_{n+1} back to AKpk. A verifier MUST reject a receipt that has
-valid parent/root inclusion but lacks the C-DBRW-derived per-step EK signature
+valid parent/root inclusion but lacks the per-step EK signature
 and certificate chain for the proposed transition.
 11.2 Identity Pre-commitment
 Let P0 be a provisioning seed; define Pi = BLAKE3-256("DSM/provision\0" ∥Pi−1). Under
 collision resistance, adversaries cannot forge a different identity chain consistent with {Pi}
 without breaking P0. For transport, commitments may be sealed via ML-KEM-768 and verified upon
 decryption by checking BLAKE3-256("DSM/commit\0" ∥Sn ∥P) = expected.
-12 Dual-Binding Random Walk (DBRW)
-Definition 1 (Hardware Entropy). H(d) ∈{0,1}n extracts device-specific microarchitectural
-entropy.
-Definition 2 (Environment Fingerprint). E(e) ∈{0,1}m fingerprints the execution environ-
-ment.
-Definition 3 (Dual-Binding).
-KDBRW = BLAKE3-256("DSM/cdbrw/bind\0"
-                    ∥ LP(genesis_hash) ∥ LP(device_id)
-                    ∥ LP(H(d))         ∥ LP(E(e))),
-where LP(x) := LE32(len(x)) ∥ x is the canonical length-prefixed encoding,
-`genesis_hash` is the n-of-n MPC genesis commitment from §2.5, and
-`device_id` is the protocol device identifier (root-device invariant:
-`device_id = genesis_hash`). K_DBRW is derived post-MPC inside the
-genesis session (so genesis_hash exists before K_DBRW); on restore the
-four inputs are persisted across the platform layer and recovered
-deterministically.
+12 Device Secret and Offline-Bearer Anti-Clone Anchor
+The device secret is s0, derived deterministically from the BIP39 wallet seed (Genesis v2, §2.5;
+the optional CommitRevealMpcV1 profile draws it from a CSPRNG instead). It is NEVER serialized or
+persisted in any form and is recoverable only by re-deriving it from the wallet seed. The master
+seed of §11,
+Smaster = KDF(secret= s0, context= "DSM/Smaster/v2" ∥ G ∥ DevID ∥ authority_policy_hash) (Eq. 13),
+roots, via the per-step KDF (Eq. 14), every ephemeral key and the deterministic ML-KEM-768 coins.
+(The attestation key AK is rooted in device_seed, NOT in Smaster — see §2.5/§11.1 — to break the
+DevID circularity.) Smaster establishes AUTHORSHIP and recovery continuity: only its holder
+produces valid per-step signatures, and a holder of the public chain alone cannot. There is no
+DBRW, no K_DBRW (or any successor), no persisted s0, and no persisted Smaster.
 
-Theorem 5 (Binding Inseparability). Let D be an enrolled DSM device
-and D′ any adversarially constructed device that is not physically
-identical to D. Under
-  (A1) canonical injective LP-encoding of the binding tuple,
-  (A2) BLAKE3-256 collision resistance,
-  (A3) conditional min-entropy H_∞(H(d) | view_A, H(d′)) ≥ λ from
-       C-DBRW Phase 2.2 calibration, and
-  (A4) Layer B W1 false-accept bound Pr[Accept_W1(D′, D)] ≤ ε_W1(λ),
-the probability that A produces a distinct device D′ accepted as
-inseparably bound to the same DSM identity as D is
+Smaster does not, and cannot, establish anti-cloning. A seed copy holds Smaster and can sign,
+and no software-derived value can close this gap: every read path that turns a physical quantity
+into a number is owned by whoever owns the machine, so a root adversary forges any such value
+self-consistently. Labels, serial numbers, token metadata, platform environment variables, and
+software-read hardware fingerprints are therefore NOT clone resistance and MUST NOT be
+described as such. Authorship and anti-cloning are distinct properties, and DSM keeps them in
+distinct layers.
 
-  Adv_bind(A) ≤ Adv^H_coll(A) + 2^(-λ) + ε_W1(λ).
+Anti-cloning is enforced ONLY by the Boot Fenced Fused Anchor, and only for the optional
+offline-bearer transfer feature: a hardware root of trust — a held secure element whose attestation
+key is generated on the element, has no read path, and signs a fresh challenge over each transition.
+The offline spend authority is that island signature; a perfect bit copy on other hardware holds
+every bit but not the island key and cannot produce it. No software-derived value (seed, Smaster,
+silicon fingerprint, or any DBRW-style device secret) is, or may be described as, anti-clone. Offline counterparties pin the exact device identity (the hash of the attested public
+key); a different genuine device of the same make does not stand in for the bound one. The
+necessity argument (no software-only physical channel can bind a transition on hardware the
+owner controls), the construction (bind the lineage to the attested device identity, not the seed),
+and the enrollment, counterparty-pinning, and resynchronization flows are specified in the
+anti-clone anchor document (.github/instructions/dsm_anticlone.instructions.md). Online and
+non-bearer transfers require no secure element and are never blocked by its absence; access to DSM
+is never denied for lack of an anchor, and the anchor gates only offline bearer, degrading to the
+online-checked path otherwise. Fork exclusion and conflict evidence across all modes are provided
+by Tripwire (Sec. 6), independently of the anchor.
 
-Full proof (case analysis on equality of the preimage byte string +
-union bound over the three failure modes) and discussion of the
-conditional nature of (A3)/(A4) are in
-`.github/instructions/cdbrw.instructions.md` §5.3 Theorem 5.2.
-DSM: Deterministic State Machines 28
-DBRW advances without clocks. The ρ/C recurrence is the abstract definition
-of forward-only DBRW state evolution:
-ρi = BLAKE3-256 "DSM/dbrw-rho\0" ∥Ci−1 ∥KDBRW , Ci = BLAKE3-256 "DSM/dbrw-step\0" ∥C
-(16)
-with nonce Ni (deterministically derived from adjacency inputs or obtained from a local
-entropy source; it MUST NOT be time-based). Mixing KDBRW into key derivations binds all
-signatures to the device and environment without introducing any external authority.
-
-Realization (normative). Implementations MUST realize the per-step KDBRW
-binding by mixing KDBRW into the per-step keyed-BLAKE3 derivation inputs that
-produce signing material — not as a separately maintained ρ/C state walk.
-Specifically, the per-step ephemeral seed (Eq. 14) and the deterministic
-ML-KEM-768 coins (Sec. 11) both fold KDBRW into their preimage (both are plain
-domain-separated BLAKE3, NOT HKDF):
-  E_{n+1} = BLAKE3-256("DSM/ek\0" ∥ h_n ∥ C_pre ∥ k_step ∥ K_DBRW)
-  coins   = BLAKE3-256("DSM/kyber-coins\0" ∥ h_n ∥ C_pre ∥ DevID ∥ K_DBRW)
-
-Because every per-step seed inherits K_DBRW, advancing the chain is
-equivalent to advancing the ρ/C recurrence; (16) is the abstract property
-that emerges from this construction. A separate explicit ρ/C state walk is
-NOT required — and implementations SHOULD NOT maintain one, since the
-extra state would be redundant with the per-step seed and would create an
-additional surface that must be kept consistent with the chain. The
-"DSM/dbrw-rho\0" / "DSM/dbrw-step\0" tags exist as conceptual labels for
-(16); the per-step HKDF mixing is the only normative realization.
-
-(Implementations MAY use distinct domain tags such as "DSM/dbrw-rwp-*" for
-unrelated DBRW-derived constructs, e.g., transaction-unlinkability random
-walks over the public message space; those are not the §12 ρ/C recurrence
-and do not satisfy the realization requirement above.)
-Privacy Rule (normative): DBRW bindings MUST NOT be used for user identification,
-tracking, or correlation. DBRW exists solely for anti-cloning protection and device binding;
-all user-facing operations use DevID and genesis-based addressing.
+Privacy Rule (normative). The device secret and the attestation identity MUST NOT be used for
+user identification, tracking, or correlation. They exist solely for authorship and offline-bearer
+anti-cloning; all user-facing operations use DevID and genesis-based addressing.
 13 Offline Recovery Protocol
 After each accepted stitched receipt, the device writes an encrypted recovery capsule to offline
 media (e.g., NFC, printed QR, removable storage) as an append-only stream. The capsule is
@@ -1391,8 +1405,10 @@ proximity channels.
 Countersigned receipts are undeniable; causal ordering emerges from parent embedding and
 Per-Device/Device Tree inclusion proofs.
 15.7 Anti-Cloning Guarantees
-DBRW binds state to both hardware and environment; without KDBRW, extending state is
-infeasible.
+Anti-cloning is scoped to the optional offline-bearer feature and provided by the secure-element
+attestation (Sec. 12): a copy on other hardware cannot produce the island signature, so it cannot
+extend an offline-bearer lineage. Online and non-bearer operation requires no anchor and is never
+blocked by its absence. Fork exclusion across all modes is Tripwire (Sec. 6).
 15.8 Offline Liveness and Recovery
 Thecapsule+TR/SRschemeenablesimmediateresumptionafterdeviceloss; per-relationship
 parents allow constructing successors without replaying history; the roll accumulator anchors
@@ -1510,16 +1526,12 @@ addrA→B := b0x[B32 BLAKE3 "DSM/addr-G\0" ∥G∥saltG.B32 BLAKE3 "DSM/addr-D\0
 Here hn is the current relationship chain tip digest for (A↔B), and nonce is sender-chosen
 per submission. B32(·) is a pure text encoding; it carries no security assumptions.
 Salt derivation (normative). Per-user blinding salts are derived inside the SDK and never
-exposed. They use plain domain-separated BLAKE3 (NOT HKDF) over the secret hardware-bound
-binding K_DBRW plus public material (b0x_sdk.rs::derive_salt, lines 509–531):
-  saltG := BLAKE3-256("DSM/b0x-salt-G\0" ∥ [K_DBRW] ∥ [genesis_hash] ∥ device_id),
-  saltD := BLAKE3-256("DSM/b0x-salt-D\0" ∥ [K_DBRW] ∥ [genesis_hash] ∥ device_id).
-K_DBRW (the device's hardware-bound secret, Sec. 12 — it approximates the master-secret role
-here and is never serialized) is folded in on the production Android/JNI build; genesis_hash is
-folded in when available. On builds or tests lacking K_DBRW, the salt falls back to
-(genesis_hash ∥ device_id) over public inputs (weaker blinding, same construction). This
-differs from earlier drafts, which specified HKDF-BLAKE3 over Smaster; the implemented form
-is plain keyed BLAKE3 as above.
+exposed. They key BLAKE3 with the master seed Smaster (the secret root, Sec. 12; never
+serialized) over public context (b0x_sdk.rs::derive_salt):
+  saltG := KDF(secret= Smaster, context= "DSM/b0x-salt-G/v1" ∥ genesis_hash ∥ device_id),
+  saltD := KDF(secret= Smaster, context= "DSM/b0x-salt-D/v1" ∥ genesis_hash ∥ device_id).
+The secret is Smaster; genesis_hash and device_id are public context binding the salt to the
+identity and relationship without revealing them.
 Rotation and privacy. Each stitched receipt advancing (A↔B) changes hn, rotating the
 final component and thus the full b0x[...] key. Only counterparties tracking the live tip
 can derive the current spool key; storage nodes store opaque bytes keyed by b0x[...] and
@@ -1571,19 +1583,25 @@ counter-based limits (e.g., per-relationship step counters) and/or work-unit gat
 fixed number of BLAKE3 iterations. These are strictly local predicates or vault predicates
 parameterized by integers, never by wall time. No calibration against time is permitted.
 DSM: Deterministic State Machines 40
-16.7 Key Management, DBRW Binding, and SPHINCS+
+16.7 Key Management and SPHINCS+
 Per-step key derivation is specified in Sec. 11.1 and Sec. 12. In summary:
-• Device-bound secret KDBRW derives from hardware and environment (DBRW) and is never
-serialized, logged, or committed.
-• Master seed Smaster derives via RFC-5869 HKDF over BLAKE3 from (G,DevID,KDBRW,s0).
-This is the one genuinely-HKDF derivation in DSM (crypto/hkdf.rs, genesis_session.rs).
-• For each parent hn and pre-commit Cpre, a per-step seed En+1 derives via plain
-domain-separated keyed BLAKE3 (NOT HKDF) from (hn,Cpre,kstep,KDBRW), where kstep is
-derived from ML-KEM-768 shared-secret material.
+• Device secret s0 = KDF(wallet_seed, "DSM/s0/v2" ∥ G ∥ device_slot ∥ authority_policy_hash) is the
+deterministic secret root (canonical Genesis v2, §2.5); it is re-derived from the BIP39 wallet seed,
+NEVER persisted, and never serialized, logged, or committed. (The optional CommitRevealMpcV1 profile
+draws s0 from a CSPRNG instead.) The attestation key AK is rooted in a separate branch (device_seed),
+not in s0/Smaster, to break the DevID circularity (§2.5/§11.1).
+• Master seed Smaster = KDF(secret=s0, context="DSM/Smaster/v2" ∥ G ∥ DevID ∥
+authority_policy_hash) ("DSM/Smaster/v1" in the legacy CommitRevealMpcV1 profile). This is the one
+genuinely-HKDF derivation in DSM (crypto/hkdf.rs, genesis_v2.rs): s0 is the IKM, the context is the
+info.
+• For each parent hn and pre-commit Cpre, a per-step seed En+1 = KDF(secret=Smaster,
+context="DSM/ek/v1" ∥ alg_id ∥ chain_id ∥ hn ∥ Cpre ∥ kstep) via keyed BLAKE3 (NOT
+HKDF), where kstep is derived from ML-KEM-768 shared-secret material.
 • Ephemeral SPHINCS+ keys are deterministically generated from En+1 and certified by
 the previous key (AK or prior EK).
 No long-term signing key is exposed at the protocol layer; all signatures are ephemeral and
-chained to the parent and DBRW binding.
+chained to the parent. These derivations establish authorship; offline-bearer anti-cloning is the
+secure-element attestation of Sec. 12.
 Receipts (Per-Device SMT replace). For (A↔B) at tip hn, a stitched receipt carries:
 (i) old/new tips (hn,hn+1), (ii) old/new Per-Device SMT roots (rA,r′
 A) (and symmetrically
@@ -1641,7 +1659,7 @@ certified NIST variant — see §11.1; size capped as specified in Sec. 11.1).
 • KEM: ML-KEM-768 (FIPS 203) for step secrets; secrets never serialized.
 • SMT: 256-bit key space; inclusion proofs logarithmic; device-local authoritative.
 • Device Tree: Standard Merkle; replicated to storage nodes and user devices.
-• Entropy: s0 from CSPRNG (Phase 13: sdevice removed from K_DBRW preimage — K_DBRW is now deterministic per device); per-step seeds via plain domain-separated keyed BLAKE3 (not HKDF) over (hn, Cpre, kstep, KDBRW).
+• Entropy: s0 = KDF(wallet_seed, "DSM/s0/v2" ∥ …) is the deterministic secret root (canonical Genesis v2; CSPRNG-drawn only in the optional CommitRevealMpcV1 profile); per-step seeds via keyed BLAKE3 (not HKDF) keyed by Smaster over context (DSM/ek/v1, alg_id, chain_id, hn, Cpre, kstep).
 • Time: No timestamps, epochs, or heights in predicates or encodings.
 • Modal rule: Pending online for (A,B) blocks offline for (A,B) until synchronized; other
 relationships commute.
@@ -1650,13 +1668,13 @@ library (NDK), invoked through a thin JNI layer, and surfaced to a React UI via 
 bridge. Transport uses protobuf (Envelope v3). All cryptographic commits are canonical
 protobuf commit bytes emitted and verified solely by dsm_core. Ordering is enforced by
 bilateral hash adjacency and Per-Device SMT replace, not by time or height. SPHINCS+ is
-per-step and deterministically derived with ML-KEM-768 and DBRW binding.
+per-step and deterministically derived with ML-KEM-768, keyed by Smaster.
 17 Conclusion
 DSM is a clockless bilateral trust fabric with two Merkle layers: a replicated Device Tree
 that binds DevIDs to a single genesis, and a Per-Device SMT that indexes relationship
 domains and their linear straight hash chains. Ordering is enforced solely by hash adjacency.
 Receipts carry inclusion proofs and post-quantum signatures; ephemeral SPHINCS+ keys are
-chained to the parent and bound to the device via DBRW. Online delivery is deterministic
+chained to the parent and keyed by Smaster. Online delivery is deterministic
 via b0x[...] spool keys; offline is bilateral live-sign. The result is robust, scalable, and
 suitable for large-scale deployment.
 DSM: Deterministic State Machines 43
@@ -1729,8 +1747,8 @@ RTT round-trip time
 UI user interface
 FFI foreign function interface
 SPHINCS+ stateless hash-based signature scheme
-DBRW dual-binding random walk; binds state to hardware entropy and environment
-fingerprint
+SE anchor held secure-element attestation; offline-bearer anti-clone, binding the lineage to a
+non-extractable device key (Sec. 12)
 DLV deterministic limbo vault; unlock key derives only upon stitched proof-of-completion
 NDK android native toolchain
 JNI java/kotlin native bridge
@@ -1787,7 +1805,7 @@ n+1,EKpk
 n+1).
 No long-term signing key is exposed at the protocol layer; the per-step key is deterministically
 bound to (hA↔B
-n ,Cpre) and the device’s DBRW binding.
+n ,Cpre) and keyed by the device’s master seed Smaster.
 Step 3: Successor state and balance update. the balance delta ∆A =−α,∆B = +α (Sec. 8), then
 hA↔B
 n+1 = H(Sn+1).

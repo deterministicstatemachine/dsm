@@ -50,16 +50,19 @@ pub fn compute_receipt_challenge_response_target(
     )
 }
 
-/// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1).
+/// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1/§12 Eq.14).
 ///
 /// The signer's per-step EK is derived as:
-///   `E_{n+1} = HKDF-BLAKE3("DSM/ek\0", h_n || C_pre || k_step || K_DBRW)`
+///   `E_{n+1} = keyed-BLAKE3(Smaster, "DSM/ek/v1\0" || alg_id || chain_id || h_n || C_pre || k_step)`
 ///   `(EK_pk_{n+1}, EK_sk_{n+1}) = SPHINCS+.KeyGen(E_{n+1})`
 ///
-/// All three inputs MUST be 32 bytes. `k_step` comes from a Kyber exchange
-/// between the parties.
+/// All four context inputs MUST be 32 bytes; the secret root is the device master seed
+/// `Smaster` (re-derived from the wallet seed, never persisted — there is no C-DBRW).
+/// `k_step` comes from a Kyber exchange between the parties.
 #[derive(Debug, Clone, Copy)]
 pub struct PerStepEkContext {
+    /// Relationship / chain identifier (the per-relationship SMT key) bound into the seed.
+    pub chain_id: [u8; 32],
     /// Current bilateral chain tip h_n (parent_tip of the receipt being built).
     pub h_n: [u8; 32],
     /// Pre-commitment hash C_pre for this step (whitepaper §4.1).
@@ -69,21 +72,24 @@ pub struct PerStepEkContext {
     pub k_step: [u8; 32],
 }
 
-/// Derive the per-step ephemeral SPHINCS+ keypair (whitepaper §11.1).
+/// Derive the per-step ephemeral SPHINCS+ keypair (whitepaper §11.1/§12 Eq.14).
 ///
 /// Wraps the underlying primitives `derive_ephemeral_seed` +
 /// `generate_ephemeral_keypair` from `dsm::crypto::ephemeral_key`. Returns
-/// `(EK_pk, EK_sk)`. The result is fully deterministic in `(h_n, c_pre,
-/// k_step, k_dbrw)` — same inputs always produce the same keypair.
+/// `(EK_pk, EK_sk)`. The result is fully deterministic in `(s_master, chain_id,
+/// h_n, c_pre, k_step)` — same inputs always produce the same keypair. `s_master`
+/// is the device master seed `Smaster` (the keyed-BLAKE3 key / secret root).
 pub fn derive_per_step_ek(
     ctx: &PerStepEkContext,
-    k_dbrw: &[u8; 32],
+    s_master: &[u8; 32],
 ) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
     let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(
+        s_master,
+        dsm::crypto::ephemeral_key::ALG_ID_SPX256F,
+        &ctx.chain_id,
         &ctx.h_n,
         &ctx.c_pre,
         &ctx.k_step,
-        k_dbrw,
     );
     dsm::crypto::ephemeral_key::generate_ephemeral_keypair(&seed)
 }
@@ -103,10 +109,10 @@ pub struct KyberStepEncap {
 /// Sender-side: derive `k_step` for the per-step EK by deterministically
 /// encapsulating against the recipient's Kyber public key (whitepaper §11).
 ///
-/// The encapsulation coins are derived from public chain context plus the
-/// device-bound `K_DBRW`:
-///   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-///                       || DevID_sender || K_DBRW)
+/// The encapsulation coins are derived from public chain context keyed by the
+/// device master seed `Smaster` (whitepaper §12):
+///   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
+///             || recipient_kem_pub_hash || h_n || C_pre || DevID_sender)
 ///
 /// Returns the `k_step` to use as input to `derive_per_step_ek` AND the
 /// ciphertext to embed in `receipt.kyber_ct_a` (or `_b` for B's side) so
@@ -115,7 +121,7 @@ pub fn derive_kyber_k_step_for_send(
     h_n: &[u8; 32],
     c_pre: &[u8; 32],
     devid_sender: &[u8; 32],
-    k_dbrw: &[u8; 32],
+    s_master: &[u8; 32],
     recipient_kyber_pk: &[u8],
 ) -> Result<KyberStepEncap, DsmError> {
     if recipient_kyber_pk.is_empty() {
@@ -125,8 +131,20 @@ pub fn derive_kyber_k_step_for_send(
              per-step EK signing",
         ));
     }
-    // coins = BLAKE3("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || K_DBRW)
-    let coins = dsm::crypto::ephemeral_key::derive_kyber_coins(h_n, c_pre, devid_sender, k_dbrw);
+    // coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || ML-KEM-768
+    //           || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
+    let recipient_kem_pub_hash = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_KYBER_RECIPIENT_PUB_V1,
+        recipient_kyber_pk,
+    );
+    let coins = dsm::crypto::ephemeral_key::derive_kyber_coins(
+        s_master,
+        dsm::crypto::ephemeral_key::KYBER_ALG_ID_MLKEM768,
+        &recipient_kem_pub_hash,
+        h_n,
+        c_pre,
+        devid_sender,
+    );
     // (ct, ss) = KyberEncDet(recipient_pk, coins)
     let (ss, ct) = dsm::crypto::kyber::kyber_encapsulate_deterministic(recipient_kyber_pk, &coins)?;
     // k_step = BLAKE3("DSM/kyber-ss\0" || ss)
@@ -174,10 +192,9 @@ pub struct PerStepSigningInputs<'a> {
     /// Local device ID — used in the deterministic Kyber `coins` derivation
     /// per whitepaper §11 (DevID_sender input to coins).
     pub devid_sender: [u8; 32],
-    /// Per-Device SMT relationship key (used to look up chain head).
+    /// Per-Device SMT relationship key (used to look up chain head AND as the
+    /// `chain_id` bound into the per-step EK seed).
     pub relationship_key: [u8; 32],
-    /// K_DBRW binding key for SK encryption + EK derivation.
-    pub k_dbrw: &'a [u8; 32],
     /// Root AK keypair, used only when the relationship has no chain head
     /// recorded yet at relationship genesis / step 0.
     /// `(ak_pk, ak_sk)`. Pass `None` to require chain-head presence.
@@ -252,9 +269,16 @@ pub fn sign_receipt_with_per_step_ek(
     use dsm::crypto::ephemeral_key::sign_ek_cert;
     use dsm::crypto::sphincs::sphincs_sign;
 
+    // 0. Re-derive the session secrets from the unlocked wallet (never persisted; no
+    //    C-DBRW). `Smaster` roots the per-step EK seed + ML-KEM coins; the chain-head
+    //    at-rest key (s0-rooted, domain-separated) unlocks the prior signer SK. Both fail
+    //    closed when the wallet is locked.
+    let s_master = crate::init::current_smaster()?;
+    let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
+
     // 1. Resolve prior signer's SK.
     let (prior_sk, used_root_ak) =
-        match load_local_chain_head_sk(&inputs.relationship_key, inputs.k_dbrw)
+        match load_local_chain_head_sk(&inputs.relationship_key, &at_rest_key)
             .map_err(|e| DsmError::invalid_operation(format!("chain-head SK load: {e}")))?
         {
             Some(sk) => (sk, false),
@@ -275,17 +299,18 @@ pub fn sign_receipt_with_per_step_ek(
         &inputs.h_n,
         &inputs.c_pre,
         &inputs.devid_sender,
-        inputs.k_dbrw,
+        &s_master,
         inputs.recipient_kyber_pk,
     )?;
 
     // 3. Derive new EK keypair using the Kyber-derived k_step.
     let ek_ctx = PerStepEkContext {
+        chain_id: inputs.relationship_key,
         h_n: inputs.h_n,
         c_pre: inputs.c_pre,
         k_step: kyber_step.k_step,
     };
-    let (ek_pk, ek_sk) = derive_per_step_ek(&ek_ctx, inputs.k_dbrw)?;
+    let (ek_pk, ek_sk) = derive_per_step_ek(&ek_ctx, &s_master)?;
 
     // 4. Sign cert.
     let cert = sign_ek_cert(&prior_sk, &ek_pk, &inputs.h_n)?;
@@ -325,7 +350,7 @@ pub fn advance_local_chain_head_after_signing(
     relationship_key: &[u8; 32],
     new_ek_pk: &[u8],
     new_ek_sk_in_memory: &[u8],
-    k_dbrw: &[u8; 32],
+    at_rest_key: &[u8; 32],
     init: bool,
 ) -> Result<(), DsmError> {
     use crate::storage::client_db::{
@@ -342,7 +367,7 @@ pub fn advance_local_chain_head_after_signing(
             relationship_key,
             new_ek_pk,
             new_ek_sk_in_memory,
-            k_dbrw,
+            at_rest_key,
         )
         .map_err(|e| DsmError::invalid_operation(format!("chain-head SK init: {e}")))?;
     } else {
@@ -350,7 +375,7 @@ pub fn advance_local_chain_head_after_signing(
             relationship_key,
             new_ek_pk,
             new_ek_sk_in_memory,
-            k_dbrw,
+            at_rest_key,
         )
         .map_err(|e| DsmError::invalid_operation(format!("chain-head SK advance: {e}")))?;
     }
@@ -998,19 +1023,20 @@ mod tests {
 
     fn ek_ctx() -> PerStepEkContext {
         PerStepEkContext {
+            chain_id: [0x77; 32],
             h_n: [0x11; 32],
             c_pre: [0x22; 32],
             k_step: [0x33; 32],
         }
     }
 
-    /// Derivation is deterministic in (h_n, c_pre, k_step, k_dbrw).
+    /// Derivation is deterministic in (h_n, c_pre, k_step, s_master).
     #[test]
     fn derive_per_step_ek_deterministic() {
         let ctx = ek_ctx();
-        let k_dbrw = [0x44; 32];
-        let (pk1, sk1) = derive_per_step_ek(&ctx, &k_dbrw).unwrap();
-        let (pk2, sk2) = derive_per_step_ek(&ctx, &k_dbrw).unwrap();
+        let s_master = [0x44; 32];
+        let (pk1, sk1) = derive_per_step_ek(&ctx, &s_master).unwrap();
+        let (pk2, sk2) = derive_per_step_ek(&ctx, &s_master).unwrap();
         assert_eq!(pk1, pk2);
         assert_eq!(sk1, sk2);
     }
@@ -1021,9 +1047,9 @@ mod tests {
         let mut ctx_a = ek_ctx();
         let mut ctx_b = ek_ctx();
         ctx_b.h_n = [0xAA; 32];
-        let k_dbrw = [0x44; 32];
-        let (pk_a, _) = derive_per_step_ek(&ctx_a, &k_dbrw).unwrap();
-        let (pk_b, _) = derive_per_step_ek(&ctx_b, &k_dbrw).unwrap();
+        let s_master = [0x44; 32];
+        let (pk_a, _) = derive_per_step_ek(&ctx_a, &s_master).unwrap();
+        let (pk_b, _) = derive_per_step_ek(&ctx_b, &s_master).unwrap();
         // Suppress "unused mut" since we want explicit construction
         let _ = (&mut ctx_a, &mut ctx_b);
         assert_ne!(pk_a, pk_b);
@@ -1036,18 +1062,30 @@ mod tests {
         let ctx_a = ek_ctx();
         let mut ctx_b = ek_ctx();
         ctx_b.k_step = [0xBB; 32];
-        let k_dbrw = [0x44; 32];
-        let (pk_a, _) = derive_per_step_ek(&ctx_a, &k_dbrw).unwrap();
-        let (pk_b, _) = derive_per_step_ek(&ctx_b, &k_dbrw).unwrap();
+        let s_master = [0x44; 32];
+        let (pk_a, _) = derive_per_step_ek(&ctx_a, &s_master).unwrap();
+        let (pk_b, _) = derive_per_step_ek(&ctx_b, &s_master).unwrap();
         assert_ne!(pk_a, pk_b);
     }
 
-    /// Distinct K_DBRW produces distinct keypairs (DBRW binding works).
+    /// Distinct Smaster produces distinct keypairs (the master-seed root binds the EK).
     #[test]
-    fn derive_per_step_ek_diverges_on_k_dbrw() {
+    fn derive_per_step_ek_diverges_on_smaster() {
         let ctx = ek_ctx();
         let (pk_a, _) = derive_per_step_ek(&ctx, &[0x44; 32]).unwrap();
         let (pk_b, _) = derive_per_step_ek(&ctx, &[0x55; 32]).unwrap();
+        assert_ne!(pk_a, pk_b);
+    }
+
+    /// Distinct chain_id produces distinct keypairs (the relationship/chain binding).
+    #[test]
+    fn derive_per_step_ek_diverges_on_chain_id() {
+        let ctx_a = ek_ctx();
+        let mut ctx_b = ek_ctx();
+        ctx_b.chain_id = [0xCC; 32];
+        let s_master = [0x44; 32];
+        let (pk_a, _) = derive_per_step_ek(&ctx_a, &s_master).unwrap();
+        let (pk_b, _) = derive_per_step_ek(&ctx_b, &s_master).unwrap();
         assert_ne!(pk_a, pk_b);
     }
 
@@ -1055,8 +1093,8 @@ mod tests {
     #[test]
     fn derive_per_step_ek_keypair_signs_and_verifies() {
         let ctx = ek_ctx();
-        let k_dbrw = [0x44; 32];
-        let (pk, sk) = derive_per_step_ek(&ctx, &k_dbrw).unwrap();
+        let s_master = [0x44; 32];
+        let (pk, sk) = derive_per_step_ek(&ctx, &s_master).unwrap();
         let msg = b"receipt commitment";
         let sig = dsm::crypto::sphincs::sphincs_sign(&sk, msg).expect("sign");
         assert!(dsm::crypto::sphincs::sphincs_verify(&pk, msg, &sig).expect("verify"));
@@ -1072,13 +1110,13 @@ mod tests {
         let h_n = [0x11u8; 32];
         let c_pre = [0x22u8; 32];
         let devid_sender = [0x33u8; 32];
-        let k_dbrw = [0x44u8; 32];
+        let s_master = [0x44u8; 32];
 
         let encap = derive_kyber_k_step_for_send(
             &h_n,
             &c_pre,
             &devid_sender,
-            &k_dbrw,
+            &s_master,
             &recipient_kp.public_key,
         )
         .expect("encap");
@@ -1101,13 +1139,13 @@ mod tests {
         let recipient_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("keygen");
         let c_pre = [0x22u8; 32];
         let devid_sender = [0x33u8; 32];
-        let k_dbrw = [0x44u8; 32];
+        let s_master = [0x44u8; 32];
 
         let encap_1 = derive_kyber_k_step_for_send(
             &[0xAA; 32],
             &c_pre,
             &devid_sender,
-            &k_dbrw,
+            &s_master,
             &recipient_kp.public_key,
         )
         .expect("encap step 1");
@@ -1115,7 +1153,7 @@ mod tests {
             &[0xBB; 32],
             &c_pre,
             &devid_sender,
-            &k_dbrw,
+            &s_master,
             &recipient_kp.public_key,
         )
         .expect("encap step 2");
@@ -1135,13 +1173,13 @@ mod tests {
         let h_n = [0x11u8; 32];
         let c_pre = [0x22u8; 32];
         let devid_sender = [0x33u8; 32];
-        let k_dbrw = [0x44u8; 32];
+        let s_master = [0x44u8; 32];
 
         let to_1 =
-            derive_kyber_k_step_for_send(&h_n, &c_pre, &devid_sender, &k_dbrw, &kp1.public_key)
+            derive_kyber_k_step_for_send(&h_n, &c_pre, &devid_sender, &s_master, &kp1.public_key)
                 .expect("encap to kp1");
         let to_2 =
-            derive_kyber_k_step_for_send(&h_n, &c_pre, &devid_sender, &k_dbrw, &kp2.public_key)
+            derive_kyber_k_step_for_send(&h_n, &c_pre, &devid_sender, &s_master, &kp2.public_key)
                 .expect("encap to kp2");
         assert_ne!(to_1.k_step, to_2.k_step);
     }
@@ -1166,13 +1204,32 @@ mod tests {
 
     // ── sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing ──
 
+    /// Set up AppState identity (`G` + `DevID`) + a cached wallet seed so the per-step signing
+    /// helpers can re-derive `Smaster` (EK/coins) and the chain-head at-rest key internally
+    /// (replaces the old explicit K_DBRW argument). Returns the at-rest key for
+    /// `advance_local_chain_head_after_signing` calls.
+    fn setup_signing_identity() -> [u8; 32] {
+        // Storage base dir is a process-global set-once; set it idempotently so the helper
+        // works regardless of test ordering (AppState::set_identity_info persists to disk).
+        let _ =
+            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+        crate::sdk::app_state::AppState::reset_for_testing();
+        crate::sdk::app_state::AppState::set_identity_info(
+            vec![0x11; 32], // device_id (DevID)
+            vec![0xAB; 32], // device signing pubkey (placeholder; not folded into Smaster)
+            vec![0x22; 32], // genesis_hash (G)
+            vec![0u8; 32],  // smt root
+        );
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9C; 64]);
+        crate::init::current_chain_head_at_rest_key().expect("at-rest key for tests")
+    }
+
     /// Helper: build minimal valid signing inputs for tests.
     fn signing_inputs<'a>(
         commitment: &'a [u8; 32],
         rel_key: &[u8; 32],
         ak_pk: &'a [u8],
         ak_sk: &'a [u8],
-        k_dbrw: &'a [u8; 32],
         recipient_kyber_pk: &'a [u8],
     ) -> PerStepSigningInputs<'a> {
         PerStepSigningInputs {
@@ -1181,7 +1238,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: *rel_key,
-            k_dbrw,
             root_ak_keypair: Some((ak_pk, ak_sk)),
             recipient_kyber_pk,
             session_binding: &TEST_SESSION_BINDING,
@@ -1205,9 +1261,9 @@ mod tests {
         let kyber_pk = kyber_kp.public_key.clone();
         let commitment = [0xCC; 32];
         let rel_key = [0xDE; 32];
-        let k_dbrw = [0xFF; 32];
+        setup_signing_identity();
 
-        let inputs = signing_inputs(&commitment, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
+        let inputs = signing_inputs(&commitment, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
         assert!(out.used_root_ak);
@@ -1244,19 +1300,19 @@ mod tests {
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
         let kyber_pk = kyber_kp.public_key.clone();
         let rel_key = [0xCA; 32];
-        let k_dbrw = [0xFE; 32];
+        let at_rest = setup_signing_identity();
 
         // Step 0: root AK path. Sign + advance to record EK_1 as chain head.
         let commit0 = [0xC0; 32];
-        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
+        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         assert!(out0.used_root_ak);
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &k_dbrw, true)
+        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &at_rest, true)
             .unwrap();
 
         // Step 1: chain head is EK_1 — root NOT used.
         let commit1 = [0xC1; 32];
-        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
+        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         inputs1.h_n = [0xBB; 32]; // pretend we advanced the chain
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
         assert!(
@@ -1296,11 +1352,11 @@ mod tests {
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
         let kyber_pk = kyber_kp.public_key.clone();
         let rel_key = [0xE1; 32];
-        let k_dbrw = [0xE2; 32];
+        let at_rest = setup_signing_identity();
 
         // ────── Step 0 ──────
         let commit0 = [0xF0; 32];
-        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
+        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
 
         // Cert step 0 chains EK_0 → AK.
@@ -1310,13 +1366,13 @@ mod tests {
         assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
 
         // Persist EK_0 as new chain head.
-        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &k_dbrw, true)
+        advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &at_rest, true)
             .unwrap();
 
         // ────── Step 1 ──────
         let commit1 = [0xF1; 32];
         // Simulate chain advancement: new h_n.
-        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
+        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &kyber_pk);
         inputs1.h_n = [0xB1; 32];
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
 
@@ -1332,7 +1388,7 @@ mod tests {
         // Distinct EK at step 1 vs step 0.
         assert_ne!(out0.ek_pk, out1.ek_pk);
 
-        advance_local_chain_head_after_signing(&rel_key, &out1.ek_pk, &out1.ek_sk, &k_dbrw, false)
+        advance_local_chain_head_after_signing(&rel_key, &out1.ek_pk, &out1.ek_sk, &at_rest, false)
             .unwrap();
     }
 
@@ -1372,7 +1428,7 @@ mod tests {
             let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
             let kyber_pk = kyber_kp.public_key.clone();
             let rel_key = [0xB0; 32];
-            let k_dbrw = [0xC0; 32];
+            let at_rest = setup_signing_identity();
 
             let mut chain_pubkeys: Vec<Vec<u8>> = Vec::with_capacity(chain_length);
             let mut chain_certs: Vec<Vec<u8>> = Vec::with_capacity(chain_length);
@@ -1396,7 +1452,6 @@ mod tests {
                     c_pre: [0xBB; 32],
                     devid_sender: [0x11; 32],
                     relationship_key: rel_key,
-                    k_dbrw: &k_dbrw,
                     root_ak_keypair: Some((&ak_pk, &ak_sk)),
                     recipient_kyber_pk: &kyber_pk,
                     session_binding: &TEST_SESSION_BINDING,
@@ -1408,7 +1463,7 @@ mod tests {
                     &rel_key,
                     &out.ek_pk,
                     &out.ek_sk,
-                    &k_dbrw,
+                    &at_rest,
                     /*init=*/ step == 0,
                 )
                 .unwrap();
@@ -1521,14 +1576,13 @@ mod tests {
 
         let commit = [0xCC; 32];
         let rel_key = [0xCD; 32];
-        let k_dbrw = [0xCE; 32];
+        setup_signing_identity();
         let inputs = PerStepSigningInputs {
             commitment: &commit,
             h_n: [0xAA; 32],
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: rel_key,
-            k_dbrw: &k_dbrw,
             root_ak_keypair: None,
             recipient_kyber_pk: &[],
             session_binding: &TEST_SESSION_BINDING,
@@ -1559,7 +1613,7 @@ mod tests {
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
         let kyber_pk = kyber_kp.public_key.clone();
         let rel_key = [0xE7; 32];
-        let k_dbrw = [0xE8; 32];
+        setup_signing_identity();
 
         // Build a minimal receipt with deterministic content so
         // `compute_commitment` is stable.
@@ -1583,7 +1637,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: rel_key,
-            k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: &TEST_SESSION_BINDING,
@@ -1746,7 +1799,7 @@ mod tests {
         let kyber_pk = kyber_kp.public_key.clone();
 
         let sender_rel_key = [0xCA; 32];
-        let k_dbrw = [0xE9; 32];
+        let at_rest = setup_signing_identity();
 
         // Seed only the Counterparty row (the verifier's mirror of the
         // signer's chain). Leave Local empty so the signer path
@@ -1774,7 +1827,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: sender_rel_key,
-            k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: &session0,
@@ -1792,7 +1844,7 @@ mod tests {
             &sender_rel_key,
             &out0.ek_pk,
             &out0.ek_sk,
-            &k_dbrw,
+            &at_rest,
             out0.used_root_ak,
         )
         .unwrap();
@@ -1849,7 +1901,6 @@ mod tests {
             c_pre: [0xDD; 32],
             devid_sender: [0x11; 32],
             relationship_key: sender_rel_key,
-            k_dbrw: &k_dbrw,
             // The existing chain head must be selected before the root AK.
             root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
@@ -1918,6 +1969,7 @@ mod tests {
         use crate::storage::client_db::reset_database_for_tests;
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
         reset_database_for_tests();
+        setup_signing_identity();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC4; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
@@ -1947,7 +1999,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: [0xD1; 32],
-            k_dbrw: &[0xE1; 32],
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: &session_c1,
@@ -2003,7 +2054,7 @@ mod tests {
 
         let sender_rel_key = [0xCA; 32];
         let receiver_rel_key = [0xDA; 32];
-        let k_dbrw = [0xE9; 32];
+        setup_signing_identity();
 
         let mut receipt = StitchedReceiptV2::new(
             [0x01; 32],
@@ -2026,7 +2077,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: sender_rel_key,
-            k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: &TEST_SESSION_BINDING,
@@ -2046,7 +2096,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x22; 32],
             relationship_key: receiver_rel_key,
-            k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&receiver_ak_pk, &receiver_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: &TEST_SESSION_BINDING,
@@ -2158,7 +2207,7 @@ mod tests {
         // outbound chain, and vice versa.
         let rel_a: [u8; 32] = [0xCA; 32];
         let rel_b: [u8; 32] = [0xCB; 32];
-        let k_dbrw = [0xE9; 32];
+        let at_rest = setup_signing_identity();
 
         // Seed Counterparty rows on both partitions:
         //   rel_a.Counterparty = ak_pk_a (B's mirror of A's chain).
@@ -2204,7 +2253,6 @@ mod tests {
                 c_pre,
                 devid_sender: [0x11; 32],
                 relationship_key: rel_a,
-                k_dbrw: &k_dbrw,
                 root_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
                 recipient_kyber_pk: &kyber_pk,
                 session_binding: &session_binding,
@@ -2230,7 +2278,7 @@ mod tests {
                 &rel_a,
                 &a_out.ek_pk,
                 &a_out.ek_sk,
-                &k_dbrw,
+                &at_rest,
                 a_out.used_root_ak,
             )
             .unwrap();
@@ -2280,7 +2328,6 @@ mod tests {
                 c_pre,
                 devid_sender: [0x22; 32],
                 relationship_key: rel_b,
-                k_dbrw: &k_dbrw,
                 root_ak_keypair: Some((&ak_pk_b, &ak_sk_b)),
                 recipient_kyber_pk: &kyber_pk,
                 session_binding: &session_binding,
@@ -2302,7 +2349,7 @@ mod tests {
                 &rel_b,
                 &b_out.ek_pk,
                 &b_out.ek_sk,
-                &k_dbrw,
+                &at_rest,
                 b_out.used_root_ak,
             )
             .unwrap();
@@ -2380,7 +2427,6 @@ mod tests {
             c_pre: [0xCF; 32],
             devid_sender: [0x11; 32],
             relationship_key: rel_a,
-            k_dbrw: &k_dbrw,
             root_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: &TEST_SESSION_BINDING,
@@ -2441,7 +2487,6 @@ mod tests {
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: [0xE7; 32],
-            k_dbrw: &[0xE8; 32],
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_kp.public_key,
             session_binding: &session_binding,

@@ -770,7 +770,7 @@ message SoftVaultExportV1 {
   uint32 version        = 1; // MUST be 1
   bytes  vault_id       = 2; // canonical vault id (binary)
   bytes  device_id      = 3; // binary device id used in KDF
-  bytes  binder_hash32  = 4 [(dsm_fixed_len)=32]; // C-DBRW device binding fingerprint
+  bytes  binder_hash32  = 4 [(dsm_fixed_len)=32]; // device binding fingerprint (wallet-seed-rooted)
   uint32 export_seqno   = 5; // deterministic counter, not time
   bytes  nonce          = 6 [(dsm_fixed_len)=24]; // XChaCha20-Poly1305 nonce
   bytes  ciphertext     = 7; // AEAD(ct || tag), AAD = vault_id
@@ -1165,8 +1165,8 @@ message VaultPendingPointerV1 {
 // unlock gate re-verifies before emitting Operation::DlvUnlock.
 //
 // Strictly stronger than VaultStateAnchorV1: the anchor only signs
-// (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
-// forge a signed anchor.  The inclusion proof additionally commits the
+// (vault_id, sequence, reserves_digest), so a compromised owner signing key
+// could forge a signed anchor.  The inclusion proof additionally commits the
 // device's PD-SMT root + a 256-sibling Merkle path that
 // dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
 // against the device's actual SMT — forgery requires also fabricating
@@ -1192,7 +1192,7 @@ message VaultStateInclusionProofV1 {
   bytes  owner_public_key      = 6 [(dsm_max_len)=65535];
   // SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
   // vault_id || sequence_be || reserves_digest || smt_root).  Binds
-  // the SMT root into the signature so a compromised K_DBRW cannot
+  // the SMT root into the signature so a compromised owner key cannot
   // forge a proof against a different root.
   bytes  owner_signature       = 7 [(dsm_max_len)=65535];
 }
@@ -1607,14 +1607,22 @@ message SystemGenesisRequest {
   string locale = 1;
   string network_id = 2;
   bytes device_entropy = 3 [(dsm_fixed_len)=32];
-  bytes cdbrw_hw_entropy = 4 [(dsm_max_len)=1024];
-  bytes cdbrw_env_fingerprint = 5 [(dsm_max_len)=1024];
-  reserved 6; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
-              // from K_DBRW preimage so wallet survives uninstall +
-              // reinstall on same device.  Layer B (opportunistic
-              // re-prove) still enforces cross-device anti-clone.
+  // Fields 4,5,6 reserved: legacy C-DBRW silicon-binding inputs
+  // (cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt). Genesis v2 is
+  // mnemonic-rooted with no silicon binding — these MUST NOT be reused.
+  reserved 4, 5, 6;
+  reserved "cdbrw_hw_entropy", "cdbrw_env_fingerprint";
 }
 message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
+
+// Canonical mnemonic-rooted Genesis v2 wallet-creation request (system.createGenesisV2).
+// The BIP39 mnemonic is the sole root: the SDK derives wallet_seed, caches it in the unlocked
+// session, and runs create_genesis_v2 (no storage nodes, no silicon, no random genesis entropy).
+message WalletCreateGenesisV2Request {
+  string mnemonic   = 1;
+  string locale     = 2;
+  string network_id = 3;
+}
 message GenesisCreated {
   bytes  device_id    = 1 [(dsm_fixed_len)=32];
   Hash32 genesis_hash = 2;
@@ -1650,8 +1658,8 @@ message SecondaryDeviceResponse {
 // Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
 // device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
 // device signing key (the gate — only a key already in the tree can authorize the insert). The new
-// device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
-// bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+// device co-signs with its own Genesis v2 device signing key (AK, rooted in the device's wallet
+// seed) to prove possession of that key. The gate signer's pubkey comes from
 // the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
 // Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
 // (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
@@ -1666,7 +1674,7 @@ message AddDeviceAdmissionV1 {
   bytes  parent_device_tree_root    = 5 [(dsm_fixed_len)=32];
   uint64 parent_device_tree_version = 6;
   bytes  signature_by_signer_device = 7 [(dsm_max_len)=65535]; // existing device — the gate
-  bytes  signature_by_new_device    = 8 [(dsm_max_len)=65535]; // new device — DBRW-bound possession
+  bytes  signature_by_new_device    = 8 [(dsm_max_len)=65535]; // new device — Genesis v2 AK possession
 }
 
 // The new (joining) device's half of an admission, sent to the existing authorized device over the
@@ -1677,7 +1685,7 @@ message AddDeviceAdmissionRequestV1 {
   bytes genesis_hash              = 1 [(dsm_fixed_len)=32];
   bytes new_device_id             = 2 [(dsm_fixed_len)=32];
   bytes new_device_signing_pubkey = 3 [(dsm_max_len)=4096];
-  bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // DBRW-bound self-attestation
+  bytes signature_by_new_device   = 4 [(dsm_max_len)=65535]; // Genesis v2 AK self-attestation
 }
 
 // NEW-device adopt input (device.adoptAdmission): the gate-signed admission received back from the
@@ -1853,12 +1861,19 @@ message BilateralConfirmRequest {
   Hash32 shared_chain_tip_new        = 7; // h_{n+1}
   bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
   bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
-  // Offline-bearer (OFFLINE_BEARER_REQUIRED) only: the anchor attestation + the signed expiry tick
-  // the receiver needs to reconstruct + verify the anchor signature against its PINNED enrollment
-  // (anchor pubkey, firmware_hash, policy, frontier). Absent for ordinary transfers. The receiver
-  // rejects an OFFLINE_BEARER_REQUIRED confirm that lacks a valid, admitted attestation (fail-closed).
+  // LEGACY Safe 7 offline-bearer shape (fields 10/11). The receiver NO LONGER accepts an
+  // offline-bearer transfer via IslandAttestation — these are quarantined and route to online
+  // recovery (superseded by field 12). Still emitted by the unmigrated sender; Phase 5 removes
+  // the producer.
   IslandAttestationProto island_attestation = 10;
   uint64 anchor_expiry_tick                 = 11; // == the transition target state the gate signed as expiry_tick
+  // Canonical offline-bearer release (Boot Fenced Fused Anchor): the prost-encoded
+  // dsm.anchor.OfflineRelease (Δ + boot chain + fused root-advance cert + counter evidence),
+  // carried as opaque bytes so the dsm.anchor namespace stays decoupled from dsm_app. The receiver
+  // decodes it and applies anchor_core::accept::accept_offline (the 22-check predicate). Until the
+  // producer side ships (Phase 5) this is empty and the transfer fails closed to online recovery;
+  // no value is released on an absent or invalid release.
+  bytes offline_release = 12 [(dsm_max_len)=262144];
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
@@ -1880,7 +1895,7 @@ message ReceiptCommit {
   // Dual SPHINCS+ signatures. These are the receipt challenge responses.
   // The challenge is the proposed transition context carried by fields 1-11
   // plus the bilateral session binding. Each response signs that context with
-  // the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+  // the fresh EK key derived from Smaster, chain_id, h_n, C_pre, and k_step.
   // NOT part of canonical commit preimage.
   // Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
   bytes sig_a = 12 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
@@ -1893,26 +1908,29 @@ message ReceiptCommit {
   // verifier walk the chain back to the device-attested AK_pk.
   bytes ek_cert_a = 14 [(dsm_max_len)=65535];
   bytes ek_cert_b = 15 [(dsm_max_len)=65535];
-  // Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
+  // Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1/§12). Each receipt
   // is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
-  // where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+  // where E_{n+1} = keyed-BLAKE3(Smaster, "DSM/ek/v1\0" || alg_id || chain_id
+  //                               || h_n || C_pre || k_step).
   // The verifier uses these to verify sig_a/sig_b without needing them
   // out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
   // same placement rationale as ek_cert_a/b.
-  // A copied database can carry old public EK material, but cannot derive the
-  // next EK on different hardware because K_DBRW is not serialized.
+  // A copied database carries old public EK material but cannot derive the next
+  // EK without the wallet seed (Smaster is re-derived on demand, never serialized
+  // in the DB). Note: the EK chain binds AUTHORSHIP, not anti-clone — anti-clone
+  // is the Boot Fenced Fused Anchor (a seed copy holds Smaster).
   bytes ek_pk_a = 16 [(dsm_max_len)=65535];
   bytes ek_pk_b = 17 [(dsm_max_len)=65535];
-  // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
+  // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
   // deterministic Kyber coins from
-  //   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-  //                       || DevID_sender || K_DBRW)
+  //   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
+  //                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
   // encapsulates against the recipient's Kyber public key, and the
   // resulting ciphertext travels here. The recipient decapsulates with
   // their local Kyber secret key to recover the same shared secret `ss`,
   // then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
   // arrive at identical k_step, which is then mixed into the per-step
-  // EK derivation alongside K_DBRW. Wire-only — not part of canonical
+  // EK derivation alongside Smaster. Wire-only — not part of canonical
   // commit form (§4.2.1).
   bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
   bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
@@ -2138,10 +2156,11 @@ message BootstrapMeasurementReport {
   bytes device_id = 2 [(dsm_fixed_len)=32];
   bytes genesis_hash = 3 [(dsm_fixed_len)=32];
   uint32 progress_percent = 4;
-  bytes cdbrw_hw_entropy = 5 [(dsm_max_len)=1024];
-  bytes cdbrw_env_fingerprint = 6 [(dsm_max_len)=1024];
-  reserved 7; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
-              // from K_DBRW preimage.  See SystemGenesisRequest.
+  // Fields 5,6,7 reserved: legacy C-DBRW silicon-binding inputs
+  // (cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt). Genesis v2 is
+  // mnemonic-rooted with no silicon binding — these MUST NOT be reused.
+  reserved 5, 6, 7;
+  reserved "cdbrw_hw_entropy", "cdbrw_env_fingerprint";
   TrustLevel trust_level = 8;
   string error_message = 9;
 }
@@ -2594,7 +2613,7 @@ message Envelope {
     // Storage node health & management
     StorageNodeStatsResponse          storage_node_stats_response      = 88;
     StorageNodeManageResponse         storage_node_manage_response     = 89;
-    DbrwStatusResponse                dbrw_status_response             = 90;
+    // Slot 90 reserved (was DbrwStatusResponse) — see message-level reserved below.
     BitcoinWithdrawalPlanRequest      bitcoin_withdrawal_plan_request  = 91;
     BitcoinWithdrawalPlanResponse     bitcoin_withdrawal_plan_response = 92;
     BitcoinWithdrawalExecuteRequest   bitcoin_withdrawal_execute_request = 93;
@@ -2611,11 +2630,8 @@ message Envelope {
     BootstrapMeasurementReport        bootstrap_measurement_report     = 101;
     BootstrapFinalizeResponse         bootstrap_finalize_response      = 102;
 
-    // C-DBRW Protocol 6.2 (ZK challenge/response)
-    CdbrwTrustSnapshot                cdbrw_trust_snapshot             = 103;
-    CdbrwRespondResponse              cdbrw_respond_response           = 104;
-    CdbrwVerifyResponse               cdbrw_verify_response            = 105;
-    CdbrwEnrollResponse               cdbrw_enroll_response            = 106;
+    // Slots 103-106 reserved (were C-DBRW Protocol 6.2 responses) — see
+    // message-level reserved below.
 
     // Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
     DeviceTreeSnapshotResponse        device_tree_snapshot_response    = 107;
@@ -2625,15 +2641,22 @@ message Envelope {
     AddDeviceAdmissionRequestV1       device_admission_request         = 108;
     AddDeviceAdmissionV1              device_admission                 = 109;
   }
+  // Legacy C-DBRW payload slots removed (Genesis v2 has no C-DBRW): slot 90
+  // was DbrwStatusResponse; 103-106 were the Protocol 6.2 responses
+  // (CdbrwTrustSnapshot/Respond/Verify/Enroll). MUST NOT be reused.
+  reserved 90, 103, 104, 105, 106;
 }
 
 // ===================== SDK INIT / STATUS =====================
 // Returned when the app attempts to mark the SDK/wallet "initialized" but a
-// mandatory prerequisite is missing (e.g., C-DBRW not bootstrapped yet).
+// mandatory prerequisite is missing.
 message InitFailed {
   enum Reason {
     REASON_UNSPECIFIED = 0;
-    CDBRW_NOT_READY = 1;
+    // Value 1 reserved (was CDBRW_NOT_READY) — Genesis v2 has no C-DBRW
+    // readiness gate; init no longer fails for a missing device secret.
+    reserved 1;
+    reserved "CDBRW_NOT_READY";
     PLATFORM_CONTEXT_MISSING = 2;
     INVALID_INPUT = 3;
   }
@@ -3075,7 +3098,7 @@ message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }
 
 // ========================= Geo Emissions (transport only) =========================
 // Transport messages for clockless geo-claim submission and acknowledgment.
-// Verification (spawn proof, C-DBRW witness, SPHINCS+ signature over canonical bytes)
+// Verification (spawn proof + SPHINCS+ signature over canonical bytes)
 // is implemented in the Rust core; these are I/O envelopes only.
 message MerkleInclusionProof {
   Hash32 root         = 1; // 32B Merkle root
@@ -3332,184 +3355,6 @@ message StorageStatusResponse {
   uint64 last_sync_iter = 3; // deterministic sync counter
   string data_size = 4;
   string backup_status = 5;
-}
-
-// ========================= C-DBRW Status =========================
-//
-// Snapshot of the Rust-side C-DBRW state for the Dev screen. Field 37
-// (`trust`) carries the live verdict published by `cdbrw_access_gate` —
-// frontend/UI consume this to drive the fail-closed gate. Runtime metrics
-// previously fetched via reverse JNI (Rust → Kotlin `getCdbrwRuntimeSnapshot`)
-// are gone; Kotlin is transport-only now and never computes trust state.
-message DbrwStatusResponse {
-  bool enrolled = 1;
-  bool binding_key_present = 2;
-  bool verifier_keypair_present = 3;
-  bool storage_base_dir_set = 4;
-  uint32 enrollment_revision = 7;
-  uint32 arena_bytes = 8;
-  uint32 probes = 9;
-  uint32 steps_per_probe = 10;
-  uint32 histogram_bins = 11;
-  uint32 rotation_bits = 12;
-  float epsilon_intra = 13;
-  uint32 mean_histogram_len = 14;
-  bytes reference_anchor_prefix = 15 [(dsm_max_len)=16];
-  bytes binding_key_prefix = 16 [(dsm_max_len)=16];
-  bytes verifier_public_key_prefix = 17 [(dsm_max_len)=16];
-  uint32 verifier_public_key_len = 18;
-  string storage_base_dir = 19;
-  string status_note = 20;
-  // Live trust snapshot from the Rust access gate. Empty when the gate has
-  // never been updated (i.e. device not yet enrolled or no probe run).
-  CdbrwTrustSnapshot trust = 37;
-}
-
-// ===================== C-DBRW Protocol 6.2 (Algorithm 3) =====================
-// Frontend/bridge shuttles raw orbit timings + environment bytes to Rust; the
-// SDK runs the entropy health test, histogram build, Wasserstein-1 drift check,
-// BLAKE3 γ commitment, deterministic Kyber-1024 encaps, ephemeral HKDF step key,
-// and SPHINCS+ Cat-5 signing. Verification runs the inverse path.
-//
-// Single-path rule: these messages travel as opaque router_query / router_invoke
-// args (sub-routes cdbrw.respond / cdbrw.verify / cdbrw.measure_trust /
-// cdbrw.enroll). Responses wrap the result in Envelope v3 payload slots 103-106.
-
-// Fail-closed access ordering (ordinal comparison in Rust).
-enum CdbrwAccessLevel {
-  CDBRW_ACCESS_UNSPECIFIED = 0;
-  CDBRW_ACCESS_BLOCKED     = 1; // hardware anchor missing or fatal health fail
-  CDBRW_ACCESS_READ_ONLY   = 2; // degraded — view only, no writes
-  CDBRW_ACCESS_PIN_REQUIRED= 3; // drift or ADAPTED — step-up auth
-  CDBRW_ACCESS_FULL_ACCESS = 4; // PASS or RESONANT with clean drift
-}
-
-// Tri-layer resonant classification per C-DBRW §7.
-enum CdbrwResonantStatus {
-  CDBRW_RESONANT_UNSPECIFIED = 0;
-  CDBRW_RESONANT_PASS        = 1; // Ĥ ≥ 0.45, |ρ̂| ≤ 0.3, L̂ ≥ 0.45
-  CDBRW_RESONANT_RESONANT    = 2; // h0_eff in [0.30, 0.45) — longer orbit OK
-  CDBRW_RESONANT_ADAPTED     = 3; // degraded entropy — step-up required
-  CDBRW_RESONANT_FAIL        = 4; // below minimum — reject
-}
-
-// One PUF orbit trial (ARX interrogation walk timings).
-message CdbrwOrbitTrial {
-  repeated int64 timings = 1 [(dsm_max_len)=16384]; // per-step ARX timing samples
-  // Per-trial CSPRNG challenge that seeded x_0 = H("DSM/cdbrw-seed\0" || challenge || K_DBRW) mod 2^32
-  // per Alg 1 step 1. For enrollment trials before K_DBRW is bound, callers pass the random 32-byte
-  // challenge alone and the Rust writer treats it as authoritative (Alg 2 line 1491).
-  // Empty bytes are treated as "this trial was not challenge-seeded" — Rust rejects such enrollments
-  // so a regression that strips per-trial challenges fails closed instead of silently downgrading.
-  bytes challenge = 2 [(dsm_max_len)=32];
-}
-
-// cdbrw.measure_trust args — compute resonant health and current access verdict
-// without running a full ZK response. Frontend polls this to surface UI state.
-message CdbrwMeasureTrustRequest {
-  bytes env_bytes       = 1 [(dsm_max_len)=1024]; // environment fingerprint blob
-  CdbrwOrbitTrial orbit = 2; // single N=HEALTH_N probe
-  uint32 histogram_bins = 3; // must match enrollment bins
-}
-
-// cdbrw.respond args — device side of Algorithm 3.
-// K_DBRW lives in Rust (set via bootstrap); Kotlin never touches signing keys.
-message CdbrwRespondRequest {
-  bytes env_bytes           = 1 [(dsm_max_len)=1024];
-  CdbrwOrbitTrial orbit     = 2; // live orbit after challenge
-  bytes challenge           = 3 [(dsm_fixed_len)=32]; // V1 verifier nonce
-  bytes chain_tip           = 4 [(dsm_fixed_len)=32]; // adjacency anchor
-  bytes commitment_preimage = 5 [(dsm_fixed_len)=32]; // 32-byte C_pre per Alg. 3
-  bytes device_id           = 6 [(dsm_fixed_len)=32];
-  bytes verifier_public_key = 7 [(dsm_max_len)=2048]; // Kyber-1024 pk
-  uint32 histogram_bins     = 8;
-}
-
-// cdbrw.verify args — pure Rust verifier path. No Kotlin orchestration.
-message CdbrwVerifyRequest {
-  bytes challenge             = 1 [(dsm_fixed_len)=32];
-  bytes gamma                 = 2 [(dsm_fixed_len)=32]; // BLAKE3 commitment
-  bytes ciphertext            = 3 [(dsm_max_len)=4096]; // Kyber ct
-  bytes signature             = 4 [(dsm_max_len)=16384]; // SPHINCS+ Cat-5
-  bytes ephemeral_public_key  = 5 [(dsm_max_len)=4096]; // HKDF-derived ephk
-  bytes chain_tip             = 6 [(dsm_fixed_len)=32];
-  bytes commitment_preimage   = 7 [(dsm_fixed_len)=32];
-  bytes enrollment_anchor     = 8 [(dsm_fixed_len)=32];
-  float epsilon_intra         = 9;
-  float epsilon_inter         = 10;
-}
-
-// cdbrw.enroll args — M-sample, K-trial-per-sample admission (Phase 9).
-//
-// Replaces the single-K-trial enrollment with median-of-M admission.
-// The Kotlin caller batches all M*K trials (default 3*21=63) into a
-// single request; Rust partitions them by `trials_per_sample`, runs
-// the per-sample health flow on each chunk, and applies
-// `classify_resonant_m_sample` to produce a stable admission verdict
-// that absorbs silicon trial-to-trial variance.
-message CdbrwEnrollRequest {
-  bytes env_bytes                 = 1 [(dsm_max_len)=1024];
-  // Flat list of M*trials_per_sample trials (e.g. 3*21=63).
-  // Partitioned by Rust into M contiguous chunks of trials_per_sample
-  // each.  Order matters: chunk i = trials[i*K .. (i+1)*K].
-  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=192];
-  uint32 arena_bytes              = 3;
-  uint32 probes                   = 4;
-  uint32 steps_per_probe          = 5;
-  uint32 histogram_bins           = 6;
-  uint32 rotation_bits            = 7;
-  // Phase 9: number of independent K-trial admission samples (M).
-  // Must equal the SDK's compiled ADMISSION_M (default 3); version
-  // skew is rejected as AdmissionShapeMismatch.
-  uint32 admission_samples        = 8;
-  // Phase 9: K, the trials per sample.  Must satisfy K >= 16 per §6.1.
-  // Rust rejects if trials.length != admission_samples * trials_per_sample.
-  uint32 trials_per_sample        = 9;
-}
-
-// Shared trust state returned with every C-DBRW op. Frontend/UI reads this
-// to drive the access gate; the ordinal AccessLevel is the only thing that
-// matters for authorization decisions — metrics are diagnostic.
-message CdbrwTrustSnapshot {
-  CdbrwAccessLevel access_level       = 1;
-  CdbrwResonantStatus resonant_status = 2;
-  float h_hat         = 3; // Shannon entropy
-  float rho_hat       = 4; // lag-1 autocorrelation
-  float l_hat         = 5; // LZ78 normalized compressibility
-  float h0_eff        = 6; // h_hat * (1 - |rho_hat|)
-  float trust_score   = 7; // [0.0, 1.0] — adapted×0.75, failed×0
-  uint64 iter         = 8; // TRUST_ITER monotonic counter (clockless)
-  uint32 recommended_n= 9; // orbit length for current h0_eff
-  float w1_distance   = 10; // Wasserstein-1 drift vs reference histogram
-  float w1_threshold  = 11;
-  string note         = 12; // diagnostic reason (never leaks secrets)
-}
-
-// cdbrw.respond response — full Algorithm 3 output plus trust snapshot.
-message CdbrwRespondResponse {
-  bytes ciphertext            = 1 [(dsm_max_len)=4096];
-  bytes gamma                 = 2 [(dsm_fixed_len)=32];
-  bytes signature             = 3 [(dsm_max_len)=16384];
-  bytes ephemeral_public_key  = 4 [(dsm_max_len)=4096];
-  CdbrwTrustSnapshot trust    = 5;
-}
-
-// cdbrw.verify response — pass/fail with diagnostic distance.
-message CdbrwVerifyResponse {
-  bool accepted          = 1;
-  string reason          = 2; // "ok" | "gamma_distance_exceeds_tau" | ...
-  float gamma_distance   = 3; // sqrt(Σ(γᵢ - anchor_iᵢ)²)/256
-  float threshold        = 4; // (ε_intra + ε_inter) / 2
-}
-
-// cdbrw.enroll response — binary reference snapshot summary (no keys).
-message CdbrwEnrollResponse {
-  uint32 revision              = 1;
-  float epsilon_intra          = 2;
-  uint32 mean_histogram_len    = 3;
-  bytes reference_anchor_prefix= 4 [(dsm_max_len)=16]; // first 10 bytes of AC_D (display hint)
-  CdbrwTrustSnapshot trust     = 5;
-  bytes reference_anchor       = 6 [(dsm_fixed_len)=32]; // full 32-byte AC_D for bootstrap handoff
 }
 
 // ========================= Storage Node Stats =========================
@@ -3901,23 +3746,27 @@ message ConfigureEnvOp {
 // Initialize the SDK runtime, storage-node registry, and router layer.
 message InitializeSdkOp {}
 
-// Install canonical identity context using the already-validated binding key.
+// Install canonical identity context. Identity is re-derived from the unlocked
+// wallet seed (Genesis v2); there is no binding key.
 message InitializeIdentityContextOp {
   bytes device_id    = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash = 2 [(dsm_fixed_len)=32];
-  bytes binding_key  = 3 [(dsm_fixed_len)=32];
+  // Field 3 reserved: legacy C-DBRW binding_key — removed (Genesis v2 has no
+  // persisted device secret). MUST NOT be reused.
+  reserved 3;
+  reserved "binding_key";
 }
 
-// Restore canonical identity context by re-deriving the binding key from
-// persisted deterministic C-DBRW inputs. This is the fast cold-start path
-// after a successful first bootstrap / enrollment.
+// Restore canonical identity context. Under Genesis v2 the device key re-derives
+// deterministically from the unlocked wallet seed; the cold-start path needs no
+// silicon inputs.
 message RestoreIdentityContextOp {
   bytes device_id             = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
-  bytes cdbrw_hw_entropy      = 3 [(dsm_fixed_len)=32];
-  bytes cdbrw_env_fingerprint = 4 [(dsm_max_len)=1024];
-  reserved 5; // was `bytes cdbrw_salt` — Phase 13 dropped random salt
-              // from K_DBRW preimage.  See SystemGenesisRequest.
+  // Fields 3,4,5 reserved: legacy C-DBRW silicon inputs (cdbrw_hw_entropy,
+  // cdbrw_env_fingerprint, cdbrw_salt). MUST NOT be reused.
+  reserved 3, 4, 5;
+  reserved "cdbrw_hw_entropy", "cdbrw_env_fingerprint";
 }
 
 // Canonical startup/bootstrap request shared by native platforms.

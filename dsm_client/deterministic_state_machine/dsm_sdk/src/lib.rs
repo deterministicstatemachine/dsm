@@ -115,9 +115,7 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
-mod binding_key;
 pub mod bridge;
-mod cdbrw_native_exports;
 // crypto_performance module deleted: orphan benchmark helpers that only
 // referenced HashChainSDK + IdentitySDK, with no consumers outside the
 // orphaned performance_demo.rs file (also deleted).
@@ -236,15 +234,15 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
                     gen.len()
                 );
                 if dev.len() == 32 && gen.len() == 32 {
-                    match fetch_dbrw_binding_key() {
-                        Ok(dbrw) => {
+                    match fetch_wallet_seed() {
+                        Ok(wallet_seed) => {
                             log::info!("Initializing SDK context from persisted AppState");
-                            let entropy = derive_production_entropy(&dev, &gen, &dbrw);
+                            let entropy = derive_production_entropy(&dev, &gen, &wallet_seed);
                             initialize_sdk_context(dev, gen.clone(), entropy)?;
                         }
                         Err(_) => {
                             log::info!(
-                                "Persisted identity found without C-DBRW binding key; deferring SDK context initialization"
+                                "Persisted identity found but wallet locked; deferring SDK context initialization until unlock"
                             );
                         }
                     }
@@ -295,43 +293,41 @@ pub fn initialize_sdk_context(
     get_sdk_context().initialize(device_id, genesis_hash, initial_entropy)
 }
 
-/// Production entropy derivation (deterministic, DBRW-bound).
+/// Production entropy derivation (deterministic, wallet-seed-rooted).
 ///
-/// This replaces the previous placeholder of reusing the genesis hash as entropy.
+/// SDK-context entropy roots in the BIP39 wallet seed (the canonical Genesis v2 root
+/// secret, re-derived from the session-cached mnemonic — never persisted, no C-DBRW).
 ///
-/// Domain: "DSM/SDK/ENTROPY/v2".
-///
-/// Inputs are expected to be 32 bytes for `device_id` and `genesis_hash`. `dbrw_binding`
-/// Derive production entropy from device identity + C-DBRW binding.
+/// Domain: "DSM/SDK/ENTROPY/v2". `device_id`/`genesis_hash` are 32 bytes; `wallet_seed`
+/// is the 64-byte BIP39 seed.
 pub(crate) fn derive_production_entropy(
     device_id: &[u8],
     genesis_hash: &[u8],
-    cdbrw_binding: &[u8],
+    wallet_seed: &[u8],
 ) -> Vec<u8> {
     let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_SDK_HASH);
     h.update(device_id);
     h.update(genesis_hash);
-    h.update(cdbrw_binding);
+    h.update(wallet_seed);
     h.finalize().as_bytes().to_vec()
 }
 
-pub(crate) fn fetch_dbrw_binding_key() -> Result<Vec<u8>, dsm::types::error::DsmError> {
-    crate::binding_key::get_binding_key().ok_or_else(|| {
+/// Seed the wallet-seed session cache (tests only). Replaces the legacy
+/// `set_cdbrw_binding_key_for_testing`: identity/EK/coins/at-rest derivations all re-root on
+/// this seed exactly as production re-roots on the mnemonic-derived seed.
+#[cfg(not(target_os = "android"))]
+pub fn set_wallet_seed_for_testing(seed: Vec<u8>) {
+    crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(seed);
+}
+
+/// The session-cached BIP39 wallet seed (unlocked via the mnemonic). Fails closed when the
+/// wallet is locked — the SDK context cannot be brought up without it.
+pub(crate) fn fetch_wallet_seed() -> Result<Vec<u8>, dsm::types::error::DsmError> {
+    crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
         dsm::types::error::DsmError::invalid_parameter(
-            "C-DBRW binding key unavailable; initialize startup/bootstrap before SDK context",
+            "wallet seed unavailable; unlock the wallet (mnemonic) before SDK context",
         )
     })
-}
-
-pub(crate) fn install_canonical_binding_key(
-    binding_key: Vec<u8>,
-) -> Result<(), dsm::types::error::DsmError> {
-    crate::binding_key::install_binding_key(binding_key)
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn set_cdbrw_binding_key_for_testing(key: Vec<u8>) {
-    let _ = crate::binding_key::install_binding_key(key);
 }
 
 /// Check if the global SDK context is properly initialized
@@ -343,7 +339,7 @@ pub fn is_sdk_context_initialized() -> bool {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_sdk_context_for_testing() {
     get_sdk_context().reset_for_testing();
-    crate::binding_key::clear_binding_key_for_testing();
+    crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
 }
 
 /// Get transport headers from SDK context for envelope v3
@@ -360,8 +356,8 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
             crate::sdk::app_state::AppState::get_genesis_hash(),
         ) {
             if dev.len() == 32 && gen.len() == 32 {
-                let dbrw = fetch_dbrw_binding_key()?;
-                let entropy = derive_production_entropy(&dev, &gen, &dbrw);
+                let wallet_seed = fetch_wallet_seed()?;
+                let entropy = derive_production_entropy(&dev, &gen, &wallet_seed);
                 initialize_sdk_context(dev, gen.clone(), entropy)?;
             }
         }
