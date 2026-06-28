@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Canonical offline-bearer acceptance for the bilateral RECEIVER path: the Boot
 //! Fenced Fused Anchor predicate (`anchor_core::accept::accept_offline`, 22 checks).
 //!
