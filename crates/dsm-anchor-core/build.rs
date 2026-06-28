@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir = manifest.join("proto");
     let proto_file = proto_dir.join("dsm_anchor.proto");
     if !proto_file.exists() {
-        panic!("anchor proto not found: {}", proto_file.display());
+        return Err(format!("anchor proto not found: {}", proto_file.display()).into());
     }
 
     prost_build::Config::new()
