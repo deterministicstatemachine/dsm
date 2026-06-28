@@ -1,0 +1,18 @@
+[package]
+name = "dsm-sphincs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "no_std BLAKE3-keyed SPHINCS+ signatures for DSM — byte-compatible with the DSM crypto SPHINCS+ (TAG_DSM_SPHINCS_KDF = \"DSM/sphincs-kdf\"), shared by the host and the RP2350 anchor firmware. Deterministic keygen from a 32-byte seed; sign/verify only (no OS RNG)."
+
+[lib]
+name = "dsm_sphincs"
+
+[dependencies]
+# BLAKE3-only hashing (matches the DSM SPHINCS+ scheme). no_std.
+blake3 = { version = "1", default-features = false }
+subtle = { version = "2", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# Deterministic keygen expands the 32-byte seed via ChaCha20 (no_std, no OS RNG).
+rand = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.9", default-features = false }

@@ -311,20 +311,9 @@ fn ensure_bootstrap() {
     if !crate::is_sdk_context_initialized() {
         log::info!("ensure_bootstrap: SDK context not initialized (bootstrap is platform-managed)");
     }
-
-    // C-DBRW check: only enforce after genesis. Pre-genesis the binding key does not
-    // exist yet — that is expected. Post-genesis a missing key indicates an attack.
-    if SDK_READY.load(Ordering::SeqCst) && crate::sdk::app_state::AppState::get_has_identity() {
-        let dbrw_ok = crate::fetch_dbrw_binding_key()
-            .map(|k| k.len() == 32)
-            .unwrap_or(false);
-        if !dbrw_ok {
-            SDK_READY.store(false, Ordering::SeqCst);
-            log::warn!(
-                "ensure_bootstrap: C-DBRW binding key missing or invalid after readiness; failing closed."
-            );
-        }
-    }
+    // Genesis v2 has no persisted device secret to re-check here: SDK readiness is structural
+    // (context initialized + identity present). Operations that need the wallet seed re-derive
+    // it from the unlocked wallet and fail closed individually when the wallet is locked.
 }
 
 #[no_mangle]
@@ -579,21 +568,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
                 );
             }
 
-            let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
-                .map(|k| k.len() == 32)
-                .unwrap_or(false);
-            if !dbrw_ok {
-                SDK_READY.store(false, Ordering::SeqCst);
-                return respond(
-                    pb::envelope::Payload::InitFailed(pb::InitFailed {
-                        reason: pb::init_failed::Reason::CdbrwNotReady as i32,
-                        message: "C-DBRW not initialized (or invalid). Call sdkBootstrap first."
-                            .to_string(),
-                    }),
-                    &mut env,
-                );
-            }
-
+            // Genesis v2: no C-DBRW binding key to gate init on. The device signing key is
+            // re-derived from the unlocked wallet seed on demand; signing operations fail
+            // closed individually when the wallet is locked.
             SDK_READY.store(true, Ordering::SeqCst);
             respond(
                 pb::envelope::Payload::AppStateResponse(pb::AppStateResponse {
@@ -4593,9 +4570,12 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
             );
 
             let has_device_identity = crate::sdk::app_state::AppState::get_device_id().is_some();
-            let has_binding_key = crate::fetch_dbrw_binding_key().is_ok();
+            // Genesis v2: the full AppRouter needs the device signing key, which re-derives from
+            // the unlocked wallet seed (no persisted C-DBRW key). Gate on wallet-unlocked.
+            let wallet_unlocked =
+                crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
 
-            if has_device_identity && has_binding_key {
+            if has_device_identity && wallet_unlocked {
                 log::info!(
                     "ensureAppRouterInstalled: Canonical identity ready, installing AppRouter"
                 );
@@ -4685,14 +4665,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
                 return 0;
             }
 
-            // Genesis exists, check C-DBRW binding key; if C-DBRW does not have a usable binding key,
-            // signal CDBRW_NOT_READY. Otherwise, conservatively report CDBRW_NOT_READY as well
-            // (SDK init step still outstanding).
-            let has_binding_key = crate::jni::cdbrw::get_cdbrw_binding_key()
-                .map(|k| k.len() == 32)
-                .unwrap_or(false);
-            if !has_binding_key {
-                log::info!("getAppRouterStatus: CDBRW_NOT_READY - no binding key");
+            // Genesis exists; the device signing key re-derives from the unlocked wallet seed
+            // (no persisted C-DBRW key). If the wallet is locked, report NOT_READY (reusing the
+            // legacy status code) so the platform prompts an unlock before router install.
+            let wallet_unlocked =
+                crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
+            if !wallet_unlocked {
+                log::info!("getAppRouterStatus: NOT_READY - wallet locked");
                 return 1;
             }
 

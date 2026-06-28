@@ -1086,9 +1086,6 @@ impl CoreSDK {
     /// initial `DeviceTreeStateV1` to a quorum of storage nodes here.
     /// If the publisher returns `Err`, the genesis aborts:
     ///
-    /// * K_DBRW is NOT installed into the binding-key slot.
-    /// * Platform silicon inputs (hw, env) are NOT zeroized — so the
-    ///   user can retry without re-running CDBRW enrollment.
     /// * No state-machine state or BCR device-head row is written.
     /// * No partial-genesis residue is left behind.
     ///
@@ -1137,43 +1134,17 @@ impl CoreSDK {
         }
 
         let device_entropy = generate_device_entropy(&device_id_arr);
-        // Peek (don't take) the silicon inputs so the slot stays alive for
-        // any later restore-path probes. The slot is cleared only AFTER
-        // the publisher succeeds and K_DBRW is staged below — see the
-        // "fail-closed before install" contract in the doc comment.
-        let silicon =
-            crate::sdk::app_state::AppState::peek_platform_entropy_inputs().ok_or_else(|| {
-                dsm::types::error::DsmError::invalid_operation(
-                    "core_sdk: platform silicon inputs (hw, env) required for genesis",
-                )
-            })?;
 
+        // Optional high-assurance / legacy profile: n-of-n commit-reveal multipart entropy
+        // (GenesisEntropyProfile::CommitRevealMpcV1). NO silicon binding and NO C-DBRW —
+        // the canonical wallet path is mnemonic-rooted Genesis v2 (`create_genesis_v2`).
         let genesis_state = create_genesis_via_blind_mpc_with_contributors(
             device_id_arr,
             storage_nodes,
-            silicon.hw_entropy.clone(),
-            silicon.env_fingerprint.clone(),
             device_entropy,
             contributor_entropies,
             client_entropy,
         )?;
-
-        // Derive (but do NOT install) the canonical K_DBRW. We need the
-        // genesis hash before this, but installation must wait until
-        // `before_install` confirms the network publish succeeded so a
-        // publisher error leaves the binding-key slot empty and the
-        // signing path gated.
-        let k_dbrw = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_state.hash,
-            &genesis_state.hash,
-            &silicon.hw_entropy,
-            &silicon.env_fingerprint,
-        )
-        .map_err(|e| {
-            dsm::types::error::DsmError::invalid_operation(format!(
-                "core_sdk: canonical K_DBRW derivation failed: {e}"
-            ))
-        })?;
 
         // Run the pre-install hook with the freshly-computed genesis
         // hash. Storage-node SDK uses this slot to publish the initial
@@ -1189,12 +1160,6 @@ impl CoreSDK {
         }
 
         // From here on: COMMITTED. Install local state.
-        crate::binding_key::install_binding_key(k_dbrw.to_vec()).map_err(|e| {
-            dsm::types::error::DsmError::invalid_operation(format!(
-                "core_sdk: install canonical K_DBRW failed: {e}"
-            ))
-        })?;
-        let _ = crate::sdk::app_state::AppState::take_platform_entropy_inputs();
         let public_key = genesis_state.signing_key.public_key.clone();
         let smt_root = genesis_state.merkle_root.unwrap_or(genesis_state.hash);
 
@@ -1228,6 +1193,29 @@ impl CoreSDK {
             public_key,
             smt_root: smt_root.to_vec(),
         })
+    }
+
+    /// Install an already-computed canonical Genesis v2 [`GenesisState`] as the device's current
+    /// state and seed the device-head cache. The caller (the `wallet.createGenesisV2` route) must
+    /// construct this `CoreSDK` with the v2 `DeviceInfo` (DevID + AK public key) so the installed
+    /// state + device head carry the canonical identity. Returns the installed genesis hash `G`.
+    ///
+    /// No MPC, no storage nodes, no silicon: the GenesisState came from
+    /// `create_genesis_v2_self_attested` over the unlocked wallet seed.
+    pub fn install_v2_genesis(
+        &self,
+        genesis_state: &dsm::core::identity::genesis::GenesisState,
+    ) -> Result<[u8; 32], DsmError> {
+        let genesis_state_hash = {
+            let mut sm = self.state_machine.lock();
+            let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
+            s.hash = genesis_state.hash;
+            let snapshot = s.clone();
+            sm.set_state(s);
+            snapshot.hash
+        };
+        self.write_genesis_device_head(genesis_state_hash)?;
+        Ok(genesis_state.hash)
     }
 
     /// Dev-only seeding of ERA token for local testing, idempotent via flag file

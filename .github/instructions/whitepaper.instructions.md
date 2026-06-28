@@ -186,33 +186,63 @@ Device identifier (normative). specific, but deterministic). Then
 Let AttA be the stable device attestation digest (platform-
 DevIDA := BLAKE3-256 "DSM/devid\0" ∥pkA ∥AttA.
 2.5 Genesis State Creation
-Genesis is an n-of-n commit-then-reveal entropy aggregation, NOT threshold cryptography.
-The n ≥ 3 storage-node participants each contribute one entropy value b_i, and the device
-contributes its own b_0 = device_id ∥ device_entropy; the contributions are committed, then
-revealed, then folded into a single deterministic hash. "n-of-n" means all n contributions
-are required — there is no t-of-n DKG or Shamir, and "b_1,...,b_n" is index notation for
-"all n contributions".
+Genesis is mnemonic-rooted and deterministic (Layer A; canonical default,
+GenesisEntropyProfile::MnemonicV2). The entire deterministic key tree derives from the device's
+BIP39 wallet seed; ordinary wallet creation requires NO storage nodes and NO multiparty ceremony.
+Let wallet_seed be the 64-byte BIP39 seed (mnemonic → wallet_seed) and let KDF(secret, context)
+denote HKDF-BLAKE3 (secret as IKM, context as info). With public parameters network_id,
+wallet_index, device_slot, genesis_version, the public authority_policy_hash, and the stable
+device attestation digest AttA:
 
-The genesis hash is computed over a single domain hasher seeded with the parent tag
-"DSM/genesis\0", folding each contribution under the sub-domain separator "DSM/genesis/mpc\0"
-so contribution digests occupy a collision-isolated region of the preimage. Concretely
-(normative; see types/genesis_types.rs::compute_genesis_hash and
-core/identity/genesis_session.rs::compute_genesis_id), with H_g := dsm_domain_hasher("DSM/genesis")
-and H(·) := domain_hash("DSM/genesis/contribution", ·):
+  genesis_nonce = KDF(wallet_seed, "DSM/genesis-public-nonce/v2" ∥ network_id ∥ wallet_index)   [PUBLIC]
+  G            = BLAKE3-256("DSM/genesis/v2" ∥ genesis_nonce ∥ network_id ∥ genesis_version)
+  s0           = KDF(wallet_seed, "DSM/s0/v2" ∥ G ∥ device_slot ∥ authority_policy_hash)         [SECRET]
+  device_seed  = KDF(wallet_seed, "DSM/device-seed/v2" ∥ G ∥ device_slot)                        [SECRET]
+  AK_seed      = KDF(device_seed, "DSM/device-ak/v2" ∥ authority_policy_hash)
+  (AKsk, AKpk) = SPHINCS+.KeyGen(AK_seed)
+  DevID        = BLAKE3-256("DSM/devid\0" ∥ AKpk ∥ AttA)
+  Smaster      = KDF(s0, "DSM/Smaster/v2" ∥ G ∥ DevID ∥ authority_policy_hash)                   [SECRET]
+
+genesis_nonce is PUBLIC (stored in the GenesisRecord) so G is recoverable from the mnemonic
+WITHOUT exposing wallet_seed. The attestation key AK is rooted in device_seed, NOT in Smaster,
+so it does not depend on DevID — DevID folds AKpk, which would otherwise be circular (the
+two-stage device derivation). s0, device_seed, and Smaster are SECRET, are NEVER persisted, and
+are re-derived from the wallet seed on demand (the wallet/recovery unlock path). G, genesis_nonce,
+DevID, and the authority policy are public; secret roots are excluded from public preimages where
+folding back would be circular. The mnemonic-rooted form keeps G clockless and publicly
+recomputable from the public nonce and parameters alone. (normative; see
+core/identity/genesis_v2.rs::derive_genesis_v2 and core/identity/genesis.rs::create_genesis_v2.)
+
+Negative space (normative). There is NO DBRW and NO K_DBRW — and no successor under any name
+(e.g. "K_DBRW2"). There is NO persisted device secret, NO persisted s0, and NO persisted Smaster
+anywhere in the system; both are re-derived from the wallet seed and zeroized after use.
+Anti-cloning is supplied ONLY by the Boot Fenced Fused Anchor (the offline-bearer secure-element
+attestation; Sec. 12 and dsm_anticlone.instructions.md). The seed-derived key tree above
+establishes AUTHORSHIP and recovery continuity, NOT anti-cloning: a seed copy holds Smaster and
+can sign, so Smaster MUST NOT be described as a clone-resistance primitive.
+
+Optional high-assurance / legacy profile (GenesisEntropyProfile::CommitRevealMpcV1). For
+deployments that require multiparty genesis entropy, DSM retains an OPTIONAL n-of-n
+commit-then-reveal aggregation. It is NOT the default and ordinary wallet creation MUST NOT
+require storage nodes. It is NOT threshold cryptography: n ≥ 3 storage-node participants each
+contribute one entropy value b_i and the device contributes b_0 = device_id ∥ device_entropy; the
+contributions are committed, then revealed, then folded into a single deterministic hash. "n-of-n"
+means all n contributions are required — there is no t-of-n DKG or Shamir. The genesis hash is
+computed over a single domain hasher seeded with "DSM/genesis\0", folding each contribution under
+the sub-domain separator "DSM/genesis/mpc\0" (normative; see
+types/genesis_types.rs::compute_genesis_hash and core/identity/genesis_session.rs::compute_genesis_id),
+with H_g := dsm_domain_hasher("DSM/genesis") and H(·) := domain_hash("DSM/genesis/contribution", ·):
 
   G := H_g( device_id
           ∥ ( "DSM/genesis/mpc\0" ∥ H(b_i)  for each contribution b_i, sorted by H(b_i) ) ).
 
-Contributions are folded in deterministic sorted order so transport-time ordering cannot
-change G. The public-key bundle (pk_sign, pk_encap) is derived from the master seed Smaster
-(Sec. 12), which itself folds G as context (keys ← Smaster ← (s0, G, DevID), §11.1), and is
-deliberately EXCLUDED from G: folding it back into G's preimage would be circular. It binds to
-genesis by derivation, not by inclusion. The device secret s0 is likewise EXCLUDED — it is secret
-CSPRNG entropy and G MUST remain publicly recomputable. Wall-clock and mutable metadata
-(e.g. created_at) are likewise EXCLUDED, keeping G clockless and publicly recomputable from
-device_id plus the revealed contributions alone. The classical flat form G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_n ∥ A)
-(3) is the conceptual presentation; the domain-separated, sorted construction above is the
-implemented normative form, and §12's "n-of-n genesis from §2.5" refers to it.
+Contributions are folded in deterministic sorted order so transport-time ordering cannot change G.
+In this profile s0 is a CSPRNG draw (not wallet-seed-derived) and the master seed uses the
+"DSM/Smaster/v1" context (Eq. 13). The public-key bundle is EXCLUDED from G (folding it back
+would be circular); s0 and wall-clock/mutable metadata are likewise EXCLUDED, keeping G publicly
+recomputable from device_id plus the revealed contributions alone. The classical flat form
+G = BLAKE3-256("DSM/genesis\0" ∥ b_1 ∥ ··· ∥ b_n ∥ A) (3) is the conceptual presentation; the
+domain-separated, sorted construction above is the implemented form for this profile.
 3 Two Merkle Structures: Storage and Replication
 Device Tree (standard Merkle). The Device Tree (leaves = device IDs) is fully replicated
 across storage nodes and across all devices under G. Adding a device is an online event: a
@@ -1018,15 +1048,26 @@ Planned / not in current implementation (Layer B). Migration to a certified, aud
 SLH-DSA (FIPS 205) signer — replacing the custom BLAKE3 SPHINCS+ above with a standardized
 SHA2/SHAKE parameter set carrying an actual NIST security category — is an architecture target,
 not shipped.
-Key derivation (normative). The device secret is the initial entropy s0 (Sec. 12), drawn from
-a CSPRNG. s0 is the sole secret root; G, DevID, and the authority policy are public context, not
-secrets. s0 MUST NEVER be serialized, logged, or included in any commitment. The master seed
-binds the secret to public context:
-Smaster = KDF(secret= s0, context= "DSM/Smaster/v1" ∥ G ∥ DevID ∥ authority_policy_hash),
+Key derivation (normative). Under the canonical mnemonic-rooted genesis (§2.5), the secret roots
+are derived deterministically from the BIP39 wallet seed — NOT from a standalone CSPRNG draw.
+The secret root for authorship/recovery is s0 = KDF(wallet_seed, "DSM/s0/v2" ∥ G ∥ device_slot ∥
+authority_policy_hash). The attestation key is rooted in a SEPARATE branch:
+device_seed = KDF(wallet_seed, "DSM/device-seed/v2" ∥ G ∥ device_slot),
+AK_seed = KDF(device_seed, "DSM/device-ak/v2" ∥ authority_policy_hash),
+(AKsk,AKpk) ← SPHINCS+.KeyGen(AK_seed). Rooting AK in device_seed rather than Smaster is required
+because DevID = BLAKE3-256("DSM/devid\0" ∥ AKpk ∥ AttA) folds AKpk; deriving AK from Smaster (which
+folds DevID) would be circular. s0, device_seed, and Smaster are SECRET, MUST NEVER be serialized,
+logged, or included in any commitment, and are re-derived from the wallet seed on demand (never
+persisted). G, DevID, and the authority policy are public context, not secrets. The master seed
+binds the secret root to public context:
+Smaster = KDF(secret= s0, context= "DSM/Smaster/v2" ∥ G ∥ DevID ∥ authority_policy_hash),
 (13)
-and an attestation key (AKsk,AKpk) ←SPHINCS+.KeyGen(Smaster). Here KDF(secret, context) is
-HKDF-BLAKE3 with the secret as IKM and the context as info; for the per-step derivations it is
-keyed BLAKE3 with the secret as the key (NOT HKDF; see ephemeral_key.rs::derive_ephemeral_seed).
+which roots the per-step ephemeral keys and the deterministic ML-KEM-768 coins (Eq. 14 below). Here
+KDF(secret, context) is HKDF-BLAKE3 with the secret as IKM and the context as info; for the per-step
+derivations it is keyed BLAKE3 with the secret as the key (NOT HKDF; see
+ephemeral_key.rs::derive_ephemeral_seed). (In the optional CommitRevealMpcV1 profile of §2.5, s0 is a
+CSPRNG draw and the master seed uses the "DSM/Smaster/v1" context; the per-step EK chain of Eq. 14 is
+identical in both profiles.)
 Given parent hn and precommit Cpre, derive the per-step seed over versioned, algorithm- and
 chain-bound context:
 En+1 = KDF(secret= Smaster, context= "DSM/ek/v1" ∥ alg_id ∥ chain_id ∥ hn ∥ Cpre ∥ kstep), (14)
@@ -1082,12 +1123,16 @@ collision resistance, adversaries cannot forge a different identity chain consis
 without breaking P0. For transport, commitments may be sealed via ML-KEM-768 and verified upon
 decryption by checking BLAKE3-256("DSM/commit\0" ∥Sn ∥P) = expected.
 12 Device Secret and Offline-Bearer Anti-Clone Anchor
-The device secret is s0, drawn from a CSPRNG at provisioning. It is never serialized in cleartext
-and is recoverable only through the wallet seed. The master seed of §11,
-Smaster = KDF(secret= s0, context= "DSM/Smaster/v1" ∥ G ∥ DevID ∥ authority_policy_hash) (Eq. 13),
-roots the attestation key and, via the per-step KDF (Eq. 14), every ephemeral key and the
-deterministic ML-KEM-768 coins. Smaster establishes AUTHORSHIP and recovery continuity: only
-its holder produces valid per-step signatures, and a holder of the public chain alone cannot.
+The device secret is s0, derived deterministically from the BIP39 wallet seed (Genesis v2, §2.5;
+the optional CommitRevealMpcV1 profile draws it from a CSPRNG instead). It is NEVER serialized or
+persisted in any form and is recoverable only by re-deriving it from the wallet seed. The master
+seed of §11,
+Smaster = KDF(secret= s0, context= "DSM/Smaster/v2" ∥ G ∥ DevID ∥ authority_policy_hash) (Eq. 13),
+roots, via the per-step KDF (Eq. 14), every ephemeral key and the deterministic ML-KEM-768 coins.
+(The attestation key AK is rooted in device_seed, NOT in Smaster — see §2.5/§11.1 — to break the
+DevID circularity.) Smaster establishes AUTHORSHIP and recovery continuity: only its holder
+produces valid per-step signatures, and a holder of the public chain alone cannot. There is no
+DBRW, no K_DBRW (or any successor), no persisted s0, and no persisted Smaster.
 
 Smaster does not, and cannot, establish anti-cloning. A seed copy holds Smaster and can sign,
 and no software-derived value can close this gap: every read path that turns a physical quantity
@@ -1097,11 +1142,12 @@ software-read hardware fingerprints are therefore NOT clone resistance and MUST 
 described as such. Authorship and anti-cloning are distinct properties, and DSM keeps them in
 distinct layers.
 
-Anti-cloning is enforced, and only for the optional offline-bearer transfer feature, by a hardware
-root of trust: a held secure element whose attestation key is generated on the element, has no read
-path, and signs a fresh challenge over each transition. The offline spend authority is that island
-signature; a perfect bit copy on other hardware holds every bit but not the island key and cannot
-produce it. Offline counterparties pin the exact device identity (the hash of the attested public
+Anti-cloning is enforced ONLY by the Boot Fenced Fused Anchor, and only for the optional
+offline-bearer transfer feature: a hardware root of trust — a held secure element whose attestation
+key is generated on the element, has no read path, and signs a fresh challenge over each transition.
+The offline spend authority is that island signature; a perfect bit copy on other hardware holds
+every bit but not the island key and cannot produce it. No software-derived value (seed, Smaster,
+silicon fingerprint, or any DBRW-style device secret) is, or may be described as, anti-clone. Offline counterparties pin the exact device identity (the hash of the attested public
 key); a different genuine device of the same make does not stand in for the bound one. The
 necessity argument (no software-only physical channel can bind a transition on hardware the
 owner controls), the construction (bind the lineage to the attested device identity, not the seed),
@@ -1539,11 +1585,15 @@ parameterized by integers, never by wall time. No calibration against time is pe
 DSM: Deterministic State Machines 40
 16.7 Key Management and SPHINCS+
 Per-step key derivation is specified in Sec. 11.1 and Sec. 12. In summary:
-• Device secret s0 is drawn from a CSPRNG, is the sole secret root, and is never serialized,
-logged, or committed.
-• Master seed Smaster = KDF(secret=s0, context="DSM/Smaster/v1" ∥ G ∥ DevID ∥
-authority_policy_hash). This is the one genuinely-HKDF derivation in DSM (crypto/hkdf.rs,
-genesis_session.rs): s0 is the IKM, the context is the info.
+• Device secret s0 = KDF(wallet_seed, "DSM/s0/v2" ∥ G ∥ device_slot ∥ authority_policy_hash) is the
+deterministic secret root (canonical Genesis v2, §2.5); it is re-derived from the BIP39 wallet seed,
+NEVER persisted, and never serialized, logged, or committed. (The optional CommitRevealMpcV1 profile
+draws s0 from a CSPRNG instead.) The attestation key AK is rooted in a separate branch (device_seed),
+not in s0/Smaster, to break the DevID circularity (§2.5/§11.1).
+• Master seed Smaster = KDF(secret=s0, context="DSM/Smaster/v2" ∥ G ∥ DevID ∥
+authority_policy_hash) ("DSM/Smaster/v1" in the legacy CommitRevealMpcV1 profile). This is the one
+genuinely-HKDF derivation in DSM (crypto/hkdf.rs, genesis_v2.rs): s0 is the IKM, the context is the
+info.
 • For each parent hn and pre-commit Cpre, a per-step seed En+1 = KDF(secret=Smaster,
 context="DSM/ek/v1" ∥ alg_id ∥ chain_id ∥ hn ∥ Cpre ∥ kstep) via keyed BLAKE3 (NOT
 HKDF), where kstep is derived from ML-KEM-768 shared-secret material.
@@ -1609,7 +1659,7 @@ certified NIST variant — see §11.1; size capped as specified in Sec. 11.1).
 • KEM: ML-KEM-768 (FIPS 203) for step secrets; secrets never serialized.
 • SMT: 256-bit key space; inclusion proofs logarithmic; device-local authoritative.
 • Device Tree: Standard Merkle; replicated to storage nodes and user devices.
-• Entropy: s0 from CSPRNG (the sole secret root); per-step seeds via keyed BLAKE3 (not HKDF) keyed by Smaster over context (DSM/ek/v1, alg_id, chain_id, hn, Cpre, kstep).
+• Entropy: s0 = KDF(wallet_seed, "DSM/s0/v2" ∥ …) is the deterministic secret root (canonical Genesis v2; CSPRNG-drawn only in the optional CommitRevealMpcV1 profile); per-step seeds via keyed BLAKE3 (not HKDF) keyed by Smaster over context (DSM/ek/v1, alg_id, chain_id, hn, Cpre, kstep).
 • Time: No timestamps, epochs, or heights in predicates or encodings.
 • Modal rule: Pending online for (A,B) blocks offline for (A,B) until synchronized; other
 relationships commute.

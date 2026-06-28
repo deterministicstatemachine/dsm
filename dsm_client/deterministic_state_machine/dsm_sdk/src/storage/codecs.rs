@@ -337,6 +337,8 @@ pub fn encode_genesis_record_bytes(r: &GenesisRecord) -> Vec<u8> {
     put_str(&r.storage_nodes.join(","), &mut out);
     put_str(&r.entropy_hash, &mut out);
     put_str(&r.protocol_version, &mut out);
+    put_str(&r.genesis_nonce, &mut out);
+    put_str(&r.genesis_profile, &mut out);
     out
 }
 
@@ -564,6 +566,8 @@ mod tests {
             hash_chain_proof: None,
             smt_proof: None,
             verification_step: None,
+            genesis_nonce: String::new(),
+            genesis_profile: String::new(),
         };
         let enc1 = encode_genesis_record_bytes(&rec);
         let enc2 = encode_genesis_record_bytes(&rec);

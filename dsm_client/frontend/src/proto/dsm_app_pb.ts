@@ -761,102 +761,6 @@ proto3.util.setEnumType(ValueCapabilityV1, "dsm.ValueCapabilityV1", [
 ]);
 
 /**
- * Fail-closed access ordering (ordinal comparison in Rust).
- *
- * @generated from enum dsm.CdbrwAccessLevel
- */
-export enum CdbrwAccessLevel {
-  /**
-   * @generated from enum value: CDBRW_ACCESS_UNSPECIFIED = 0;
-   */
-  CDBRW_ACCESS_UNSPECIFIED = 0,
-
-  /**
-   * hardware anchor missing or fatal health fail
-   *
-   * @generated from enum value: CDBRW_ACCESS_BLOCKED = 1;
-   */
-  CDBRW_ACCESS_BLOCKED = 1,
-
-  /**
-   * degraded — view only, no writes
-   *
-   * @generated from enum value: CDBRW_ACCESS_READ_ONLY = 2;
-   */
-  CDBRW_ACCESS_READ_ONLY = 2,
-
-  /**
-   * drift or ADAPTED — step-up auth
-   *
-   * @generated from enum value: CDBRW_ACCESS_PIN_REQUIRED = 3;
-   */
-  CDBRW_ACCESS_PIN_REQUIRED = 3,
-
-  /**
-   * PASS or RESONANT with clean drift
-   *
-   * @generated from enum value: CDBRW_ACCESS_FULL_ACCESS = 4;
-   */
-  CDBRW_ACCESS_FULL_ACCESS = 4,
-}
-// Retrieve enum metadata with: proto3.getEnumType(CdbrwAccessLevel)
-proto3.util.setEnumType(CdbrwAccessLevel, "dsm.CdbrwAccessLevel", [
-  { no: 0, name: "CDBRW_ACCESS_UNSPECIFIED" },
-  { no: 1, name: "CDBRW_ACCESS_BLOCKED" },
-  { no: 2, name: "CDBRW_ACCESS_READ_ONLY" },
-  { no: 3, name: "CDBRW_ACCESS_PIN_REQUIRED" },
-  { no: 4, name: "CDBRW_ACCESS_FULL_ACCESS" },
-]);
-
-/**
- * Tri-layer resonant classification per C-DBRW §7.
- *
- * @generated from enum dsm.CdbrwResonantStatus
- */
-export enum CdbrwResonantStatus {
-  /**
-   * @generated from enum value: CDBRW_RESONANT_UNSPECIFIED = 0;
-   */
-  CDBRW_RESONANT_UNSPECIFIED = 0,
-
-  /**
-   * Ĥ ≥ 0.45, |ρ̂| ≤ 0.3, L̂ ≥ 0.45
-   *
-   * @generated from enum value: CDBRW_RESONANT_PASS = 1;
-   */
-  CDBRW_RESONANT_PASS = 1,
-
-  /**
-   * h0_eff in [0.30, 0.45) — longer orbit OK
-   *
-   * @generated from enum value: CDBRW_RESONANT_RESONANT = 2;
-   */
-  CDBRW_RESONANT_RESONANT = 2,
-
-  /**
-   * degraded entropy — step-up required
-   *
-   * @generated from enum value: CDBRW_RESONANT_ADAPTED = 3;
-   */
-  CDBRW_RESONANT_ADAPTED = 3,
-
-  /**
-   * below minimum — reject
-   *
-   * @generated from enum value: CDBRW_RESONANT_FAIL = 4;
-   */
-  CDBRW_RESONANT_FAIL = 4,
-}
-// Retrieve enum metadata with: proto3.getEnumType(CdbrwResonantStatus)
-proto3.util.setEnumType(CdbrwResonantStatus, "dsm.CdbrwResonantStatus", [
-  { no: 0, name: "CDBRW_RESONANT_UNSPECIFIED" },
-  { no: 1, name: "CDBRW_RESONANT_PASS" },
-  { no: 2, name: "CDBRW_RESONANT_RESONANT" },
-  { no: 3, name: "CDBRW_RESONANT_ADAPTED" },
-  { no: 4, name: "CDBRW_RESONANT_FAIL" },
-]);
-
-/**
  * ========================= Storage Replica Set Config =========================
  * UI/local configuration persisted via protobuf (no JSON/localStorage).
  * Storage nodes are independent, free-market participants — any N nodes can
@@ -6863,7 +6767,7 @@ export class SoftVaultExportV1 extends Message<SoftVaultExportV1> {
   deviceId = new Uint8Array(0);
 
   /**
-   * C-DBRW device binding fingerprint
+   * device binding fingerprint (wallet-seed-rooted)
    *
    * @generated from field: bytes binder_hash32 = 4;
    */
@@ -8476,8 +8380,8 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
  * unlock gate re-verifies before emitting Operation::DlvUnlock.
  *
  * Strictly stronger than VaultStateAnchorV1: the anchor only signs
- * (vault_id, sequence, reserves_digest), so a compromised K_DBRW could
- * forge a signed anchor.  The inclusion proof additionally commits the
+ * (vault_id, sequence, reserves_digest), so a compromised owner signing key
+ * could forge a signed anchor.  The inclusion proof additionally commits the
  * device's PD-SMT root + a 256-sibling Merkle path that
  * dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
  * against the device's actual SMT — forgery requires also fabricating
@@ -8537,7 +8441,7 @@ export class VaultStateInclusionProofV1 extends Message<VaultStateInclusionProof
   /**
    * SPHINCS+ signature over BLAKE3("DSM/vault-state-inclusion\0" ||
    * vault_id || sequence_be || reserves_digest || smt_root).  Binds
-   * the SMT root into the signature so a compromised K_DBRW cannot
+   * the SMT root into the signature so a compromised owner key cannot
    * forge a proof against a different root.
    *
    * @generated from field: bytes owner_signature = 7;
@@ -11625,16 +11529,6 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
    */
   deviceEntropy = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes cdbrw_hw_entropy = 4;
-   */
-  cdbrwHwEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes cdbrw_env_fingerprint = 5;
-   */
-  cdbrwEnvFingerprint = new Uint8Array(0);
-
   constructor(data?: PartialMessage<SystemGenesisRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11646,8 +11540,6 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
     { no: 1, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SystemGenesisRequest {
@@ -11707,6 +11599,59 @@ export class SystemGenesisResponse extends Message<SystemGenesisResponse> {
 
   static equals(a: SystemGenesisResponse | PlainMessage<SystemGenesisResponse> | undefined, b: SystemGenesisResponse | PlainMessage<SystemGenesisResponse> | undefined): boolean {
     return proto3.util.equals(SystemGenesisResponse, a, b);
+  }
+}
+
+/**
+ * Canonical mnemonic-rooted Genesis v2 wallet-creation request (system.createGenesisV2).
+ * The BIP39 mnemonic is the sole root: the SDK derives wallet_seed, caches it in the unlocked
+ * session, and runs create_genesis_v2 (no storage nodes, no silicon, no random genesis entropy).
+ *
+ * @generated from message dsm.WalletCreateGenesisV2Request
+ */
+export class WalletCreateGenesisV2Request extends Message<WalletCreateGenesisV2Request> {
+  /**
+   * @generated from field: string mnemonic = 1;
+   */
+  mnemonic = "";
+
+  /**
+   * @generated from field: string locale = 2;
+   */
+  locale = "";
+
+  /**
+   * @generated from field: string network_id = 3;
+   */
+  networkId = "";
+
+  constructor(data?: PartialMessage<WalletCreateGenesisV2Request>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.WalletCreateGenesisV2Request";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "mnemonic", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): WalletCreateGenesisV2Request {
+    return new WalletCreateGenesisV2Request().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): WalletCreateGenesisV2Request {
+    return new WalletCreateGenesisV2Request().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): WalletCreateGenesisV2Request {
+    return new WalletCreateGenesisV2Request().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: WalletCreateGenesisV2Request | PlainMessage<WalletCreateGenesisV2Request> | undefined, b: WalletCreateGenesisV2Request | PlainMessage<WalletCreateGenesisV2Request> | undefined): boolean {
+    return proto3.util.equals(WalletCreateGenesisV2Request, a, b);
   }
 }
 
@@ -11920,8 +11865,8 @@ export class SecondaryDeviceResponse extends Message<SecondaryDeviceResponse> {
  * Additional-device admission (§16.3). Gate-only, two-signature, co-present. An already-authorized
  * device admits a new device into an EXISTING genesis Device Tree by signing this with its NORMAL
  * device signing key (the gate — only a key already in the tree can authorize the insert). The new
- * device co-signs with its own DBRW-bound device key to prove physical possession (DBRW is silicon-
- * bound and cannot be faked) WITHOUT revealing the raw DBRW. The gate signer's pubkey comes from
+ * device co-signs with its own Genesis v2 device signing key (AK, rooted in the device's wallet
+ * seed) to prove possession of that key. The gate signer's pubkey comes from
  * the QR the new device scanned (co-present) — NOT a storage-node quorum or any external verifier.
  * Verifier: (a) signer_device_id is in the CURRENT tree (root case signer_device_id==genesis_hash);
  * (b) signature_by_signer_device verifies under the scanned-QR signer pubkey; (c)
@@ -11972,7 +11917,7 @@ export class AddDeviceAdmissionV1 extends Message<AddDeviceAdmissionV1> {
   signatureBySignerDevice = new Uint8Array(0);
 
   /**
-   * new device — DBRW-bound possession
+   * new device — Genesis v2 AK possession
    *
    * @generated from field: bytes signature_by_new_device = 8;
    */
@@ -12038,7 +11983,7 @@ export class AddDeviceAdmissionRequestV1 extends Message<AddDeviceAdmissionReque
   newDeviceSigningPubkey = new Uint8Array(0);
 
   /**
-   * DBRW-bound self-attestation
+   * Genesis v2 AK self-attestation
    *
    * @generated from field: bytes signature_by_new_device = 4;
    */
@@ -12377,6 +12322,14 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    */
   transferAmountDisplay = "";
 
+  /**
+   * Present iff the sender holds an offline-bearer anchor. The receiver pins it (admit) at
+   * relationship establishment, then verifies every offline-bearer receipt against it.
+   *
+   * @generated from field: dsm.AnchorIdentityProto sender_anchor_identity = 15;
+   */
+  senderAnchorIdentity?: AnchorIdentityProto;
+
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12399,6 +12352,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 12, name: "token_id_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 15, name: "sender_anchor_identity", kind: "message", T: AnchorIdentityProto },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {
@@ -13166,6 +13120,35 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
    */
   senderSmtRootBefore = new Uint8Array(0);
 
+  /**
+   * LEGACY Safe 7 offline-bearer shape (fields 10/11). The receiver NO LONGER accepts an
+   * offline-bearer transfer via IslandAttestation — these are quarantined and route to online
+   * recovery (superseded by field 12). Still emitted by the unmigrated sender; Phase 5 removes
+   * the producer.
+   *
+   * @generated from field: dsm.IslandAttestationProto island_attestation = 10;
+   */
+  islandAttestation?: IslandAttestationProto;
+
+  /**
+   * == the transition target state the gate signed as expiry_tick
+   *
+   * @generated from field: uint64 anchor_expiry_tick = 11;
+   */
+  anchorExpiryTick = protoInt64.zero;
+
+  /**
+   * Canonical offline-bearer release (Boot Fenced Fused Anchor): the prost-encoded
+   * dsm.anchor.OfflineRelease (Δ + boot chain + fused root-advance cert + counter evidence),
+   * carried as opaque bytes so the dsm.anchor namespace stays decoupled from dsm_app. The receiver
+   * decodes it and applies anchor_core::accept::accept_offline (the 22-check predicate). Until the
+   * producer side ships (Phase 5) this is empty and the transfer fails closed to online recovery;
+   * no value is released on an absent or invalid release.
+   *
+   * @generated from field: bytes offline_release = 12;
+   */
+  offlineRelease = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralConfirmRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13183,6 +13166,9 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
     { no: 7, name: "shared_chain_tip_new", kind: "message", T: Hash32 },
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "sender_smt_root_before", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "island_attestation", kind: "message", T: IslandAttestationProto },
+    { no: 11, name: "anchor_expiry_tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 12, name: "offline_release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralConfirmRequest {
@@ -13292,7 +13278,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    * Dual SPHINCS+ signatures. These are the receipt challenge responses.
    * The challenge is the proposed transition context carried by fields 1-11
    * plus the bilateral session binding. Each response signs that context with
-   * the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+   * the fresh EK key derived from Smaster, chain_id, h_n, C_pre, and k_step.
    * NOT part of canonical commit preimage.
    * Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
    *
@@ -13327,14 +13313,17 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   ekCertB = new Uint8Array(0);
 
   /**
-   * Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
+   * Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1/§12). Each receipt
    * is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
-   * where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+   * where E_{n+1} = keyed-BLAKE3(Smaster, "DSM/ek/v1\0" || alg_id || chain_id
+   *                               || h_n || C_pre || k_step).
    * The verifier uses these to verify sig_a/sig_b without needing them
    * out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
    * same placement rationale as ek_cert_a/b.
-   * A copied database can carry old public EK material, but cannot derive the
-   * next EK on different hardware because K_DBRW is not serialized.
+   * A copied database carries old public EK material but cannot derive the next
+   * EK without the wallet seed (Smaster is re-derived on demand, never serialized
+   * in the DB). Note: the EK chain binds AUTHORSHIP, not anti-clone — anti-clone
+   * is the Boot Fenced Fused Anchor (a seed copy holds Smaster).
    *
    * @generated from field: bytes ek_pk_a = 16;
    */
@@ -13346,16 +13335,16 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
+   * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
    * deterministic Kyber coins from
-   *   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-   *                       || DevID_sender || K_DBRW)
+   *   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
+   *                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
    * encapsulates against the recipient's Kyber public key, and the
    * resulting ciphertext travels here. The recipient decapsulates with
    * their local Kyber secret key to recover the same shared secret `ss`,
    * then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
    * arrive at identical k_step, which is then mixed into the per-step
-   * EK derivation alongside K_DBRW. Wire-only — not part of canonical
+   * EK derivation alongside Smaster. Wire-only — not part of canonical
    * commit form (§4.2.1).
    *
    * @generated from field: bytes kyber_ct_a = 18;
@@ -14751,18 +14740,6 @@ export class BootstrapMeasurementReport extends Message<BootstrapMeasurementRepo
   progressPercent = 0;
 
   /**
-   * @generated from field: bytes cdbrw_hw_entropy = 5;
-   */
-  cdbrwHwEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes cdbrw_env_fingerprint = 6;
-   */
-  cdbrwEnvFingerprint = new Uint8Array(0);
-
-  /**
-   * from K_DBRW preimage.  See SystemGenesisRequest.
-   *
    * @generated from field: dsm.BootstrapMeasurementReport.TrustLevel trust_level = 8;
    */
   trustLevel = BootstrapMeasurementReport_TrustLevel.BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED;
@@ -14784,8 +14761,6 @@ export class BootstrapMeasurementReport extends Message<BootstrapMeasurementRepo
     { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "progress_percent", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 5, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "trust_level", kind: "enum", T: proto3.getEnumType(BootstrapMeasurementReport_TrustLevel) },
     { no: 9, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
@@ -18199,12 +18174,8 @@ export class Envelope extends Message<Envelope> {
     case: "storageNodeManageResponse";
   } | {
     /**
-     * @generated from field: dsm.DbrwStatusResponse dbrw_status_response = 90;
-     */
-    value: DbrwStatusResponse;
-    case: "dbrwStatusResponse";
-  } | {
-    /**
+     * Slot 90 reserved (was DbrwStatusResponse) — see message-level reserved below.
+     *
      * @generated from field: dsm.BitcoinWithdrawalPlanRequest bitcoin_withdrawal_plan_request = 91;
      */
     value: BitcoinWithdrawalPlanRequest;
@@ -18277,32 +18248,6 @@ export class Envelope extends Message<Envelope> {
      */
     value: BootstrapFinalizeResponse;
     case: "bootstrapFinalizeResponse";
-  } | {
-    /**
-     * C-DBRW Protocol 6.2 (ZK challenge/response)
-     *
-     * @generated from field: dsm.CdbrwTrustSnapshot cdbrw_trust_snapshot = 103;
-     */
-    value: CdbrwTrustSnapshot;
-    case: "cdbrwTrustSnapshot";
-  } | {
-    /**
-     * @generated from field: dsm.CdbrwRespondResponse cdbrw_respond_response = 104;
-     */
-    value: CdbrwRespondResponse;
-    case: "cdbrwRespondResponse";
-  } | {
-    /**
-     * @generated from field: dsm.CdbrwVerifyResponse cdbrw_verify_response = 105;
-     */
-    value: CdbrwVerifyResponse;
-    case: "cdbrwVerifyResponse";
-  } | {
-    /**
-     * @generated from field: dsm.CdbrwEnrollResponse cdbrw_enroll_response = 106;
-     */
-    value: CdbrwEnrollResponse;
-    case: "cdbrwEnrollResponse";
   } | {
     /**
      * Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
@@ -18414,7 +18359,6 @@ export class Envelope extends Message<Envelope> {
     { no: 87, name: "bitcoin_wallet_create_response", kind: "message", T: BitcoinWalletCreateResponse, oneof: "payload" },
     { no: 88, name: "storage_node_stats_response", kind: "message", T: StorageNodeStatsResponse, oneof: "payload" },
     { no: 89, name: "storage_node_manage_response", kind: "message", T: StorageNodeManageResponse, oneof: "payload" },
-    { no: 90, name: "dbrw_status_response", kind: "message", T: DbrwStatusResponse, oneof: "payload" },
     { no: 91, name: "bitcoin_withdrawal_plan_request", kind: "message", T: BitcoinWithdrawalPlanRequest, oneof: "payload" },
     { no: 92, name: "bitcoin_withdrawal_plan_response", kind: "message", T: BitcoinWithdrawalPlanResponse, oneof: "payload" },
     { no: 93, name: "bitcoin_withdrawal_execute_request", kind: "message", T: BitcoinWithdrawalExecuteRequest, oneof: "payload" },
@@ -18427,10 +18371,6 @@ export class Envelope extends Message<Envelope> {
     { no: 100, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "payload" },
     { no: 101, name: "bootstrap_measurement_report", kind: "message", T: BootstrapMeasurementReport, oneof: "payload" },
     { no: 102, name: "bootstrap_finalize_response", kind: "message", T: BootstrapFinalizeResponse, oneof: "payload" },
-    { no: 103, name: "cdbrw_trust_snapshot", kind: "message", T: CdbrwTrustSnapshot, oneof: "payload" },
-    { no: 104, name: "cdbrw_respond_response", kind: "message", T: CdbrwRespondResponse, oneof: "payload" },
-    { no: 105, name: "cdbrw_verify_response", kind: "message", T: CdbrwVerifyResponse, oneof: "payload" },
-    { no: 106, name: "cdbrw_enroll_response", kind: "message", T: CdbrwEnrollResponse, oneof: "payload" },
     { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
     { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
@@ -18456,7 +18396,7 @@ export class Envelope extends Message<Envelope> {
 /**
  * ===================== SDK INIT / STATUS =====================
  * Returned when the app attempts to mark the SDK/wallet "initialized" but a
- * mandatory prerequisite is missing (e.g., C-DBRW not bootstrapped yet).
+ * mandatory prerequisite is missing.
  *
  * @generated from message dsm.InitFailed
  */
@@ -18510,11 +18450,6 @@ export enum InitFailed_Reason {
   REASON_UNSPECIFIED = 0,
 
   /**
-   * @generated from enum value: CDBRW_NOT_READY = 1;
-   */
-  CDBRW_NOT_READY = 1,
-
-  /**
    * @generated from enum value: PLATFORM_CONTEXT_MISSING = 2;
    */
   PLATFORM_CONTEXT_MISSING = 2,
@@ -18527,7 +18462,6 @@ export enum InitFailed_Reason {
 // Retrieve enum metadata with: proto3.getEnumType(InitFailed_Reason)
 proto3.util.setEnumType(InitFailed_Reason, "dsm.InitFailed.Reason", [
   { no: 0, name: "REASON_UNSPECIFIED" },
-  { no: 1, name: "CDBRW_NOT_READY" },
   { no: 2, name: "PLATFORM_CONTEXT_MISSING" },
   { no: 3, name: "INVALID_INPUT" },
 ]);
@@ -20147,6 +20081,73 @@ export class IslandAttestationProto extends Message<IslandAttestationProto> {
    */
   policyId = new Uint8Array(0);
 
+  /**
+   * canonical anchor-set id (compute_anchor_set_id)
+   *
+   * @generated from field: bytes id_anchor_set = 4;
+   */
+  idAnchorSet = new Uint8Array(0);
+
+  /**
+   * UI transcript hash the island signed over
+   *
+   * @generated from field: bytes ui_transcript_hash = 5;
+   */
+  uiTranscriptHash = new Uint8Array(0);
+
+  /**
+   * Stateful-receipt fields (anchor monotonic frontier + firmware/policy binding). Append-only;
+   * NOT folded into compute_chain_tip (only id_island/signature/policy_id are), so tip bytes are
+   * unchanged. genesis/device_id are already on StitchedReceiptV2 and not duplicated here.
+   *
+   * dsm_anchor_pubkey_hash(leaf_spki)
+   *
+   * @generated from field: bytes anchor_pubkey_hash = 6;
+   */
+  anchorPubkeyHash = new Uint8Array(0);
+
+  /**
+   * device-measured firmware hash (secmon-gate enforced)
+   *
+   * @generated from field: bytes firmware_hash = 7;
+   */
+  firmwareHash = new Uint8Array(0);
+
+  /**
+   * dsm_policy_hash(policy_id, id_anchor_set)
+   *
+   * @generated from field: bytes policy_hash = 8;
+   */
+  policyHash = new Uint8Array(0);
+
+  /**
+   * anchor frontier root this advance consumes
+   *
+   * @generated from field: bytes parent_root = 9;
+   */
+  parentRoot = new Uint8Array(0);
+
+  /**
+   * anchor frontier root this advance produces
+   *
+   * @generated from field: bytes successor_root = 10;
+   */
+  successorRoot = new Uint8Array(0);
+
+  /**
+   * == payload_hash of the transition
+   *
+   * @generated from field: bytes operation_hash = 11;
+   */
+  operationHash = new Uint8Array(0);
+
+  /**
+   * monotonic anchor frontier counter
+   *
+   * @generated from field: uint64 state_number = 12;
+   */
+  stateNumber = protoInt64.zero;
+
   constructor(data?: PartialMessage<IslandAttestationProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20158,6 +20159,15 @@ export class IslandAttestationProto extends Message<IslandAttestationProto> {
     { no: 1, name: "id_island", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "policy_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "id_anchor_set", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "ui_transcript_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "anchor_pubkey_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "firmware_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "policy_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "parent_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "successor_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "operation_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IslandAttestationProto {
@@ -20174,6 +20184,90 @@ export class IslandAttestationProto extends Message<IslandAttestationProto> {
 
   static equals(a: IslandAttestationProto | PlainMessage<IslandAttestationProto> | undefined, b: IslandAttestationProto | PlainMessage<IslandAttestationProto> | undefined): boolean {
     return proto3.util.equals(IslandAttestationProto, a, b);
+  }
+}
+
+/**
+ * The sender's published offline-bearer anchor identity, exchanged so the receiver can PIN it
+ * (admit it through the relationship-establishment authority path) and thereafter verify every
+ * offline-bearer receipt against this exact identity + enrolled firmware hash. Comes from the
+ * element (real Safe 7 transport) or the in-process mock; the exchange + pinning are identical.
+ *
+ * @generated from message dsm.AnchorIdentityProto
+ */
+export class AnchorIdentityProto extends Message<AnchorIdentityProto> {
+  /**
+   * anchor id (from birth commitment + key)
+   *
+   * @generated from field: bytes id_anchor = 1;
+   */
+  idAnchor = new Uint8Array(0);
+
+  /**
+   * birth commitment C
+   *
+   * @generated from field: bytes commitment_c = 2;
+   */
+  commitmentC = new Uint8Array(0);
+
+  /**
+   * SubjectPublicKeyInfo DER of the signing key
+   *
+   * @generated from field: bytes leaf_spki = 3;
+   */
+  leafSpki = new Uint8Array(0);
+
+  /**
+   * display-bound firmware id
+   *
+   * @generated from field: bytes firmware_id = 4;
+   */
+  firmwareId = new Uint8Array(0);
+
+  /**
+   * consent screen layout version
+   *
+   * @generated from field: uint32 screen_template_id = 5;
+   */
+  screenTemplateId = 0;
+
+  /**
+   * measured firmware hash enrolled at provisioning
+   *
+   * @generated from field: bytes firmware_hash = 6;
+   */
+  firmwareHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AnchorIdentityProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorIdentityProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "id_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "commitment_c", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "leaf_spki", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "firmware_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "screen_template_id", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "firmware_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorIdentityProto {
+    return new AnchorIdentityProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorIdentityProto {
+    return new AnchorIdentityProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorIdentityProto {
+    return new AnchorIdentityProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorIdentityProto | PlainMessage<AnchorIdentityProto> | undefined, b: AnchorIdentityProto | PlainMessage<AnchorIdentityProto> | undefined): boolean {
+    return proto3.util.equals(AnchorIdentityProto, a, b);
   }
 }
 
@@ -21711,7 +21805,7 @@ export class ContactsListResponse extends Message<ContactsListResponse> {
 /**
  * ========================= Geo Emissions (transport only) =========================
  * Transport messages for clockless geo-claim submission and acknowledgment.
- * Verification (spawn proof, C-DBRW witness, SPHINCS+ signature over canonical bytes)
+ * Verification (spawn proof + SPHINCS+ signature over canonical bytes)
  * is implemented in the Rust core; these are I/O envelopes only.
  *
  * @generated from message dsm.MerkleInclusionProof
@@ -23165,895 +23259,6 @@ export class StorageStatusResponse extends Message<StorageStatusResponse> {
 
   static equals(a: StorageStatusResponse | PlainMessage<StorageStatusResponse> | undefined, b: StorageStatusResponse | PlainMessage<StorageStatusResponse> | undefined): boolean {
     return proto3.util.equals(StorageStatusResponse, a, b);
-  }
-}
-
-/**
- * ========================= C-DBRW Status =========================
- *
- * Snapshot of the Rust-side C-DBRW state for the Dev screen. Field 37
- * (`trust`) carries the live verdict published by `cdbrw_access_gate` —
- * frontend/UI consume this to drive the fail-closed gate. Runtime metrics
- * previously fetched via reverse JNI (Rust → Kotlin `getCdbrwRuntimeSnapshot`)
- * are gone; Kotlin is transport-only now and never computes trust state.
- *
- * @generated from message dsm.DbrwStatusResponse
- */
-export class DbrwStatusResponse extends Message<DbrwStatusResponse> {
-  /**
-   * @generated from field: bool enrolled = 1;
-   */
-  enrolled = false;
-
-  /**
-   * @generated from field: bool binding_key_present = 2;
-   */
-  bindingKeyPresent = false;
-
-  /**
-   * @generated from field: bool verifier_keypair_present = 3;
-   */
-  verifierKeypairPresent = false;
-
-  /**
-   * @generated from field: bool storage_base_dir_set = 4;
-   */
-  storageBaseDirSet = false;
-
-  /**
-   * @generated from field: uint32 enrollment_revision = 7;
-   */
-  enrollmentRevision = 0;
-
-  /**
-   * @generated from field: uint32 arena_bytes = 8;
-   */
-  arenaBytes = 0;
-
-  /**
-   * @generated from field: uint32 probes = 9;
-   */
-  probes = 0;
-
-  /**
-   * @generated from field: uint32 steps_per_probe = 10;
-   */
-  stepsPerProbe = 0;
-
-  /**
-   * @generated from field: uint32 histogram_bins = 11;
-   */
-  histogramBins = 0;
-
-  /**
-   * @generated from field: uint32 rotation_bits = 12;
-   */
-  rotationBits = 0;
-
-  /**
-   * @generated from field: float epsilon_intra = 13;
-   */
-  epsilonIntra = 0;
-
-  /**
-   * @generated from field: uint32 mean_histogram_len = 14;
-   */
-  meanHistogramLen = 0;
-
-  /**
-   * @generated from field: bytes reference_anchor_prefix = 15;
-   */
-  referenceAnchorPrefix = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes binding_key_prefix = 16;
-   */
-  bindingKeyPrefix = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes verifier_public_key_prefix = 17;
-   */
-  verifierPublicKeyPrefix = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint32 verifier_public_key_len = 18;
-   */
-  verifierPublicKeyLen = 0;
-
-  /**
-   * @generated from field: string storage_base_dir = 19;
-   */
-  storageBaseDir = "";
-
-  /**
-   * @generated from field: string status_note = 20;
-   */
-  statusNote = "";
-
-  /**
-   * Live trust snapshot from the Rust access gate. Empty when the gate has
-   * never been updated (i.e. device not yet enrolled or no probe run).
-   *
-   * @generated from field: dsm.CdbrwTrustSnapshot trust = 37;
-   */
-  trust?: CdbrwTrustSnapshot;
-
-  constructor(data?: PartialMessage<DbrwStatusResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DbrwStatusResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "enrolled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "binding_key_present", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 3, name: "verifier_keypair_present", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 4, name: "storage_base_dir_set", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 7, name: "enrollment_revision", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 8, name: "arena_bytes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 9, name: "probes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 10, name: "steps_per_probe", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 11, name: "histogram_bins", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 12, name: "rotation_bits", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 13, name: "epsilon_intra", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 14, name: "mean_histogram_len", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 15, name: "reference_anchor_prefix", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 16, name: "binding_key_prefix", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 17, name: "verifier_public_key_prefix", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 18, name: "verifier_public_key_len", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 19, name: "storage_base_dir", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 20, name: "status_note", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 37, name: "trust", kind: "message", T: CdbrwTrustSnapshot },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DbrwStatusResponse {
-    return new DbrwStatusResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DbrwStatusResponse {
-    return new DbrwStatusResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DbrwStatusResponse {
-    return new DbrwStatusResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DbrwStatusResponse | PlainMessage<DbrwStatusResponse> | undefined, b: DbrwStatusResponse | PlainMessage<DbrwStatusResponse> | undefined): boolean {
-    return proto3.util.equals(DbrwStatusResponse, a, b);
-  }
-}
-
-/**
- * One PUF orbit trial (ARX interrogation walk timings).
- *
- * @generated from message dsm.CdbrwOrbitTrial
- */
-export class CdbrwOrbitTrial extends Message<CdbrwOrbitTrial> {
-  /**
-   * per-step ARX timing samples
-   *
-   * @generated from field: repeated int64 timings = 1;
-   */
-  timings: bigint[] = [];
-
-  /**
-   * Per-trial CSPRNG challenge that seeded x_0 = H("DSM/cdbrw-seed\0" || challenge || K_DBRW) mod 2^32
-   * per Alg 1 step 1. For enrollment trials before K_DBRW is bound, callers pass the random 32-byte
-   * challenge alone and the Rust writer treats it as authoritative (Alg 2 line 1491).
-   * Empty bytes are treated as "this trial was not challenge-seeded" — Rust rejects such enrollments
-   * so a regression that strips per-trial challenges fails closed instead of silently downgrading.
-   *
-   * @generated from field: bytes challenge = 2;
-   */
-  challenge = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<CdbrwOrbitTrial>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwOrbitTrial";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "timings", kind: "scalar", T: 3 /* ScalarType.INT64 */, repeated: true },
-    { no: 2, name: "challenge", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwOrbitTrial {
-    return new CdbrwOrbitTrial().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwOrbitTrial {
-    return new CdbrwOrbitTrial().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwOrbitTrial {
-    return new CdbrwOrbitTrial().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwOrbitTrial | PlainMessage<CdbrwOrbitTrial> | undefined, b: CdbrwOrbitTrial | PlainMessage<CdbrwOrbitTrial> | undefined): boolean {
-    return proto3.util.equals(CdbrwOrbitTrial, a, b);
-  }
-}
-
-/**
- * cdbrw.measure_trust args — compute resonant health and current access verdict
- * without running a full ZK response. Frontend polls this to surface UI state.
- *
- * @generated from message dsm.CdbrwMeasureTrustRequest
- */
-export class CdbrwMeasureTrustRequest extends Message<CdbrwMeasureTrustRequest> {
-  /**
-   * environment fingerprint blob
-   *
-   * @generated from field: bytes env_bytes = 1;
-   */
-  envBytes = new Uint8Array(0);
-
-  /**
-   * single N=HEALTH_N probe
-   *
-   * @generated from field: dsm.CdbrwOrbitTrial orbit = 2;
-   */
-  orbit?: CdbrwOrbitTrial;
-
-  /**
-   * must match enrollment bins
-   *
-   * @generated from field: uint32 histogram_bins = 3;
-   */
-  histogramBins = 0;
-
-  constructor(data?: PartialMessage<CdbrwMeasureTrustRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwMeasureTrustRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "env_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "orbit", kind: "message", T: CdbrwOrbitTrial },
-    { no: 3, name: "histogram_bins", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwMeasureTrustRequest {
-    return new CdbrwMeasureTrustRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwMeasureTrustRequest {
-    return new CdbrwMeasureTrustRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwMeasureTrustRequest {
-    return new CdbrwMeasureTrustRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwMeasureTrustRequest | PlainMessage<CdbrwMeasureTrustRequest> | undefined, b: CdbrwMeasureTrustRequest | PlainMessage<CdbrwMeasureTrustRequest> | undefined): boolean {
-    return proto3.util.equals(CdbrwMeasureTrustRequest, a, b);
-  }
-}
-
-/**
- * cdbrw.respond args — device side of Algorithm 3.
- * K_DBRW lives in Rust (set via bootstrap); Kotlin never touches signing keys.
- *
- * @generated from message dsm.CdbrwRespondRequest
- */
-export class CdbrwRespondRequest extends Message<CdbrwRespondRequest> {
-  /**
-   * @generated from field: bytes env_bytes = 1;
-   */
-  envBytes = new Uint8Array(0);
-
-  /**
-   * live orbit after challenge
-   *
-   * @generated from field: dsm.CdbrwOrbitTrial orbit = 2;
-   */
-  orbit?: CdbrwOrbitTrial;
-
-  /**
-   * V1 verifier nonce
-   *
-   * @generated from field: bytes challenge = 3;
-   */
-  challenge = new Uint8Array(0);
-
-  /**
-   * adjacency anchor
-   *
-   * @generated from field: bytes chain_tip = 4;
-   */
-  chainTip = new Uint8Array(0);
-
-  /**
-   * 32-byte C_pre per Alg. 3
-   *
-   * @generated from field: bytes commitment_preimage = 5;
-   */
-  commitmentPreimage = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes device_id = 6;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * Kyber-1024 pk
-   *
-   * @generated from field: bytes verifier_public_key = 7;
-   */
-  verifierPublicKey = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint32 histogram_bins = 8;
-   */
-  histogramBins = 0;
-
-  constructor(data?: PartialMessage<CdbrwRespondRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwRespondRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "env_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "orbit", kind: "message", T: CdbrwOrbitTrial },
-    { no: 3, name: "challenge", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "commitment_preimage", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "verifier_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "histogram_bins", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwRespondRequest {
-    return new CdbrwRespondRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwRespondRequest {
-    return new CdbrwRespondRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwRespondRequest {
-    return new CdbrwRespondRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwRespondRequest | PlainMessage<CdbrwRespondRequest> | undefined, b: CdbrwRespondRequest | PlainMessage<CdbrwRespondRequest> | undefined): boolean {
-    return proto3.util.equals(CdbrwRespondRequest, a, b);
-  }
-}
-
-/**
- * cdbrw.verify args — pure Rust verifier path. No Kotlin orchestration.
- *
- * @generated from message dsm.CdbrwVerifyRequest
- */
-export class CdbrwVerifyRequest extends Message<CdbrwVerifyRequest> {
-  /**
-   * @generated from field: bytes challenge = 1;
-   */
-  challenge = new Uint8Array(0);
-
-  /**
-   * BLAKE3 commitment
-   *
-   * @generated from field: bytes gamma = 2;
-   */
-  gamma = new Uint8Array(0);
-
-  /**
-   * Kyber ct
-   *
-   * @generated from field: bytes ciphertext = 3;
-   */
-  ciphertext = new Uint8Array(0);
-
-  /**
-   * SPHINCS+ Cat-5
-   *
-   * @generated from field: bytes signature = 4;
-   */
-  signature = new Uint8Array(0);
-
-  /**
-   * HKDF-derived ephk
-   *
-   * @generated from field: bytes ephemeral_public_key = 5;
-   */
-  ephemeralPublicKey = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes chain_tip = 6;
-   */
-  chainTip = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes commitment_preimage = 7;
-   */
-  commitmentPreimage = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes enrollment_anchor = 8;
-   */
-  enrollmentAnchor = new Uint8Array(0);
-
-  /**
-   * @generated from field: float epsilon_intra = 9;
-   */
-  epsilonIntra = 0;
-
-  /**
-   * @generated from field: float epsilon_inter = 10;
-   */
-  epsilonInter = 0;
-
-  constructor(data?: PartialMessage<CdbrwVerifyRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwVerifyRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "challenge", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "gamma", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "ciphertext", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "ephemeral_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 7, name: "commitment_preimage", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "enrollment_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 9, name: "epsilon_intra", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 10, name: "epsilon_inter", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwVerifyRequest {
-    return new CdbrwVerifyRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwVerifyRequest {
-    return new CdbrwVerifyRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwVerifyRequest {
-    return new CdbrwVerifyRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwVerifyRequest | PlainMessage<CdbrwVerifyRequest> | undefined, b: CdbrwVerifyRequest | PlainMessage<CdbrwVerifyRequest> | undefined): boolean {
-    return proto3.util.equals(CdbrwVerifyRequest, a, b);
-  }
-}
-
-/**
- * cdbrw.enroll args — M-sample, K-trial-per-sample admission (Phase 9).
- *
- * Replaces the single-K-trial enrollment with median-of-M admission.
- * The Kotlin caller batches all M*K trials (default 3*21=63) into a
- * single request; Rust partitions them by `trials_per_sample`, runs
- * the per-sample health flow on each chunk, and applies
- * `classify_resonant_m_sample` to produce a stable admission verdict
- * that absorbs silicon trial-to-trial variance.
- *
- * @generated from message dsm.CdbrwEnrollRequest
- */
-export class CdbrwEnrollRequest extends Message<CdbrwEnrollRequest> {
-  /**
-   * @generated from field: bytes env_bytes = 1;
-   */
-  envBytes = new Uint8Array(0);
-
-  /**
-   * Flat list of M*trials_per_sample trials (e.g. 3*21=63).
-   * Partitioned by Rust into M contiguous chunks of trials_per_sample
-   * each.  Order matters: chunk i = trials[i*K .. (i+1)*K].
-   *
-   * @generated from field: repeated dsm.CdbrwOrbitTrial trials = 2;
-   */
-  trials: CdbrwOrbitTrial[] = [];
-
-  /**
-   * @generated from field: uint32 arena_bytes = 3;
-   */
-  arenaBytes = 0;
-
-  /**
-   * @generated from field: uint32 probes = 4;
-   */
-  probes = 0;
-
-  /**
-   * @generated from field: uint32 steps_per_probe = 5;
-   */
-  stepsPerProbe = 0;
-
-  /**
-   * @generated from field: uint32 histogram_bins = 6;
-   */
-  histogramBins = 0;
-
-  /**
-   * @generated from field: uint32 rotation_bits = 7;
-   */
-  rotationBits = 0;
-
-  /**
-   * Phase 9: number of independent K-trial admission samples (M).
-   * Must equal the SDK's compiled ADMISSION_M (default 3); version
-   * skew is rejected as AdmissionShapeMismatch.
-   *
-   * @generated from field: uint32 admission_samples = 8;
-   */
-  admissionSamples = 0;
-
-  /**
-   * Phase 9: K, the trials per sample.  Must satisfy K >= 16 per §6.1.
-   * Rust rejects if trials.length != admission_samples * trials_per_sample.
-   *
-   * @generated from field: uint32 trials_per_sample = 9;
-   */
-  trialsPerSample = 0;
-
-  constructor(data?: PartialMessage<CdbrwEnrollRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwEnrollRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "env_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "trials", kind: "message", T: CdbrwOrbitTrial, repeated: true },
-    { no: 3, name: "arena_bytes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 4, name: "probes", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 5, name: "steps_per_probe", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 6, name: "histogram_bins", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 7, name: "rotation_bits", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 8, name: "admission_samples", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 9, name: "trials_per_sample", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwEnrollRequest {
-    return new CdbrwEnrollRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwEnrollRequest {
-    return new CdbrwEnrollRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwEnrollRequest {
-    return new CdbrwEnrollRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwEnrollRequest | PlainMessage<CdbrwEnrollRequest> | undefined, b: CdbrwEnrollRequest | PlainMessage<CdbrwEnrollRequest> | undefined): boolean {
-    return proto3.util.equals(CdbrwEnrollRequest, a, b);
-  }
-}
-
-/**
- * Shared trust state returned with every C-DBRW op. Frontend/UI reads this
- * to drive the access gate; the ordinal AccessLevel is the only thing that
- * matters for authorization decisions — metrics are diagnostic.
- *
- * @generated from message dsm.CdbrwTrustSnapshot
- */
-export class CdbrwTrustSnapshot extends Message<CdbrwTrustSnapshot> {
-  /**
-   * @generated from field: dsm.CdbrwAccessLevel access_level = 1;
-   */
-  accessLevel = CdbrwAccessLevel.CDBRW_ACCESS_UNSPECIFIED;
-
-  /**
-   * @generated from field: dsm.CdbrwResonantStatus resonant_status = 2;
-   */
-  resonantStatus = CdbrwResonantStatus.CDBRW_RESONANT_UNSPECIFIED;
-
-  /**
-   * Shannon entropy
-   *
-   * @generated from field: float h_hat = 3;
-   */
-  hHat = 0;
-
-  /**
-   * lag-1 autocorrelation
-   *
-   * @generated from field: float rho_hat = 4;
-   */
-  rhoHat = 0;
-
-  /**
-   * LZ78 normalized compressibility
-   *
-   * @generated from field: float l_hat = 5;
-   */
-  lHat = 0;
-
-  /**
-   * h_hat * (1 - |rho_hat|)
-   *
-   * @generated from field: float h0_eff = 6;
-   */
-  h0Eff = 0;
-
-  /**
-   * [0.0, 1.0] — adapted×0.75, failed×0
-   *
-   * @generated from field: float trust_score = 7;
-   */
-  trustScore = 0;
-
-  /**
-   * TRUST_ITER monotonic counter (clockless)
-   *
-   * @generated from field: uint64 iter = 8;
-   */
-  iter = protoInt64.zero;
-
-  /**
-   * orbit length for current h0_eff
-   *
-   * @generated from field: uint32 recommended_n = 9;
-   */
-  recommendedN = 0;
-
-  /**
-   * Wasserstein-1 drift vs reference histogram
-   *
-   * @generated from field: float w1_distance = 10;
-   */
-  w1Distance = 0;
-
-  /**
-   * @generated from field: float w1_threshold = 11;
-   */
-  w1Threshold = 0;
-
-  /**
-   * diagnostic reason (never leaks secrets)
-   *
-   * @generated from field: string note = 12;
-   */
-  note = "";
-
-  constructor(data?: PartialMessage<CdbrwTrustSnapshot>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwTrustSnapshot";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "access_level", kind: "enum", T: proto3.getEnumType(CdbrwAccessLevel) },
-    { no: 2, name: "resonant_status", kind: "enum", T: proto3.getEnumType(CdbrwResonantStatus) },
-    { no: 3, name: "h_hat", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 4, name: "rho_hat", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 5, name: "l_hat", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 6, name: "h0_eff", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 7, name: "trust_score", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 8, name: "iter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 9, name: "recommended_n", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 10, name: "w1_distance", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 11, name: "w1_threshold", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 12, name: "note", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwTrustSnapshot {
-    return new CdbrwTrustSnapshot().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwTrustSnapshot {
-    return new CdbrwTrustSnapshot().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwTrustSnapshot {
-    return new CdbrwTrustSnapshot().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwTrustSnapshot | PlainMessage<CdbrwTrustSnapshot> | undefined, b: CdbrwTrustSnapshot | PlainMessage<CdbrwTrustSnapshot> | undefined): boolean {
-    return proto3.util.equals(CdbrwTrustSnapshot, a, b);
-  }
-}
-
-/**
- * cdbrw.respond response — full Algorithm 3 output plus trust snapshot.
- *
- * @generated from message dsm.CdbrwRespondResponse
- */
-export class CdbrwRespondResponse extends Message<CdbrwRespondResponse> {
-  /**
-   * @generated from field: bytes ciphertext = 1;
-   */
-  ciphertext = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes gamma = 2;
-   */
-  gamma = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes signature = 3;
-   */
-  signature = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes ephemeral_public_key = 4;
-   */
-  ephemeralPublicKey = new Uint8Array(0);
-
-  /**
-   * @generated from field: dsm.CdbrwTrustSnapshot trust = 5;
-   */
-  trust?: CdbrwTrustSnapshot;
-
-  constructor(data?: PartialMessage<CdbrwRespondResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwRespondResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "ciphertext", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "gamma", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "ephemeral_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "trust", kind: "message", T: CdbrwTrustSnapshot },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwRespondResponse {
-    return new CdbrwRespondResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwRespondResponse {
-    return new CdbrwRespondResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwRespondResponse {
-    return new CdbrwRespondResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwRespondResponse | PlainMessage<CdbrwRespondResponse> | undefined, b: CdbrwRespondResponse | PlainMessage<CdbrwRespondResponse> | undefined): boolean {
-    return proto3.util.equals(CdbrwRespondResponse, a, b);
-  }
-}
-
-/**
- * cdbrw.verify response — pass/fail with diagnostic distance.
- *
- * @generated from message dsm.CdbrwVerifyResponse
- */
-export class CdbrwVerifyResponse extends Message<CdbrwVerifyResponse> {
-  /**
-   * @generated from field: bool accepted = 1;
-   */
-  accepted = false;
-
-  /**
-   * "ok" | "gamma_distance_exceeds_tau" | ...
-   *
-   * @generated from field: string reason = 2;
-   */
-  reason = "";
-
-  /**
-   * sqrt(Σ(γᵢ - anchor_iᵢ)²)/256
-   *
-   * @generated from field: float gamma_distance = 3;
-   */
-  gammaDistance = 0;
-
-  /**
-   * (ε_intra + ε_inter) / 2
-   *
-   * @generated from field: float threshold = 4;
-   */
-  threshold = 0;
-
-  constructor(data?: PartialMessage<CdbrwVerifyResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwVerifyResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "accepted", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "gamma_distance", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 4, name: "threshold", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwVerifyResponse {
-    return new CdbrwVerifyResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwVerifyResponse {
-    return new CdbrwVerifyResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwVerifyResponse {
-    return new CdbrwVerifyResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwVerifyResponse | PlainMessage<CdbrwVerifyResponse> | undefined, b: CdbrwVerifyResponse | PlainMessage<CdbrwVerifyResponse> | undefined): boolean {
-    return proto3.util.equals(CdbrwVerifyResponse, a, b);
-  }
-}
-
-/**
- * cdbrw.enroll response — binary reference snapshot summary (no keys).
- *
- * @generated from message dsm.CdbrwEnrollResponse
- */
-export class CdbrwEnrollResponse extends Message<CdbrwEnrollResponse> {
-  /**
-   * @generated from field: uint32 revision = 1;
-   */
-  revision = 0;
-
-  /**
-   * @generated from field: float epsilon_intra = 2;
-   */
-  epsilonIntra = 0;
-
-  /**
-   * @generated from field: uint32 mean_histogram_len = 3;
-   */
-  meanHistogramLen = 0;
-
-  /**
-   * first 10 bytes of AC_D (display hint)
-   *
-   * @generated from field: bytes reference_anchor_prefix = 4;
-   */
-  referenceAnchorPrefix = new Uint8Array(0);
-
-  /**
-   * @generated from field: dsm.CdbrwTrustSnapshot trust = 5;
-   */
-  trust?: CdbrwTrustSnapshot;
-
-  /**
-   * full 32-byte AC_D for bootstrap handoff
-   *
-   * @generated from field: bytes reference_anchor = 6;
-   */
-  referenceAnchor = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<CdbrwEnrollResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.CdbrwEnrollResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "revision", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 2, name: "epsilon_intra", kind: "scalar", T: 2 /* ScalarType.FLOAT */ },
-    { no: 3, name: "mean_histogram_len", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 4, name: "reference_anchor_prefix", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "trust", kind: "message", T: CdbrwTrustSnapshot },
-    { no: 6, name: "reference_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CdbrwEnrollResponse {
-    return new CdbrwEnrollResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CdbrwEnrollResponse {
-    return new CdbrwEnrollResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CdbrwEnrollResponse {
-    return new CdbrwEnrollResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: CdbrwEnrollResponse | PlainMessage<CdbrwEnrollResponse> | undefined, b: CdbrwEnrollResponse | PlainMessage<CdbrwEnrollResponse> | undefined): boolean {
-    return proto3.util.equals(CdbrwEnrollResponse, a, b);
   }
 }
 
@@ -26829,7 +26034,8 @@ export class InitializeSdkOp extends Message<InitializeSdkOp> {
 }
 
 /**
- * Install canonical identity context using the already-validated binding key.
+ * Install canonical identity context. Identity is re-derived from the unlocked
+ * wallet seed (Genesis v2); there is no binding key.
  *
  * @generated from message dsm.InitializeIdentityContextOp
  */
@@ -26844,11 +26050,6 @@ export class InitializeIdentityContextOp extends Message<InitializeIdentityConte
    */
   genesisHash = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes binding_key = 3;
-   */
-  bindingKey = new Uint8Array(0);
-
   constructor(data?: PartialMessage<InitializeIdentityContextOp>) {
     super();
     proto3.util.initPartial(data, this);
@@ -26859,7 +26060,6 @@ export class InitializeIdentityContextOp extends Message<InitializeIdentityConte
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "binding_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): InitializeIdentityContextOp {
@@ -26880,9 +26080,9 @@ export class InitializeIdentityContextOp extends Message<InitializeIdentityConte
 }
 
 /**
- * Restore canonical identity context by re-deriving the binding key from
- * persisted deterministic C-DBRW inputs. This is the fast cold-start path
- * after a successful first bootstrap / enrollment.
+ * Restore canonical identity context. Under Genesis v2 the device key re-derives
+ * deterministically from the unlocked wallet seed; the cold-start path needs no
+ * silicon inputs.
  *
  * @generated from message dsm.RestoreIdentityContextOp
  */
@@ -26897,16 +26097,6 @@ export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> 
    */
   genesisHash = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes cdbrw_hw_entropy = 3;
-   */
-  cdbrwHwEntropy = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes cdbrw_env_fingerprint = 4;
-   */
-  cdbrwEnvFingerprint = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RestoreIdentityContextOp>) {
     super();
     proto3.util.initPartial(data, this);
@@ -26917,8 +26107,6 @@ export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> 
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RestoreIdentityContextOp {

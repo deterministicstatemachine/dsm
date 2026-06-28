@@ -106,14 +106,12 @@ fn bootstrap_finalize_envelope(
 fn startup_initialize_identity_context(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
-    binding_key: Vec<u8>,
 ) -> Result<(), pb::Error> {
     match dispatch_startup(StartupRequest {
         operation: Some(startup_request::Operation::InitializeIdentityContext(
             pb::InitializeIdentityContextOp {
                 device_id,
                 genesis_hash,
-                binding_key,
             },
         )),
     })
@@ -234,8 +232,6 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id.clone(),
         genesis_hash_raw: genesis_hash.clone(),
-        cdbrw_hw_entropy: report.cdbrw_hw_entropy.clone(),
-        cdbrw_env_fingerprint: report.cdbrw_env_fingerprint.clone(),
     })
     .map_err(|e| {
         ingress_error(
@@ -244,13 +240,9 @@ fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Env
         )
     })?;
 
-    #[cfg(target_os = "android")]
-    crate::jni::cdbrw::set_cdbrw_binding_key(context.cdbrw_binding.to_vec());
-
     if let Err(error) = startup_initialize_identity_context(
         context.device_id.to_vec(),
         context.genesis_hash.to_vec(),
-        context.cdbrw_binding.to_vec(),
     ) {
         log::error!(
             "FLASH_DEBUG: FINALIZE_BOOTSTRAP: startup_initialize_identity_context FAILED err={} BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
@@ -653,15 +645,10 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
 }
 
 fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(), pb::Error> {
-    // Derive the REAL SPHINCS+ public key from the canonical entropy triple.
-    // The binding key should already be installed by the startup flow. If it is not,
-    // surface that as a typed startup failure rather than terminating the process.
-    let Some(bk) = crate::binding_key::get_binding_key() else {
-        return Err(ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            "startup: binding key missing before identity priming",
-        ));
-    };
+    // Re-derive the canonical device signing (AK) public key from the unlocked wallet seed
+    // via the single Genesis v2 derivation (`derive_device_ak_keypair`, byte-identical to the
+    // key `create_genesis_v2` registered). No C-DBRW binding key. Fails closed if the wallet
+    // is locked (the seed is re-derived from the session-cached mnemonic, never persisted).
     if device_id.len() != 32 {
         return Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
@@ -680,21 +667,15 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(),
             ),
         ));
     }
-    if bk.len() != 32 {
-        return Err(ingress_error(
+    let wallet_seed = crate::fetch_wallet_seed().map_err(|e| {
+        ingress_error(
             ERROR_CODE_PROCESSING_FAILED,
-            format!(
-                "startup: binding key must be 32 bytes before identity priming, got {}",
-                bk.len()
-            ),
-        ));
-    }
-
-    let mut entropy = Vec::with_capacity(96);
-    entropy.extend_from_slice(genesis_hash);
-    entropy.extend_from_slice(device_id);
-    entropy.extend_from_slice(&bk);
-    let kp = dsm::crypto::SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| {
+            format!("startup: wallet locked before identity priming: {e}"),
+        )
+    })?;
+    let mut g = [0u8; 32];
+    g.copy_from_slice(genesis_hash);
+    let kp = crate::init::derive_device_signing_keypair(&wallet_seed, &g).map_err(|e| {
         ingress_error(
             ERROR_CODE_PROCESSING_FAILED,
             format!("startup: canonical SPHINCS+ key derivation failed: {e}"),
@@ -765,7 +746,6 @@ fn ensure_identity_context_matches(
 fn install_identity_context_core(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
-    binding_key: Vec<u8>,
 ) -> Result<(), pb::Error> {
     if device_id.len() != 32 {
         return Err(ingress_error(
@@ -785,36 +765,10 @@ fn install_identity_context_core(
             ),
         ));
     }
-    if binding_key.len() != 32 {
-        return Err(ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            format!(
-                "startup: binding_key must be 32 bytes, got {}",
-                binding_key.len()
-            ),
-        ));
-    }
 
     if ensure_identity_context_matches(&device_id, &genesis_hash)? {
-        crate::install_canonical_binding_key(binding_key.clone()).map_err(|e| {
-            ingress_error(
-                ERROR_CODE_INVALID_INPUT,
-                format!("startup: invalid binding key: {e}"),
-            )
-        })?;
-        #[cfg(target_os = "android")]
-        crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
         return Ok(());
     }
-
-    crate::install_canonical_binding_key(binding_key.clone()).map_err(|e| {
-        ingress_error(
-            ERROR_CODE_INVALID_INPUT,
-            format!("startup: invalid binding key: {e}"),
-        )
-    })?;
-    #[cfg(target_os = "android")]
-    crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
 
     prime_identity_app_state(&device_id, &genesis_hash)?;
 
@@ -829,7 +783,13 @@ fn install_identity_context_core(
     // offline we'll retry on the next bootstrap.
     ensure_device_tree_registered(device_id.clone(), genesis_hash.clone());
 
-    let entropy = crate::derive_production_entropy(&device_id, &genesis_hash, &binding_key);
+    let wallet_seed = crate::fetch_wallet_seed().map_err(|e| {
+        ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!("startup: wallet locked before SDK context init: {e}"),
+        )
+    })?;
+    let entropy = crate::derive_production_entropy(&device_id, &genesis_hash, &wallet_seed);
     crate::initialize_sdk_context(device_id, genesis_hash, entropy).map_err(|e| {
         ingress_error(
             ERROR_CODE_PROCESSING_FAILED,
@@ -884,23 +844,18 @@ fn ensure_device_tree_registered(device_id: Vec<u8>, genesis_hash: Vec<u8>) {
 fn initialize_identity_context_core(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
-    binding_key: Vec<u8>,
 ) -> Result<Vec<u8>, pb::Error> {
-    install_identity_context_core(device_id, genesis_hash, binding_key)?;
+    install_identity_context_core(device_id, genesis_hash)?;
     initialize_sdk_core()
 }
 
 fn restore_identity_context_core(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
-    cdbrw_hw_entropy: Vec<u8>,
-    cdbrw_env_fingerprint: Vec<u8>,
 ) -> Result<Vec<u8>, pb::Error> {
     let context = PlatformContext::bootstrap(RawPlatformInputs {
         device_id_raw: device_id,
         genesis_hash_raw: genesis_hash,
-        cdbrw_hw_entropy,
-        cdbrw_env_fingerprint,
     })
     .map_err(|e| {
         ingress_error(
@@ -909,11 +864,7 @@ fn restore_identity_context_core(
         )
     })?;
 
-    initialize_identity_context_core(
-        context.device_id.to_vec(),
-        context.genesis_hash.to_vec(),
-        context.cdbrw_binding.to_vec(),
-    )
+    initialize_identity_context_core(context.device_id.to_vec(), context.genesis_hash.to_vec())
 }
 
 pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
@@ -1010,16 +961,14 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
         }
         Some(startup_request::Operation::InitializeSdk(_)) => initialize_sdk_core(),
         Some(startup_request::Operation::InitializeIdentityContext(op)) => {
-            initialize_identity_context_core(op.device_id, op.genesis_hash, op.binding_key)
+            // op.binding_key is a reserved/ignored legacy C-DBRW field (Genesis v2 roots
+            // identity in the wallet seed).
+            initialize_identity_context_core(op.device_id, op.genesis_hash)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
-            // Phase 13: op.cdbrw_salt is `reserved 7;` in proto and ignored.
-            restore_identity_context_core(
-                op.device_id,
-                op.genesis_hash,
-                op.cdbrw_hw_entropy,
-                op.cdbrw_env_fingerprint,
-            )
+            // op.cdbrw_hw_entropy / op.cdbrw_env_fingerprint / op.cdbrw_salt are reserved/ignored
+            // legacy C-DBRW fields; identity restores deterministically from the wallet seed.
+            restore_identity_context_core(op.device_id, op.genesis_hash)
         }
         None => Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
@@ -1430,8 +1379,6 @@ endpoint = "http://127.0.0.1:8080"
                 locale: "en-US".to_string(),
                 network_id: "testnet".to_string(),
                 device_entropy: vec![0x42; 8],
-                cdbrw_hw_entropy: Vec::new(),
-                cdbrw_env_fingerprint: Vec::new(),
             }
             .encode_to_vec(),
         }
@@ -1449,74 +1396,68 @@ endpoint = "http://127.0.0.1:8080"
         assert!(!error.message.contains("requires genesis"));
     }
 
+    /// Cache a deterministic wallet seed so the Genesis v2 identity derivation can run
+    /// (replaces the legacy C-DBRW binding-key staging).
+    fn unlock_test_wallet_seed() {
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x33; 64]);
+    }
+
     #[test]
     #[serial]
-    fn startup_initialize_identity_context_sets_binding_key_and_router() {
+    fn startup_initialize_identity_context_sets_identity_and_router() {
         let _guard = setup_test_env();
-        install_identity_context_core(vec![0x11; 32], vec![0x22; 32], vec![0x33; 32])
+        unlock_test_wallet_seed();
+        install_identity_context_core(vec![0x11; 32], vec![0x22; 32])
             .expect("identity context install should succeed");
-        assert_eq!(
-            crate::fetch_dbrw_binding_key().expect("binding key"),
-            vec![0x33; 32]
-        );
         assert!(crate::is_sdk_context_initialized());
     }
 
     #[test]
     #[serial]
-    fn prime_identity_app_state_returns_error_when_binding_key_missing() {
+    fn prime_identity_app_state_returns_error_when_wallet_locked() {
         let _guard = setup_test_env();
-
+        // No wallet seed cached → identity priming fails closed.
         let error = prime_identity_app_state(&[0x11; 32], &[0x22; 32])
-            .expect_err("missing binding key should be surfaced as startup error");
+            .expect_err("missing wallet seed should be surfaced as startup error");
 
         assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
         assert!(error
             .message
-            .contains("binding key missing before identity priming"));
+            .contains("wallet locked before identity priming"));
     }
 
     #[test]
     #[serial]
-    fn startup_initialize_identity_context_rejects_short_binding_key() {
+    fn startup_initialize_identity_context_via_dispatch_succeeds() {
         let _guard = setup_test_env();
+        unlock_test_wallet_seed();
+        // The legacy C-DBRW binding_key field is gone from the proto; identity install is
+        // wallet-seed-rooted and succeeds via the dispatch path.
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::InitializeIdentityContext(
                 pb::InitializeIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    binding_key: vec![0x33; 8],
                 },
             )),
         });
-        let error = expect_startup_error(response);
-        assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
-        assert!(error.message.contains("binding_key must be 32 bytes"));
+        match response.result {
+            Some(startup_response::Result::OkBytes(_)) => {}
+            other => panic!("expected OkBytes, got {other:?}"),
+        }
+        assert!(crate::is_sdk_context_initialized());
     }
 
     #[test]
     #[serial]
-    fn startup_restore_identity_context_derives_binding_key_and_router() {
+    fn startup_restore_identity_context_initializes_router() {
         let _guard = setup_test_env();
-        let device_id = vec![0x11; 32];
-        let genesis_hash = vec![0x22; 32];
-        let hw = vec![0x33; 32];
-        let env = vec![0x44; 32];
-        let expected_binding = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
-            &genesis_hash,
-            &device_id,
-            &hw,
-            &env,
-        )
-        .expect("binding derivation");
-
+        unlock_test_wallet_seed();
         let response = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: hw,
-                    cdbrw_env_fingerprint: env,
                 },
             )),
         });
@@ -1525,11 +1466,6 @@ endpoint = "http://127.0.0.1:8080"
             Some(startup_response::Result::OkBytes(_)) => {}
             other => panic!("expected OkBytes, got {other:?}"),
         }
-
-        assert_eq!(
-            crate::fetch_dbrw_binding_key().expect("binding key"),
-            expected_binding.to_vec()
-        );
         assert!(crate::is_sdk_context_initialized());
     }
 
@@ -1537,14 +1473,13 @@ endpoint = "http://127.0.0.1:8080"
     #[serial]
     fn startup_restore_identity_context_is_idempotent_for_same_identity() {
         let _guard = setup_test_env();
+        unlock_test_wallet_seed();
 
         let first = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
                 },
             )),
         });
@@ -1558,8 +1493,6 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
                 },
             )),
         });
@@ -1573,14 +1506,13 @@ endpoint = "http://127.0.0.1:8080"
     #[serial]
     fn startup_restore_identity_context_rejects_mismatched_identity() {
         let _guard = setup_test_env();
+        unlock_test_wallet_seed();
 
         let first = dispatch_startup(StartupRequest {
             operation: Some(startup_request::Operation::RestoreIdentityContext(
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x11; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
                 },
             )),
         });
@@ -1594,8 +1526,6 @@ endpoint = "http://127.0.0.1:8080"
                 pb::RestoreIdentityContextOp {
                     device_id: vec![0x99; 32],
                     genesis_hash: vec![0x22; 32],
-                    cdbrw_hw_entropy: vec![0x33; 32],
-                    cdbrw_env_fingerprint: vec![0x44; 32],
                 },
             )),
         });

@@ -380,6 +380,8 @@ mod tests {
             hash_chain_proof: None,
             smt_proof: None,
             verification_step: None,
+            genesis_nonce: String::new(),
+            genesis_profile: String::new(),
         };
         store_genesis_record_with_verification(&gen).expect("store genesis");
         initialize_wallet_from_verified_genesis(&gen).expect("init wallet");

@@ -29,6 +29,12 @@ static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 /// Never persisted to disk — cleared alongside the encryption key.
 static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
 
+/// In-memory cached BIP39 wallet seed (`mnemonic.to_seed("")`). The canonical Genesis v2
+/// root-secret input — `wallet_seed -> s0 -> Smaster -> {device signing key, per-step EK,
+/// ML-KEM coins}` are re-derived from it on demand via the wallet/recovery unlock path.
+/// NEVER persisted; populated at unlock alongside the recovery key, cleared with it.
+static WALLET_SEED_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
 /// SDK for DSM recovery operations
 pub struct RecoverySDK;
 
@@ -300,6 +306,31 @@ impl RecoverySDK {
         Ok(mnemonic.to_string())
     }
 
+    /// The cached BIP39 wallet seed (the Genesis v2 root-secret input), if the mnemonic
+    /// has been unlocked this session via [`Self::derive_and_cache_key`]. `None` otherwise —
+    /// callers that need it (device-key re-derivation, per-step EK/ML-KEM) MUST fail closed.
+    pub fn get_cached_wallet_seed() -> Option<Vec<u8>> {
+        WALLET_SEED_CACHE.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Seed the wallet-seed session cache directly (tests only). Replaces the legacy
+    /// C-DBRW binding-key fixtures: derivations re-root on this seed exactly as production
+    /// re-roots on the mnemonic-derived seed.
+    #[cfg(not(target_os = "android"))]
+    pub fn set_cached_wallet_seed_for_testing(seed: Vec<u8>) {
+        if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
+            *guard = Some(seed);
+        }
+    }
+
+    /// Clear the wallet-seed session cache (tests only / wallet lock).
+    #[cfg(not(target_os = "android"))]
+    pub fn clear_cached_wallet_seed_for_testing() {
+        if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
+            *guard = None;
+        }
+    }
+
     /// Derive recovery key from mnemonic and cache it in memory.
     ///
     /// Key derivation: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic)
@@ -315,6 +346,19 @@ impl RecoverySDK {
                 .lock()
                 .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
             *guard = Some(key);
+        }
+
+        // Cache the BIP39 wallet seed — the canonical Genesis v2 root-secret input
+        // (mnemonic -> wallet_seed -> s0 -> Smaster). NEVER persisted; lives only for the
+        // unlocked session so device-key + per-step EK/ML-KEM derivations can re-derive it.
+        {
+            let seed = bip39::Mnemonic::parse(mnemonic)
+                .map_err(|e| DsmError::InvalidState(format!("invalid mnemonic: {e}")))?
+                .to_seed("");
+            let mut guard = WALLET_SEED_CACHE
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
+            *guard = Some(seed.to_vec());
         }
 
         // Persist the key encrypted by a device-bound wrapping key so it
@@ -392,20 +436,16 @@ impl RecoverySDK {
             "genesis_hash",
         )?;
 
-        let dbrw = crate::fetch_dbrw_binding_key().map_err(|e| {
-            DsmError::InvalidState(format!("recovery anchor: K_DBRW unavailable: {e}"))
-        })?;
-        let k_dbrw = <[u8; 32]>::try_from(dbrw.as_slice()).map_err(|_| {
-            DsmError::InvalidState(format!(
-                "recovery anchor: K_DBRW must be 32 bytes, got {}",
-                dbrw.len()
-            ))
+        let wallet_seed = Self::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::InvalidState(
+                "recovery anchor: wallet seed not unlocked (cache the mnemonic via derive_and_cache_key first)"
+                    .into(),
+            )
         })?;
 
-        // Re-derive the device signing keypair — byte-identical to the one in the
-        // device tree (the genesis-binding signer for the anchor).
-        let device_kp =
-            crate::init::derive_device_signing_keypair(&genesis_id, &device_id, &k_dbrw)?;
+        // Re-derive the device signing keypair — byte-identical to the one create_genesis_v2
+        // registered (the AK keypair rooted in the BIP39 wallet seed; Genesis v2). No DBRW.
+        let device_kp = crate::init::derive_device_signing_keypair(&wallet_seed, &genesis_id)?;
 
         let (authority_pk, authority_sk) =
             Self::get_cached_authority_keypair().ok_or_else(|| {

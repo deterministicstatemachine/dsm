@@ -229,6 +229,8 @@ mod tests {
             hash_chain_proof: None,
             smt_proof: None,
             verification_step: None,
+            genesis_nonce: String::new(),
+            genesis_profile: String::new(),
         }
     }
 

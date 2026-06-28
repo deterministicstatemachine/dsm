@@ -863,10 +863,11 @@ class AndroidLayerProofTest {
         // 3. Tell Rust where the config is (sets ENV_CONFIG_PATH + DSM_ALLOW_LOCALHOST)
         Unified.initDsmSdk(cfgFile.absolutePath)
 
-        // MPC genesis — requires local storage nodes + adb reverse on ports 8080-8084
-        val entropy = ByteArray(32)
-        SecureRandom().nextBytes(entropy)
-        val envelope = bridge.createGenesis(Locale.getDefault().toLanguageTag(), "dev", entropy)
+        // Canonical mnemonic-rooted Genesis v2: generate a mnemonic, then create the wallet from
+        // it. No storage nodes, no silicon — the BIP39 mnemonic is the sole root.
+        val mnemonic = String(bridge.generateMnemonic(), Charsets.UTF_8)
+        assertTrue("generateMnemonic must return a mnemonic", mnemonic.isNotBlank())
+        val envelope = bridge.createGenesisV2(mnemonic, Locale.getDefault().toLanguageTag(), "dev")
         assertTrue("Genesis must produce non-empty envelope", envelope.isNotEmpty())
         genesisCreated = true
     }

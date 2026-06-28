@@ -1,0 +1,52 @@
+[package]
+name = "dsm-anchor-pico"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "RP2350 (Pico 2 W) DSM Boot Fenced Fused Anchor firmware: TROPIC01 via the official libtropic-rs driver (two MACANDD slots), WOTS-over-BLAKE3 witness + no_std BLAKE3-SPHINCS+ partition signatures, boot fence, and the fused offline-bearer appliance over USB-CDC."
+
+# Not a host workspace member — thumbv8m-only binary (excluded in the root manifest).
+# Build from inside this dir so .cargo/config.toml (target + linker) applies.
+
+[[bin]]
+name = "dsm-anchor-pico"
+test = false
+bench = false
+
+[dependencies]
+# Boot Fenced Fused Anchor protocol core (Tropic/WitnessSig/PartitionSig traits,
+# enrollment/boot/appliance/accept, the wire protocol). Workspace sibling.
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+# no_std BLAKE3-SPHINCS+ — the concrete PartitionSig (partition certificates).
+dsm-sphincs = { path = "../dsm-sphincs" }
+# Heap allocator: the witness flow + SPHINCS+ + release encoding allocate.
+embedded-alloc = "0.6"
+
+# Official Tropic Square Rust driver (no_std, embedded-hal). Sibling of the DSM repo.
+tropic01 = { path = "../../../../libtropic-rs/tropic01" }
+
+# Same x25519-dalek major as libtropic-rs (v2) for the L3 handshake key types.
+x25519-dalek = { version = "2", default-features = false, features = [
+    "static_secrets",
+    "zeroize",
+] }
+
+# --- RP2350 / Pico 2 W ---
+rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
+panic-halt = "1.0"
+
+# --- USB CDC transport + bringup logs ---
+usb-device = "0.3"
+usbd-serial = "0.2"
+
+# --- embedded-hal 1.0 + SpiDevice wrapper ---
+embedded-hal = "1.0"
+embedded-hal-bus = "0.3"
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+riscv = "0.12"
+riscv-rt = "0.12"
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"

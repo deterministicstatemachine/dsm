@@ -73,11 +73,15 @@ fn decrypt_secret(enc_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("XChaCha20 decrypt: {e}"))
 }
 
-/// Get the DBRW-derived encryption key.
+/// Get the at-rest encryption key for Bitcoin account secret material.
+///
+/// Rooted in the wallet seed via the Genesis v2 chain-head at-rest key (s0-rooted,
+/// domain-separated, re-derived from the session-cached mnemonic — never persisted, no C-DBRW).
+/// Fails closed when the wallet is locked.
 fn get_enc_key() -> Result<[u8; 32]> {
-    let dbrw = crate::fetch_dbrw_binding_key()
-        .map_err(|e| anyhow::anyhow!("DBRW binding key unavailable: {e}"))?;
-    Ok(derive_enc_key(&dbrw))
+    let at_rest = crate::init::current_chain_head_at_rest_key()
+        .map_err(|e| anyhow::anyhow!("at-rest key unavailable (wallet locked?): {e}"))?;
+    Ok(derive_enc_key(&at_rest))
 }
 
 /// Persisted Bitcoin wallet account import material.

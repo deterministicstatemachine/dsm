@@ -12,9 +12,20 @@ type Args = {
   setAppState: (s: AppState) => void;
   setError: (s: string | null) => void;
   setSecuringProgress: (p: number) => void;
+  /**
+   * Called with the freshly generated BIP39 mnemonic (Genesis v2) so the UI can show it for
+   * backup. The mnemonic is the ONLY recovery path; the host never persists it.
+   */
+  onMnemonicGenerated?: (mnemonic: string) => void;
 };
 
-export function useGenesisFlow({ appState, setAppState, setError, setSecuringProgress }: Args) {
+export function useGenesisFlow({
+  appState,
+  setAppState,
+  setError,
+  setSecuringProgress,
+  onMnemonicGenerated,
+}: Args) {
   const genesisInFlight = useRef(false);
   const interruptedMessage = 'Device securing was interrupted. Do not leave the screen until finished. Initialization was wiped and must be started again so DBRW is not corrupted.';
 
@@ -83,19 +94,22 @@ export function useGenesisFlow({ appState, setAppState, setError, setSecuringPro
     logger.info('FRONTEND: handleGenerateGenesis called');
     try {
       genesisInFlight.current = true;
-      logger.info('FRONTEND: Triggering genesis via router (Kotlin owns entropy/locale/network)');
+      logger.info('FRONTEND: Triggering canonical mnemonic-rooted Genesis v2');
 
-      const { createGenesisViaRouter } = await import('../dsm/WebViewBridge');
+      const { createGenesisViaRouter, generateMnemonic } = await import('../dsm/WebViewBridge');
 
-      // Generate 32 bytes of cryptographic entropy for genesis key material.
-      // Kotlin's parseCreateGenesisPayload requires non-blank locale/networkId
-      // and non-empty entropy — it forwards them to the JNI genesis handler.
-      const entropy = new Uint8Array(32);
-      crypto.getRandomValues(entropy);
+      // Canonical Genesis v2 (whitepaper §2.5): the BIP39 mnemonic is the sole root — no random
+      // genesis entropy, no silicon. Generate it, surface it for the user to back up, then create
+      // the wallet from it. The mnemonic is the ONLY way to recover the wallet.
+      const mnemonic = await generateMnemonic();
+      if (!mnemonic || mnemonic.trim().split(/\s+/).length < 12) {
+        throw new Error('Genesis: failed to generate a valid recovery mnemonic');
+      }
+      onMnemonicGenerated?.(mnemonic);
       const locale = navigator.language || 'en-US';
       const networkId = 'mainnet';
 
-      const envelopeBytes = await createGenesisViaRouter(locale, networkId, entropy);
+      const envelopeBytes = await createGenesisViaRouter(mnemonic, locale, networkId);
       logger.debug('FRONTEND: createGenesisViaRouter returned bytes', envelopeBytes?.length);
 
       if (!envelopeBytes || envelopeBytes.length < 10) {
@@ -130,7 +144,7 @@ export function useGenesisFlow({ appState, setAppState, setError, setSecuringPro
     } finally {
       genesisInFlight.current = false;
     }
-  }, [setAppState, setError, setSecuringProgress]);
+  }, [setAppState, setError, setSecuringProgress, onMnemonicGenerated]);
 
   return { handleGenerateGenesis };
 }

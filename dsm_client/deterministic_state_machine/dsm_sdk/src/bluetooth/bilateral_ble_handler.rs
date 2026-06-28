@@ -214,16 +214,6 @@ impl BilateralBleHandler {
                 }
             };
 
-        let k_dbrw_vec = crate::fetch_dbrw_binding_key()?;
-        if k_dbrw_vec.len() < 32 {
-            return Err(DsmError::invalid_operation(format!(
-                "bilateral receipt: K_DBRW too short ({} bytes)",
-                k_dbrw_vec.len()
-            )));
-        }
-        let mut k_dbrw_arr = [0u8; 32];
-        k_dbrw_arr.copy_from_slice(&k_dbrw_vec[..32]);
-
         let (ak_pk, ak_sk) = {
             let mgr = self.bilateral_tx_manager.read().await;
             mgr.ak_keypair_for_cert_chain()
@@ -244,7 +234,6 @@ impl BilateralBleHandler {
             c_pre: commitment_hash,
             devid_sender: self.device_id,
             relationship_key: rel_key,
-            k_dbrw: &k_dbrw_arr,
             root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &recipient_kyber_pk,
             // §11.1 Item 7: bind the per-step EK response to this
@@ -271,11 +260,12 @@ impl BilateralBleHandler {
             }
         }
 
+        let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
         crate::sdk::receipts::advance_local_chain_head_after_signing(
             &rel_key,
             &signing_out.ek_pk,
             &signing_out.ek_sk,
-            &k_dbrw_arr,
+            &at_rest_key,
             signing_out.used_root_ak,
         )?;
 
@@ -3526,6 +3516,10 @@ impl BilateralBleHandler {
             // enrollment; absent for ordinary transfers and rejected fail-closed for bearer ones.
             island_attestation: offline_att_proto,
             anchor_expiry_tick: offline_expiry_tick,
+            // Canonical Boot Fenced Fused offline release. The unmigrated sender does not produce
+            // one yet (Phase 5), so it rides empty — the receiver then fails closed to online
+            // recovery. The legacy island_attestation above is no longer accepted by the receiver.
+            offline_release: Vec::new(),
         };
 
         // 8. Wrap in envelope
@@ -3883,34 +3877,9 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// Convert the SDK's generated IslandAttestationProto into the core domain type. The SDK and
-    /// core have distinct generated proto modules, so this bridges the two.
-    fn island_attestation_from_generated(
-        p: &generated::IslandAttestationProto,
-    ) -> Result<dsm::types::device_state::IslandAttestation, DsmError> {
-        fn f32(name: &str, v: &[u8]) -> Result<[u8; 32], DsmError> {
-            <[u8; 32]>::try_from(v).map_err(|_| {
-                DsmError::invalid_operation(format!("island_attestation.{name} must be 32 bytes"))
-            })
-        }
-        Ok(dsm::types::device_state::IslandAttestation {
-            id_island: f32("id_island", &p.id_island)?,
-            id_anchor_set: f32("id_anchor_set", &p.id_anchor_set)?,
-            ui_transcript_hash: f32("ui_transcript_hash", &p.ui_transcript_hash)?,
-            signature: p.signature.clone(),
-            policy_id: f32("policy_id", &p.policy_id)?,
-            anchor_pubkey_hash: f32("anchor_pubkey_hash", &p.anchor_pubkey_hash)?,
-            firmware_hash: f32("firmware_hash", &p.firmware_hash)?,
-            policy_hash: f32("policy_hash", &p.policy_hash)?,
-            parent_root: f32("parent_root", &p.parent_root)?,
-            successor_root: f32("successor_root", &p.successor_root)?,
-            operation_hash: f32("operation_hash", &p.operation_hash)?,
-            state_number: p.state_number,
-        })
-    }
-
-    /// Convert a core IslandAttestation into the SDK's generated proto type (reverse of
-    /// island_attestation_from_generated), for the sender to carry in the confirm.
+    /// Convert a core IslandAttestation into the SDK's generated proto type, for the (unmigrated)
+    /// sender to carry in the confirm. The receiver no longer consumes it — offline-bearer
+    /// acceptance is the Boot Fenced Fused predicate (see `anchor_accept`).
     fn island_attestation_to_generated(
         a: &dsm::types::device_state::IslandAttestation,
     ) -> generated::IslandAttestationProto {
@@ -4302,38 +4271,39 @@ impl BilateralBleHandler {
             ));
         }
 
-        // Offline-bearer anchor enforcement (OFFLINE_BEARER_REQUIRED transfers only). The receiver
-        // releases value only if the sender's anchor attestation verifies against the PINNED
-        // enrollment for this counterparty (anchor pubkey + measured firmware hash + policy) and
-        // validly advances the pinned monotonic frontier. Fail-closed: a missing attestation, an
-        // un-admitted / fresh self-provisioned identity, a non-enrolled firmware, or a forked /
-        // replayed frontier rejects the transfer. `h_n` above is the shared relationship tip the gate
-        // signed as the transition input; the device's on-chip frontier is the primary serializer,
-        // this is the receiver-side identity pin + cross-receiver fork detector. Ordinary transfers
-        // are unaffected (the gate predicate is false for them).
+        // Offline-bearer acceptance (OFFLINE_BEARER_REQUIRED transfers only). Canonical predicate:
+        // the Boot Fenced Fused Anchor `accept_offline` (22 checks), via `anchor_accept`. The legacy
+        // Safe 7 IslandAttestation receiver path is QUARANTINED — it is no longer an accepted
+        // offline-bearer path. Fail-closed to ONLINE RECOVERY: an absent/malformed release, an
+        // un-enrolled anchor, an empty/inauthentic counter transcript, or ANY failed predicate check
+        // rejects HERE, before the value-release commit below — so no value is released. Three
+        // producer-side inputs are unbuilt (sender OfflineRelease, authenticated counter transcript,
+        // anchor-state-committing SMT leaf), so this currently always recovers online (Phase 5
+        // makes it operational). Ordinary transfers are unaffected (the predicate is false for them).
         if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
             &session.operation,
         ) {
-            // The sender's anchor was pinned when its OFFLINE_BEARER_REQUIRED offer was first seen
-            // (handle_prepare_request, the relationship-establishment authority path). Verify the
-            // attestation against that pinned enrollment; if none was pinned this rejects fail-closed.
-            let att_proto = confirm_request.island_attestation.as_ref().ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "OFFLINE_BEARER_REQUIRED confirm missing anchor attestation (fail-closed)",
-                )
-            })?;
-            let att = Self::island_attestation_from_generated(att_proto)?;
-            let manager = self.bilateral_tx_manager.read().await;
-            manager.verify_incoming_offline_bearer_commit(
-                &session.counterparty_device_id,
-                &session.operation,
+            // The receiver supplies no fused-anchor pin or challenge yet (Phase 5): `pinned = None`
+            // routes every offline-bearer transfer to online recovery. `h_n` is the receiver's
+            // accepted relationship tip.
+            let policy_hash = match &session.operation {
+                Operation::Transfer {
+                    authority_policy: Some(ap),
+                    ..
+                } => ap.policy_id,
+                _ => [0u8; 32],
+            };
+            crate::bluetooth::anchor_accept::accept_offline_release(
+                &confirm_request.offline_release,
+                None,
                 &h_n,
-                confirm_request.anchor_expiry_tick,
-                &pre_entropy,
-                &att,
-            )?;
+                &self.device_id,
+                &[0u8; 32],
+                &policy_hash,
+            )
+            .map_err(|r| r.into_dsm_error())?;
             info!(
-                "[BILATERAL] offline-bearer anchor verified against pinned enrollment for commitment {}",
+                "[BILATERAL] offline-bearer release accepted (canonical Boot Fenced Fused predicate) for commitment {}",
                 bytes_to_base32(&commitment_hash[..8])
             );
         }

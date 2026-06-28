@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/dsm-anchor-core",
+    "crates/dsm-sphincs",
     "dsm_client/deterministic_state_machine/dsm",
     "dsm_client/deterministic_state_machine/dsm_sdk",
     "dsm_storage_node",
@@ -8,6 +10,10 @@ members = [
     "tools/vector_builder",
     "tools/vertical_validation",
 ]
+# RP2350 firmware is a thumbv8m-only binary; built separately from inside the
+# crate dir (its .cargo/config.toml sets the target). Excluded so host
+# `cargo build`/`test` over the workspace doesn't try to build it for the host.
+exclude = ["crates/dsm-anchor-pico"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"

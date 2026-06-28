@@ -722,7 +722,7 @@ mod tests {
             TEST_GENESIS_HASH.to_vec(),
             vec![0u8; 32],
         );
-        crate::set_cdbrw_binding_key_for_testing(TEST_BINDING_KEY.to_vec());
+        crate::set_wallet_seed_for_testing(TEST_BINDING_KEY.to_vec());
         public_key
     }
 

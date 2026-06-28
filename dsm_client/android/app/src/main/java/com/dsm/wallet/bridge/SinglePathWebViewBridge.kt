@@ -11,7 +11,7 @@ import android.util.Log
 import com.dsm.native.DsmNativeException
 import java.util.concurrent.atomic.AtomicBoolean
 import com.dsm.wallet.bridge.ble.BleCoordinator
-import dsm.types.proto.SystemGenesisRequest
+import dsm.types.proto.WalletCreateGenesisV2Request
 
 // ============================================================================
 // DSM APP INTEGRATION BOUNDARY -- WebView RPC Dispatcher
@@ -67,7 +67,6 @@ class SinglePathWebViewBridge(private val context: Context) {
         private const val KEY_DEVICE_ID = "device_id_bytes"
         private const val KEY_GENESIS_HASH = "genesis_hash_bytes"
         private const val KEY_GENESIS_ENVELOPE = "genesis_envelope_bytes"
-        private const val KEY_DBRW_SALT = "dbrw_salt_bytes"
 
 
 
@@ -334,20 +333,18 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                "createGenesis" -> {
-                    val req = SystemGenesisRequest.parseFrom(payload)
-                    BridgeIdentityHandler.createGenesis(
-                        context = inst.context,
-                        prefs = inst.prefs(),
-                        sdkContextInitialized = sdkContextInitialized,
-                        logTag = TAG,
-                        keyDeviceId = KEY_DEVICE_ID,
-                        keyGenesisHash = KEY_GENESIS_HASH,
-                        keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-                        keyDbrwSalt = KEY_DBRW_SALT,
+                // Canonical mnemonic-rooted Genesis v2 (whitepaper §2.5): generate a mnemonic for
+                // backup, then create the wallet from it. No silicon enrollment, no random entropy.
+                "generateMnemonic" -> {
+                    inst.generateMnemonic()
+                }
+
+                "createGenesisV2" -> {
+                    val req = WalletCreateGenesisV2Request.parseFrom(payload)
+                    inst.createGenesisV2(
+                        mnemonic = req.mnemonic,
                         locale = req.locale,
                         networkId = req.networkId,
-                        entropyBytes = req.deviceEntropy.toByteArray(),
                     )
                 }
 
@@ -449,7 +446,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                         keyDeviceId = KEY_DEVICE_ID,
                         keyGenesisHash = KEY_GENESIS_HASH,
                         keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-                        keyDbrwSalt = KEY_DBRW_SALT,
                         requestBytes = payload,
                     )
                 }
@@ -608,47 +604,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
-                "captureCdbrwOrbitTimings" -> {
-                    try {
-                        val envBytes = com.dsm.wallet.security.AntiCloneGate.buildEnvironmentBytes()
-                        // Per Alg 1 step 1, the orbit seed needs a CSPRNG
-                        // challenge. The frontend never holds business state,
-                        // so we mint the challenge here on every probe.
-                        val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-                        // Thermal HAL snapshot — Android-sanctioned path
-                        // because direct sysfs reads are SELinux-blocked on
-                        // most OEMs. Kotlin layer is doing transport only;
-                        // PowerManager reads are not business logic.
-                        val thermalBytes = com.dsm.wallet.security.AntiCloneGate.sampleThermalBytesForBridge(inst.context)
-                        val timings = com.dsm.wallet.security.SiliconFingerprintNative.captureOrbitDensity(
-                            envBytes,
-                            challenge,
-                            thermalBytes,
-                            1024 * 1024, // 1MB arena
-                            8,           // probes (must be divisible by 8)
-                            1000,        // 1000 steps per probe
-                            1,           // 1 warmup round
-                            7            // rotation bits
-                        )
-                        if (timings == null) {
-                            Log.w(TAG, "captureCdbrwOrbitTimings: silicon PUF returned null")
-                            return ByteArray(0)
-                        }
-                        // Convert LongArray to ByteArray (little-endian i64)
-                        val result = ByteArray(timings.size * 8)
-                        for (i in timings.indices) {
-                            val value = timings[i]
-                            for (j in 0..7) {
-                                result[i * 8 + j] = (value shr (j * 8)).toByte()
-                            }
-                        }
-                        result
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "captureCdbrwOrbitTimings failed", t)
-                        ByteArray(0)
-                    }
-                }
-
                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }
@@ -711,38 +666,42 @@ class SinglePathWebViewBridge(private val context: Context) {
      */
     fun bootstrapFromPrefs(): Boolean {
         return BridgeIdentityHandler.bootstrapFromPrefs(
-            context = context,
             prefs = prefs(),
             sdkContextInitialized = sdkContextInitialized,
             logTag = TAG,
             keyDeviceId = KEY_DEVICE_ID,
             keyGenesisHash = KEY_GENESIS_HASH,
-            keyDbrwSalt = KEY_DBRW_SALT
         )
     }
-    
-    /**
-     * Create genesis via JNI.
-     * Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
-     * Automatically parses envelope, persists identity, initializes SDK context, and populates transport headers.
-     */
-    fun createGenesis(locale: String, networkId: String, entropyBytes: ByteArray): ByteArray {
+
+    /** Generate a fresh BIP39 mnemonic for display/backup (canonical Genesis v2). */
+    fun generateMnemonic(): ByteArray {
         if (!ready) {
-            Log.e(TAG, "createGenesis: bridge not ready")
+            Log.e(TAG, "generateMnemonic: bridge not ready")
             return ByteArray(0)
         }
-        return BridgeIdentityHandler.createGenesis(
-            context = context,
+        return BridgeIdentityHandler.generateMnemonic()
+    }
+
+    /**
+     * Canonical mnemonic-rooted Genesis v2 wallet creation. The (backed-up) mnemonic is the sole
+     * root. Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
+     */
+    fun createGenesisV2(mnemonic: String, locale: String, networkId: String): ByteArray {
+        if (!ready) {
+            Log.e(TAG, "createGenesisV2: bridge not ready")
+            return ByteArray(0)
+        }
+        return BridgeIdentityHandler.createGenesisV2(
             prefs = prefs(),
             sdkContextInitialized = sdkContextInitialized,
             logTag = TAG,
             keyDeviceId = KEY_DEVICE_ID,
             keyGenesisHash = KEY_GENESIS_HASH,
             keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-            keyDbrwSalt = KEY_DBRW_SALT,
+            mnemonic = mnemonic,
             locale = locale,
             networkId = networkId,
-            entropyBytes = entropyBytes
         )
     }
 

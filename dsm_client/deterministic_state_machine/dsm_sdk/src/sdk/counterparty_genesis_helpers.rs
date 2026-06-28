@@ -235,24 +235,9 @@ pub async fn fetch_genesis_state(
     // Use a fixed small set of test nodes (deterministic; no network dependency)
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
-    // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
-    // The MPC session derives the canonical K_DBRW internally from
-    // (genesis_id, device_id = genesis_id, hw, env) — we just supply the
-    // silicon inputs.
-    let silicon =
-        crate::sdk::app_state::AppState::take_platform_entropy_inputs().ok_or_else(|| {
-            dsm::types::error::DsmError::invalid_operation(
-                "counterparty_genesis_helpers: platform silicon inputs (hw, env) required",
-            )
-        })?;
-    create_genesis_via_blind_mpc(
-        device_id_arr,
-        nodes,
-        silicon.hw_entropy.clone(),
-        silicon.env_fingerprint.clone(),
-        None,
-    )
-    .await
+    // Per whitepaper §2.5: n-of-n commit-reveal MPC (optional high-assurance / legacy profile);
+    // no threshold parameter, no silicon binding, no C-DBRW.
+    create_genesis_via_blind_mpc(device_id_arr, nodes, None).await
 }
 
 /// Verify a Genesis state against known storage nodes

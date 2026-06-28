@@ -508,20 +508,14 @@ impl B0xSDK {
     /// Falls back to device_id-only derivation if genesis is not yet available
     /// (e.g. during initial registration before genesis is stored).
     fn derive_salt(domain_tag: &[u8], device_id_bytes: &[u8]) -> [u8; 32] {
-        // §16.4: saltG/saltD MUST be derived from Smaster (secret), not public inputs.
-        // Spec: saltG := HKDF-BLAKE3("DSM/b0x-salt-G\0", Smaster)
-        //       saltD := HKDF-BLAKE3("DSM/b0x-salt-D\0", Smaster)
-        // KDBRW (cdbrw_binding) is the hardware-bound secret that approximates Smaster here:
-        // it is never serialized or externalized per §12 Privacy Rule.
-        // Without KDBRW (e.g. unit tests), falls back to genesis+device_id (public, weaker privacy).
+        // §16.4: salt = BLAKE3("DSM/b0x-salt-{G|D}\0" || genesis_hash || device_id).
+        // The legacy C-DBRW (KDBRW) IKM fold has been removed (Genesis v2 has no silicon-bound
+        // secret). genesis_hash is the public Genesis v2 digest `G`; combined with device_id it
+        // gives per-device, domain-separated salts. (A future §16.4 hardening can fold the secret
+        // Smaster here once b0x salt derivation is wired through the unlocked-wallet path.)
         let tag_str = std::str::from_utf8(domain_tag).unwrap_or("DSM/b0x-salt");
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag_str);
-        // Primary IKM: KDBRW — the secret hardware-bound entropy source
-        #[cfg(all(target_os = "android", feature = "jni"))]
-        if let Some(k) = crate::jni::cdbrw::get_cdbrw_binding_key() {
-            hasher.update(&k);
-        }
-        // Augment with public material for domain separation
+        // Augment with public genesis material for domain separation when storage is available.
         if crate::storage_utils::get_storage_base_dir().is_some() {
             if let Some(genesis) = crate::sdk::app_state::AppState::get_genesis_hash() {
                 hasher.update(&genesis);

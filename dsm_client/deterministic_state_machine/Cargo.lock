@@ -1196,6 +1196,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsm-anchor-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "prost 0.14.3",
+ "prost-build 0.14.3",
+ "protoc-bin-vendored",
+]
+
+[[package]]
 name = "dsm_sdk"
 version = "0.1.0-beta.3"
 dependencies = [
@@ -1220,6 +1230,7 @@ dependencies = [
  "ctor",
  "dirs",
  "dsm",
+ "dsm-anchor-core",
  "env_logger 0.11.10",
  "erased-serde",
  "fastrand",

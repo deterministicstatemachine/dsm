@@ -68,7 +68,8 @@ pub trait KeyStorage: Send + Sync {
     fn delete_key(&self, alias: &str, key_type: KeyType) -> Result<(), DsmError>;
 }
 
-/// Source for a 32-byte device binding key (DBRW-derived). Plug in your real implementation.
+/// Source for a 32-byte at-rest binding key. Production wiring supplies the wallet-seed-rooted
+/// Genesis v2 at-rest key (`init::current_chain_head_at_rest_key`); there is no C-DBRW.
 pub trait BindingKeyProvider: Send + Sync {
     fn device_binding_key(&self) -> Result<[u8; 32], DsmError>;
 }
@@ -92,32 +93,6 @@ impl BindingKeyProvider for TestBindingKeyProvider {
         let mut out = [0u8; 32];
         let d = blake3::hash(self.device_id.as_bytes());
         out.copy_from_slice(d.as_bytes());
-        Ok(out)
-    }
-}
-
-/// DBRW-backed binder intended to be deterministic across processes/devices of the same identity.
-/// This default implementation is **stable**: it derives the binding key from a domain-separated
-/// hash of the provided device_id_hint. Replace with a platform DBRW that returns the same 32B
-/// across runs on the same device (no clocks, no randomness).
-#[derive(Clone)]
-pub struct DbrwBindingKeyProvider {
-    device_id_hint: String,
-}
-
-impl DbrwBindingKeyProvider {
-    pub fn new(device_id_hint: String) -> Self {
-        Self { device_id_hint }
-    }
-}
-
-impl BindingKeyProvider for DbrwBindingKeyProvider {
-    fn device_binding_key(&self) -> Result<[u8; 32], DsmError> {
-        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DBRW_BINDING_V2);
-        hasher.update(self.device_id_hint.as_bytes());
-        let digest = hasher.finalize();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(digest.as_bytes());
         Ok(out)
     }
 }
@@ -892,11 +867,11 @@ mod tests {
     }
 
     #[test]
-    fn export_import_roundtrip_dbrw() {
-        // Validate that DbrwBindingKeyProvider is deterministic and importable.
+    fn export_import_roundtrip() {
+        // Validate that a deterministic binder is importable across fresh vault instances.
         let dir = tempfile::tempdir().unwrap();
-        let device_id = "dev-dbrw-1".to_string();
-        let binder = DbrwBindingKeyProvider::new(device_id.clone());
+        let device_id = "dev-binding-1".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
         let vault =
             SoftVaultKeyStorage::new(dir.path(), device_id.clone(), binder, Some("pw")).unwrap();
 
@@ -905,7 +880,7 @@ mod tests {
         let env = vault.export_envelope("alias", KeyType::PeerKey).unwrap();
 
         // Recreate with a fresh instance and same binder hint/passphrase
-        let binder2 = DbrwBindingKeyProvider::new(device_id.clone());
+        let binder2 = TestBindingKeyProvider::new(device_id.clone());
         let vault2 =
             SoftVaultKeyStorage::new(dir.path(), device_id.clone(), binder2, Some("pw")).unwrap();
         let _addr = vault2
@@ -925,22 +900,18 @@ mod tests {
     }
 
     #[test]
-    fn dbrw_binding_key_deterministic() {
-        let b1 = DbrwBindingKeyProvider::new("device-A".into());
-        let b2 = DbrwBindingKeyProvider::new("device-A".into());
+    fn binding_key_deterministic_and_hint_varying() {
+        let b1 = TestBindingKeyProvider::new("device-A".into());
+        let b2 = TestBindingKeyProvider::new("device-A".into());
         assert_eq!(
             b1.device_binding_key().unwrap(),
             b2.device_binding_key().unwrap(),
             "same hint must yield same binding key"
         );
-    }
-
-    #[test]
-    fn dbrw_binding_key_varies_with_hint() {
-        let k1 = DbrwBindingKeyProvider::new("dev-1".into())
+        let k1 = TestBindingKeyProvider::new("dev-1".into())
             .device_binding_key()
             .unwrap();
-        let k2 = DbrwBindingKeyProvider::new("dev-2".into())
+        let k2 = TestBindingKeyProvider::new("dev-2".into())
             .device_binding_key()
             .unwrap();
         assert_ne!(k1, k2);
