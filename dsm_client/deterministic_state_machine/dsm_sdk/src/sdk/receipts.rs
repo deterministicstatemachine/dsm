@@ -2464,6 +2464,11 @@ mod tests {
         use crate::storage::client_db::reset_database_for_tests;
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
         reset_database_for_tests();
+        // Install identity (`G` + DevID) and the cached wallet seed so the per-step
+        // EK signer can re-derive `Smaster` internally. Without this the test only
+        // passed when an earlier test happened to leave `G` set in the process-global
+        // AppState — an implicit ordering dependency that flakes under parallel runs.
+        let _ = setup_signing_identity();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC2; 32]).unwrap();
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
