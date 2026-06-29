@@ -145,7 +145,7 @@ jobs:
           cache-dependency-path: dsm_client/frontend/package-lock.json
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.npm
@@ -200,7 +200,7 @@ jobs:
       # cost more in flake than it added in assurance.
 
       - name: Cache Gradle caches
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.gradle/caches
