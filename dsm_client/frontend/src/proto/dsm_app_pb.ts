@@ -12406,8 +12406,6 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
    * CRITICAL: This allows the sender to update their contact's signing key
    * when receiving the accept response, enabling session registration for future transfers.
    *
-   * Field 7 reserved (removed: old DBRW warning)
-   *
    * @generated from field: bytes responder_signing_public_key = 6;
    */
   responderSigningPublicKey = new Uint8Array(0);
@@ -13616,8 +13614,6 @@ export class BilateralEventNotification extends Message<BilateralEventNotificati
   senderBleAddress?: string;
 
   /**
-   * Field 11 reserved (removed: old DBRW warning)
-   *
    * @generated from field: optional dsm.BilateralFailureReason failure_reason = 10;
    */
   failureReason?: BilateralFailureReason;
@@ -17164,8 +17160,6 @@ export class UniversalOp extends Message<UniversalOp> {
     case: "query";
   } | {
     /**
-     * Field numbers 20, 21, 30 reserved (removed: old DBRW ops)
-     *
      * @generated from field: dsm.RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
      */
     value: RecoveryCapsuleDecryptRequest;
@@ -17710,8 +17704,6 @@ export class Envelope extends Message<Envelope> {
     case: "batchEnvelope";
   } | {
     /**
-     * Field numbers 13, 14, 33 reserved (removed: old DBRW responses)
-     *
      * @generated from field: dsm.RecoveryCapsuleDecryptResponse recovery_capsule_decrypt_response = 15;
      */
     value: RecoveryCapsuleDecryptResponse;
@@ -18174,8 +18166,6 @@ export class Envelope extends Message<Envelope> {
     case: "storageNodeManageResponse";
   } | {
     /**
-     * Slot 90 reserved (was DbrwStatusResponse) — see message-level reserved below.
-     *
      * @generated from field: dsm.BitcoinWithdrawalPlanRequest bitcoin_withdrawal_plan_request = 91;
      */
     value: BitcoinWithdrawalPlanRequest;

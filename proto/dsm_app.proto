@@ -1607,11 +1607,6 @@ message SystemGenesisRequest {
   string locale = 1;
   string network_id = 2;
   bytes device_entropy = 3 [(dsm_fixed_len)=32];
-  // Fields 4,5,6 reserved: legacy C-DBRW silicon-binding inputs
-  // (cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt). Genesis v2 is
-  // mnemonic-rooted with no silicon binding — these MUST NOT be reused.
-  reserved 4, 5, 6;
-  reserved "cdbrw_hw_entropy", "cdbrw_env_fingerprint";
 }
 message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
 
@@ -1753,7 +1748,6 @@ message BilateralPrepareResponse {
   // CRITICAL: This allows the sender to update their contact's signing key
   // when receiving the accept response, enabling session registration for future transfers.
   bytes  responder_signing_public_key = 6 [(dsm_fixed_len)=64];
-  // Field 7 reserved (removed: old DBRW warning)
 }
 
 enum RelationshipSendCheckState {
@@ -2020,7 +2014,6 @@ message BilateralEventNotification {
   string             message                = 8; // optional details
   optional string    sender_ble_address     = 9;  // BLE MAC address for response routing
   optional BilateralFailureReason failure_reason = 10;
-  // Field 11 reserved (removed: old DBRW warning)
 }
 
 // =========================== Bluetooth Transport ====================
@@ -2156,11 +2149,6 @@ message BootstrapMeasurementReport {
   bytes device_id = 2 [(dsm_fixed_len)=32];
   bytes genesis_hash = 3 [(dsm_fixed_len)=32];
   uint32 progress_percent = 4;
-  // Fields 5,6,7 reserved: legacy C-DBRW silicon-binding inputs
-  // (cdbrw_hw_entropy, cdbrw_env_fingerprint, cdbrw_salt). Genesis v2 is
-  // mnemonic-rooted with no silicon binding — these MUST NOT be reused.
-  reserved 5, 6, 7;
-  reserved "cdbrw_hw_entropy", "cdbrw_env_fingerprint";
   TrustLevel trust_level = 8;
   string error_message = 9;
 }
@@ -2449,7 +2437,6 @@ message UniversalOp {
     AttestedAction          attested_action        = 15;
     VaultOp                 vault                  = 16;
     QueryOp                 query                  = 17;
-    // Field numbers 20, 21, 30 reserved (removed: old DBRW ops)
     RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
     RecoveryTombstoneRequest     recovery_tombstone       = 23;
     RecoverySuccessionRequest    recovery_succession      = 24;
@@ -2509,7 +2496,6 @@ message Envelope {
     UniversalRx  universal_rx    = 11;
     BatchEnvelope batch_envelope = 12;
 
-    // Field numbers 13, 14, 33 reserved (removed: old DBRW responses)
     RecoveryCapsuleDecryptResponse   recovery_capsule_decrypt_response = 15;
     RecoveryTombstoneResponse        recovery_tombstone_response       = 16;
     RecoverySuccessionResponse       recovery_succession_response      = 17;
@@ -2613,7 +2599,6 @@ message Envelope {
     // Storage node health & management
     StorageNodeStatsResponse          storage_node_stats_response      = 88;
     StorageNodeManageResponse         storage_node_manage_response     = 89;
-    // Slot 90 reserved (was DbrwStatusResponse) — see message-level reserved below.
     BitcoinWithdrawalPlanRequest      bitcoin_withdrawal_plan_request  = 91;
     BitcoinWithdrawalPlanResponse     bitcoin_withdrawal_plan_response = 92;
     BitcoinWithdrawalExecuteRequest   bitcoin_withdrawal_execute_request = 93;
@@ -2630,9 +2615,6 @@ message Envelope {
     BootstrapMeasurementReport        bootstrap_measurement_report     = 101;
     BootstrapFinalizeResponse         bootstrap_finalize_response      = 102;
 
-    // Slots 103-106 reserved (were C-DBRW Protocol 6.2 responses) — see
-    // message-level reserved below.
-
     // Phase B.7 (issue #278) — pure-rendering DeviceTreeViewer payload.
     DeviceTreeSnapshotResponse        device_tree_snapshot_response    = 107;
 
@@ -2641,10 +2623,6 @@ message Envelope {
     AddDeviceAdmissionRequestV1       device_admission_request         = 108;
     AddDeviceAdmissionV1              device_admission                 = 109;
   }
-  // Legacy C-DBRW payload slots removed (Genesis v2 has no C-DBRW): slot 90
-  // was DbrwStatusResponse; 103-106 were the Protocol 6.2 responses
-  // (CdbrwTrustSnapshot/Respond/Verify/Enroll). MUST NOT be reused.
-  reserved 90, 103, 104, 105, 106;
 }
 
 // ===================== SDK INIT / STATUS =====================
@@ -2653,10 +2631,6 @@ message Envelope {
 message InitFailed {
   enum Reason {
     REASON_UNSPECIFIED = 0;
-    // Value 1 reserved (was CDBRW_NOT_READY) — Genesis v2 has no C-DBRW
-    // readiness gate; init no longer fails for a missing device secret.
-    reserved 1;
-    reserved "CDBRW_NOT_READY";
     PLATFORM_CONTEXT_MISSING = 2;
     INVALID_INPUT = 3;
   }
@@ -2856,10 +2830,6 @@ message RelationshipChainStateProto {
   bytes  operation           = 4 [(dsm_max_len)=1048576]; // Operation::to_bytes (canonical)
   bytes  entropy             = 5 [(dsm_max_len)=65535];
   optional bytes encapsulated_entropy = 6 [(dsm_max_len)=65535]; // None vs Some(empty) preserved
-  // Field 7 reserved (removed: old C-DBRW dbrw_summary_hash chain-tip component;
-  // GenesisV2 has no C-DBRW). MUST NOT be reused.
-  reserved 7;
-  reserved "dbrw_summary_hash";
   repeated BalanceWitnessEntryProto balance_witness = 8;
   optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
   optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
@@ -3753,10 +3723,6 @@ message InitializeSdkOp {}
 message InitializeIdentityContextOp {
   bytes device_id    = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash = 2 [(dsm_fixed_len)=32];
-  // Field 3 reserved: legacy C-DBRW binding_key — removed (Genesis v2 has no
-  // persisted device secret). MUST NOT be reused.
-  reserved 3;
-  reserved "binding_key";
 }
 
 // Restore canonical identity context. Under Genesis v2 the device key re-derives
@@ -3765,10 +3731,6 @@ message InitializeIdentityContextOp {
 message RestoreIdentityContextOp {
   bytes device_id             = 1 [(dsm_fixed_len)=32];
   bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
-  // Fields 3,4,5 reserved: legacy C-DBRW silicon inputs (cdbrw_hw_entropy,
-  // cdbrw_env_fingerprint, cdbrw_salt). MUST NOT be reused.
-  reserved 3, 4, 5;
-  reserved "cdbrw_hw_entropy", "cdbrw_env_fingerprint";
 }
 
 // Canonical startup/bootstrap request shared by native platforms.
