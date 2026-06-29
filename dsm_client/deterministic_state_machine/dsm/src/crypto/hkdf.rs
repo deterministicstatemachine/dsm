@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! S_master = HKDF-Extract(salt = "DSM/dev\0",
-//!                         IKM  = G ‖ DevID ‖ K_DBRW ‖ s_0)
+//!                         IKM  = G ‖ DevID ‖ s_0  (GenesisV2: mnemonic-rooted, no DBRW))
 //! ```
 //!
 //! The HMAC primitive is constructed per RFC 2104 with BLAKE3 as the
@@ -218,12 +218,12 @@ mod tests {
         // shape works through this module.
         let g = [0xAAu8; 32];
         let devid = [0xBBu8; 32];
-        let k_dbrw = [0xCCu8; 32];
+        let chain_head_wrap_key = [0xCCu8; 32];
         let s_0 = [0xDDu8; 32];
         let mut ikm = Vec::with_capacity(32 * 4);
         ikm.extend_from_slice(&g);
         ikm.extend_from_slice(&devid);
-        ikm.extend_from_slice(&k_dbrw);
+        ikm.extend_from_slice(&chain_head_wrap_key);
         ikm.extend_from_slice(&s_0);
         let s_master = extract(b"DSM/dev\0", &ikm);
         assert_eq!(s_master.len(), 32);

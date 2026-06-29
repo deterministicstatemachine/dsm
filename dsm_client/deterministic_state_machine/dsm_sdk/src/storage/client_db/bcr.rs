@@ -58,9 +58,9 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
 // These codecs are byte-exact for the real types in
 // `dsm/src/types/device_state.rs`. The hashed prefix of a RelationshipChainState
 // matches `compute_chain_tip()` (rel_key ‖ embedded_parent ‖ counterparty_devid
-// ‖ op(len+bytes) ‖ entropy(len+bytes) ‖ encap_flag+optional ‖ dbrw_flag+
-// optional fixed 32B (NO length prefix) ‖ witness count + (policy_commit ‖
-// value u64 le) sorted). Sigs are appended outside the hashed prefix.
+// ‖ op(len+bytes) ‖ entropy(len+bytes) ‖ encap_flag+optional ‖ witness count
+// + (policy_commit ‖ value u64 le) sorted). Sigs are appended outside the
+// hashed prefix.
 // ──────────────────────────────────────────────────────────────────────────
 
 const REL_CHAIN_STATE_VERSION: u8 = 0x02;
@@ -105,15 +105,6 @@ pub fn encode_rel_chain_state(state: &RelationshipChainState) -> Vec<u8> {
         Some(enc) => {
             out.push(1u8);
             put_vec(&mut out, enc);
-        }
-        None => out.push(0u8),
-    }
-
-    match &state.dbrw_summary_hash {
-        Some(d) => {
-            out.push(1u8);
-            // Fixed 32 bytes, NO length prefix — mirrors compute_chain_tip().
-            out.extend_from_slice(d);
         }
         None => out.push(0u8),
     }
@@ -177,13 +168,6 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         other => return Err(anyhow!("encap_flag invalid: {other}")),
     };
 
-    let dbrw_flag = read_u8(&mut cursor).map_err(|e| anyhow!("dbrw_flag: {e}"))?;
-    let dbrw_summary_hash = match dbrw_flag {
-        0 => None,
-        1 => Some(take::<32>(&mut cursor).map_err(|e| anyhow!("dbrw summary: {e}"))?),
-        other => return Err(anyhow!("dbrw_flag invalid: {other}")),
-    };
-
     let witness_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("witness count: {e}"))?;
     let mut balance_witness: BTreeMap<[u8; 32], u64> = BTreeMap::new();
     for _ in 0..witness_count {
@@ -217,7 +201,6 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         balance_witness,
         entity_sig,
         counterparty_sig,
-        dbrw_summary_hash,
         island_attestation: None,
     };
     let chain_tip = state.compute_chain_tip();
@@ -664,7 +647,6 @@ mod tests {
                     amount: 7,
                 }],
                 Some([0x55; 32]),
-                Some([0x66; 32]),
             )
             .expect("advance relationship");
 
@@ -756,7 +738,6 @@ mod tests {
         assert_eq!(decoded.balance_witness, rel.balance_witness);
         assert_eq!(decoded.entity_sig, rel.entity_sig);
         assert_eq!(decoded.counterparty_sig, rel.counterparty_sig);
-        assert_eq!(decoded.dbrw_summary_hash, rel.dbrw_summary_hash);
     }
 
     #[test]
@@ -847,7 +828,6 @@ mod tests {
                     amount: 9,
                 }],
                 None,
-                None,
             )
             .expect("second advance");
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
@@ -893,7 +873,6 @@ mod tests {
                     amount: 11,
                 }],
                 None,
-                Some([0xAA; 32]),
             )
             .expect("third advance");
         update_bcr_device_head(&outcome1.new_device_state).expect("upsert head1");

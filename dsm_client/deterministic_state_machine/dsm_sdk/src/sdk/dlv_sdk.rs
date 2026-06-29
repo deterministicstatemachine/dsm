@@ -3,7 +3,7 @@
 //! Deterministic Limbo Vault SDK (STRICT, fail-closed)
 //!
 //! This SDK exposes high-level, *identity-centric* helpers for DLVs.
-//! - SPHINCS+ signing authority is derived from canonical C-DBRW state.
+//! - SPHINCS+ signing authority is derived from the canonical wallet-rooted signing state.
 //! - Content Encryption Key (CEK) and unsealing KEK are managed **inside DLVManager**.
 //! - No alternate paths, no discovery shortcuts, explicit errors on missing inputs.
 
@@ -134,7 +134,7 @@ pub struct UnlockOptions {
     /// Requester's public key — Kyber key checked against vault's `intended_recipient`.
     pub requester_public_key: Vec<u8>,
     /// SPHINCS+ public key embedded in the DlvUnlock operation for signature verification.
-    /// If `None`, the SDK derives the current canonical C-DBRW signing public key.
+    /// If `None`, the SDK derives the current canonical signing public key.
     pub signing_public_key: Option<Vec<u8>>,
     /// Additional context data
     pub context: HashMap<String, String>,

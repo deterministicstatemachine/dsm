@@ -53,7 +53,7 @@
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
 //! | [`envelope`] | Envelope v3 construction, framing (`0x03` prefix), guard rails |
-//! | [`security`] | DBRW clone-detection validation at the SDK boundary |
+//! | [`security`] | clone-detection validation at the SDK boundary |
 //! | [`storage`] | SQLite-backed client database for contacts, chain tips, bilateral state |
 //! | [`network`] | Multi-node storage endpoint registry and env-config loader |
 //! | [`recovery`] | Capsule, tombstone, and rollup recovery flows |
@@ -65,7 +65,7 @@
 //!
 //! 1. **Core ready** (`SDK_READY` in `unified_protobuf_bridge`) — set after
 //!    `sdkBootstrap` completes PBI (Platform Boundary Interface) initialization
-//!    with device_id, genesis_hash, and DBRW entropy.
+//!    with device_id and genesis_hash (GenesisV2: mnemonic-rooted).
 //! 2. **Bilateral ready** (`BILATERAL_READY`) — set after
 //!    [`initialize_bilateral_sdk`] verifies that the SDK context and bilateral
 //!    handler are installed, and device performance calibration succeeds.
@@ -313,7 +313,7 @@ pub(crate) fn derive_production_entropy(
 }
 
 /// Seed the wallet-seed session cache (tests only). Replaces the legacy
-/// `set_cdbrw_binding_key_for_testing`: identity/EK/coins/at-rest derivations all re-root on
+/// `set_cdevice_birth_binding_key_for_testing`: identity/EK/coins/at-rest derivations all re-root on
 /// this seed exactly as production re-roots on the mnemonic-derived seed.
 #[cfg(not(target_os = "android"))]
 pub fn set_wallet_seed_for_testing(seed: Vec<u8>) {

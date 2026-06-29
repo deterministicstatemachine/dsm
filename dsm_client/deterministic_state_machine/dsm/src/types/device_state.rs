@@ -336,10 +336,6 @@ pub struct RelationshipChainState {
     /// Counterparty SPHINCS+ signature (bilateral mode).
     pub counterparty_sig: Option<Vec<u8>>,
 
-    /// Optional DBRW health summary commitment (§12). Advisory only —
-    /// included in the hash iff present on the advancing device.
-    pub dbrw_summary_hash: Option<[u8; 32]>,
-
     /// Optional offline-bearer secure-element island attestation (anti-clone, see
     /// [`crate::attestation`]). Folded into the chain tip iff present; absent on every
     /// non-offline-bearer transition, so those tips hash exactly as before.
@@ -354,7 +350,7 @@ impl RelationshipChainState {
     /// and any counter-like metadata per §4.3. Ordering of fields is:
     ///
     /// `rel_key ‖ embedded_parent ‖ counterparty_devid ‖ op ‖ entropy
-    /// ‖ encap_flag ‖ encap? ‖ dbrw_flag ‖ dbrw? ‖ witness_len
+    /// ‖ encap_flag ‖ encap? ‖ witness_len
     /// ‖ (policy_commit ‖ value)* sorted_by_policy_commit`
     ///
     /// Signatures are NOT hashed — they sign this digest, not the other
@@ -378,16 +374,6 @@ impl RelationshipChainState {
                 hasher.update(&[1u8]);
                 hasher.update(&(enc.len() as u32).to_le_bytes());
                 hasher.update(enc);
-            }
-            None => {
-                hasher.update(&[0u8]);
-            }
-        }
-
-        match &self.dbrw_summary_hash {
-            Some(dbrw) => {
-                hasher.update(&[1u8]);
-                hasher.update(dbrw);
             }
             None => {
                 hasher.update(&[0u8]);
@@ -750,7 +736,6 @@ impl DeviceState {
     /// - `deltas` — balance mutations to apply to device-level `B^T`
     /// - `initial_chain_tip` — spec-canonical initial tip, used ONLY if
     ///   `rel_key` has no prior entry in the SMT (first-ever tx)
-    /// - `dbrw_summary_hash` — optional DBRW health commitment (§12)
     ///
     /// # Errors
     ///
@@ -774,7 +759,6 @@ impl DeviceState {
         encapsulated_entropy: Option<Vec<u8>>,
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
-        dbrw_summary_hash: Option<[u8; 32]>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -837,7 +821,6 @@ impl DeviceState {
             balance_witness: new_balances.clone(),
             entity_sig: None,
             counterparty_sig: None,
-            dbrw_summary_hash,
             island_attestation: None,
         };
 
@@ -1055,7 +1038,6 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
-                None,
             )
             .expect("advance");
         assert_eq!(
@@ -1211,7 +1193,6 @@ mod tests {
                     amount: 50,
                 }],
                 Some(init_tip),
-                None,
             )
             .expect("credit advance succeeds");
 
@@ -1281,7 +1262,6 @@ mod tests {
                     amount: 10,
                 }],
                 Some(init),
-                None,
             )
             .expect("value advance");
         assert_eq!(
@@ -1296,7 +1276,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None, None)
+            .advance(rk, cp, op(), entropy(2), None, &[], None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -1311,7 +1291,7 @@ mod tests {
         let rk2 = compute_smt_key(&dev.devid, &cp2);
         let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
         let o3 = dev
-            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
+            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2))
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -1361,7 +1341,6 @@ mod tests {
                     amount: 30,
                 }],
                 Some(init_bob),
-                None,
             )
             .expect("advance Bob");
         assert_eq!(
@@ -1385,7 +1364,6 @@ mod tests {
                     amount: 50,
                 }],
                 Some(init_chrl),
-                None,
             )
             .expect("advance Charlie");
         assert_eq!(
@@ -1443,7 +1421,6 @@ mod tests {
                     amount: 10,
                 }],
                 Some(init_bob),
-                None,
             )
             .expect("advance A");
         let b = dev
@@ -1459,7 +1436,6 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init_chrl),
-                None,
             )
             .expect("advance B");
 
@@ -1510,7 +1486,6 @@ mod tests {
                     amount: 10,
                 }],
                 Some(init),
-                None,
             )
             .expect("advance A");
         let b = dev
@@ -1526,7 +1501,6 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init),
-                None,
             )
             .expect("advance B");
 
@@ -1571,7 +1545,6 @@ mod tests {
                 amount: 10,
             }],
             Some(init),
-            None,
         );
         assert!(
             r.is_err(),
@@ -1604,7 +1577,6 @@ mod tests {
                 amount: 1,
             }],
             Some(init),
-            None,
         );
         assert!(r.is_err(), "u64::MAX + 1 must overflow");
     }
@@ -1653,7 +1625,6 @@ mod tests {
                         amount: amt,
                     }],
                     Some(init),
-                    None,
                 )
                 .expect("advance");
             dev = out.new_device_state;
@@ -1742,7 +1713,6 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
-                None,
             )
             .expect("bilateral advance succeeds")
             .new_device_state;

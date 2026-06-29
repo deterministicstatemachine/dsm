@@ -199,7 +199,7 @@ pub(crate) async fn compose_vault_state(
     // SoFi spec §4.1.2 / §8.4 step 2 — STRICT MODE.  Verify the
     // owner's PD-SMT inclusion proof for the baseline vault state.
     // The anchor signature above is *necessary* but not *sufficient*:
-    // an attacker who recovered K_DBRW could forge a signed anchor.
+    // an attacker who recovered the signing key could forge a signed anchor.
     // The inclusion proof additionally commits the SMT root + a
     // 256-sibling Merkle path that
     // dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
@@ -1375,7 +1375,7 @@ mod tests {
 
     /// Strict mode refuses to fold a vault whose owner never published
     /// a `VaultStateInclusionProofV1` — the legacy anchor alone is
-    /// insufficient.  This is the K_DBRW-forgery hole closure: an
+    /// insufficient.  This is the signing-key-forgery hole closure: an
     /// attacker with the owner's key can forge a signed anchor but
     /// cannot fabricate SMT consistency.
     #[tokio::test]

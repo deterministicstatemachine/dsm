@@ -398,7 +398,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
-            dbrw_summary_hash: None,
             island_attestation: None,
         }
     }
@@ -454,7 +453,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
-            dbrw_summary_hash: None,
             island_attestation: None,
         };
         let t_new_established = est_state.compute_chain_tip();

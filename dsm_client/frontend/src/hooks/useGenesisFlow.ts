@@ -27,15 +27,15 @@ export function useGenesisFlow({
   onMnemonicGenerated,
 }: Args) {
   const genesisInFlight = useRef(false);
-  const interruptedMessage = 'Device securing was interrupted. Do not leave the screen until finished. Initialization was wiped and must be started again so DBRW is not corrupted.';
+  const interruptedMessage = 'Device securing was interrupted. Do not leave the screen until finished. Initialization was wiped and must be started again so the device key material is not corrupted.';
 
-  // Abort DBRW salt initialisation if the user navigates away during securing.
+  // Abort device-key initialisation if the user navigates away during securing.
   // If the securing is interrupted the device state is corrupt — wipe and restart.
   useEffect(() => {
     if (appState !== 'securing_device') return;
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        logger.warn('FRONTEND: User left screen during DBRW securing - aborting and wiping');
+        logger.warn('FRONTEND: User left screen during device securing - aborting and wiping');
         genesisInFlight.current = false;
         setSecuringProgress(0);
         setError(interruptedMessage);
@@ -55,7 +55,7 @@ export function useGenesisFlow({
     }
   }, [appState]);
 
-  // Listen for silicon fingerprint enrollment progress events from Kotlin
+  // Listen for device-key enrollment progress events from Kotlin
   useEffect(() => {
     const unsub = addDsmEventListener((evt) => {
       if (!genesisInFlight.current) {
@@ -65,15 +65,15 @@ export function useGenesisFlow({
         return;
       }
       if (evt.topic === 'genesis.securing-device') {
-        logger.info('FRONTEND: Silicon fingerprint enrollment started');
+        logger.info('FRONTEND: Device-key enrollment started');
         setSecuringProgress(0);
         setAppState('securing_device');
       } else if (evt.topic === 'genesis.securing-device-progress') {
         const pct = evt.payload.length > 0 ? (evt.payload[0] & 0xFF) : 0;
-        logger.info(`FRONTEND: Silicon fingerprint progress: ${pct}%`);
+        logger.info(`FRONTEND: Device-key enrollment progress: ${pct}%`);
         setSecuringProgress(pct);
       } else if (evt.topic === 'genesis.securing-device-complete') {
-        logger.info('FRONTEND: Silicon fingerprint enrollment complete');
+        logger.info('FRONTEND: Device-key enrollment complete');
         setSecuringProgress(100);
       } else if (evt.topic === 'genesis.securing-device-aborted') {
         logger.warn('FRONTEND: Device securing aborted after the screen was left');

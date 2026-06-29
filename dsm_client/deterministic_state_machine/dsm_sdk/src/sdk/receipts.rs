@@ -32,7 +32,7 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
 /// target becomes
 /// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
 /// commitment_hash)`. The fresh EK key that signs this target is derived from
-/// h_n, C_pre, k_step, and K_DBRW, so a copied database cannot answer the
+/// h_n, C_pre, k_step (keyed under Smaster), so a copied database cannot answer the
 /// next receipt challenge on different hardware.
 ///
 /// The §4.2.1 canonical commit form remains unchanged in both modes — the
@@ -98,7 +98,7 @@ pub fn derive_per_step_ek(
 #[derive(Debug)]
 pub struct KyberStepEncap {
     /// The 32-byte `k_step = BLAKE3("DSM/kyber-ss\0" || ss)` mixed into
-    /// the per-step EK derivation alongside K_DBRW.
+    /// the per-step EK derivation (keyed under Smaster).
     pub k_step: [u8; 32],
     /// Kyber ciphertext that travels in the receipt envelope; recipient
     /// decapsulates with their Kyber secret key to recover the same `ss`
@@ -256,7 +256,7 @@ pub struct PerStepSigningOutput {
 ///    The recipient's Kyber pubkey is mandatory.
 ///    The resulting Kyber ciphertext travels in `receipt.kyber_ct_a` so
 ///    the recipient can reconstruct the same `k_step`.
-/// 3. Derive `EK_{n+1}` from `(h_n, C_pre, k_step, K_DBRW)`.
+/// 3. Derive `EK_{n+1}` from `(h_n, C_pre, k_step) keyed under Smaster`.
 /// 4. Sign `cert_{n+1} = Sign_{prior_SK}(BLAKE3("DSM/ek-cert\0" ||
 ///    EK_pk_{n+1} || h_n))`.
 /// 5. Sign `inputs.commitment` with the new `EK_sk_{n+1}` to produce sig.
@@ -547,7 +547,7 @@ pub fn verify_per_step_ek_signing_strict_aware(
 /// required for offline receipt acceptance. Parent/root inclusion proves state
 /// consistency, but it is not spend authority. The receipt challenge is the
 /// proposed transition context. The response is `sig_a` or `sig_b` under the
-/// fresh EK key derived from h_n, C_pre, k_step, and K_DBRW, with `ek_cert`
+/// fresh EK key derived from h_n, C_pre, k_step (keyed under Smaster), with `ek_cert`
 /// linking that key to AK at step 0 or the prior EK on later steps.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_stitched_receipt(
@@ -567,7 +567,7 @@ pub fn verify_stitched_receipt(
     // Match receipt party (A vs B) to local-vs-counterparty roles by
     // looking up the local device id. If we can't determine which side
     // is local, fail closed rather than accepting a receipt without sender
-    // C-DBRW-bound authorization.
+    // EK-cert-chain authorization.
     let local_id = AppState::get_device_id();
     let (head_for_a, head_for_b): (Option<Vec<u8>>, Option<Vec<u8>>) = match local_id.as_deref() {
         Some(id) if id.len() == 32 && id == receipt.devid_a.as_slice() => {
@@ -599,7 +599,7 @@ pub fn verify_stitched_receipt(
 
     if head_for_a.is_none() {
         return Err(DsmError::invalid_operation(
-            "Receipt verification failed: missing sender cert-chain head for C-DBRW-bound \
+            "Receipt verification failed: missing sender cert-chain head for cert-chain-bound \
              receipt authorization",
         ));
     }
@@ -2818,7 +2818,6 @@ mod tests {
                 None,
                 &[],
                 Some(initial_tip),
-                None,
             )
             .expect("first-ever advance should succeed");
 
@@ -2935,7 +2934,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("missing sender cert-chain head")
-                || err.contains("C-DBRW-bound receipt authorization"),
+                || err.contains("cert-chain-bound receipt authorization"),
             "wrong rejection reason: {}",
             err
         );

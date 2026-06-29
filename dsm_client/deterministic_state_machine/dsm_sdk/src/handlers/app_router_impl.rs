@@ -1372,7 +1372,7 @@ impl AppRouterImpl {
             // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
             //
             // The receipt challenge is signed by a per-step EK derived from
-            // canonical C_pre, fresh Kyber k_step material, and K_DBRW.
+            // canonical C_pre and fresh Kyber k_step material (keyed under Smaster).
             let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 &rc_canonical,
             ) {

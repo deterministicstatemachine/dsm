@@ -11,7 +11,7 @@
 //! No quorum, no external verifier: the new device gets the existing device's signing pubkey from
 //! the QR it scanned in person; the existing device's gate signature is the authorization (only a
 //! key already in the tree can produce a verifying admission). The new device co-signs with its
-//! DBRW-bound key to prove physical possession without revealing the raw DBRW.
+//! device signing key to prove physical possession without revealing the raw key.
 
 use dsm::common::device_admission::{
     derive_secondary_device_id, self_attest_digest, verify_self_attestation_sig, AddDeviceAdmission,
@@ -115,7 +115,7 @@ impl DeviceAdmissionSDK {
                 "admission request: genesis != this device's genesis",
             ));
         }
-        // Verify the new device's DBRW-bound self-attestation (proof of physical possession).
+        // Verify the new device's signing-key self-attestation (proof of physical possession).
         if !verify_self_attestation_sig(
             &genesis,
             &new_device_id,

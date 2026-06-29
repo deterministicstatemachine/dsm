@@ -9,8 +9,8 @@
 //!
 //! Gate-only, two-signature, co-present. The only control added over a plain insert is a
 //! **signature gate**: only a device key already in the tree may authorize the insert. The new
-//! device co-signs with its own DBRW-bound key to prove physical possession (DBRW is silicon-bound
-//! and cannot be cloned) WITHOUT revealing the raw DBRW. The gate signer's pubkey is obtained from
+//! device co-signs with its own device signing key to prove physical possession (the key is
+//! mnemonic-rooted under GenesisV2) WITHOUT revealing the raw key. The gate signer's pubkey is obtained from
 //! the QR the new device scanned in person — there is **no storage-node quorum and no external
 //! verifier** (that is only needed by the recovery flow, where a remote party authenticates a
 //! device it never met). Replay is prevented by the monotonic `parent_device_tree_version`: an
@@ -97,7 +97,7 @@ pub struct AddDeviceAdmission {
     pub parent_device_tree_version: u64,
     /// SPHINCS+ by `signer_device_id` (the existing device) — the authorization gate.
     pub signature_by_signer_device: Vec<u8>,
-    /// SPHINCS+ by the new device's DBRW-bound key — proof of physical possession.
+    /// SPHINCS+ by the new device's signing key — proof of physical possession.
     pub signature_by_new_device: Vec<u8>,
 }
 
@@ -285,10 +285,10 @@ mod tests {
     fn fixture() -> (AddDeviceAdmission, Vec<u8>, [u8; 32], Vec<[u8; 32]>, u64) {
         let genesis = [0x6E; 32]; // root device id == genesis
         let (signer_pk, signer_sk) = kp(0x11); // existing (root) device signing key
-        let (new_pk, new_sk) = kp(0x22); // new device signing key (DBRW-bound)
+        let (new_pk, new_sk) = kp(0x22); // new device signing key (device-bound)
         let entropy = vec![0xAB; 32];
-        let dbrw = vec![0xCD; 48];
-        let new_id = derive_secondary_device_id(&entropy, &genesis, &dbrw);
+        let device_binding = vec![0xCD; 48];
+        let new_id = derive_secondary_device_id(&entropy, &genesis, &device_binding);
         let current: Vec<[u8; 32]> = vec![genesis];
         let version = 1u64;
         let parent_root = DeviceTree::new(current.clone()).root();

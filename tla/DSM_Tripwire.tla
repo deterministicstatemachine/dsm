@@ -27,7 +27,7 @@ Vars == <<deviceRoots, smtState, ledger>>
 \*
 \*   (1) Each receipt's sig_a / sig_b is produced by a freshly-derived
 \*       EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre ||
-\*                                       k_step || K_DBRW)).
+\*                                       k_step)).  \* keyed under s_master (GenesisV2: no device-binding key in the EK preimage)
 \*       k_step is recovered via Kyber-768 deterministic encapsulation
 \*       against the recipient's contact-bound Kyber pubkey
 \*       (no stubs, recipient_kyber_pk mandatory).
@@ -36,7 +36,7 @@ Vars == <<deviceRoots, smtState, ledger>>
 \*       "DSM/ek-cert\0" || EK_pk_{n+1} || h_n)) chaining it back to
 \*       the device's attested AK_pk via prior step keys. Per-relationship
 \*       chain heads + encrypted SK material live in cert_chain_heads
-\*       (XChaCha20-Poly1305 with K_DBRW-derived AEAD key).
+\*       (XChaCha20-Poly1305 with a chain-head-wrap-key-derived AEAD key).
 \*
 \*   (3) Bilateral both-side stamping. In every accepted bilateral
 \*       transition the sender stamps {ek_pk_a, ek_cert_a, kyber_ct_a,

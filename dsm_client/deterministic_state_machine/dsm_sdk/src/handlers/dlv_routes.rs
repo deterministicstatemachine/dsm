@@ -693,7 +693,7 @@ impl AppRouterImpl {
                                     // SMT verification); the inclusion
                                     // proof is the spec-strict
                                     // strengthening that closes the
-                                    // K_DBRW-forgery hole.
+                                    // signing-key-forgery hole.
                                     publish_vault_state_inclusion_proof(
                                         self.core_sdk.as_ref(),
                                         &vault_id,
@@ -1430,7 +1430,7 @@ impl AppRouterImpl {
                             // PD-SMT and publish a
                             // VaultStateInclusionProofV1.  This is the
                             // spec-strict strengthening that closes
-                            // the K_DBRW-forgery hole on the unlock
+                            // the signing-key-forgery hole on the unlock
                             // path.  Same owner-key gate as the anchor
                             // republish above.
                             publish_vault_state_inclusion_proof(

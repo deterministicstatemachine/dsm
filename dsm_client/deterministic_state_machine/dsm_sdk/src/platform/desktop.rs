@@ -2,7 +2,7 @@
 
 //! # Desktop Platform Implementation
 //!
-//! Provides `DesktopPlatform` with file-system-based storage and DBRW
+//! Provides `DesktopPlatform` with file-system-based storage
 //! stubs for non-Android (desktop/test) builds.
 
 use dsm::types::error::DsmError;

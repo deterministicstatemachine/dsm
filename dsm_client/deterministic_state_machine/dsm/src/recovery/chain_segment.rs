@@ -70,7 +70,6 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
         operation: s.operation.to_bytes(),
         entropy: s.entropy.clone(),
         encapsulated_entropy: s.encapsulated_entropy.clone(),
-        dbrw_summary_hash: s.dbrw_summary_hash.map(|d| d.to_vec()),
         // BTreeMap iterates sorted by 32B policy_commit → canonical order on the wire.
         balance_witness: s
             .balance_witness
@@ -106,11 +105,6 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
 pub fn rel_chain_state_from_proto(
     p: &RelationshipChainStateProto,
 ) -> Result<RelationshipChainState, DsmError> {
-    let dbrw_summary_hash = match &p.dbrw_summary_hash {
-        Some(d) => Some(fixed32("dbrw_summary_hash", d)?),
-        None => None,
-    };
-
     let mut balance_witness: BTreeMap<[u8; 32], u64> = BTreeMap::new();
     for (i, e) in p.balance_witness.iter().enumerate() {
         let pc = fixed32("balance_witness.policy_commit", &e.policy_commit)?;
@@ -157,7 +151,6 @@ pub fn rel_chain_state_from_proto(
         balance_witness,
         entity_sig: p.entity_sig.clone(),
         counterparty_sig: p.counterparty_sig.clone(),
-        dbrw_summary_hash,
         island_attestation,
     })
 }
@@ -400,7 +393,6 @@ mod tests {
             balance_witness: bw,
             entity_sig: Some(vec![0x11; 8]),
             counterparty_sig: None,
-            dbrw_summary_hash: Some([tag; 32]),
             island_attestation: None,
         }
     }
@@ -537,7 +529,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: Some(vec![0x22; 8]),
             counterparty_sig: Some(vec![0x33; 8]),
-            dbrw_summary_hash: None,
             island_attestation: None,
         };
         RecoveryEstablishmentReceipt { rel_key: rk, state }

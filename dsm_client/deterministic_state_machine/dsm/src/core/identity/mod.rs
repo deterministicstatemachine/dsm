@@ -107,9 +107,9 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
 pub fn convert_session_to_genesis_state(
     session: &GenesisSession,
 ) -> Result<GenesisState, IdentityError> {
-    // DBRW is an optional, local anti-cloning signal and must NOT be required to
+    // GenesisV2 is mnemonic-rooted; no DBRW/anti-cloning signal is required to
     // create or represent genesis / identity. Genesis must remain derivable and
-    // recoverable without DBRW present.
+    // recoverable from the wallet seed alone.
 
     if session.storage_nodes.len() < 3 {
         return Err(IdentityError::InvalidParameter(

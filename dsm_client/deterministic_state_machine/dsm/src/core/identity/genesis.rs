@@ -5,7 +5,7 @@
 //!
 //! - n-of-n commit-then-reveal entropy aggregation (participants ≥3); NOT
 //!   threshold cryptography — every participant's contribution is required.
-//! - DBRW is a local, optional anti-cloning signal; it must not be required for
+//! - GenesisV2 is mnemonic-rooted; no DBRW/anti-cloning signal is required for
 //!   genesis / identity creation and is not part of genesis binding.
 //! - No system wall-clock dependence.
 //! - Bytes-only at logical boundaries; strings are local to display/IDs only.
@@ -408,7 +408,7 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     Ok(gs)
 }
 
-// -------------------- Device entropy (no DBRW) --------------------
+// -------------------- Device entropy --------------------
 
 pub fn get_device_entropy(
     device_id: &str,
@@ -551,7 +551,7 @@ pub fn convert_session_to_genesis_state_compat(
     session: &crate::core::identity::genesis_session::GenesisSession,
 ) -> Result<GenesisState, DsmError> {
     // Canonical contribution materials `[device_id ∥ device_entropy, b_1, …, b_n]`
-    // — exactly the bytes the session hashed into `G`. Metadata and DBRW are
+    // — exactly the bytes the session hashed into `G`. Metadata is
     // NOT contributions and are excluded (they don't bind `G`).
     let contribs: Vec<Vec<u8>> = session.canonical_contribution_materials();
 

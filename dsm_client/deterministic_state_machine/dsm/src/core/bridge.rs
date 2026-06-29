@@ -839,7 +839,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                         }
                     }
 
-                    // -------- Recovery / DBRW ops are SDK-only --------
+                    // -------- Recovery ops are SDK-only --------
                     Some(gp::universal_op::Kind::RecoveryCapsuleDecrypt(req)) => {
                         if let Some(handler) = recovery_handler() {
                             match handler.handle_recovery_capsule_decrypt(req) {

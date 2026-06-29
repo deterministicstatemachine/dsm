@@ -278,7 +278,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             genesis_id        TEXT PRIMARY KEY,
             device_id         TEXT NOT NULL,
             mpc_proof         TEXT NOT NULL,
-            dbrw_binding      TEXT NOT NULL,
+            device_birth_binding      TEXT NOT NULL,
             merkle_root       TEXT NOT NULL,
             participant_count INTEGER NOT NULL,
             chain_tip         TEXT NOT NULL,
@@ -686,7 +686,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         --
         -- chain_head_sk_encrypted is the ChaCha20-Poly1305 ciphertext of
         -- the corresponding SECRET key (for Local rows only; NULL for
-        -- Counterparty), encrypted under a key derived from K_DBRW so
+        -- Counterparty), encrypted under a key derived from the chain-head wrap key so
         -- extracted ciphertext cannot be used on a different device.
         -- Used at receipt creation time to sign cert_{n+1}; wiped after
         -- consumption when chain_head advances.
@@ -1331,7 +1331,7 @@ mod tests {
             genesis_id: "gen-123".into(),
             device_id: "dev-456".into(),
             mpc_proof: "mpc".into(),
-            dbrw_binding: "bind".into(),
+            device_birth_binding: "bind".into(),
             merkle_root: "root".into(),
             participant_count: 3,
             progress_marker: "P".into(),
@@ -1370,7 +1370,7 @@ mod tests {
             genesis_id: "gid".into(),
             device_id: "did".into(),
             mpc_proof: "mpc".into(),
-            dbrw_binding: "bind".into(),
+            device_birth_binding: "bind".into(),
             merkle_root: "root".into(),
             participant_count: 5,
             progress_marker: "Ps".into(),

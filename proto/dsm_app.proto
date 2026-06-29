@@ -2845,11 +2845,10 @@ message BalanceWitnessEntryProto {
 
 // Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
 // EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
-// canonical operation bytes, entropy, optional encapsulated_entropy, optional
-// dbrw_summary_hash, sorted balance witness) plus the two optional signatures (NOT hashed —
-// they sign the digest). proto3 `optional` distinguishes None from an empty Some, which the
-// chain-tip hash treats differently; a faithful round-trip is REQUIRED so a decoder can
-// recompute the tip and assert equality.
+// canonical operation bytes, entropy, optional encapsulated_entropy, sorted balance witness)
+// plus the two optional signatures (NOT hashed — they sign the digest). proto3 `optional`
+// distinguishes None from an empty Some, which the chain-tip hash treats differently; a
+// faithful round-trip is REQUIRED so a decoder can recompute the tip and assert equality.
 message RelationshipChainStateProto {
   bytes  rel_key             = 1 [(dsm_fixed_len)=32];
   bytes  embedded_parent     = 2 [(dsm_fixed_len)=32];
@@ -2857,7 +2856,10 @@ message RelationshipChainStateProto {
   bytes  operation           = 4 [(dsm_max_len)=1048576]; // Operation::to_bytes (canonical)
   bytes  entropy             = 5 [(dsm_max_len)=65535];
   optional bytes encapsulated_entropy = 6 [(dsm_max_len)=65535]; // None vs Some(empty) preserved
-  optional bytes dbrw_summary_hash    = 7 [(dsm_fixed_len)=32];
+  // Field 7 reserved (removed: old C-DBRW dbrw_summary_hash chain-tip component;
+  // GenesisV2 has no C-DBRW). MUST NOT be reused.
+  reserved 7;
+  reserved "dbrw_summary_hash";
   repeated BalanceWitnessEntryProto balance_witness = 8;
   optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
   optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
@@ -3970,7 +3972,7 @@ message RegistryV3 {
 // Applicant pack for joining the active storage-node set.
 // Domain: "DSM/apply\0"
 message ApplicantV3 {
-  bytes hw_bind   = 1; // C-DBRW hardware binding
+  bytes hw_bind   = 1; // device-birth hardware binding
   bytes env_fp    = 2; // environment fingerprint
   uint64 capacity = 3; // declared capacity C
   bytes stake_dlv = 4; // StakeDLV address

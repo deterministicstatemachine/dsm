@@ -79,19 +79,19 @@ pub fn verify_stitched_receipt(
         ));
     }
 
-    // Rule 2b: C-DBRW-bound ephemeral-key authorization (whitepaper §11.1).
+    // Rule 2b: EK-cert-chain ephemeral-key authorization (whitepaper §11.1).
     // Offline receipt acceptance is fail-closed: the sender signature must be
     // made by a per-step EK that is certified by the current AK/EK chain head.
     // Parent/root inclusion proves state consistency; this cert proves live
     // enrolled-device authorization for the proposed transition.
     let Some(chain_head) = &ctx.chain_head_pubkey_a else {
         return Ok(ReceiptAcceptance::reject(
-            "Missing chain_head_pubkey_a (C-DBRW EK cert chain required)".to_string(),
+            "Missing chain_head_pubkey_a (EK cert chain required)".to_string(),
         ));
     };
     if receipt.ek_cert_a.is_empty() {
         return Ok(ReceiptAcceptance::reject(
-            "Missing ek_cert_a (C-DBRW EK cert chain required)".to_string(),
+            "Missing ek_cert_a (EK cert chain required)".to_string(),
         ));
     }
     match crate::crypto::ephemeral_key::verify_ek_cert(
@@ -110,12 +110,12 @@ pub fn verify_stitched_receipt(
     }
     let Some(chain_head) = &ctx.chain_head_pubkey_b else {
         return Ok(ReceiptAcceptance::reject(
-            "Missing chain_head_pubkey_b (C-DBRW EK cert chain required)".to_string(),
+            "Missing chain_head_pubkey_b (EK cert chain required)".to_string(),
         ));
     };
     if receipt.ek_cert_b.is_empty() {
         return Ok(ReceiptAcceptance::reject(
-            "Missing ek_cert_b (C-DBRW EK cert chain required)".to_string(),
+            "Missing ek_cert_b (EK cert chain required)".to_string(),
         ));
     }
     match crate::crypto::ephemeral_key::verify_ek_cert(
@@ -567,7 +567,7 @@ mod tests {
 
     /// Receipt verification is fail-closed when no sender chain head is set.
     /// Parent/root inclusion alone is not spend authority; the recipient must
-    /// also verify the C-DBRW-bound per-step EK cert chain.
+    /// also verify the per-step EK cert chain.
     #[test]
     fn test_no_chain_head_rejects_receipt_authorization() {
         // Reuse the parent_uniqueness test setup but without consuming the parent.
@@ -609,7 +609,7 @@ mod tests {
         assert!(!result.valid, "missing chain head must reject");
         let reason = result.reason.unwrap();
         assert!(
-            reason.contains("chain_head_pubkey_a") || reason.contains("C-DBRW"),
+            reason.contains("chain_head_pubkey_a") || reason.contains("EK cert chain"),
             "wrong rejection reason: {}",
             reason
         );
