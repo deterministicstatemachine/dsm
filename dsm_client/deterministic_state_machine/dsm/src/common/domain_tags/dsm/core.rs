@@ -7,7 +7,6 @@
 pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit";
 pub const TAG_SMT_NODE: &str = "DSM/smt-node";
 pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf";
-pub const TAG_DBRW: &str = "DSM/dbrw";
 pub const TAG_HASH_DATA: &str = "DSM/hash-data";
 pub const TAG_ENTITY_ID: &str = "DSM/entity-id";
 pub const TAG_DEVICE_ID: &str = "DSM/device-id";
@@ -37,7 +36,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_RECEIPT_COMMIT,
     TAG_SMT_NODE,
     TAG_SMT_LEAF,
-    TAG_DBRW,
     TAG_HASH_DATA,
     TAG_ENTITY_ID,
     TAG_DEVICE_ID,

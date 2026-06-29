@@ -171,7 +171,7 @@ impl BilateralBleHandler {
     /// Apply per-step EK signing (whitepaper §11.1) to an unsigned bilateral
     /// receipt. Looks up the counterparty's Kyber pubkey from the contact
     /// record, fetches the local AK keypair from the bilateral transaction
-    /// manager, fetches K_DBRW for SK encryption and EK derivation, runs the
+    /// manager, fetches the chain-head wrap key for SK encryption, runs the
     /// per-step signing helper, stamps the artifacts on the receipt's local
     /// side (A for sender, B for receiver), and advances the local chain
     /// head. Returns the full-protobuf bytes of the signed receipt.

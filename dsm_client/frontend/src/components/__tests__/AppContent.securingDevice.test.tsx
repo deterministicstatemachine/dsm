@@ -5,7 +5,7 @@ import { render, screen } from '@testing-library/react';
 import AppContent from '../AppContent';
 
 describe('AppContent securing device state', () => {
-  test('shows the leave-screen warning while DBRW securing is in progress', () => {
+  test('shows the leave-screen warning while device securing is in progress', () => {
     render(
       <AppContent
         appState="securing_device"
@@ -31,7 +31,7 @@ describe('AppContent securing device state', () => {
       />,
     );
 
-    expect(screen.getByText(/DBRW SALT INITIALIZATION/i)).toBeTruthy();
+    expect(screen.getByText(/DEVICE KEY INITIALIZATION/i)).toBeTruthy();
     expect(screen.getByText(/THIS ONLY HAPPENS ONCE/i)).toBeTruthy();
     expect(screen.getByText(/DO NOT LEAVE THE SCREEN UNTIL FINISHED/i)).toBeTruthy();
     expect(screen.queryByText(/PLEASE WAIT/i)).toBeNull();

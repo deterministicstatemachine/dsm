@@ -4630,7 +4630,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
                 );
             } else {
                 log::error!(
-                    "ensureAppRouterInstalled: Cannot install AppRouter - canonical C-DBRW binding key missing or invalid"
+                    "ensureAppRouterInstalled: Cannot install AppRouter - canonical chain-head binding key missing or invalid"
                 );
             }
             0 // false
@@ -4641,7 +4641,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
 /// Return an integer status code describing why AppRouter may not be available.
 /// Codes:
 /// 0 = NOT_READY_NO_GENESIS
-/// 1 = DBRW_NOT_READY
+/// 1 = ROUTER_NOT_READY
 /// 2 = INSTALLED
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterStatus(
@@ -4680,10 +4680,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
             }
 
             // Conservative status: genesis and canonical binding are ready, but AppRouter still
-            // is not installed. Return DBRW_NOT_READY to indicate startup/router initialization is
+            // is not installed. Return ROUTER_NOT_READY to indicate startup/router initialization is
             // still incomplete.
             log::warn!(
-                "getAppRouterStatus: genesis present and canonical C-DBRW binding ready but AppRouter missing; returning DBRW_NOT_READY"
+                "getAppRouterStatus: genesis present and canonical binding ready but AppRouter missing; returning ROUTER_NOT_READY"
             );
             1
         }),

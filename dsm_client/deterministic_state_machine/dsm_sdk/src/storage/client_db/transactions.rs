@@ -613,7 +613,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
-            dbrw_summary_hash: None,
             island_attestation: None,
         };
         let failed_chain_tip = failed_chain_state.compute_chain_tip();
@@ -718,7 +717,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
-            dbrw_summary_hash: None,
             island_attestation: None,
         };
         let failed_chain_tip = failed_chain_state.compute_chain_tip();

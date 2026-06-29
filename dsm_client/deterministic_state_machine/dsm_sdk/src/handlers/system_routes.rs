@@ -75,7 +75,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             mpc_proof: res.session_id.clone(),
             // Legacy C-DBRW binding-record column (Genesis v2 has no silicon binding);
             // retained empty until the GenesisRecord schema column is dropped.
-            dbrw_binding: String::new(),
+            device_birth_binding: String::new(),
             merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
             participant_count: res.participating_nodes.len() as u32,
             progress_marker: "genesis".to_string(),
@@ -283,7 +283,7 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         genesis_id: genesis_id_b32.clone(),
         device_id: device_id_b32.clone(),
         mpc_proof: String::new(),
-        dbrw_binding: String::new(),
+        device_birth_binding: String::new(),
         merkle_root: crate::util::text_id::encode_base32_crockford(&smt_root),
         participant_count: 0,
         progress_marker: "genesis".to_string(),

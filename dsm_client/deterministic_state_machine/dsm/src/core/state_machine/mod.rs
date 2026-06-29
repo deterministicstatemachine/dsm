@@ -205,7 +205,6 @@ impl StateMachine {
             None, // encapsulated_entropy — caller can set if needed
             deltas,
             initial_chain_tip,
-            None, // dbrw_summary_hash
         )
     }
 

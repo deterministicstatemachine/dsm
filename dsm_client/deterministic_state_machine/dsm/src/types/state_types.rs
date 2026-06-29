@@ -87,11 +87,6 @@ pub struct StateParams {
     pub device_info: DeviceInfo,
     /// Optional forward commitment binding this state to a future transition.
     pub forward_commitment: Option<PreCommitment>,
-    /// Optional deterministic commitment to DBRW health summary for this transition.
-    ///
-    /// This MUST NOT be the raw DBRW binding key or any secret. It is intended to be a
-    /// small, canonical digest produced from local DBRW health telemetry.
-    pub dbrw_summary_hash: Option<[u8; 32]>,
     pub previous_hash: [u8; 32],
     #[allow(dead_code)]
     pub(crate) none_field: Option<Vec<u8>>,
@@ -124,7 +119,6 @@ impl StateParams {
             operation,
             device_info,
             forward_commitment: None,
-            dbrw_summary_hash: None,
             previous_hash: [0u8; 32],
             none_field: None,
             metadata: Vec::new(),
@@ -137,9 +131,6 @@ impl StateParams {
             counterparty_sig: None,
         }
     }
-
-    // with_dbrw_summary_hash deleted: zero callers. The DBRW summary hash
-    // travels through DeviceState::advance directly (not StateParams).
 
     /// Set encapsulated entropy
     pub fn with_encapsulated_entropy(mut self, encapsulated_entropy: Vec<u8>) -> Self {
@@ -331,13 +322,6 @@ pub struct State {
     /// Relationship context for tracking state relationships
     pub relationship_context: Option<RelationshipContext>,
 
-    /// Optional deterministic commitment to DBRW health summary for this transition.
-    ///
-    /// This MUST NOT be the raw DBRW binding key or any secret. It is intended to be a
-    /// small, canonical digest (e.g., BLAKE3 over a minimal DBRW stat summary like the
-    /// global bit error rate) so that state progression is cryptographically coupled to
-    /// the anti-cloning gate.
-    pub dbrw_summary_hash: Option<[u8; 32]>,
     pub(crate) forward_commitment: Option<PreCommitment>,
     pub(crate) position_sequence: Option<PositionSequence>,
     pub(crate) positions: Vec<Vec<i32>>,
@@ -411,7 +395,6 @@ impl State {
             flags: HashSet::new(),
             token_balances: HashMap::new(),
             relationship_context: None,
-            dbrw_summary_hash: params.dbrw_summary_hash,
             forward_commitment: params.forward_commitment,
             positions: Vec::new(),
             position_sequence: None,
@@ -453,7 +436,6 @@ impl State {
             flags,
             token_balances: HashMap::new(), // Initialize empty token balances
             relationship_context: None,
-            dbrw_summary_hash: None,
             forward_commitment: None,
             positions: Vec::new(),
             position_sequence: None,
@@ -528,11 +510,6 @@ impl State {
         if let Some(enc) = &self.encapsulated_entropy {
             hasher.update(enc);
         }
-
-        // DBRW health summaries are intentionally excluded from the canonical
-        // state hash. They are device-local, advisory telemetry and must not
-        // perturb deterministic state identity or balance projection matching
-        // across restore/replay paths.
 
         // Deterministic serialization of operation (canonical bytes)
         let op_bytes = self.operation.to_bytes();
@@ -703,26 +680,6 @@ impl CanonicalEncode for State {
 mod tests {
     use super::{DeviceInfo, State, StateParams};
     use crate::types::operations::Operation;
-
-    #[test]
-    fn dbrw_summary_hash_does_not_change_state_hash() {
-        let device_info = DeviceInfo::new([0x11; 32], vec![0x22; 64]);
-
-        let base = State::new(StateParams::new(
-            vec![1, 2, 3, 4],
-            Operation::Noop,
-            device_info.clone(),
-        ));
-
-        let mut params = StateParams::new(vec![1, 2, 3, 4], Operation::Noop, device_info);
-        params.dbrw_summary_hash = Some([0xAB; 32]);
-        let with_dbrw = State::new(params);
-
-        let base_hash = base.compute_hash().expect("base hash");
-        let dbrw_hash = with_dbrw.compute_hash().expect("dbrw hash");
-
-        assert_eq!(base_hash, dbrw_hash);
-    }
 
     // ── helpers ──────────────────────────────────────────────────────
 
@@ -1333,13 +1290,6 @@ mod tests {
         let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_forward_commitment(pc);
         assert!(sp.forward_commitment.is_some());
-    }
-
-    #[test]
-    fn state_params_dbrw_summary_hash_direct() {
-        let mut sp = StateParams::new(vec![], Operation::Noop, test_device_info());
-        sp.dbrw_summary_hash = Some([0xDD; 32]);
-        assert_eq!(sp.dbrw_summary_hash, Some([0xDD; 32]));
     }
 
     // ── State hash varies with different inputs ─────────────────────

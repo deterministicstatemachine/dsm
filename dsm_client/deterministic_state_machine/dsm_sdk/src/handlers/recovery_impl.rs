@@ -195,7 +195,7 @@ impl RecoveryHandler for RecoveryImpl {
 
         // The device_entropy serves as both the device_id identifier and the private key
         // for signing the tombstone receipt. In production, the private key would come from
-        // the PlatformContext DBRW-bound key material.
+        // the PlatformContext key material.
         let device_id_bytes = &operation.device_entropy;
         if device_id_bytes.len() < 32 {
             return Err("device_entropy must be at least 32 bytes".to_string());

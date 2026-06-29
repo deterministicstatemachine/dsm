@@ -2,8 +2,8 @@
 //! Bitcoin account persistence with at-rest encryption for secret material.
 //!
 //! `secret_material` is encrypted with XChaCha20-Poly1305 using a key derived
-//! from the DBRW binding key via BLAKE3 domain separation:
-//!   enc_key = BLAKE3("DSM/btc-key-enc\0" || dbrw_binding_key)
+//! from the device binding key via BLAKE3 domain separation:
+//!   enc_key = BLAKE3("DSM/btc-key-enc\0" || binding_key)
 //!
 //! Storage format: `[24-byte nonce][ciphertext + 16-byte Poly1305 tag]`
 
@@ -22,13 +22,10 @@ const TAG_LEN: usize = 16;
 /// Minimum length of encrypted blob: nonce + at least 1 byte plaintext + tag.
 const MIN_ENCRYPTED_LEN: usize = NONCE_LEN + 1 + TAG_LEN;
 
-/// Derive a 32-byte encryption key from the DBRW binding key.
-fn derive_enc_key(dbrw_binding_key: &[u8]) -> [u8; 32] {
-    *dsm::crypto::blake3::domain_hash(
-        dsm::common::domain_tags::TAG_DSM_BTC_KEY_ENC,
-        dbrw_binding_key,
-    )
-    .as_bytes()
+/// Derive a 32-byte encryption key from the device binding key.
+fn derive_enc_key(binding_key: &[u8]) -> [u8; 32] {
+    *dsm::crypto::blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_BTC_KEY_ENC, binding_key)
+        .as_bytes()
 }
 
 /// Encrypt `plaintext` with XChaCha20-Poly1305 using a BLAKE3-derived deterministic nonce.
@@ -268,8 +265,8 @@ mod tests {
 
     #[test]
     fn derive_enc_key_is_deterministic() {
-        let key1 = derive_enc_key(b"test-dbrw-binding-key");
-        let key2 = derive_enc_key(b"test-dbrw-binding-key");
+        let key1 = derive_enc_key(b"test-binding-key");
+        let key2 = derive_enc_key(b"test-binding-key");
         assert_eq!(key1, key2);
         assert_ne!(key1, [0u8; 32]);
     }

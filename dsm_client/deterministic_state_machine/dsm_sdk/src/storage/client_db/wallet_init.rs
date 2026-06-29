@@ -218,7 +218,7 @@ mod tests {
             genesis_id: "gen-test-001".to_string(),
             device_id: "dev-test-001".to_string(),
             mpc_proof: "proof".to_string(),
-            dbrw_binding: "binding".to_string(),
+            device_birth_binding: "binding".to_string(),
             merkle_root: "root123".to_string(),
             participant_count: 1,
             progress_marker: "complete".to_string(),
@@ -293,7 +293,7 @@ mod tests {
         let conn = binding.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO genesis_records (
-                genesis_id, device_id, mpc_proof, dbrw_binding, merkle_root,
+                genesis_id, device_id, mpc_proof, device_birth_binding, merkle_root,
                 participant_count, chain_tip, publication_hash, storage_nodes,
                 entropy_hash, protocol_version, created_at
             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
@@ -301,7 +301,7 @@ mod tests {
                 gen.genesis_id,
                 gen.device_id,
                 gen.mpc_proof,
-                gen.dbrw_binding,
+                gen.device_birth_binding,
                 gen.merkle_root,
                 gen.participant_count as i64,
                 gen.progress_marker,

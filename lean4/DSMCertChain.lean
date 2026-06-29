@@ -48,7 +48,7 @@
     implementation `k_step` is derived from a fresh per-step Kyber-768
     encapsulation between the bilateral parties:
       coins  = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
-                          || DevID_sender || K_DBRW)
+                          || DevID_sender)
       (ct, ss) = KyberEncDet(recipient_kyber_pk, coins)
       k_step = BLAKE3-256("DSM/kyber-ss\0" || ss)
     The recipient decapsulates `ct` with their Kyber sk to recover the

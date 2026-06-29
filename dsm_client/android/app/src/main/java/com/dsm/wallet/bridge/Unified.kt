@@ -135,7 +135,7 @@ object Unified {
     /**
      * Get a compact AppRouter status code (native):
      * 0 = NOT_READY_NO_GENESIS
-     * 1 = DBRW_NOT_READY
+     * 1 = ROUTER_NOT_READY
      * 2 = INSTALLED
      */
     @Keep @JvmStatic fun getAppRouterStatus(): Int = UnifiedNativeApi.getAppRouterStatus()

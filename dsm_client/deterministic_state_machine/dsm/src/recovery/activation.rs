@@ -260,7 +260,6 @@ mod tests {
                 balance_witness: BTreeMap::new(),
                 entity_sig: None,
                 counterparty_sig: None,
-                dbrw_summary_hash: None,
                 island_attestation: None,
             },
             carry_forward_commitment: [0; 32],

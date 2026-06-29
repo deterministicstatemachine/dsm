@@ -25,7 +25,7 @@ pub struct GenesisRecord {
     pub genesis_id: String,
     pub device_id: String,
     pub mpc_proof: String,
-    pub dbrw_binding: String,
+    pub device_birth_binding: String,
     pub merkle_root: String,
     pub participant_count: u32,
     pub progress_marker: String,

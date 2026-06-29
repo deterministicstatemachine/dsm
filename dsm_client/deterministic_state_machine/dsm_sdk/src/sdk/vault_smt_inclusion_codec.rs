@@ -6,7 +6,7 @@
 //! SoFi spec §4.1.2 / §8.4 step 2 — strictly stronger than the
 //! `VaultStateAnchorV1` codec next door: an inclusion proof commits
 //! the PD-SMT root + a 256-sibling Merkle path, so a stateless
-//! attacker who recovered the owner's K_DBRW still cannot forge a
+//! attacker who recovered the owner's signing key still cannot forge a
 //! proof against the device's actual SMT.
 //!
 //! Lives in `dsm_sdk` (not `dsm` core) because the `dsm` crate cannot

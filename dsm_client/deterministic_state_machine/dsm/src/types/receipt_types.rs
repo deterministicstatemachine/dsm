@@ -11,7 +11,7 @@
 //! - Domain-separated BLAKE3 hashing
 //! - Dual SPHINCS+ signatures (both parties)
 //! - Inclusion proofs for old/new leaves and device binding
-//! - Per-step C-DBRW receipt response through EK derivation and cert chaining
+//! - Per-step receipt response through EK derivation and cert chaining
 
 use crate::common::domain_tags::TAG_RECEIPT_COMMIT;
 use crate::types::error::DsmError;
@@ -82,7 +82,7 @@ pub struct StitchedReceiptV2 {
     /// SPHINCS+ response from party A for this receipt challenge.
     ///
     /// The challenge is the proposed transition context. The signer answers
-    /// with the fresh EK key derived from h_n, C_pre, k_step, and K_DBRW.
+    /// with the fresh EK key derived from h_n, C_pre, k_step (keyed under Smaster).
     pub sig_a: Vec<u8>,
 
     /// SPHINCS+ response from party B for this receipt challenge.
@@ -104,7 +104,7 @@ pub struct StitchedReceiptV2 {
     /// Per-step ephemeral SPHINCS+ public key for party A (whitepaper §11.1).
     ///
     /// `EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1})`, where
-    /// `E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)`.
+    /// `E_{n+1} = HKDF_Smaster("DSM/ek\0" || h_n || C_pre || k_step)`.
     ///
     /// Carried in the envelope alongside `sig_a` so verifiers don't need
     /// the per-step EK out-of-band. NOT in canonical commit form (§4.2.1).

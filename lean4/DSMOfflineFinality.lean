@@ -27,8 +27,7 @@
     The receipt-signing predicate this module relies on (every accepted
     commit is signed by valid SPHINCS+ keys) is implemented in the
     codebase via the per-step ephemeral key chain:
-      EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre || k_step
-                                       || K_DBRW))
+      EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre || k_step))
       cert_{n+1} = Sign_{SK_n}(BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n))
     Each receipt body is signed by EK_{n+1}; the cert chain anchors back
     to AK_pk via prior step keys (AK at step 0).

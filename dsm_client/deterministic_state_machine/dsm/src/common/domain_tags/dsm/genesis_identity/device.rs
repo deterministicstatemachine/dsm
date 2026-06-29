@@ -11,8 +11,8 @@ pub const TAG_DSM_DEVID: &str = "DSM/devid";
 /// additional-device enrollment) — the existing authorized device signs this with its device key.
 pub const TAG_DSM_ADD_DEVICE_ADMISSION: &str = "DSM/add-device-admission";
 /// Canonical signing-payload domain for the NEW-DEVICE self-attestation half of an
-/// `AddDeviceAdmission` — the joining device signs this with its DBRW-bound device key to prove
-/// physical possession of its claimed identity (without revealing the raw DBRW).
+/// `AddDeviceAdmission` — the joining device signs this with its device signing key to prove
+/// physical possession of its claimed identity (without revealing the raw key).
 pub const TAG_DSM_ADD_DEVICE_SELF_ATTEST: &str = "DSM/add-device-self-attest";
 pub const TAG_DSM_GENESIS_DEVICE_COMMIT: &str = "DSM/genesis-device-commit";
 pub const TAG_DSM_GENESIS_DEVICE_ENTROPY: &str = "DSM/genesis-device-entropy";

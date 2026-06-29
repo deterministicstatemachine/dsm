@@ -2706,7 +2706,7 @@ impl B0xSDK {
             .local_chain_tip()
             .await
             .map(|v| text_id::encode_base32_crockford(&v))?;
-        // Use signing_authority (C-DBRW-derived) to match the key used by
+        // Use signing_authority to match the key used by
         // wallet.sign_operation_bytes — see submit_to_b0x for rationale.
         let sender_signing_public_key = crate::sdk::signing_authority::current_public_key()
             .unwrap_or_else(|_| core_sdk.get_device_identity().public_key);

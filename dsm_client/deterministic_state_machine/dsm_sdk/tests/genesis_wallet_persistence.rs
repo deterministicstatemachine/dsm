@@ -24,7 +24,7 @@ fn genesis_persists_and_initializes_wallet_metadata() {
         genesis_id: genesis_b32.clone(),
         device_id: device_b32.clone(),
         mpc_proof: "mpc-proof".to_string(),
-        dbrw_binding: "binding".to_string(),
+        device_birth_binding: "binding".to_string(),
         merkle_root: genesis_b32.clone(),
         participant_count: 3,
         progress_marker: "t".to_string(),

@@ -35,10 +35,12 @@ use crate::util::deterministic_time::tick;
 // The local device's chain-head secret key is needed at receipt construction
 // time to sign cert_{n+1}. Persisting it in plaintext would defeat its
 // "ephemeral" property; persisting it under an OS keystore is platform-
-// specific. We persist it AEAD-encrypted under a key derived from K_DBRW so:
+// specific. We persist it AEAD-encrypted under a key derived from the
+// chain-head wrap key (the per-step EK / chain-head key provided by the
+// caller) so:
 //
-// 1. Extracted ciphertext is useless on a different device — K_DBRW binds
-//    decryption to hardware/environment per whitepaper §12.
+// 1. Extracted ciphertext is useless without the chain-head wrap key — the
+//    wrapping binds decryption to possession of that key.
 // 2. The SK lifetime is bounded: encrypted at receipt-build time for step n,
 //    used at receipt-build time for step n+1, then wiped (overwritten with
 //    NULL) when chain head advances.
@@ -51,20 +53,20 @@ use crate::util::deterministic_time::tick;
 const CERT_CHAIN_SK_AAD: &[u8] = b"DSM/cert-chain-sk-aead-v1\0";
 
 /// Derive the AEAD key for cert-chain SK encryption from the device's
-/// `K_DBRW`. Whitepaper §12 binds this key to hardware/environment.
-fn derive_chain_sk_aead_key(k_dbrw: &[u8; 32]) -> [u8; 32] {
+/// chain-head wrap key.
+fn derive_chain_sk_aead_key(chain_head_wrap_key: &[u8; 32]) -> [u8; 32] {
     let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(
         dsm::common::domain_tags::TAG_DSM_CERT_CHAIN_SK_AEAD,
     );
-    hasher.update(k_dbrw);
+    hasher.update(chain_head_wrap_key);
     *hasher.finalize().as_bytes()
 }
 
 /// AEAD-encrypt a chain-head secret key.
 ///
 /// Output layout: `nonce(24) || ciphertext_with_tag`.
-pub fn encrypt_chain_sk(plain_sk: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>> {
-    let key = derive_chain_sk_aead_key(k_dbrw);
+pub fn encrypt_chain_sk(plain_sk: &[u8], chain_head_wrap_key: &[u8; 32]) -> Result<Vec<u8>> {
+    let key = derive_chain_sk_aead_key(chain_head_wrap_key);
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| anyhow!("XChaCha20Poly1305 init: {e}"))?;
     let mut nonce_bytes = [0u8; 24];
@@ -86,15 +88,15 @@ pub fn encrypt_chain_sk(plain_sk: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 /// AEAD-decrypt a chain-head secret key. Returns `Err` if the ciphertext
-/// is tampered or if `k_dbrw` doesn't match what was used at encryption.
-pub fn decrypt_chain_sk(ciphertext: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>> {
+/// is tampered or if `chain_head_wrap_key` doesn't match what was used at encryption.
+pub fn decrypt_chain_sk(ciphertext: &[u8], chain_head_wrap_key: &[u8; 32]) -> Result<Vec<u8>> {
     if ciphertext.len() < 24 + 16 {
         return Err(anyhow!(
             "cert-chain SK ciphertext too short ({} bytes, need >= 40)",
             ciphertext.len()
         ));
     }
-    let key = derive_chain_sk_aead_key(k_dbrw);
+    let key = derive_chain_sk_aead_key(chain_head_wrap_key);
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| anyhow!("XChaCha20Poly1305 init: {e}"))?;
     let (nonce_bytes, ct_with_tag) = ciphertext.split_at(24);
@@ -106,7 +108,9 @@ pub fn decrypt_chain_sk(ciphertext: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>>
                 aad: CERT_CHAIN_SK_AAD,
             },
         )
-        .map_err(|_| anyhow!("cert-chain SK decryption failed (tamper or wrong K_DBRW)"))
+        .map_err(|_| {
+            anyhow!("cert-chain SK decryption failed (tamper or wrong chain-head wrap key)")
+        })
 }
 
 /// Which side of a bilateral relationship a chain head belongs to.
@@ -231,9 +235,9 @@ pub fn init_local_cert_chain_head_with_sk(
     relationship_key: &[u8; 32],
     chain_head_pubkey: &[u8],
     chain_head_secret_key: &[u8],
-    k_dbrw: &[u8; 32],
+    chain_head_wrap_key: &[u8; 32],
 ) -> Result<bool> {
-    let encrypted_sk = encrypt_chain_sk(chain_head_secret_key, k_dbrw)?;
+    let encrypted_sk = encrypt_chain_sk(chain_head_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let now = tick() as i64;
@@ -252,15 +256,15 @@ pub fn init_local_cert_chain_head_with_sk(
 }
 
 /// Advance the local chain head to a new pubkey + secret key after a
-/// receipt is accepted. Encrypts the new SK under `K_DBRW`. Returns the
+/// receipt is accepted. Encrypts the new SK under `chain-head wrap key`. Returns the
 /// new step count, or `None` if no row exists for that relationship.
 pub fn advance_local_cert_chain_head_with_sk(
     relationship_key: &[u8; 32],
     new_pubkey: &[u8],
     new_secret_key: &[u8],
-    k_dbrw: &[u8; 32],
+    chain_head_wrap_key: &[u8; 32],
 ) -> Result<Option<u64>> {
-    let encrypted_sk = encrypt_chain_sk(new_secret_key, k_dbrw)?;
+    let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let now = tick() as i64;
@@ -293,7 +297,7 @@ pub fn advance_local_cert_chain_head_with_sk(
 /// rows always).
 pub fn load_local_chain_head_sk(
     relationship_key: &[u8; 32],
-    k_dbrw: &[u8; 32],
+    chain_head_wrap_key: &[u8; 32],
 ) -> Result<Option<Vec<u8>>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -308,7 +312,7 @@ pub fn load_local_chain_head_sk(
         .flatten();
     match ct {
         Some(ciphertext) if !ciphertext.is_empty() => {
-            decrypt_chain_sk(&ciphertext, k_dbrw).map(Some)
+            decrypt_chain_sk(&ciphertext, chain_head_wrap_key).map(Some)
         }
         _ => Ok(None),
     }
@@ -613,11 +617,11 @@ mod tests {
     #[serial_test::serial]
     fn chain_sk_aead_round_trip() {
         let plain = vec![0xABu8; 64]; // SPHINCS+ secret keys are larger; test with 64 bytes
-        let k_dbrw = [0xCD; 32];
-        let ct = encrypt_chain_sk(&plain, &k_dbrw).unwrap();
+        let chain_head_wrap_key = [0xCD; 32];
+        let ct = encrypt_chain_sk(&plain, &chain_head_wrap_key).unwrap();
         // Nonce(24) + ciphertext(>=plain.len()) + tag(16) = at least 40 + plain.len()
         assert!(ct.len() >= 24 + plain.len() + 16);
-        let recovered = decrypt_chain_sk(&ct, &k_dbrw).unwrap();
+        let recovered = decrypt_chain_sk(&ct, &chain_head_wrap_key).unwrap();
         assert_eq!(recovered, plain);
     }
 
@@ -627,9 +631,9 @@ mod tests {
     #[serial_test::serial]
     fn chain_sk_aead_random_nonce_per_encryption() {
         let plain = vec![0x11u8; 32];
-        let k_dbrw = [0x22; 32];
-        let ct1 = encrypt_chain_sk(&plain, &k_dbrw).unwrap();
-        let ct2 = encrypt_chain_sk(&plain, &k_dbrw).unwrap();
+        let chain_head_wrap_key = [0x22; 32];
+        let ct1 = encrypt_chain_sk(&plain, &chain_head_wrap_key).unwrap();
+        let ct2 = encrypt_chain_sk(&plain, &chain_head_wrap_key).unwrap();
         assert_ne!(ct1, ct2, "fresh nonce per encryption");
     }
 
@@ -638,26 +642,26 @@ mod tests {
     #[serial_test::serial]
     fn chain_sk_aead_tamper_fails() {
         let plain = vec![0x33u8; 64];
-        let k_dbrw = [0x44; 32];
-        let mut ct = encrypt_chain_sk(&plain, &k_dbrw).unwrap();
+        let chain_head_wrap_key = [0x44; 32];
+        let mut ct = encrypt_chain_sk(&plain, &chain_head_wrap_key).unwrap();
         // Flip a bit in the ciphertext payload (after the 24-byte nonce).
         ct[30] ^= 0x01;
-        assert!(decrypt_chain_sk(&ct, &k_dbrw).is_err());
+        assert!(decrypt_chain_sk(&ct, &chain_head_wrap_key).is_err());
     }
 
-    /// Decrypting with a different K_DBRW (different device) fails.
+    /// Decrypting with a different chain-head wrap key (different device) fails.
     #[test]
     #[serial_test::serial]
-    fn chain_sk_aead_wrong_k_dbrw_fails() {
+    fn chain_sk_aead_wrong_chain_head_wrap_key_fails() {
         let plain = vec![0x55u8; 64];
-        let k_dbrw_a = [0x77; 32];
-        let k_dbrw_b = [0x88; 32];
-        let ct = encrypt_chain_sk(&plain, &k_dbrw_a).unwrap();
-        assert!(decrypt_chain_sk(&ct, &k_dbrw_b).is_err());
+        let chain_head_wrap_key_a = [0x77; 32];
+        let chain_head_wrap_key_b = [0x88; 32];
+        let ct = encrypt_chain_sk(&plain, &chain_head_wrap_key_a).unwrap();
+        assert!(decrypt_chain_sk(&ct, &chain_head_wrap_key_b).is_err());
     }
 
     /// Init-with-SK round-trip: encrypted SK survives the storage layer
-    /// and decrypts cleanly under the right K_DBRW.
+    /// and decrypts cleanly under the right chain-head wrap key.
     #[test]
     #[serial_test::serial]
     fn local_chain_head_sk_init_load_round_trip() {
@@ -665,17 +669,21 @@ mod tests {
         let r = rel(0xB1);
         let pk = vec![0xAA; 64];
         let sk = vec![0xBB; 96];
-        let k_dbrw = [0xCC; 32];
+        let chain_head_wrap_key = [0xCC; 32];
 
-        let inserted = init_local_cert_chain_head_with_sk(&r, &pk, &sk, &k_dbrw).unwrap();
+        let inserted =
+            init_local_cert_chain_head_with_sk(&r, &pk, &sk, &chain_head_wrap_key).unwrap();
         assert!(inserted);
 
-        let loaded = load_local_chain_head_sk(&r, &k_dbrw).unwrap();
+        let loaded = load_local_chain_head_sk(&r, &chain_head_wrap_key).unwrap();
         assert_eq!(loaded, Some(sk.clone()));
 
-        // Decrypting with wrong K_DBRW fails.
+        // Decrypting with wrong chain-head wrap key fails.
         let bad = load_local_chain_head_sk(&r, &[0xDD; 32]);
-        assert!(bad.is_err(), "wrong K_DBRW must fail decryption");
+        assert!(
+            bad.is_err(),
+            "wrong chain-head wrap key must fail decryption"
+        );
     }
 
     /// Advance-with-SK round-trip: after advancing, the new SK is what
@@ -689,15 +697,17 @@ mod tests {
         let sk0 = vec![0x11; 96];
         let pk1 = vec![0x20; 64];
         let sk1 = vec![0x22; 96];
-        let k_dbrw = [0x33; 32];
+        let chain_head_wrap_key = [0x33; 32];
 
-        init_local_cert_chain_head_with_sk(&r, &pk0, &sk0, &k_dbrw).unwrap();
-        let step1 = advance_local_cert_chain_head_with_sk(&r, &pk1, &sk1, &k_dbrw)
+        init_local_cert_chain_head_with_sk(&r, &pk0, &sk0, &chain_head_wrap_key).unwrap();
+        let step1 = advance_local_cert_chain_head_with_sk(&r, &pk1, &sk1, &chain_head_wrap_key)
             .unwrap()
             .unwrap();
         assert_eq!(step1, 1);
 
-        let loaded_sk = load_local_chain_head_sk(&r, &k_dbrw).unwrap().unwrap();
+        let loaded_sk = load_local_chain_head_sk(&r, &chain_head_wrap_key)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded_sk, sk1);
         // Old SK is not recoverable post-advance.
         assert_ne!(loaded_sk, sk0);
@@ -717,15 +727,19 @@ mod tests {
         let r = rel(0xB3);
         let pk = vec![0x44; 64];
         let sk = vec![0x55; 96];
-        let k_dbrw = [0x66; 32];
+        let chain_head_wrap_key = [0x66; 32];
 
-        init_local_cert_chain_head_with_sk(&r, &pk, &sk, &k_dbrw).unwrap();
-        assert!(load_local_chain_head_sk(&r, &k_dbrw).unwrap().is_some());
+        init_local_cert_chain_head_with_sk(&r, &pk, &sk, &chain_head_wrap_key).unwrap();
+        assert!(load_local_chain_head_sk(&r, &chain_head_wrap_key)
+            .unwrap()
+            .is_some());
 
         wipe_local_chain_head_sk(&r).unwrap();
 
         // SK is gone.
-        assert!(load_local_chain_head_sk(&r, &k_dbrw).unwrap().is_none());
+        assert!(load_local_chain_head_sk(&r, &chain_head_wrap_key)
+            .unwrap()
+            .is_none());
         // Pubkey is still there.
         let pk_after = load_cert_chain_head_pubkey(&r, CertChainSide::Local)
             .unwrap()
