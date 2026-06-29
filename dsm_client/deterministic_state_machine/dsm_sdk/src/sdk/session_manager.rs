@@ -393,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn default_phase_is_runtime_loading() {
         let _g = setup_test_env();
         // SDK_READY already reset to false by setup_test_env
@@ -403,6 +404,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn phase_needs_genesis_when_ready_but_no_identity() {
         let _g = setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
@@ -414,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn phase_locked_when_lock_set() {
         let _g = setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
@@ -429,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn fatal_error_overrides_phase() {
         let _g = setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
@@ -491,6 +495,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn hardware_facts_round_trip() {
         let _g = setup_test_env();
         // SDK_READY already reset to false by setup_test_env
@@ -528,6 +533,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn sync_lock_config_reads_native_prefs() {
         let _g = setup_test_env();
         AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
@@ -544,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn cold_start_with_enabled_lock_defaults_to_locked() {
         let _g = setup_test_env();
         AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
@@ -563,6 +570,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn runtime_unlock_persists_until_next_process_start() {
         let _g = setup_test_env();
         AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
@@ -588,6 +596,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn snapshot_bytes_are_envelope_wrapped() {
         let _g = setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);

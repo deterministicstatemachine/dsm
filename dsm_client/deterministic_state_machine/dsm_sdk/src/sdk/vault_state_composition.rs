@@ -1001,6 +1001,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn skips_pointer_when_rc_missing_even_if_x_present() {
         // Cross-version safety: a legacy publisher might write the X
         // anchor without the paired RC bytes.  The composer must skip
@@ -1121,6 +1122,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn rejects_pointer_whose_rc_hop_baseline_disagrees_with_cursor() {
         // A trader publishes a RouteCommit whose hop's
         // vault_state_reserves_digest doesn't match the composer's
@@ -1189,6 +1191,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn rejects_pointer_when_route_commit_x_mismatches_pointer_x() {
         let vault_id = vid_seed(0x18);
         let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");

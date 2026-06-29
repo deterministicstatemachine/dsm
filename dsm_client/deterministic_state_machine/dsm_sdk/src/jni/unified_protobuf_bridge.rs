@@ -3587,6 +3587,7 @@ mod unified_protobuf_bridge_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn query_frame_preserves_req_id_on_success_and_error() {
         let _guard = setup_test_env();
         let req_id = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -3614,6 +3615,7 @@ mod unified_protobuf_bridge_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn invoke_frame_preserves_existing_success_and_error_wire_shape() {
         let _guard = setup_test_env();
 
@@ -3638,6 +3640,7 @@ mod unified_protobuf_bridge_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn hardware_facts_wrapper_matches_session_manager_bytes() {
         let _guard = setup_test_env();
         let facts = pb::SessionHardwareFactsProto {
@@ -3660,6 +3663,7 @@ mod unified_protobuf_bridge_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn envelope_wrapper_preserves_framed_response_behavior() {
         let _guard = setup_test_env();
         let request = pb::Envelope {

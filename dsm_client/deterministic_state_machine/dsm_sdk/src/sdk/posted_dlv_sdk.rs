@@ -383,6 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn alice_posts_bob_lists_carol_sees_nothing() {
         let bob_pk = pk(0xB0, 1568);
         let carol_pk = pk(0xC0, 1568);
@@ -407,6 +408,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn advertisement_digest_binds_proto() {
         let bob_pk = pk(0xB1, 1568);
         let dlv_id = vid(0x02);
@@ -433,6 +435,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn tampered_proto_rejected_by_digest_check() {
         let bob_pk = pk(0xB2, 1568);
         let dlv_id = vid(0x03);
@@ -455,6 +458,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn claimed_state_supersedes_active_in_dedup() {
         let bob_pk = pk(0xB3, 1568);
         let dlv_id = vid(0x04);
@@ -487,6 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn dedup_prefers_higher_state_number() {
         use super::super::bitcoin_tap_sdk::BitcoinTapSdk;
 
@@ -540,6 +545,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn delete_removes_both_ad_and_proto() {
         let bob_pk = pk(0xB5, 1568);
         let dlv_id = vid(0x06);
@@ -573,6 +579,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn empty_recipient_prefix_lists_nothing() {
         let ghost_pk = pk(0xF0, 1568);
         let view = load_active_advertisements_for_recipient(&ghost_pk)
