@@ -19938,11 +19938,10 @@ export class BalanceWitnessEntryProto extends Message<BalanceWitnessEntryProto> 
 /**
  * Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
  * EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
- * canonical operation bytes, entropy, optional encapsulated_entropy, sorted balance
- * witness) plus the two optional signatures (NOT hashed —
- * they sign the digest). proto3 `optional` distinguishes None from an empty Some, which the
- * chain-tip hash treats differently; a faithful round-trip is REQUIRED so a decoder can
- * recompute the tip and assert equality.
+ * canonical operation bytes, entropy, optional encapsulated_entropy, sorted balance witness)
+ * plus the two optional signatures (NOT hashed — they sign the digest). proto3 `optional`
+ * distinguishes None from an empty Some, which the chain-tip hash treats differently; a
+ * faithful round-trip is REQUIRED so a decoder can recompute the tip and assert equality.
  *
  * @generated from message dsm.RelationshipChainStateProto
  */
@@ -27424,7 +27423,7 @@ export class RegistryV3 extends Message<RegistryV3> {
  */
 export class ApplicantV3 extends Message<ApplicantV3> {
   /**
-   * C-DBRW hardware binding
+   * device-birth hardware binding
    *
    * @generated from field: bytes hw_bind = 1;
    */

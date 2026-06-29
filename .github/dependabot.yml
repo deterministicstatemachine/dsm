@@ -31,6 +31,22 @@ updates:
       - "dependencies"
       - "frontend"
     open-pull-requests-limit: 5
+    ignore:
+      # @bufbuild/protoc-gen-es is pinned to the v1 line because it must match
+      # the @bufbuild/protobuf ^1 runtime. The v1 plugin emits the class-based
+      # API (proto3.makeMessageType / new Message()) used by every proto
+      # consumer in src/services and src/proto/dsm_app_pb.ts. v2+ emits a
+      # different runtime (typeName-keyed schemas, create(Schema, ...)) and
+      # requires migrating @bufbuild/protobuf to ^2 plus rewriting every
+      # consumer; bumping the plugin alone silently breaks `npm run type-check`
+      # and `proto:gen`. A 2.x bump was already reverted twice (the pin in
+      # commit b14e436a, then PR #457 re-bumped it). Hold minor/major until a
+      # coordinated v2 migration lands. Patch bumps OK.
+      - dependency-name: "@bufbuild/protoc-gen-es"
+        update-types:
+          ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "@bufbuild/protobuf"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
