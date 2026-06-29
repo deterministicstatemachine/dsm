@@ -874,6 +874,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn invalid_digest_excluded_from_verified_search() {
         let a = token("AAAd1");
         let b = token("BBBd1");

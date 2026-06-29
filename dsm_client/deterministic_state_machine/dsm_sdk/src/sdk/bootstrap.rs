@@ -130,6 +130,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn load_without_identity_errors_or_panics_on_race() {
         setup_test_env();
         // In parallel tests, ensure_storage_loaded() may race on STORAGE_INITIALIZED.

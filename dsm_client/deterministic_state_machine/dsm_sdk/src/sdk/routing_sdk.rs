@@ -449,6 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn lists_advertisements_for_pair_in_either_order() {
         let token_a = token(0xA0);
         let token_b = token(0xB0);
@@ -485,6 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn reserves_canonicalise_to_lex_lower_token() {
         // tokens(0x01) < tokens(0xFE) lexicographically (string compare).
         let lower = token(0x01);
@@ -526,6 +528,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn pair_isolation_no_cross_pair_leakage() {
         let token_a = token(0xA1);
         let token_b = token(0xB1);
@@ -558,6 +561,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn digest_binds_proto_and_tamper_is_caught() {
         let token_a = token(0xA2);
         let token_b = token(0xB2);
@@ -588,6 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn terminal_state_supersedes_active_in_dedup() {
         let token_a = token(0xA3);
         let token_b = token(0xB3);
@@ -620,6 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn dedup_prefers_higher_state_number() {
         let token_a = token(0xA4);
         let token_b = token(0xB4);
@@ -669,6 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn delete_removes_both_keys() {
         let token_a = token(0xA5);
         let token_b = token(0xB5);
@@ -693,6 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn unknown_pair_lists_empty() {
         let ghost_a = token(0xF0);
         let ghost_b = token(0xF1);
@@ -715,6 +723,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn republish_with_reserves_bumps_state_and_updates_reserves() {
         let token_a = token(0x60);
         let token_b = token(0x61);
@@ -756,6 +765,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn republish_preserves_non_reserve_fields() {
         let token_a = token(0x70);
         let token_b = token(0x71);
@@ -812,6 +822,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn republish_for_absent_advertisement_returns_err() {
         // Vault that was never advertised — republish must surface
         // the storage-not-found error so the caller (chunk #7
@@ -828,6 +839,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn republish_supersedes_baseline_in_dedup() {
         // Republish must produce a higher updated_state_number so the
         // chunk-#1 dedup selector picks the post-trade ad in any

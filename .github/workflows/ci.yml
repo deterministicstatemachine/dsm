@@ -79,13 +79,9 @@ jobs:
         run: cargo build --locked --workspace --all-features
 
       - name: Test
-        # Run single-threaded: parts of the suite exercise process-global singletons
-        # (AppState, the session wallet-seed cache, the storage base dir, the posted-DLV
-        # store) that are one-per-process by design and are not isolated across parallel
-        # test threads. The Coverage job already runs the same suite with --test-threads=1.
         run: |
-          cargo test --locked --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture --test-threads=1
+          cargo test --locked --workspace --exclude dsm_storage_node -- --nocapture
+          cargo test --locked -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 
       - name: Codegen enforcement
         run: |
@@ -252,21 +248,11 @@ jobs:
         run: npm ci
 
       - name: Generate Rust coverage artifacts
-        # --test-threads=1: under llvm-cov's instrumentation the test
-        # scheduling differs enough from a plain `cargo test` run that
-        # tests touching shared global state in dsm_sdk (AppState,
-        # binding-key slot, identity-info slot) race. The plain Rust
-        # job passes with default parallelism because its schedule
-        # happens to avoid the bad interleavings; coverage runs flake
-        # on different tests (e.g. test_generate_recovery_mnemonic_and_config,
-        # set_and_get_sdk_initialized) depending on order. Serializing
-        # is the cheap deterministic fix while the wider serial-group
-        # audit lands separately.
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --locked --workspace --exclude dsm_storage_node --no-report -- --nocapture --test-threads=1
-          cargo llvm-cov --locked -p dsm_storage_node --no-default-features --features local-dev,strict --no-report -- --nocapture --test-threads=1
+          cargo llvm-cov --locked --workspace --exclude dsm_storage_node --no-report -- --nocapture
+          cargo llvm-cov --locked -p dsm_storage_node --no-default-features --features local-dev,strict --no-report -- --nocapture
           cargo llvm-cov report --json --output-path coverage.json
           cargo llvm-cov report --lcov --output-path coverage/rust.lcov
 

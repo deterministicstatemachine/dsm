@@ -1345,6 +1345,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn anchor_key_collision_is_rejected_on_fetch() {
         // Manually plant an anchor whose `x` field disagrees with its
         // key.  The fetch helper must reject this — otherwise a
@@ -1495,6 +1496,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn eligibility_rejects_when_anchor_x_does_not_match_key() {
         // Anchor exists at the right key but its `x` field disagrees —
         // a forged/swapped record.  Eligibility MUST reject.
@@ -1889,6 +1891,7 @@ mod tests {
     // chunk-#3 publish flows already use.
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn demo_full_amm_trade_e2e() {
         use dsm::crypto::sphincs::{generate_keypair, sign as sphincs_sign, SphincsVariant};
         use dsm::vault::FulfillmentMechanism;

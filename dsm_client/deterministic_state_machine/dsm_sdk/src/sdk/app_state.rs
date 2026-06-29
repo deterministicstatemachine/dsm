@@ -136,6 +136,34 @@ impl AppState {
         STORAGE_INITIALIZED.store(true, Ordering::SeqCst);
     }
 
+    /// Test-isolation guard around [`Self::ensure_storage_loaded`].
+    ///
+    /// In production (`DSM_SDK_TEST_MODE` unset) this lazily loads persisted
+    /// state exactly like calling `ensure_storage_loaded` directly — behavior
+    /// is unchanged.
+    ///
+    /// Under tests the in-memory `STORAGE` slot is primed explicitly by the
+    /// per-test setup helpers, so a full `ensure_storage_loaded` here is both
+    /// redundant and unsafe. `ensure_storage_loaded` is non-atomic — it checks
+    /// `STORAGE_INITIALIZED`, then later re-stores the `HAS_IDENTITY` /
+    /// `SDK_INITIALIZED` atomics from the loaded/default state — so running it
+    /// concurrently with another test's reset window (which briefly clears
+    /// `STORAGE_INITIALIZED`) stomps those atomics mid-assertion and flakes the
+    /// AppState tests. In test mode we therefore only make sure the `STORAGE`
+    /// slot exists, so accessors can still read and write it, and never touch
+    /// the global atomics or `STORAGE_INITIALIZED`. This generalises the guard
+    /// already used by `get_has_identity` / `get_sdk_initialized`.
+    fn ensure_storage_loaded_unless_test() {
+        if std::env::var("DSM_SDK_TEST_MODE").is_err() {
+            Self::ensure_storage_loaded();
+            return;
+        }
+        let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_none() {
+            *guard = Some(AppStateStorage::default());
+        }
+    }
+
     /// Atomically write current in-memory storage to disk as protobuf.
     fn save_storage() {
         if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
@@ -216,7 +244,7 @@ impl AppState {
         genesis_hash: Vec<u8>,
         smt_root: Vec<u8>,
     ) {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         {
             let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(ref mut s) = *guard {
@@ -248,7 +276,7 @@ impl AppState {
         genesis_hash: Vec<u8>,
         smt_root: Vec<u8>,
     ) {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         {
             let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(ref mut s) = *guard {
@@ -281,7 +309,7 @@ impl AppState {
 
     /// Accessors (binary values stay binary; UI must encode externally).
     pub fn get_device_id() -> Option<Vec<u8>> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         STORAGE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -289,7 +317,7 @@ impl AppState {
             .and_then(|s| s.device_id.clone())
     }
     pub fn get_public_key() -> Option<Vec<u8>> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         STORAGE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -297,7 +325,7 @@ impl AppState {
             .and_then(|s| s.public_key.clone())
     }
     pub fn get_genesis_hash() -> Option<Vec<u8>> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         STORAGE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -305,7 +333,7 @@ impl AppState {
             .and_then(|s| s.genesis_hash.clone())
     }
     pub fn get_smt_root() -> Option<Vec<u8>> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         STORAGE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -315,7 +343,7 @@ impl AppState {
     /// Get the Device Tree root R_G (§2.3).
     /// Returns the stored 32-byte root, or None if not yet computed.
     pub fn get_device_tree_root() -> Option<[u8; 32]> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         let guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
         guard.as_ref()?.device_tree_root.as_ref().and_then(|v| {
             if v.len() == 32 {
@@ -337,7 +365,7 @@ impl AppState {
     }
     /// Set the Device Tree root R_G and persist.
     pub fn set_device_tree_root(root: [u8; 32]) {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         {
             let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(ref mut s) = *guard {
@@ -349,29 +377,23 @@ impl AppState {
 
     /// Boolean flags
     pub fn get_has_identity() -> bool {
-        if std::env::var("DSM_SDK_TEST_MODE").is_err() {
-            Self::ensure_storage_loaded();
-        }
+        Self::ensure_storage_loaded_unless_test();
         HAS_IDENTITY.load(Ordering::SeqCst)
     }
     pub fn set_sdk_initialized(value: bool) {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         SDK_INITIALIZED.store(value, Ordering::SeqCst);
         Self::save_storage();
     }
     pub fn get_sdk_initialized() -> bool {
-        if std::env::var("DSM_SDK_TEST_MODE").is_err() {
-            Self::ensure_storage_loaded();
-        }
+        Self::ensure_storage_loaded_unless_test();
         SDK_INITIALIZED.load(Ordering::SeqCst)
     }
 
     /// Preference bridge used by JNI-facing helpers (string K/V only).
     /// Binary fields remain inaccessible here (device_id/genesis_hash).
     pub fn handle_app_state_request(key: &str, operation: &str, value: &str) -> String {
-        if std::env::var("DSM_SDK_TEST_MODE").is_err() {
-            Self::ensure_storage_loaded();
-        }
+        Self::ensure_storage_loaded_unless_test();
 
         match key {
             "has_identity" => {
@@ -437,7 +459,7 @@ impl AppState {
     /// Used by `purge_legacy_prefs` at AppRouterImpl boot to wipe the
     /// retired `dsm.token.*` / `dsm.dlv.*` / `dsm.sofi.*` keyspace.
     pub fn purge_keys_with_prefixes(prefixes: &[&str]) -> usize {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         let removed = {
             let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
             let Some(ref mut store) = *guard else {
@@ -462,7 +484,7 @@ impl AppState {
 
     /// Recovery session helpers
     pub fn set_recovery_state(recovery_id: &str, status: &str) -> Result<(), String> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         {
             let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(ref mut store) = *guard {
@@ -478,13 +500,13 @@ impl AppState {
     }
 
     pub fn get_recovery_state(recovery_id: &str) -> Option<String> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         let guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
         guard.as_ref()?.recovery_sessions.get(recovery_id).cloned()
     }
 
     pub fn clear_recovery_state(recovery_id: &str) -> Result<(), String> {
-        Self::ensure_storage_loaded();
+        Self::ensure_storage_loaded_unless_test();
         {
             let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(ref mut store) = *guard {

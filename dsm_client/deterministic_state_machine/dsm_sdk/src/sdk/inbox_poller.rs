@@ -400,6 +400,7 @@ mod tests {
     // ── Poller state flags ──
 
     #[test]
+    #[serial_test::serial]
     fn stop_poller_sets_flag() {
         POLLER_STOP.store(false, Ordering::SeqCst);
         POLLER_RUNNING.store(false, Ordering::SeqCst);
@@ -410,6 +411,7 @@ mod tests {
     // ── resume_poller when not running calls start_poller ──
 
     #[test]
+    #[serial_test::serial]
     fn resume_when_running_does_not_restart() {
         POLLER_RUNNING.store(true, Ordering::SeqCst);
         POLLER_STOP.store(false, Ordering::SeqCst);
@@ -503,18 +505,21 @@ mod tests {
     // ── Poller flags: independent checks ──
 
     #[test]
+    #[serial_test::serial]
     fn poller_stop_flag_initially_false() {
         POLLER_STOP.store(false, Ordering::SeqCst);
         assert!(!POLLER_STOP.load(Ordering::SeqCst));
     }
 
     #[test]
+    #[serial_test::serial]
     fn poller_running_flag_initially_false() {
         POLLER_RUNNING.store(false, Ordering::SeqCst);
         assert!(!POLLER_RUNNING.load(Ordering::SeqCst));
     }
 
     #[test]
+    #[serial_test::serial]
     fn stop_then_stop_is_idempotent() {
         POLLER_STOP.store(false, Ordering::SeqCst);
         POLLER_RUNNING.store(false, Ordering::SeqCst);
