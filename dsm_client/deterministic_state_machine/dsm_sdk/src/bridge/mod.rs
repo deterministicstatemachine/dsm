@@ -176,6 +176,7 @@ pub trait AppRouter: Send + Sync {
         _operation: dsm::types::operations::Operation,
         _deltas: &[dsm::types::device_state::BalanceDelta],
         _initial_chain_tip: Option<[u8; 32]>,
+        _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
             "execute_on_relationship_for_bilateral not implemented on this router",

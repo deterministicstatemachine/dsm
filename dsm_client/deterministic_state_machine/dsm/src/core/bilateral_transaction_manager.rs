@@ -494,6 +494,11 @@ pub struct PreparedBilateralAdvance {
     /// Bilateral precommitment hash, for post-commit cleanup via
     /// [`BilateralTransactionManager::consume_pre_commitment`].
     pub pre_commitment_hash: [u8; 32],
+    /// Offline-bearer fused-anchor-state leaf update to commit atomically with the relationship
+    /// leaf (Boot Fenced Fused Anchor). `Some` iff this is a bearer transfer whose sender drove the
+    /// appliance; the SAME value the sender's `simulate_advance_for_confirm` used to build the wire
+    /// proofs, so the canonical committed root matches (both-or-neither). `None` for ordinary transfers.
+    pub anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
 }
 
 #[derive(Debug)]
@@ -1427,6 +1432,7 @@ impl BilateralTransactionManager {
         receiver_acceptance_proof: &[u8],
         pre_generated_entropy: Option<[u8; 32]>,
         sender_deltas: Vec<BalanceDelta>,
+        anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
     ) -> Result<PreparedBilateralAdvance, DsmError> {
         info!("prepare_bilateral_advance: tripwire + entropy (no SMT/anchor mutation)");
 
@@ -1536,6 +1542,7 @@ impl BilateralTransactionManager {
             parent_tip: anchor.chain_tip,
             entropy,
             pre_commitment_hash: *pre_commitment_hash,
+            anchor_leaf,
         })
     }
 

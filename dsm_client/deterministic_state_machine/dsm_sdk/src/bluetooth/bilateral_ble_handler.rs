@@ -572,6 +572,8 @@ impl BilateralBleHandler {
             pre_finalize_entropy: None,
             stitched_receipt_bytes: record.stitched_receipt_bytes.clone(),
             receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
         })
     }
 
@@ -1571,6 +1573,8 @@ impl BilateralBleHandler {
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
             receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
         };
 
         {
@@ -2501,6 +2505,8 @@ impl BilateralBleHandler {
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
             receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
         };
 
         {
@@ -3304,13 +3310,70 @@ impl BilateralBleHandler {
                 "send_bilateral_confirm: app_router not installed; cannot simulate advance",
             )
         })?;
+        // Boot Fenced Fused Anchor (§21) producer step: for offline-bearer transfers, drive the
+        // device fused-anchor appliance (PREPARE(r_R)→COMMIT→EMIT→FINALIZE) so the confirm can carry
+        // a real `OfflineRelease` plus the successor fused-anchor leaf. That SAME leaf is fed into
+        // both the confirm-proof simulation below AND the canonical commit later (stashed on the
+        // session for `mark_sender_committed_with_post_state_hash`) — both-or-neither: if the two
+        // roots ever diverge the commit-side guard fails closed. Ordinary transfers (predicate
+        // false) and bearer transfers lacking a receiver challenge produce no artifacts, so the
+        // release rides empty and the receiver fails closed to online recovery.
+        let bearer_artifacts =
+            if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &session.operation,
+            ) {
+                match (session.receiver_challenge, &session.operation) {
+                    (
+                        Some(r_r),
+                        Operation::Transfer {
+                            token_id,
+                            authority_policy,
+                            ..
+                        },
+                    ) => {
+                        let object_id = dsm::crypto::blake3::domain_hash_bytes(
+                            "DSM/bearer-object/v1",
+                            token_id,
+                        );
+                        let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
+                            "DSM/bearer-payload/v1",
+                            &op_bytes,
+                        );
+                        let authority_policy_hash = authority_policy
+                            .as_ref()
+                            .map(|ap| ap.policy_id)
+                            .unwrap_or([0u8; 32]);
+                        match router.build_offline_bearer_release(
+                            rel_key,
+                            session.counterparty_device_id,
+                            object_id,
+                            payload_hash,
+                            authority_policy_hash,
+                            0,
+                            op_bytes.clone(),
+                            r_r,
+                        ) {
+                            Ok(art) => Some(art),
+                            Err(e) => {
+                                log::warn!(
+                                    "[bilateral_ble] offline-bearer release build failed (fail closed to online recovery): {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
         let sim_outcome = router.simulate_advance_for_confirm(
             rel_key,
             session.counterparty_device_id,
             session.operation.clone(),
             &sender_deltas,
             Some(h_n),
-            None,
+            bearer_artifacts.as_ref().map(|a| a.anchor_leaf.clone()),
         )?;
         // `parent_r_a` is the CAS-layer device head (pre-seed root). The
         // Merkle `parent_proof` is built against the post-seed tree, so the
@@ -3320,6 +3383,19 @@ impl BilateralBleHandler {
         // seeding changes the root.
         let pre_root = sim_outcome.smt_proofs.pre_root;
         let sender_smt_root = sim_outcome.child_r_a;
+        // Stash the driven successor leaf AND the sim post-root so the canonical commit in
+        // `mark_sender_committed_with_post_state_hash` applies the byte-exact same leaf the on-wire
+        // proofs were built from, and can enforce both-or-neither (committed root == this sent sim
+        // root). Mirrors the `pre_finalize_entropy` stash; only set for bearer transfers.
+        {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&commitment_hash) {
+                if let Some(art) = bearer_artifacts.as_ref() {
+                    s.anchor_leaf = Some(art.anchor_leaf.clone());
+                    s.anchor_sim_root = Some(sender_smt_root);
+                }
+            }
+        }
         let rel_proof_parent_bytes = sim_outcome.smt_proofs.parent_proof.to_bytes();
         let rel_proof_child_bytes = sim_outcome.smt_proofs.child_proof.to_bytes();
         // Override the receipt tips: SMT stores the asymmetric (A-side)
@@ -3462,12 +3538,24 @@ impl BilateralBleHandler {
             // π_rel_parent (h_n ∈ r_A) per whitepaper §4.3 acceptance predicate #2.
             sender_smt_root_before: pre_root.to_vec(),
             // Canonical Boot Fenced Fused offline release + the two anchor-state SMT inclusion
-            // proofs (prev = pinned frontier, next = adopted successor). The send path does not
-            // drive the appliance yet (Phase 5 producer-driving is wired incrementally), so these
-            // ride empty and the receiver fails closed to online recovery.
-            offline_release: Vec::new(),
-            anchor_state_prev_proof: Vec::new(),
-            anchor_state_next_proof: Vec::new(),
+            // proofs (prev = pinned frontier, next = adopted successor), produced by driving the
+            // device fused-anchor appliance above. Non-bearer transfers (or a bearer transfer with
+            // no receiver challenge / a failed appliance drive) leave these empty and the receiver
+            // fails closed to online recovery.
+            offline_release: bearer_artifacts
+                .as_ref()
+                .map(|a| a.offline_release.clone())
+                .unwrap_or_default(),
+            anchor_state_prev_proof: sim_outcome
+                .anchor_proofs
+                .as_ref()
+                .map(|p| p.parent.clone())
+                .unwrap_or_default(),
+            anchor_state_next_proof: sim_outcome
+                .anchor_proofs
+                .as_ref()
+                .map(|p| p.child.clone())
+                .unwrap_or_default(),
         };
 
         // 8. Wrap in envelope
@@ -4169,19 +4257,20 @@ impl BilateralBleHandler {
         // Safe 7 IslandAttestation receiver path is QUARANTINED — it is no longer an accepted
         // offline-bearer path. Fail-closed to ONLINE RECOVERY: an absent/malformed release, an
         // un-enrolled anchor, an empty/inauthentic counter transcript, or ANY failed predicate check
-        // rejects HERE, before the value-release commit below — so no value is released. Three
-        // producer-side inputs are unbuilt (sender OfflineRelease, authenticated counter transcript,
-        // anchor-state-committing SMT leaf), so this currently always recovers online (Phase 5
-        // makes it operational). Ordinary transfers are unaffected (the predicate is false for them).
+        // rejects HERE, before the value-release commit below — so no value is released. The sender
+        // now produces a real `OfflineRelease` + anchor-state SMT proofs on the confirm, but the
+        // receiver-side admit is still gated: no fused anchor is pinned (`pinned = None`) and the
+        // relay counter-verifier slot is unfilled, so this still always recovers online. Ordinary
+        // transfers are unaffected (the predicate is false for them).
         if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
             &session.operation,
         ) {
-            // The receiver supplies no fused-anchor pin yet (Phase 5): `pinned = None` routes every
+            // The receiver supplies no fused-anchor pin yet: `pinned = None` routes every
             // offline-bearer transfer to online recovery. `h_n` is the receiver's accepted
             // relationship tip. `expected_receiver_challenge` is the r_R this receiver generated in
             // its prepare-response and stashed against the session — the release must bind it, so a
             // release minted for a different receiver session is rejected (defense-in-depth; the
-            // empty live release already short-circuits to recovery before this check).
+            // absent pin already short-circuits to recovery before this check).
             let policy_hash = match &session.operation {
                 Operation::Transfer {
                     authority_policy: Some(ap),
@@ -4192,7 +4281,8 @@ impl BilateralBleHandler {
             let expected_receiver_challenge = session.receiver_challenge.unwrap_or([0u8; 32]);
             // Anchor-state binding: the sender's device-SMT roots (before = pinned frontier,
             // after = adopted successor) and the two inclusion proofs, as carried on the confirm.
-            // Empty proofs (Phase 5 send path unwired) route to online recovery fail-closed.
+            // The send path now populates these; with no pin admitted they still route to online
+            // recovery fail-closed.
             let sender_smt_root: [u8; 32] = confirm_request
                 .sender_smt_root
                 .as_slice()
@@ -4295,6 +4385,7 @@ impl BilateralBleHandler {
                 session.operation.clone(),
                 &receiver_deltas,
                 Some(h_n),
+                None, // receiver credits ordinary; the fused-anchor leaf is a sender-side concern
             )
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
@@ -4765,6 +4856,8 @@ impl BilateralBleHandler {
             session_operation,
             pre_entropy,
             cached_receipt,
+            session_anchor_leaf,
+            session_anchor_sim_root,
         ) = {
             let sessions = self.sessions.sessions.lock().await;
             let sess = match sessions.get(commitment_hash) {
@@ -4789,6 +4882,8 @@ impl BilateralBleHandler {
                 sess.operation.clone(),
                 sess.pre_finalize_entropy,
                 sess.stitched_receipt_bytes.clone(),
+                sess.anchor_leaf.clone(),
+                sess.anchor_sim_root,
             )
         };
 
@@ -4856,6 +4951,7 @@ impl BilateralBleHandler {
                     &counterparty_sig,
                     pre_entropy,
                     sender_deltas,
+                    session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
                 )
                 .await
             {
@@ -4904,12 +5000,67 @@ impl BilateralBleHandler {
             }
         };
 
+        // Both-or-neither guard (bearer transfers only). Re-simulate the advance the canonical
+        // commit is about to perform — same rel_key/operation/deltas/parent_tip and the SAME driven
+        // `anchor_leaf` — and require its post-root to equal the sim root already sent to the
+        // receiver on the confirm. `simulate_advance_for_confirm` is prepare-only (it does NOT
+        // re-drive the appliance), so this re-applies the stashed successor leaf without advancing
+        // the fused anchor. A divergence (device head / relationship tip drifted between confirm and
+        // commit) means the receiver verified proofs against a root we would NOT commit; abort BEFORE
+        // the canonical mutation and fail closed to online recovery. Structurally this should never
+        // fire — it guards against regressions that break the determinism the invariant rests on.
+        if let Some(sent_sim_root) = session_anchor_sim_root {
+            let projected_root = match router.simulate_advance_for_confirm(
+                prepared.rel_key,
+                prepared.counterparty_devid,
+                prepared.operation.clone(),
+                &prepared.deltas,
+                Some(prepared.parent_tip),
+                prepared.anchor_leaf.clone(),
+            ) {
+                Ok(o) => o.child_r_a,
+                Err(e) => {
+                    warn!(
+                        "[BILATERAL] bearer both-or-neither re-simulation failed: {e} — fail closed to recovery"
+                    );
+                    return self
+                        .finalize_sender_recovery(
+                            commitment_hash,
+                            &counterparty_device_id,
+                            post_state_hash,
+                            &op_bytes,
+                            event_amount_opt,
+                            event_token_id_opt,
+                        )
+                        .await;
+                }
+            };
+            if projected_root != sent_sim_root {
+                error!(
+                    "[BILATERAL] both-or-neither VIOLATION: commit-time sim root {} != sent sim root {} — aborting before canonical commit, fail closed",
+                    bytes_to_base32(&projected_root[..8]),
+                    bytes_to_base32(&sent_sim_root[..8]),
+                );
+                return self
+                    .finalize_sender_recovery(
+                        commitment_hash,
+                        &counterparty_device_id,
+                        post_state_hash,
+                        &op_bytes,
+                        event_amount_opt,
+                        event_token_id_opt,
+                    )
+                    .await;
+            }
+        }
+
         let outcome = match router.execute_on_relationship_for_bilateral(
             prepared.rel_key,
             prepared.counterparty_devid,
             prepared.operation.clone(),
             &prepared.deltas,
             Some(prepared.parent_tip),
+            prepared.anchor_leaf.clone(), // bearer: commit the same fused-anchor leaf as the sim proofs
         ) {
             Ok(o) => o,
             Err(advance_err) => {
@@ -5567,6 +5718,8 @@ impl BilateralBleHandler {
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
             receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
         };
 
         // Insert into active sessions
@@ -5906,6 +6059,8 @@ mod tests {
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
                 receiver_challenge: None,
+                anchor_leaf: None,
+                anchor_sim_root: None,
             })
             .await;
 
@@ -6008,6 +6163,8 @@ mod tests {
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
                 receiver_challenge: None,
+                anchor_leaf: None,
+                anchor_sim_root: None,
             })
             .await;
 
@@ -6075,6 +6232,8 @@ mod tests {
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
                 receiver_challenge: None,
+                anchor_leaf: None,
+                anchor_sim_root: None,
             })
             .await;
         handler
@@ -6094,6 +6253,8 @@ mod tests {
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
                 receiver_challenge: None,
+                anchor_leaf: None,
+                anchor_sim_root: None,
             })
             .await;
 

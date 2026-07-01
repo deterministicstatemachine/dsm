@@ -2579,14 +2579,16 @@ impl AppRouter for AppRouterImpl {
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk
-            .execute_on_relationship(
+            .execute_on_relationship_with_anchor_leaf(
                 rel_key,
                 counterparty_devid,
                 operation,
                 deltas,
                 initial_chain_tip,
+                anchor_leaf,
             )
             .map(|(_state, outcome)| outcome)
     }
