@@ -1,7 +1,6 @@
 ---
 applyTo: '**'
 ---
-
 Boot Fenced Fused Anchor Authority
 for DSM Offline Bearer State
 One Way Birth Fuse, Fused Anchor Head, RP2350 Partition Witness,
@@ -277,45 +276,66 @@ anchor head is not an offline bearer successor.
 11 Boot Fenced Fused Anchor
 Definition 16 (Boot Fenced Fused Anchor). Offline bearer mode is enabled only after the appliance
 produces a boot ticket chained from the DSM committed boot head. The boot ticket is produced
-jointly by the RP2350 secure partition boot ratchet and a TROPIC01 boot MACANDD slot. Every
-offline release binds the current boot ticket or boot chain. A copied state image cannot resume
-on new hardware because the new hardware cannot advance the committed boot head under the
-enrolled anchor bundle.
-On boot, the appliance advances:
+internally by the firmware target from a device authoritative boot measurement, the RP2350 secure
+partition boot ratchet, and a TROPIC01 boot MACANDD slot. A host request cannot drive boot
+head advancement and cannot supply an attacker chosen firmware measurement. Every offline
+release binds the current boot ticket or boot chain. A copied state image on new hardware cannot
+resume offline bearer mode because the new hardware cannot advance the committed boot head
+under the enrolled anchor bundle.
+On boot, the firmware target advances:
 Jb → Jb+1.
-The boot input is:
+The boot input is formed from device internal state:
 Xboot
 b+1 = H("DSM/boot-fuse-input/v1"∥B∥Ai∥Jb∥boot seq∥firmware measurement∥partition device id).
+The values boot seq and firmware measurement are device supplied. They are not fields accepted
+from the host transport request.
+8
 TROPIC01 consumes the boot MACANDD slot:
 W
 T,boot
 b+1 = MACANDD(qboot, Xboot
 b+1 ).
 The partition advances its boot ratchet:
-8
 pb+1 = H("DSM/partition-boot-ratchet/v1"∥pb∥W
 T,boot
 b+1 ∥B∥Ai∥Jb∥boot seq∥firmware measurement).
 The old partition ratchet is erased:
 pb ← ⊥.
-The new boot head is:
-Jb+1 = H("DSM/fused-boot-head/v1"∥B∥Ai∥Jb∥boot seq∥H(pb+1)∥H(W
+The partition boot certificate message is:
+MP
+boot,b+1 = H("DSM/partition-boot-cert/v1"∥B∥Ai∥Jb∥Xboot
+b+1 ∥H(W
 T,boot
-b+1 )∥firmware measurement).
-The partition signs a boot certificate:
+b+1 )∥boot seq∥firmware measurement).
+The partition signs:
 σ
 P
-boot = PartSign (H("DSM/partition-boot-cert/v1" ∥ B ∥ Ai ∥ Jb ∥ Jb+1 ∥ boot seq ∥ firmware measurement)).
+boot,b+1 = PartSign(MP
+boot,b+1).
+The fixed width boot signature commitment is:
+Σ
+P
+boot,b+1 = SigCommit(σ
+P
+boot,b+1).
+The new boot head is:
+Jb+1 = H("DSM/fused-boot-head/v1"∥B∥Ai∥Jb∥Xboot
+b+1 ∥H(pb+1)∥H(W
+T,boot
+b+1 )∥Σ
+P
+boot,b+1∥firmware measurement).
 The boot ticket is:
 BootTicketb+1 = (B, Ai
 , Jb, Jb+1, boot seq, firmware measurement, σP
-boot, Xboot
+boot,b+1, Xboot
 b+1 ,tropic boot witness).
 If multiple boots occur between DSM transfers, the release carries a boot chain:
 BootChain = (BootTicketb+1, . . . ,BootTicketb+k),
 which proves:
 Jb → Jb+k.
 The next DSM root commits to the latest boot head used by the release.
+9
 12 State Bound to the Previous Root
 The key simplification is to put the fused anchor state into the DSM state committed by the
 previous root.
@@ -331,7 +351,6 @@ A receiver that sees a candidate transfer from hi rejects it unless the candidat
 ′, ui + 1).
 This removes the need for a table of offered or pending precommits. The previous root itself
 carries the expected fused anchor state.
-9
 13 TROPIC01 Counter Evidence
 The receiver must not trust a host string that says “the counter moved.” The receiver must also
 not treat a sender supplied live counter field as proof. That value is only a claim unless it is
@@ -353,6 +372,7 @@ Equivalently, the receiver derives:
 uattested = H0 − Hattested
 and requires:
 uattested = ui + 1.
+10
 The RP2350 may relay packets, but it is not the trusted endpoint. The release may carry a
 counter field for transport convenience, but that field is not trusted. The receiver accepts only the
 transcript attested value, or another policy approved TROPIC01 authenticated counter value.
@@ -366,7 +386,6 @@ where q is a MACANDD slot index, X ∈ {0, 1}
 256 is a 32 byte input, and W ∈ {0, 1}
 256 is the
 32 byte output returned by TROPIC01 over an authenticated L3session.
-10
 Definition 20 (MACANDD Slot Evolution). Let Vt be the old slot state before a MACANDD
 call. Let X be the input. The call computes a new state:
 Vt+1 = F1(X ∥ q),
@@ -385,6 +404,7 @@ $←− {0, 1}
 .
 The challenge is bound into the boot fenced root advance message and release. A release for
 one receiver challenge is not accepted for another challenge.
+11
 16 Boot Bound Root Advance Message
 Let Jb
 ′ be the current boot head proven by a boot ticket or boot chain from the DSM committed
@@ -393,18 +413,18 @@ The boot bound root advance message is:
 Mi+1 = H("DSM/fused-root-advance-message/v1"∥B∥Ai∥Jb
 ′∥hi∥hi+1∥ui∥(ui+1)∥Di+1∥recipient device id∥objecEvery partition certificate and TROPIC01 transfer witness must bind this same message.
 17 Partition Commitment and TROPIC Cross Binding
-The partition first commits to the root advance message:
+The partition first commits to the root advance message. The code authoritative partition commitment has no partition epoch and no partition nonce. The wire certificate carries only the fields
+below, and the verifier recomputes the commitment from those fields:
 C
 P
 i+1 = H("DSM/partition-commit/v1" ∥ B ∥ Ai ∥ Jb
-′ ∥ Mi+1 ∥ partition epoch ∥ partition nonce).
+′ ∥ Mi+1).
 The TROPIC01 transfer witness input includes that partition commitment:
 XT
 i+1 = H("DSM/tropic-fused-transfer-input/v1" ∥ B ∥ Ai ∥ Jb
 ′ ∥ Mi+1 ∥ C
 P
 i+1 ∥ qtx).
-11
 TROPIC01 returns:
 WT
 i+1 = MACANDD(qtx, XT
@@ -430,39 +450,53 @@ The TROPIC witness signature is:
 T
 i+1 = StepSign(skhw, MT
 i+1).
-The partition final certificate binds the TROPIC witness back into the partition lineage:
+The fixed width TROPIC signature commitment is:
+12
+Σ
+T
+i+1 = SigCommit(σ
+T
+i+1).
+The partition final certificate binds the TROPIC witness commitment back into the partition
+lineage:
 MP
 i+1 = H("DSM/partition-final-cert/v1" ∥ B ∥ Ai ∥ Jb
 ′ ∥ Mi+1 ∥ C
 P
-i+1 ∥ Phw ∥ H(σ
+i+1 ∥ Phw ∥ Σ
 T
-i+1) ∥ (ui + 1)).
+i+1 ∥ (ui + 1)).
 The partition certificate is:
 σ
 P
 i+1 = PartSign(MP
 i+1).
+The fixed width partition signature commitment is:
+Σ
+P
+i+1 = SigCommit(σ
+P
+i+1).
 The cross binding is:
 C
 P
 i+1 → XT
-i+1 → σ
+i+1 → Σ
 T
 i+1 → MP
-i+1 → σ
+i+1 → Σ
 P
 i+1.
-Thus the TROPIC witness is bound to the partition commitment, and the partition final certificate is bound back to the TROPIC witness. Neither proof can be swapped out for a proof from
-another device, another boot, another root transition, or another anchor bundle.
+Thus the TROPIC witness is bound to the partition commitment, and the partition final certificate is bound back to the TROPIC witness commitment. Neither proof can be swapped out for
+a proof from another device, another boot, another root transition, or another anchor bundle.
 18 Next Fused Anchor Head
 After the receiver obtains authenticated counter evidence, the next fused anchor head is:
 Ai+1 = H("DSM/fused-anchor-head/v1" ∥ B ∥ Ai ∥ Jb
 ′ ∥ Mi+1 ∥ C
 P
-i+1 ∥ σ
+i+1 ∥ Σ
 P
-i+1 ∥ Phw ∥ σ
+i+1 ∥ Phw ∥ Σ
 T
 i+1 ∥ Hattested).
 The next DSM root hi+1 must commit to:
@@ -470,7 +504,6 @@ The next DSM root hi+1 must commit to:
 ′, ui + 1).
 The receiver verifies that hi committed to the old fused anchor state and that hi+1 commits to
 the new fused anchor state.
-12
 19 Witness Signature Scheme
 The appliance profile uses wots over BLAKE3. The witness key signs exactly one digest, so a one
 time signature is sufficient.
@@ -478,6 +511,7 @@ Definition 21 (wots Parameters). Let n = 32, w = 16, ℓ1 = 64, ℓ2 = 3, and �
 is:
 ℓ · n = 2144
 bytes. The compressed public key is 32 bytes.
+13
 Definition 22 (Chain Function). The chain function is:
 F(x) = H("DSM/anchor/wots-chain/v1" ∥ x).
 For seed K and chain index j:
@@ -505,18 +539,19 @@ i+1, σP
 i+1, anchor id, qtx, rR).
 The release package is:
 Pkgi+1 = (∆i+1, BootChain, Certi+1, counter evidencei+1).
-13
 21 Compact Appliance Protocol
 The appliance has three transfer states:
 Ready, Prepared, Committed.
 Boot state is separate. Offline transfer is disabled until a valid boot ticket or boot chain exists
 for the current boot.
+14
 21.1 Boot
-On boot, the appliance:
+Boot is device internal. The host transport does not submit a boot operation, boot sequence, or
+firmware measurement. On boot, the appliance:
 (1) reads the active B, Ai
 , Jb, ui
 ;
-(2) measures firmware and policy state;
+(2) obtains the firmware and policy measurement from the firmware target;
 (3) computes Xboot
 b+1 ;
 (4) consumes the TROPIC01 boot MACANDD slot;
@@ -540,7 +575,6 @@ Active.A = Ai
 Active.u = ui
 ,
 ui = H0 − H.
-14
 The expression H0 − H is computed with checked subtraction. If H > H0, the state is rejected
 as a counter mismatch because a down counter cannot report a value above its enrolled value.
 The appliance verifies that a boot ticket or boot chain exists from the DSM committed boot
@@ -553,6 +587,7 @@ i+1. It calls MACANDD on the transfer slot, derives the
 witness key, forms the TROPIC witness, forms the partition final certificate, computes Ai+1, and
 constructs Certi+1 without exporting it yet.
 It writes a durable prepared record:
+15
 Active ← (hi
 , B, Ai
 , Jb
@@ -582,12 +617,12 @@ The receiver obtains counter evidence from TROPIC01. In the preferred mode, the 
 an authenticated L3verifier session through a verifier pairing slot, with the host relaying encrypted
 packets only.
 The receiver obtains Hattested and checks:
-15
 Hattested = H0 − (ui + 1).
 If this check fails, the receiver rejects offline bearer acceptance.
 21.5 Emit
 The appliance may export the release only after the counter commit. The receiver attaches or
 records authenticated counter evidence and verifies Pkgi+1.
+16
 21.6 Finalize
 After emitting the release, the appliance may finalize only if the active anchor counter equals the
 live counter derived anchor counter:
@@ -622,7 +657,6 @@ i+1 recomputes from B, Ai
 ′, Mi+1, CP
 i+1, qtx;
 (11) Phw = H("DSM/tropic/pk-hash/v1" ∥ pkhw);
-16
 (12) MT
 i+1 recomputes and
 StepVerify(pkhw, MT
@@ -636,6 +670,7 @@ i+1) = 1;
 (14) the DSM transition proof verifies hi → hi+1;
 (15) the transfer gives the claimed object or value to the receiver;
 (16) the authority policy hash matches the previous state;
+17
 (17) the receiver obtains an authenticated TROPIC01 counter value Hattested;
 (18) the authenticated counter value satisfies
 Hattested = H0 − (ui + 1);
@@ -660,12 +695,12 @@ If the RP2350 partition is breached alone, the attacker may:
 • burn counter steps;
 • export invalid packages;
 • corrupt local state;
-17
 • brick the appliance into online recovery.
 These attacks do not become successful offline bearer transfers unless the receiver acceptance
 predicate is also satisfied.
 A partition certificate without a matching TROPIC01 transfer witness fails. A partition certificate without authenticated TROPIC01 counter evidence fails. A partition certificate over an
 invalid DSM transition fails.
+18
 24 What Happens if TROPIC01 Is Broken
 TROPIC01 is not the sole authority.
 If TROPIC01 is broken alone, the attacker may try to forge hardware witness output or counter
@@ -696,12 +731,12 @@ Therefore a release from new hardware fails one of:
 • boot chain verification;
 • partition certificate verification;
 • TROPIC01 boot witness verification;
-18
 • TROPIC01 transfer witness verification;
 • authenticated counter evidence;
 • fused anchor head recomputation;
 • next root commitment.
 New hardware requires online authority rotation. It cannot continue offline from a root committed to another bundle and fused anchor head.
+19
 26 Power Loss Behavior
 Power may fail between any two operations.
 26.1 Before Boot Ticket Is Durable
@@ -727,13 +762,13 @@ If the physical counter moved but counter committed was not durably written, rec
 move the counter again. If the committed candidate target anchor counter already equals the live
 counter derived anchor counter, recovery marks the candidate committed and re emits the same
 release.
-19
 26.7 After Counter Commit but Before Export
 The counter has moved and the release is durable. Recovery re emits the same release package. It
 does not sign a new one.
 26.8 After Export but Before Finalize
 Recovery re emits the same release and finalization advances to the same hi+1, guarded by:
 Active.u = H0 − H.
+20
 27 Recovery
 Recovery must preserve the exact committed release until it has been re emitted and finalized. It
 must not erase the committed release merely because recovery found it.
@@ -761,7 +796,6 @@ outcome. The record remains committed until the same release is emitted and fina
 counter:
 Active.u = H0 − H.
 This prevents frontier advance when local state and the physical counter disagree.
-20
 28 Recovery Algorithm
 recover(H0, H, Active):
 live_anchor_counter = checked_sub(H0, H)
@@ -771,6 +805,7 @@ if firmware_boundary_invalid():
 return DOWNGRADE_ONLINE
 if rmemory_map_invalid():
 return DOWNGRADE_ONLINE
+21
 if boot_ticket_required() and not valid_boot_ticket_or_chain():
 return DOWNGRADE_ONLINE
 if Active.status == COMMITTED:
@@ -802,7 +837,6 @@ return DOWNGRADE_ONLINE
 if Active.record.prev_anchor_head != Active.anchor_head:
 return DOWNGRADE_ONLINE
 if witness_key_present(Active.record) and partition_record_present(Active.record):
-21
 return ACCEPT_PREPARED_CAN_COMPLETE
 return ONLINE_CANCEL_OR_RESOLVE
 if Active.status == READY:
@@ -812,6 +846,7 @@ if Active.anchor_counter > live_anchor_counter:
 return FAIL_CLOSED
 if H == 0:
 return EXHAUSTED_ONLINE_ONLY
+22
 return ACCEPT(Active.root)
 return DOWNGRADE_ONLINE
 29 Online Checked Mode and New Relationships
@@ -836,7 +871,6 @@ DSM predicate, or violated hardware evidence condition.
 31 Security Claims
 Theorem 27 (Birth Non Recreation). Public enrollment data is insufficient to recreate the initial
 fused anchor lineage on new hardware.
-22
 Proof. The anchor bundle, initial fused anchor head, initial boot head, and initial partition ratchet
 are derived from sbirth, but only H(sbirth) is public. The preimage sbirth is destroyed after deriving
 the initial private ratchet. A new device that has only public enrollment data cannot derive p0,
@@ -847,6 +881,7 @@ anchor head Ai, boot head Jb, and anchor counter ui. A device with different par
 state or different TROPIC01 boot state cannot produce an accepted offline bearer successor from that
 root, except by forging the partition boot certificate, forging the TROPIC01 boot witness, breaking
 the hash binding, or extracting and perfectly emulating the original non exportable live states.
+23
 Proof. An accepted release requires a boot ticket or boot chain from Jb to Jb
 ′. The boot ticket is
 produced from the RP2350 partition boot ratchet and the TROPIC01 boot MACANDD slot under
@@ -882,7 +917,6 @@ H0 − (ui + 1).
 A second attempted transfer from the same spendable parent after a counter commit cannot
 present the same authenticated live counter evidence, because the physical counter cannot increase
 or reset under the counter assumption.
-23
 Theorem 32 (TROPIC01 Is Necessary but Not Sufficient). A TROPIC01 witness and counter
 value alone do not authorize an offline bearer transfer.
 Proof. The receiver acceptance predicate also requires public DSM transition validity, previous root
@@ -891,6 +925,7 @@ receiver challenge binding, fused anchor head recomputation, and next root commi
 new fused anchor state. TROPIC01 evidence alone cannot satisfy those checks.
 Theorem 33 (Partition Is Necessary but Not Sufficient). An RP2350 partition certificate alone
 does not authorize an offline bearer transfer.
+24
 Proof. The receiver acceptance predicate also requires a TROPIC01 transfer witness, authenticated
 TROPIC01 counter evidence, DSM transition proof, receiver challenge binding, boot ticket verification, and fused anchor head recomputation. A partition certificate alone cannot satisfy those
 checks.
@@ -926,13 +961,13 @@ next root commitment to the new fused anchor state.
 A software clone cannot produce the partition and TROPIC evidence. A new hardware clone
 cannot resume the committed boot head. A breached RP2350 alone cannot fake authenticated
 TROPIC01 counter evidence. A broken TROPIC01 alone cannot fake the partition certificate,
-24
 DSM proof, boot ticket, and fused anchor head update. After one accepted counter commit, the
 physical counter no longer supports a second accepted package from the same anchor counter. A
 different successor from the same spendable parent is therefore rejected by the receiver predicate
 or becomes a fork exposed by DSM reconciliation.
 32 TLA+ Model
 VARIABLES H, Active, CurrentRoot, step, delivered
+25
 LiveAnchorCounter == H0 - H
 NextAnchorCounter == LiveAnchorCounter + 1
 OfflineReady ==
@@ -973,7 +1008,6 @@ record |-> [
 prev_root |-> Active.root,
 next_root |-> NextRoot,
 prev_anchor_head |-> Active.anchor_head,
-25
 next_anchor_head |-> NextAnchorHead,
 boot_head |-> Active.boot_head,
 anchor_counter |-> LiveAnchorCounter,
@@ -985,6 +1019,7 @@ committed |-> FALSE
 ]
 /\ step’ = "prepared"
 /\ UNCHANGED <<H, CurrentRoot, delivered>>
+26
 CommitStart ==
 /\ step = "prepared"
 /\ Active.status = "prepared"
@@ -1025,7 +1060,6 @@ Emit ==
 /\ Active.anchor_counter = LiveAnchorCounter
 /\ delivered’ = delivered \cup {Active.record.release}
 /\ step’ = "emitted"
-26
 /\ UNCHANGED <<H, Active, CurrentRoot>>
 Finalize ==
 /\ step \in {"committed", "emitted"}
@@ -1036,6 +1070,7 @@ Finalize ==
 root |-> Active.record.next_root,
 anchor_bundle |-> Active.anchor_bundle,
 anchor_head |-> Active.record.next_anchor_head,
+27
 boot_head |-> Active.record.boot_head,
 anchor_counter |-> Active.record.next_anchor_counter,
 boot_valid |-> Active.boot_valid,
@@ -1075,7 +1110,6 @@ RecoverCommitNotMoved ==
 /\ Active.status = "committed"
 /\ Active.record.committed = FALSE
 /\ Active.record.next_anchor_counter = LiveAnchorCounter + 1
-27
 /\ Active.record.prev_root = Active.root
 /\ Active.record.prev_anchor_head = Active.anchor_head
 /\ H > 0
@@ -1086,6 +1120,7 @@ Active.record.next_anchor_counter]
 /\ delivered’ = delivered \cup {Active.record.release}
 /\ CurrentRoot’ = CurrentRoot
 /\ step’ = "emitted"
+28
 RecoverPrepared ==
 /\ step = "recover"
 /\ Active.status = "prepared"
@@ -1125,7 +1160,6 @@ Boot
 \/ RecoverPrepared
 \/ RecoverIdle
 \/ OnlineAdvance
-28
 The model obligations are:
 Single active root.
 The appliance has one active root and one active anchor counter.
@@ -1134,6 +1168,7 @@ The active root commits to one fused anchor head.
 Boot before offline.
 Offline transfer is disabled unless a boot ticket or boot chain verifies from the DSM committed
 boot head.
+29
 No export before commit.
 A release is emitted only after the counter moves.
 Replay is idempotent.
@@ -1151,6 +1186,8 @@ The transport uses protocol buffers. The secure core exposes one entry point:
 handle : bytes → bytes.
 The host may relay packets, but receiver acceptance is based on public proofs, boot evidence,
 partition evidence, fused anchor head verification, and authenticated TROPIC01 counter evidence.
+Boot fencing is device internal. The host transport does not expose a callable boot operation, and
+it does not accept host supplied boot sequence or firmware measurement fields.
 syntax = "proto3";
 package dsm.anchor;
 message TransitionPackage {
@@ -1164,7 +1201,6 @@ uint64 anchor_counter = 7;
 uint64 next_anchor_counter = 8;
 uint32 action_type = 9;
 bytes action_fields = 10;
-29
 bytes payload_hash = 11;
 bytes old_leaf_proof = 12;
 bytes new_leaf_proof = 13;
@@ -1174,6 +1210,7 @@ message BootTicket {
 bytes anchor_bundle = 1;
 bytes anchor_head = 2;
 bytes prev_boot_head = 3;
+30
 bytes next_boot_head = 4;
 uint64 boot_seq = 5;
 bytes firmware_measurement = 6;
@@ -1215,22 +1252,23 @@ TransitionPackage transition = 1;
 repeated BootTicket boot_chain = 2;
 RootAdvanceCertificate cert = 3;
 CounterEvidence counter = 4;
-30
 }
 enum Op {
 OP_UNSPECIFIED = 0;
-OP_BOOT = 1;
+OP_BOOT_RESERVED = 1;
 OP_PREPARE = 2;
 OP_COMMIT = 3;
 OP_EMIT = 4;
 OP_FINALIZE = 5;
 OP_STATUS = 6;
+31
 OP_CANCEL = 7;
 }
 message ApplianceRequest {
 Op op = 1;
 TransitionPackage transition = 2;
 bytes receiver_challenge = 3;
+reserved 4, 5;
 }
 message ApplianceResponse {
 Op op = 1;
@@ -1244,28 +1282,48 @@ bytes active_boot_head = 8;
 uint64 active_anchor_counter = 9;
 uint32 status = 10;
 }
+The field name OP BOOT RESERVED is deliberate. The value is reserved so old host driven boot
+semantics do not reappear. ApplianceRequest fields 4 and 5 are also reserved. They must not
+be reused for host supplied boot seq or firmware measurement. Those values are device internal
+boot data recorded in the BootTicket.
+The partition commitment in RootAdvanceCertificate is recomputed from B, Ai
+, Jb
+′, and
+Mi+1 only. It does not carry and does not hash a partition epoch or partition nonce.
 The fields live counter claim and derived anchor counter claim are transport claims. They
 are not accepted as proof. The receiver verifier must parse or obtain an authenticated TROPIC01
 value from verifier transcript, or through another policy approved authenticated counter evidence path.
+The signature fields sigma tropic and sigma partition are variable length. Whenever either
+signature is bound into another digest, the implementation uses SigCommit(σ), not raw concatenation and not a bare H(σ).
 34 Reference Implementation
-The reference implementation has two parts.
-The protocol core is a Rust crate that implements:
+The reference implementation has three visible parts:
+• crates/dsm-anchor-core, the Rust protocol core;
+• crates/dsm-anchor-pico, the firmware target;
+• the DSM SDK receiver adapter that routes offline bearer acceptance through the anchor
+predicate.
+The protocol core implements:
 • canonical encodings;
+32
 • anchor bundle construction;
 • birth fuse commitment;
 • boot ticket verification;
 • root advance digest construction;
-• partition commitment construction;
-31
+• partition commitment construction without partition epoch or partition nonce;
 • TROPIC01 witness input construction;
 • wots witness signatures;
+• BLAKE3-SPHINCS+ SPX128f partition signature handling;
+• fixed width SigCommit(σ) binding for variable length signatures;
 • partition certificate verification;
 • fused anchor head construction;
 • public receiver acceptance;
 • recovery;
 • protocol buffer wire encoding.
-The firmware target drives TROPIC01 through libtropic over SPI at 3.3 V under an authenticated L3session. The RP2350 code is a transport and partition state machine layer. Receiver
+The firmware target is the Rust dsm-anchor-pico crate. It drives TROPIC01 through libtropic-rs
+bindings over SPI at 3.3 V under an authenticated L3 session. The protocol does not require a missing C firmware layer. The RP2350 code is a transport and partition state machine layer. Receiver
 acceptance is not based on trusting RP2350 statements.
+Boot fencing is performed by the device. The host operation value formerly used for boot is
+reserved. The host does not provide the boot sequence or firmware measurement used by the boot
+ratchet.
 The receiver acceptance implementation separates the counter evidence parser from the release
 fields. The counter verifier returns the authenticated counter value obtained from TROPIC01, and
 the acceptance predicate compares that value to the expected H0 − (ui + 1).
@@ -1276,7 +1334,29 @@ Verifier trait names should follow the same semantics:
 • verify partition certificate;
 • read authentic counter;
 • next root commits anchor state.
-35 Validation Plan
+33
+35 Implementation Status
+The host side appliance state machine, fused root advance, receiver predicate, canonical wire validation, and Pico firmware target are implemented in the reference code. Host tests are green for
+the implemented anchor core behavior.
+Receiver side offline bearer acceptance is intentionally fail closed until the Phase 5 producer
+inputs are present. The sender side must carry an OfflineRelease on transfer confirmation, the
+counter evidence path must supply a usable authenticated verifier transcript, and the DSM SMT
+leaf must commit the anchor tuple:
+(B, Ai
+, Jb, ui).
+Until those inputs exist together, the receiver adapter routes offline bearer transfers to online
+checked recovery rather than accepting offline bearer mode.
+Device side durable recovery is specified by the protocol and implemented in host logic, but it
+is not yet a hardware backed cross power cycle property unless Active is persisted in TROPIC01
+R memory. A firmware build that keeps Active in RAM and re enrolls on boot is an early bringup
+build, not a complete hardware backed recovery implementation.
+Firmware measurement is specified by the protocol, but a fixed test constant is only a bringup
+stub. A production measured boot claim requires replacing that constant with a real measurement
+of firmware and policy state.
+The TLA+ model in this paper is the boot fenced fused anchor model. It should exist in the
+repository as tla/DSM BootFencedFusedAnchor.tla. Older offline finality or Tripwire models do
+not replace this model because they use different variables and prove a different machine.
+36 Validation Plan
 T1. Hardware bringup.
 Connect Raspberry Pi Pico 2 W to Secure Tropic Click over SPI at 3.3 V and confirm
 TROPIC01 communication.
@@ -1290,12 +1370,12 @@ recreate p0.
 T5. Boot ticket.
 Produce a boot ticket from the partition boot ratchet and TROPIC01 boot MACANDD slot.
 Expected result: offline bearer mode is disabled until the ticket verifies.
-32
 T6. New hardware resume.
 Copy host state to a different RP2350/TROPIC01 pair. Expected result: boot ticket cannot
 be chained from the committed boot head under the enrolled bundle.
 T7. Counter direction.
 Initialize counter at H0, update it, and confirm u = H0 − H increases by one.
+34
 T8. Counter evidence.
 Have the receiver act as verifier endpoint and read the live counter through an authenticated
 L3session.
@@ -1330,13 +1410,13 @@ mode remains disabled.
 T18. Power loss after prepared.
 Cut power after prepared record is durable. Expected result: complete the same record, cancel
 it, or route online. Do not create a second record from the same active root.
-33
 T19. Power loss after release durable before counter commit.
 Cut power after the committed candidate is durable but before the counter moves. Expected
 result: recovery may commit the same release only if the candidate previous root and fused
 anchor state still equal the active state.
 T20. Power loss after counter moved before commit flag.
 Cut power after the physical counter moves but before the committed flag is durable. Expected
+35
 result: recovery marks the same candidate committed, does not move the counter again, and
 re emits the same release.
 T21. Replay.
@@ -1346,17 +1426,18 @@ Advance DSM online without the anchor. Expected result: offline bearer mode refu
 resync.
 T23. Physical compromise policy.
 Mark anchor physically suspect. Expected result: offline mode suspended and authority rotation required.
-36 Validation Results on Target Hardware
+37 Validation Results on Target Hardware
 The prior hardware bringup exercised the target stack:
 Stage Result Meaning
 Chip identity TROPIC01 identity read; silicon revision ACAB anchor can be pinned
-Secure session X25519 handshake, encrypted L3, echo and TRNG checked authenticated command pCounter counter initialized at H0 = 1000, updated to H = 997 u = H0 − H advances
-MACANDD reproducible witness after rearm, distinct output without rearm stateful witness behavior cWitness flow MACANDD → K → wots, 32 byte public key, 2144 byte signature public witness path works
-Acceptance release verified and successor frontier matched public predicate accepts aUSB host external host drove status and offer flow over USB CDC appliance can be driven exFor this boot fenced fused anchor version, the remaining validation work is focused on birth
-fuse destruction, boot ticket production, new hardware resume rejection, receiver counter evidence,
-previous state committed fused anchor state, durable recovery, and the counter trust seam.
-37 Security Summary
-34
+Secure session X25519 handshake, encrypted L3, echo and TRNG checked authenticated commandCounter counter initialized at H0 = 1000, updated to H = 997 u = H0 − H advances
+MACANDD reproducible witness after rearm, distinct output without rearm stateful witness behavioWitness flow MACANDD → K → wots, 32 byte public key, 2144 byte signature public witness path worCore acceptance release verified and successor frontier matched in host validation public predicate acceptsUSB host external host drove status and offer flow over USB CDC appliance can be drivenFor this boot fenced fused anchor version, the remaining activation work is focused on sender
+side OfflineRelease transport, receiver authenticated counter transcript support, DSM SMT commitment of B, Ai
+, Jb, ui
+, TROPIC01 R memory backed durable Active persistence, and replacement
+of the firmware measurement test constant with a real measurement.
+38 Security Summary
+36
 Part Provides Does not provide
 Birth fuse non recreatable enrollment preimage live clone detection by itself
 Anchor bundle immutable hardware and policy binding forward motion by itself
@@ -1372,7 +1453,7 @@ RP2350 host path transport and local state machine trusted receiver facts
 Recovery record no orphaned committed release new authority by itself
 Tripwire fork exposure on reconciliation instant awareness
 cryptographic security
-38 Limits
+39 Limits
 (1) Perfect live state emulation is outside offline distinguishability. If an attacker extracts
 and perfectly emulates the exact current non exportable state of the partition, TROPIC01,
 and DSM authority state, no offline-only protocol can distinguish that from the original.
@@ -1395,8 +1476,8 @@ liveness failure.
 honest parties because independent relationships and reconciliation require valid root lineage
 and counter evidence.
 (9) Tripwire exposes later. Tripwire exposes forks on reconciliation.
-35
-39 Conclusion
+37
+40 Conclusion
 The boot fenced fused anchor authority is the compact form of the DSM offline bearer appliance.
 It does not need a large precommit table. It does not need separate offered, pending, armed,
 and released protocol names. The load bearing object is the fused transition:
@@ -1432,4 +1513,4 @@ Manufacturer documentation.
 the Security of the Winternitz One Time Signature Scheme. AFRICACRYPT 2011.
 [5] Leslie Lamport. Specifying Systems: The TLA plus Language and Tools for Hardware and
 Software Engineers. Addison Wesley, 2002.
-36
+38

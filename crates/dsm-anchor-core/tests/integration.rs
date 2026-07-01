@@ -555,6 +555,7 @@ fn proto_request_roundtrip() {
         op: pb::Op::Prepare as i32,
         transition: Some(t.to_pb()),
         receiver_challenge: RCHAL.to_vec(),
+        ..Default::default()
     };
     let back = decode_request(&encode_request(&req)).unwrap();
     assert_eq!(back.op, pb::Op::Prepare as i32);
@@ -576,6 +577,7 @@ fn service_handle_full_flow() {
         op: pb::Op::Prepare as i32,
         transition: Some(t.to_pb()),
         receiver_challenge: RCHAL.to_vec(),
+        ..Default::default()
     };
     let r = decode_response(&handle(&mut a, &encode_request(&prep))).unwrap();
     assert!(r.ok, "prepare failed: {}", r.error);

@@ -613,7 +613,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
-            island_attestation: None,
         };
         let failed_chain_tip = failed_chain_state.compute_chain_tip();
         store_bcr_chain_state(&device, &failed_chain_state, false).expect("store failed chain");
@@ -717,7 +716,6 @@ mod tests {
             balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
-            island_attestation: None,
         };
         let failed_chain_tip = failed_chain_state.compute_chain_tip();
         let failed_head = dsm::types::device_state::DeviceState::restore(

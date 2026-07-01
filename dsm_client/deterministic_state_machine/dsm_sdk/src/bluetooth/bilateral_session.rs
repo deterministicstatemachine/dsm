@@ -130,6 +130,11 @@ pub struct BilateralBleSession {
     /// the same verifiable receipt instead of building a degraded one after the
     /// Per-Device SMT has already been mutated.
     pub stitched_receipt_bytes: Option<Vec<u8>>,
+    /// Offline-bearer receiver challenge r_R (Boot Fenced Fused Anchor §15). RECEIVER: the fresh
+    /// challenge it issued in `BilateralPrepareResponse` (checked vs the release on confirm).
+    /// SENDER: the challenge received from that response, bound into the appliance PREPARE. `None`
+    /// for ordinary transfers.
+    pub receiver_challenge: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -502,6 +507,7 @@ impl SessionStore {
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
+            receiver_challenge: None,
         })
     }
 }
@@ -526,6 +532,7 @@ mod tests {
             created_at_wall: Instant::now(),
             stitched_receipt_bytes: None,
             pre_finalize_entropy: None,
+            receiver_challenge: None,
         }
     }
 

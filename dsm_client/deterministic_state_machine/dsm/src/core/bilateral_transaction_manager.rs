@@ -26,7 +26,10 @@ use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::types::state_types::{PreCommitment, State};
 use crate::core::utility::labeling;
-use crate::common::domain_tags::{TAG_BILATERAL_SESSION, TAG_SMT_KEY, TAG_TIP};
+use crate::common::domain_tags::{
+    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY,
+    TAG_TIP,
+};
 
 // -------------------- Cryptographic Progress (strictly increasing, clockless) --------------------
 #[inline]
@@ -160,44 +163,172 @@ pub fn compute_precommit(h_n: &[u8; 32], op_bytes: &[u8], entropy: &[u8]) -> [u8
     CanonicalPreCommitment::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
-/// §16.6: h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || e || σ) — successor shared tip
-/// Both parties compute this identically from shared inputs. Deterministic.
-///
-/// Non-attested path: delegates to [`compute_successor_tip_attested`] with no anchor proof, so its
-/// bytes are unchanged from the original formula.
+/// §16.6: h_{n+1} = BLAKE3("DSM/tip\0" || h_n || op || e || σ) — successor shared tip.
+/// Both parties compute this identically from shared inputs. Deterministic and symmetric —
+/// it carries no device-private state (the fused anchor state is committed by its own
+/// per-device SMT leaf, not folded here).
 pub fn compute_successor_tip(
     h_n: &[u8; 32],
     op_bytes: &[u8],
     entropy: &[u8],
     receipt_digest: &[u8; 32],
 ) -> [u8; 32] {
-    compute_successor_tip_attested(h_n, op_bytes, entropy, receipt_digest, None)
-}
-
-/// §16.6 successor tip with an optional offline-bearer anchor-proof tail (append-only-when-present).
-///
-/// For non-attested transitions (`anchor_proof_hash = None`) this is BYTE-IDENTICAL to the base
-/// formula, so every existing tip is unchanged and DSM core / online-checked paths are untouched.
-/// For offline-bearer attested transitions the canonical
-/// [`crate::attestation::compute_anchor_proof_hash`] digest is appended, binding the attestation
-/// into the authoritative bilateral tip — only the 32-byte digest is folded, never a raw
-/// `id_anchor || s_n || policy_id` concatenation. The full proof bundle stays on the receipt.
-pub fn compute_successor_tip_attested(
-    h_n: &[u8; 32],
-    op_bytes: &[u8],
-    entropy: &[u8],
-    receipt_digest: &[u8; 32],
-    anchor_proof_hash: Option<&[u8; 32]>,
-) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_TIP);
     h.update(h_n);
     h.update(op_bytes);
     h.update(entropy);
     h.update(receipt_digest);
-    if let Some(aph) = anchor_proof_hash {
-        h.update(aph);
-    }
     bytes32(h.finalize().as_bytes())
+}
+
+/// Boot Fenced Fused Anchor offline-bearer **state commitment** `(B, Aᵢ, J_b, uᵢ)`
+/// (`H("DSM/fused-anchor-state/v1" ‖ B ‖ Aᵢ ‖ J_b ‖ uᵢ_le)`).
+///
+/// This is the value the DSM root must commit so the receiver predicate
+/// (`anchor_core::accept::accept_offline`, clauses 3 & 21) can prove that `prev_root`
+/// commits `(B, Aᵢ, J_b, uᵢ)` and `next_root` commits the successor
+/// `(B, A_{i+1}, J_{b'}, uᵢ+1)`. The producer inserts this commit as a dedicated SMT
+/// leaf and carries an inclusion proof; the receiver recomputes it from the cert's fused
+/// fields and checks inclusion. It binds the fused anchor **head** `Aᵢ` — never the root —
+/// so the commitment is not circular.
+pub fn anchor_state_commit(
+    bundle: &[u8; 32],
+    anchor_head: &[u8; 32],
+    boot_head: &[u8; 32],
+    anchor_counter: u64,
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_FUSED_ANCHOR_STATE);
+    h.update(bundle);
+    h.update(anchor_head);
+    h.update(boot_head);
+    h.update(&anchor_counter.to_le_bytes());
+    bytes32(h.finalize().as_bytes())
+}
+
+/// SMT key of the single per-device fused-anchor-state leaf: `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`.
+///
+/// One stable key per device (the fused anchor is device-level — one appliance, one counter),
+/// bound to the immutable anchor bundle `B`. Its VALUE is the current [`anchor_state_commit`],
+/// bootstrapped to `commit_0` when the fused anchor is admitted and replaced old→successor on
+/// every bearer transfer's device-SMT advance. So `prev_root` proves `key → commit(B,Aᵢ,J_b,uᵢ)`
+/// and `next_root` proves the same `key → commit(B,A_{i+1},J_{b'},uᵢ+1)`. Never keyed by
+/// relationship id, root, `Aᵢ`, `J_b`, or `uᵢ`.
+pub fn anchor_state_leaf_key(bundle: &[u8; 32]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_FUSED_ANCHOR_STATE_LEAF);
+    h.update(bundle);
+    bytes32(h.finalize().as_bytes())
+}
+
+/// Set the per-device fused-anchor-state leaf to the commit for `(B, A, J, u)` in `smt` and return
+/// its inclusion proof (bytes) against the resulting device-SMT root. Producer-side: called inside
+/// the device-SMT advance so the returned proof binds the same root the transfer commits.
+///
+/// The device root then commits the fused anchor state (spec Def 1/§12): a receiver recomputes the
+/// leaf key+value from the release cert's fused fields and verifies the proof with
+/// [`verify_anchor_state_commitment`]. `prev_root` proves `(B, Aᵢ, J_b, uᵢ)`; `next_root` (post the
+/// old→successor replace, in the same advance) proves `(B, A_{i+1}, J_{b'}, uᵢ+1)`.
+pub fn set_anchor_state_leaf(
+    smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+    bundle: &[u8; 32],
+    anchor_head: &[u8; 32],
+    boot_head: &[u8; 32],
+    anchor_counter: u64,
+) -> Result<Vec<u8>, DsmError> {
+    let key = anchor_state_leaf_key(bundle);
+    let value = anchor_state_commit(bundle, anchor_head, boot_head, anchor_counter);
+    smt.update_leaf(&key, &value)
+        .map_err(|e| DsmError::invalid_operation(format!("anchor-state leaf update: {e}")))?;
+    let proof = smt
+        .get_inclusion_proof(&key, 256)
+        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
+    Ok(proof.to_bytes())
+}
+
+/// Inclusion proof (bytes) of the CURRENT per-device fused-anchor-state leaf against `smt`'s root
+/// (no mutation). Producer-side: the "parent" proof that `prev_root` still commits `(B, Aᵢ, J_b, uᵢ)`
+/// before the advance replaces it with the successor commit.
+pub fn anchor_state_leaf_proof(
+    smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+    bundle: &[u8; 32],
+) -> Result<Vec<u8>, DsmError> {
+    let key = anchor_state_leaf_key(bundle);
+    let proof = smt
+        .get_inclusion_proof(&key, 256)
+        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
+    Ok(proof.to_bytes())
+}
+
+/// Receiver-side: verify that `device_root` (a per-device SMT root the receiver already receives +
+/// verifies) commits the fused anchor state `(B, A, J, u)` via the per-device anchor-state leaf.
+/// Recomputes the leaf key + value and checks the carried inclusion proof binds exactly that
+/// key/value under `device_root`. Fail-closed on any mismatch (wrong key, value, or root).
+pub fn verify_anchor_state_commitment(
+    device_root: &[u8; 32],
+    bundle: &[u8; 32],
+    anchor_head: &[u8; 32],
+    boot_head: &[u8; 32],
+    anchor_counter: u64,
+    proof_bytes: &[u8],
+) -> bool {
+    use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
+    let key = anchor_state_leaf_key(bundle);
+    let value = anchor_state_commit(bundle, anchor_head, boot_head, anchor_counter);
+    let Some(proof) = SmtInclusionProof::from_bytes(proof_bytes) else {
+        return false;
+    };
+    proof.key == key
+        && proof.value == Some(value)
+        && SparseMerkleTree::verify_proof_against_root(&proof, device_root)
+}
+
+/// The receiver's pinned CURRENT fused anchor state `(Aᵢ, J_b, uᵢ)` for a counterparty — the state
+/// the NEXT offline-bearer transfer from that counterparty must consume. Advanced to the successor
+/// on each accepted transfer, so it is the anti-replay frontier: a release whose previous fused
+/// state does not equal this is rejected (verify-only is not activation; verify + ADOPT is).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FusedAnchorFrontier {
+    pub anchor_head: [u8; 32],
+    pub boot_head: [u8; 32],
+    pub counter: u64,
+}
+
+impl FusedAnchorFrontier {
+    /// `commit_0` frontier for a freshly admitted fused anchor: `(A₀, J₀, 0)`.
+    pub fn genesis(anchor_head: [u8; 32], boot_head: [u8; 32]) -> Self {
+        Self {
+            anchor_head,
+            boot_head,
+            counter: 0,
+        }
+    }
+
+    /// True iff this frontier equals the release's PREVIOUS fused state `(prev_anchor_head,
+    /// prev_boot_head, prev_counter)` — i.e. the transfer consumes the state the receiver adopted.
+    /// A mismatch is a replay / stale / forked release and must be rejected.
+    pub fn matches_prev(
+        &self,
+        prev_anchor_head: &[u8; 32],
+        prev_boot_head: &[u8; 32],
+        prev_counter: u64,
+    ) -> bool {
+        &self.anchor_head == prev_anchor_head
+            && &self.boot_head == prev_boot_head
+            && self.counter == prev_counter
+    }
+
+    /// The successor frontier to ADOPT after an accepted transfer: the release's next fused state
+    /// `(next_anchor_head, current_boot_head, next_counter)`.
+    pub fn adopt_successor(
+        next_anchor_head: [u8; 32],
+        current_boot_head: [u8; 32],
+        next_counter: u64,
+    ) -> Self {
+        Self {
+            anchor_head: next_anchor_head,
+            boot_head: current_boot_head,
+            counter: next_counter,
+        }
+    }
 }
 
 /// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
@@ -208,225 +339,6 @@ pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operatio
         op,
         Operation::Transfer { authority_policy: Some(ap), .. }
             if ap.mode == AuthorityMode::OfflineBearerRequired
-    )
-}
-
-/// Outcome of the offline-bearer gate: the receipt bundle (carries the proof inputs so the digest
-/// is reconstructable) and the `anchor_proof_hash` the caller folds into the attested successor tip.
-pub struct OfflineBearerGateOutcome {
-    pub island_attestation: crate::types::device_state::IslandAttestation,
-    pub anchor_proof_hash: [u8; 32],
-}
-
-/// The offline-bearer authority gate. This is the cryptographic gate ONLY — it does not mutate
-/// DeviceState (the caller flips `OfflineBearerAttestation::Attested`). It fails closed: any
-/// condition below rejects the transition, never a silent downgrade.
-///
-/// Rejects, in order:
-///  1. operation is not an `OfflineBearerRequired` transfer, or no anchor transport is present;
-///  2. `value_capability` is not `Yes`;
-///  3. anchor identity fetch / signing fails (device unreachable, human rejects, malformed material);
-///  4. the anchor signature does not verify host-side;
-///  5. the recomputed canonical anchor-set id != the operation's declared `anchor_set_id`.
-///
-/// On success returns the receipt + the `anchor_proof_hash` to fold; a re-verifier recomputing the
-/// digest from the receipt and matching it to the folded tip is reject (6) — see
-/// [`anchor_proof_hash_from_receipt`].
-#[allow(clippy::too_many_arguments)]
-pub async fn run_offline_bearer_gate(
-    transport: Option<&std::sync::Arc<dyn crate::crypto::anchor_transport::AnchorTransport>>,
-    frontier_store: &std::sync::Arc<dyn crate::core::chain_tip_store::ChainTipStore>,
-    op: &crate::types::operations::Operation,
-    current_tip: &[u8; 32],
-    rel_key: &[u8; 32],
-    local_device_id: &[u8; 32],
-    entropy: &[u8; 32],
-    expiry_tick: u64,
-    value_capability: crate::types::device_state::ValueCapability,
-) -> Result<OfflineBearerGateOutcome, DsmError> {
-    use crate::attestation::{
-        canonical_signature_bundle, compute_anchor_proof_hash, compute_anchor_set_id,
-        dsm_offline_bearer_payload_hash, dsm_ui_transcript, id_island_from_spki, OfflineBearerMode,
-    };
-    use crate::crypto::anchor_transport::{verify_anchor_signature, AnchorSignRequest};
-    use crate::types::device_state::{IslandAttestation, ValueCapability};
-    use crate::types::operations::{AuthorityMode, Operation};
-
-    // (1a) Must be an offline-bearer-required transfer.
-    let (to_device_id, amount, token_id, ap) = match op {
-        Operation::Transfer {
-            to_device_id,
-            amount,
-            token_id,
-            authority_policy: Some(ap),
-            ..
-        } if ap.mode == AuthorityMode::OfflineBearerRequired => {
-            (to_device_id, amount, token_id, ap)
-        }
-        _ => {
-            return Err(DsmError::invalid_operation(
-                "offline-bearer gate: operation is not an OFFLINE_BEARER_REQUIRED transfer",
-            ))
-        }
-    };
-
-    // (1b) Transport must be present.
-    let transport = transport.ok_or_else(|| {
-        DsmError::verification(
-            "offline-bearer gate: OFFLINE_BEARER_REQUIRED but no anchor transport (fail-closed)",
-        )
-    })?;
-
-    // (2) Value capability must be Yes (No/Unknown hard reject).
-    if value_capability != ValueCapability::Yes {
-        return Err(DsmError::verification(
-            "offline-bearer gate: value_capability is not Yes (fail-closed)",
-        ));
-    }
-
-    // Counterparty must be a 32-byte device id.
-    let counterparty_id: [u8; 32] = to_device_id.as_slice().try_into().map_err(|_| {
-        DsmError::invalid_operation("offline-bearer gate: to_device_id must be 32 bytes")
-    })?;
-
-    let op_bytes = op.to_bytes();
-    let payload_hash = dsm_offline_bearer_payload_hash(&op_bytes);
-    let amount_u64 = amount.value();
-
-    // (3a) Fetch the device's published identity (the ACTUAL anchor set it signs under).
-    let rec = transport.get_identity().await.map_err(|e| {
-        DsmError::verification(format!(
-            "offline-bearer gate: anchor identity fetch failed: {e} (fail-closed)"
-        ))
-    })?;
-
-    // (5) Recomputed canonical anchor-set id must equal the policy's declared id — a policy cannot
-    // name one anchor set while the device signs under a different concrete identity set.
-    let id_anchor_set = compute_anchor_set_id(&[rec.id_anchor]);
-    if id_anchor_set != ap.anchor_set_id {
-        return Err(DsmError::verification(
-            "offline-bearer gate: anchor-set id mismatch vs declared policy (fail-closed)",
-        ));
-    }
-
-    // The anchor's SINGLE monotonic frontier (ONE per device, keyed by the anchor identity — NOT per
-    // relationship; every offline-bearer transition advances this one counter, so a clone must fork
-    // it). parent_root = the device's current frontier root; successor_root advances it
-    // deterministically (no signature dependency → no circularity). It is its OWN chain, separate
-    // from the relationship chain tip (`current_tip`).
-    let (parent_root, stored_state) = frontier_store
-        .get_anchor_frontier(&rec.id_anchor)
-        .unwrap_or(([0u8; 32], 0));
-    let state_number = stored_state + 1;
-    let operation_hash = payload_hash;
-    let successor_root = crate::attestation::dsm_anchor_frontier_successor(
-        &parent_root,
-        &operation_hash,
-        state_number,
-    );
-    let policy_hash = crate::attestation::dsm_policy_hash(&ap.policy_id, &id_anchor_set);
-
-    // The request the device displays and computes the challenge over.
-    let req = AnchorSignRequest {
-        h_n: current_tip,
-        payload_hash: &payload_hash,
-        relationship_id: rel_key,
-        device_id: local_device_id,
-        value_capability: value_capability.to_wire() as u8,
-        offline_bearer_mode: OfflineBearerMode::Required.tag(),
-        nonce: entropy.as_slice(),
-        expiry_tick,
-        amount: amount_u64,
-        asset: token_id.as_slice(),
-        counterparty_id: &counterparty_id,
-        policy_id: &ap.policy_id,
-        policy_hash: &policy_hash,
-        parent_root: &parent_root,
-        successor_root: &successor_root,
-        state_number,
-    };
-
-    // (3b) Sign on the device.
-    let signature = transport.sign(&req).await.map_err(|e| {
-        DsmError::verification(format!(
-            "offline-bearer gate: anchor signing failed: {e} (fail-closed)"
-        ))
-    })?;
-
-    // (4) Verify the signature host-side against the pinned identity.
-    verify_anchor_signature(&rec, &req, &signature).map_err(|e| {
-        DsmError::verification(format!(
-            "offline-bearer gate: anchor signature verification failed: {e} (fail-closed)"
-        ))
-    })?;
-
-    // (4b) Advance the device's SINGLE anchor frontier (CAS, keyed by id_anchor). Fail-closed if the
-    // advance is rejected — a stale/forked parent or non-monotonic state means a concurrent or
-    // cloned signer touched this device's one frontier.
-    let advanced = frontier_store
-        .set_anchor_frontier(&rec.id_anchor, parent_root, successor_root, state_number)
-        .map_err(|e| {
-            DsmError::verification(format!(
-                "offline-bearer gate: anchor frontier advance failed: {e} (fail-closed)"
-            ))
-        })?;
-    if !advanced {
-        return Err(DsmError::verification(
-            "offline-bearer gate: anchor frontier advance rejected — forked/concurrent advance (fail-closed)",
-        ));
-    }
-
-    // The UI transcript the device bound (recompute the same bytes for the receipt + proof digest).
-    let ui_transcript_hash = dsm_ui_transcript(
-        amount_u64,
-        token_id.as_slice(),
-        &counterparty_id,
-        current_tip,
-        &payload_hash,
-        &ap.policy_id,
-        &rec.firmware_id,
-        rec.screen_template_id,
-    );
-
-    let bundle = canonical_signature_bundle(std::slice::from_ref(&signature));
-    let anchor_proof_hash =
-        compute_anchor_proof_hash(&ap.policy_id, &id_anchor_set, &ui_transcript_hash, &bundle);
-
-    let island_attestation = IslandAttestation {
-        id_island: id_island_from_spki(&rec.leaf_spki),
-        id_anchor_set,
-        ui_transcript_hash,
-        signature,
-        policy_id: ap.policy_id,
-        anchor_pubkey_hash: crate::attestation::dsm_anchor_pubkey_hash(&rec.leaf_spki),
-        firmware_hash: rec.firmware_hash,
-        policy_hash,
-        parent_root,
-        successor_root,
-        operation_hash,
-        state_number,
-    };
-
-    Ok(OfflineBearerGateOutcome {
-        island_attestation,
-        anchor_proof_hash,
-    })
-}
-
-/// Reconstruct the `anchor_proof_hash` from a receipt's `IslandAttestation` (reject 6: the recomputed
-/// digest must equal the one folded into the attested successor tip). Every input comes from the
-/// receipt, so the folded tip is independently checkable. (Single-island; dual-island carries
-/// multiple signatures.)
-pub fn anchor_proof_hash_from_receipt(
-    att: &crate::types::device_state::IslandAttestation,
-) -> [u8; 32] {
-    let bundle =
-        crate::attestation::canonical_signature_bundle(std::slice::from_ref(&att.signature));
-    crate::attestation::compute_anchor_proof_hash(
-        &att.policy_id,
-        &att.id_anchor_set,
-        &att.ui_transcript_hash,
-        &bundle,
     )
 }
 
@@ -550,10 +462,6 @@ pub struct BilateralTransactionResult {
     pub relationship_anchor: BilateralRelationshipAnchor,
     pub transaction_hash: [u8; 32],
     pub completed_offline: bool,
-    /// Offline-bearer island attestation receipt — `Some` iff this was an attested
-    /// OFFLINE_BEARER_REQUIRED transfer. Carries the proof inputs so a re-verifier can reconstruct
-    /// the `anchor_proof_hash` folded into the chain tip.
-    pub island_attestation: Option<crate::types::device_state::IslandAttestation>,
 }
 
 /// Prepared bilateral advance — handoff from the tripwire-verified
@@ -598,13 +506,8 @@ pub struct BilateralTransactionManager {
     local_device_id: [u8; 32],
     local_genesis_hash: [u8; 32],
     chain_tip_store: std::sync::Arc<dyn ChainTipStore>,
-    /// Optional offline-bearer signing anchor (the DeviceAnchor). `None` = no offline-bearer
-    /// authority admitted, so OFFLINE_BEARER_REQUIRED transitions hard-reject (fail-closed). Set
-    /// via [`BilateralTransactionManager::with_anchor_transport`].
-    anchor_transport: Option<std::sync::Arc<dyn crate::crypto::anchor_transport::AnchorTransport>>,
-    /// Receiver-side pinned anchor enrollments. An incoming OFFLINE_BEARER_REQUIRED commit from a
-    /// sender whose anchor is not admitted here is rejected fail-closed. Default: empty (admit a
-    /// counterparty's anchor via [`BilateralTransactionManager::admit_anchor`]).
+    /// Receiver-side pinned fused-anchor enrollments. An incoming OFFLINE_BEARER_REQUIRED commit
+    /// from a counterparty whose fused anchor is not pinned here is rejected fail-closed.
     enrollment_store: std::sync::Arc<dyn crate::crypto::anchor_enrollment::AnchorEnrollmentStore>,
 }
 
@@ -643,22 +546,10 @@ impl BilateralTransactionManager {
             local_device_id,
             local_genesis_hash,
             chain_tip_store,
-            anchor_transport: None,
             enrollment_store: std::sync::Arc::new(
                 crate::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore::new(),
             ),
         }
-    }
-
-    /// Inject the offline-bearer signing anchor (the admitted hardware island). Builder-style, so
-    /// existing constructors are unchanged. Without it, OFFLINE_BEARER_REQUIRED transitions
-    /// hard-reject (fail-closed).
-    pub fn with_anchor_transport(
-        mut self,
-        transport: std::sync::Arc<dyn crate::crypto::anchor_transport::AnchorTransport>,
-    ) -> Self {
-        self.anchor_transport = Some(transport);
-        self
     }
 
     /// Inject a receiver-side anchor enrollment store (SDKs back it with persistent storage).
@@ -668,138 +559,6 @@ impl BilateralTransactionManager {
     ) -> Self {
         self.enrollment_store = store;
         self
-    }
-
-    /// Admit (pin) a counterparty's anchor through the authority path: pin its identity record,
-    /// offline-bearer policy hash, and initial frontier `(root, state)`. A later offline-bearer
-    /// commit from this sender is accepted ONLY if it advances this pinned frontier under the pinned
-    /// identity. Never call this implicitly from a received receipt — that is the anti-reprovision
-    /// rule (a fresh self-provisioned identity must not admit itself).
-    pub fn admit_anchor(
-        &self,
-        sender_device_id: [u8; 32],
-        record: crate::crypto::anchor_transport::AnchorIdentityRecord,
-        policy_hash: [u8; 32],
-        initial_root: [u8; 32],
-        initial_state: u64,
-    ) -> Result<(), DsmError> {
-        self.enrollment_store
-            .admit(crate::crypto::anchor_enrollment::AnchorEnrollment {
-                device_id: sender_device_id,
-                record,
-                policy_hash,
-                frontier_root: initial_root,
-                frontier_state: initial_state,
-            })
-    }
-
-    /// This device's published anchor identity, if an anchor transport is admitted. `None` means no
-    /// offline-bearer anchor (no element / no mock) — the device cannot anchor transfers and falls
-    /// back to the online-checked path. The identity is the element's (real Safe 7 transport) or the
-    /// in-process mock's; the exchange + pinning around it are identical either way.
-    pub async fn anchor_identity(
-        &self,
-    ) -> Option<crate::crypto::anchor_transport::AnchorIdentityRecord> {
-        match &self.anchor_transport {
-            Some(t) => t.get_identity().await.ok(),
-            None => None,
-        }
-    }
-
-    /// Production policy: a device that HOLDS an offline-bearer anchor stamps OFFLINE_BEARER_REQUIRED
-    /// on its plain offline transfers, pinning its own anchor set. A device with no anchor leaves the
-    /// transfer plain (online-checked fallback). Not a test hook — the only thing the mock supplies is
-    /// the anchor transport; this policy logic is identical with a real element.
-    pub async fn apply_offline_bearer_policy(&self, op: &mut crate::types::operations::Operation) {
-        use crate::types::operations::{AuthorityMode, AuthorityPolicy, Operation};
-        if let Operation::Transfer {
-            authority_policy, ..
-        } = op
-        {
-            if authority_policy.is_none() {
-                if let Some(rec) = self.anchor_identity().await {
-                    *authority_policy = Some(AuthorityPolicy {
-                        mode: AuthorityMode::OfflineBearerRequired,
-                        policy_id: crate::attestation::dsm_offline_bearer_policy_id(),
-                        anchor_set_id: crate::attestation::compute_anchor_set_id(&[rec.id_anchor]),
-                    });
-                }
-            }
-        }
-    }
-
-    /// Admit a counterparty's anchor only if it is not already admitted (idempotent). Returns
-    /// whether an admission was performed. Used so re-seeing a counterparty does not reset its
-    /// tracked monotonic frontier back to genesis.
-    pub fn admit_anchor_if_absent(
-        &self,
-        sender_device_id: [u8; 32],
-        record: crate::crypto::anchor_transport::AnchorIdentityRecord,
-        policy_hash: [u8; 32],
-        initial_root: [u8; 32],
-        initial_state: u64,
-    ) -> Result<bool, DsmError> {
-        if self.enrollment_store.get(&sender_device_id).is_some() {
-            return Ok(false);
-        }
-        self.admit_anchor(
-            sender_device_id,
-            record,
-            policy_hash,
-            initial_root,
-            initial_state,
-        )?;
-        Ok(true)
-    }
-
-    /// Sender-side: produce the offline-bearer anchor attestation for a pending precommitment by
-    /// running the anchor gate over the transition (signs with the admitted anchor transport and
-    /// advances the device's single frontier). Returns `None` when no anchor transport is admitted
-    /// or the op is not OFFLINE_BEARER_REQUIRED — so a build with no transport carries no attestation
-    /// and the receiver rejects fail-closed. The returned `u64` is the signed `expiry_tick` the
-    /// receiver must echo (as `anchor_expiry_tick`) to reconstruct the signature.
-    pub async fn attest_offline_bearer_for_commitment(
-        &self,
-        commitment_hash: &[u8; 32],
-        current_tip: &[u8; 32],
-        entropy: &[u8; 32],
-        value_capability: crate::types::device_state::ValueCapability,
-    ) -> Result<Option<(crate::types::device_state::IslandAttestation, u64)>, DsmError> {
-        use crate::types::operations::Operation;
-        if self.anchor_transport.is_none() {
-            return Ok(None);
-        }
-        let (op, expiry) = match self.pending_commitments.get(commitment_hash) {
-            Some(p) => (p.operation.clone(), p.target_state_number),
-            None => return Ok(None),
-        };
-        if !operation_requires_offline_bearer(&op) {
-            return Ok(None);
-        }
-        let counterparty: [u8; 32] = match &op {
-            Operation::Transfer { to_device_id, .. } => {
-                to_device_id.as_slice().try_into().map_err(|_| {
-                    DsmError::invalid_operation(
-                        "attest_offline_bearer: to_device_id must be 32 bytes",
-                    )
-                })?
-            }
-            _ => return Ok(None),
-        };
-        let rel_key = compute_smt_key(&self.local_device_id, &counterparty);
-        let outcome = run_offline_bearer_gate(
-            self.anchor_transport.as_ref(),
-            &self.chain_tip_store,
-            &op,
-            current_tip,
-            &rel_key,
-            &self.local_device_id,
-            entropy,
-            expiry,
-            value_capability,
-        )
-        .await?;
-        Ok(Some((outcome.island_attestation, expiry)))
     }
 
     pub fn list_relationships(&self) -> Vec<BilateralRelationshipAnchor> {
@@ -1491,7 +1250,6 @@ impl BilateralTransactionManager {
         pre_commitment_hash: &[u8; 32],
         receiver_acceptance_proof: &[u8],
         smt: &mut SparseMerkleTree,
-        value_capability: crate::types::device_state::ValueCapability,
     ) -> Result<BilateralTransactionResult, DsmError> {
         self.finalize_offline_transfer_with_entropy(
             remote_device_id,
@@ -1499,7 +1257,6 @@ impl BilateralTransactionManager {
             receiver_acceptance_proof,
             None,
             smt,
-            value_capability,
         )
         .await
     }
@@ -1517,7 +1274,6 @@ impl BilateralTransactionManager {
         receiver_acceptance_proof: &[u8],
         pre_generated_entropy: Option<[u8; 32]>,
         smt: &mut SparseMerkleTree,
-        value_capability: crate::types::device_state::ValueCapability,
     ) -> Result<BilateralTransactionResult, DsmError> {
         info!("Phase 2: finalize offline");
         let pre = self
@@ -1627,41 +1383,11 @@ impl BilateralTransactionManager {
         let op_bytes = pre.operation.to_bytes();
         let receipt_sigma = compute_precommit(&current_tip, &op_bytes, &entropy);
 
-        // ===== Phase 5: offline-bearer authority gate =====
-        // Runs ONLY for an OFFLINE_BEARER_REQUIRED transfer. Fail-closed: the operation REQUIRES the
-        // proof, so any gate error (no admitted anchor, value-capability not Yes, signing/verify
-        // failure, anchor-set mismatch) propagates as a HARD reject — never a silent downgrade.
-        // Cryptographic gate ONLY; flipping OfflineBearerAttestation::Attested is the
-        // DeviceState-owning caller's job (clean split).
-        let island_outcome = if operation_requires_offline_bearer(&pre.operation) {
-            let rel_key = compute_smt_key(&self.local_device_id, remote_device_id);
-            Some(
-                run_offline_bearer_gate(
-                    self.anchor_transport.as_ref(),
-                    &self.chain_tip_store,
-                    &pre.operation,
-                    &current_tip,
-                    &rel_key,
-                    &self.local_device_id,
-                    &entropy,
-                    pre.target_state_number,
-                    value_capability,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        // Attested transitions fold the canonical anchor-proof digest into the §16.6 successor tip
-        // (append-only); non-attested transitions stay byte-identical to before.
-        let new_tip = compute_successor_tip_attested(
-            &current_tip,
-            &op_bytes,
-            &entropy,
-            &receipt_sigma,
-            island_outcome.as_ref().map(|o| &o.anchor_proof_hash),
-        );
+        // Successor relationship tip: the symmetric §16.6 tip both parties recompute from the
+        // shared inputs. The Boot Fenced Fused Anchor state is NOT folded here (the tip is
+        // symmetric and cannot carry one party's device-private fused state); it is committed
+        // by a dedicated per-device fused-anchor SMT leaf (`anchor_state_leaf_key`).
+        let new_tip = compute_successor_tip(&current_tip, &op_bytes, &entropy, &receipt_sigma);
         let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
 
         // §4.2: SMT-Replace FIRST, then anchor update from the result.
@@ -1674,7 +1400,6 @@ impl BilateralTransactionManager {
             relationship_anchor: anchor.clone(),
             transaction_hash: tx_hash,
             completed_offline: true,
-            island_attestation: island_outcome.map(|o| o.island_attestation),
         })
     }
 
@@ -1868,20 +1593,13 @@ mod tests {
     use tokio; // for #[tokio::test]
 
     #[test]
-    fn successor_tip_attested_is_append_only_and_non_attested_is_byte_identical() {
+    fn successor_tip_is_the_symmetric_canonical_formula() {
         let h_n = [1u8; 32];
         let op = b"op-bytes";
         let e = [2u8; 32];
         let sigma = [3u8; 32];
-        let proof = [4u8; 32];
-
-        // Non-attested path is byte-identical to the base formula — zero ripple to existing tips.
+        // The successor tip is exactly H("DSM/tip" ‖ h_n ‖ op ‖ e ‖ σ) — no anchor fold.
         let base = compute_successor_tip(&h_n, op, &e, &sigma);
-        assert_eq!(
-            base,
-            compute_successor_tip_attested(&h_n, op, &e, &sigma, None)
-        );
-        // Pin the bytes: reproduce the original §16.6 formula explicitly.
         let explicit = {
             let mut h = dsm_domain_hasher(TAG_TIP);
             h.update(&h_n);
@@ -1891,174 +1609,116 @@ mod tests {
             bytes32(h.finalize().as_bytes())
         };
         assert_eq!(base, explicit);
-        // Attested path appends the anchor-proof digest → different, deterministic tip.
-        let attested = compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&proof));
-        assert_ne!(attested, base);
-        assert_eq!(
-            attested,
-            compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&proof))
-        );
-        // A different proof digest → different tip (the attestation is bound into the tip).
-        assert_ne!(
-            attested,
-            compute_successor_tip_attested(&h_n, op, &e, &sigma, Some(&[5u8; 32]))
-        );
     }
 
-    #[tokio::test]
-    async fn offline_bearer_gate_accepts_valid_proof_and_fails_closed() {
-        use crate::attestation::compute_anchor_set_id;
-        use crate::crypto::anchor_transport::{AnchorTransport, MockAnchorTransport};
-        use crate::types::device_state::ValueCapability;
-        use crate::types::operations::{AuthorityMode, AuthorityPolicy};
-        use std::sync::Arc;
+    #[test]
+    fn anchor_state_commit_is_deterministic_and_field_sensitive() {
+        let b = [1u8; 32];
+        let a = [2u8; 32];
+        let j = [3u8; 32];
+        let u = 7u64;
+        let c = anchor_state_commit(&b, &a, &j, u);
+        // Deterministic.
+        assert_eq!(c, anchor_state_commit(&b, &a, &j, u));
+        // Every field is bound: flipping any input changes the commit.
+        assert_ne!(c, anchor_state_commit(&[9u8; 32], &a, &j, u));
+        assert_ne!(c, anchor_state_commit(&b, &[9u8; 32], &j, u));
+        assert_ne!(c, anchor_state_commit(&b, &a, &[9u8; 32], u));
+        assert_ne!(c, anchor_state_commit(&b, &a, &j, u + 1));
+        // Binds the fused anchor HEAD, not the root: a head/boot-head swap is a distinct commit
+        // (so the commitment cannot be circular with the root that carries it).
+        assert_ne!(c, anchor_state_commit(&b, &j, &a, u));
+        // Domain-separated: not a bare BLAKE3 over the concatenation.
+        let mut raw = blake3::Hasher::new();
+        raw.update(&b);
+        raw.update(&a);
+        raw.update(&j);
+        raw.update(&u.to_le_bytes());
+        assert_ne!(c, *raw.finalize().as_bytes());
+    }
 
-        let anchor: Arc<dyn AnchorTransport> = Arc::new(MockAnchorTransport::from_seed([7u8; 32]));
-        let rec = anchor.get_identity().await.unwrap();
-        let policy_id = [0x11u8; 32];
-        let anchor_set_id = compute_anchor_set_id(&[rec.id_anchor]);
+    #[test]
+    fn anchor_state_leaf_inclusion_round_trips_and_rejects_tamper() {
+        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
+        let b = [0xB1u8; 32];
+        let (a0, j0) = ([0xA0u8; 32], [0x50u8; 32]);
+        let (a1, j1) = ([0xA1u8; 32], [0x51u8; 32]);
 
-        let make_op = |ap: Option<AuthorityPolicy>| Operation::Transfer {
-            to_device_id: vec![0x22u8; 32],
-            amount: Balance::from_parts(10, 0, Some([0u8; 32])),
-            token_id: b"ERA".to_vec(),
-            policy_commit: [0u8; 32],
-            mode: TransactionMode::Bilateral,
-            nonce: vec![1, 2, 3],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
-            recipient: vec![0x22u8; 32],
-            to: vec![0x22u8; 32],
-            message: String::new(),
-            signature: vec![],
-            authority_policy: ap,
-        };
-        let required = AuthorityPolicy {
-            mode: AuthorityMode::OfflineBearerRequired,
-            policy_id,
-            anchor_set_id,
-        };
-        let op = make_op(Some(required.clone()));
-        let (h_n, rel, dev, entropy) = ([0xAAu8; 32], [0xBBu8; 32], [0xCCu8; 32], [0xDDu8; 32]);
-        let store = crate::core::chain_tip_store::noop_chain_tip_store();
+        let mut smt = SparseMerkleTree::new(256);
+        // Bootstrap commit_0 = (B, A_0, J_0, u=0), then the "parent" proof against prev_root.
+        let parent_proof = set_anchor_state_leaf(&mut smt, &b, &a0, &j0, 0).expect("set0");
+        let prev_root = *smt.root();
+        // The parent proof must verify the OLD fused state under prev_root.
+        assert!(verify_anchor_state_commitment(
+            &prev_root,
+            &b,
+            &a0,
+            &j0,
+            0,
+            &parent_proof
+        ));
 
-        // (3) Happy path: a valid anchor proof finalizes.
-        let outcome = run_offline_bearer_gate(
-            Some(&anchor),
-            &store,
-            &op,
-            &h_n,
-            &rel,
-            &dev,
-            &entropy,
-            42,
-            ValueCapability::Yes,
-        )
-        .await
-        .expect("valid offline-bearer proof must finalize");
-        // (6) The receipt reconstructs the exact anchor_proof_hash folded into the tip.
-        assert_eq!(
-            anchor_proof_hash_from_receipt(&outcome.island_attestation),
-            outcome.anchor_proof_hash
-        );
-        // (1) Attested tip differs from the non-attested tip (and non-attested stays byte-identical).
-        let base_tip = compute_successor_tip(&h_n, b"op", &entropy, &[1u8; 32]);
-        let attested_tip = compute_successor_tip_attested(
-            &h_n,
-            b"op",
-            &entropy,
-            &[1u8; 32],
-            Some(&outcome.anchor_proof_hash),
-        );
-        assert_ne!(base_tip, attested_tip);
+        // Advance the leaf to the successor commit_1 = (B, A_1, J_1, u=1); "child" proof vs next_root.
+        let child_proof = set_anchor_state_leaf(&mut smt, &b, &a1, &j1, 1).expect("set1");
+        let next_root = *smt.root();
+        assert!(verify_anchor_state_commitment(
+            &next_root,
+            &b,
+            &a1,
+            &j1,
+            1,
+            &child_proof
+        ));
 
-        // (4) Fail-closed: no transport present.
-        assert!(run_offline_bearer_gate(
-            None,
-            &store,
-            &op,
-            &h_n,
-            &rel,
-            &dev,
-            &entropy,
-            42,
-            ValueCapability::Yes
-        )
-        .await
-        .is_err());
-        // (4) Fail-closed: device rejects / signing fails.
-        let rej: Arc<dyn AnchorTransport> = Arc::new(MockAnchorTransport::rejecting([7u8; 32]));
-        assert!(run_offline_bearer_gate(
-            Some(&rej),
-            &store,
-            &op,
-            &h_n,
-            &rel,
-            &dev,
-            &entropy,
-            42,
-            ValueCapability::Yes
-        )
-        .await
-        .is_err());
-        // (2) Fail-closed: value_capability not Yes.
-        for vc in [ValueCapability::No, ValueCapability::Unknown] {
-            assert!(run_offline_bearer_gate(
-                Some(&anchor),
-                &store,
-                &op,
-                &h_n,
-                &rel,
-                &dev,
-                &entropy,
-                42,
-                vc
-            )
-            .await
-            .is_err());
-        }
-        // (5) Fail-closed: policy declares a different anchor_set_id than the device's actual set.
-        let wrong_op = make_op(Some(AuthorityPolicy {
-            mode: AuthorityMode::OfflineBearerRequired,
-            policy_id,
-            anchor_set_id: [0x99u8; 32],
-        }));
-        assert!(run_offline_bearer_gate(
-            Some(&anchor),
-            &store,
-            &wrong_op,
-            &h_n,
-            &rel,
-            &dev,
-            &entropy,
-            42,
-            ValueCapability::Yes
-        )
-        .await
-        .is_err());
-        // (1) A non-offline-bearer transfer (no policy) is not gated here.
-        let plain = make_op(None);
-        assert!(run_offline_bearer_gate(
-            Some(&anchor),
-            &store,
-            &plain,
-            &h_n,
-            &rel,
-            &dev,
-            &entropy,
-            42,
-            ValueCapability::Yes
-        )
-        .await
-        .is_err());
+        // Fail-closed rejections:
+        // wrong counter (off-by-one) under next_root.
+        assert!(!verify_anchor_state_commitment(
+            &next_root,
+            &b,
+            &a1,
+            &j1,
+            0,
+            &child_proof
+        ));
+        // wrong fused head.
+        assert!(!verify_anchor_state_commitment(
+            &next_root,
+            &b,
+            &a0,
+            &j1,
+            1,
+            &child_proof
+        ));
+        // right state but wrong root (child proof does not verify under prev_root).
+        assert!(!verify_anchor_state_commitment(
+            &prev_root,
+            &b,
+            &a1,
+            &j1,
+            1,
+            &child_proof
+        ));
+        // parent (old) state is NOT committed by next_root.
+        assert!(!verify_anchor_state_commitment(
+            &next_root,
+            &b,
+            &a0,
+            &j0,
+            0,
+            &parent_proof
+        ));
+    }
 
-        // (6, tamper) A tampered signature bundle in the receipt changes the reconstructed digest.
-        let mut tampered = outcome.island_attestation.clone();
-        tampered.signature[0] ^= 0xff;
-        assert_ne!(
-            anchor_proof_hash_from_receipt(&tampered),
-            outcome.anchor_proof_hash
-        );
+    #[test]
+    fn anchor_state_leaf_key_is_stable_per_bundle_and_distinct_from_commit() {
+        let b = [1u8; 32];
+        let k = anchor_state_leaf_key(&b);
+        // One stable key per device bundle (value changes, key does not).
+        assert_eq!(k, anchor_state_leaf_key(&b));
+        // Different bundle → different key.
+        assert_ne!(k, anchor_state_leaf_key(&[2u8; 32]));
+        // The KEY (over B only) is not the VALUE commit (over B‖A‖J‖u) — distinct domains.
+        assert_ne!(k, anchor_state_commit(&b, &b, &b, 0));
     }
 
     fn make_manager_ids() -> ([u8; 32], [u8; 32]) {
@@ -2266,117 +1926,11 @@ mod tests {
                 &pre.bilateral_commitment_hash,
                 b"accept",
                 &mut smt,
-                crate::types::device_state::ValueCapability::Yes,
             )
             .await
             .expect("finalize");
         assert!(result.completed_offline);
         assert!(!manager.has_pending_commitment(&pre.bilateral_commitment_hash));
-    }
-
-    #[tokio::test]
-    async fn finalize_with_offline_bearer_required_attests_or_fails_closed() {
-        use crate::attestation::compute_anchor_set_id;
-        use crate::crypto::anchor_transport::{AnchorTransport, MockAnchorTransport};
-        use crate::types::device_state::ValueCapability;
-        use crate::types::operations::{AuthorityMode, AuthorityPolicy};
-        use std::sync::Arc;
-
-        // Admit a hardware anchor and discover its canonical set id.
-        let anchor: Arc<dyn AnchorTransport> = Arc::new(MockAnchorTransport::from_seed([7u8; 32]));
-        let rec = anchor.get_identity().await.unwrap();
-        let policy_id = [0x11u8; 32];
-        let anchor_set_id = compute_anchor_set_id(&[rec.id_anchor]);
-
-        // An OFFLINE_BEARER_REQUIRED transfer, signed AFTER the policy is set (bound into the bytes).
-        let build_obr_op = |kp: &SignatureKeyPair| -> Operation {
-            let mut op = Operation::Transfer {
-                policy_commit: [0u8; 32],
-                token_id: b"ERA".to_vec(),
-                to_device_id: vec![9u8; 32],
-                amount: Balance::from_state(1, [0u8; 32]),
-                mode: TransactionMode::Bilateral,
-                nonce: vec![3u8; 8],
-                verification: VerificationType::Standard,
-                pre_commit: None,
-                recipient: vec![9u8; 32],
-                to: b"b32recipient".to_vec(),
-                message: "obr".to_string(),
-                signature: Vec::new(),
-                authority_policy: Some(AuthorityPolicy {
-                    mode: AuthorityMode::OfflineBearerRequired,
-                    policy_id,
-                    anchor_set_id,
-                }),
-            };
-            let sig = kp.sign(&op.to_bytes()).expect("sign");
-            if let Operation::Transfer { signature, .. } = &mut op {
-                *signature = sig;
-            }
-            op
-        };
-
-        // Happy path: manager WITH the admitted anchor → finalize attests.
-        let (m, kp) = make_manager();
-        let mut manager = m.with_anchor_transport(anchor.clone());
-        let contact = make_verified_contact("Island", true, true);
-        let remote_id = contact.device_id;
-        manager.add_verified_contact(contact).expect("add");
-        manager
-            .establish_relationship(&remote_id)
-            .await
-            .expect("establish");
-        let pre = manager
-            .prepare_offline_transfer(&remote_id, build_obr_op(&kp), 500)
-            .await
-            .expect("prepare");
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let result = manager
-            .finalize_offline_transfer(
-                &remote_id,
-                &pre.bilateral_commitment_hash,
-                b"accept",
-                &mut smt,
-                ValueCapability::Yes,
-            )
-            .await
-            .expect("attested finalize");
-        let att = result
-            .island_attestation
-            .expect("an OFFLINE_BEARER_REQUIRED transfer must carry an attestation receipt");
-        assert_eq!(att.id_anchor_set, anchor_set_id);
-        assert_eq!(att.policy_id, policy_id);
-        // The receipt reconstructs the proof digest folded into the chain tip (reject-6 basis).
-        let _ = anchor_proof_hash_from_receipt(&att);
-
-        // Fail-closed: the SAME OBR transfer through a manager with NO admitted anchor hard-rejects
-        // (the operation REQUIRES the proof — never a silent downgrade to online).
-        let (bare, kp2) = make_manager();
-        let mut bare = bare;
-        let contact2 = make_verified_contact("NoIsland", true, true);
-        let remote2 = contact2.device_id;
-        bare.add_verified_contact(contact2).expect("add");
-        bare.establish_relationship(&remote2)
-            .await
-            .expect("establish");
-        let pre2 = bare
-            .prepare_offline_transfer(&remote2, build_obr_op(&kp2), 500)
-            .await
-            .expect("prepare");
-        let mut smt2 = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let res2 = bare
-            .finalize_offline_transfer(
-                &remote2,
-                &pre2.bilateral_commitment_hash,
-                b"accept",
-                &mut smt2,
-                ValueCapability::Yes,
-            )
-            .await;
-        assert!(
-            res2.is_err(),
-            "OFFLINE_BEARER_REQUIRED with no admitted anchor must hard-reject (fail-closed)"
-        );
     }
 
     #[tokio::test]

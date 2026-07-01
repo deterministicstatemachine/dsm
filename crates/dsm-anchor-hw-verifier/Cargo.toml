@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "dsm-anchor-hw-verifier"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "DSM Boot Fenced Fused Anchor Path-B HARDWARE verifier: the receiver's real libtropic-rs session (Tropic01::new(RemoteSpiDevice) -> session_start -> mcounter_get) driven over the relay bridge. The ONLY crate that depends on the sibling libtropic-rs (tropic01); EXCLUDED from the workspace so CI builds without the sibling checkout."
+
+[dependencies]
+# The tropic01-free relay spine (RemoteSpiDevice + SpiRelayChannel + relay_bridge).
+dsm-anchor-verifier = { path = "../dsm-anchor-verifier" }
+# The official Tropic Square driver (sibling checkout) — the receiver runs its FULL stack.
+tropic01 = { path = "../../../../libtropic-rs/tropic01" }
+# Same x25519-dalek major (v2) as tropic01, for the L3 handshake key types.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# Runs the sync libtropic stack on a blocking task and drives the async relay pump.
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+# Hardware bring-up proof (examples/usb_counter_read.rs): drive a real TROPIC01 counter read over
+# the USB-CDC raw-SPI passthrough. dsm-anchor-core supplies the ApplianceRequest/Response codec.
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+serialport = "4"

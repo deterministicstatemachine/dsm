@@ -60,7 +60,7 @@ use anchor_core::accept::{accept_offline, CounterVerifier, DsmVerifier, Verifier
 use anchor_core::appliance::{Appliance, RecoverOutcome};
 use anchor_core::boot::BootTicket;
 use anchor_core::enrollment::{birth, Birth, BirthInputs};
-use anchor_core::proto::{decode_response, encode_request, pb};
+use anchor_core::proto::{decode_request, decode_response, encode_request, encode_response, pb};
 use anchor_core::root_advance::{CounterEvidence, Transition};
 use anchor_core::service;
 use anchor_core::sig::WotsBlake3;
@@ -177,12 +177,22 @@ impl<SPI: SpiDevice, CS: OutputPin> Tropic for ChipTropic<'_, SPI, CS> {
             .map_err(|_| TropicError::Comm)
     }
     fn counter_get(&mut self) -> Result<u32, TropicError> {
-        self.sess.mcounter_get(COUNTER).map_err(|_| TropicError::Comm)
+        self.sess
+            .mcounter_get(COUNTER)
+            .map_err(|_| TropicError::Comm)
     }
     fn counter_update(&mut self) -> Result<(), TropicError> {
         self.sess
             .mcounter_update(COUNTER)
             .map_err(|_| TropicError::CounterExhausted)
+    }
+}
+impl<SPI: SpiDevice, CS: OutputPin> ChipTropic<'_, SPI, CS> {
+    /// Transparent raw-SPI relay bridge (Path-B counter read): clock `buf` to TROPIC01 and read the
+    /// MISO back in place. The bytes are NOT interpreted — a remote receiver drives its own
+    /// libtropic session through these opaque transactions; this device is only the SPI bridge.
+    fn passthrough(&mut self, buf: &mut [u8]) -> Result<(), TropicError> {
+        self.sess.l1_passthrough(buf).map_err(|_| TropicError::Comm)
     }
 }
 
@@ -193,6 +203,29 @@ struct SecureCore<'a, SPI: SpiDevice, CS: OutputPin> {
 }
 impl<SPI: SpiDevice, CS: OutputPin> SecureCore<'_, SPI, CS> {
     fn handle(&mut self, frame: &[u8]) -> Vec<u8> {
+        // OP_SPI_PASSTHROUGH is a transparent raw-SPI relay bridge, not an appliance op: clock the
+        // caller's bytes straight to the chip and return the MISO. Handled here (not in the generic
+        // service) because it reaches the concrete chip backend directly via `tropic_mut`.
+        if let Ok(req) = decode_request(frame) {
+            if req.op == pb::Op::SpiPassthrough as i32 {
+                let mut buf = req.spi_payload;
+                let resp = match self.app.tropic_mut().passthrough(&mut buf) {
+                    Ok(()) => pb::ApplianceResponse {
+                        op: req.op,
+                        ok: true,
+                        spi_response: buf,
+                        ..Default::default()
+                    },
+                    Err(_) => pb::ApplianceResponse {
+                        op: req.op,
+                        ok: false,
+                        error: 8, // TROPIC comm
+                        ..Default::default()
+                    },
+                };
+                return encode_response(&resp);
+            }
+        }
         service::handle(&mut self.app, frame)
     }
 }
@@ -205,7 +238,14 @@ struct FwDsm {
     part_pk: Vec<u8>,
 }
 impl DsmVerifier for FwDsm {
-    fn prev_root_commits_anchor_state(&self, _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: u64) -> bool {
+    fn prev_root_commits_anchor_state(
+        &self,
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: u64,
+    ) -> bool {
         true
     }
     fn verify_boot_chain(
@@ -218,10 +258,17 @@ impl DsmVerifier for FwDsm {
     ) -> bool {
         let mut prev = *committed_boot_head;
         for tk in boot_chain {
-            if &tk.anchor_bundle != bundle || &tk.anchor_head != anchor_head || tk.prev_boot_head != prev {
+            if &tk.anchor_bundle != bundle
+                || &tk.anchor_head != anchor_head
+                || tk.prev_boot_head != prev
+            {
                 return false;
             }
-            if !SphincsPart::part_verify(&self.part_pk, &tk.cert_message(), &tk.partition_boot_signature) {
+            if !SphincsPart::part_verify(
+                &self.part_pk,
+                &tk.cert_message(),
+                &tk.partition_boot_signature,
+            ) {
                 return false;
             }
             prev = tk.next_boot_head;
@@ -237,7 +284,14 @@ impl DsmVerifier for FwDsm {
     fn delivers_to_receiver(&self, _: &Transition) -> bool {
         true
     }
-    fn next_root_commits_anchor_state(&self, _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: &[u8; 32], _: u64) -> bool {
+    fn next_root_commits_anchor_state(
+        &self,
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: &[u8; 32],
+        _: u64,
+    ) -> bool {
         true
     }
 }
@@ -268,11 +322,15 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     partition_trng: &[u8; 32],
     host_nonce: &[u8; 32],
 ) -> Result<(u32, Birth), &'static str> {
-    sess.mcounter_init(COUNTER, ENROLL_H0).map_err(|_| "mcounter_init")?;
+    sess.mcounter_init(COUNTER, ENROLL_H0)
+        .map_err(|_| "mcounter_init")?;
     let h0 = sess.mcounter_get(COUNTER).map_err(|_| "mcounter_get")?;
     // Arm both slots; capture the boot slot's output as the TROPIC birth witness.
-    let birth_witness = *sess.mac_and_destroy(Q_BOOT.into(), &ARM0).map_err(|_| "arm q_boot")?;
-    sess.mac_and_destroy(Q_TX.into(), &ARM0).map_err(|_| "arm q_tx")?;
+    let birth_witness = *sess
+        .mac_and_destroy(Q_BOOT.into(), &ARM0)
+        .map_err(|_| "arm q_boot")?;
+    sess.mac_and_destroy(Q_TX.into(), &ARM0)
+        .map_err(|_| "arm q_tx")?;
     let b = birth::<SphincsPart>(&BirthInputs {
         partition_trng,
         tropic_birth_witness: &birth_witness,
@@ -337,8 +395,21 @@ fn self_test<SPI: SpiDevice, CS: OutputPin>(
     // measurement directly (the host wire path has no boot op), as serve_forever does.
     ok_all &= core.app.boot(1, &FW).is_ok();
     ok_all &= rt(core, &prepare_request())?.ok;
-    ok_all &= rt(core, &pb::ApplianceRequest { op: pb::Op::Commit as i32, ..Default::default() })?.ok;
-    let emitr = rt(core, &pb::ApplianceRequest { op: pb::Op::Emit as i32, ..Default::default() })?;
+    ok_all &= rt(
+        core,
+        &pb::ApplianceRequest {
+            op: pb::Op::Commit as i32,
+            ..Default::default()
+        },
+    )?
+    .ok;
+    let emitr = rt(
+        core,
+        &pb::ApplianceRequest {
+            op: pb::Op::Emit as i32,
+            ..Default::default()
+        },
+    )?;
     ok_all &= emitr.ok;
     let relpb = emitr.release.clone();
     let (pk_len, sig_tropic_len, sig_partition_len) = relpb
@@ -346,13 +417,25 @@ fn self_test<SPI: SpiDevice, CS: OutputPin>(
         .and_then(|r| r.cert.as_ref())
         .map(|c| (c.pk_hw.len(), c.sigma_tropic.len(), c.sigma_partition.len()))
         .unwrap_or((0, 0, 0));
-    let fin = rt(core, &pb::ApplianceRequest { op: pb::Op::Finalize as i32, ..Default::default() })?;
+    let fin = rt(
+        core,
+        &pb::ApplianceRequest {
+            op: pb::Op::Finalize as i32,
+            ..Default::default()
+        },
+    )?;
     ok_all &= fin.ok;
     let mut fin_root = [0u8; 32];
     if fin.active_root.len() == 32 {
         fin_root.copy_from_slice(&fin.active_root);
     }
-    let st = rt(core, &pb::ApplianceRequest { op: pb::Op::Status as i32, ..Default::default() })?;
+    let st = rt(
+        core,
+        &pb::ApplianceRequest {
+            op: pb::Op::Status as i32,
+            ..Default::default()
+        },
+    )?;
     ok_all &= st.ok;
 
     let verify_ok = match relpb.as_ref().and_then(|r| r.to_release().ok()) {
@@ -366,7 +449,9 @@ fn self_test<SPI: SpiDevice, CS: OutputPin>(
                 enrolled_counter: ENROLL_H0 as u64,
                 anchor_uncompromised: true,
             };
-            let dsm = FwDsm { part_pk: part_pk.to_vec() };
+            let dsm = FwDsm {
+                part_pk: part_pk.to_vec(),
+            };
             accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, &SelfCounter).is_ok()
         }
         None => false,
@@ -466,7 +551,12 @@ fn main() -> ! {
 
     let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
     let sio = hal::Sio::new(pac.SIO);
-    let pins = hal::gpio::Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut pac.RESETS);
+    let pins = hal::gpio::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
 
     let sck = pins.gpio18.into_function::<hal::gpio::FunctionSpi>();
     let mosi = pins.gpio19.into_function::<hal::gpio::FunctionSpi>();
@@ -553,7 +643,10 @@ fn main() -> ! {
     let _ = serial.flush();
 
     // ---- Phase 4: T5 self-test (own appliance), reported briefly ----
-    put(&mut serial, b"[T5] self-test (boot-fenced fused protocol, secure-core seam)...\r\n");
+    put(
+        &mut serial,
+        b"[T5] self-test (boot-fenced fused protocol, secure-core seam)...\r\n",
+    );
     let _ = serial.flush();
     usb_dev.poll(&mut [&mut serial]);
     let st = match enroll(&mut sess, &part_trng, &host_nonce) {
@@ -576,7 +669,10 @@ fn main() -> ! {
         Err(e) => Err(e),
     };
     {
-        let mut w = BufW { buf: [0u8; 256], len: 0 };
+        let mut w = BufW {
+            buf: [0u8; 256],
+            len: 0,
+        };
         match &st {
             Ok(r) => {
                 let pass = r.ops_ok
@@ -667,9 +763,15 @@ fn main() -> ! {
             RecoverOutcome::ReemitCommitted(_) => b"[T6] recover: ReemitCommitted\r\n".as_slice(),
             RecoverOutcome::DowngradeOnline => b"[T6] recover: DowngradeOnline\r\n".as_slice(),
             RecoverOutcome::FailClosed => b"[T6] recover: FailClosed\r\n".as_slice(),
-            RecoverOutcome::ExhaustedOnlineOnly => b"[T6] recover: ExhaustedOnlineOnly\r\n".as_slice(),
-            RecoverOutcome::AcceptPreparedCanComplete => b"[T6] recover: PreparedCanComplete\r\n".as_slice(),
-            RecoverOutcome::OnlineCancelOrResolve => b"[T6] recover: OnlineCancelOrResolve\r\n".as_slice(),
+            RecoverOutcome::ExhaustedOnlineOnly => {
+                b"[T6] recover: ExhaustedOnlineOnly\r\n".as_slice()
+            }
+            RecoverOutcome::AcceptPreparedCanComplete => {
+                b"[T6] recover: PreparedCanComplete\r\n".as_slice()
+            }
+            RecoverOutcome::OnlineCancelOrResolve => {
+                b"[T6] recover: OnlineCancelOrResolve\r\n".as_slice()
+            }
         },
     );
     let _ = serial.flush();
@@ -681,6 +783,8 @@ fn main() -> ! {
 #[used]
 pub static PICOTOOL_ENTRIES: [hal::binary_info::EntryAddr; 3] = [
     hal::binary_info::rp_cargo_bin_name!(),
-    hal::binary_info::rp_program_description!(c"DSM anchor (boot-fenced fused appliance + USB transport)"),
+    hal::binary_info::rp_program_description!(
+        c"DSM anchor (boot-fenced fused appliance + USB transport)"
+    ),
     hal::binary_info::rp_program_build_attribute!(),
 ];

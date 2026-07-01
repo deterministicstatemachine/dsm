@@ -1388,6 +1388,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsm-anchor-verifier"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+ "tokio",
+]
+
+[[package]]
 name = "dsm-sphincs"
 version = "0.1.0"
 dependencies = [
@@ -1424,6 +1432,7 @@ dependencies = [
  "dirs",
  "dsm",
  "dsm-anchor-core",
+ "dsm-anchor-verifier",
  "env_logger",
  "erased-serde",
  "fastrand",
@@ -1634,6 +1643,12 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
 name = "encoding_rs"

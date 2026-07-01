@@ -201,7 +201,6 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         balance_witness,
         entity_sig,
         counterparty_sig,
-        island_attestation: None,
     };
     let chain_tip = state.compute_chain_tip();
     Ok((state, chain_tip))
@@ -647,6 +646,7 @@ mod tests {
                     amount: 7,
                 }],
                 Some([0x55; 32]),
+                None,
             )
             .expect("advance relationship");
 
@@ -828,6 +828,7 @@ mod tests {
                     amount: 9,
                 }],
                 None,
+                None,
             )
             .expect("second advance");
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
@@ -872,6 +873,7 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 11,
                 }],
+                None,
                 None,
             )
             .expect("third advance");

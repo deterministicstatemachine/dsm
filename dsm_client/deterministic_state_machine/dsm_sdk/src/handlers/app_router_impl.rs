@@ -2598,6 +2598,7 @@ impl AppRouter for AppRouterImpl {
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk.simulate_advance_for_confirm(
             rel_key,
@@ -2605,6 +2606,30 @@ impl AppRouter for AppRouterImpl {
             operation,
             deltas,
             initial_chain_tip,
+            anchor_leaf,
+        )
+    }
+
+    fn build_offline_bearer_release(
+        &self,
+        relationship_id: [u8; 32],
+        recipient_device_id: [u8; 32],
+        object_id: [u8; 32],
+        payload_hash: [u8; 32],
+        authority_policy_hash: [u8; 32],
+        action_type: u32,
+        action_fields: Vec<u8>,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+        self.core_sdk.build_offline_bearer_release(
+            relationship_id,
+            recipient_device_id,
+            object_id,
+            payload_hash,
+            authority_policy_hash,
+            action_type,
+            action_fields,
+            receiver_challenge,
         )
     }
 

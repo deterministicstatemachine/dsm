@@ -48,17 +48,39 @@ pub trait BleTransportDelegate: Send + Sync + 'static {
 
 pub struct BilateralTransportAdapter {
     bilateral_handler: Arc<BilateralBleHandler>,
+    /// Path-B raw-SPI counter relay router (D2): services `TropicSpiRelay` frames on both ends —
+    /// sender A forwards to its local Pico, receiver B resolves its pending round-trips.
+    tropic_relay: Arc<crate::bluetooth::tropic_relay::TropicRelayRouter>,
 }
 
 impl BilateralTransportAdapter {
     #[must_use]
     pub fn new(bilateral_handler: Arc<BilateralBleHandler>) -> Self {
-        Self { bilateral_handler }
+        Self {
+            bilateral_handler,
+            tropic_relay: Arc::new(crate::bluetooth::tropic_relay::TropicRelayRouter::new()),
+        }
     }
 
     #[must_use]
     pub fn bilateral_handler(&self) -> &Arc<BilateralBleHandler> {
         &self.bilateral_handler
+    }
+
+    /// The Path-B counter-relay router. On a sender device, install the local Pico link via
+    /// `router.set_local_pico(...)`. The receiver drives round-trips through it for the counter read:
+    /// the on-device layer wires `router.round_trip(commitment, mosi, |frame| queue_relay_frame(peer,
+    /// frame))` into `dsm_anchor_hw_verifier::read_counter_over_relay` (that reader depends on
+    /// `tropic01` and lives in the excluded hardware crate, so it is not referenced here).
+    #[must_use]
+    pub fn tropic_relay(&self) -> &Arc<crate::bluetooth::tropic_relay::TropicRelayRouter> {
+        &self.tropic_relay
+    }
+
+    /// Send one Path-B relay frame to `peer_address` over BLE (`TropicSpiRelay`). The on-device
+    /// receiver layer uses this as the `send` closure inside `TropicRelayRouter::round_trip`.
+    pub async fn queue_relay_frame(peer_address: &str, frame: &[u8]) -> Result<(), DsmError> {
+        queue_follow_up_chunks(peer_address, BleFrameType::TropicSpiRelay, frame).await
     }
 
     /// Send a secondary-device admission REQUEST envelope to the existing device over BLE
@@ -226,6 +248,7 @@ impl BleTransportDelegate for BilateralTransportAdapter {
         message: TransportInboundMessage,
     ) -> DelegateFuture<Result<Vec<TransportOutbound>, DsmError>> {
         let bilateral_handler = Arc::clone(&self.bilateral_handler);
+        let tropic_relay = Arc::clone(&self.tropic_relay);
         Box::pin(async move {
             match message.frame_type {
                 BleFrameType::BilateralPrepare => {
@@ -467,6 +490,23 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         Err(e) => {
                             warn!("[ADMISSION] adopt failed: {e}");
                             Err(e)
+                        }
+                    }
+                }
+                BleFrameType::TropicSpiRelay => {
+                    // Path-B raw-SPI counter relay (D2). One relayed SPI transaction: on the sender
+                    // (from_receiver=true) forward to the local Pico and reply; on the receiver
+                    // (from_receiver=false) resolve the pending round-trip. The router decides by the
+                    // packet's direction. Opaque bytes only — no anchor/counter semantics here.
+                    match tropic_relay.handle_inbound(&message.payload).await {
+                        Ok(Some(reply)) => Ok(vec![TransportOutbound::new(
+                            BleFrameType::TropicSpiRelay,
+                            reply,
+                        )]),
+                        Ok(None) => Ok(Vec::new()),
+                        Err(e) => {
+                            warn!("TROPIC_SPI_RELAY handling failed (fail-closed): {e}");
+                            Ok(Vec::new())
                         }
                     }
                 }

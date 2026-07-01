@@ -125,9 +125,32 @@ pub trait AppRouter: Send + Sync {
         _operation: dsm::types::operations::Operation,
         _deltas: &[dsm::types::device_state::BalanceDelta],
         _initial_chain_tip: Option<[u8; 32]>,
+        _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
             "simulate_advance_for_confirm not implemented on this router",
+        ))
+    }
+
+    /// Drive the Boot Fenced Fused Anchor appliance (PREPARE → COMMIT → EMIT) for an
+    /// offline-bearer transfer and return the artifacts the sender puts on the confirm:
+    /// the prost-encoded `dsm.anchor.OfflineRelease`, the fused-anchor-state leaf update to
+    /// commit into the per-device SMT advance, the consumed/successor appliance roots, and the
+    /// pin the receiver admits. Delegates to [`CoreSDK::build_offline_bearer_release`].
+    #[allow(clippy::too_many_arguments)]
+    fn build_offline_bearer_release(
+        &self,
+        _relationship_id: [u8; 32],
+        _recipient_device_id: [u8; 32],
+        _object_id: [u8; 32],
+        _payload_hash: [u8; 32],
+        _authority_policy_hash: [u8; 32],
+        _action_type: u32,
+        _action_fields: Vec<u8>,
+        _receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "build_offline_bearer_release not implemented on this router",
         ))
     }
 

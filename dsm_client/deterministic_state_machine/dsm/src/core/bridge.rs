@@ -1570,6 +1570,7 @@ pub fn handle_bilateral_offline_send(env_bytes: &[u8], ble_address: &str) -> Vec
                         counterparty_state_hash: None, // Populated by higher layers if needed
                         local_state_hash: None,        // Populated by higher layers if needed
                         responder_signing_public_key: vec![], // Populated by BLE handler with local signing key
+                        receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
                     };
                     let body = response.encode_to_vec();
                     results.push(op_success(op_id, body, None, None, gp::Codec::Proto));
