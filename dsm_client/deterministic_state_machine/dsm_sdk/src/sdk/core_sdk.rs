@@ -852,6 +852,9 @@ impl CoreSDK {
     /// view derived from the AdvanceOutcome's DeviceState + chain state. The
     /// `State` will be removed once all downstream readers migrate to
     /// `DeviceState`.
+    /// Ordinary advance (no fused-anchor-state leaf). Thin wrapper over
+    /// [`Self::execute_on_relationship_with_anchor_leaf`] with `anchor_leaf = None`, so the many
+    /// non-bearer callers stay unchanged.
     pub fn execute_on_relationship(
         &self,
         rel_key: [u8; 32],
@@ -859,6 +862,29 @@ impl CoreSDK {
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        self.execute_on_relationship_with_anchor_leaf(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            None,
+        )
+    }
+
+    /// Advance the relationship, optionally committing an offline-bearer fused-anchor-state leaf
+    /// (`anchor_leaf`) ATOMICALLY with the relationship leaf. The bilateral confirm path passes the
+    /// same `anchor_leaf` its `simulate_advance_for_confirm` used, so the committed device root
+    /// matches the on-wire proofs (both-or-neither); ordinary advances pass `None`.
+    pub fn execute_on_relationship_with_anchor_leaf(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
@@ -923,7 +949,7 @@ impl CoreSDK {
             operation,
             deltas,
             initial_chain_tip,
-            None, // anchor_leaf — ordinary persisted advance
+            anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
         )?;
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
@@ -2985,6 +3011,84 @@ mod tests {
             &TrustedTestCounter,
         )
         .expect("transfer 2 must be accepted from the adopted frontier");
+    }
+
+    /// SAFETY RAIL for the sender-release thread (both-or-neither): the SIMULATED post-root the
+    /// sender puts on the confirm proofs MUST equal the CANONICAL committed post-root — so long as
+    /// BOTH advances carry the same `anchor_leaf`. If either side omits it, the roots diverge (the
+    /// sender's own §4.3 history would go Invalid). Both paths route through the deterministic
+    /// `StateMachine::prepare_advance_relationship`, which already takes `anchor_leaf`, so this is
+    /// provable before the higher commit layers are threaded.
+    #[test]
+    #[serial]
+    fn sim_post_root_equals_canonical_committed_post_root_with_anchor_leaf() {
+        use dsm::core::bilateral_transaction_manager::{
+            anchor_state_commit, anchor_state_leaf_key, compute_smt_key,
+            initial_chain_tip_from_device_ids,
+        };
+        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
+
+        let sdk = test_sdk();
+        let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+        sdk.state_machine.lock().set_device_head(ds);
+
+        let cp = [0x33u8; 32];
+        let rel_key = compute_smt_key(&sdk.device_info.device_id, &cp);
+        let init = initial_chain_tip_from_device_ids(&sdk.device_info.device_id, &cp);
+        let op = DsmOperation::Noop;
+        let deltas: &[dsm::types::device_state::BalanceDelta] = &[];
+        let b = [0xB7u8; 32];
+        let leaf = AnchorLeafUpdate {
+            key: anchor_state_leaf_key(&b),
+            new_value: anchor_state_commit(&b, &[0xA1u8; 32], &[0x51u8; 32], 1),
+        };
+
+        // `simulate_advance_for_confirm` is PURE (no head mutation), so we can call it twice.
+        let sim_with = sdk
+            .simulate_advance_for_confirm(
+                rel_key,
+                cp,
+                op.clone(),
+                deltas,
+                Some(init),
+                Some(leaf.clone()),
+            )
+            .expect("sim with anchor_leaf")
+            .child_r_a;
+        let sim_without = sdk
+            .simulate_advance_for_confirm(rel_key, cp, op.clone(), deltas, Some(init), None)
+            .expect("sim without anchor_leaf")
+            .child_r_a;
+
+        // The hazard is real: the anchor_leaf changes the device root. Omitting it on EITHER side
+        // (sim carried it, a commit that dropped it) diverges -> §4.3 Invalid.
+        assert_ne!(
+            sim_with, sim_without,
+            "anchor_leaf must change the committed device root"
+        );
+
+        // Canonical commit WITH the same anchor_leaf, via the deterministic prepare + install.
+        let committed_root = {
+            let mut sm = sdk.state_machine.lock();
+            let outcome = sm
+                .prepare_advance_relationship(
+                    rel_key,
+                    cp,
+                    op.clone(),
+                    deltas,
+                    Some(init),
+                    Some(leaf.clone()),
+                )
+                .expect("canonical prepare with anchor_leaf");
+            sm.commit_advance(&outcome);
+            outcome.new_device_state.root()
+        };
+
+        // Both-or-neither: sim post-root == canonical committed post-root when both carry the leaf.
+        assert_eq!(
+            sim_with, committed_root,
+            "simulated post-root must equal the canonical committed post-root for the same anchor_leaf"
+        );
     }
 
     #[test]

@@ -135,6 +135,17 @@ pub struct BilateralBleSession {
     /// SENDER: the challenge received from that response, bound into the appliance PREPARE. `None`
     /// for ordinary transfers.
     pub receiver_challenge: Option<[u8; 32]>,
+    /// SENDER-only: the fused-anchor-state leaf update the appliance produced for this bearer
+    /// transfer, stashed at confirm-build time so `mark_sender_committed_with_post_state_hash`
+    /// commits the SAME successor state the on-wire proofs were built from (both-or-neither). `None`
+    /// for ordinary transfers and on the receiver side.
+    pub anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+    /// SENDER-only: the simulated post-advance Per-Device SMT root (`child_r_a`) that was placed on
+    /// the `BilateralConfirmRequest` and sent to the receiver. Stashed at confirm-build time so the
+    /// canonical commit can enforce both-or-neither: the committed root MUST equal this sent sim
+    /// root, else the sender fails closed to recovery (the receiver verified proofs against this
+    /// value). `None` for ordinary transfers and on the receiver side.
+    pub anchor_sim_root: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +519,8 @@ impl SessionStore {
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
             receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
         })
     }
 }
@@ -533,6 +546,8 @@ mod tests {
             stitched_receipt_bytes: None,
             pre_finalize_entropy: None,
             receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
         }
     }
 
