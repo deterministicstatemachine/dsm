@@ -4209,14 +4209,38 @@ impl BilateralBleHandler {
                 prev_proof: &confirm_request.anchor_state_prev_proof,
                 next_proof: &confirm_request.anchor_state_next_proof,
             };
-            crate::bluetooth::anchor_accept::accept_offline_release(
+            // D2 activation seam: look up the pinned fused anchor this receiver admitted for the
+            // sender, then read the sender's live TROPIC01 counter over the relay via the injected
+            // reader. Reader + store + pin all present AND the read succeeds -> live accept with the
+            // authenticated counter (predicate enforces `H == H0 - (u_i+1)`). Any absent -> pin
+            // `None` / attested `None` -> fail-closed to online recovery. Until the device layer
+            // installs a real relay-backed reader + enrollment store, this stays fail-closed.
+            let sender_device_id = session.counterparty_device_id;
+            let pin = crate::bridge::anchor_enrollment_store()
+                .and_then(|s| s.get(&sender_device_id))
+                .map(|e| e.pin);
+            let attested: Option<([u8; 32], u64)> = if let (Some(p), Some(reader)) =
+                (pin.as_ref(), crate::bridge::anchor_counter_reader())
+            {
+                reader
+                    .read_counter(sender_device_id, commitment_hash, p.clone())
+                    .await
+                    .map(|h| (p.anchor_id, u64::from(h)))
+            } else {
+                None
+            };
+            let pinned = pin
+                .as_ref()
+                .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
+            crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
                 &confirm_request.offline_release,
-                None,
+                pinned.as_ref(),
                 &h_n,
                 &self.device_id,
                 &expected_receiver_challenge,
                 &policy_hash,
                 &binding,
+                attested,
             )
             .map_err(|r| r.into_dsm_error())?;
             info!(
