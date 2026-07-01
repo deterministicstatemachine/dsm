@@ -213,6 +213,53 @@ pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
+/// Receiver-side Path-B counter reader (D2 activation). Installed by the device layer with an
+/// implementation backed by the BLE relay + the excluded hardware verifier crate. `None` until
+/// installed, which keeps offline-bearer acceptance fail-closed (online recovery).
+static ANCHOR_COUNTER_READER: Lazy<
+    RwLock<Option<Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>>>,
+> = Lazy::new(|| RwLock::new(None));
+
+/// Install (or replace) the receiver-side counter reader used to authenticate the sender's TROPIC01
+/// counter over the relay.
+pub fn install_anchor_counter_reader(
+    reader: Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>,
+) {
+    if let Ok(mut g) = ANCHOR_COUNTER_READER.write() {
+        *g = Some(reader);
+        log::info!("[SDK] AnchorCounterReader installed (Path-B counter activation)");
+    }
+}
+
+#[must_use]
+pub fn anchor_counter_reader(
+) -> Option<Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>> {
+    ANCHOR_COUNTER_READER.read().ok()?.clone()
+}
+
+/// Receiver-side pinned fused-anchor enrollment store. Installed by the device layer; supplies the
+/// `FusedAnchorPin` the receiver admitted for a counterparty. `None` until installed -> no pin ->
+/// offline-bearer acceptance fail-closed.
+static ANCHOR_ENROLLMENT_STORE: Lazy<
+    RwLock<Option<Arc<dyn dsm::crypto::anchor_enrollment::AnchorEnrollmentStore>>>,
+> = Lazy::new(|| RwLock::new(None));
+
+/// Install (or replace) the receiver-side fused-anchor enrollment store.
+pub fn install_anchor_enrollment_store(
+    store: Arc<dyn dsm::crypto::anchor_enrollment::AnchorEnrollmentStore>,
+) {
+    if let Ok(mut g) = ANCHOR_ENROLLMENT_STORE.write() {
+        *g = Some(store);
+        log::info!("[SDK] AnchorEnrollmentStore installed");
+    }
+}
+
+#[must_use]
+pub fn anchor_enrollment_store(
+) -> Option<Arc<dyn dsm::crypto::anchor_enrollment::AnchorEnrollmentStore>> {
+    ANCHOR_ENROLLMENT_STORE.read().ok()?.clone()
+}
+
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {

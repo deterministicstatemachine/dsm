@@ -28,6 +28,25 @@ use crate::generated::TropicSpiRelayPacket;
 /// implementations clone/Arc what they need rather than borrowing `self` across the future.
 pub type PicoFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+/// Injectable receiver-side counter reader (D2 activation seam). The device layer implements this
+/// using [`TropicRelayRouter::round_trip`] + the excluded `dsm-anchor-hw-verifier` reader: it opens
+/// receiver B's OWN authenticated libtropic session to the sender's TROPIC01 over the BLE relay and
+/// reads the live physical counter `H`. `dsm_sdk` stays `tropic01`-free — it only calls this seam.
+///
+/// Returns `None` (fail-closed) on ANY failure — no reader installed, no relay transport, session or
+/// identity failure, or malformed response. The acceptance predicate then recovers online.
+pub trait AnchorCounterReader: Send + Sync {
+    /// Read the sender's live TROPIC01 counter `H` for this transfer. `pin` supplies the enrolled
+    /// `anchor_id`, `H0`, verifier slot, and pinned chip static key; the implementation supplies B's
+    /// own verifier pairing keypair + a fresh ephemeral. `commitment` correlates the relay frames.
+    fn read_counter(
+        &self,
+        peer_device_id: [u8; 32],
+        commitment: [u8; 32],
+        pin: dsm::crypto::anchor_enrollment::FusedAnchorPin,
+    ) -> PicoFuture<Option<u32>>;
+}
+
 /// The SENDER's link to its OWN local Pico (Phone A -> Pico A), used to service a relayed
 /// `TropicSpiRelayPacket`: forward one raw SPI transaction to the Pico's `OP_SPI_PASSTHROUGH` and
 /// return the MISO bytes. The real implementation bridges to the Android phone-to-Pico transport
