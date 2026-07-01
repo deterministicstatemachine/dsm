@@ -571,6 +571,7 @@ impl BilateralBleHandler {
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
             stitched_receipt_bytes: record.stitched_receipt_bytes.clone(),
+            receiver_challenge: None,
         })
     }
 
@@ -1310,24 +1311,13 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// Stamp OFFLINE_BEARER_REQUIRED on a plain transfer iff this device holds an anchor (production
-    /// policy — the manager decides based on whether an anchor transport is admitted; the ONLY mocked
-    /// piece is the transport itself). MUST be applied identically wherever the sender's operation is
-    /// built — the prepare request the receiver decodes AND the precommit — so both parties hash the
-    /// same op. A device with no anchor leaves the transfer plain (online-checked fallback).
-    async fn apply_offline_bearer_policy(&self, op: &mut Operation) {
-        let m = self.bilateral_tx_manager.read().await;
-        m.apply_offline_bearer_policy(op).await;
-    }
-
     pub async fn prepare_bilateral_transaction(
         &self,
         counterparty_device_id: [u8; 32],
-        mut operation: Operation,
+        operation: Operation,
         validity_iterations: u64,
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
-        self.apply_offline_bearer_policy(&mut operation).await;
 
         self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
             .await?;
@@ -1580,6 +1570,7 @@ impl BilateralBleHandler {
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
+            receiver_challenge: None,
         };
 
         {
@@ -1661,16 +1652,6 @@ impl BilateralBleHandler {
                 .unwrap_or([0u8; 32]) // use zero if no relationship established yet
         };
 
-        // The sender's published anchor identity, so the receiver can PIN it at relationship
-        // establishment and verify every offline-bearer receipt against it. None when this device
-        // holds no anchor (the transfer is then not offline-bearer and the receiver does not pin).
-        let sender_anchor_identity = {
-            let m = self.bilateral_tx_manager.read().await;
-            m.anchor_identity()
-                .await
-                .map(|rec| Self::anchor_identity_to_generated(&rec))
-        };
-
         debug!(
             "[BLE_HANDLER] Including sender_signing_public_key (len={}) and sender_chain_tip={} in PrepareRequest",
             sender_signing_public_key.len(),
@@ -1704,7 +1685,6 @@ impl BilateralBleHandler {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
-            sender_anchor_identity,
         };
 
         let tip_override = {
@@ -1994,43 +1974,6 @@ impl BilateralBleHandler {
         // Deserialize operation
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
-
-        // Offline-bearer admission (authority path = relationship establishment): the first time an
-        // OFFLINE_BEARER_REQUIRED offer arrives from a counterparty, PIN the anchor identity it
-        // carries. Idempotent — never resets the tracked frontier — so a later confirm verifies
-        // against this exact identity + enrolled firmware hash, and a clone/reflash presenting a
-        // different identity is rejected. No identity carried -> nothing pinned -> the confirm
-        // rejects fail-closed.
-        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(&operation) {
-            if let (
-                Some(ai),
-                dsm::types::operations::Operation::Transfer {
-                    authority_policy: Some(ap),
-                    ..
-                },
-            ) = (prepare_request.sender_anchor_identity.as_ref(), &operation)
-            {
-                let rec = Self::anchor_identity_from_generated(ai)?;
-                let policy_hash = dsm::attestation::dsm_policy_hash(
-                    &ap.policy_id,
-                    &dsm::attestation::compute_anchor_set_id(&[rec.id_anchor]),
-                );
-                let manager = self.bilateral_tx_manager.read().await;
-                let admitted = manager.admit_anchor_if_absent(
-                    sender_device_id,
-                    rec,
-                    policy_hash,
-                    [0u8; 32],
-                    0,
-                )?;
-                if admitted {
-                    info!(
-                        "[BILATERAL] pinned offline-bearer anchor for sender={}",
-                        bytes_to_base32(&sender_device_id[..8])
-                    );
-                }
-            }
-        }
 
         // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
@@ -2557,6 +2500,7 @@ impl BilateralBleHandler {
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
+            receiver_challenge: None,
         };
 
         {
@@ -2684,6 +2628,21 @@ impl BilateralBleHandler {
             m.local_signing_public_key()
         };
 
+        // Receiver challenge r_R (Boot Fenced Fused Anchor §15): the receiver-generated freshness
+        // nonce the sender MUST bind into the offline release, so a replayed or pre-computed release
+        // for a different receiver session is rejected. Fresh CSPRNG per prepare-response
+        // (deterministic under a seeded test RNG). Stashed against this commitment so the confirm's
+        // release can be checked to bind the same r_R.
+        let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("random_bytes(32) wrong length"))?;
+        {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&origin_commitment_hash) {
+                s.receiver_challenge = Some(receiver_challenge);
+            }
+        }
+
         // Build prepare response
         let prepare_response = generated::BilateralPrepareResponse {
             commitment_hash: Some(generated::Hash32 {
@@ -2698,6 +2657,7 @@ impl BilateralBleHandler {
                 v: shared_chain_tip.to_vec(),
             }),
             responder_signing_public_key: local_signing_key,
+            receiver_challenge: receiver_challenge.to_vec(),
         };
 
         // Wrap in envelope
@@ -2974,6 +2934,16 @@ impl BilateralBleHandler {
             .clone()
             .try_into()
             .map_err(|_| DsmError::invalid_operation("commitment hash must be 32 bytes"))?;
+
+        // Stash the receiver's challenge r_R (Boot Fenced Fused Anchor §15) against our sender-side
+        // session, so the confirm's offline-bearer release can bind it. Absent/short -> left None,
+        // which keeps the offline-bearer send path fail-closed (no release produced).
+        if let Ok(r_r) = <[u8; 32]>::try_from(prepare_response.receiver_challenge.as_slice()) {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&commitment_hash) {
+                s.receiver_challenge = Some(r_r);
+            }
+        }
 
         // Extract responder's signing public key and update contact if present
         if !prepare_response.responder_signing_public_key.is_empty() {
@@ -3295,27 +3265,6 @@ impl BilateralBleHandler {
             &receipt_digest,
         );
 
-        // Offline-bearer: the sender's anchor (mock element under mock-anchor, real Safe 7 otherwise)
-        // signs an attestation over this transition, carried in the confirm for the receiver to
-        // verify against its pinned enrollment. None when no transport is admitted -> the receiver
-        // rejects an OFFLINE_BEARER_REQUIRED transfer fail-closed. Verified as a side artifact; it is
-        // not (yet) folded into the shared tip, so the §C1 h_{n+1} check above is unaffected.
-        let (offline_att_proto, offline_expiry_tick) = {
-            let m = self.bilateral_tx_manager.read().await;
-            match m
-                .attest_offline_bearer_for_commitment(
-                    &commitment_hash,
-                    &h_n,
-                    &pre_entropy,
-                    dsm::types::device_state::ValueCapability::Yes,
-                )
-                .await?
-            {
-                Some((att, expiry)) => (Some(Self::island_attestation_to_generated(&att)), expiry),
-                None => (None, 0u64),
-            }
-        };
-
         // 5. Build sender SMT proofs via a prepare-only simulation of the
         // canonical advance (§2.2). No canonical state mutation yet — that
         // happens after the receiver ACKs, inside
@@ -3361,6 +3310,7 @@ impl BilateralBleHandler {
             session.operation.clone(),
             &sender_deltas,
             Some(h_n),
+            None,
         )?;
         // `parent_r_a` is the CAS-layer device head (pre-seed root). The
         // Merkle `parent_proof` is built against the post-seed tree, so the
@@ -3511,15 +3461,13 @@ impl BilateralBleHandler {
             // §4.3: transmit pre-update SMT root (r_A) so receiver can fully verify
             // π_rel_parent (h_n ∈ r_A) per whitepaper §4.3 acceptance predicate #2.
             sender_smt_root_before: pre_root.to_vec(),
-            // Offline-bearer anchor attestation (Some iff an anchor transport produced one for an
-            // OFFLINE_BEARER_REQUIRED transfer). The receiver verifies it against its pinned
-            // enrollment; absent for ordinary transfers and rejected fail-closed for bearer ones.
-            island_attestation: offline_att_proto,
-            anchor_expiry_tick: offline_expiry_tick,
-            // Canonical Boot Fenced Fused offline release. The unmigrated sender does not produce
-            // one yet (Phase 5), so it rides empty — the receiver then fails closed to online
-            // recovery. The legacy island_attestation above is no longer accepted by the receiver.
+            // Canonical Boot Fenced Fused offline release + the two anchor-state SMT inclusion
+            // proofs (prev = pinned frontier, next = adopted successor). The send path does not
+            // drive the appliance yet (Phase 5 producer-driving is wired incrementally), so these
+            // ride empty and the receiver fails closed to online recovery.
             offline_release: Vec::new(),
+            anchor_state_prev_proof: Vec::new(),
+            anchor_state_next_proof: Vec::new(),
         };
 
         // 8. Wrap in envelope
@@ -3877,61 +3825,6 @@ impl BilateralBleHandler {
         Ok(())
     }
 
-    /// Convert a core IslandAttestation into the SDK's generated proto type, for the (unmigrated)
-    /// sender to carry in the confirm. The receiver no longer consumes it — offline-bearer
-    /// acceptance is the Boot Fenced Fused predicate (see `anchor_accept`).
-    fn island_attestation_to_generated(
-        a: &dsm::types::device_state::IslandAttestation,
-    ) -> generated::IslandAttestationProto {
-        generated::IslandAttestationProto {
-            id_island: a.id_island.to_vec(),
-            signature: a.signature.clone(),
-            policy_id: a.policy_id.to_vec(),
-            id_anchor_set: a.id_anchor_set.to_vec(),
-            ui_transcript_hash: a.ui_transcript_hash.to_vec(),
-            anchor_pubkey_hash: a.anchor_pubkey_hash.to_vec(),
-            firmware_hash: a.firmware_hash.to_vec(),
-            policy_hash: a.policy_hash.to_vec(),
-            parent_root: a.parent_root.to_vec(),
-            successor_root: a.successor_root.to_vec(),
-            operation_hash: a.operation_hash.to_vec(),
-            state_number: a.state_number,
-        }
-    }
-
-    /// Convert this device's anchor identity to the wire proto for the prepare request.
-    fn anchor_identity_to_generated(
-        rec: &dsm::crypto::anchor_transport::AnchorIdentityRecord,
-    ) -> generated::AnchorIdentityProto {
-        generated::AnchorIdentityProto {
-            id_anchor: rec.id_anchor.to_vec(),
-            commitment_c: rec.commitment_c.to_vec(),
-            leaf_spki: rec.leaf_spki.clone(),
-            firmware_id: rec.firmware_id.to_vec(),
-            screen_template_id: rec.screen_template_id,
-            firmware_hash: rec.firmware_hash.to_vec(),
-        }
-    }
-
-    /// Convert a peer's wire anchor identity (from the prepare request) to the core record to pin.
-    fn anchor_identity_from_generated(
-        p: &generated::AnchorIdentityProto,
-    ) -> Result<dsm::crypto::anchor_transport::AnchorIdentityRecord, DsmError> {
-        fn f32(name: &str, v: &[u8]) -> Result<[u8; 32], DsmError> {
-            <[u8; 32]>::try_from(v).map_err(|_| {
-                DsmError::invalid_operation(format!("anchor_identity.{name} must be 32 bytes"))
-            })
-        }
-        Ok(dsm::crypto::anchor_transport::AnchorIdentityRecord {
-            id_anchor: f32("id_anchor", &p.id_anchor)?,
-            commitment_c: f32("commitment_c", &p.commitment_c)?,
-            leaf_spki: p.leaf_spki.clone(),
-            firmware_id: f32("firmware_id", &p.firmware_id)?,
-            screen_template_id: p.screen_template_id,
-            firmware_hash: f32("firmware_hash", &p.firmware_hash)?,
-        })
-    }
-
     /// 3-step protocol step 3 (receiver side): Handle BilateralConfirmRequest from sender.
     ///
     /// Verifies sender's signature, validates proofs, finalizes the receiver side
@@ -4283,9 +4176,12 @@ impl BilateralBleHandler {
         if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
             &session.operation,
         ) {
-            // The receiver supplies no fused-anchor pin or challenge yet (Phase 5): `pinned = None`
-            // routes every offline-bearer transfer to online recovery. `h_n` is the receiver's
-            // accepted relationship tip.
+            // The receiver supplies no fused-anchor pin yet (Phase 5): `pinned = None` routes every
+            // offline-bearer transfer to online recovery. `h_n` is the receiver's accepted
+            // relationship tip. `expected_receiver_challenge` is the r_R this receiver generated in
+            // its prepare-response and stashed against the session — the release must bind it, so a
+            // release minted for a different receiver session is rejected (defense-in-depth; the
+            // empty live release already short-circuits to recovery before this check).
             let policy_hash = match &session.operation {
                 Operation::Transfer {
                     authority_policy: Some(ap),
@@ -4293,13 +4189,34 @@ impl BilateralBleHandler {
                 } => ap.policy_id,
                 _ => [0u8; 32],
             };
+            let expected_receiver_challenge = session.receiver_challenge.unwrap_or([0u8; 32]);
+            // Anchor-state binding: the sender's device-SMT roots (before = pinned frontier,
+            // after = adopted successor) and the two inclusion proofs, as carried on the confirm.
+            // Empty proofs (Phase 5 send path unwired) route to online recovery fail-closed.
+            let sender_smt_root: [u8; 32] = confirm_request
+                .sender_smt_root
+                .as_slice()
+                .try_into()
+                .unwrap_or([0u8; 32]);
+            let sender_smt_root_before: [u8; 32] = confirm_request
+                .sender_smt_root_before
+                .as_slice()
+                .try_into()
+                .unwrap_or([0u8; 32]);
+            let binding = crate::bluetooth::anchor_accept::AnchorStateBinding {
+                sender_smt_root: &sender_smt_root,
+                sender_smt_root_before: &sender_smt_root_before,
+                prev_proof: &confirm_request.anchor_state_prev_proof,
+                next_proof: &confirm_request.anchor_state_next_proof,
+            };
             crate::bluetooth::anchor_accept::accept_offline_release(
                 &confirm_request.offline_release,
                 None,
                 &h_n,
                 &self.device_id,
-                &[0u8; 32],
+                &expected_receiver_challenge,
                 &policy_hash,
+                &binding,
             )
             .map_err(|r| r.into_dsm_error())?;
             info!(
@@ -5511,10 +5428,6 @@ impl BilateralBleHandler {
                 )
             })?;
 
-        // Apply the offline-bearer policy identically to the prepare path, so the sender's precommit
-        // and the receiver's decoded op (from the prepare request) hash the same bytes.
-        self.apply_offline_bearer_policy(&mut operation).await;
-
         // Ensure relationship + create a matching pre-commitment in the core manager.
         // This ensures the core has a pending commitment (used during finalization)
         // and that relationship chain-tips exist for commit-time validation.
@@ -5629,6 +5542,7 @@ impl BilateralBleHandler {
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
             stitched_receipt_bytes: None,
+            receiver_challenge: None,
         };
 
         // Insert into active sessions
@@ -5967,6 +5881,7 @@ mod tests {
                 created_at_wall: Instant::now() - Duration::from_secs(121),
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
+                receiver_challenge: None,
             })
             .await;
 
@@ -6068,6 +5983,7 @@ mod tests {
                 created_at_wall: Instant::now(),
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
+                receiver_challenge: None,
             })
             .await;
 
@@ -6134,6 +6050,7 @@ mod tests {
                 created_at_wall: Instant::now(),
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
+                receiver_challenge: None,
             })
             .await;
         handler
@@ -6152,6 +6069,7 @@ mod tests {
                 created_at_wall: Instant::now(),
                 pre_finalize_entropy: None,
                 stitched_receipt_bytes: None,
+                receiver_challenge: None,
             })
             .await;
 

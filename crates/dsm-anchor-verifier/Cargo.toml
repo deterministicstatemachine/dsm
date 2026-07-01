@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "dsm-anchor-verifier"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Receiver-side Path-B relay primitives for the DSM Boot Fenced Fused Anchor: RemoteSpiDevice + SpiRelayChannel + the sync/async relay bridge + the exact counter check. tropic01-free so it builds in CI without the sibling libtropic checkout; the actual libtropic session driver lives in the excluded dsm-anchor-hw-verifier crate."
+
+[dependencies]
+# embedded-hal 1.0 SpiDevice — the exact trait libtropic-rs (tropic01) is generic over, so
+# RemoteSpiDevice is a drop-in for a real host SpiDevice. NO tropic01 dependency here.
+embedded-hal = "1"
+# The sync<->async relay bridge (RelayChannel/RelayPump) uses tokio sync primitives only.
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "rt-multi-thread", "macros"] }

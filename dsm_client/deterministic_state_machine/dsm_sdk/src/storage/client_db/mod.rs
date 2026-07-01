@@ -15,7 +15,6 @@ pub use crate::storage::codecs::{
 
 // --- Submodules (domain-specific) ---
 
-pub mod anchor_persist;
 mod auth_tokens;
 mod bcr;
 mod bilateral_sessions;

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/dsm-anchor-core",
+    "crates/dsm-anchor-verifier",
     "crates/dsm-sphincs",
     "dsm_client/deterministic_state_machine/dsm",
     "dsm_client/deterministic_state_machine/dsm_sdk",
@@ -13,7 +14,10 @@ members = [
 # RP2350 firmware is a thumbv8m-only binary; built separately from inside the
 # crate dir (its .cargo/config.toml sets the target). Excluded so host
 # `cargo build`/`test` over the workspace doesn't try to build it for the host.
-exclude = ["crates/dsm-anchor-pico"]
+# dsm-anchor-hw-verifier is the ONLY crate that depends on the sibling libtropic-rs
+# checkout (tropic01); excluded so CI builds green without that sibling. Build it
+# directly (cargo build -p dsm-anchor-hw-verifier) on a machine that has the sibling.
+exclude = ["crates/dsm-anchor-pico", "crates/dsm-anchor-hw-verifier"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"

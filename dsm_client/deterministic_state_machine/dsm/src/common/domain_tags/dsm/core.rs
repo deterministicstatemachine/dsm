@@ -16,6 +16,15 @@ pub const TAG_BILATERAL_SESSION: &str = "DSM/bilateral-session";
 pub const TAG_SMT_KEY: &str = "DSM/smt-key";
 pub const TAG_TIP: &str = "DSM/tip";
 pub const TAG_STATE_HASH: &str = "DSM/state-hash";
+/// Boot Fenced Fused Anchor offline-bearer state commitment `(B, Aᵢ, J_b, uᵢ)`.
+/// Bound into the DSM root for the receiver predicate (`anchor_core::accept`)
+/// clauses 3/21. Versioned to match the anchor-core domain-tag convention.
+pub const TAG_FUSED_ANCHOR_STATE: &str = "DSM/fused-anchor-state/v1";
+/// SMT key of the single per-device fused-anchor-state leaf: `H(tag ‖ B)`. One stable key
+/// per device (the fused anchor is device-level: one appliance, one counter); its VALUE is
+/// the current `TAG_FUSED_ANCHOR_STATE` commit, replaced old→successor on every bearer
+/// transfer's device-SMT advance. Never keyed by relationship/root/Aᵢ/J_b/uᵢ.
+pub const TAG_FUSED_ANCHOR_STATE_LEAF: &str = "DSM/fused-anchor-state-leaf/v1";
 pub const TAG_COMMITMENT: &str = "DSM/commitment";
 pub const TAG_COMMITMENT_OPEN: &str = "DSM/commitment-open";
 pub const TAG_COMMITMENT_FIELDS: &str = "DSM/commitment-fields";
@@ -45,6 +54,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_SMT_KEY,
     TAG_TIP,
     TAG_STATE_HASH,
+    TAG_FUSED_ANCHOR_STATE,
+    TAG_FUSED_ANCHOR_STATE_LEAF,
     TAG_COMMITMENT,
     TAG_COMMITMENT_OPEN,
     TAG_COMMITMENT_FIELDS,

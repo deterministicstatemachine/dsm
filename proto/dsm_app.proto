@@ -1734,9 +1734,7 @@ message BilateralPrepareRequest {
   string token_id_hint           = 12; // token ID (e.g. "ERA")
   string memo_hint               = 13; // optional transfer memo
   string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
-  // Present iff the sender holds an offline-bearer anchor. The receiver pins it (admit) at
-  // relationship establishment, then verifies every offline-bearer receipt against it.
-  AnchorIdentityProto sender_anchor_identity = 15;
+  reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
 }
 message BilateralPrepareResponse {
   Hash32 commitment_hash        = 1;
@@ -1748,6 +1746,11 @@ message BilateralPrepareResponse {
   // CRITICAL: This allows the sender to update their contact's signing key
   // when receiving the accept response, enabling session registration for future transfers.
   bytes  responder_signing_public_key = 6 [(dsm_fixed_len)=64];
+  // Fresh receiver challenge r_R (Boot Fenced Fused Anchor §15). The receiver
+  // generates this per offline-bearer transfer; it rides the prepare response
+  // (which precedes the sender's confirm) so the sender can bind it into the
+  // anchor appliance PREPARE. Empty for ordinary (non-bearer) transfers.
+  bytes  receiver_challenge = 7 [(dsm_fixed_len)=32];
 }
 
 enum RelationshipSendCheckState {
@@ -1855,12 +1858,7 @@ message BilateralConfirmRequest {
   Hash32 shared_chain_tip_new        = 7; // h_{n+1}
   bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
   bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
-  // LEGACY Safe 7 offline-bearer shape (fields 10/11). The receiver NO LONGER accepts an
-  // offline-bearer transfer via IslandAttestation — these are quarantined and route to online
-  // recovery (superseded by field 12). Still emitted by the unmigrated sender; Phase 5 removes
-  // the producer.
-  IslandAttestationProto island_attestation = 10;
-  uint64 anchor_expiry_tick                 = 11; // == the transition target state the gate signed as expiry_tick
+  reserved 10, 11; // removed: legacy Safe-7 island_attestation / anchor_expiry_tick (replaced by field 12)
   // Canonical offline-bearer release (Boot Fenced Fused Anchor): the prost-encoded
   // dsm.anchor.OfflineRelease (Δ + boot chain + fused root-advance cert + counter evidence),
   // carried as opaque bytes so the dsm.anchor namespace stays decoupled from dsm_app. The receiver
@@ -1868,6 +1866,15 @@ message BilateralConfirmRequest {
   // producer side ships (Phase 5) this is empty and the transfer fails closed to online recovery;
   // no value is released on an absent or invalid release.
   bytes offline_release = 12 [(dsm_max_len)=262144];
+  // Fused-anchor-state leaf inclusion proofs (Boot Fenced Fused Anchor §12), siblings of
+  // rel_proof_parent/child. `anchor_state_prev_proof` proves the OLD fused commit
+  // H("DSM/fused-anchor-state/v1"‖B‖Aᵢ‖J_b‖uᵢ) ∈ sender_smt_root_before; `anchor_state_next_proof`
+  // proves the SUCCESSOR commit (…A_{i+1}‖J_{b'}‖uᵢ+1) ∈ sender_smt_root. The receiver recomputes
+  // both commits from the release cert's fused fields and verifies inclusion against those device
+  // roots (verify_anchor_state_commitment). Present iff offline_release is; absent for ordinary
+  // transfers (which never touch the fused-anchor leaf).
+  bytes anchor_state_prev_proof = 13 [(dsm_max_len)=131072];
+  bytes anchor_state_next_proof = 14 [(dsm_max_len)=131072];
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
@@ -2356,6 +2363,22 @@ enum BleFrameType {
   BLE_FRAME_TYPE_BILATERAL_CONFIRM         = 12; // Step 3: Sender confirms (BilateralConfirmRequest)
   BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST  = 13; // Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
   BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14; // Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
+  BLE_FRAME_TYPE_TROPIC_SPI_RELAY          = 15; // TropicSpiRelayPacket: opaque raw-SPI transaction relay (Path B counter read, L1 raw-SPI tunnel)
+}
+
+// Opaque TROPIC01 raw-SPI relay packet (Boot Fenced Fused Anchor §13, Path B counter
+// evidence). The relay cuts at L1/SPI, NOT at a separable L3 packet: the receiver runs
+// the FULL libtropic-rs stack over a RemoteSpiDevice and the sender's phone + Pico A only
+// forward raw SPI transaction bytes to TROPIC01 A (Pico A never decrypts, parses, or
+// interprets the counter). This frame carries ONE SPI transaction (request or response)
+// and is correlated to the in-flight transfer by commitment_hash. It has NO DSM/anchor
+// semantics — no decoded counter, no signature; the encrypted libtropic session (its
+// AES-256-GCM L3) that protects the counter read lives end-to-end at the receiver and
+// chip, tunnelled inside these opaque SPI bytes, never in this frame.
+message TropicSpiRelayPacket {
+  bytes  spi_payload     = 1 [(dsm_max_len)=4160]; // opaque raw SPI transaction bytes (one transaction; sized for a full L2 frame)
+  bool   from_receiver   = 2;                       // true: receiver→chip request; false: chip→receiver response
+  bytes  commitment_hash = 3 [(dsm_fixed_len)=32];  // correlates to the in-flight bilateral transfer
 }
 
 message BleFrameHeader {
@@ -2833,44 +2856,7 @@ message RelationshipChainStateProto {
   repeated BalanceWitnessEntryProto balance_witness = 8;
   optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
   optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
-  // Offline-bearer secure-element island attestation (anti-clone). Feeds compute_chain_tip,
-  // so the faithful codec MUST carry it. Message field -> Option in prost (None vs Some
-  // preserved). Absent on non-offline-bearer states.
-  IslandAttestationProto island_attestation = 11;
-}
-
-// Offline-bearer secure-element island attestation folded into a relationship chain tip
-// (anti-clone, see dsm_anticlone.instructions.md). Carried in the faithful codec because it
-// feeds compute_chain_tip.
-message IslandAttestationProto {
-  bytes id_island = 1 [(dsm_fixed_len)=32];   // SHA-256(leaf SubjectPublicKeyInfo)
-  bytes signature = 2 [(dsm_max_len)=65535];  // island signature over the framed intent challenge
-  bytes policy_id = 3 [(dsm_fixed_len)=32];   // pinning policy id under which the island was admitted
-  bytes id_anchor_set = 4 [(dsm_fixed_len)=32];      // canonical anchor-set id (compute_anchor_set_id)
-  bytes ui_transcript_hash = 5 [(dsm_fixed_len)=32]; // UI transcript hash the island signed over
-  // Stateful-receipt fields (anchor monotonic frontier + firmware/policy binding). Append-only;
-  // NOT folded into compute_chain_tip (only id_island/signature/policy_id are), so tip bytes are
-  // unchanged. genesis/device_id are already on StitchedReceiptV2 and not duplicated here.
-  bytes anchor_pubkey_hash = 6 [(dsm_fixed_len)=32]; // dsm_anchor_pubkey_hash(leaf_spki)
-  bytes firmware_hash = 7 [(dsm_fixed_len)=32];      // device-measured firmware hash (secmon-gate enforced)
-  bytes policy_hash = 8 [(dsm_fixed_len)=32];        // dsm_policy_hash(policy_id, id_anchor_set)
-  bytes parent_root = 9 [(dsm_fixed_len)=32];        // anchor frontier root this advance consumes
-  bytes successor_root = 10 [(dsm_fixed_len)=32];    // anchor frontier root this advance produces
-  bytes operation_hash = 11 [(dsm_fixed_len)=32];    // == payload_hash of the transition
-  uint64 state_number = 12;                          // monotonic anchor frontier counter
-}
-
-// The sender's published offline-bearer anchor identity, exchanged so the receiver can PIN it
-// (admit it through the relationship-establishment authority path) and thereafter verify every
-// offline-bearer receipt against this exact identity + enrolled firmware hash. Comes from the
-// element (real Safe 7 transport) or the in-process mock; the exchange + pinning are identical.
-message AnchorIdentityProto {
-  bytes  id_anchor          = 1 [(dsm_fixed_len)=32]; // anchor id (from birth commitment + key)
-  bytes  commitment_c       = 2 [(dsm_fixed_len)=32]; // birth commitment C
-  bytes  leaf_spki          = 3 [(dsm_max_len)=2048]; // SubjectPublicKeyInfo DER of the signing key
-  bytes  firmware_id        = 4 [(dsm_fixed_len)=32]; // display-bound firmware id
-  uint32 screen_template_id = 5;                      // consent screen layout version
-  bytes  firmware_hash      = 6 [(dsm_fixed_len)=32]; // measured firmware hash enrolled at provisioning
+  reserved 11; // removed: legacy Safe-7 island_attestation (no longer folded into compute_chain_tip)
 }
 
 // A contiguous forward-ancestry segment of ONE relationship chain (rel_key), covering a

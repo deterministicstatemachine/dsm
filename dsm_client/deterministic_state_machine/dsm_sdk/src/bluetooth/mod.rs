@@ -14,6 +14,7 @@ pub mod bilateral_session;
 pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
 pub mod pairing_orchestrator;
+pub mod tropic_relay;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{
@@ -330,27 +331,13 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     let contact_manager = DsmContactManager::new(dev_fixed, storage_nodes);
     let keypair = SignatureKeyPair::new().map_err(|e| format!("keypair generation failed: {e}"))?;
     let chain_tip_store = Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-    #[allow(unused_mut)]
-    let mut manager = BilateralTransactionManager::new_with_chain_tip_store(
+    let manager = BilateralTransactionManager::new_with_chain_tip_store(
         contact_manager,
         keypair,
         dev_fixed,
         gen_fixed,
         chain_tip_store,
-    )
-    .with_enrollment_store(Arc::new(
-        crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
-    ));
-    // mock-anchor: same in-process MockAnchorTransport as the primary init path, so the offline-bearer
-    // path works end-to-end on this late/fallback manager too. OFF in production.
-    #[cfg(feature = "mock-anchor")]
-    {
-        manager = manager.with_anchor_transport(Arc::new(
-            dsm::crypto::anchor_transport::MockAnchorTransport::from_seed(mock_anchor_seed(
-                &dev_fixed,
-            )),
-        ));
-    }
+    );
     let btx = Arc::new(TokioRwLock::new(manager));
     let mgr = BluetoothManager::new(dev_fixed, btx);
     let mgr_arc = Arc::new(mgr);

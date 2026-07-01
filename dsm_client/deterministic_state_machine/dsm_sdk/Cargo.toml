@@ -69,6 +69,10 @@ dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false }
 # Supplies accept_offline + the WOTS witness scheme + the dsm.anchor wire types; the partition
 # certificate is verified by reusing the existing dsm::crypto::sphincs verifier.
 dsm-anchor-core = { path = "../../../crates/dsm-anchor-core" }
+# Path-B relay spine (RemoteSpiDevice + SpiRelayChannel + RelayError + the exact counter check).
+# tropic01-free so CI builds without the sibling libtropic checkout; the actual libtropic session
+# reader lives in the workspace-excluded dsm-anchor-hw-verifier crate (D2).
+dsm-anchor-verifier = { path = "../../../crates/dsm-anchor-verifier" }
 
 # JNI for Android integration
 jni = { version = "0.21", optional = true }

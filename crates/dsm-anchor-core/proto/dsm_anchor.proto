@@ -103,6 +103,10 @@ enum Op {
   OP_FINALIZE    = 5;  // advance the active fused state
   OP_STATUS      = 6;  // read active fused state (no state change)
   OP_CANCEL      = 7;  // discard a prepared (uncommitted) record
+  OP_SPI_PASSTHROUGH = 8; // raw-SPI relay bridge: clock spi_payload to TROPIC01, return the MISO
+                          // bytes. NOT an appliance op — the bytes are not interpreted. For the
+                          // DSM Path-B counter read, where a remote receiver runs its own libtropic
+                          // session end-to-end and this device is a transparent SPI bridge.
 }
 
 // A request from the (non-secure) host transport into the secure core. There is
@@ -113,6 +117,7 @@ message ApplianceRequest {
   TransitionPackage transition = 2;  // OP_PREPARE
   bytes receiver_challenge     = 3;  // OP_PREPARE (32, r_R)
   reserved 4, 5;                     // were boot_seq / firmware_measurement
+  bytes spi_payload            = 6;  // OP_SPI_PASSTHROUGH: raw MOSI bytes to clock to the chip
 }
 
 // The secure core's response.
@@ -128,4 +133,5 @@ message ApplianceResponse {
   uint64 active_anchor_counter = 9;  // OP_STATUS: uᵢ
   uint32 status                = 10; // OP_STATUS: 0=Ready 1=Prepared 2=Committed
   bool boot_valid              = 11; // OP_STATUS: offline mode enabled this cycle
+  bytes spi_response           = 12; // OP_SPI_PASSTHROUGH: raw MISO bytes read back from the chip
 }

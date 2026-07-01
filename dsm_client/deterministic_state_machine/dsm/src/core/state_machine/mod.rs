@@ -167,6 +167,7 @@ impl StateMachine {
         operation: Operation,
         deltas: &[crate::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
             DsmError::state_machine(
@@ -205,6 +206,7 @@ impl StateMachine {
             None, // encapsulated_entropy — caller can set if needed
             deltas,
             initial_chain_tip,
+            anchor_leaf,
         )
     }
 
@@ -288,6 +290,7 @@ impl StateMachine {
             operation,
             deltas,
             initial_chain_tip,
+            None, // anchor_leaf — this convenience path is for ordinary transitions
         )?;
         self.commit_advance(&outcome);
         Ok(outcome)

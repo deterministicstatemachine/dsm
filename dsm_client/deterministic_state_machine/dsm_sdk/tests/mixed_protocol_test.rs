@@ -163,7 +163,6 @@ async fn test_offline_offline_tripwire() {
             &precommit1.bilateral_commitment_hash,
             &[1u8; 32],
             &mut smt,
-            dsm::types::device_state::ValueCapability::Yes,
         )
         .await;
 
@@ -188,7 +187,6 @@ async fn test_offline_offline_tripwire() {
             &precommit2.bilateral_commitment_hash,
             &[2u8; 32],
             &mut smt,
-            dsm::types::device_state::ValueCapability::Yes,
         )
         .await;
 

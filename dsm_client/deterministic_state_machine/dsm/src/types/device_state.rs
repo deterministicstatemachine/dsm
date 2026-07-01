@@ -258,41 +258,6 @@ pub struct RelChainTip {
     pub value_capability: ValueCapability,
 }
 
-/// Offline-bearer secure-element attestation folded into a chain tip (anti-clone island
-/// binding, see `crate::attestation`). Carries the pinned per-device island identity, the
-/// island's signature over the framed canonical intent challenge, and the pinning-policy id.
-/// Present only on offline-bearer attested transitions.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IslandAttestation {
-    /// Pinned per-device island identity = SHA-256(leaf SubjectPublicKeyInfo).
-    pub id_island: [u8; 32],
-    /// Canonical anchor-set identifier this attestation was produced under
-    /// (`crate::attestation::compute_anchor_set_id`). A receipt input so a re-verifier can
-    /// reconstruct `anchor_proof_hash` (the digest the §16.6 successor tip folds).
-    pub id_anchor_set: [u8; 32],
-    /// The on-device UI transcript hash the island signed over (consent-oracle binding). A receipt
-    /// input for reconstructing `anchor_proof_hash`.
-    pub ui_transcript_hash: [u8; 32],
-    /// The island's signature over the framed canonical intent challenge.
-    pub signature: Vec<u8>,
-    /// Identifier of the pinning policy under which the island was admitted.
-    pub policy_id: [u8; 32],
-    /// Domain-separated hash of the anchor's signing-key SPKI (which key signed this receipt).
-    pub anchor_pubkey_hash: [u8; 32],
-    /// Device-measured firmware hash the secmon gate enforced for this signature.
-    pub firmware_hash: [u8; 32],
-    /// Hash of the pinning policy's canonical contents (distinct from `policy_id`).
-    pub policy_hash: [u8; 32],
-    /// Anchor monotonic-frontier root this advance consumed (must equal the device's `stored_root`).
-    pub parent_root: [u8; 32],
-    /// Anchor monotonic-frontier root this advance produced (`stored_root` after the atomic advance).
-    pub successor_root: [u8; 32],
-    /// Operation payload hash this advance committed to (== the transition `payload_hash`).
-    pub operation_hash: [u8; 32],
-    /// Monotonic anchor-frontier counter for this advance.
-    pub state_number: u64,
-}
-
 /// One accepted state in a per-relationship straight hash chain (§2.1).
 ///
 /// Replaces the old monolithic `State` for per-chain semantics. Carries
@@ -335,11 +300,6 @@ pub struct RelationshipChainState {
 
     /// Counterparty SPHINCS+ signature (bilateral mode).
     pub counterparty_sig: Option<Vec<u8>>,
-
-    /// Optional offline-bearer secure-element island attestation (anti-clone, see
-    /// [`crate::attestation`]). Folded into the chain tip iff present; absent on every
-    /// non-offline-bearer transition, so those tips hash exactly as before.
-    pub island_attestation: Option<IslandAttestation>,
 }
 
 impl RelationshipChainState {
@@ -385,17 +345,6 @@ impl RelationshipChainState {
         for (policy_commit, value) in &self.balance_witness {
             hasher.update(policy_commit);
             hasher.update(&value.to_le_bytes());
-        }
-
-        // Offline-bearer island attestation (anti-clone). Appended ONLY when present, so a
-        // non-attested transition hashes byte-for-byte as before: existing tips and vectors
-        // are unchanged. id_island and policy_id are fixed 32B; the signature is
-        // length-prefixed for unambiguous canonical bytes.
-        if let Some(att) = &self.island_attestation {
-            hasher.update(&att.id_island);
-            hasher.update(&(att.signature.len() as u32).to_le_bytes());
-            hasher.update(&att.signature);
-            hasher.update(&att.policy_id);
         }
 
         *hasher.finalize().as_bytes()
@@ -520,6 +469,28 @@ fn validate_conservation(
 /// The caller must CAS-swap the device head from `parent_r_a` to
 /// `child_r_a`. If the CAS fails, another advance landed first and this
 /// outcome is stale; discard and rebuild from the new head.
+/// A fused-anchor-state leaf replacement to apply in the SAME device-SMT batch as a bearer
+/// transfer's relationship-leaf advance (Boot Fenced Fused Anchor §12). `key` is the stable
+/// per-device anchor-state leaf key `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`; `new_value` is the
+/// SUCCESSOR commit `H("DSM/fused-anchor-state/v1" ‖ B ‖ A_{i+1} ‖ J_{b'} ‖ uᵢ+1)`. The key is
+/// stable; only the value changes, so the successor root changes because the value changes and a
+/// receiver verifies both roots independently.
+#[derive(Clone, Debug)]
+pub struct AnchorLeafUpdate {
+    pub key: [u8; 32],
+    pub new_value: [u8; 32],
+}
+
+/// Inclusion proofs for the fused-anchor-state leaf across a bearer advance: `parent` proves the
+/// OLD commit under the pre-advance device root, `child` proves the SUCCESSOR commit under the
+/// post-advance device root (`child_r_a`). Both are `SmtInclusionProof::to_bytes()` and verify via
+/// `verify_anchor_state_commitment`.
+#[derive(Clone, Debug)]
+pub struct AnchorLeafProofs {
+    pub parent: Vec<u8>,
+    pub child: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AdvanceOutcome {
     /// The new [`DeviceState`] to install on CAS success.
@@ -541,6 +512,11 @@ pub struct AdvanceOutcome {
 
     /// Child device root `r'_A` produced by the leaf replace.
     pub child_r_a: [u8; 32],
+
+    /// Fused-anchor-state leaf inclusion proofs, `Some` iff an [`AnchorLeafUpdate`] was applied
+    /// (a bearer advance). `parent` binds the old commit under `parent_r_a`/`smt_proofs.pre_root`;
+    /// `child` binds the successor commit under `child_r_a`. `None` for ordinary transitions.
+    pub anchor_proofs: Option<AnchorLeafProofs>,
 }
 
 impl DeviceState {
@@ -759,6 +735,7 @@ impl DeviceState {
         encapsulated_entropy: Option<Vec<u8>>,
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<AnchorLeafUpdate>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -821,7 +798,6 @@ impl DeviceState {
             balance_witness: new_balances.clone(),
             entity_sig: None,
             counterparty_sig: None,
-            island_attestation: None,
         };
 
         // Derive h_{n+1} = H(canonical_bytes(new_chain_state)).
@@ -847,9 +823,53 @@ impl DeviceState {
                     ))
                 })?;
         }
-        let smt_proofs = new_smt
-            .smt_replace(&rel_key, &child_chain_tip)
-            .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
+        // Ordinary transitions: a single relationship-leaf replace (unchanged bytes). Bearer
+        // transitions with an `anchor_leaf`: replace the relationship leaf AND the stable
+        // per-device anchor-state leaf as ONE atomic root update — all four inclusion proofs are
+        // taken against the true pre/post roots (never an intermediate root), so both the
+        // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
+        let (smt_proofs, anchor_proofs) = match &anchor_leaf {
+            None => {
+                let p = new_smt
+                    .smt_replace(&rel_key, &child_chain_tip)
+                    .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
+                (p, None)
+            }
+            Some(al) => {
+                let pre_root = *new_smt.root();
+                let rel_parent = new_smt
+                    .get_inclusion_proof(&rel_key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
+                let anchor_parent = new_smt.get_inclusion_proof(&al.key, 256).map_err(|e| {
+                    DsmError::invalid_operation(format!("anchor parent proof: {e}"))
+                })?;
+                new_smt
+                    .update_leaf(&rel_key, &child_chain_tip)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
+                new_smt.update_leaf(&al.key, &al.new_value).map_err(|e| {
+                    DsmError::invalid_operation(format!("anchor leaf replace: {e}"))
+                })?;
+                let post_root = *new_smt.root();
+                let rel_child = new_smt
+                    .get_inclusion_proof(&rel_key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
+                let anchor_child = new_smt
+                    .get_inclusion_proof(&al.key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("anchor child proof: {e}")))?;
+                (
+                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
+                        pre_root,
+                        post_root,
+                        parent_proof: rel_parent,
+                        child_proof: rel_child,
+                    },
+                    Some(AnchorLeafProofs {
+                        parent: anchor_parent.to_bytes(),
+                        child: anchor_child.to_bytes(),
+                    }),
+                )
+            }
+        };
 
         let child_r_a = smt_proofs.post_root;
 
@@ -893,6 +913,33 @@ impl DeviceState {
             smt_proofs,
             parent_r_a,
             child_r_a,
+            anchor_proofs,
+        })
+    }
+
+    /// Bootstrap the per-device fused-anchor-state leaf into the device SMT (Boot Fenced Fused
+    /// Anchor §12): insert `key → value` where `key = H("DSM/fused-anchor-state-leaf/v1" ‖ B)` and
+    /// `value = commit_0 = H("DSM/fused-anchor-state/v1" ‖ B ‖ A_0 ‖ J_0 ‖ 0)`. Called ONCE when
+    /// the device's fused anchor is admitted; the resulting device root becomes the first valid
+    /// offline-bearer parent root. Returns the new [`DeviceState`] (the caller CAS-installs it).
+    pub fn with_anchor_state_leaf(
+        &self,
+        key: &[u8; 32],
+        value: &[u8; 32],
+    ) -> Result<Self, DsmError> {
+        let mut new_smt = self.smt.clone();
+        new_smt.update_leaf(key, value).map_err(|e| {
+            DsmError::invalid_operation(format!("anchor-state leaf bootstrap: {e}"))
+        })?;
+        Ok(Self {
+            genesis: self.genesis,
+            devid: self.devid,
+            public_key: self.public_key.clone(),
+            smt: new_smt,
+            balances: self.balances.clone(),
+            tips: self.tips.clone(),
+            legacy_anchor: self.legacy_anchor,
+            offline_bearer_attestation: self.offline_bearer_attestation,
         })
     }
 
@@ -1038,6 +1085,7 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
+                None,
             )
             .expect("advance");
         assert_eq!(
@@ -1193,6 +1241,7 @@ mod tests {
                     amount: 50,
                 }],
                 Some(init_tip),
+                None,
             )
             .expect("credit advance succeeds");
 
@@ -1239,6 +1288,267 @@ mod tests {
     }
 
     #[test]
+    fn bearer_advance_commits_fused_anchor_leaf_into_real_device_roots() {
+        use crate::core::bilateral_transaction_manager::{
+            anchor_state_commit, anchor_state_leaf_key, compute_smt_key,
+            initial_chain_tip_from_device_ids, verify_anchor_state_commitment,
+        };
+        // Fused anchor identity + two states (A_i,J_b,u_i) → (A_{i+1},J_{b'},u_i+1).
+        let b = [0xB1u8; 32];
+        let (a0, j0) = ([0xA0u8; 32], [0x50u8; 32]);
+        let (a1, j1) = ([0xA1u8; 32], [0x51u8; 32]);
+        let key = anchor_state_leaf_key(&b);
+        let commit0 = anchor_state_commit(&b, &a0, &j0, 0);
+        let commit1 = anchor_state_commit(&b, &a1, &j1, 1);
+
+        // (bootstrap) The admitted device SMT carries commit_0 at the stable anchor-state key.
+        let dev = fresh_device(0xAB);
+        let dev = dev
+            .with_anchor_state_leaf(&key, &commit0)
+            .expect("bootstrap");
+
+        let cp = devid(0xC0);
+        let rk = compute_smt_key(&dev.devid, &cp);
+        let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+
+        // (bearer advance) updates the SAME anchor leaf key old→successor in the same root batch.
+        let out = dev
+            .advance(
+                rk,
+                cp,
+                mint_op(10),
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc(0xF1),
+                    direction: BalanceDirection::Credit,
+                    amount: 10,
+                }],
+                Some(init),
+                Some(AnchorLeafUpdate {
+                    key,
+                    new_value: commit1,
+                }),
+            )
+            .expect("bearer advance");
+        let ap = out
+            .anchor_proofs
+            .clone()
+            .expect("bearer advance emits anchor proofs");
+
+        // prev proof verifies (B,A0,J0,0) ONLY against the prev root; next proof verifies
+        // (B,A1,J1,1) ONLY against the next root.
+        assert!(verify_anchor_state_commitment(
+            &out.smt_proofs.pre_root,
+            &b,
+            &a0,
+            &j0,
+            0,
+            &ap.parent
+        ));
+        assert!(verify_anchor_state_commitment(
+            &out.child_r_a,
+            &b,
+            &a1,
+            &j1,
+            1,
+            &ap.child
+        ));
+        assert!(!verify_anchor_state_commitment(
+            &out.child_r_a,
+            &b,
+            &a0,
+            &j0,
+            0,
+            &ap.parent
+        ));
+        assert!(!verify_anchor_state_commitment(
+            &out.smt_proofs.pre_root,
+            &b,
+            &a1,
+            &j1,
+            1,
+            &ap.child
+        ));
+        // off-by-one A / u binding rejects.
+        assert!(!verify_anchor_state_commitment(
+            &out.child_r_a,
+            &b,
+            &a1,
+            &j1,
+            0,
+            &ap.child
+        ));
+        assert!(!verify_anchor_state_commitment(
+            &out.child_r_a,
+            &b,
+            &a0,
+            &j1,
+            1,
+            &ap.child
+        ));
+
+        // (non-bearer) an ordinary advance (anchor_leaf=None) emits no anchor proofs and does NOT
+        // mutate the fused anchor state — a subsequent bearer advance still sees commit_0 as parent.
+        let cp2 = devid(0xC2);
+        let rk2 = compute_smt_key(&dev.devid, &cp2);
+        let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
+        let plain = dev
+            .advance(
+                rk2,
+                cp2,
+                mint_op(5),
+                entropy(2),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc(0xF2),
+                    direction: BalanceDirection::Credit,
+                    amount: 5,
+                }],
+                Some(init2),
+                None,
+            )
+            .expect("plain advance");
+        assert!(plain.anchor_proofs.is_none());
+
+        let cp3 = devid(0xC3);
+        let rk3 = compute_smt_key(&dev.devid, &cp3);
+        let init3 = initial_chain_tip_from_device_ids(&dev.devid, &cp3);
+        let out2 = plain
+            .new_device_state
+            .advance(
+                rk3,
+                cp3,
+                mint_op(7),
+                entropy(3),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc(0xF3),
+                    direction: BalanceDirection::Credit,
+                    amount: 7,
+                }],
+                Some(init3),
+                Some(AnchorLeafUpdate {
+                    key,
+                    new_value: commit1,
+                }),
+            )
+            .expect("bearer advance after a plain one");
+        let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
+        assert!(
+            verify_anchor_state_commitment(&out2.smt_proofs.pre_root, &b, &a0, &j0, 0, &ap2.parent),
+            "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
+        );
+    }
+
+    #[test]
+    fn two_transfer_adoption_advances_receiver_frontier_and_rejects_replay() {
+        use crate::core::bilateral_transaction_manager::{
+            anchor_state_commit, anchor_state_leaf_key, compute_smt_key,
+            initial_chain_tip_from_device_ids, verify_anchor_state_commitment, FusedAnchorFrontier,
+        };
+        let b = [0xB1u8; 32];
+        let key = anchor_state_leaf_key(&b);
+        let (a0, j0) = ([0xA0u8; 32], [0x50u8; 32]);
+        let (a1, j1) = ([0xA1u8; 32], [0x51u8; 32]);
+        let (a2, j2) = ([0xA2u8; 32], [0x52u8; 32]);
+
+        // Sender device: bootstrap the fused-anchor leaf at commit_0 = (B, A_0, J_0, 0).
+        let dev = fresh_device(0xAB)
+            .with_anchor_state_leaf(&key, &anchor_state_commit(&b, &a0, &j0, 0))
+            .expect("bootstrap");
+
+        // One bearer advance to `(a_next, j_next, u)` on relationship `cp_tag`.
+        let bearer = |dev: &DeviceState, cp_tag: u8, a_next: [u8; 32], j_next: [u8; 32], u: u64| {
+            let cp = devid(cp_tag);
+            let rk = compute_smt_key(&dev.devid, &cp);
+            let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
+            dev.advance(
+                rk,
+                cp,
+                mint_op(1),
+                entropy(u as u8 + 1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc(0xF0 + u as u8),
+                    direction: BalanceDirection::Credit,
+                    amount: 1,
+                }],
+                Some(init),
+                Some(AnchorLeafUpdate {
+                    key,
+                    new_value: anchor_state_commit(&b, &a_next, &j_next, u),
+                }),
+            )
+            .expect("bearer advance")
+        };
+
+        // Receiver frontier starts at the admitted genesis fused state.
+        let mut frontier = FusedAnchorFrontier::genesis(a0, j0);
+
+        // ---- Transfer 1: (A_0,J_0,0) -> (A_1,J_1,1) ----
+        let out1 = bearer(&dev, 0xC0, a1, j1, 1);
+        let ap1 = out1.anchor_proofs.clone().unwrap();
+        assert!(frontier.matches_prev(&a0, &j0, 0)); // consumes the adopted state
+        assert!(verify_anchor_state_commitment(
+            &out1.smt_proofs.pre_root,
+            &b,
+            &a0,
+            &j0,
+            0,
+            &ap1.parent
+        ));
+        assert!(verify_anchor_state_commitment(
+            &out1.child_r_a,
+            &b,
+            &a1,
+            &j1,
+            1,
+            &ap1.child
+        ));
+        frontier = FusedAnchorFrontier::adopt_successor(a1, j1, 1); // adopt
+
+        // ---- Replay: presenting Transfer 1 again (prev = A_0) now REJECTS ----
+        assert!(
+            !frontier.matches_prev(&a0, &j0, 0),
+            "after adoption the receiver must reject a replay of the consumed (A_0,u_0) state"
+        );
+
+        // ---- Transfer 2: (A_1,J_1,1) -> (A_2,J_2,2), from the adopted state ----
+        let out2 = bearer(&out1.new_device_state, 0xC1, a2, j2, 2);
+        let ap2 = out2.anchor_proofs.clone().unwrap();
+        assert!(
+            frontier.matches_prev(&a1, &j1, 1),
+            "transfer 2 must consume exactly the successor the receiver adopted"
+        );
+        assert!(verify_anchor_state_commitment(
+            &out2.smt_proofs.pre_root,
+            &b,
+            &a1,
+            &j1,
+            1,
+            &ap2.parent
+        ));
+        assert!(verify_anchor_state_commitment(
+            &out2.child_r_a,
+            &b,
+            &a2,
+            &j2,
+            2,
+            &ap2.child
+        ));
+        frontier = FusedAnchorFrontier::adopt_successor(a2, j2, 2);
+        assert_eq!(
+            frontier,
+            FusedAnchorFrontier {
+                anchor_head: a2,
+                boot_head: j2,
+                counter: 2
+            }
+        );
+    }
+
+    #[test]
     fn advance_sets_value_capability_sticky_yes_and_birth_no() {
         use crate::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
@@ -1262,6 +1572,7 @@ mod tests {
                     amount: 10,
                 }],
                 Some(init),
+                None,
             )
             .expect("value advance");
         assert_eq!(
@@ -1276,7 +1587,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None)
+            .advance(rk, cp, op(), entropy(2), None, &[], None, None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -1291,7 +1602,7 @@ mod tests {
         let rk2 = compute_smt_key(&dev.devid, &cp2);
         let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
         let o3 = dev
-            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2))
+            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -1341,6 +1652,7 @@ mod tests {
                     amount: 30,
                 }],
                 Some(init_bob),
+                None,
             )
             .expect("advance Bob");
         assert_eq!(
@@ -1364,6 +1676,7 @@ mod tests {
                     amount: 50,
                 }],
                 Some(init_chrl),
+                None,
             )
             .expect("advance Charlie");
         assert_eq!(
@@ -1421,6 +1734,7 @@ mod tests {
                     amount: 10,
                 }],
                 Some(init_bob),
+                None,
             )
             .expect("advance A");
         let b = dev
@@ -1436,6 +1750,7 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init_chrl),
+                None,
             )
             .expect("advance B");
 
@@ -1486,6 +1801,7 @@ mod tests {
                     amount: 10,
                 }],
                 Some(init),
+                None,
             )
             .expect("advance A");
         let b = dev
@@ -1501,6 +1817,7 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init),
+                None,
             )
             .expect("advance B");
 
@@ -1545,6 +1862,7 @@ mod tests {
                 amount: 10,
             }],
             Some(init),
+            None,
         );
         assert!(
             r.is_err(),
@@ -1577,6 +1895,7 @@ mod tests {
                 amount: 1,
             }],
             Some(init),
+            None,
         );
         assert!(r.is_err(), "u64::MAX + 1 must overflow");
     }
@@ -1625,6 +1944,7 @@ mod tests {
                         amount: amt,
                     }],
                     Some(init),
+                    None,
                 )
                 .expect("advance");
             dev = out.new_device_state;
@@ -1713,6 +2033,7 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
+                None,
             )
             .expect("bilateral advance succeeds")
             .new_device_state;

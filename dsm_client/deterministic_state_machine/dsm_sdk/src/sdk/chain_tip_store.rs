@@ -12,8 +12,8 @@ use dsm::types::error::DsmError;
 
 use crate::storage::client_db;
 
-/// SQLite-backed chain tip store for SDK usage. The per-device anchor frontier is persisted in the
-/// `anchor_frontiers` table (see `client_db::anchor_persist`) so it survives an app restart.
+/// SQLite-backed chain tip store for SDK usage: persists per-relationship contact chain tips so
+/// they survive an app restart.
 #[derive(Default, Clone)]
 pub struct SqliteChainTipStore;
 
@@ -52,26 +52,6 @@ impl ChainTipStore for SqliteChainTipStore {
                 "SqliteChainTipStore persist failed: {e}"
             ))),
         }
-    }
-
-    fn get_anchor_frontier(&self, anchor_id: &[u8; 32]) -> Option<([u8; 32], u64)> {
-        client_db::anchor_persist::get_anchor_frontier(anchor_id)
-    }
-
-    fn set_anchor_frontier(
-        &self,
-        anchor_id: &[u8; 32],
-        expected_parent_root: [u8; 32],
-        new_root: [u8; 32],
-        new_state_number: u64,
-    ) -> Result<bool, DsmError> {
-        client_db::anchor_persist::set_anchor_frontier_cas(
-            anchor_id,
-            expected_parent_root,
-            new_root,
-            new_state_number,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("set_anchor_frontier persist failed: {e}")))
     }
 }
 

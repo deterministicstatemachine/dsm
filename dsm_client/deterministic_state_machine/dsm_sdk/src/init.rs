@@ -606,31 +606,13 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 
         let chain_tip_store =
             std::sync::Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
-        #[allow(unused_mut)]
-        let mut manager = BilateralTransactionManager::new_with_chain_tip_store(
+        let manager = BilateralTransactionManager::new_with_chain_tip_store(
             contact_manager,
             keypair,
             dev_fixed,
             gen_fixed,
             chain_tip_store,
-        )
-        .with_enrollment_store(std::sync::Arc::new(
-            crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
-        ));
-        // mock-anchor: stand in for the Safe 7 element with an in-process MockAnchorTransport so the
-        // sender produces offline-bearer attestations and the whole anti-clone path runs end-to-end
-        // without hardware. OFF in production (no transport -> OFFLINE_BEARER_REQUIRED fails closed).
-        #[cfg(feature = "mock-anchor")]
-        {
-            manager = manager.with_anchor_transport(std::sync::Arc::new(
-                dsm::crypto::anchor_transport::MockAnchorTransport::from_seed(
-                    crate::bluetooth::mock_anchor_seed(&dev_fixed),
-                ),
-            ));
-            log::info!(
-                "[SDK Init] mock-anchor: wired in-process MockAnchorTransport into the bilateral manager"
-            );
-        }
+        );
         let btx = std::sync::Arc::new(TokioRwLock::new(manager));
         let manager_arc =
             std::sync::Arc::new(crate::bluetooth::BluetoothManager::new(dev_fixed, btx));

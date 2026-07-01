@@ -185,6 +185,14 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
         }
     }
 
+    /// Mutable access to the underlying `Tropic` backend. For a firmware host that also serves a
+    /// transparent raw-SPI relay (DSM Path-B counter read): the relayed transactions go straight to
+    /// the chip via the backend, bypassing the appliance protocol entirely. Not used by the
+    /// appliance's own operations.
+    pub fn tropic_mut(&mut self) -> &mut T {
+        &mut self.tropic
+    }
+
     /// Live anchor counter `u = H₀ − H` from the chip. The counter only counts
     /// down, so `H ≤ H₀`; a reported `H > H₀` is impossible and is rejected.
     pub fn live_index(&mut self) -> Result<u64, ApplianceError> {
