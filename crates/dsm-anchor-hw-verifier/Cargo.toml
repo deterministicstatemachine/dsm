@@ -27,3 +27,5 @@ log = "0.4"
 # the USB-CDC raw-SPI passthrough. dsm-anchor-core supplies the ApplianceRequest/Response codec.
 dsm-anchor-core = { path = "../dsm-anchor-core" }
 serialport = "4"
+# UAP probe example constructs the U16 config addresses (same zerocopy major as tropic01).
+zerocopy = { version = "0.8", default-features = false }
