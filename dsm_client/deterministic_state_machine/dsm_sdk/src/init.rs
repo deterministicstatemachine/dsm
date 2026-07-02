@@ -433,6 +433,14 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         install_sdk_app_router(app_router)
             .map_err(|e| format!("Failed to install app router: {:?}", e))?;
         install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
+        // Receiver-admit fold (Boot Fenced Fused Anchor): persistent pinned-anchor store, so an
+        // admitted counterparty pin survives restarts (a restart must never re-open the
+        // first-transfer TOFU window). This does NOT enable live offline-bearer acceptance: the
+        // counter reader is a separate device-layer install (`install_anchor_counter_reader`,
+        // deliberately absent here) and an incomplete pin fail-closes the Path-B read regardless.
+        crate::bridge::install_anchor_enrollment_store(Arc::new(
+            crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
+        ));
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
     } else {
         // Install minimal bootstrap router for pre-genesis queries

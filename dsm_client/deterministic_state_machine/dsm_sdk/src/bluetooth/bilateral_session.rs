@@ -146,6 +146,12 @@ pub struct BilateralBleSession {
     /// root, else the sender fails closed to recovery (the receiver verified proofs against this
     /// value). `None` for ordinary transfers and on the receiver side.
     pub anchor_sim_root: Option<[u8; 32]>,
+    /// SENDER-only (receiver-admit fold): the receiver's first-transfer `AnchorEnrollRequest`
+    /// pairing pubkey from the prepare-response (possibly EMPTY when B has no pairing deriver).
+    /// `Some` means B asked to enroll — `send_bilateral_confirm` attaches the anchor disclosure to
+    /// this transfer's confirm. `None` for ordinary transfers / already-pinned counterparties.
+    /// In-memory only: lost on restart, the next bearer transfer simply re-requests (fail-safe).
+    pub pending_enroll_pubkey: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -521,6 +527,7 @@ impl SessionStore {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            pending_enroll_pubkey: None,
         })
     }
 }
@@ -548,6 +555,7 @@ mod tests {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            pending_enroll_pubkey: None,
         }
     }
 

@@ -21,7 +21,7 @@ use crate::types::error::DsmError;
 /// recognize and verify a `dsm.anchor.OfflineRelease` (the anchor-core `VerifierContext` inputs).
 /// Pinned at admission from the anchor appliance's enrollment. The `dsm_sdk` side adapts this into
 /// `anchor_core::accept::PinnedAnchor` (the SDK owns that type; core does not depend on it).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FusedAnchorPin {
     /// Immutable anchor bundle `B` (Def. 14).
     pub bundle: [u8; 32],
@@ -50,7 +50,7 @@ pub struct FusedAnchorPin {
 /// Filed under the counterparty's 32-byte DSM `device_id`. Populated ONLY through the normal
 /// authority/admission path — never implicitly from a received release (the anti-reprovision rule:
 /// a fresh self-provisioned anchor has no enrollment and is rejected).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchorEnrollment {
     /// 32-byte DSM device id of the anchor holder (the key this enrollment is filed under).
     pub device_id: [u8; 32],
