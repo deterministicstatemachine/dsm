@@ -20,6 +20,15 @@ Vars == <<deviceRoots, smtState, ledger>>
 \* DSM_OfflineFinality.tla; this module assumes no unresolved pending online
 \* projection for the relationship being advanced.
 \*
+\* Generalization (formalizing_DSM.pdf, June 2026): this module proves the
+\* bilateral-tip SPECIAL CASE — uniqueness keyed on the concrete pair
+\* (rel, oldTip). The GENERAL key-scoped statement (Theorem 2 / Theorem 4 over an
+\* abstract resource consumption key kappa_res and an arbitrary guard family) is
+\* modeled in DSM_Guarded.tla (TLC-checked via DSM_GuardedMC_WF.cfg, with the
+\* malformed-fork counter-example DSM_GuardedMC_Fork.cfg) and PROVED universally,
+\* axiom-free, in lean4/DSMGuardedTripwire.lean. The (rel, oldTip) pair here is
+\* one instantiation of that resource consumption key.
+\*
 \* Refinement note (whitepaper §11.1 per-step EK signing):
 \* The CountersignedByBoth predicate below is satisfied in the
 \* implementation by a per-step ephemeral SPHINCS+ key chain that BOTH
