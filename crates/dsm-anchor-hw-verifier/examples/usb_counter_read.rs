@@ -10,6 +10,9 @@
 //!   4. read the physical monotonic counter `H` (`mcounter_get`).
 //!
 //! This stands in for the phone-to-phone BLE relay: same architecture, USB-CDC as the transport.
+
+// Bring-up example, not a production path: fail loudly at the console.
+#![allow(clippy::disallowed_methods)]
 //! Run with the board attached:  `cargo run -p dsm-anchor-verifier --example usb_counter_read`
 
 use std::io::{Read, Write};

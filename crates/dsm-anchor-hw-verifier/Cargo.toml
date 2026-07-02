@@ -15,6 +15,12 @@ tropic01 = { path = "../../../../libtropic-rs/tropic01" }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 # Runs the sync libtropic stack on a blocking task and drives the async relay pump.
 tokio = { version = "1", default-features = false, features = ["sync", "rt", "rt-multi-thread", "macros"] }
+# The SDK seams this crate fills (AnchorCounterReader + VerifierPairingDeriver) and the DSM
+# crypto/types they reference (FusedAnchorPin, BLAKE3 domain hashing, CSPRNG). Path deps INTO the
+# workspace are fine — the workspace never depends back on this crate (tropic01 isolation).
+dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+log = "0.4"
 
 [dev-dependencies]
 # Hardware bring-up proof (examples/usb_counter_read.rs): drive a real TROPIC01 counter read over
