@@ -1011,6 +1011,7 @@ dependencies = [
  "tokio",
  "tropic01",
  "x25519-dalek",
+ "zerocopy",
 ]
 
 [[package]]
