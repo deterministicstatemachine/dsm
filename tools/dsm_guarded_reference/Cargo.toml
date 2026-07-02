@@ -1,0 +1,20 @@
+# Standalone reference crate for Appendix D of Ramsay, "Deterministic State
+# Machines as Guarded Linear Constraint Systems" (June 2026).
+#
+# This is an independent, self-contained REFERENCE implementation of the paper's
+# verify_candidate / apply_candidate enforcement skeleton. It is deliberately
+# NOT wired into the production state machine and NOT a member of the root DSM
+# workspace — the empty [workspace] table below makes this crate its own
+# workspace root so `cargo test` here is isolated from the protocol crates.
+[package]
+name = "dsm_guarded_reference"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Reference implementation of DSM guarded-candidate enforcement (paper App. D)"
+
+# Own workspace root: do not attach to the parent DSM workspace.
+[workspace]
+
+[dependencies]

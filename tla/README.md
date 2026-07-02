@@ -79,7 +79,72 @@ modeled deterministic selection.
 A focused specification modeling the **Atomic Interlock Tripwire** and **Causal Consistency**
 without wall clocks. It specifically verifies that linear device histories + SMT check
 prevent fork acceptance even in the presence of an active adversary attempting
-replay/fork strategies.
+replay/fork strategies. This is the bilateral-tip SPECIAL CASE of the general
+guarded kernel below: its uniqueness key is the concrete pair `(rel, oldTip)`.
+
+### Guarded kernel: DSM_Guarded.tla and companions
+Machine-checkable realization of the guarded linear constraint system paper
+(Appendix B), with the general key-scoped statement over an abstract resource
+consumption key and an arbitrary guard family. The Lean counterpart
+(`lean4/DSMGuardedTripwire.lean`) proves the universal theorems; these modules
+model-check concrete instances and, critically, demonstrate the property is
+load bearing through deliberate falsification.
+
+The kernel states fork exclusion at two distinct levels, and both are checked:
+
+- **Static (per-state) form**, invariant `Safety`: no reachable state has two
+  conflicting `Step_K`-enabled successors. This is the paper's Theorem 2/4 as
+  literally written. It requires guard-family well formedness (G5/G7): a
+  key-split family violates it at depth 0, before anything is realized.
+- **Dynamic (trace) form**, invariant `RealizedHistoryUnique`: the ledger of
+  accepted receipts never contains two receipts consuming the same
+  `(parent, key)` with different successors. This is the form that matches
+  `DSM_Tripwire.tla`'s ledger-style invariant, lifted to the abstract key.
+
+Instances and expected TLC outcomes:
+
+| Config | Module | Family | Expected |
+|---|---|---|---|
+| `DSM_GuardedMC_WF.cfg` | `DSM_GuardedMC_WF.tla` | well formed | No error (Safety + RealizedHistoryUnique) |
+| `DSM_GuardedMC_Fork.cfg` | `DSM_GuardedMC_Fork.tla` | key split | `Invariant Safety is violated` at the initial state (static falsification) |
+| `DSM_GuardedMC_Fork_Ledger.cfg` | `DSM_GuardedMC_Fork.tla` | key split | No error: a SINGLE honest verifier never realizes a local fork even under a malformed family (paper Prop 11) |
+| `DSM_GuardedMC_BilateralWF.cfg` | `DSM_GuardedMC_BilateralWF.tla` | relationship scoped, attempted same-parent conflict included | No error: derived keys + one receiver per relationship make the fork unconstructible |
+| `DSM_GuardedMC_BilateralFork.cfg` | `DSM_GuardedMC_BilateralFork.tla` | structure removed (free keys, two independent receivers of one parent) | `Invariant CrossVerifierAgreement is violated`: the contrast identifying the load-bearing structure |
+
+`DSM_GuardedBilateral.tla` encodes the two structural facts that make
+"two receivers, same parent" unconstructible in online DSM. First, every
+counterparty relationship is its own straight hash chain and the derived
+consumption key embeds the relationship identity, so a parent under one
+relationship is not replayable under another even when chains reuse node
+names (paper Sec 6, Def 27/33, Rule 2). Second, the topology is bilateral: a
+relationship step has exactly one receiver, the counterparty of that
+relationship, so each relationship is modeled with a single acceptance locus.
+Online acceptance is the receiver's own frontier and proof checks (Def 55);
+no co-signing round is part of the online path. The WF instance deliberately
+includes an attempted same-parent conflict and TLC proves it cannot fork in
+any interleaving. The Fork instance is the structure-removed contrast: free
+keys and two independent receivers of one parent, neither of which exists in
+online DSM, and only then does the cross-receiver fork appear. The one
+setting where a spendable object is genuinely presented to multiple distinct
+receivers is offline bearer mode, governed by the fused anchor, the Def 56
+pending lock, the offline anchor design's co-signed precommit, and
+reconciliation (paper Sec 29, Thm 14), modeled separately.
+
+```zsh
+cd tla
+java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_WF.cfg            DSM_GuardedMC_WF.tla
+java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_Fork.cfg          DSM_GuardedMC_Fork.tla
+java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_Fork_Ledger.cfg   DSM_GuardedMC_Fork.tla
+java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_BilateralWF.cfg   DSM_GuardedMC_BilateralWF.tla
+java -cp tla2tools.jar tlc2.TLC -config DSM_GuardedMC_BilateralFork.cfg DSM_GuardedMC_BilateralFork.tla
+```
+
+Note on `*_TTrace_*` files: TLC writes trace-exploration specs whenever a run
+reports a violation, so the two EXPECTED-violation configs above regenerate
+them on every run. They are disposable artifacts. The older
+`DSM_GuardedMC_Fork_TTrace_*.bin` files (June 30) came from the pre-merge
+falsification harness on the `feat/formalize-dsm-guarded-tripwire` branch and
+are superseded; they can be deleted.
 
 ### DSM_dBTC_TrustReduction.tla
 A focused dBTC trust-boundary model. It makes the mainnet settlement predicate
