@@ -17,8 +17,10 @@
 // production; production code in this crate does not use them).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+mod reader;
 mod relay_driver;
 mod session;
 
+pub use reader::{derive_pairing_pubkey, RelayCounterReader, RelayRoundTrip, SeedPairingDeriver};
 pub use relay_driver::read_counter_over_relay;
 pub use session::{read_live_counter, VerifierError, VerifierSessionCredential};
