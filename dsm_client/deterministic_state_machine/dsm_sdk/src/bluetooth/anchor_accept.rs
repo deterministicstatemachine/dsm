@@ -11,13 +11,14 @@
 //!   - [`DsmCounterVerifier`] (`CounterVerifier`): the authenticated TROPIC01 counter, read
 //!     ONLY from `ev.verifier_transcript`, NEVER a host-supplied `*_claim` field.
 //!
-//! Fail-closed posture (Phase 4). Three producer-side inputs do not exist yet: the sender
-//! does not ride an `OfflineRelease`, there is no authenticated counter-read transcript, and
-//! the DSM SMT leaf does not yet commit the fused anchor state `(B, Aᵢ, J_b, uᵢ)` (spec §6).
-//! Until they ship (Phase 5) every offline-bearer transfer routes to ONLINE RECOVERY — an
-//! absent/malformed release, an un-enrolled anchor, an empty/inauthentic counter transcript,
-//! or ANY failed predicate check rejects before any value is released. There is no
-//! IslandAttestation fallback and no degraded-acceptance path.
+//! Fail-closed posture. The sender now rides a real `OfflineRelease` + anchor-state proofs and
+//! the receiver pins the disclosed fused anchor on the first bearer transfer, but ACCEPTANCE is
+//! still gated on the authenticated Path-B counter read: the pin must be COMPLETE (verifier
+//! slot + chip static key, hardware-provisioned) and a live `AnchorCounterReader` must attest
+//! `H == H₀ − (uᵢ+1)` from the pinned chip. Until the device layer installs that reader, every
+//! offline-bearer transfer routes to ONLINE RECOVERY — an absent/malformed release, an
+//! un-enrolled anchor, an incomplete pin, or ANY failed predicate check rejects before any
+//! value is released. There is no IslandAttestation fallback and no degraded-acceptance path.
 
 use anchor_core::accept::{accept_offline, AcceptError, CounterVerifier, DsmVerifier, VerifierContext};
 use anchor_core::boot::BootTicket;
@@ -242,6 +243,100 @@ impl CounterVerifier for DsmCounterVerifier {
         }
         Some(*h)
     }
+}
+
+/// Receiver-admit fold: the decision for a sender's fused-anchor disclosure against the
+/// receiver's existing pin state. PURE — no store, no I/O; the confirm handler applies it inside
+/// the bearer branch (bound to that transfer), and the caller owns the surrounding gates
+/// (offline-bearer op, verified contact, disclosure present on THIS confirm).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PinAdmitDecision {
+    /// No existing pin: admit the disclosed pin (first-transfer TOFU under the verified contact).
+    Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment),
+    /// Same anchor identity, and the disclosure completes an incomplete pin (supplies the
+    /// verifier slot / chip static key the pre-HW admission lacked): upgrade in place.
+    Upgrade(dsm::crypto::anchor_enrollment::AnchorEnrollment),
+    /// Already pinned and the disclosure adds nothing new: keep the pin untouched.
+    NoChange,
+    /// The disclosure CONFLICTS with the pinned anchor (differing anchor_id / bundle / policy /
+    /// H0 / partition key / chip static key / slot). A changed anchor after pinning is a
+    /// silent-substitution attack: keep the pinned anchor, never overwrite from a transfer.
+    Reject(&'static str),
+}
+
+/// Decide admit/upgrade/reject for a disclosed pin. `disclosed.uncompromised` is ignored on
+/// upgrade — the EXISTING flag is preserved so a disclosure can never resurrect a compromised
+/// anchor.
+pub(crate) fn pin_admit_decision(
+    device_id: [u8; 32],
+    disclosed_policy: [u8; 32],
+    disclosed: &dsm::crypto::anchor_enrollment::FusedAnchorPin,
+    existing: Option<&dsm::crypto::anchor_enrollment::AnchorEnrollment>,
+) -> PinAdmitDecision {
+    let Some(cur) = existing else {
+        return PinAdmitDecision::Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment {
+            device_id,
+            policy_hash: disclosed_policy,
+            pin: dsm::crypto::anchor_enrollment::FusedAnchorPin {
+                uncompromised: true,
+                ..disclosed.clone()
+            },
+        });
+    };
+    if cur.pin.anchor_id != disclosed.anchor_id || cur.pin.bundle != disclosed.bundle {
+        return PinAdmitDecision::Reject("disclosed anchor identity differs from the pinned one");
+    }
+    if cur.policy_hash != disclosed_policy {
+        return PinAdmitDecision::Reject("disclosed policy differs from the admitted one");
+    }
+    if cur.pin.enrolled_counter != disclosed.enrolled_counter {
+        return PinAdmitDecision::Reject("disclosed H0 differs from the enrolled counter");
+    }
+    if cur.pin.partition_pk != disclosed.partition_pk {
+        return PinAdmitDecision::Reject("disclosed partition key differs from the pinned one");
+    }
+    match (cur.pin.chip_static_pubkey, disclosed.chip_static_pubkey) {
+        (Some(pinned), Some(new)) if pinned != new => {
+            return PinAdmitDecision::Reject(
+                "disclosed chip static key differs from the pinned one",
+            );
+        }
+        _ => {}
+    }
+    match (cur.pin.verifier_slot, disclosed.verifier_slot) {
+        (Some(pinned), Some(new)) if pinned != new => {
+            return PinAdmitDecision::Reject("disclosed verifier slot differs from the pinned one");
+        }
+        _ => {}
+    }
+    let adds_slot = cur.pin.verifier_slot.is_none() && disclosed.verifier_slot.is_some();
+    let adds_stpub = cur.pin.chip_static_pubkey.is_none() && disclosed.chip_static_pubkey.is_some();
+    if adds_slot || adds_stpub {
+        return PinAdmitDecision::Upgrade(dsm::crypto::anchor_enrollment::AnchorEnrollment {
+            device_id,
+            policy_hash: cur.policy_hash,
+            pin: dsm::crypto::anchor_enrollment::FusedAnchorPin {
+                verifier_slot: cur.pin.verifier_slot.or(disclosed.verifier_slot),
+                chip_static_pubkey: cur.pin.chip_static_pubkey.or(disclosed.chip_static_pubkey),
+                // Preserve the existing flag: a disclosure never resurrects a compromised anchor.
+                uncompromised: cur.pin.uncompromised,
+                ..cur.pin.clone()
+            },
+        });
+    }
+    PinAdmitDecision::NoChange
+}
+
+/// Admission never implies acceptance: a pinned anchor may only be COUNTER-READ when the pin is
+/// COMPLETE — verifier slot provisioned, chip static key pinned (anti-substitution), and the
+/// anchor uncompromised. The confirm handler consults this BEFORE invoking any installed
+/// [`AnchorCounterReader`](crate::bluetooth::tropic_relay::AnchorCounterReader), so an incomplete
+/// pre-HW pin can never yield `attested = Some` even against a buggy or malicious reader
+/// (defense-in-depth: the hardware reader independently refuses the same conditions).
+pub(crate) fn pin_ready_for_counter_read(
+    pin: &dsm::crypto::anchor_enrollment::FusedAnchorPin,
+) -> bool {
+    pin.verifier_slot.is_some() && pin.chip_static_pubkey.is_some() && pin.uncompromised
 }
 
 /// Test-only stand-in for the D2 receiver-operated authenticated L3 counter session. It returns the
@@ -559,5 +654,161 @@ mod tests {
         // Off-by-one counter / wrong head reject.
         assert!(!v.prev_root_commits_anchor_state(&ZERO, &b, &a, &j, u + 1));
         assert!(!v.next_root_commits_anchor_state(&ZERO, &b, &[0u8; 32], &j, u));
+    }
+
+    // ------------------------------------------------------------------
+    // Receiver-admit fold: pin_admit_decision matrix + the admission-never-
+    // implies-acceptance invariant.
+    // ------------------------------------------------------------------
+
+    fn fused_pin(
+        slot: Option<u8>,
+        stpub: Option<[u8; 32]>,
+    ) -> dsm::crypto::anchor_enrollment::FusedAnchorPin {
+        dsm::crypto::anchor_enrollment::FusedAnchorPin {
+            bundle: [0xB1; 32],
+            anchor_id: [0xA1; 32],
+            enrolled_counter: 1_000_000,
+            partition_pk: vec![0x07; 64],
+            uncompromised: true,
+            verifier_slot: slot,
+            chip_static_pubkey: stpub,
+        }
+    }
+
+    fn pinned(
+        slot: Option<u8>,
+        stpub: Option<[u8; 32]>,
+    ) -> dsm::crypto::anchor_enrollment::AnchorEnrollment {
+        dsm::crypto::anchor_enrollment::AnchorEnrollment {
+            device_id: [0x11; 32],
+            policy_hash: [0x9A; 32],
+            pin: fused_pin(slot, stpub),
+        }
+    }
+
+    #[test]
+    fn pin_admit_decision_first_transfer_admits_under_disclosed_policy() {
+        let d = fused_pin(None, None);
+        match pin_admit_decision([0x11; 32], [0x9A; 32], &d, None) {
+            PinAdmitDecision::Admit(e) => {
+                assert_eq!(e.device_id, [0x11; 32]);
+                assert_eq!(e.policy_hash, [0x9A; 32]);
+                assert_eq!(e.pin.anchor_id, [0xA1; 32]);
+                assert!(e.pin.uncompromised, "admission sets uncompromised=true");
+                assert_eq!(e.pin.verifier_slot, None, "pre-HW admit is incomplete");
+            }
+            other => panic!("expected Admit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_admit_decision_upgrades_incomplete_pin_and_preserves_compromise_flag() {
+        // The pre-HW pin lacks slot+stpub; a later disclosure for the SAME anchor supplies them.
+        let mut cur = pinned(None, None);
+        cur.pin.uncompromised = false; // a disclosure must never resurrect a compromised anchor
+        let d = fused_pin(Some(2), Some([0xCC; 32]));
+        match pin_admit_decision([0x11; 32], [0x9A; 32], &d, Some(&cur)) {
+            PinAdmitDecision::Upgrade(e) => {
+                assert_eq!(e.pin.verifier_slot, Some(2));
+                assert_eq!(e.pin.chip_static_pubkey, Some([0xCC; 32]));
+                assert!(!e.pin.uncompromised, "existing compromise flag preserved");
+                assert_eq!(e.policy_hash, [0x9A; 32], "existing policy preserved");
+            }
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_admit_decision_no_change_when_disclosure_adds_nothing() {
+        let cur = pinned(Some(2), Some([0xCC; 32]));
+        let d = fused_pin(Some(2), Some([0xCC; 32]));
+        assert_eq!(
+            pin_admit_decision([0x11; 32], [0x9A; 32], &d, Some(&cur)),
+            PinAdmitDecision::NoChange
+        );
+        // Re-disclosing the incomplete shape against a complete pin also changes nothing.
+        let d = fused_pin(None, None);
+        assert_eq!(
+            pin_admit_decision([0x11; 32], [0x9A; 32], &d, Some(&cur)),
+            PinAdmitDecision::NoChange
+        );
+    }
+
+    #[test]
+    fn pin_admit_decision_rejects_every_conflicting_disclosure() {
+        let cur = pinned(Some(2), Some([0xCC; 32]));
+        let base = fused_pin(Some(2), Some([0xCC; 32]));
+
+        let mut anchor = base.clone();
+        anchor.anchor_id = [0xEE; 32]; // changed anchor id after pinning = substitution attack
+        let mut bundle = base.clone();
+        bundle.bundle = [0xEE; 32];
+        let mut h0 = base.clone();
+        h0.enrolled_counter = 999_999;
+        let mut part = base.clone();
+        part.partition_pk = vec![0x08; 64];
+        let mut stpub = base.clone();
+        stpub.chip_static_pubkey = Some([0xDD; 32]);
+        let mut slot = base.clone();
+        slot.verifier_slot = Some(3);
+
+        for d in [&anchor, &bundle, &h0, &part, &stpub, &slot] {
+            assert!(
+                matches!(
+                    pin_admit_decision([0x11; 32], [0x9A; 32], d, Some(&cur)),
+                    PinAdmitDecision::Reject(_)
+                ),
+                "conflicting disclosure must be rejected: {d:?}"
+            );
+        }
+        // Differing policy rejects too.
+        assert!(matches!(
+            pin_admit_decision([0x11; 32], [0x9B; 32], &base, Some(&cur)),
+            PinAdmitDecision::Reject(_)
+        ));
+    }
+
+    /// THE invariant: admission never implies acceptance. An incomplete pin (as admitted on the
+    /// pre-HW first transfer) is never counter-read — `pin_ready_for_counter_read` gates the
+    /// handler BEFORE any installed reader — so even a reader that would (wrongly) return the
+    /// exactly-correct counter cannot produce `attested = Some`, and the predicate fails closed
+    /// to online recovery exactly as with no reader at all.
+    #[test]
+    fn incomplete_pin_is_never_counter_read_even_with_a_reader_that_would_answer() {
+        let incomplete = fused_pin(None, None);
+        assert!(!pin_ready_for_counter_read(&incomplete));
+        let slot_only = fused_pin(Some(2), None);
+        assert!(!pin_ready_for_counter_read(&slot_only));
+        let stpub_only = fused_pin(None, Some([0xCC; 32]));
+        assert!(!pin_ready_for_counter_read(&stpub_only));
+        let mut compromised = fused_pin(Some(2), Some([0xCC; 32]));
+        compromised.uncompromised = false;
+        assert!(!pin_ready_for_counter_read(&compromised));
+        let complete = fused_pin(Some(2), Some([0xCC; 32]));
+        assert!(pin_ready_for_counter_read(&complete));
+
+        // Mirror the handler seam byte-for-byte: a stub "reader" that would answer with the
+        // exactly-correct counter is unreachable behind the gate, so attested stays None...
+        let would_be_correct_h: u64 = 999_999;
+        let reader = |_pin: &dsm::crypto::anchor_enrollment::FusedAnchorPin| {
+            Some((incomplete.anchor_id, would_be_correct_h))
+        };
+        let attested: Option<([u8; 32], u64)> = Some(&incomplete)
+            .filter(|p| pin_ready_for_counter_read(p))
+            .and_then(reader);
+        assert_eq!(attested, None, "incomplete pin must never be counter-read");
+
+        // ...and with attested=None the counter verifier refuses, so the 22-check predicate can
+        // never see an authentic counter: acceptance is impossible, online recovery only.
+        let v = DsmCounterVerifier { attested };
+        let ev = CounterEvidence {
+            anchor_id: incomplete.anchor_id,
+            enrolled_counter: 1_000_000,
+            live_counter_claim: would_be_correct_h, // host claims are never trusted
+            derived_anchor_counter_claim: 1,
+            verifier_transcript: Vec::new(),
+        };
+        assert_eq!(v.read_authentic_counter(&incomplete.anchor_id, &ev), None);
     }
 }

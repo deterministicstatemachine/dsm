@@ -327,6 +327,7 @@ impl BilateralHandler for BiImpl {
                         responder_signing_public_key:
                             crate::sdk::app_state::AppState::get_public_key().unwrap_or_default(),
                         receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
+                        anchor_enroll_request: None, // set by the BLE receiver path (first-transfer bearer enroll)
                     };
 
                     BiResult {

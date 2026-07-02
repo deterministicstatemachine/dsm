@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! Fused-anchor enrollment persistence (Boot Fenced Fused Anchor receiver-admit).
+//!
+//! The RECEIVER's pinned admission of a counterparty's fused anchor, keyed by the counterparty
+//! device id — the SQLite backing for
+//! [`dsm::crypto::anchor_enrollment::AnchorEnrollmentStore`]. Pins are admitted only inside the
+//! offline-bearer bilateral confirm flow (first valid transfer for an already-verified contact),
+//! never implicitly from a release alone. `verifier_slot` / `chip_static_pubkey` stay NULL until
+//! the sender's SE-slot provisioning discloses them; an incomplete pin keeps Path-B counter
+//! verification fail-closed.
+
+use anyhow::{anyhow, Result};
+use rusqlite::{params, OptionalExtension};
+
+use dsm::crypto::anchor_enrollment::{AnchorEnrollment, FusedAnchorPin};
+
+use super::get_connection;
+
+fn fixed32(bytes: Vec<u8>, what: &str) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("anchor_enrollments: {what} is not 32 bytes"))
+}
+
+/// The pinned enrollment for a counterparty device, if admitted.
+pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEnrollment>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("anchor_enrollments: db lock poisoned"))?;
+    let row = conn
+        .query_row(
+            "SELECT policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
+                    uncompromised, verifier_slot, chip_static_pubkey
+             FROM anchor_enrollments WHERE device_id = ?1",
+            params![device_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((policy_hash, bundle, anchor_id, enrolled, partition_pk, uncompromised, slot, stpub)) =
+        row
+    else {
+        return Ok(None);
+    };
+    let verifier_slot = match slot {
+        Some(s) if (0..=255).contains(&s) => Some(s as u8),
+        Some(_) => return Err(anyhow!("anchor_enrollments: verifier_slot out of u8 range")),
+        None => None,
+    };
+    let chip_static_pubkey = match stpub {
+        Some(k) => Some(fixed32(k, "chip_static_pubkey")?),
+        None => None,
+    };
+    Ok(Some(AnchorEnrollment {
+        device_id: *device_id,
+        policy_hash: fixed32(policy_hash, "policy_hash")?,
+        pin: FusedAnchorPin {
+            bundle: fixed32(bundle, "bundle")?,
+            anchor_id: fixed32(anchor_id, "anchor_id")?,
+            enrolled_counter: enrolled as u64,
+            partition_pk,
+            uncompromised: uncompromised != 0,
+            verifier_slot,
+            chip_static_pubkey,
+        },
+    }))
+}
+
+/// Admit (pin) a fused anchor. INSERT OR REPLACE: re-admission overwrites, matching the
+/// [`AnchorEnrollmentStore`](dsm::crypto::anchor_enrollment::AnchorEnrollmentStore) contract —
+/// the CALLER owns the authority rules (first-transfer TOFU / same-anchor upgrade only; a
+/// differing anchor is rejected before ever reaching this write).
+pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("anchor_enrollments: db lock poisoned"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO anchor_enrollments
+            (device_id, policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
+             uncompromised, verifier_slot, chip_static_pubkey)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            e.device_id.as_slice(),
+            e.policy_hash.as_slice(),
+            e.pin.bundle.as_slice(),
+            e.pin.anchor_id.as_slice(),
+            e.pin.enrolled_counter as i64,
+            e.pin.partition_pk.as_slice(),
+            e.pin.uncompromised as i64,
+            e.pin.verifier_slot.map(|s| s as i64),
+            e.pin.chip_static_pubkey.as_ref().map(|k| k.as_slice()),
+        ],
+    )?;
+    Ok(())
+}

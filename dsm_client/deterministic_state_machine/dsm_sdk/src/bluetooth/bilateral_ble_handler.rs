@@ -574,6 +574,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            pending_enroll_pubkey: None,
         })
     }
 
@@ -1575,6 +1576,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            pending_enroll_pubkey: None,
         };
 
         {
@@ -2507,6 +2509,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            pending_enroll_pubkey: None,
         };
 
         {
@@ -2649,6 +2652,40 @@ impl BilateralBleHandler {
             }
         }
 
+        // Receiver-admit fold (Boot Fenced Fused Anchor): on the FIRST offline-bearer transfer
+        // with an already-verified contact for which this receiver holds no pinned fused anchor,
+        // piggyback the enrollment request — B's X25519 verifier pairing pubkey the sender should
+        // provision into a read-only slot on its TROPIC01. Rides the SAME prepare-response as r_R
+        // (no separate ceremony). The pubkey comes from the injected pairing deriver; with none
+        // installed (CI / no HW) it rides EMPTY, the sender cannot provision a slot, and Path-B
+        // stays fail-closed. Non-bearer ops, unverified contacts, and already-pinned counterparties
+        // send no request.
+        let anchor_enroll_request =
+            if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &session.operation,
+            ) {
+                let contact_verified = {
+                    let mgr = self.bilateral_tx_manager.read().await;
+                    mgr.has_verified_contact(&session.counterparty_device_id)
+                };
+                let already_pinned = crate::bridge::anchor_enrollment_store()
+                    .and_then(|s| s.get(&session.counterparty_device_id))
+                    .is_some();
+                if contact_verified && !already_pinned {
+                    let verifier_pairing_pubkey = crate::bridge::verifier_pairing_deriver()
+                        .and_then(|d| d.verifier_pairing_pubkey(session.counterparty_device_id))
+                        .map(|k| k.to_vec())
+                        .unwrap_or_default();
+                    Some(generated::AnchorEnrollRequest {
+                        verifier_pairing_pubkey,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         // Build prepare response
         let prepare_response = generated::BilateralPrepareResponse {
             commitment_hash: Some(generated::Hash32 {
@@ -2664,6 +2701,7 @@ impl BilateralBleHandler {
             }),
             responder_signing_public_key: local_signing_key,
             receiver_challenge: receiver_challenge.to_vec(),
+            anchor_enroll_request,
         };
 
         // Wrap in envelope
@@ -2948,6 +2986,15 @@ impl BilateralBleHandler {
             let mut sessions = self.sessions.sessions.lock().await;
             if let Some(s) = sessions.get_mut(&commitment_hash) {
                 s.receiver_challenge = Some(r_r);
+            }
+        }
+        // Receiver-admit fold: stash the receiver's first-transfer enrollment request (its verifier
+        // pairing pubkey, possibly EMPTY when B has no pairing deriver) so `send_bilateral_confirm`
+        // attaches the anchor disclosure to the SAME transfer. Absent request -> no disclosure.
+        if let Some(enroll) = prepare_response.anchor_enroll_request.as_ref() {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&commitment_hash) {
+                s.pending_enroll_pubkey = Some(enroll.verifier_pairing_pubkey.clone());
             }
         }
 
@@ -3367,6 +3414,47 @@ impl BilateralBleHandler {
             } else {
                 None
             };
+        // Receiver-admit fold: when this bearer transfer's prepare-response carried the receiver's
+        // first-transfer enrollment request, disclose the fused-anchor pin material on the SAME
+        // confirm (bound to this transfer — never a standalone message). bundle/anchor_id/H0/
+        // partition_pk come from the driven appliance's pin; the verifier slot + chip static key
+        // are provisioned ONLY when the receiver offered a real 32-byte pairing pubkey AND the
+        // SE slot-writer is installed (device layer). Otherwise they ride empty and the receiver's
+        // admitted pin stays incomplete -> Path-B counter verification stays fail-closed.
+        let anchor_disclosure = match (
+            bearer_artifacts.as_ref(),
+            session.pending_enroll_pubkey.as_ref(),
+        ) {
+            (Some(art), Some(enroll_pubkey)) => {
+                let provisioned = <[u8; 32]>::try_from(enroll_pubkey.as_slice())
+                    .ok()
+                    .and_then(|pk| {
+                        crate::bridge::se_slot_writer().and_then(|w| {
+                            w.provision_verifier_slot(session.counterparty_device_id, pk)
+                        })
+                    });
+                let policy_hash = match &session.operation {
+                    Operation::Transfer {
+                        authority_policy: Some(ap),
+                        ..
+                    } => ap.policy_id,
+                    _ => [0u8; 32],
+                };
+                Some(generated::AnchorDisclosure {
+                    bundle: art.pin.bundle.to_vec(),
+                    anchor_id: art.pin.anchor_id.to_vec(),
+                    enrolled_counter: art.pin.enrolled_counter,
+                    partition_pk: art.pin.partition_pk.clone(),
+                    policy_hash: policy_hash.to_vec(),
+                    verifier_slot: provisioned.map(|(s, _)| u32::from(s)).unwrap_or_default(),
+                    verifier_slot_present: provisioned.is_some(),
+                    chip_static_pubkey: provisioned
+                        .map(|(_, stpub)| stpub.to_vec())
+                        .unwrap_or_default(),
+                })
+            }
+            _ => None,
+        };
         let sim_outcome = router.simulate_advance_for_confirm(
             rel_key,
             session.counterparty_device_id,
@@ -3556,6 +3644,7 @@ impl BilateralBleHandler {
                 .as_ref()
                 .map(|p| p.child.clone())
                 .unwrap_or_default(),
+            anchor_disclosure,
         };
 
         // 8. Wrap in envelope
@@ -4299,19 +4388,115 @@ impl BilateralBleHandler {
                 prev_proof: &confirm_request.anchor_state_prev_proof,
                 next_proof: &confirm_request.anchor_state_next_proof,
             };
+            // Receiver-admit fold (Boot Fenced Fused Anchor): on the FIRST bearer transfer from
+            // this ALREADY-VERIFIED contact, admit (pin) the sender's disclosed fused anchor —
+            // bound to THIS confirm's disclosure + release + commitment, never standalone and
+            // never from a release alone. Existing-pin rules (`pin_admit_decision`): the same
+            // anchor completing an incomplete pre-HW pin upgrades in place; a DIFFERING anchor is
+            // rejected and the pinned one kept (silent substitution never succeeds via a
+            // transfer). Admission is a memory of what to verify — it never implies acceptance:
+            // the counter read below still requires the reader + slot + chip key + live H.
+            // Malformed disclosures (wrong field lengths) are ignored fail-closed.
+            let sender_device_id = session.counterparty_device_id;
+            if let Some(d) = confirm_request.anchor_disclosure.as_ref() {
+                let contact_verified = {
+                    let mgr = self.bilateral_tx_manager.read().await;
+                    mgr.has_verified_contact(&sender_device_id)
+                };
+                let parsed = (|| {
+                    let bundle = <[u8; 32]>::try_from(d.bundle.as_slice()).ok()?;
+                    let anchor_id = <[u8; 32]>::try_from(d.anchor_id.as_slice()).ok()?;
+                    let policy = <[u8; 32]>::try_from(d.policy_hash.as_slice()).ok()?;
+                    let verifier_slot = if d.verifier_slot_present {
+                        Some(u8::try_from(d.verifier_slot).ok()?)
+                    } else {
+                        None
+                    };
+                    let chip_static_pubkey = if d.chip_static_pubkey.is_empty() {
+                        None
+                    } else {
+                        Some(<[u8; 32]>::try_from(d.chip_static_pubkey.as_slice()).ok()?)
+                    };
+                    Some((
+                        policy,
+                        dsm::crypto::anchor_enrollment::FusedAnchorPin {
+                            bundle,
+                            anchor_id,
+                            enrolled_counter: d.enrolled_counter,
+                            partition_pk: d.partition_pk.clone(),
+                            uncompromised: true,
+                            verifier_slot,
+                            chip_static_pubkey,
+                        },
+                    ))
+                })();
+                match (contact_verified, parsed, crate::bridge::anchor_enrollment_store()) {
+                    (true, Some((policy, disclosed)), Some(store)) => {
+                        let existing = store.get(&sender_device_id);
+                        match crate::bluetooth::anchor_accept::pin_admit_decision(
+                            sender_device_id,
+                            policy,
+                            &disclosed,
+                            existing.as_ref(),
+                        ) {
+                            crate::bluetooth::anchor_accept::PinAdmitDecision::Admit(e) => {
+                                match store.admit(e) {
+                                    Ok(()) => info!(
+                                        "[BILATERAL] fused anchor PINNED for {} (first-transfer admit; Path-B still gated on slot/stpub/reader)",
+                                        bytes_to_base32(&sender_device_id[..8])
+                                    ),
+                                    Err(err) => warn!(
+                                        "[BILATERAL] fused anchor admit failed (continuing fail-closed): {err}"
+                                    ),
+                                }
+                            }
+                            crate::bluetooth::anchor_accept::PinAdmitDecision::Upgrade(e) => {
+                                match store.admit(e) {
+                                    Ok(()) => info!(
+                                        "[BILATERAL] fused anchor pin UPGRADED for {} (slot/stpub disclosed for the pinned anchor)",
+                                        bytes_to_base32(&sender_device_id[..8])
+                                    ),
+                                    Err(err) => warn!(
+                                        "[BILATERAL] fused anchor upgrade failed (continuing fail-closed): {err}"
+                                    ),
+                                }
+                            }
+                            crate::bluetooth::anchor_accept::PinAdmitDecision::NoChange => {}
+                            crate::bluetooth::anchor_accept::PinAdmitDecision::Reject(reason) => {
+                                warn!(
+                                    "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason}); keeping the pinned anchor",
+                                    bytes_to_base32(&sender_device_id[..8])
+                                );
+                            }
+                        }
+                    }
+                    (false, _, _) => warn!(
+                        "[BILATERAL] fused anchor disclosure ignored: sender is not a verified contact"
+                    ),
+                    (_, None, _) => warn!(
+                        "[BILATERAL] fused anchor disclosure ignored: malformed fields (fail-closed)"
+                    ),
+                    (_, _, None) => {}
+                }
+            }
             // D2 activation seam: look up the pinned fused anchor this receiver admitted for the
             // sender, then read the sender's live TROPIC01 counter over the relay via the injected
-            // reader. Reader + store + pin all present AND the read succeeds -> live accept with the
+            // reader. Reader + COMPLETE pin present AND the read succeeds -> live accept with the
             // authenticated counter (predicate enforces `H == H0 - (u_i+1)`). Any absent -> pin
-            // `None` / attested `None` -> fail-closed to online recovery. Until the device layer
-            // installs a real relay-backed reader + enrollment store, this stays fail-closed.
-            let sender_device_id = session.counterparty_device_id;
+            // `None` / attested `None` -> fail-closed to online recovery. The store is installed
+            // (pins persist), but the reader + the slot/stpub provisioning are device-layer
+            // hardware installs — until they land, this stays fail-closed.
             let pin = crate::bridge::anchor_enrollment_store()
                 .and_then(|s| s.get(&sender_device_id))
                 .map(|e| e.pin);
-            let attested: Option<([u8; 32], u64)> = if let (Some(p), Some(reader)) =
-                (pin.as_ref(), crate::bridge::anchor_counter_reader())
-            {
+            // Admission never implies acceptance: only a COMPLETE pin (slot + chip key +
+            // uncompromised) is ever counter-read — an incomplete first-transfer pin cannot yield
+            // `attested = Some` even against a misbehaving reader.
+            let attested: Option<([u8; 32], u64)> = if let (Some(p), Some(reader)) = (
+                pin.as_ref()
+                    .filter(|p| crate::bluetooth::anchor_accept::pin_ready_for_counter_read(p)),
+                crate::bridge::anchor_counter_reader(),
+            ) {
                 reader
                     .read_counter(sender_device_id, commitment_hash, p.clone())
                     .await
@@ -5720,6 +5905,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            pending_enroll_pubkey: None,
         };
 
         // Insert into active sessions
@@ -6061,6 +6247,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                pending_enroll_pubkey: None,
             })
             .await;
 
@@ -6165,6 +6352,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                pending_enroll_pubkey: None,
             })
             .await;
 
@@ -6234,6 +6422,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                pending_enroll_pubkey: None,
             })
             .await;
         handler
@@ -6255,6 +6444,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                pending_enroll_pubkey: None,
             })
             .await;
 

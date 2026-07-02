@@ -1736,6 +1736,31 @@ message BilateralPrepareRequest {
   string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
   reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
 }
+// B -> A, rides BilateralPrepareResponse (Boot Fenced Fused Anchor, receiver-admit fold).
+// On the FIRST offline-bearer transfer with an already-verified contact, the value receiver B
+// asks to become a read-only Path-B verifier on the sender A's TROPIC01: it offers its X25519
+// verifier pairing public key for A to enroll into a read-only slot. Empty until the device layer
+// installs a pairing deriver (no HW) -> A cannot provision a slot -> Path-B stays fail-closed.
+message AnchorEnrollRequest {
+  bytes verifier_pairing_pubkey = 1 [(dsm_fixed_len)=32];
+}
+
+// A -> B, rides BilateralConfirmRequest (Boot Fenced Fused Anchor, receiver-admit fold).
+// A discloses its fused-anchor pin material so B can PIN it under the ALREADY-verified contact,
+// bound to THIS transfer's state transition (never a standalone/implicit pin). bundle/anchor_id/
+// enrolled_counter/partition_pk come from A's appliance today; verifier_slot + chip_static_pubkey
+// ride EMPTY until A's SE-slot-write firmware op lands. Empty slot/stpub => Path-B fail-closed.
+message AnchorDisclosure {
+  bytes  bundle                = 1 [(dsm_fixed_len)=32];
+  bytes  anchor_id             = 2 [(dsm_fixed_len)=32];
+  uint64 enrolled_counter      = 3;                        // H0
+  bytes  partition_pk          = 4 [(dsm_max_len)=4096];
+  bytes  policy_hash           = 5 [(dsm_fixed_len)=32];   // policy the anchor is admitted under
+  uint32 verifier_slot         = 6;                        // read-only pairing slot on A's chip
+  bool   verifier_slot_present = 7;                        // proto3 cannot distinguish slot 0 from unset
+  bytes  chip_static_pubkey    = 8 [(dsm_max_len)=32];     // A's chip Noise stpub; empty => none
+}
+
 message BilateralPrepareResponse {
   Hash32 commitment_hash        = 1;
   bytes  local_signature        = 2 [(dsm_max_len)=65535];
@@ -1751,6 +1776,9 @@ message BilateralPrepareResponse {
   // (which precedes the sender's confirm) so the sender can bind it into the
   // anchor appliance PREPARE. Empty for ordinary (non-bearer) transfers.
   bytes  receiver_challenge = 7 [(dsm_fixed_len)=32];
+  // Receiver-admit fold: present iff this is an offline-bearer transfer with an already-verified
+  // contact for which B holds no pin yet (first-transfer enrollment request). See AnchorEnrollRequest.
+  AnchorEnrollRequest anchor_enroll_request = 8;
 }
 
 enum RelationshipSendCheckState {
@@ -1875,6 +1903,10 @@ message BilateralConfirmRequest {
   // transfers (which never touch the fused-anchor leaf).
   bytes anchor_state_prev_proof = 13 [(dsm_max_len)=131072];
   bytes anchor_state_next_proof = 14 [(dsm_max_len)=131072];
+  // Receiver-admit fold: A's fused-anchor pin disclosure, present iff this confirm carries a bearer
+  // release AND the prepare-response asked to enroll (first-transfer). B pins/upgrades it under the
+  // already-verified contact, bound to this transfer. Absent for ordinary transfers. See AnchorDisclosure.
+  AnchorDisclosure anchor_disclosure = 15;
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)

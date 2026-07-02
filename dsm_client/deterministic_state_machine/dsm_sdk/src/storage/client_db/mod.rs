@@ -15,6 +15,7 @@ pub use crate::storage::codecs::{
 
 // --- Submodules (domain-specific) ---
 
+pub mod anchor_enrollments;
 mod auth_tokens;
 mod bcr;
 mod bilateral_sessions;
@@ -701,30 +702,23 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (relationship_key, side)
         );
 
-        -- Offline-bearer anti-clone: the SENDER's single per-device anchor monotonic frontier,
-        -- keyed by the anchor identity (id_anchor). Advanced by the offline-bearer gate; must persist
-        -- so a restart cannot replay a consumed frontier state.
-        CREATE TABLE IF NOT EXISTS anchor_frontiers(
-            anchor_id     BLOB NOT NULL PRIMARY KEY,
-            frontier_root BLOB NOT NULL,
-            state_number  INTEGER NOT NULL
-        );
-
-        -- Offline-bearer anti-clone: the RECEIVER's pinned admission of a counterparty's anchor
-        -- (identity + enrolled firmware hash + policy + its monotonic frontier), keyed by the
-        -- counterparty device id. Must persist so a restart cannot reset the frontier (which would
-        -- let a consumed-parent replay through) nor drop the pinned identity.
+        -- Offline-bearer anti-clone (Boot Fenced Fused Anchor): the RECEIVER's pinned admission of
+        -- a counterparty's fused anchor, keyed by the counterparty device id — the persistent
+        -- backing for `dsm::crypto::anchor_enrollment::AnchorEnrollmentStore` (FusedAnchorPin
+        -- shape). Must persist so a restart cannot drop the pinned identity (which would re-open
+        -- the first-transfer TOFU window). verifier_slot / chip_static_pubkey are NULL until the
+        -- sender's SE-slot provisioning discloses them; an incomplete pin keeps Path-B counter
+        -- verification fail-closed (online recovery only).
         CREATE TABLE IF NOT EXISTS anchor_enrollments(
             device_id          BLOB NOT NULL PRIMARY KEY,
-            id_anchor          BLOB NOT NULL,
-            commitment_c       BLOB NOT NULL,
-            leaf_spki          BLOB NOT NULL,
-            firmware_id        BLOB NOT NULL,
-            screen_template_id INTEGER NOT NULL,
-            firmware_hash      BLOB NOT NULL,
             policy_hash        BLOB NOT NULL,
-            frontier_root      BLOB NOT NULL,
-            frontier_state     INTEGER NOT NULL
+            bundle             BLOB NOT NULL,
+            anchor_id          BLOB NOT NULL,
+            enrolled_counter   INTEGER NOT NULL,
+            partition_pk       BLOB NOT NULL,
+            uncompromised      INTEGER NOT NULL,
+            verifier_slot      INTEGER,
+            chip_static_pubkey BLOB
         );
         "#,
         );
@@ -757,6 +751,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
     ] {
         let _ = conn.execute(stmt, []);
     }
+    ensure_anchor_enrollments_fused_shape(conn)?;
 
     // Now create remaining indices (not part of the retried batch).
     conn.execute(
@@ -768,6 +763,39 @@ fn create_schema(conn: &Connection) -> Result<()> {
         [],
     )?;
     info!("Schema OK (clockless, binary-first)");
+    Ok(())
+}
+
+/// One-time migration to the fused-anchor pin shape. Pre-existing dev DBs may hold the legacy
+/// Safe-7 placeholder tables (`anchor_frontiers`, and `anchor_enrollments` with the
+/// `id_anchor/commitment_c/...` columns) — proven dead: no production code ever read or wrote
+/// them, so they are empty and safe to drop. The batch's `CREATE TABLE IF NOT EXISTS` cannot fix
+/// an old-shaped table in place; detect the old shape by the missing `bundle` column, drop it,
+/// and recreate the FusedAnchorPin shape. New installs already get the new shape from the batch.
+fn ensure_anchor_enrollments_fused_shape(conn: &Connection) -> Result<()> {
+    conn.execute("DROP TABLE IF EXISTS anchor_frontiers;", [])?;
+    let mut stmt = conn.prepare("PRAGMA table_info(anchor_enrollments)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in cols {
+        if col? == "bundle" {
+            return Ok(()); // already the fused shape
+        }
+    }
+    conn.execute("DROP TABLE IF EXISTS anchor_enrollments;", [])?;
+    conn.execute(
+        "CREATE TABLE anchor_enrollments(
+            device_id          BLOB NOT NULL PRIMARY KEY,
+            policy_hash        BLOB NOT NULL,
+            bundle             BLOB NOT NULL,
+            anchor_id          BLOB NOT NULL,
+            enrolled_counter   INTEGER NOT NULL,
+            partition_pk       BLOB NOT NULL,
+            uncompromised      INTEGER NOT NULL,
+            verifier_slot      INTEGER,
+            chip_static_pubkey BLOB
+        );",
+        [],
+    )?;
     Ok(())
 }
 
@@ -2386,5 +2414,104 @@ mod tests {
         assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(tip_c));
 
         // Invariant: both columns equal at every step
+    }
+
+    /// Receiver-admit fold: a fresh DB gets the FusedAnchorPin-shaped `anchor_enrollments`
+    /// (and no legacy `anchor_frontiers`); a pre-existing DB holding the dead Safe-7 placeholder
+    /// shape is migrated to the fused shape by `ensure_anchor_enrollments_fused_shape`.
+    #[test]
+    #[serial]
+    fn anchor_enrollments_schema_is_fused_shape_and_legacy_placeholder_migrates() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let binding = get_connection().expect("db connection");
+        let conn = binding.lock().expect("db lock");
+
+        let columns = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(anchor_enrollments)")
+                .expect("table_info");
+            let cols = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("query");
+            cols.map(|c| c.expect("col")).collect()
+        };
+
+        // Fresh DB: fused shape, no legacy columns, no anchor_frontiers table.
+        let cols = columns(&conn);
+        for want in [
+            "device_id",
+            "policy_hash",
+            "bundle",
+            "anchor_id",
+            "enrolled_counter",
+            "partition_pk",
+            "uncompromised",
+            "verifier_slot",
+            "chip_static_pubkey",
+        ] {
+            assert!(cols.iter().any(|c| c == want), "missing column {want}");
+        }
+        for gone in ["id_anchor", "commitment_c", "leaf_spki", "frontier_root"] {
+            assert!(
+                !cols.iter().any(|c| c == gone),
+                "legacy column {gone} present"
+            );
+        }
+        let frontier_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='anchor_frontiers'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sqlite_master");
+        assert_eq!(frontier_count, 0, "legacy anchor_frontiers table present");
+
+        // Pre-existing dev DB with the dead Safe-7 placeholder shape: migrated in place.
+        conn.execute_batch(
+            r#"
+            DROP TABLE anchor_enrollments;
+            CREATE TABLE anchor_enrollments(
+                device_id          BLOB NOT NULL PRIMARY KEY,
+                id_anchor          BLOB NOT NULL,
+                commitment_c       BLOB NOT NULL,
+                leaf_spki          BLOB NOT NULL,
+                firmware_id        BLOB NOT NULL,
+                screen_template_id INTEGER NOT NULL,
+                firmware_hash      BLOB NOT NULL,
+                policy_hash        BLOB NOT NULL,
+                frontier_root      BLOB NOT NULL,
+                frontier_state     INTEGER NOT NULL
+            );
+            CREATE TABLE anchor_frontiers(
+                anchor_id     BLOB NOT NULL PRIMARY KEY,
+                frontier_root BLOB NOT NULL,
+                state_number  INTEGER NOT NULL
+            );
+            "#,
+        )
+        .expect("recreate legacy shape");
+        ensure_anchor_enrollments_fused_shape(&conn).expect("migrate");
+        let cols = columns(&conn);
+        assert!(
+            cols.iter().any(|c| c == "bundle"),
+            "migration missed bundle"
+        );
+        assert!(
+            !cols.iter().any(|c| c == "id_anchor"),
+            "migration left the legacy shape"
+        );
+        let frontier_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='anchor_frontiers'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sqlite_master");
+        assert_eq!(frontier_count, 0, "migration left anchor_frontiers");
     }
 }

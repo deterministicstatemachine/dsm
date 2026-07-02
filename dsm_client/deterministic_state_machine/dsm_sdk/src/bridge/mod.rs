@@ -261,6 +261,61 @@ pub fn anchor_enrollment_store(
     ANCHOR_ENROLLMENT_STORE.read().ok()?.clone()
 }
 
+/// RECEIVER-side X25519 verifier pairing key deriver (Boot Fenced Fused Anchor receiver-admit).
+/// Produces the pairing PUBLIC key B offers in the first-transfer `AnchorEnrollRequest`, derived
+/// per-counterparty from B's identity seed (the private half is re-derived at read time by the
+/// hardware verifier — nothing is persisted). X25519 lives in the device/hardware layer, so this
+/// is an injected seam: `None` (CI / no HW) -> the enroll request rides an EMPTY pubkey -> the
+/// sender cannot provision a verifier slot -> Path-B stays fail-closed.
+pub trait VerifierPairingDeriver: Send + Sync {
+    fn verifier_pairing_pubkey(&self, peer_device_id: [u8; 32]) -> Option<[u8; 32]>;
+}
+
+static VERIFIER_PAIRING_DERIVER: Lazy<RwLock<Option<Arc<dyn VerifierPairingDeriver>>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Install (or replace) the receiver-side verifier pairing key deriver.
+pub fn install_verifier_pairing_deriver(deriver: Arc<dyn VerifierPairingDeriver>) {
+    if let Ok(mut g) = VERIFIER_PAIRING_DERIVER.write() {
+        *g = Some(deriver);
+        log::info!("[SDK] VerifierPairingDeriver installed");
+    }
+}
+
+#[must_use]
+pub fn verifier_pairing_deriver() -> Option<Arc<dyn VerifierPairingDeriver>> {
+    VERIFIER_PAIRING_DERIVER.read().ok()?.clone()
+}
+
+/// SENDER-side SE verifier-slot provisioner (Boot Fenced Fused Anchor receiver-admit). Writes the
+/// requester's pairing public key into a READ-ONLY verifier pairing slot on the sender's TROPIC01
+/// (via the Pico firmware) and returns `(slot_index, chip_static_pubkey)` for the disclosure.
+/// `None` (CI / firmware op unbuilt) -> the disclosure rides with slot/stpub EMPTY -> the admitted
+/// pin is incomplete -> Path-B counter verification stays fail-closed.
+pub trait SeSlotWriter: Send + Sync {
+    fn provision_verifier_slot(
+        &self,
+        requester_device_id: [u8; 32],
+        pairing_pubkey: [u8; 32],
+    ) -> Option<(u8, [u8; 32])>;
+}
+
+static SE_SLOT_WRITER: Lazy<RwLock<Option<Arc<dyn SeSlotWriter>>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Install (or replace) the sender-side SE verifier-slot provisioner.
+pub fn install_se_slot_writer(writer: Arc<dyn SeSlotWriter>) {
+    if let Ok(mut g) = SE_SLOT_WRITER.write() {
+        *g = Some(writer);
+        log::info!("[SDK] SeSlotWriter installed");
+    }
+}
+
+#[must_use]
+pub fn se_slot_writer() -> Option<Arc<dyn SeSlotWriter>> {
+    SE_SLOT_WRITER.read().ok()?.clone()
+}
+
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {
