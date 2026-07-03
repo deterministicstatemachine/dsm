@@ -15,6 +15,10 @@
 //! `set_local_pico` on the bilateral adapter's relay router. Until every piece is installed, the
 //! SDK stays fail-closed (absent reader / incomplete pin -> online recovery).
 
+// Tests use `.unwrap()`/`.expect()` freely; production code in this crate does not (the workspace
+// `.clippy.toml` disallows them).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 use std::sync::Arc;
 
 use dsm_anchor_hw_verifier::{RelayCounterReader, RelayRoundTrip, SeedPairingDeriver};
@@ -22,6 +26,9 @@ use dsm_sdk::bridge::{
     install_anchor_counter_reader, install_se_slot_writer, install_verifier_pairing_deriver,
     SeSlotWriter,
 };
+
+pub mod usb_pico;
+pub use usb_pico::{UsbPicoTransport, UsbTransceive};
 
 /// Install the RECEIVER-side anchor impls, both derived from B's wallet seed (nothing persisted):
 /// - [`RelayCounterReader`] — B opens its own authenticated libtropic session to the sender's
