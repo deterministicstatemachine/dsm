@@ -339,6 +339,29 @@ pub(crate) fn pin_ready_for_counter_read(
     pin.verifier_slot.is_some() && pin.chip_static_pubkey.is_some() && pin.uncompromised
 }
 
+/// Confirm-flow D2 seam: resolve the authenticated relay counter for this transfer. Gates the pin
+/// on readiness (verifier slot + pinned chip key + uncompromised), and — only if an
+/// [`AnchorCounterReader`](crate::bluetooth::tropic_relay::AnchorCounterReader) is installed —
+/// reads the sender's live counter `H` over the relay. Returns `Some((anchor_id, H))` ONLY when the
+/// pin is complete AND the read succeeds; every other case (no reader, incomplete pin, read failure)
+/// is `None` -> fail-closed to online recovery. Extracted from `handle_confirm_request` so the
+/// phone-to-chip relay wiring is exercised in-process with mock transports (Phase H0) through the
+/// exact code the handler runs; the handler passes `crate::bridge::anchor_counter_reader()` as
+/// `reader`.
+pub(crate) async fn resolve_attested_counter(
+    pin: Option<&dsm::crypto::anchor_enrollment::FusedAnchorPin>,
+    reader: Option<std::sync::Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>>,
+    sender_device_id: [u8; 32],
+    commitment_hash: [u8; 32],
+) -> Option<([u8; 32], u64)> {
+    let p = pin.filter(|p| pin_ready_for_counter_read(p))?;
+    let reader = reader?;
+    reader
+        .read_counter(sender_device_id, commitment_hash, p.clone())
+        .await
+        .map(|h| (p.anchor_id, u64::from(h)))
+}
+
 /// Test-only stand-in for the D2 receiver-operated authenticated L3 counter session. It returns the
 /// counter an authentic verifier session WOULD attest — `H = H₀ − (uᵢ+1)`, computed from the pinned
 /// enrolled counter and the transition's `next_anchor_counter` — so the full producer → accept →
