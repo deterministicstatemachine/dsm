@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "dsm-android-anchor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "On-device glue that installs the DSM Boot Fenced Fused Anchor hardware impls (RelayCounterReader / SeedPairingDeriver / SeSlotWriter / LocalPicoTransport) into the dsm_sdk bridge seams. Depends on dsm_sdk + dsm-anchor-hw-verifier in ONE direction (no dependency cycle); transitively pulls tropic01, so it is EXCLUDED from the workspace and built only in the Android cargo-ndk pipeline — the default CI workspace stays tropic01-free."
+
+[lib]
+# rlib for host tests; staticlib/cdylib so the Android build can link the on-device JNI shell (H3).
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+# The SDK whose bridge install seams we fill. One-directional: dsm_sdk never depends back on us.
+dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
+# The real libtropic-backed anchor impls (Phase F/G): RelayCounterReader, SeedPairingDeriver,
+# the verifier session, and (H2) the slot-write logic. This is the crate that pulls tropic01.
+dsm-anchor-hw-verifier = { path = "../dsm-anchor-hw-verifier" }
+# The tropic01-free relay spine — for `RelayError` in the injected round-trip type.
+dsm-anchor-verifier = { path = "../dsm-anchor-verifier" }
