@@ -33,7 +33,10 @@ object LocalPicoUsb {
     // need to also match the product id or the "dsm_anchor" product string.
     private const val RPI_VENDOR_ID = 0x2E8A
     private const val WRITE_TIMEOUT_MS = 2000
-    private const val READ_TIMEOUT_MS = 8000
+    private const val READ_TIMEOUT_MS = 500
+    // Max idle bulk-IN polls before failing closed (each blocks up to READ_TIMEOUT_MS). Bounds the
+    // total read wait deterministically without a wall-clock deadline (repo invariant).
+    private const val MAX_EMPTY_POLLS = 16
 
     @Volatile private var appContext: Context? = null
     private var connection: UsbDeviceConnection? = null
@@ -81,19 +84,25 @@ object LocalPicoUsb {
         return body
     }
 
-    /** Read exactly `n` bytes off the bulk-IN endpoint (accumulating across USB packets), or null. */
+    /** Read exactly `n` bytes off the bulk-IN endpoint (accumulating across USB packets), or null.
+     * Bounded by a poll COUNT (not wall-clock — repo invariant): each `bulkTransfer` already blocks
+     * up to `READ_TIMEOUT_MS`, so at most `MAX_EMPTY_POLLS` idle polls elapse before we fail closed. */
     private fun readExact(conn: UsbDeviceConnection, ep: UsbEndpoint, n: Int): ByteArray? {
         val out = ByteArray(n)
         var got = 0
         val buf = ByteArray(ep.maxPacketSize.coerceAtLeast(64))
-        val deadline = System.nanoTime() + READ_TIMEOUT_MS * 1_000_000L
+        var emptyPolls = 0
         while (got < n) {
-            if (System.nanoTime() > deadline) {
-                Log.w(TAG, "USB read timeout ($got/$n) — recover online")
-                return null
-            }
             val r = conn.bulkTransfer(ep, buf, buf.size, READ_TIMEOUT_MS)
-            if (r < 0) continue // no data this poll; loop until deadline
+            if (r < 0) {
+                emptyPolls++
+                if (emptyPolls > MAX_EMPTY_POLLS) {
+                    Log.w(TAG, "USB read gave up after $MAX_EMPTY_POLLS idle polls ($got/$n) — recover online")
+                    return null
+                }
+                continue
+            }
+            emptyPolls = 0
             val take = minOf(r, n - got)
             System.arraycopy(buf, 0, out, got, take)
             got += take
