@@ -81,6 +81,15 @@ pub fn install_path_b_transports() -> bool {
     // Receiver side: the ACCEPT-ENABLING reader + verifier-pairing deriver (fixed key, no seed).
     crate::install_receiver_anchor(adapter_round_trip());
     log::info!("[anchor-install] RelayCounterReader + verifier deriver installed (Path-B active)");
+
+    // Sender side: the READ-ONLY SE slot writer — discloses (slot, stpub) iff the verifier slot is
+    // already provisioned + caged. It NEVER burns; the burn is the separate explicit setup trigger
+    // (`provisionVerifierSlotCommit`). Until the slot is provisioned, the disclosure stays empty and
+    // the receiver's pin is incomplete -> fail-closed.
+    crate::install_sender_slot_writer(std::sync::Arc::new(crate::se_slot::SeVerifierSlotWriter));
+    log::info!(
+        "[anchor-install] read-only SeSlotWriter installed (disclosure fail-closed until setup)"
+    );
     true
 }
 

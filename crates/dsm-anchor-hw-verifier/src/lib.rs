@@ -17,10 +17,14 @@
 // production; production code in this crate does not use them).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+mod provisioner;
 mod reader;
 mod relay_driver;
 mod session;
 
+pub use provisioner::{
+    commit_verifier_slot, read_verifier_slot, ProvisionError, VerifierSlotState, VERIFIER_SLOT,
+};
 pub use reader::{
     dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_bytes, DsmVerifierPairingDeriver,
     RelayCounterReader, RelayRoundTrip,
