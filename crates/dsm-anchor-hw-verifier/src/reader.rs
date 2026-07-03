@@ -3,14 +3,14 @@
 //! SDK's [`AnchorCounterReader`] seam by joining the pinned enrollment
 //! ([`FusedAnchorPin`]) to the real libtropic verifier session
 //! ([`read_counter_over_relay`]) over a caller-supplied relay transport, and
-//! [`SeedPairingDeriver`] fills the [`VerifierPairingDeriver`] seam with the SAME per-counterparty
-//! pairing key derivation — so the pubkey B offers in the first-transfer enroll request is, by
+//! [`DsmVerifierPairingDeriver`] fills the [`VerifierPairingDeriver`] seam with the fixed DSM
+//! verifier pubkey — so the pubkey B offers in the first-transfer enroll request is, by
 //! construction, the key its future counter reads authenticate with.
 //!
-//! Key handling follows the DSM idiom: nothing is persisted. B's X25519 verifier pairing keypair
-//! is re-derived at use time from B's identity seed + the counterparty device id
-//! (`BLAKE3("DSM/anchor/verifier-pairing/v1" ‖ seed ‖ peer)`), and the handshake ephemeral is
-//! fresh CSPRNG per session.
+//! Key handling: the verifier pairing keypair is a FIXED, well-known DSM constant
+//! (`dsm_verifier_pairing_secret_bytes` — see the SMT-root-counter rationale there), the same on
+//! every device, so a SINGLE caged read-only slot serves every counterparty. Nothing is persisted;
+//! the handshake ephemeral is fresh CSPRNG per session.
 //!
 //! Fail-closed: an INCOMPLETE pin (no verifier slot, no pinned chip static key, or a compromised
 //! anchor) returns `None` WITHOUT touching the transport — mirroring the SDK-side
@@ -44,42 +44,47 @@ pub type RelayRoundTrip = Arc<
         + Sync,
 >;
 
-/// The raw 32-byte seed for B's per-counterparty verifier pairing key, before the X25519 clamp.
-/// Single source of truth for the derivation (the reader, the deriver, and hardware provisioning
-/// tooling all go through here). `#[doc(hidden)]`: device-layer/bring-up use only.
+/// The raw 32-byte secret of the FIXED, well-known DSM verifier pairing keypair, before the X25519
+/// clamp. Single source of truth (the reader, the deriver, and hardware provisioning tooling all go
+/// through here). `#[doc(hidden)]`: device-layer/bring-up use only.
+///
+/// Rationale — the SMT-root counter path: the verifier slot exposes the physical monotonic counter
+/// that advances along the device's SMT-root state-transition path — the compressed correctness
+/// point for ALL relationships — so a SINGLE caged read-only slot serves every counterparty. There
+/// is no per-relationship pairing key; the per-receiver binding is the pinned chip identity (stpub)
+/// + the SMT proof under the committed root + the DSM transition predicate (`H == H0 − (u_i+1)`),
+/// none of which use this session key. The session may only READ the counter (the slot is caged to
+/// MCOUNTER_GET), so the secret being well-known grants nothing more. This also sidesteps the hard
+/// 3-slot pairing budget (`PAIRING_KEY_SLOT_MAX = 3`) that per-relationship keying would exhaust.
+/// Derived by domain separation so it is fixed, documented, and reproducible on every device.
 #[doc(hidden)]
-pub fn derive_pairing_secret_bytes(seed: &[u8; 32], peer_device_id: &[u8; 32]) -> [u8; 32] {
-    let mut buf = [0u8; 64];
-    buf[..32].copy_from_slice(seed);
-    buf[32..].copy_from_slice(peer_device_id);
-    dsm::crypto::blake3::domain_hash_bytes("DSM/anchor/verifier-pairing/v1", &buf)
+pub fn dsm_verifier_pairing_secret_bytes() -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes("DSM/anchor/verifier-pairing/well-known/v1", &[])
 }
 
-/// Derive B's per-counterparty X25519 verifier pairing SECRET from B's identity seed. Deterministic
-/// (re-derivable after restore, nothing persisted) and per-peer (a compromise of one pairing key
-/// never crosses relationships). `StaticSecret::from` applies the X25519 clamp.
-fn derive_pairing_secret(seed: &[u8; 32], peer_device_id: &[u8; 32]) -> StaticSecret {
-    StaticSecret::from(derive_pairing_secret_bytes(seed, peer_device_id))
+/// The fixed DSM verifier pairing SECRET (X25519-clamped). Same on every device.
+fn dsm_verifier_pairing_secret() -> StaticSecret {
+    StaticSecret::from(dsm_verifier_pairing_secret_bytes())
 }
 
-/// The pairing PUBLIC key for `derive_pairing_secret` — what B offers in the enroll request and
-/// what A provisions into the read-only verifier slot.
-pub fn derive_pairing_pubkey(seed: &[u8; 32], peer_device_id: &[u8; 32]) -> [u8; 32] {
-    PublicKey::from(&derive_pairing_secret(seed, peer_device_id)).to_bytes()
+/// The public half of the fixed DSM verifier keypair — provisioned once into the caged verifier slot
+/// and offered (redundantly, since it is well-known) in the first-transfer enroll request.
+pub fn dsm_verifier_pairing_pubkey() -> [u8; 32] {
+    PublicKey::from(&dsm_verifier_pairing_secret()).to_bytes()
 }
 
 /// Fills `dsm_sdk`'s [`AnchorCounterReader`] seam: B's real Path-B counter read over the relay.
 /// Install on-device via `dsm_sdk::bridge::install_anchor_counter_reader`.
 pub struct RelayCounterReader {
-    seed: [u8; 32],
     transport: RelayRoundTrip,
 }
 
 impl RelayCounterReader {
-    /// `seed` is B's identity seed root for pairing-key derivation; `transport` performs one relay
-    /// round-trip to the sender's Pico (B -> A -> Pico A -> A -> B).
-    pub fn new(seed: [u8; 32], transport: RelayRoundTrip) -> Self {
-        Self { seed, transport }
+    /// `transport` performs one relay round-trip to the sender's Pico (B -> A -> Pico A -> A -> B).
+    /// The verifier pairing key is the fixed DSM keypair (see [`dsm_verifier_pairing_secret_bytes`]),
+    /// so no per-relationship seed is needed.
+    pub fn new(transport: RelayRoundTrip) -> Self {
+        Self { transport }
     }
 }
 
@@ -102,7 +107,7 @@ impl AnchorCounterReader for RelayCounterReader {
             }
         };
 
-        let sh_priv = derive_pairing_secret(&self.seed, &peer_device_id);
+        let sh_priv = dsm_verifier_pairing_secret();
         let cred = VerifierSessionCredential {
             slot,
             sh_pub: PublicKey::from(&sh_priv).to_bytes(),
@@ -132,22 +137,22 @@ impl AnchorCounterReader for RelayCounterReader {
     }
 }
 
-/// Fills `dsm_sdk`'s [`VerifierPairingDeriver`] seam with the SAME derivation the reader uses, so
-/// the enroll-request pubkey and the read-time keypair can never diverge. Install on-device via
+/// Fills `dsm_sdk`'s [`VerifierPairingDeriver`] seam with the fixed DSM verifier pubkey the reader
+/// authenticates with, so the enroll-request pubkey and the read-time keypair can never diverge.
+/// Peer-independent (one caged slot serves all relationships). Install on-device via
 /// `dsm_sdk::bridge::install_verifier_pairing_deriver`.
-pub struct SeedPairingDeriver {
-    seed: [u8; 32],
-}
+#[derive(Default)]
+pub struct DsmVerifierPairingDeriver;
 
-impl SeedPairingDeriver {
-    pub fn new(seed: [u8; 32]) -> Self {
-        Self { seed }
+impl DsmVerifierPairingDeriver {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl VerifierPairingDeriver for SeedPairingDeriver {
-    fn verifier_pairing_pubkey(&self, peer_device_id: [u8; 32]) -> Option<[u8; 32]> {
-        Some(derive_pairing_pubkey(&self.seed, &peer_device_id))
+impl VerifierPairingDeriver for DsmVerifierPairingDeriver {
+    fn verifier_pairing_pubkey(&self, _peer_device_id: [u8; 32]) -> Option<[u8; 32]> {
+        Some(dsm_verifier_pairing_pubkey())
     }
 }
 
@@ -182,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn incomplete_or_compromised_pin_returns_none_without_touching_the_transport() {
         let (transport, calls) = counting_dead_transport();
-        let reader = RelayCounterReader::new([0x42; 32], transport);
+        let reader = RelayCounterReader::new(transport);
         for p in [
             pin(None, None, true),                 // pre-HW admit shape
             pin(Some(2), None, true),              // slot without pinned chip identity
@@ -202,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn complete_pin_reaches_the_transport_and_a_dead_relay_fails_closed() {
         let (transport, calls) = counting_dead_transport();
-        let reader = RelayCounterReader::new([0x42; 32], transport);
+        let reader = RelayCounterReader::new(transport);
         let h = reader
             .read_counter([0x11; 32], [0x22; 32], pin(Some(2), Some([0xCC; 32]), true))
             .await;
@@ -214,23 +219,28 @@ mod tests {
     }
 
     #[test]
-    fn enroll_request_pubkey_and_read_time_keypair_are_the_same_derivation() {
-        let seed = [0x42; 32];
-        let peer = [0x11; 32];
-        let deriver = SeedPairingDeriver::new(seed);
-        let offered = deriver.verifier_pairing_pubkey(peer).expect("pubkey");
-        // The reader derives its session keypair from the same seed+peer: the pubkeys must match.
-        let session_pub = PublicKey::from(&derive_pairing_secret(&seed, &peer)).to_bytes();
+    fn enroll_request_pubkey_and_read_time_keypair_are_the_fixed_verifier_key() {
+        // The pubkey B offers in the enroll request is the fixed verifier pubkey, and it is the
+        // public half of the exact secret the reader opens the session with — they cannot diverge.
+        let offered = DsmVerifierPairingDeriver::new()
+            .verifier_pairing_pubkey([0x11; 32])
+            .expect("pubkey");
+        let session_pub = PublicKey::from(&dsm_verifier_pairing_secret()).to_bytes();
         assert_eq!(offered, session_pub);
-        assert_eq!(offered, derive_pairing_pubkey(&seed, &peer));
+        assert_eq!(offered, dsm_verifier_pairing_pubkey());
     }
 
     #[test]
-    fn pairing_keys_are_per_peer_and_per_seed() {
-        let a = derive_pairing_pubkey(&[0x42; 32], &[0x11; 32]);
-        let b = derive_pairing_pubkey(&[0x42; 32], &[0x12; 32]);
-        let c = derive_pairing_pubkey(&[0x43; 32], &[0x11; 32]);
-        assert_ne!(a, b, "different peers must get different pairing keys");
-        assert_ne!(a, c, "different seeds must get different pairing keys");
+    fn verifier_pairing_key_is_fixed_across_peers() {
+        // One caged slot serves all relationships: the offered pubkey is identical regardless of the
+        // counterparty (the per-receiver binding is the pin/SMT/predicate, not this key).
+        let d = DsmVerifierPairingDeriver::new();
+        assert_eq!(
+            d.verifier_pairing_pubkey([0x11; 32]),
+            d.verifier_pairing_pubkey([0x12; 32]),
+            "the verifier pairing key must not depend on the counterparty"
+        );
+        // And it is stable across calls (a well-known protocol constant).
+        assert_eq!(dsm_verifier_pairing_pubkey(), dsm_verifier_pairing_pubkey());
     }
 }

@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use dsm_anchor_hw_verifier::{RelayCounterReader, RelayRoundTrip, SeedPairingDeriver};
+use dsm_anchor_hw_verifier::{DsmVerifierPairingDeriver, RelayCounterReader, RelayRoundTrip};
 use dsm_sdk::bridge::{
     install_anchor_counter_reader, install_se_slot_writer, install_verifier_pairing_deriver,
     SeSlotWriter,
@@ -32,19 +32,20 @@ pub mod self_test;
 pub mod usb_pico;
 pub use usb_pico::{UsbPicoTransport, UsbTransceive};
 
-/// Install the RECEIVER-side anchor impls, both derived from B's wallet seed (nothing persisted):
+/// Install the RECEIVER-side anchor impls (nothing persisted; the verifier pairing key is the fixed
+/// DSM constant, so no seed is needed):
 /// - [`RelayCounterReader`] — B opens its own authenticated libtropic session to the sender's
 ///   TROPIC01 over the relay and reads the live counter `H`. `round_trip` is the device-layer BLE
 ///   bridge carrying one raw-SPI transaction B -> A -> Pico A -> A -> B (H3 supplies it, wrapping
 ///   `TropicRelayRouter::round_trip` + `queue_relay_frame`).
-/// - [`SeedPairingDeriver`] — B's per-counterparty X25519 verifier pairing pubkey it offers in the
-///   first-transfer enroll request; the SAME derivation the reader authenticates with.
+/// - [`DsmVerifierPairingDeriver`] — the fixed DSM verifier pubkey B offers in the first-transfer
+///   enroll request; the SAME key the reader authenticates with (one caged slot serves all peers).
 ///
 /// Until this runs, `dsm_sdk`'s counter reader is absent and every offline-bearer transfer recovers
 /// online. The reader itself still fail-closes on an incomplete pin (no verifier slot / chip key).
-pub fn install_receiver_anchor(wallet_seed: [u8; 32], round_trip: RelayRoundTrip) {
-    install_anchor_counter_reader(Arc::new(RelayCounterReader::new(wallet_seed, round_trip)));
-    install_verifier_pairing_deriver(Arc::new(SeedPairingDeriver::new(wallet_seed)));
+pub fn install_receiver_anchor(round_trip: RelayRoundTrip) {
+    install_anchor_counter_reader(Arc::new(RelayCounterReader::new(round_trip)));
+    install_verifier_pairing_deriver(Arc::new(DsmVerifierPairingDeriver::new()));
 }
 
 /// Install the SENDER-side SE verifier-slot provisioner: on a first-transfer enroll request, A
@@ -99,7 +100,7 @@ mod tests {
         assert!(dsm_sdk::bridge::verifier_pairing_deriver().is_none());
         assert!(dsm_sdk::bridge::se_slot_writer().is_none());
 
-        install_receiver_anchor([0xB0; 32], dead_round_trip());
+        install_receiver_anchor(dead_round_trip());
         install_sender_slot_writer(Arc::new(NoopSlotWriter));
 
         assert!(dsm_sdk::bridge::anchor_counter_reader().is_some());

@@ -7,13 +7,14 @@
 //!   1. SENDER side — `set_local_pico(android_usb_pico_transport())` on the bilateral adapter's
 //!      `TropicRelayRouter`, so an inbound `from_receiver` relay frame is forwarded to A's Pico and
 //!      the MISO replied. (Being READABLE is not acceptance.)
-//!   2. RECEIVER side — `install_receiver_anchor(seed, round_trip)`: the reader + verifier-pairing
-//!      deriver. The `round_trip` closure resolves the peer's BLE address, then drives ONE relay
-//!      round-trip through the adapter's router (`round_trip` registers the pending reply + sends
-//!      via `queue_relay_frame`). This is the ACCEPT-ENABLING install: with the reader present AND a
-//!      COMPLETE pin (verifier slot + pinned stpub, from the sender's SeSlotWriter disclosure) AND a
-//!      matching counter, the canonical predicate accepts. It stays fail-closed while any of those
-//!      is absent — in particular the SeSlotWriter is a separate install, so no pin completes yet.
+//!   2. RECEIVER side — `install_receiver_anchor(round_trip)`: the reader + verifier-pairing deriver
+//!      (fixed DSM verifier key — no seed). The `round_trip` closure resolves the peer's BLE address,
+//!      then drives ONE relay round-trip through the adapter's router (`round_trip` registers the
+//!      pending reply + sends via `queue_relay_frame`). This is the ACCEPT-ENABLING install: with the
+//!      reader present AND a COMPLETE pin (verifier slot + pinned stpub, from the sender's
+//!      SeSlotWriter disclosure) AND a matching counter, the canonical predicate accepts. It stays
+//!      fail-closed while any is absent — in particular the SeSlotWriter is a separate install, so no
+//!      pin completes yet.
 //!
 //! NOT auto-called from `initDsmSdk`: the reader install is gated behind an explicit device-layer
 //! trigger (bench for the 2-phone test; the production flip is the owner's call).
@@ -56,8 +57,8 @@ fn adapter_round_trip() -> RelayRoundTrip {
 }
 
 /// Install BOTH Path-B transports onto the global bilateral stack (see module docs). Idempotent-ish:
-/// installing again just replaces the seams. Returns `false` fail-closed if the wallet seed is
-/// unavailable (wallet locked) — nothing is installed in that case.
+/// installing again just replaces the seams. Returns `false` fail-closed if the BluetoothManager is
+/// not yet registered — nothing is installed in that case.
 ///
 /// Android + explicit `on_device_installs` opt-in only. The reader is accept-enabling, so it never
 /// compiles into a default build; the device layer (bench / the owner's flip) enables the feature
@@ -66,32 +67,19 @@ fn adapter_round_trip() -> RelayRoundTrip {
 pub fn install_path_b_transports() -> bool {
     use dsm_sdk::bluetooth::get_global_bluetooth_manager;
 
-    let seed: [u8; 32] = match dsm_sdk::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
-        .and_then(|s| {
-            let a: Result<[u8; 32], _> = s.as_slice().try_into();
-            a.ok()
-        }) {
-        Some(s) => s,
-        None => {
-            log::warn!("[anchor-install] wallet seed unavailable — Path-B not installed");
-            return false;
-        }
-    };
-
     // Sender side: service relay reads from A's local Pico.
-    if let Some(manager) = get_global_bluetooth_manager() {
-        manager
-            .transport_adapter()
-            .tropic_relay()
-            .set_local_pico(Arc::new(crate::usb_pico::android_usb_pico_transport()));
-        log::info!("[anchor-install] local Pico transport set on the bilateral relay router");
-    } else {
-        log::warn!("[anchor-install] no BluetoothManager — local Pico not set");
+    let Some(manager) = get_global_bluetooth_manager() else {
+        log::warn!("[anchor-install] no BluetoothManager — Path-B not installed");
         return false;
-    }
+    };
+    manager
+        .transport_adapter()
+        .tropic_relay()
+        .set_local_pico(Arc::new(crate::usb_pico::android_usb_pico_transport()));
+    log::info!("[anchor-install] local Pico transport set on the bilateral relay router");
 
-    // Receiver side: the ACCEPT-ENABLING reader + verifier-pairing deriver.
-    crate::install_receiver_anchor(seed, adapter_round_trip());
+    // Receiver side: the ACCEPT-ENABLING reader + verifier-pairing deriver (fixed key, no seed).
+    crate::install_receiver_anchor(adapter_round_trip());
     log::info!("[anchor-install] RelayCounterReader + verifier deriver installed (Path-B active)");
     true
 }
