@@ -21,6 +21,9 @@ mod reader;
 mod relay_driver;
 mod session;
 
-pub use reader::{derive_pairing_pubkey, RelayCounterReader, RelayRoundTrip, SeedPairingDeriver};
+pub use reader::{
+    derive_pairing_pubkey, derive_pairing_secret_bytes, RelayCounterReader, RelayRoundTrip,
+    SeedPairingDeriver,
+};
 pub use relay_driver::read_counter_over_relay;
 pub use session::{read_live_counter, VerifierError, VerifierSessionCredential};

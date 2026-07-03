@@ -44,17 +44,22 @@ pub type RelayRoundTrip = Arc<
         + Sync,
 >;
 
+/// The raw 32-byte seed for B's per-counterparty verifier pairing key, before the X25519 clamp.
+/// Single source of truth for the derivation (the reader, the deriver, and hardware provisioning
+/// tooling all go through here). `#[doc(hidden)]`: device-layer/bring-up use only.
+#[doc(hidden)]
+pub fn derive_pairing_secret_bytes(seed: &[u8; 32], peer_device_id: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(seed);
+    buf[32..].copy_from_slice(peer_device_id);
+    dsm::crypto::blake3::domain_hash_bytes("DSM/anchor/verifier-pairing/v1", &buf)
+}
+
 /// Derive B's per-counterparty X25519 verifier pairing SECRET from B's identity seed. Deterministic
 /// (re-derivable after restore, nothing persisted) and per-peer (a compromise of one pairing key
 /// never crosses relationships). `StaticSecret::from` applies the X25519 clamp.
 fn derive_pairing_secret(seed: &[u8; 32], peer_device_id: &[u8; 32]) -> StaticSecret {
-    let mut buf = [0u8; 64];
-    buf[..32].copy_from_slice(seed);
-    buf[32..].copy_from_slice(peer_device_id);
-    StaticSecret::from(dsm::crypto::blake3::domain_hash_bytes(
-        "DSM/anchor/verifier-pairing/v1",
-        &buf,
-    ))
+    StaticSecret::from(derive_pairing_secret_bytes(seed, peer_device_id))
 }
 
 /// The pairing PUBLIC key for `derive_pairing_secret` — what B offers in the enroll request and
