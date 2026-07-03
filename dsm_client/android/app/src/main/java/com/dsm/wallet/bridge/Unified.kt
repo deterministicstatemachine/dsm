@@ -119,6 +119,13 @@ object Unified {
     // (>= 0) or -1. Invoked deliberately by the operator over ADB (DsmSetupOp path); never from boot or
     // a transfer. Callers must catch UnsatisfiedLinkError.
     @Keep @JvmStatic external fun provisionVerifierSlot(slot: Int): Int
+
+    // GATED ACCEPT-ENABLING install (only in on_device_installs-feature .so; absent otherwise):
+    // installs the Path-B receiver reader + sender local-Pico + read-only SeSlotWriter into the global
+    // bilateral stack, wiring the counter read over the live BLE relay. Requires the BluetoothManager
+    // to be registered first (returns false otherwise). This is the accept-enabling step for the
+    // 2-phone test; still fail-closed until a complete pin + matching counter. Catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun installPathBTransports(): Boolean
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =

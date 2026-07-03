@@ -122,6 +122,18 @@ class PicoSelfTestActivity : Activity() {
                         Log.e(TAG, "counter-init REFUSED: confirm must be 'yes-init-counter-max' (got '$confirm')")
                     }
                 }
+                // GATED accept-enabling Path-B install (for the 2-phone test). Runs ONLY when launched
+                // with `--ez install_path_b true`. Requires the app's BLE bilateral stack (BT manager)
+                // to be up; logs the result. Absent from the default .so.
+                if (intent?.getBooleanExtra("install_path_b", false) == true) {
+                    val ok = try {
+                        com.dsm.wallet.bridge.Unified.installPathBTransports()
+                    } catch (e: UnsatisfiedLinkError) {
+                        Log.e(TAG, "installPathBTransports not in this .so (needs on_device_installs): ${e.message}")
+                        false
+                    }
+                    Log.i(TAG, "*** installPathBTransports = $ok (false = BT manager not up yet) ***")
+                }
                 // GATED verifier-slot BURN (irreversible). Runs ONLY when launched with
                 // `--ez run_slot_commit true --ei slot N --es confirm yes-burn-slot-N`. The confirm
                 // MUST name the same slot (mismatch refused). A normal launch never reaches this.
