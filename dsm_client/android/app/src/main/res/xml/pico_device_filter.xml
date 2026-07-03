@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- H2 bench self-test: match the DSM Anchor firmware's USB descriptor so plugging the Pico into the
+     phone over USB-OTG launches PicoSelfTestActivity and grants USB permission for that device. The
+     anchor firmware sets vendor id 0x1209 (4617, pid.codes community VID), product id 0xD5A1 (54689),
+     product string "DSM Anchor" — NOT the bare RP2350 VID 0x2E8A. Debug bring-up only. -->
+<resources>
+    <usb-device vendor-id="4617" product-id="54689" />
+</resources>

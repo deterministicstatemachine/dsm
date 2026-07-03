@@ -95,6 +95,13 @@ object Unified {
     // recovery. `LocalPicoUsb.init(context)` must have been called at startup.
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)
+
+    // H3 bench self-test — implemented in the anchor glue (`dsm-android-anchor`, packaged into the
+    // same .so): ONE attested TROPIC01 counter read through the full production reader stack
+    // (libtropic session over the relay router over the H2 USB transport). Returns the live counter
+    // H (>= 0) or a negative fail-closed code. Only present in glue-packaged builds — callers must
+    // catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun anchorCounterSelfTest(): Long
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =

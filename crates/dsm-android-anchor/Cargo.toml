@@ -21,7 +21,12 @@ dsm-anchor-verifier = { path = "../dsm-anchor-verifier" }
 # The OP_SPI_PASSTHROUGH ApplianceRequest/Response codec (tropic01-free) — the Phone->Pico USB
 # bridge frames requests / decodes responses in Rust so Kotlin stays an opaque byte transport.
 dsm-anchor-core = { path = "../dsm-anchor-core" }
+# FusedAnchorPin (the reader's pin type) for the on-device self-test.
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
 log = "0.4"
+# The self-test drives the reader's relay bridge (spawn_blocking) + the router's bounded round-trip
+# (timers); versions unify with dsm_sdk's own tokio.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
 # On Android, the USB bridge's LocalPicoTransport does a JNI up-call to Kotlin's opaque
 # picoUsbTransceive (mirrors queue_follow_up_chunks' with_env pattern), so it needs dsm_sdk's `jni`
@@ -35,3 +40,13 @@ jni = "0.21"
 [dev-dependencies]
 # Poll the boxed PicoFuture in host tests without a full async runtime.
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+
+# This crate is workspace-EXCLUDED, so it is its own profile root: mirror the deterministic_state_machine
+# workspace release profile — LTO must stay off and symbols unstripped to preserve the JNI exports when
+# this cdylib ships as the app's libdsm_sdk.so (H3 packaging).
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 1
+strip = false
