@@ -261,14 +261,19 @@ pub fn preflight_verifier_slot<C: SpiRelayChannel>(
         let mcounter = s0
             .mcounter_get(MCounterIndex::Index0)
             .map_err(|e| ProvisionError::Precondition(format!("mcounter unreadable: {e:?}")))?;
+        // The SELECTED slot must currently have FULL (factory) access at every deny/allow register,
+        // so the cage is a real restriction and the slot retains the allow set. Only THIS slot's
+        // access bits are checked — a lower slot already caged on the same chip (e.g. slot 1 on a dev
+        // chip) leaves other lanes' bits cleared, which is irrelevant to provisioning this slot.
+        let mask = sh_mask_for(slot);
         for (addr, name) in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
             let r = s0.r_config_read(U16::new(*addr));
             let i = s0.i_config_read(U16::new(*addr));
             match (r, i) {
-                (Ok(r), Ok(i)) if r == 0xffff_ffff && i == 0xffff_ffff => {}
+                (Ok(r), Ok(i)) if r & mask == mask && i & mask == mask => {}
                 (r, i) => {
                     return Err(ProvisionError::Precondition(format!(
-                    "0x{addr:03x} {name} not factory-open (r={r:?} i={i:?}); refusing to provision"
+                    "0x{addr:03x} {name}: slot-{slot} access not factory-open (r={r:?} i={i:?}); refusing to provision"
                 )))
                 }
             }
@@ -343,14 +348,15 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
     }
     s0.mcounter_get(MCounterIndex::Index0)
         .map_err(|e| ProvisionError::Precondition(format!("mcounter unreadable: {e:?}")))?;
+    let mask = sh_mask_for(slot);
     for (addr, name) in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
         let r = s0.r_config_read(U16::new(*addr));
         let i = s0.i_config_read(U16::new(*addr));
         match (r, i) {
-            (Ok(r), Ok(i)) if r == 0xffff_ffff && i == 0xffff_ffff => {}
+            (Ok(r), Ok(i)) if r & mask == mask && i & mask == mask => {}
             (r, i) => {
                 return Err(ProvisionError::Precondition(format!(
-                    "0x{addr:03x} {name} not factory-open (r={r:?} i={i:?}); refusing to provision"
+                    "0x{addr:03x} {name}: slot-{slot} access not factory-open (r={r:?} i={i:?}); refusing to provision"
                 )))
             }
         }
