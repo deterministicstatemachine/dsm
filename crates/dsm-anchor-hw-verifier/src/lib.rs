@@ -23,8 +23,9 @@ mod relay_driver;
 mod session;
 
 pub use provisioner::{
-    commit_verifier_slot, read_verifier_slot, ProvisionError, VerifierSlotState,
-    ALLOW_FACTORY_OPEN, DENY, VERIFIER_SLOT,
+    commit_verifier_slot, find_provisioned_slot, preflight_verifier_slot, read_verifier_slot,
+    PreflightReport, ProvisionError, VerifierSlotState, ALLOW_FACTORY_OPEN, DENY, VERIFIER_SLOT,
+    VERIFIER_SLOT_CANDIDATES,
 };
 pub use reader::{
     dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_bytes, DsmVerifierPairingDeriver,
