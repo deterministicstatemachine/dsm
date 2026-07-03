@@ -87,6 +87,14 @@ object Unified {
     @Keep @JvmStatic fun initDsmSdk(configPath: String) {
         UnifiedNativeApi.initDsmSdk(configPath)
     }
+
+    // H2 — Phone->Pico USB-OTG bridge. Rust's `UsbPicoTransport` up-calls this with an OPAQUE,
+    // already-framed OP_SPI_PASSTHROUGH request; this just moves the bytes over USB to the Pico and
+    // returns the response body (Rust decodes it). We understand NOTHING about the payload — no
+    // TROPIC frames, no key material. Empty return on any failure -> Rust fails closed to online
+    // recovery. `LocalPicoUsb.init(context)` must have been called at startup.
+    @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
+        LocalPicoUsb.transceive(frame)
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =
