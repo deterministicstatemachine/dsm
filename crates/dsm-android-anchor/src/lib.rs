@@ -27,6 +27,7 @@ use dsm_sdk::bridge::{
     SeSlotWriter,
 };
 
+pub mod self_test;
 pub mod usb_pico;
 pub use usb_pico::{UsbPicoTransport, UsbTransceive};
 

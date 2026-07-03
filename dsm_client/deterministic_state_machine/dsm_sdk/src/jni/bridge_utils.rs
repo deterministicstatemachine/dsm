@@ -2,16 +2,13 @@
 
 //! # JNI Bridge Utility Functions
 //!
-//! Shared helpers for JNI entry points: `SDK_READY` gate checks,
-//! protobuf request/response marshalling, and error-to-`OpResult`
-//! conversion.
+//! Shared helpers for JNI entry points: protobuf request/response
+//! marshalling and error-to-`OpResult` conversion.
 
 use crate::generated as pb;
-use crate::sdk::session_manager::SDK_READY;
 use jni::objects::{JByteArray, JString};
 use jni::JNIEnv;
 use prost::Message;
-use std::sync::atomic::Ordering;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FFI panic safety: catch_unwind wrappers for JNI export functions.

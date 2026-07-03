@@ -1039,6 +1039,7 @@ dependencies = [
 name = "dsm-android-anchor"
 version = "0.1.0"
 dependencies = [
+ "dsm",
  "dsm-anchor-core",
  "dsm-anchor-hw-verifier",
  "dsm-anchor-verifier",
@@ -1046,6 +1047,7 @@ dependencies = [
  "futures",
  "jni",
  "log",
+ "tokio",
 ]
 
 [[package]]
