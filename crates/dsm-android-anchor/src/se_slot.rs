@@ -15,10 +15,16 @@
 //! sync `SpiRelayChannel` so the proven `provisioner` read runs unchanged on-device.
 
 // Host-testable decision types (hw-verifier is a normal dep, so these resolve on host too).
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use dsm_anchor_hw_verifier::find_provisioned_slot;
 use dsm_anchor_hw_verifier::{dsm_verifier_pairing_pubkey, ProvisionError};
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+// The read-only transport + status probes are NOT accept-enabling, so they live under plain
+// `target_os = "android"` (shipped in the default .so). Only the accept-enabling `SeSlotWriter` is
+// behind the `on_device_installs` feature.
+#[cfg(target_os = "android")]
+use dsm_anchor_hw_verifier::{
+    find_provisioned_slot, preflight_verifier_slot, read_verifier_slot, VerifierSlotState,
+    VERIFIER_SLOT_CANDIDATES,
+};
+#[cfg(target_os = "android")]
 use dsm_anchor_verifier::{RelayError, SpiRelayChannel};
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 use dsm_sdk::bridge::SeSlotWriter;
@@ -43,10 +49,10 @@ fn map_disclosure(
 /// A sync `SpiRelayChannel` to A's LOCAL Pico over the JNI USB up-call: each `transceive` frames one
 /// raw SPI transaction as `OP_SPI_PASSTHROUGH` (in Rust) and returns the MISO. Zero-size — a fresh
 /// one is minted per probed slot (the scanner's factory).
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+#[cfg(target_os = "android")]
 pub struct JniLocalSpiChannel;
 
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+#[cfg(target_os = "android")]
 impl SpiRelayChannel for JniLocalSpiChannel {
     fn transceive(&mut self, mosi: &[u8]) -> Result<Vec<u8>, RelayError> {
         let frame = crate::usb_pico::frame_passthrough(mosi.to_vec());
@@ -55,6 +61,56 @@ impl SpiRelayChannel for JniLocalSpiChannel {
         crate::usb_pico::decode_passthrough(&body)
             .map_err(|e| RelayError::Transport(format!("local pico decode: {e}")))
     }
+}
+
+/// READ-ONLY diagnostic (no writes, no burn): scan every candidate index + run the slot-2 preflight
+/// on A's local chip, logging chip identity + per-slot state so an operator (via `adb logcat`) can
+/// confirm which chip this is and whether it is safe to burn — through the phone, without moving the
+/// chip to a bench. Returns 0 always; results are in logcat under "se-slot". Present in the default
+/// .so (read-only); it can never write hardware.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_verifierSlotStatus(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) -> jni::sys::jint {
+    log::info!("[se-slot] === verifier-slot STATUS (read-only) ===");
+    for &slot in VERIFIER_SLOT_CANDIDATES {
+        match read_verifier_slot(slot, JniLocalSpiChannel) {
+            Ok(VerifierSlotState::Provisioned { stpub }) => {
+                log::info!(
+                    "[se-slot] slot {slot}: PROVISIONED (fixed DSM key, caged); stpub={stpub:02x?}"
+                )
+            }
+            Ok(VerifierSlotState::Empty { stpub }) => {
+                log::info!("[se-slot] slot {slot}: EMPTY; stpub={stpub:02x?}")
+            }
+            Ok(VerifierSlotState::Occupied) => {
+                log::info!("[se-slot] slot {slot}: OCCUPIED (non-fixed key or not caged)")
+            }
+            Err(e) => log::warn!("[se-slot] slot {slot}: read error {e:?}"),
+        }
+    }
+    match find_provisioned_slot(|| JniLocalSpiChannel) {
+        Ok(Some((slot, stpub))) => {
+            log::info!(
+                "[se-slot] provisioned verifier role located at slot {slot}; stpub={stpub:02x?}"
+            )
+        }
+        Ok(None) => log::info!("[se-slot] no verifier role provisioned on any candidate index"),
+        Err(e) => log::warn!("[se-slot] scan error {e:?}"),
+    }
+    // Read-only preflight of the intended dev-chip slot (2). Writes nothing.
+    match preflight_verifier_slot(2, JniLocalSpiChannel) {
+        Ok(r) => log::info!(
+            "[se-slot] preflight slot 2: WOULD PROCEED; stpub={:02x?} mcounter[0]={}",
+            r.stpub,
+            r.mcounter
+        ),
+        Err(e) => log::warn!("[se-slot] preflight slot 2: NOT eligible: {e:?}"),
+    }
+    log::info!("[se-slot] === verifier-slot STATUS done ===");
+    0
 }
 
 /// Read-only `SeSlotWriter`: discloses the verifier slot iff it is already provisioned + caged

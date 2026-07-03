@@ -102,6 +102,11 @@ object Unified {
     // H (>= 0) or a negative fail-closed code. Only present in glue-packaged builds — callers must
     // catch UnsatisfiedLinkError.
     @Keep @JvmStatic external fun anchorCounterSelfTest(): Long
+
+    // READ-ONLY verifier-slot diagnostic (no writes / no burn): scans candidate slots + runs the
+    // slot-2 preflight on A's local chip, logging results to logcat under "se-slot". Lets an operator
+    // inspect the chip THROUGH the phone (via adb) without moving it to a bench.
+    @Keep @JvmStatic external fun verifierSlotStatus(): Int
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =

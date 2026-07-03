@@ -97,6 +97,12 @@ class PicoSelfTestActivity : Activity() {
                     h == Long.MIN_VALUE -> Log.i(TAG, "H3 self-test skipped (symbol absent)")
                     else -> Log.e(TAG, "*** H3 FAIL: attested counter read failed (code $h) ***")
                 }
+                // READ-ONLY verifier-slot status/preflight (no writes) — logs under "se-slot".
+                try {
+                    com.dsm.wallet.bridge.Unified.verifierSlotStatus()
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.w(TAG, "verifierSlotStatus not in this .so: ${e.message}")
+                }
             } else {
                 Log.e(TAG, "*** H2 FAIL: no real chip response (see resp above) ***")
             }
