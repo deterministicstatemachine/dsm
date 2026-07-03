@@ -113,6 +113,12 @@ object Unified {
     // read-back counter (>= 0) or -1. Invoked deliberately by the operator over ADB (see
     // DsmSetupOpReceiver); never from app boot or a transfer. Callers must catch UnsatisfiedLinkError.
     @Keep @JvmStatic external fun counterInitMax(): Long
+
+    // GATED verifier-slot BURN (only in on_device_installs-feature .so; absent otherwise): irreversibly
+    // provision + cage the fixed DSM verifier key into `slot` on A's local chip. Returns the slot index
+    // (>= 0) or -1. Invoked deliberately by the operator over ADB (DsmSetupOp path); never from boot or
+    // a transfer. Callers must catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun provisionVerifierSlot(slot: Int): Int
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =

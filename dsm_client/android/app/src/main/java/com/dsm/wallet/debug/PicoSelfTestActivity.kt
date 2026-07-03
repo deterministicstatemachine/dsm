@@ -122,6 +122,26 @@ class PicoSelfTestActivity : Activity() {
                         Log.e(TAG, "counter-init REFUSED: confirm must be 'yes-init-counter-max' (got '$confirm')")
                     }
                 }
+                // GATED verifier-slot BURN (irreversible). Runs ONLY when launched with
+                // `--ez run_slot_commit true --ei slot N --es confirm yes-burn-slot-N`. The confirm
+                // MUST name the same slot (mismatch refused). A normal launch never reaches this.
+                val doSlotCommit = intent?.getBooleanExtra("run_slot_commit", false) == true
+                if (doSlotCommit) {
+                    val slot = intent?.getIntExtra("slot", -1) ?: -1
+                    if (slot in 1..3 && confirm == "yes-burn-slot-$slot") {
+                        Log.i(TAG, "*** slot-$slot BURN starting (irreversible) ***")
+                        val r = try {
+                            com.dsm.wallet.bridge.Unified.provisionVerifierSlot(slot)
+                        } catch (e: UnsatisfiedLinkError) {
+                            Log.e(TAG, "provisionVerifierSlot not in this .so (needs on_device_installs): ${e.message}")
+                            -2
+                        }
+                        if (r >= 0) Log.i(TAG, "*** slot-$slot BURN OK: verifier slot $r caged ***")
+                        else Log.e(TAG, "*** slot-$slot BURN FAILED (code $r) ***")
+                    } else {
+                        Log.e(TAG, "slot-commit REFUSED: need --ei slot N (1..3) + --es confirm yes-burn-slot-N (got slot=$slot confirm='$confirm')")
+                    }
+                }
             } else {
                 Log.e(TAG, "*** H2 FAIL: no real chip response (see resp above) ***")
             }

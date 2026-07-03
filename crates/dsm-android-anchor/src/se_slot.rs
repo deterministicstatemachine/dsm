@@ -26,9 +26,9 @@ use dsm_anchor_hw_verifier::{
 };
 #[cfg(target_os = "android")]
 use dsm_anchor_verifier::{RelayError, SpiRelayChannel};
-// The counter-init WRITE is a gated setup op (like the burn) — feature-gated, absent from default .so.
+// The counter-init + verifier-slot WRITES are gated setup ops — feature-gated, absent from default .so.
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use dsm_anchor_hw_verifier::init_counter_max;
+use dsm_anchor_hw_verifier::{commit_verifier_slot, init_counter_max};
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 use dsm_sdk::bridge::SeSlotWriter;
 
@@ -148,6 +148,32 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_counterInitMax(
         }
         Err(e) => {
             log::error!("[se-slot] counter-init FAILED: {e:?}");
+            -1
+        }
+    }
+}
+
+/// GATED verifier-slot BURN (absent from the default .so): irreversibly provision the fixed DSM
+/// verifier key into `slot` on A's local chip + cage it read-only (the reviewed `commit_verifier_slot`
+/// over the phone USB relay). SEPARATE from counter-init; run AFTER it. Returns the provisioned slot
+/// index (>= 0) on success, or -1 on failure. Invoked deliberately by the operator over ADB with an
+/// explicit slot + confirm; never from app boot or a transfer.
+#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_provisionVerifierSlot(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    slot: jni::sys::jint,
+) -> jni::sys::jint {
+    let slot = slot as u16;
+    log::info!("[se-slot] BURN: provisioning verifier slot {slot} (irreversible) ...");
+    match commit_verifier_slot(slot, || JniLocalSpiChannel) {
+        Ok((s, stpub)) => {
+            log::info!("[se-slot] BURN OK: slot {s} caged; stpub={stpub:02x?}");
+            i32::from(s as u8)
+        }
+        Err(e) => {
+            log::error!("[se-slot] BURN FAILED (nothing partial trusted): {e:?}");
             -1
         }
     }
