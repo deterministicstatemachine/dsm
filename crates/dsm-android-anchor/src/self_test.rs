@@ -31,8 +31,10 @@ const KNOWN_BENCH_STPUB: [u8; 32] = [
     0x91, 0xe0, 0xd3, 0x70, 0x91, 0x0a, 0x07, 0xdb, 0x82, 0x1a, 0x32, 0x25, 0x83, 0x0f, 0xbe, 0x7d,
 ];
 
-/// The bench chip's read-only verifier slot (Phase G).
-const VERIFIER_SLOT: u8 = 1;
+/// The dev chip's read-only verifier slot INDEX. On this bench chip slot 1 is spent on the old
+/// per-relationship demo key, so the fixed DSM verifier role is provisioned at slot 2. Must match the
+/// index the `usb_verifier_slot` bench CLI actually burned (`commit --slot 2`).
+const VERIFIER_SLOT: u8 = 2;
 
 /// Synthetic-but-complete demo pin: exactly the fields `read_counter` gates on (verifier slot,
 /// pinned chip static key, uncompromised); the acceptance-predicate fields are placeholders.

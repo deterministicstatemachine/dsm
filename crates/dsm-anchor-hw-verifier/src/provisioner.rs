@@ -1,24 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The DSM SMT-root verifier slot: read + (gated) provision the ONE caged read-only counter slot on
-//! a TROPIC01, over any [`SpiRelayChannel`]. Factored channel-generic from the exact write -> cage
-//! -> reboot -> verify sequence the bench CLIs (`usb_provision_verifier_slot` /
-//! `usb_verify_verifier_slot`) proved on hardware in Phase G, so the on-device SeSlotWriter runs the
-//! same proven steps over the Phone->Pico USB relay.
+//! The DSM SMT-root verifier slot: read / preflight / (gated) provision the ONE caged read-only
+//! counter slot on a TROPIC01, over any [`SpiRelayChannel`]. Factored channel-generic from the exact
+//! write -> cage -> reboot -> verify sequence the bench proved on hardware in Phase G.
 //!
-//! Slot map (fixed, never negotiated):
-//! ```text
-//! slot 0     = owner/admin host session (PROD0)
-//! slot 1     = the fixed DSM SMT-root verifier slot
-//! slots 2/3  = RESERVED — never allocated, never a fallback
-//! ```
-//! One caged slot serves every relationship: the verifier pairing key is the fixed DSM constant
-//! (see [`dsm_verifier_pairing_secret_bytes`]); the per-receiver binding is the pinned chip identity
-//! + the SMT proof + the DSM predicate, not this session key.
+//! **Role vs index.** There is exactly ONE verifier-slot ROLE (the fixed DSM verifier key — see
+//! [`dsm_verifier_pairing_secret_bytes`]); it serves every relationship (the per-receiver binding is
+//! the pinned chip identity + the SMT proof + the DSM predicate, not this session key). Which physical
+//! pairing-key INDEX holds that role is a per-chip deployment detail: index 1 on a fresh chip, or
+//! index 2/3 on a dev chip whose lower slot is already spent. The commit takes the index EXPLICITLY
+//! (never auto-selected — no silent fallback); the disclosure read SCANS the candidate indices to
+//! LOCATE the role. Slot 0 (host) is never a verifier slot.
 //!
-//! [`read_verifier_slot`] is NON-DESTRUCTIVE (the transfer path uses it). [`commit_verifier_slot`]
-//! performs the IRREVERSIBLE burn and must only ever run under an explicit setup/commit gate — never
-//! as a side effect of app boot. It refuses to overwrite a non-empty slot (an old demo/per-
-//! relationship key fails closed), so it can never clobber existing key material.
+//! [`read_verifier_slot`] / [`find_provisioned_slot`] / [`preflight_verifier_slot`] are NON-
+//! DESTRUCTIVE. [`commit_verifier_slot`] performs the IRREVERSIBLE burn and must only ever run under
+//! an explicit setup/commit gate. It refuses to overwrite a non-empty slot.
 
 use std::time::{Duration, Instant};
 
@@ -30,16 +25,22 @@ use zerocopy::little_endian::U16;
 
 use crate::reader::{dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_bytes};
 
-/// The fixed DSM SMT-root verifier slot. NEVER slot 0 (host) and NEVER slots 2/3 (reserved).
+/// The canonical (fresh-chip) verifier-slot index. A specific dev chip may place the single verifier
+/// role at another free index (e.g. 2) — pass it explicitly.
 pub const VERIFIER_SLOT: u16 = 1;
 
-/// Absolute bit indices of the SH1 (slot-1) access bit across the 4 lanes of a UAP register.
-const SH1_BITS: [u8; 4] = [1, 9, 17, 25];
+/// Pairing-key indices that MAY hold the verifier role — never slot 0 (host). The disclosure read
+/// scans these to locate the role wherever it was provisioned.
+pub const VERIFIER_SLOT_CANDIDATES: &[u16] = &[1, 2, 3];
 
-/// Registers whose SH1 access is REVOKED to cage the verifier slot to MCOUNTER_GET only, with names
-/// for the bench dry-run. `I_CONFIG_WRITE` (0x040) is LAST so the sweep cannot lock out the writes
-/// that build the cage, and so the caged slot can never loosen its own cage afterward. `pub` so the
-/// bench runbook CLI can print the exact deny list operators are about to burn.
+/// Absolute bit indices of the SH1..SH3 access bit... note the cage always targets the SELECTED
+/// slot's session bit; see `sh_mask_for`. The four lanes carry the access bit per session.
+const SH_LANES: [u8; 4] = [0, 8, 16, 24];
+
+/// Registers whose access is REVOKED to cage the verifier slot to MCOUNTER_GET only, with names for
+/// the bench dry-run. `I_CONFIG_WRITE` (0x040) is LAST so the sweep cannot lock out the writes that
+/// build the cage, and so the caged slot can never loosen its own cage afterward. `pub` so the bench
+/// runbook CLI can print the exact deny list operators are about to burn.
 pub const DENY: &[(u16, &str)] = &[
     (0x020, "PAIRING_KEY_WRITE"),
     (0x024, "PAIRING_KEY_READ"),
@@ -60,7 +61,7 @@ pub const DENY: &[(u16, &str)] = &[
     (0x040, "I_CONFIG_WRITE"), // LAST
 ];
 
-/// Registers left at factory (SH1 keeps access): the counter read + harmless reads.
+/// Registers left at factory (the slot keeps access): the counter read + harmless reads.
 pub const ALLOW_FACTORY_OPEN: &[(u16, &str)] = &[
     (0x154, "MCOUNTER_GET"), // needed
     (0x100, "PING"),
@@ -69,8 +70,8 @@ pub const ALLOW_FACTORY_OPEN: &[(u16, &str)] = &[
     (0x044, "I_CONFIG_READ"),
 ];
 
-/// The security-critical writes whose SH1 access MUST be revoked for the slot to count as caged
-/// (the exact set the Phase-G verify tool proved). Checked NON-destructively via `i_config_read`.
+/// The security-critical writes whose access MUST be revoked for the slot to count as caged (the set
+/// the Phase-G verify tool proved). Checked NON-destructively via `i_config_read`.
 const CAGE_CHECK: &[u16] = &[
     0x020, // PAIRING_KEY_WRITE
     0x040, // I_CONFIG_WRITE (self-cage-lock)
@@ -79,20 +80,34 @@ const CAGE_CHECK: &[u16] = &[
     0x160, // MAC_AND_DESTROY
 ];
 
-/// SH1 access mask across the 4 UAP lanes (bits {1,9,17,25}); zero means SH1 is denied that command.
-const SH1_MASK: u32 = 0x0202_0202;
+/// The UAP access mask across the 4 lanes for the given pairing slot's session bit (SH`slot`). Zero
+/// in the masked bits means that session is denied the command. `slot` is 1..=3 (session bit = slot).
+fn sh_mask_for(slot: u16) -> u32 {
+    let bit = slot as u32; // session bit index within a lane: SH1=1, SH2=2, SH3=3
+    SH_LANES
+        .iter()
+        .fold(0u32, |m, lane| m | (1u32 << (*lane as u32 + bit)))
+}
 
-/// Non-destructive state of the verifier slot.
+/// Non-destructive state of a specific verifier-slot index.
 pub enum VerifierSlotState {
-    /// Slot 1 holds the fixed DSM verifier key AND is correctly caged read-only. Ready to use:
-    /// disclose `(VERIFIER_SLOT, stpub)`.
+    /// Holds the fixed DSM verifier key AND is correctly caged read-only. Disclose `(index, stpub)`.
     Provisioned { stpub: [u8; 32] },
-    /// Slot 1 is empty — provisioning MAY proceed, but ONLY under an explicit commit gate.
+    /// Empty — provisioning MAY proceed at this index, but ONLY under an explicit commit gate.
     Empty { stpub: [u8; 32] },
-    /// Slot 1 holds a NON-fixed key, or the fixed key without the correct cage (e.g. an old
-    /// demo/per-relationship key, or a half-finished provision). FAIL CLOSED: never overwrite,
-    /// never disclose.
+    /// Holds a NON-fixed key, or the fixed key without the correct cage (e.g. an old demo/per-
+    /// relationship key, or a half-finished provision). FAIL CLOSED: never overwrite, never disclose.
     Occupied,
+}
+
+/// Read-only preflight facts an operator sees BEFORE any burn.
+pub struct PreflightReport {
+    /// The slot index the burn would target.
+    pub slot: u16,
+    /// The chip's Noise static public key (its identity) — confirm this is the intended chip.
+    pub stpub: [u8; 32],
+    /// The current monotonic counter value (proves the counter reads).
+    pub mcounter: u32,
 }
 
 /// Provisioning / read errors. All map to fail-closed at the SeSlotWriter boundary.
@@ -105,6 +120,8 @@ pub enum ProvisionError {
     Precondition(String),
     /// The post-burn cage verification did not match the required MCOUNTER_GET-only surface.
     CageVerify(String),
+    /// The requested slot index is not a valid verifier candidate (must be 1..=3, never slot 0).
+    BadSlot(u16),
     /// CSPRNG unavailable for a handshake ephemeral.
     Rng,
 }
@@ -120,15 +137,23 @@ fn is_unauthorized<A, B>(r: &Result<impl Sized, TrError<A, B>>) -> bool {
     matches!(r, Err(TrError::Unauthorized))
 }
 
-/// Read the verifier slot's state WITHOUT writing anything (strictly read-only — safe on the
-/// transfer path and at boot). Opens the host slot-0 session, reads slot 1's pairing key, and — if
-/// it is the fixed key — confirms the cage via `i_config_read` of the security-critical registers
-/// (SH1 access bits cleared). No slot-1 session and no write is attempted, so this can never mutate
-/// or provision. The chip type is left inferred (it is parameterized by `dummy_pin::DummyPin`, a
-/// tropic01 internal we do not name).
+fn check_slot(slot: u16) -> Result<(), ProvisionError> {
+    if VERIFIER_SLOT_CANDIDATES.contains(&slot) {
+        Ok(())
+    } else {
+        Err(ProvisionError::BadSlot(slot))
+    }
+}
+
+/// Classify a SPECIFIC verifier-slot index WITHOUT writing anything (strictly read-only). Opens the
+/// host slot-0 session, reads the slot's pairing key, and — if it is the fixed key — confirms the
+/// cage via `i_config_read` of the security-critical registers (the slot's access bits cleared). No
+/// session as the verifier slot and no write is attempted, so this can never mutate or provision.
 pub fn read_verifier_slot<C: SpiRelayChannel>(
+    slot: u16,
     channel: C,
 ) -> Result<VerifierSlotState, ProvisionError> {
+    check_slot(slot)?;
     let mut chip = Tropic01::new(RemoteSpiDevice::new(channel));
     let stpub = *chip
         .get_info_cert_store()
@@ -136,6 +161,7 @@ pub fn read_verifier_slot<C: SpiRelayChannel>(
         .public_key()
         .map_err(|e| ProvisionError::Chip(format!("cert public_key: {e:?}")))?;
     let fixed_pub = dsm_verifier_pairing_pubkey();
+    let mask = sh_mask_for(slot);
 
     let eh = fresh_ephemeral()?;
     let mut s0 = chip
@@ -149,53 +175,131 @@ pub fn read_verifier_slot<C: SpiRelayChannel>(
         )
         .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 session_start: {e:?}")))?;
 
-    let slot1 = s0.pairing_key_read(U16::new(VERIFIER_SLOT)).map(|k| *k);
-    // Only the specific `SlotEmpty` status means an unwritten slot. ANY other error (transport,
-    // session, hardware) is ambiguous and must NOT be classified as Empty — that would let a commit
-    // proceed to a burn on a slot whose emptiness was never confirmed. Propagate it as a Chip error
-    // (fail-closed at the caller). The cage check needs `s0`, so classify before aborting.
-    let result: Result<VerifierSlotState, ProvisionError> = match slot1 {
+    let key = s0.pairing_key_read(U16::new(slot)).map(|k| *k);
+    // Only the specific `SlotEmpty` status means an unwritten slot. ANY other error is ambiguous and
+    // must NOT be classified as Empty (that would let a commit burn on an unconfirmed slot).
+    let result: Result<VerifierSlotState, ProvisionError> = match key {
         Err(TrError::SlotEmpty) => Ok(VerifierSlotState::Empty { stpub }),
         Err(e) => Err(ProvisionError::Chip(format!(
-            "pairing_key_read slot {VERIFIER_SLOT}: {e:?}"
+            "pairing_key_read slot {slot}: {e:?}"
         ))),
-        // A key is present: it must be EXACTLY the fixed key, and the cage must be configured.
         Ok(k) if k == fixed_pub => {
-            // Pure-read cage check: every security-critical register must have SH1 access cleared.
-            let caged = CAGE_CHECK.iter().all(
-                |addr| matches!(s0.i_config_read(U16::new(*addr)), Ok(v) if v & SH1_MASK == 0),
-            );
+            // Pure-read cage check: every security-critical register must have this slot's access cleared.
+            let caged = CAGE_CHECK
+                .iter()
+                .all(|addr| matches!(s0.i_config_read(U16::new(*addr)), Ok(v) if v & mask == 0));
             if caged {
                 Ok(VerifierSlotState::Provisioned { stpub })
             } else {
-                // Fixed key but not (fully) caged = half-provisioned; fail closed (re-commit re-cages).
                 Ok(VerifierSlotState::Occupied)
             }
         }
-        // Any other key (e.g. an old demo/per-relationship key) — never overwrite, never disclose.
         Ok(_) => Ok(VerifierSlotState::Occupied),
     };
-    // Abort the slot-0 session on every path (before surfacing an error).
     s0.session_abort()
         .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 abort: {e:?}")))?;
     result
 }
 
-/// Provision the verifier slot — the IRREVERSIBLE burn. MUST be called only under an explicit
-/// setup/commit gate. Idempotent when already provisioned; refuses (fail-closed) to overwrite any
-/// non-empty slot. `make_channel` mints a fresh relay channel per session (the non-destructive
-/// classification read and the burn each need their own).
-pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
+/// Scan the candidate indices to LOCATE the single provisioned verifier role. Returns `Some((index,
+/// stpub))` for the first index that reads back as `Provisioned`, else `None`. Non-destructive.
+/// `make_channel` mints a fresh relay channel per probed index.
+pub fn find_provisioned_slot<C: SpiRelayChannel, F: Fn() -> C>(
     make_channel: F,
-) -> Result<(u8, [u8; 32]), ProvisionError> {
+) -> Result<Option<(u16, [u8; 32])>, ProvisionError> {
+    for &slot in VERIFIER_SLOT_CANDIDATES {
+        if let VerifierSlotState::Provisioned { stpub } = read_verifier_slot(slot, make_channel())?
+        {
+            return Ok(Some((slot, stpub)));
+        }
+    }
+    Ok(None)
+}
+
+/// Read-only dry-run of the burn's ENTIRE gating logic for `slot`, on the actual chip: the slot reads
+/// back `SlotEmpty`, the counter is readable, and every deny/allow register is factory-open. Returns
+/// the [`PreflightReport`] (chip identity + counter) iff a commit WOULD proceed. Writes NOTHING.
+pub fn preflight_verifier_slot<C: SpiRelayChannel>(
+    slot: u16,
+    channel: C,
+) -> Result<PreflightReport, ProvisionError> {
+    check_slot(slot)?;
+    let mut chip = Tropic01::new(RemoteSpiDevice::new(channel));
+    let stpub = *chip
+        .get_info_cert_store()
+        .map_err(|e| ProvisionError::Chip(format!("get_info_cert_store: {e:?}")))?
+        .public_key()
+        .map_err(|e| ProvisionError::Chip(format!("cert public_key: {e:?}")))?;
+
+    let eh = fresh_ephemeral()?;
+    let mut s0 = chip
+        .session_start(
+            &X25519Dalek,
+            PublicKey::from(SH0PUB_PROD0),
+            StaticSecret::from(SH0PRIV_PROD0),
+            PublicKey::from(&eh),
+            eh,
+            0,
+        )
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 session_start: {e:?}")))?;
+
+    // Preflight body (read-only) inline, so the open-session chip type stays inferred.
+    let report = (|| -> Result<PreflightReport, ProvisionError> {
+        match s0.pairing_key_read(U16::new(slot)) {
+            Err(TrError::SlotEmpty) => {}
+            Ok(_) => {
+                return Err(ProvisionError::Precondition(format!(
+                    "slot {slot} is non-empty; refusing to burn (no overwrite)"
+                )))
+            }
+            Err(e) => {
+                return Err(ProvisionError::Chip(format!(
+                    "preflight pairing_key_read slot {slot} (emptiness unconfirmed): {e:?}"
+                )))
+            }
+        }
+        let mcounter = s0
+            .mcounter_get(MCounterIndex::Index0)
+            .map_err(|e| ProvisionError::Precondition(format!("mcounter unreadable: {e:?}")))?;
+        for (addr, name) in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
+            let r = s0.r_config_read(U16::new(*addr));
+            let i = s0.i_config_read(U16::new(*addr));
+            match (r, i) {
+                (Ok(r), Ok(i)) if r == 0xffff_ffff && i == 0xffff_ffff => {}
+                (r, i) => {
+                    return Err(ProvisionError::Precondition(format!(
+                    "0x{addr:03x} {name} not factory-open (r={r:?} i={i:?}); refusing to provision"
+                )))
+                }
+            }
+        }
+        Ok(PreflightReport {
+            slot,
+            stpub,
+            mcounter,
+        })
+    })();
+    s0.session_abort()
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 abort: {e:?}")))?;
+    report
+}
+
+/// Provision the verifier role at `slot` — the IRREVERSIBLE burn. MUST be called only under an
+/// explicit setup/commit gate. Idempotent when `slot` already holds the fixed key + cage; refuses
+/// (fail-closed) to overwrite any non-empty slot. `make_channel` mints a fresh relay channel per
+/// session (the non-destructive classification read and the burn each need their own).
+pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
+    slot: u16,
+    make_channel: F,
+) -> Result<(u16, [u8; 32]), ProvisionError> {
+    check_slot(slot)?;
     // 1) Classify the slot non-destructively first.
-    match read_verifier_slot(make_channel())? {
-        VerifierSlotState::Provisioned { stpub } => return Ok((VERIFIER_SLOT as u8, stpub)),
+    match read_verifier_slot(slot, make_channel())? {
+        VerifierSlotState::Provisioned { stpub } => return Ok((slot, stpub)),
         VerifierSlotState::Occupied => {
-            return Err(ProvisionError::Precondition(
-                "slot 1 is occupied by a non-fixed key or is not caged; refusing to overwrite"
-                    .into(),
-            ))
+            return Err(ProvisionError::Precondition(format!(
+                "slot {slot} is occupied by a non-fixed key or is not caged; refusing to overwrite"
+            )))
         }
         VerifierSlotState::Empty { .. } => {}
     }
@@ -222,53 +326,53 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
         )
         .map_err(|(_, e)| ProvisionError::Chip(format!("commit slot-0 session_start: {e:?}")))?;
 
-    // 2a) Preflight: slot 1 must POSITIVELY read as `SlotEmpty` (not merely error) before any write —
-    // an ambiguous transport error must abort the burn, never fall through to it. Then counter
-    // readable + every DENY+ALLOW register factory-open.
-    match s0.pairing_key_read(U16::new(VERIFIER_SLOT)) {
+    // 2a) Preflight (positive SlotEmpty + factory-open + readable counter) — writes nothing. Inline
+    // so the open-session chip type stays inferred; identical checks to `preflight_verifier_slot`.
+    match s0.pairing_key_read(U16::new(slot)) {
         Err(TrError::SlotEmpty) => {}
         Ok(_) => {
-            return Err(ProvisionError::Precondition(
-                "slot 1 is non-empty; refusing to overwrite".into(),
-            ))
+            return Err(ProvisionError::Precondition(format!(
+                "slot {slot} became non-empty before write; refusing to overwrite"
+            )))
         }
         Err(e) => {
             return Err(ProvisionError::Chip(format!(
-                "preflight pairing_key_read (emptiness unconfirmed): {e:?}"
+                "commit preflight pairing_key_read slot {slot}: {e:?}"
             )))
         }
     }
     s0.mcounter_get(MCounterIndex::Index0)
         .map_err(|e| ProvisionError::Precondition(format!("mcounter unreadable: {e:?}")))?;
-    for (addr, _name) in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
+    for (addr, name) in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
         let r = s0.r_config_read(U16::new(*addr));
         let i = s0.i_config_read(U16::new(*addr));
         match (r, i) {
             (Ok(r), Ok(i)) if r == 0xffff_ffff && i == 0xffff_ffff => {}
             (r, i) => {
                 return Err(ProvisionError::Precondition(format!(
-                    "0x{addr:03x} not factory-open (r={r:?} i={i:?}); refusing to provision"
+                    "0x{addr:03x} {name} not factory-open (r={r:?} i={i:?}); refusing to provision"
                 )))
             }
         }
     }
 
     // 2b) Write the fixed verifier pubkey, verify read-back.
-    s0.pairing_key_write(U16::new(VERIFIER_SLOT), &fixed_pub)
+    s0.pairing_key_write(U16::new(slot), &fixed_pub)
         .map_err(|e| ProvisionError::Chip(format!("pairing_key_write: {e:?}")))?;
-    match s0.pairing_key_read(U16::new(VERIFIER_SLOT)).map(|k| *k) {
+    match s0.pairing_key_read(U16::new(slot)).map(|k| *k) {
         Ok(k) if k == fixed_pub => {}
         other => {
             return Err(ProvisionError::Chip(format!(
-                "slot 1 read-back mismatch after write: {other:?}"
+                "slot {slot} read-back mismatch after write: {other:?}"
             )))
         }
     }
 
-    // 2c) Cage: revoke SH1 access to every DENY register (I_CONFIG_WRITE last, by list order).
+    // 2c) Cage: revoke this slot's access to every DENY register (I_CONFIG_WRITE last, by list order).
     for (addr, _name) in DENY {
-        for bit in SH1_BITS {
-            s0.i_config_write(U16::new(*addr), bit).map_err(|e| {
+        for lane in SH_LANES {
+            let bit = (lane as u16) + slot; // absolute bit index of SH`slot` in this lane
+            s0.i_config_write(U16::new(*addr), bit as u8).map_err(|e| {
                 ProvisionError::Chip(format!("i_config_write(0x{addr:03x} bit {bit}): {e:?}"))
             })?;
         }
@@ -293,7 +397,8 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
         }
     }
 
-    // 2e) Verify the caged surface AS slot 1: MCOUNTER_GET ok; INIT/PAIRING_WRITE/I_CONFIG_WRITE denied.
+    // 2e) Verify the caged surface AS the verifier slot: MCOUNTER_GET ok; INIT/PAIRING_WRITE/
+    // I_CONFIG_WRITE denied.
     let eh1 = fresh_ephemeral()?;
     let mut v = chip
         .session_start(
@@ -302,12 +407,12 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
             StaticSecret::from(fixed_priv),
             PublicKey::from(&eh1),
             eh1,
-            VERIFIER_SLOT as u8,
+            slot as u8,
         )
         .map_err(|(_, e)| ProvisionError::CageVerify(format!("verifier session_start: {e:?}")))?;
     let get = v.mcounter_get(MCounterIndex::Index0);
-    let init = v.mcounter_init(MCounterIndex::Index0, 1000);
-    let pkw = v.pairing_key_write(U16::new(VERIFIER_SLOT), &fixed_pub);
+    let init = v.mcounter_init(MCounterIndex::Index0, 1000); // value irrelevant; expected denied
+    let pkw = v.pairing_key_write(U16::new(slot), &fixed_pub);
     let icw = v.i_config_write(U16::new(0x040), 1);
     let chip = v
         .session_abort()
@@ -328,10 +433,8 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
     let slot0_get = s0.mcounter_get(MCounterIndex::Index0);
     let _ = s0.session_abort();
 
-    // The security invariant is that each mutating command did NOT execute: ANY Err == not executed
-    // == denied (matches the proven bench gate). A transport glitch on a probe is still "not
-    // executed", so gate on `.is_err()`; keep the Unauthorized check as a diagnostic only, so a
-    // non-Unauthorized denial does not turn a correctly-caged slot into a false CageVerify failure.
+    // Any Err on a mutating command == not executed == denied (matches the proven bench gate). Keep
+    // the Unauthorized check only as a diagnostic so a non-Unauthorized denial does not false-fail.
     let denied_as_expected =
         is_unauthorized(&init) && is_unauthorized(&pkw) && is_unauthorized(&icw);
     if !denied_as_expected {
@@ -345,5 +448,46 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
             "caged surface wrong: get={get:?} init={init:?} pkw={pkw:?} icw={icw:?} slot0={slot0_get:?}"
         )));
     }
-    Ok((VERIFIER_SLOT as u8, stpub))
+    Ok((slot, stpub))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sh_mask_matches_the_session_bit_per_lane() {
+        // Session bit N within each lane byte (SH1=bit1, SH2=bit2, SH3=bit3), 4 lanes at 0/8/16/24.
+        assert_eq!(sh_mask_for(1), 0x0202_0202, "SH1 = bits {{1,9,17,25}}");
+        assert_eq!(sh_mask_for(2), 0x0404_0404, "SH2 = bits {{2,10,18,26}}");
+        assert_eq!(sh_mask_for(3), 0x0808_0808, "SH3 = bits {{3,11,19,27}}");
+    }
+
+    #[test]
+    fn cage_sweep_bits_are_absolute_and_match_the_mask() {
+        // The commit sweep writes bits (lane + slot); their OR must equal the read-path mask.
+        for &slot in VERIFIER_SLOT_CANDIDATES {
+            let mut swept = 0u32;
+            for lane in SH_LANES {
+                swept |= 1u32 << (lane as u32 + slot as u32);
+            }
+            assert_eq!(
+                swept,
+                sh_mask_for(slot),
+                "sweep vs mask mismatch for slot {slot}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_candidate_slots_are_accepted() {
+        assert!(
+            check_slot(0).is_err(),
+            "slot 0 (host) is never a verifier slot"
+        );
+        assert!(check_slot(4).is_err(), "slot 4 is out of range");
+        for &s in VERIFIER_SLOT_CANDIDATES {
+            assert!(check_slot(s).is_ok());
+        }
+    }
 }
