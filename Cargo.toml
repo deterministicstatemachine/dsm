@@ -17,7 +17,14 @@ members = [
 # dsm-anchor-hw-verifier is the ONLY crate that depends on the sibling libtropic-rs
 # checkout (tropic01); excluded so CI builds green without that sibling. Build it
 # directly (cargo build -p dsm-anchor-hw-verifier) on a machine that has the sibling.
-exclude = ["crates/dsm-anchor-pico", "crates/dsm-anchor-hw-verifier"]
+# dsm-android-anchor is the on-device glue that installs the hw-verifier anchor impls into the SDK
+# bridge; it transitively pulls tropic01, so it too is excluded (built only in the Android cargo-ndk
+# pipeline). The default workspace stays tropic01-free (verify: `cargo tree --workspace -i tropic01`).
+exclude = [
+    "crates/dsm-anchor-pico",
+    "crates/dsm-anchor-hw-verifier",
+    "crates/dsm-android-anchor",
+]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
