@@ -87,7 +87,10 @@ fn main() {
     let (frame2, body2) = one_passthrough(&mut port, &mosi);
 
     let resp1 = decode_response(&body1).expect("decode ApplianceResponse #1");
-    assert_eq!(frame1, frame2, "request frame must be identical (it is host-built)");
+    assert_eq!(
+        frame1, frame2,
+        "request frame must be identical (it is host-built)"
+    );
     let deterministic = body1 == body2;
 
     println!("req_frame_len   = {}", frame1.len());
@@ -97,7 +100,10 @@ fn main() {
     println!("resp.ok         = {}", resp1.ok);
     println!("resp.spi_len    = {}", resp1.spi_response.len());
     if let Some(status) = resp1.spi_response.first() {
-        println!("chip_status_b0  = 0x{status:02x}  (ready bit0={})", status & 0x01);
+        println!(
+            "chip_status_b0  = 0x{status:02x}  (ready bit0={})",
+            status & 0x01
+        );
     }
     println!("deterministic   = {deterministic}  (body #1 == body #2)");
     if !deterministic {

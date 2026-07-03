@@ -36,36 +36,37 @@ pub const VERIFIER_SLOT: u16 = 1;
 /// Absolute bit indices of the SH1 (slot-1) access bit across the 4 lanes of a UAP register.
 const SH1_BITS: [u8; 4] = [1, 9, 17, 25];
 
-/// Registers whose SH1 access is REVOKED to cage the verifier slot to MCOUNTER_GET only.
-/// `I_CONFIG_WRITE` (0x040) is LAST so the sweep cannot lock out the writes that build the cage, and
-/// so the caged slot can never loosen its own cage afterward.
-const DENY: &[u16] = &[
-    0x020, // PAIRING_KEY_WRITE
-    0x024, // PAIRING_KEY_READ
-    0x028, // PAIRING_KEY_INVALIDATE
-    0x030, // R_CONFIG_WRITE_ERASE
-    0x110, // R_MEM_DATA_WRITE
-    0x114, // R_MEM_DATA_READ
-    0x118, // R_MEM_DATA_ERASE
-    0x130, // ECC_KEY_GENERATE
-    0x134, // ECC_KEY_STORE
-    0x138, // ECC_KEY_READ
-    0x13C, // ECC_KEY_ERASE
-    0x140, // ECDSA_SIGN
-    0x144, // EDDSA_SIGN
-    0x150, // MCOUNTER_INIT
-    0x158, // MCOUNTER_UPDATE
-    0x160, // MAC_AND_DESTROY
-    0x040, // I_CONFIG_WRITE — LAST
+/// Registers whose SH1 access is REVOKED to cage the verifier slot to MCOUNTER_GET only, with names
+/// for the bench dry-run. `I_CONFIG_WRITE` (0x040) is LAST so the sweep cannot lock out the writes
+/// that build the cage, and so the caged slot can never loosen its own cage afterward. `pub` so the
+/// bench runbook CLI can print the exact deny list operators are about to burn.
+pub const DENY: &[(u16, &str)] = &[
+    (0x020, "PAIRING_KEY_WRITE"),
+    (0x024, "PAIRING_KEY_READ"),
+    (0x028, "PAIRING_KEY_INVALIDATE"),
+    (0x030, "R_CONFIG_WRITE_ERASE"),
+    (0x110, "R_MEM_DATA_WRITE"),
+    (0x114, "R_MEM_DATA_READ"),
+    (0x118, "R_MEM_DATA_ERASE"),
+    (0x130, "ECC_KEY_GENERATE"),
+    (0x134, "ECC_KEY_STORE"),
+    (0x138, "ECC_KEY_READ"),
+    (0x13C, "ECC_KEY_ERASE"),
+    (0x140, "ECDSA_SIGN"),
+    (0x144, "EDDSA_SIGN"),
+    (0x150, "MCOUNTER_INIT"),
+    (0x158, "MCOUNTER_UPDATE"),
+    (0x160, "MAC_AND_DESTROY"),
+    (0x040, "I_CONFIG_WRITE"), // LAST
 ];
 
 /// Registers left at factory (SH1 keeps access): the counter read + harmless reads.
-const ALLOW_FACTORY_OPEN: &[u16] = &[
-    0x154, // MCOUNTER_GET (needed)
-    0x100, // PING
-    0x120, // RANDOM_VALUE_GET
-    0x034, // R_CONFIG_READ
-    0x044, // I_CONFIG_READ
+pub const ALLOW_FACTORY_OPEN: &[(u16, &str)] = &[
+    (0x154, "MCOUNTER_GET"), // needed
+    (0x100, "PING"),
+    (0x120, "RANDOM_VALUE_GET"),
+    (0x034, "R_CONFIG_READ"),
+    (0x044, "I_CONFIG_READ"),
 ];
 
 /// The security-critical writes whose SH1 access MUST be revoked for the slot to count as caged
@@ -239,7 +240,7 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
     }
     s0.mcounter_get(MCounterIndex::Index0)
         .map_err(|e| ProvisionError::Precondition(format!("mcounter unreadable: {e:?}")))?;
-    for addr in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
+    for (addr, _name) in DENY.iter().chain(ALLOW_FACTORY_OPEN.iter()) {
         let r = s0.r_config_read(U16::new(*addr));
         let i = s0.i_config_read(U16::new(*addr));
         match (r, i) {
@@ -265,7 +266,7 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
     }
 
     // 2c) Cage: revoke SH1 access to every DENY register (I_CONFIG_WRITE last, by list order).
-    for addr in DENY {
+    for (addr, _name) in DENY {
         for bit in SH1_BITS {
             s0.i_config_write(U16::new(*addr), bit).map_err(|e| {
                 ProvisionError::Chip(format!("i_config_write(0x{addr:03x} bit {bit}): {e:?}"))
