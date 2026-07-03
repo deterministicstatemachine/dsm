@@ -23,6 +23,15 @@ dsm-anchor-verifier = { path = "../dsm-anchor-verifier" }
 dsm-anchor-core = { path = "../dsm-anchor-core" }
 log = "0.4"
 
+# On Android, the USB bridge's LocalPicoTransport does a JNI up-call to Kotlin's opaque
+# picoUsbTransceive (mirrors queue_follow_up_chunks' with_env pattern), so it needs dsm_sdk's `jni`
+# feature + the jni crate. Host builds/tests don't compile this path (it's target_os="android").
+# Match the app's on-device feature set: jni (with_env up-call) + bluetooth (the tropic_relay/BLE
+# code paths). Enabling jni WITHOUT bluetooth surfaces dsm_sdk's own conditional warnings-as-errors.
+[target.'cfg(target_os = "android")'.dependencies]
+dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk", features = ["jni", "bluetooth"] }
+jni = "0.21"
+
 [dev-dependencies]
 # Poll the boxed PicoFuture in host tests without a full async runtime.
 futures = { version = "0.3", default-features = false, features = ["executor"] }

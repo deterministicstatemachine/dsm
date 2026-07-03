@@ -81,12 +81,45 @@ impl LocalPicoTransport for UsbPicoTransport {
     }
 }
 
-// Android JNI wiring (bench step): the on-device constructor builds `UsbPicoTransport::new(usb)`
-// where `usb` is the up-call to Kotlin's opaque `picoUsbTransceive`, using the same
-// `dsm_sdk::jni::jni_common::with_env` pattern as `queue_follow_up_chunks`. It is written alongside
-// the Kotlin `LocalPicoUsb` transport in H2's bench session (it needs the Kotlin symbol to target),
-// so it is intentionally absent here — this module ships the framing + fail-closed core, which is
-// host-testable and cross-compiles for Android on its own.
+/// The on-device constructor: `usb` up-calls Kotlin's opaque `Unified.picoUsbTransceive([B)[B`,
+/// which does the actual USB-OTG round-trip to the Pico. Mirrors `queue_follow_up_chunks`'
+/// `with_env` + re-derive-mutable-JNIEnv pattern. Any JNI/USB failure -> `Err` (fail-closed). A
+/// null return from Kotlin (no device / permission / timeout) is treated as a USB failure. This
+/// path is Android-only; host builds/tests use `UsbPicoTransport::new` with a mock.
+#[cfg(target_os = "android")]
+pub fn android_usb_pico_transport() -> UsbPicoTransport {
+    use jni::objects::{JByteArray, JObject, JValue};
+    UsbPicoTransport::new(Arc::new(|frame: Vec<u8>| -> Result<Vec<u8>, DsmError> {
+        dsm_sdk::jni::jni_common::with_env(|env| -> Result<Vec<u8>, String> {
+            // Re-derive a mutable JNIEnv from the raw handle (same as queue_follow_up_chunks).
+            let mut env = unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _) }
+                .map_err(|e| format!("clone JNIEnv: {e}"))?;
+            let cls = dsm_sdk::jni::jni_common::find_class_with_app_loader(
+                &mut env,
+                "com/dsm/wallet/bridge/Unified",
+            )?;
+            let arr = env
+                .byte_array_from_slice(&frame)
+                .map_err(|e| format!("byte_array_from_slice: {e}"))?;
+            let arr_obj = JObject::from(arr);
+            let res = env
+                .call_static_method(
+                    &cls,
+                    "picoUsbTransceive",
+                    "([B)[B",
+                    &[JValue::Object(&arr_obj)],
+                )
+                .map_err(|e| format!("call picoUsbTransceive: {e}"))?;
+            let obj = res.l().map_err(|e| format!("result not object: {e}"))?;
+            if obj.is_null() {
+                return Err("picoUsbTransceive returned null (USB failure)".to_string());
+            }
+            env.convert_byte_array(JByteArray::from(obj))
+                .map_err(|e| format!("convert_byte_array: {e}"))
+        })
+        .map_err(|e| DsmError::invalid_operation(format!("usb-pico JNI up-call: {e}")))
+    }))
+}
 
 #[cfg(test)]
 mod tests {

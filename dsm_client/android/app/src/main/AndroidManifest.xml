@@ -19,6 +19,10 @@
         tools:targetApi="s"/>
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
 
+    <!-- USB host (OTG) for the sender phone -> Pico raw-SPI passthrough (offline-bearer H2).
+         Optional so non-OTG devices still install; the Pico link is only needed to hold an anchor. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
+
     <!-- Location permissions for BLE scanning on pre-Android 12 devices only -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30"/>
     <!-- FINE_LOCATION removed: BLE scanning uses neverForLocation on Android 12+ -->
