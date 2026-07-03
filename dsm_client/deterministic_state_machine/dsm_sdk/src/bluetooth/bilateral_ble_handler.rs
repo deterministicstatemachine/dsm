@@ -4489,21 +4489,18 @@ impl BilateralBleHandler {
             let pin = crate::bridge::anchor_enrollment_store()
                 .and_then(|s| s.get(&sender_device_id))
                 .map(|e| e.pin);
-            // Admission never implies acceptance: only a COMPLETE pin (slot + chip key +
-            // uncompromised) is ever counter-read — an incomplete first-transfer pin cannot yield
-            // `attested = Some` even against a misbehaving reader.
-            let attested: Option<([u8; 32], u64)> = if let (Some(p), Some(reader)) = (
-                pin.as_ref()
-                    .filter(|p| crate::bluetooth::anchor_accept::pin_ready_for_counter_read(p)),
-                crate::bridge::anchor_counter_reader(),
-            ) {
-                reader
-                    .read_counter(sender_device_id, commitment_hash, p.clone())
-                    .await
-                    .map(|h| (p.anchor_id, u64::from(h)))
-            } else {
-                None
-            };
+            // Admission never implies acceptance: `resolve_attested_counter` gates on a COMPLETE pin
+            // (slot + chip key + uncompromised) and only then reads the live counter over the relay
+            // via the installed reader — an incomplete first-transfer pin or an absent reader can
+            // never yield `attested = Some`. Same logic exercised in-process in the Phase H0 test.
+            let attested: Option<([u8; 32], u64)> =
+                crate::bluetooth::anchor_accept::resolve_attested_counter(
+                    pin.as_ref(),
+                    crate::bridge::anchor_counter_reader(),
+                    sender_device_id,
+                    commitment_hash,
+                )
+                .await;
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);

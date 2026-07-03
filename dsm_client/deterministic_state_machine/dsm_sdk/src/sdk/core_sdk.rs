@@ -3013,6 +3013,258 @@ mod tests {
         .expect("transfer 2 must be accepted from the adopted frontier");
     }
 
+    /// PHASE H0 — prove the whole phone-to-chip relay path with FAKE PIPES before any Android/BLE:
+    /// receiver resolves the counter through the REAL `TropicRelayRouter` round-trip (B -> in-process
+    /// "BLE" -> A.handle_inbound -> A's mock Pico -> reply -> B), feeds it through the exact confirm
+    /// seam (`resolve_attested_counter`), and the canonical predicate accepts iff the counter matches.
+    /// Every missing install / wrong counter fails closed to online recovery. No `tropic01`, no
+    /// hardware — replace the fake pipes with Android USB/BLE in H2/H3.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn phase_h0_relay_counter_flows_end_to_end_with_mock_transports() {
+        use crate::bluetooth::anchor_accept::{
+            accept_offline_release_with_relay_counter, resolve_attested_counter,
+            AnchorStateBinding, OfflineRecover, PinnedAnchor,
+        };
+        use crate::bluetooth::tropic_relay::{
+            AnchorCounterReader, LocalPicoTransport, PicoFuture, TropicRelayRouter,
+        };
+        use dsm::crypto::anchor_enrollment::FusedAnchorPin;
+        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
+        use dsm::types::error::DsmError;
+        use std::sync::Arc;
+
+        // A mock Pico A: for any MOSI, return the 4-byte LE counter `h` as MISO (stands in for a
+        // real libtropic mcounter_get over the raw-SPI passthrough).
+        struct MockPico {
+            h: u32,
+        }
+        impl LocalPicoTransport for MockPico {
+            fn spi_passthrough(&self, _spi: Vec<u8>) -> PicoFuture<Result<Vec<u8>, DsmError>> {
+                let h = self.h;
+                Box::pin(async move { Ok(h.to_le_bytes().to_vec()) })
+            }
+        }
+
+        // Mock receiver-side reader standing in for the real `RelayCounterReader`: it drives the REAL
+        // router round-trip through sender A's router (which owns a mock Pico), then decodes H. Fails
+        // closed on an incomplete pin (mirrors the hardware reader) or any relay failure (e.g. A has
+        // no local Pico). `a` is `None` to simulate "no sender router at all".
+        struct RelayMockReader {
+            a: Option<Arc<TropicRelayRouter>>,
+        }
+        impl AnchorCounterReader for RelayMockReader {
+            fn read_counter(
+                &self,
+                _peer: [u8; 32],
+                commitment: [u8; 32],
+                pin: FusedAnchorPin,
+            ) -> PicoFuture<Option<u32>> {
+                if pin.verifier_slot.is_none()
+                    || pin.chip_static_pubkey.is_none()
+                    || !pin.uncompromised
+                {
+                    return Box::pin(async { None });
+                }
+                let a = self.a.clone();
+                Box::pin(async move {
+                    let b = Arc::new(TropicRelayRouter::new());
+                    let b2 = b.clone();
+                    let miso = b
+                        .round_trip(commitment, vec![0u8], move |frame| {
+                            let a = a.clone();
+                            let b2 = b2.clone();
+                            async move {
+                                let a = a.ok_or_else(|| {
+                                    DsmError::invalid_operation(
+                                        "no sender A router (fake pipe down)",
+                                    )
+                                })?;
+                                // A services the relayed request against its local Pico, or errors
+                                // fail-closed if it has no Pico installed.
+                                let reply = a.handle_inbound(&frame).await?.ok_or_else(|| {
+                                    DsmError::invalid_operation("A produced no reply")
+                                })?;
+                                b2.handle_inbound(&reply).await?;
+                                Ok(())
+                            }
+                        })
+                        .await
+                        .ok()?;
+                    let arr: [u8; 4] = miso.get(..4)?.try_into().ok()?;
+                    Some(u32::from_le_bytes(arr))
+                })
+            }
+        }
+
+        // ---- One real bearer release + a COMPLETE receiver pin (slot + stpub) ----------------------
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let sender_dev = sdk.device_info.device_id;
+        let recipient = [4u8; 32];
+        let policy_hash = [3u8; 32];
+        let r_r = [0x55u8; 32];
+
+        let art = sdk
+            .build_offline_bearer_release(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                policy_hash,
+                0,
+                vec![0xAB],
+                r_r,
+            )
+            .expect("prime bootstrap");
+        let head = sdk
+            .state_machine
+            .lock()
+            .device_head()
+            .expect("bootstrapped head")
+            .clone();
+        let cp = [0xC0u8; 32];
+        let rk = dsm::core::bilateral_transaction_manager::compute_smt_key(&head.devid(), &cp);
+        let init = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &head.devid(),
+            &cp,
+        );
+        let out = head
+            .advance(
+                rk,
+                cp,
+                DsmOperation::Noop,
+                vec![0xC0u8; 32],
+                None,
+                &[],
+                Some(init),
+                Some(AnchorLeafUpdate {
+                    key: art.anchor_leaf.key,
+                    new_value: art.anchor_leaf.new_value,
+                }),
+            )
+            .expect("bearer advance");
+
+        let ap = out.anchor_proofs.clone().expect("anchor proofs");
+        let before = out.smt_proofs.pre_root;
+        let after = out.child_r_a;
+        let binding = AnchorStateBinding {
+            sender_smt_root: &after,
+            sender_smt_root_before: &before,
+            prev_proof: &ap.parent,
+            next_proof: &ap.child,
+        };
+        // COMPLETE pin = the producer's own enrolled material + the slot/stpub A would provision.
+        let pin = FusedAnchorPin {
+            bundle: art.pin.bundle,
+            anchor_id: art.pin.anchor_id,
+            enrolled_counter: art.pin.enrolled_counter,
+            partition_pk: art.pin.partition_pk.clone(),
+            uncompromised: true,
+            verifier_slot: Some(1),
+            chip_static_pubkey: Some([0xCC; 32]),
+        };
+        let pinned = PinnedAnchor::from_fused(&pin);
+        let expected_h = (pin.enrolled_counter - 1) as u32; // H = H0 - (u_i+1), transfer 1
+        let commitment = [0x42u8; 32];
+
+        // Helper: run the exact confirm seam (`resolve_attested_counter` -> predicate) and report the
+        // acceptance result, mirroring `handle_confirm_request` byte-for-byte.
+        let accept_with = |attested: Option<([u8; 32], u64)>| {
+            accept_offline_release_with_relay_counter(
+                &art.offline_release,
+                Some(&pinned),
+                &art.appliance_prev_root,
+                &recipient,
+                &r_r,
+                &policy_hash,
+                &binding,
+                attested,
+            )
+        };
+
+        // ---- (1) HAPPY PATH: correct counter through the relay -> ACCEPT ---------------------------
+        let a = Arc::new(TropicRelayRouter::new());
+        a.set_local_pico(Arc::new(MockPico { h: expected_h }));
+        let reader: Arc<dyn AnchorCounterReader> = Arc::new(RelayMockReader { a: Some(a) });
+        let attested =
+            resolve_attested_counter(Some(&pin), Some(reader.clone()), sender_dev, commitment)
+                .await;
+        assert_eq!(
+            attested,
+            Some((pin.anchor_id, expected_h as u64)),
+            "the counter must flow through the relay to the seam"
+        );
+        accept_with(attested).expect("correct relay counter must accept");
+
+        // ---- (2) NO READER INSTALLED -> None -> online recovery ------------------------------------
+        let attested = resolve_attested_counter(Some(&pin), None, sender_dev, commitment).await;
+        assert_eq!(attested, None, "no reader must yield no counter");
+        assert!(
+            matches!(accept_with(attested), Err(OfflineRecover::Predicate(_))),
+            "no reader must recover online"
+        );
+
+        // ---- (3) NO LOCAL PICO on A (relay pipe down) -> None -> online recovery -------------------
+        let a_nopico = Arc::new(TropicRelayRouter::new()); // no set_local_pico
+        let reader_nopico: Arc<dyn AnchorCounterReader> =
+            Arc::new(RelayMockReader { a: Some(a_nopico) });
+        let attested =
+            resolve_attested_counter(Some(&pin), Some(reader_nopico), sender_dev, commitment).await;
+        assert_eq!(
+            attested, None,
+            "no local Pico must fail the relay read closed"
+        );
+        assert!(matches!(
+            accept_with(attested),
+            Err(OfflineRecover::Predicate(_))
+        ));
+
+        // ---- (4) INCOMPLETE PIN (no slot writer / no deriver provisioned it) -> None -> recovery ---
+        // A first-transfer pin admitted before HW provisioning has verifier_slot = None; that is the
+        // receiver-observable form of "no SeSlotWriter" and "no VerifierPairingDeriver" (the sender
+        // never provisioned the slot / B never offered a pairing key), so the read is never attempted.
+        let incomplete = FusedAnchorPin {
+            verifier_slot: None,
+            chip_static_pubkey: None,
+            ..pin.clone()
+        };
+        let attested = resolve_attested_counter(
+            Some(&incomplete),
+            Some(reader.clone()),
+            sender_dev,
+            commitment,
+        )
+        .await;
+        assert_eq!(
+            attested, None,
+            "an incomplete pin must never be counter-read"
+        );
+        assert!(matches!(
+            accept_with(attested),
+            Err(OfflineRecover::Predicate(_))
+        ));
+
+        // ---- (5) WRONG COUNTER through the relay -> predicate rejects -> recovery ------------------
+        let a_wrong = Arc::new(TropicRelayRouter::new());
+        a_wrong.set_local_pico(Arc::new(MockPico { h: expected_h + 1 }));
+        let reader_wrong: Arc<dyn AnchorCounterReader> =
+            Arc::new(RelayMockReader { a: Some(a_wrong) });
+        let attested =
+            resolve_attested_counter(Some(&pin), Some(reader_wrong), sender_dev, commitment).await;
+        assert_eq!(
+            attested,
+            Some((pin.anchor_id, (expected_h + 1) as u64)),
+            "the (wrong) counter still flows to the seam"
+        );
+        assert!(
+            matches!(accept_with(attested), Err(OfflineRecover::Predicate(_))),
+            "a wrong counter must be rejected by the predicate"
+        );
+    }
+
     /// SAFETY RAIL for the sender-release thread (both-or-neither): the SIMULATED post-root the
     /// sender puts on the confirm proofs MUST equal the CANONICAL committed post-root — so long as
     /// BOTH advances carry the same `anchor_leaf`. If either side omits it, the roots diverge (the
