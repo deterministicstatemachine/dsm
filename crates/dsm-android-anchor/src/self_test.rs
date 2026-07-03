@@ -6,11 +6,12 @@
 //! the REAL Phone->Pico USB transport proven in H2. The ONLY substitutions vs production are the
 //! loopback `round_trip` (in-process instead of BLE — the H4 seam) and the demo pin below.
 //!
-//! Bench-only wiring: the reader authenticates with the FIXED DSM verifier key, so the bench chip's
-//! verifier slot must hold `dsm_verifier_pairing_pubkey()` (a fresh chip/slot provisioned with the
-//! fixed key — see `usb_provision_verifier_slot`). `KNOWN_BENCH_STPUB` is that chip's pinned Noise
-//! static key (anti-substitution). A full production pin comes from the first-transfer enroll/
-//! disclosure flow instead. Expected result on a provisioned bench chip: `H = 1000`.
+//! Bench-only wiring: the reader authenticates with the FIXED DSM verifier key, so the chip's
+//! verifier slot must hold `dsm_verifier_pairing_pubkey()` (provisioned with the fixed key — see
+//! `usb_verifier_slot`). `KNOWN_BENCH_STPUB` is that chip's pinned Noise static key (anti-
+//! substitution). A full production pin comes from the first-transfer enroll/disclosure flow instead.
+//! It reports whatever counter `H` the chip returns and treats that as `H0` — NOT a fixed `1000`
+//! (that was only a bring-up placeholder; after `counter-init` the chip reads the max budget).
 
 use std::sync::Arc;
 
@@ -36,13 +37,14 @@ const KNOWN_BENCH_STPUB: [u8; 32] = [
 /// index the `usb_verifier_slot` bench CLI actually burned (`commit --slot 2`).
 const VERIFIER_SLOT: u8 = 2;
 
-/// Synthetic-but-complete demo pin: exactly the fields `read_counter` gates on (verifier slot,
-/// pinned chip static key, uncompromised); the acceptance-predicate fields are placeholders.
+/// Synthetic-but-complete demo pin: exactly the fields the reader gates on (verifier slot, pinned
+/// chip static key, uncompromised). The acceptance-predicate fields (incl. `enrolled_counter`/H0) are
+/// placeholders NOT exercised by this read-only counter read — set to 0, never a stale `1000`.
 fn demo_pin() -> dsm::crypto::anchor_enrollment::FusedAnchorPin {
     dsm::crypto::anchor_enrollment::FusedAnchorPin {
         bundle: [0u8; 32],
         anchor_id: [0u8; 32],
-        enrolled_counter: 1000,
+        enrolled_counter: 0,
         partition_pk: Vec::new(),
         uncompromised: true,
         verifier_slot: Some(VERIFIER_SLOT),
@@ -73,7 +75,7 @@ fn loopback_round_trip(router: Arc<TropicRelayRouter>) -> RelayRoundTrip {
 }
 
 /// Drive one attested counter read through the full production reader stack over `pico`.
-/// Returns the live counter `H` (expect 1000 on the bench chip) or `None` fail-closed.
+/// Returns whatever live counter `H` the chip reports (treated as `H0`), or `None` fail-closed.
 pub async fn demo_counter_read_via_local_pico(pico: Arc<dyn LocalPicoTransport>) -> Option<u32> {
     let router = Arc::new(TropicRelayRouter::new());
     router.set_local_pico(pico);

@@ -28,9 +28,9 @@
 mod usb;
 
 use dsm_anchor_hw_verifier::{
-    commit_verifier_slot, dsm_verifier_pairing_pubkey, find_provisioned_slot,
-    preflight_verifier_slot, read_verifier_slot, VerifierSlotState, ALLOW_FACTORY_OPEN, DENY,
-    VERIFIER_SLOT_CANDIDATES,
+    commit_verifier_slot, dsm_verifier_pairing_pubkey, find_provisioned_slot, init_counter_max,
+    preflight_verifier_slot, read_counter, read_verifier_slot, VerifierSlotState,
+    ALLOW_FACTORY_OPEN, DENY, MCOUNTER_MAX, VERIFIER_SLOT_CANDIDATES,
 };
 
 fn print_plan(slot: u16) {
@@ -135,6 +135,38 @@ fn main() {
                 }
             },
         },
+        "counter-status" => match read_counter(make()) {
+            Ok(v) => {
+                println!("[counter] mcounter[0] current : {v}");
+                println!("[counter] intended max (H0)   : {MCOUNTER_MAX}");
+                println!(
+                    "[counter] {}",
+                    if v == MCOUNTER_MAX {
+                        "already at max"
+                    } else {
+                        "NOT at max (still a placeholder / partially spent) — counter-init sets it"
+                    }
+                );
+            }
+            Err(e) => {
+                eprintln!("[counter] read failed: {e:?}");
+                std::process::exit(1);
+            }
+        },
+        "counter-init" => {
+            if !args.iter().any(|a| a == "--yes-init-counter-max") {
+                eprintln!("[counter-init] REFUSING: pass --yes-init-counter-max to set mcounter[0] to {MCOUNTER_MAX} (device budget). This is a slot-0 setup write; run it BEFORE the verifier-slot burn.");
+                std::process::exit(2);
+            }
+            println!("[counter-init] setting mcounter[0] to MCOUNTER_MAX = {MCOUNTER_MAX} ...");
+            match init_counter_max(make()) {
+                Ok(v) => println!("[counter-init] OK: mcounter[0] read-back = {v} (== max)"),
+                Err(e) => {
+                    eprintln!("[counter-init] FAILED: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "preflight" => {
             let s = require_slot(slot);
             match preflight_verifier_slot(s, make()) {
@@ -185,7 +217,7 @@ fn main() {
             }
         }
         other => {
-            eprintln!("[verifier-slot] unknown subcommand '{other}' (use: status | preflight | commit)");
+            eprintln!("[verifier-slot] unknown subcommand '{other}' (use: counter-status | counter-init | status | preflight | commit)");
             std::process::exit(2);
         }
     }

@@ -56,6 +56,26 @@ run usb_verifier_slot -- status --slot "$SLOT" "$PORT"
 | `PROVISIONED` | already done (idempotent) — no burn |
 | `OCCUPIED` | **stop.** Do NOT overwrite. Pick another empty candidate index and re-confirm. |
 
+## 3b. Set the counter budget to max (SEPARATE slot-0 setup, BEFORE the slot burn)
+
+The monotonic counter is the device's lifetime offline-bearer budget (`H0`). It must be initialized
+to the hardware max, not the `1000` bring-up placeholder. This is a distinct operation from the
+verifier-slot burn — do it first so the enrolled `H0` is the real max.
+
+```sh
+run usb_verifier_slot -- counter-status "$PORT"      # prints current mcounter[0] vs intended max
+```
+
+Only if it is not already at max, and after fresh approval:
+
+```sh
+run usb_verifier_slot -- counter-init --yes-init-counter-max "$PORT"   # slot-0 write; sets + reads back
+```
+
+It refuses without `--yes-init-counter-max`. On success it prints the read-back value; **confirm it
+equals `MCOUNTER_MAX` (4294967294)** before continuing. Re-run `counter-status` to double-check.
+From here on, every diagnostic reads whatever the chip reports as `H0` — never assume `1000`.
+
 ## 4. Read-only preflight against the actual chip (the key protection)
 
 ```sh

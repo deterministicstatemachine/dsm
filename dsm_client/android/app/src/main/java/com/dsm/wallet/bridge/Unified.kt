@@ -107,6 +107,12 @@ object Unified {
     // slot-2 preflight on A's local chip, logging results to logcat under "se-slot". Lets an operator
     // inspect the chip THROUGH the phone (via adb) without moving it to a bench.
     @Keep @JvmStatic external fun verifierSlotStatus(): Int
+
+    // GATED device-setup WRITE (only in on_device_installs-feature .so builds; absent otherwise):
+    // initialize mcounter[0] to the max device budget on A's local chip, via slot 0. Returns the
+    // read-back counter (>= 0) or -1. Invoked deliberately by the operator over ADB (see
+    // DsmSetupOpReceiver); never from app boot or a transfer. Callers must catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun counterInitMax(): Long
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =

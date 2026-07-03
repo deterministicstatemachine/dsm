@@ -103,6 +103,25 @@ class PicoSelfTestActivity : Activity() {
                 } catch (e: UnsatisfiedLinkError) {
                     Log.w(TAG, "verifierSlotStatus not in this .so: ${e.message}")
                 }
+                // GATED device-setup WRITE — counter-init to max. Runs ONLY when explicitly launched
+                // with `--ez run_counter_init true --es confirm yes-init-counter-max` (a normal
+                // USB-attach launch has neither, so it stays read-only). The counterInitMax symbol is
+                // present only in on_device_installs-feature .so builds.
+                val doCounterInit = intent?.getBooleanExtra("run_counter_init", false) == true
+                val confirm = intent?.getStringExtra("confirm")
+                if (doCounterInit) {
+                    if (confirm == "yes-init-counter-max") {
+                        val v = try {
+                            com.dsm.wallet.bridge.Unified.counterInitMax()
+                        } catch (e: UnsatisfiedLinkError) {
+                            Log.e(TAG, "counterInitMax not in this .so (needs on_device_installs): ${e.message}")
+                            -2L
+                        }
+                        Log.i(TAG, "*** counter-init result = $v (max=4294967294) ***")
+                    } else {
+                        Log.e(TAG, "counter-init REFUSED: confirm must be 'yes-init-counter-max' (got '$confirm')")
+                    }
+                }
             } else {
                 Log.e(TAG, "*** H2 FAIL: no real chip response (see resp above) ***")
             }
