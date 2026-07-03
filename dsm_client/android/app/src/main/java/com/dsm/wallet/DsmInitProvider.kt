@@ -22,7 +22,11 @@ class DsmInitProvider : ContentProvider() {
 
             // Finally, resolve the class to ensure its static initializers run.
             Class.forName("com.dsm.wallet.bridge.Unified")
-            
+
+            // Cache the app context for the Phone->Pico USB transport (Path-B relay). Cheap + safe:
+            // it only opens the Pico lazily on the first counter read, and accepts no value by itself.
+            context?.let { com.dsm.wallet.bridge.LocalPicoUsb.init(it) }
+
             // Library loaded successfully - clear any previous incompatibility flag
             context?.let {
                 it.getSharedPreferences("dsm_system", android.content.Context.MODE_PRIVATE)

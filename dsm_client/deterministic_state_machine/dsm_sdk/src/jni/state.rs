@@ -33,6 +33,16 @@ pub fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// Resolve a peer's current BLE address from its device_id (the reverse of
+/// [`register_ble_address_mapping`]). Used by the Path-B relay round-trip to address the sender.
+/// Returns `None` if the peer has no observed address yet (relay then fails closed).
+pub fn resolve_ble_address(device_id: &[u8; 32]) -> Option<String> {
+    match DEVICE_ID_TO_ADDR.lock() {
+        Ok(map) => map.get(device_id).cloned(),
+        Err(poisoned) => poisoned.into_inner().get(device_id).cloned(),
+    }
+}
+
 /// Register a BLE address mapping for a device_id in the in-memory resolution map.
 /// Called from BLE pairing flow (ble_events.rs) and on every reconnect identity
 /// observation so the map tracks the peer's current RPA.

@@ -10,6 +10,12 @@ description = "On-device glue that installs the DSM Boot Fenced Fused Anchor har
 # rlib for host tests; staticlib/cdylib so the Android build can link the on-device JNI shell (H3).
 crate-type = ["rlib", "staticlib", "cdylib"]
 
+[features]
+# OFF by default. Compiles the ACCEPT-ENABLING receiver-reader install (install.rs) + its JNI
+# trigger. A default build cannot accept offline-bearer value — the reader never even compiles in.
+# The device layer enables this for the 2-phone bench test; the production flip is the owner's call.
+on_device_installs = []
+
 [dependencies]
 # The SDK whose bridge install seams we fill. One-directional: dsm_sdk never depends back on us.
 dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
