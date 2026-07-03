@@ -18,3 +18,11 @@ dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
 dsm-anchor-hw-verifier = { path = "../dsm-anchor-hw-verifier" }
 # The tropic01-free relay spine — for `RelayError` in the injected round-trip type.
 dsm-anchor-verifier = { path = "../dsm-anchor-verifier" }
+# The OP_SPI_PASSTHROUGH ApplianceRequest/Response codec (tropic01-free) — the Phone->Pico USB
+# bridge frames requests / decodes responses in Rust so Kotlin stays an opaque byte transport.
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+log = "0.4"
+
+[dev-dependencies]
+# Poll the boxed PicoFuture in host tests without a full async runtime.
+futures = { version = "0.3", default-features = false, features = ["executor"] }
