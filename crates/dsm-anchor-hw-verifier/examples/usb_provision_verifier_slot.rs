@@ -21,7 +21,7 @@
 #[path = "shared/usb.rs"]
 mod usb;
 
-use dsm_anchor_hw_verifier::{derive_pairing_pubkey, derive_pairing_secret_bytes};
+use dsm_anchor_hw_verifier::{dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_bytes};
 use dsm_anchor_verifier::RemoteSpiDevice;
 use std::time::{Duration, Instant};
 
@@ -41,11 +41,9 @@ const VERIFIER_SLOT: u16 = 1;
 /// Absolute bit indices of the SH1 (session/slot-1) access bit across the 4 lanes of a UAP register.
 const SH1_BITS: [u8; 4] = [1, 9, 17, 25];
 
-/// Bench-demo B verifier pairing key = the reader's own derivation over a fixed demo (B seed, A
-/// peer). Slot 1 will PERMANENTLY hold this key; a real 2-device run re-provisions a fresh chip/slot
-/// with the real receiver's key. Kept identical to `RelayCounterReader`'s derivation on purpose.
-const B_DEMO_SEED: [u8; 32] = [0xB0; 32];
-const A_DEMO_PEER: [u8; 32] = [0xA0; 32];
+// The verifier pairing key is the FIXED DSM verifier key (the SAME one `RelayCounterReader` opens
+// the session with — the SMT-root counter path uses one caged slot for all relationships). Slot 1
+// PERMANENTLY holds this well-known key; every receiver reads through it.
 
 /// Registers whose SH1 access must be REVOKED. I_CONFIG_WRITE is last so the verifier can never
 /// loosen its own cage; ordering is otherwise cosmetic (we act as SH0, never clearing SH0 bits).
@@ -94,8 +92,8 @@ fn main() {
     }
     let dev = dev.unwrap_or_else(usb::find_port);
 
-    let b_pub = derive_pairing_pubkey(&B_DEMO_SEED, &A_DEMO_PEER);
-    let b_priv = derive_pairing_secret_bytes(&B_DEMO_SEED, &A_DEMO_PEER);
+    let b_pub = dsm_verifier_pairing_pubkey();
+    let b_priv = dsm_verifier_pairing_secret_bytes();
 
     // ---- Plan (printed before ANY write) --------------------------------------------------------
     println!("=== Phase-G verifier-slot provisioning PLAN (bench TROPIC01) ===");

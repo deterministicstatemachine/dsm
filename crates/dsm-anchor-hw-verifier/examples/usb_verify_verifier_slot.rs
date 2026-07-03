@@ -17,7 +17,7 @@ mod usb;
 
 use std::time::{Duration, Instant};
 
-use dsm_anchor_hw_verifier::{derive_pairing_pubkey, derive_pairing_secret_bytes};
+use dsm_anchor_hw_verifier::{dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_bytes};
 use dsm_anchor_verifier::RemoteSpiDevice;
 use tropic01::keys::{SH0PRIV_PROD0, SH0PUB_PROD0};
 use tropic01::{Error as TrError, MCounterIndex, StartupReq, Tropic01, X25519Dalek};
@@ -25,8 +25,6 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zerocopy::little_endian::U16;
 
 const VERIFIER_SLOT: u16 = 1;
-const B_DEMO_SEED: [u8; 32] = [0xB0; 32];
-const A_DEMO_PEER: [u8; 32] = [0xA0; 32];
 
 /// The bench chip's pinned Noise static key (captured by usb_uap_probe / provisioning). Verification
 /// asserts the relay reached THIS chip before trusting anything it reports.
@@ -50,8 +48,8 @@ fn is_unauthorized<A, B>(r: &Result<impl Sized, TrError<A, B>>) -> bool {
 
 fn main() {
     let dev = std::env::args().nth(1).unwrap_or_else(usb::find_port);
-    let b_pub = derive_pairing_pubkey(&B_DEMO_SEED, &A_DEMO_PEER);
-    let b_priv = derive_pairing_secret_bytes(&B_DEMO_SEED, &A_DEMO_PEER);
+    let b_pub = dsm_verifier_pairing_pubkey();
+    let b_priv = dsm_verifier_pairing_secret_bytes();
 
     eprintln!("[verify] port = {dev}");
     let port = usb::open_and_drain(&dev);

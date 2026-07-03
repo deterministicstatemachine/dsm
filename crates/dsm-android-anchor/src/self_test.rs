@@ -6,10 +6,11 @@
 //! the REAL Phone->Pico USB transport proven in H2. The ONLY substitutions vs production are the
 //! loopback `round_trip` (in-process instead of BLE — the H4 seam) and the demo pin below.
 //!
-//! Bench-only wiring: the demo verifier identity (`B_DEMO_SEED`/`A_DEMO_PEER`) is the pairing key
-//! Phase G burned into the bench chip's READ-ONLY verifier slot 1, and `KNOWN_BENCH_STPUB` is that
-//! chip's pinned Noise static key (anti-substitution). A full production pin comes from the
-//! first-transfer enroll/disclosure flow instead. Expected result on the bench chip: `H = 1000`.
+//! Bench-only wiring: the reader authenticates with the FIXED DSM verifier key, so the bench chip's
+//! verifier slot must hold `dsm_verifier_pairing_pubkey()` (a fresh chip/slot provisioned with the
+//! fixed key — see `usb_provision_verifier_slot`). `KNOWN_BENCH_STPUB` is that chip's pinned Noise
+//! static key (anti-substitution). A full production pin comes from the first-transfer enroll/
+//! disclosure flow instead. Expected result on a provisioned bench chip: `H = 1000`.
 
 use std::sync::Arc;
 
@@ -19,9 +20,8 @@ use dsm_sdk::bluetooth::tropic_relay::{
     AnchorCounterReader, LocalPicoTransport, TropicRelayRouter,
 };
 
-/// Phase-G demo verifier identity: the bench chip's slot-1 pairing key is
-/// `derive_pairing_pubkey(B_DEMO_SEED, A_DEMO_PEER)` (see `usb_provision_verifier_slot`).
-const B_DEMO_SEED: [u8; 32] = [0xB0; 32];
+/// A dummy peer device id — for the loopback it only labels the relay round-trip (the verifier
+/// pairing key is the fixed DSM constant, independent of the peer).
 const A_DEMO_PEER: [u8; 32] = [0xA0; 32];
 
 /// The bench chip's pinned Noise static key (captured at provisioning; asserted by
@@ -75,7 +75,7 @@ fn loopback_round_trip(router: Arc<TropicRelayRouter>) -> RelayRoundTrip {
 pub async fn demo_counter_read_via_local_pico(pico: Arc<dyn LocalPicoTransport>) -> Option<u32> {
     let router = Arc::new(TropicRelayRouter::new());
     router.set_local_pico(pico);
-    let reader = RelayCounterReader::new(B_DEMO_SEED, loopback_round_trip(router));
+    let reader = RelayCounterReader::new(loopback_round_trip(router));
     // Any 32-byte correlation id works for the single in-process exchange.
     let commitment = [0x5Eu8; 32];
     reader
