@@ -28,6 +28,13 @@ const VERIFIER_SLOT: u16 = 1;
 const B_DEMO_SEED: [u8; 32] = [0xB0; 32];
 const A_DEMO_PEER: [u8; 32] = [0xA0; 32];
 
+/// The bench chip's pinned Noise static key (captured by usb_uap_probe / provisioning). Verification
+/// asserts the relay reached THIS chip before trusting anything it reports.
+const KNOWN_BENCH_STPUB: [u8; 32] = [
+    0xd1, 0x87, 0xbc, 0xf1, 0x08, 0x9e, 0x9d, 0xaa, 0xb6, 0x4e, 0x5c, 0x0b, 0x96, 0xfd, 0x3a, 0x26,
+    0x91, 0xe0, 0xd3, 0x70, 0x91, 0x0a, 0x07, 0xdb, 0x82, 0x1a, 0x32, 0x25, 0x83, 0x0f, 0xbe, 0x7d,
+];
+
 /// Restricted registers (must show SH1 access bits {1,9,17,25} cleared in i-config).
 const DENY: &[(u16, &str)] = &[
     (0x020, "PAIRING_KEY_WRITE"),
@@ -49,7 +56,21 @@ fn main() {
     eprintln!("[verify] port = {dev}");
     let port = usb::open_and_drain(&dev);
     eprintln!("\n[verify] serve loop quiet; starting libtropic over RemoteSpiDevice");
-    let chip = Tropic01::new(RemoteSpiDevice::new(usb::UsbPassthrough { port }));
+    let mut chip = Tropic01::new(RemoteSpiDevice::new(usb::UsbPassthrough { port }));
+
+    // ---- 0) Anti-substitution: the relay must have reached THE bench chip (literal stpub match) --
+    let stpub: [u8; 32] = *chip
+        .get_info_cert_store()
+        .expect("get_info_cert_store")
+        .public_key()
+        .expect("cert public_key");
+    let stpub_ok = stpub == KNOWN_BENCH_STPUB;
+    println!("[verify] chip stpub: {stpub:02x?}");
+    println!("[verify] stpub == expected bench chip: {stpub_ok}");
+    if !stpub_ok {
+        eprintln!("[FATAL] stpub mismatch — relay reached the WRONG chip. STOP.");
+        std::process::exit(1);
+    }
 
     // ---- 1) Read back i-config to prove the restriction writes landed --------------------------
     let eh = StaticSecret::from([0x42u8; 32]);
