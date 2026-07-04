@@ -21,7 +21,8 @@ use crate::bridge::install_bilateral_handler as install_sdk_bilateral_handler;
 use crate::bridge::install_unilateral_handler as install_sdk_unilateral_handler;
 use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
-    AppRouterImpl, BiImpl, UniImpl, handle_system_genesis_query, install_app_router_adapter,
+    handle_create_genesis_v2_query, handle_generate_mnemonic_query, handle_system_genesis_query,
+    install_app_router_adapter, AppRouterImpl, BiImpl, UniImpl,
 };
 use dsm::types::proto as pb;
 use prost::Message;
@@ -475,6 +476,12 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                         }
                     }
                     "system.genesis" => handle_system_genesis_query(q),
+                    // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
+                    // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
+                    // wallet seed + establishes the identity — after which a re-init installs the full
+                    // router. Without these, a fresh device can never create a wallet (chicken-and-egg).
+                    "system.generateMnemonic" => handle_generate_mnemonic_query(),
+                    "system.createGenesisV2" => handle_create_genesis_v2_query(q),
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),

@@ -45,5 +45,7 @@ pub mod token_routes;
 pub mod transfer_helpers;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;
-pub(crate) use system_routes::handle_system_genesis_query;
+pub(crate) use system_routes::{
+    handle_create_genesis_v2_query, handle_generate_mnemonic_query, handle_system_genesis_query,
+};
 pub use unilateral_impl::UniImpl;
