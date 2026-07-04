@@ -1735,6 +1735,12 @@ message BilateralPrepareRequest {
   string memo_hint               = 13; // optional transfer memo
   string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
   reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
+  // Sender's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
+  // The device Kyber keypair is deliberately RANDOMIZED per wallet init (no persisted device
+  // secret), so the peer's copy must be refreshed on every prepare exchange — exactly like
+  // sender_signing_public_key above. The receiver persists it on the contact record; the
+  // §11.1 per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
+  bytes  sender_kyber_public_key = 16 [(dsm_max_len)=1184];
 }
 // B -> A, rides BilateralPrepareResponse (Boot Fenced Fused Anchor, receiver-admit fold).
 // On the FIRST offline-bearer transfer with an already-verified contact, the value receiver B
@@ -1779,6 +1785,10 @@ message BilateralPrepareResponse {
   // Receiver-admit fold: present iff this is an offline-bearer transfer with an already-verified
   // contact for which B holds no pin yet (first-transfer enrollment request). See AnchorEnrollRequest.
   AnchorEnrollRequest anchor_enroll_request = 8;
+  // Responder's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
+  // Mirrors responder_signing_public_key: the sender persists it on the contact record so the
+  // §11.1 per-step EK receipt built in the immediately following confirm can encapsulate to it.
+  bytes  responder_kyber_public_key = 9 [(dsm_max_len)=1184];
 }
 
 enum RelationshipSendCheckState {

@@ -101,6 +101,7 @@ fn anchor_enroll_and_disclosure_roundtrip_on_bilateral_messages() {
         anchor_enroll_request: Some(AnchorEnrollRequest {
             verifier_pairing_pubkey: vec![0xB0; 32],
         }),
+        responder_kyber_public_key: vec![],
     };
     let prep2 = BilateralPrepareResponse::decode(prep.encode_to_vec().as_slice()).unwrap();
     assert_eq!(

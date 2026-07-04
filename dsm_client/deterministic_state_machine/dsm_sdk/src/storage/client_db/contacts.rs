@@ -1332,6 +1332,49 @@ pub fn update_contact_public_key(device_id: &[u8], public_key: &[u8]) -> Result<
     Ok(())
 }
 
+/// Update a contact's ML-KEM-768 (Kyber) encapsulation key from a live bilateral prepare
+/// exchange. The peer's Kyber keypair is randomized per wallet init, so this is refreshed on
+/// every exchange (mirrors [`update_contact_public_key`]); per-step EK receipts encapsulate
+/// to this key and fail-close when it is absent.
+pub fn update_contact_kyber_key(device_id: &[u8], kyber_public_key: &[u8]) -> Result<()> {
+    if device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+    // ML-KEM-768 encapsulation key is exactly 1184 bytes; never persist anything else.
+    if kyber_public_key.len() != 1184 {
+        return Err(anyhow!(
+            "Invalid Kyber public key length {} (expected 1184)",
+            kyber_public_key.len()
+        ));
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let rows_changed = conn.execute(
+        "UPDATE contacts SET kyber_public_key = ?1 WHERE device_id = ?2",
+        params![kyber_public_key, device_id],
+    )?;
+
+    if rows_changed == 0 {
+        info!(
+            "No contact found with device_id={:?} to update kyber_public_key",
+            &device_id[..8]
+        );
+    } else {
+        info!(
+            "Updated contact kyber_public_key: device_id={:?} key_len={}",
+            &device_id[..8],
+            kyber_public_key.len()
+        );
+    }
+
+    Ok(())
+}
+
 /// Remove a contact by its contact_id. Returns Ok(true) if a row was deleted, Ok(false) if not found.
 pub fn remove_contact(contact_id: &str) -> Result<bool> {
     let binding = get_connection()?;
