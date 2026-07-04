@@ -1,0 +1,31 @@
+# DSM environment config — Alibaba Cloud storage nodes (3-node, us-west-1)
+# Push to device with: scripts/push_env_override.sh --alibaba
+#
+# Nodes (ECS, VPC vpc-rj9oepiel1c2517avaboj, sg dsm-storage-sg):
+#   us-west-1a: 47.251.246.93, 47.251.250.159, 47.251.88.58
+
+protocol = "https"
+lan_ip = "0.0.0.0"
+allow_localhost = false
+storage_node_mode = "remote"
+ports = [8080]
+
+bitcoin_network = "signet"
+dbtc_min_confirmations = 1
+mempool_api_url = "https://mempool.space"
+
+# Self-signed CA for Alibaba storage node TLS certs
+# Path is relative to this config file's directory (resolved by SDK).
+custom_ca_certs = ["ca.crt"]
+
+[[nodes]]
+name = "us-west-1a-1"
+endpoint = "https://47.251.246.93:8080"
+
+[[nodes]]
+name = "us-west-1a-2"
+endpoint = "https://47.251.250.159:8080"
+
+[[nodes]]
+name = "us-west-1a-3"
+endpoint = "https://47.251.88.58:8080"
