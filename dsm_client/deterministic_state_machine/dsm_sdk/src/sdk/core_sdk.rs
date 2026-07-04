@@ -70,7 +70,7 @@ pub struct CoreSDK {
     /// its down-counter + fused-anchor lineage advance. Its `commit_0` is bootstrapped into the
     /// DeviceState anchor-state leaf on birth; each bearer transfer drives PREPARE→COMMIT→EMIT→
     /// FINALIZE and advances the leaf in the same `DeviceState::advance`.
-    anchor_appliance: Mutex<Option<crate::anchor::InProcessAnchorAppliance>>,
+    anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
 }
 
 /* ------------------------------- Helpers -------------------------------- */
@@ -1602,7 +1602,6 @@ impl CoreSDK {
         action_fields: Vec<u8>,
         receiver_challenge: [u8; 32],
     ) -> Result<OfflineBearerArtifacts, DsmError> {
-        use crate::anchor::{AnchorAppliance, BirthConfig, InProcessAnchorAppliance};
         use dsm::core::bilateral_transaction_manager::{anchor_state_commit, anchor_state_leaf_key};
 
         let dev = self.device_info.device_id;
@@ -1610,34 +1609,40 @@ impl CoreSDK {
 
         let mut guard = self.anchor_appliance.lock();
         if guard.is_none() {
-            // Birth the device appliance from deterministic device-derived material (in-process
-            // mock silicon; real chip material is hardware follow-on).
-            let app = InProcessAnchorAppliance::birth_and_boot(&BirthConfig {
-                partition_trng: seed("DSM/anchor/partition-trng/v1"),
-                host_nonce: seed("DSM/anchor/host-nonce/v1"),
-                device_id: dev,
-                policy_hash: seed("DSM/anchor/policy-hash/v1"),
-                partition_device_id: seed("DSM/anchor/partition-device-id/v1"),
-                anchor_id: seed("DSM/anchor/anchor-id/v1"),
-                partition_key_seed: seed("DSM/anchor/partition-key-seed/v1"),
-                enrolled_counter: 1_000_000,
-                q_boot: 5,
-                q_tx: 6,
-                genesis_root: seed("DSM/anchor/genesis-root/v1"),
-                firmware_measurement: seed("DSM/anchor/firmware-measurement/v1"),
-                se_secret: seed("DSM/anchor/se-secret/v1"),
-            })?;
-            // Bootstrap commit_0 = (B, A_0, J_0, 0) into the DeviceState anchor-state leaf.
-            let st = {
-                // status() needs &mut; take it, read, put back below.
-                let mut a = app;
+            // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
+            // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
+            // producer. The factory is called once and cached (stateful appliance).
+            let mut a: Box<dyn crate::anchor::AnchorAppliance + Send> =
+                match crate::bridge::anchor_appliance_factory() {
+                    Some(factory) => factory()?,
+                    None => hardware_appliance_or_fail(&seed, dev)?,
+                };
+            // Reconcile the DeviceState anchor-state leaf to the appliance's CURRENT committed fused
+            // state, sourced from the chip's own status()/pin() (chip identity for hardware; seeds for
+            // the test mock). The CHIP is the source of truth for the counter, so this uses its live
+            // `anchor_counter` (u), NOT a hardcoded 0:
+            //   * fresh provisioned chip -> u == 0 (H == H0), the genesis commit;
+            //   * process restart with k prior offline-bearer transfers (possibly with ONLINE transfers
+            //     in between — those advance the device SMT but never touch the chip counter) -> u == k,
+            //     so the leaf adopts the true post-k state instead of resetting to genesis;
+            //   * device-state/chip divergence -> the hardware wins (a monotonic counter cannot lie).
+            // Writing the current committed state is idempotent when the leaf already matches.
+            {
                 let s = a.status()?;
                 let pin = a.pin();
-                // commit_0 must commit the COMMITTED boot head (what the first transfer's cert reports
-                // as `prev_boot_head`), NOT the live `boot_head` — `birth_and_boot` advances the live
-                // head past the committed one, so they differ at genesis until the first finalize.
-                let commit0 =
-                    anchor_state_commit(&pin.bundle, &s.anchor_head, &s.committed_boot_head, 0);
+                // Commit the COMMITTED boot head (what the next transfer's cert reports as
+                // `prev_boot_head`), NOT the live `boot_head` — a boot advance moves the live head past
+                // the committed one until the next finalize.
+                let committed = anchor_state_commit(
+                    &pin.bundle,
+                    &s.anchor_head,
+                    &s.committed_boot_head,
+                    s.anchor_counter,
+                );
+                log::info!(
+                    "[offline-bearer] anchor-state leaf reconciled to chip state: u(anchor_counter)={} (online-transfer-safe; chip is source of truth)",
+                    s.anchor_counter
+                );
                 let key = anchor_state_leaf_key(&pin.bundle);
                 {
                     let mut sm = self.state_machine.lock();
@@ -1646,13 +1651,11 @@ impl CoreSDK {
                             "offline-bearer: DeviceState not initialized (genesis first)",
                         )
                     })?;
-                    let bootstrapped = ds.with_anchor_state_leaf(&key, &commit0)?;
+                    let bootstrapped = ds.with_anchor_state_leaf(&key, &committed)?;
                     sm.set_device_head(bootstrapped);
                 }
                 *guard = Some(a);
-                s
-            };
-            let _ = st;
+            }
         }
 
         let app = guard.as_mut().ok_or_else(|| {
@@ -1716,6 +1719,44 @@ impl CoreSDK {
 }
 
 /* ------------------------------ Private helpers ------------------------- */
+
+/// The sender-side appliance when NO hardware factory is installed. Test builds get the in-process
+/// mock so the release-path unit tests keep exercising `build_offline_bearer_release`; real device
+/// builds FAIL CLOSED — offline-bearer strictly requires the physical chip ("offline = chips").
+#[cfg(test)]
+fn hardware_appliance_or_fail(
+    seed: &impl Fn(&str) -> [u8; 32],
+    dev: [u8; 32],
+) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
+    use crate::anchor::{BirthConfig, InProcessAnchorAppliance};
+    Ok(Box::new(InProcessAnchorAppliance::birth_and_boot(
+        &BirthConfig {
+            partition_trng: seed("DSM/anchor/partition-trng/v1"),
+            host_nonce: seed("DSM/anchor/host-nonce/v1"),
+            device_id: dev,
+            policy_hash: seed("DSM/anchor/policy-hash/v1"),
+            partition_device_id: seed("DSM/anchor/partition-device-id/v1"),
+            anchor_id: seed("DSM/anchor/anchor-id/v1"),
+            partition_key_seed: seed("DSM/anchor/partition-key-seed/v1"),
+            enrolled_counter: 1_000_000,
+            q_boot: 5,
+            q_tx: 6,
+            genesis_root: seed("DSM/anchor/genesis-root/v1"),
+            firmware_measurement: seed("DSM/anchor/firmware-measurement/v1"),
+            se_secret: seed("DSM/anchor/se-secret/v1"),
+        },
+    )?))
+}
+
+#[cfg(not(test))]
+fn hardware_appliance_or_fail(
+    _seed: &impl Fn(&str) -> [u8; 32],
+    _dev: [u8; 32],
+) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
+    Err(DsmError::invalid_operation(
+        "offline-bearer requires the hardware anchor; connect the Pico and install Path-B (fail closed)",
+    ))
+}
 
 impl CoreSDK {
     fn validate_transfer_request(

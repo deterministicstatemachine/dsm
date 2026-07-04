@@ -3390,6 +3390,15 @@ impl BilateralBleHandler {
                             .as_ref()
                             .map(|ap| ap.policy_id)
                             .unwrap_or([0u8; 32]);
+                        // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
+                        // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
+                        // proof is meaningless. Compared against the canonical value here.
+                        info!(
+                            "[BILATERAL][offline-bearer][sender] chip PREPARE authority_policy_hash={} (canonical_match={})",
+                            bytes_to_base32(&authority_policy_hash),
+                            authority_policy_hash
+                                == dsm::types::operations::canonical_offline_bearer_policy().policy_id
+                        );
                         match router.build_offline_bearer_release(
                             rel_key,
                             session.counterparty_device_id,
@@ -4367,6 +4376,14 @@ impl BilateralBleHandler {
                 } => ap.policy_id,
                 _ => [0u8; 32],
             };
+            // Policy-binding trace (receiver verify): the policy_id this receiver enforces against the
+            // release MUST equal the canonical value the sender bound. A mismatch means the proof does
+            // not attest what we think — reject rather than "run and mean nothing".
+            info!(
+                "[BILATERAL][offline-bearer][receiver] verify policy_id={} (canonical_match={})",
+                bytes_to_base32(&policy_hash),
+                policy_hash == dsm::types::operations::canonical_offline_bearer_policy().policy_id
+            );
             let expected_receiver_challenge = session.receiver_challenge.unwrap_or([0u8; 32]);
             // Anchor-state binding: the sender's device-SMT roots (before = pinned frontier,
             // after = adopted successor) and the two inclusion proofs, as carried on the confirm.

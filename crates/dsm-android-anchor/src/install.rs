@@ -90,6 +90,19 @@ pub fn install_path_b_transports() -> bool {
     log::info!(
         "[anchor-install] read-only SeSlotWriter installed (disclosure fail-closed until setup)"
     );
+
+    // Sender side: the ACCEPT-PRODUCING appliance factory. Each offline-bearer release is built by a
+    // fresh `UsbAnchorAppliance` that drives A's own physical RP2350/TROPIC01 over the same opaque USB
+    // up-call, self-sourcing its pin from a STATUS round-trip. Installing this replaces the in-process
+    // mock so a real send consumes a real counter step. Absent -> offline-bearer fails closed in the
+    // SDK ("offline = chips").
+    dsm_sdk::bridge::install_anchor_appliance_factory(std::sync::Arc::new(|| {
+        let usb: crate::usb_pico::UsbTransceive =
+            std::sync::Arc::new(crate::usb_pico::jni_usb_transceive);
+        crate::usb_appliance::UsbAnchorAppliance::connect(usb)
+            .map(|a| Box::new(a) as Box<dyn dsm_sdk::anchor::AnchorAppliance + Send>)
+    }));
+    log::info!("[anchor-install] UsbAnchorAppliance factory installed (offline-bearer = physical chip)");
     true
 }
 

@@ -248,6 +248,17 @@ fn encode_offline_transfer_operation_canonical(
     push_str(&mut out, memo);
     push_bytes(&mut out, &[]);
 
+    // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"): append the canonical
+    // offline-bearer authority-policy tail so `operation_requires_offline_bearer` fires and the send
+    // drives the physical anchor (fail-closed if no chip). Uses the real `append_canonical` codec, so
+    // the bytes are exactly what `Operation::from_bytes` decodes on the receiver.
+    let policy = dsm::types::operations::canonical_offline_bearer_policy();
+    policy.append_canonical(&mut out);
+    log::info!(
+        "[wallet.sendOffline] offline-bearer authority policy bound: policy_id={}",
+        crate::util::text_id::encode_base32_crockford(&policy.policy_id)
+    );
+
     out
 }
 

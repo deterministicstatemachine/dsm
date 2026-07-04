@@ -83,6 +83,9 @@ fn base(op: i32) -> pb::ApplianceResponse {
         boot_valid: false,
         spi_response: Vec::new(),
         active_committed_boot_head: Vec::new(),
+        pin_anchor_id: Vec::new(),
+        pin_enrolled_counter: 0,
+        pin_partition_pk: Vec::new(),
     }
 }
 
@@ -159,6 +162,9 @@ pub fn dispatch<T: Tropic, S: WitnessSig, P: PartitionSig>(
             active_anchor_counter: app.active.anchor_counter,
             status: status_code(app.active.status),
             boot_valid: app.active.boot_valid,
+            pin_anchor_id: app.anchor_id.to_vec(),
+            pin_enrolled_counter: u64::from(app.h0),
+            pin_partition_pk: app.partition_pk.clone(),
             ..base(op)
         },
         Ok(pb::Op::Cancel) => match app.cancel() {

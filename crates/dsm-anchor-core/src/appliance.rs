@@ -128,6 +128,9 @@ pub struct Appliance<T: Tropic, S: WitnessSig, P: PartitionSig> {
     pub q_boot: u16,
     pub q_tx: u16,
     pub partition_device_id: [u8; 32],
+    /// PUBLIC partition verification key (safe to disclose). Part of the receiver pin material; the
+    /// STATUS op returns it so a host client / disclosure can carry the full `AnchorPin`.
+    pub partition_pk: Vec<u8>,
     pub active: Active,
     /// Set when recovery sees a firmware-boundary / R-memory-map event.
     pub firmware_boundary_invalid: bool,
@@ -164,6 +167,7 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
             q_boot,
             q_tx,
             partition_device_id,
+            partition_pk: birth.partition_pk.clone(),
             active: Active {
                 root: genesis_root,
                 anchor_head: birth.anchor_head,
