@@ -157,6 +157,58 @@ impl SdkConfig {
     }
 }
 
+/// Hot-swap the MinimalBootstrapRouter for the full [`AppRouterImpl`] once the canonical identity is
+/// ready (device_id present + wallet seed cached). This is the single install path for the
+/// *warm* swap — used by `system.createGenesisV2` (fresh wallet) and the JNI `ensureAppRouterInstalled`
+/// (post-unlock on restart) — both of which have no [`SdkConfig`] in hand, so it derives one from the
+/// storage-endpoint registry (falling back to env config). The cold-boot path in [`init_dsm_sdk`]
+/// keeps its caller-supplied `SdkConfig`.
+///
+/// Idempotent: keyed off [`crate::bridge::full_app_router_installed`] so repeated calls don't rebuild
+/// the router. The core adapter reads the router slot live, so the swap takes effect on the next
+/// query without touching the adapter registration.
+///
+/// Returns `Ok(true)` when the full router is installed (now or already), `Ok(false)` when the
+/// canonical identity is not yet ready, and `Err` on a hard construction/install failure.
+pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
+    if crate::bridge::full_app_router_installed() {
+        return Ok(true);
+    }
+    let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
+        && crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
+    if !canonical_identity_ready {
+        return Ok(false);
+    }
+    // Storage endpoints: registry first, env config fallback (same source as cold boot).
+    let storage_endpoints = match crate::network::list_storage_endpoints() {
+        Ok(list) if !list.is_empty() => list,
+        _ => match crate::network::NetworkConfigLoader::load_env_config() {
+            Ok(env) => env.nodes.into_iter().map(|n| n.endpoint).collect(),
+            Err(_) => Vec::new(),
+        },
+    };
+    let cfg = SdkConfig {
+        node_id: "default".to_string(),
+        storage_endpoints,
+        enable_offline: false,
+    };
+    let app_router = Arc::new(
+        AppRouterImpl::new(cfg).map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
+    );
+    install_sdk_app_router(app_router)
+        .map_err(|e| format!("Failed to install app router: {:?}", e))?;
+    install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
+    // Receiver-admit fold parity with the cold-boot full-router branch: pinned fused-anchor store so
+    // an admitted counterparty pin survives restarts. Does NOT enable live offline-bearer acceptance
+    // (the counter reader is a separate device-layer install; an incomplete pin fail-closes Path-B).
+    crate::bridge::install_anchor_enrollment_store(Arc::new(
+        crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
+    ));
+    crate::bridge::mark_full_app_router_installed();
+    log::info!("[SDK] Full AppRouter hot-swapped in (canonical identity ready)");
+    Ok(true)
+}
+
 /// Core bilateral handler that wraps SDK's async BiImpl
 struct CoreBilateralBridge {
     sdk_handler: Arc<dyn crate::bridge::BilateralHandler>,
@@ -442,6 +494,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         crate::bridge::install_anchor_enrollment_store(Arc::new(
             crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
         ));
+        crate::bridge::mark_full_app_router_installed();
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
     } else {
         // Install minimal bootstrap router for pre-genesis queries

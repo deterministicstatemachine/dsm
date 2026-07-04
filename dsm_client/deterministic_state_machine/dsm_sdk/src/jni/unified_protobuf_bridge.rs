@@ -4562,78 +4562,28 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
 
             log::info!("ensureAppRouterInstalled: START - function called");
 
-            // Check if already installed
-            if crate::bridge::app_router().is_some() {
-                log::info!("ensureAppRouterInstalled: AppRouter is available - SUCCESS");
-                return 1; // true
-            }
-
-            // AppRouter not installed - try to install it only when canonical identity is ready.
-            log::info!(
-                "ensureAppRouterInstalled: AppRouter not available, attempting to install..."
-            );
-
-            let has_device_identity = crate::sdk::app_state::AppState::get_device_id().is_some();
-            // Genesis v2: the full AppRouter needs the device signing key, which re-derives from
-            // the unlocked wallet seed (no persisted C-DBRW key). Gate on wallet-unlocked.
-            let wallet_unlocked =
-                crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
-
-            if has_device_identity && wallet_unlocked {
-                log::info!(
-                    "ensureAppRouterInstalled: Canonical identity ready, installing AppRouter"
-                );
-
-                // Get storage endpoints: try registry first, fall back to env config
-                let endpoints = match crate::network::list_storage_endpoints() {
-                    Ok(list) if !list.is_empty() => list,
-                    _ => match crate::network::NetworkConfigLoader::load_env_config() {
-                        Ok(env) => env.nodes.into_iter().map(|n| n.endpoint).collect(),
-                        Err(_) => Vec::new(),
-                    },
-                };
-                let cfg = crate::init::SdkConfig {
-                    node_id: "default".to_string(),
-                    storage_endpoints: endpoints,
-                    enable_offline: false,
-                };
-
-                // Install full AppRouter (same logic as init.rs)
-                let app_router = match crate::handlers::AppRouterImpl::new(cfg) {
-                    Ok(router) => std::sync::Arc::new(router),
-                    Err(e) => {
-                        log::error!(
-                            "ensureAppRouterInstalled: Failed to create AppRouter: {:?}",
-                            e
-                        );
-                        return 0; // false
-                    }
-                };
-                if let Err(e) = crate::bridge::install_app_router(app_router) {
-                    log::error!(
-                        "ensureAppRouterInstalled: Failed to install AppRouter: {:?}",
-                        e
-                    );
-                    return 0; // false
+            // Upgrade the MinimalBootstrapRouter to the full AppRouter when the canonical identity is
+            // ready (device_id + unlocked wallet seed). This funnels through the single warm-swap
+            // helper shared with `system.createGenesisV2`; it is idempotent (keyed off
+            // `full_app_router_installed`, NOT `app_router().is_some()` — the latter is true for the
+            // bootstrap router and used to short-circuit the upgrade, leaving post-genesis routes
+            // failing with "requires genesis").
+            match crate::init::install_full_app_router_self_config() {
+                Ok(true) => {
+                    log::info!("ensureAppRouterInstalled: full AppRouter ready - SUCCESS");
+                    1 // true
                 }
-                crate::handlers::install_app_router_adapter(
-                    crate::runtime::get_runtime().handle().clone(),
-                );
-
-                log::info!("ensureAppRouterInstalled: AppRouter installed successfully");
-                return 1; // true
+                Ok(false) => {
+                    log::error!(
+                        "ensureAppRouterInstalled: canonical identity not ready (need device identity + unlocked wallet seed)"
+                    );
+                    0 // false
+                }
+                Err(e) => {
+                    log::error!("ensureAppRouterInstalled: {e}");
+                    0 // false
+                }
             }
-
-            if !has_device_identity {
-                log::error!(
-                    "ensureAppRouterInstalled: Cannot install AppRouter - no device identity available"
-                );
-            } else {
-                log::error!(
-                    "ensureAppRouterInstalled: Cannot install AppRouter - canonical chain-head binding key missing or invalid"
-                );
-            }
-            0 // false
         }),
     )
 }
@@ -4656,8 +4606,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
 
             log::info!("getAppRouterStatus: START");
 
-            // If AppRouter is installed, report INSTALLED
-            if crate::bridge::app_router().is_some() {
+            // INSTALLED means the FULL AppRouter. `app_router().is_some()` would also be true for
+            // the MinimalBootstrapRouter and mask the locked/needs-genesis states below.
+            if crate::bridge::full_app_router_installed() {
                 log::info!("getAppRouterStatus: INSTALLED");
                 return 2;
             }

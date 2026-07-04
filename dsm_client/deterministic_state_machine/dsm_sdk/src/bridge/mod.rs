@@ -187,6 +187,26 @@ pub trait AppRouter: Send + Sync {
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
 static APP_ROUTER: Lazy<RwLock<Option<Arc<dyn AppRouter>>>> = Lazy::new(|| RwLock::new(None));
 
+/// True once the *full* [`AppRouterImpl`] has replaced the MinimalBootstrapRouter in [`APP_ROUTER`].
+/// `app_router().is_some()` cannot distinguish the two (both occupy the single slot), so the
+/// post-genesis / post-unlock hot-swap paths key idempotency off this flag instead — otherwise
+/// `ensureAppRouterInstalled` would either rebuild the router on every call or (its original bug)
+/// short-circuit on the *minimal* router and never upgrade. Prod never resets `APP_ROUTER` (the
+/// only resets are `#[cfg(test)]`), so this flag only clears in those test resets.
+static FULL_APP_ROUTER_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the full app router (not the MinimalBootstrapRouter) is installed.
+#[must_use]
+pub fn full_app_router_installed() -> bool {
+    FULL_APP_ROUTER_INSTALLED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Mark the full app router as installed. Called by the install helper after a successful swap.
+pub(crate) fn mark_full_app_router_installed() {
+    FULL_APP_ROUTER_INSTALLED.store(true, std::sync::atomic::Ordering::Release);
+}
+
 /// Install (or replace) the SDK app router.
 ///
 /// This is called:
@@ -321,6 +341,7 @@ pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {
         *guard = None;
     }
+    FULL_APP_ROUTER_INSTALLED.store(false, std::sync::atomic::Ordering::Release);
     if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
         *guard = None;
     }
@@ -791,6 +812,7 @@ mod tests {
         if let Ok(mut guard) = APP_ROUTER.write() {
             *guard = None;
         }
+        FULL_APP_ROUTER_INSTALLED.store(false, std::sync::atomic::Ordering::Release);
         if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
             *guard = None;
         }
