@@ -222,6 +222,22 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         req.network_id.clone()
     };
 
+    // FAIL CLOSED on re-genesis: one wallet identity per process/app-data. The full router,
+    // ContactManager, and SDK context all snapshot the identity when they are built — a second
+    // successful genesis in the same process would rewrite AppState/persisted genesis to a NEW
+    // identity while those keep serving the OLD one (silent split-brain, and the user's newly
+    // backed-up mnemonic would not recover the chain actually being advanced). This guard sits
+    // BEFORE derive_and_cache_key so a rejected retry can't clobber the cached wallet seed either.
+    // (A retry after a genuine mid-genesis failure is still possible: the error paths below roll
+    // has_identity back.)
+    if crate::sdk::app_state::AppState::get_has_identity() {
+        return err(
+            "system.createGenesisV2: an identity already exists on this device; wipe app data or \
+             restore instead of re-running genesis (fail closed)"
+                .into(),
+        );
+    }
+
     // Genesis v2 lifecycle rail: drive the frontend securing screen through the SAME native
     // events as the legacy bootstrap path (EventBridge maps these to `genesis.securing-device*`
     // topics the useGenesisFlow hook already renders). The frontend is pure rendering — progress
@@ -239,7 +255,8 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     // Hold phase=securing_device for any concurrent session-state read until this function
     // exits (success OR error), mirroring the finalize_bootstrap_core scope-guard discipline —
     // otherwise a mid-genesis snapshot would report needs_genesis and flash the start screen.
-    crate::sdk::session_manager::BOOTSTRAP_SECURING.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::sdk::session_manager::BOOTSTRAP_SECURING
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     struct ClearSecuringOnDrop;
     impl Drop for ClearSecuringOnDrop {
         fn drop(&mut self) {
@@ -347,9 +364,18 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         smt_root.to_vec(),
     );
     crate::sdk::app_state::AppState::set_has_identity(true);
+    // Any failure AFTER has_identity=true must roll it back before returning the error envelope:
+    // Kotlin publishes a session snapshot after EVERY createGenesisV2 response, and with
+    // has_identity left true a failed genesis would compute phase=wallet_ready — landing the user
+    // on a wallet screen whose router/context never came up (fail-open). Rolled back, the snapshot
+    // honestly reports needs_genesis and the user can retry.
+    let fail_rolled_back = |msg: String| {
+        crate::sdk::app_state::AppState::set_has_identity(false);
+        err(msg)
+    };
     let entropy = crate::derive_production_entropy(&devid, &g, &wallet_seed);
     if let Err(e) = crate::initialize_sdk_context(devid.to_vec(), g.to_vec(), entropy) {
-        return err(format!(
+        return fail_rolled_back(format!(
             "system.createGenesisV2: SDK context init failed: {e}"
         ));
     }
@@ -363,13 +389,13 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     match crate::init::install_full_app_router_self_config() {
         Ok(true) => {}
         Ok(false) => {
-            return err(
+            return fail_rolled_back(
                 "system.createGenesisV2: canonical identity not ready after genesis (fail closed)"
                     .into(),
             )
         }
         Err(e) => {
-            return err(format!(
+            return fail_rolled_back(format!(
                 "system.createGenesisV2: full AppRouter install failed: {e}"
             ))
         }

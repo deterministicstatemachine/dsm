@@ -171,10 +171,19 @@ impl SdkConfig {
 /// Returns `Ok(true)` when the full router is installed (now or already), `Ok(false)` when the
 /// canonical identity is not yet ready, and `Err` on a hard construction/install failure.
 pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
+    // Identity-keyed idempotency: true only when the installed full router was built for the
+    // CURRENT identity (see bridge::full_app_router_installed) — an identity mismatch falls
+    // through and rebuilds instead of serving routes under a stale snapshot.
     if crate::bridge::full_app_router_installed() {
         return Ok(true);
     }
-    let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
+    // has_identity participates so a rolled-back failed genesis (which clears it) reads as
+    // not-ready here even while device_id/seed linger in the session.
+    let device_id = match crate::sdk::app_state::AppState::get_device_id() {
+        Some(d) => d,
+        None => return Ok(false),
+    };
+    let canonical_identity_ready = crate::sdk::app_state::AppState::get_has_identity()
         && crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
     if !canonical_identity_ready {
         return Ok(false);
@@ -204,7 +213,7 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
     crate::bridge::install_anchor_enrollment_store(Arc::new(
         crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
     ));
-    crate::bridge::mark_full_app_router_installed();
+    crate::bridge::mark_full_app_router_installed(device_id);
     log::info!("[SDK] Full AppRouter hot-swapped in (canonical identity ready)");
     Ok(true)
 }
@@ -475,10 +484,11 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // WebView/bridge re-inits after createGenesisV2). Therefore, we must always prefer the
     // full router when identity is available, even if a MinimalBootstrapRouter was installed
     // earlier.
-    let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
+    let boot_device_id = crate::sdk::app_state::AppState::get_device_id();
+    let canonical_identity_ready = boot_device_id.is_some()
         && crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
 
-    if canonical_identity_ready {
+    if let (true, Some(device_id)) = (canonical_identity_ready, boot_device_id) {
         let app_router = Arc::new(
             AppRouterImpl::new(cfg.clone())
                 .map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
@@ -494,7 +504,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         crate::bridge::install_anchor_enrollment_store(Arc::new(
             crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
         ));
-        crate::bridge::mark_full_app_router_installed();
+        crate::bridge::mark_full_app_router_installed(device_id);
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
     } else {
         // Install minimal bootstrap router for pre-genesis queries
