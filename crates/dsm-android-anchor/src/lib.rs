@@ -30,6 +30,7 @@ use dsm_sdk::bridge::{
 pub mod install;
 pub mod se_slot;
 pub mod self_test;
+pub mod usb_appliance;
 pub mod usb_pico;
 pub use usb_pico::{UsbPicoTransport, UsbTransceive};
 

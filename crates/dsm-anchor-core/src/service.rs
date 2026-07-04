@@ -82,6 +82,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         status: 0,
         boot_valid: false,
         spi_response: Vec::new(),
+        active_committed_boot_head: Vec::new(),
     }
 }
 
@@ -154,6 +155,7 @@ pub fn dispatch<T: Tropic, S: WitnessSig, P: PartitionSig>(
             anchor_bundle: app.bundle.to_vec(),
             active_anchor_head: app.active.anchor_head.to_vec(),
             active_boot_head: app.active.boot_head.to_vec(),
+            active_committed_boot_head: app.active.committed_boot_head.to_vec(),
             active_anchor_counter: app.active.anchor_counter,
             status: status_code(app.active.status),
             boot_valid: app.active.boot_valid,
