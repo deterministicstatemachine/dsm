@@ -298,6 +298,12 @@ pub fn encode_request(req: &pb::ApplianceRequest) -> Vec<u8> {
     req.encode_to_vec()
 }
 
+/// Encode an `OfflineRelease` sub-message to its canonical bytes — what a USB appliance client puts
+/// into `BilateralConfirmRequest.offline_release` after reading it from an `EMIT` response.
+pub fn encode_release(rel: &pb::OfflineRelease) -> Vec<u8> {
+    rel.encode_to_vec()
+}
+
 /// Decode an `ApplianceResponse` frame (host/transport side).
 pub fn decode_response(bytes: &[u8]) -> Result<pb::ApplianceResponse, ProtoError> {
     pb::ApplianceResponse::decode(bytes).map_err(|_| ProtoError::Decode)

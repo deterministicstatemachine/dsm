@@ -134,4 +134,7 @@ message ApplianceResponse {
   uint32 status                = 10; // OP_STATUS: 0=Ready 1=Prepared 2=Committed
   bool boot_valid              = 11; // OP_STATUS: offline mode enabled this cycle
   bytes spi_response           = 12; // OP_SPI_PASSTHROUGH: raw MISO bytes read back from the chip
+  bytes active_committed_boot_head = 13; // OP_STATUS: committed boot head J_b (== active_boot_head at
+                                         // rest; the PREV fused-anchor-state leaf commits THIS). The
+                                         // USB appliance client needs it to build the next transition.
 }
