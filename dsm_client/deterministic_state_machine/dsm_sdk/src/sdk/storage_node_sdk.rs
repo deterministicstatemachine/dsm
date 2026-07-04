@@ -2181,6 +2181,131 @@ impl StorageNodeSDK {
         acks
     }
 
+    /// Best-effort, idempotent publish of the local wallet's registry artifacts so counterparties
+    /// can verify it (`verify_device_tree_evidence_quorum` during contact add): storage-node
+    /// auth-registration + [`Self::ensure_device_in_tree`] (the content-addressed 100-byte
+    /// DeviceTreeEntry evidence blob the contact-discovery quorum reader actually GETs — NOT the
+    /// `devtree/root` DeviceTreeStateV1, which serves the multi-device admission path and has a
+    /// canonical single-device fallback).
+    ///
+    /// Genesis v2 is offline-first (mnemonic-rooted) and does NOT fail-close on the registry the
+    /// way the legacy MPC genesis publisher did — a wallet created offline is valid; it just is
+    /// not registry-visible until this succeeds. Spawned detached from `system.createGenesisV2`
+    /// AND from every `storage.sync`, so an offline-created wallet heals on the first sync with
+    /// reachable nodes. Publishes are content-addressed idempotent, and a process-wide success
+    /// latch stops re-checking once quorum has confirmed. (A same-process re-genesis is refused
+    /// fail-closed upstream, so the latch cannot mask a second wallet.)
+    pub fn spawn_ensure_genesis_registry_published(trigger: &'static str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Success latch + single-flight guard (concurrent storage.syncs must not stack publishes).
+        static PUBLISH_CONFIRMED: AtomicBool = AtomicBool::new(false);
+        static PUBLISH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+        if PUBLISH_CONFIRMED.load(Ordering::Acquire) {
+            return;
+        }
+        // No identity yet (pre-genesis storage.sync) is the EXPECTED state, not an anomaly:
+        // return silently without spawning so periodic syncs don't spam warn logs.
+        let (Some(device_id), Some(genesis_hash_vec), Some(public_key)) = (
+            crate::sdk::app_state::AppState::get_device_id().filter(|d| d.len() == 32),
+            crate::sdk::app_state::AppState::get_genesis_hash().filter(|g| g.len() == 32),
+            crate::sdk::app_state::AppState::get_public_key().filter(|p| !p.is_empty()),
+        ) else {
+            return;
+        };
+        if PUBLISH_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let task = async move {
+            let attempt = async {
+                let mut genesis_hash = [0u8; 32];
+                genesis_hash.copy_from_slice(&genesis_hash_vec);
+
+                let mut cfg = StorageNodeConfig::from_env_config()
+                    .await
+                    .map_err(|e| format!("config: {e}"))?;
+                // This SDK instance is a short-lived publish tool: disable the background health
+                // monitor (interval 0 -> not spawned). With the default 30000 every failed heal
+                // attempt would leak one immortal monitor task — unbounded on an offline device
+                // since storage.sync re-spawns until the latch confirms.
+                cfg.selection_config.health_check_interval_ms = 0;
+                let sdk = StorageNodeSDK::new(cfg)
+                    .await
+                    .map_err(|e| format!("sdk: {e}"))?;
+
+                let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+                let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
+                let pubkey_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+
+                // Auth-registration first: nodes that gate PUTs by token would otherwise 401 the
+                // devtree publish. Warn-and-continue — dev nodes run require_auth=false.
+                if let Err(e) = sdk
+                    .register_device_for_auth(&device_id_b32, &pubkey_b32, &genesis_b32)
+                    .await
+                {
+                    warn!(
+                        "registry publish ({trigger}): auth-registration failed (continuing): {e}"
+                    );
+                }
+
+                // The evidence blob contact discovery reads: verify-first, republish below quorum.
+                // Ok(count) contractually means count >= REGISTRY_QUORUM_THRESHOLD.
+                let count = sdk
+                    .ensure_device_in_tree(&device_id, &genesis_hash)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "evidence publish below quorum ({e}); will retry on next storage.sync"
+                        )
+                    })?;
+                Ok((count as usize, sdk.get_node_urls().len()))
+            };
+            // TOTAL deadline over the whole attempt (transport-layer timing — the sanctioned
+            // clockless exception, per the execute_with_retry contract). The CA-aware reqwest
+            // client has NO per-request timeout, so one half-dead node (TCP accepted, response
+            // never sent) would otherwise pend forever with PUBLISH_IN_FLIGHT held — silently
+            // killing the very heal loop this function exists to provide. Bounded here, the
+            // guard ALWAYS releases and the next storage.sync retries.
+            let outcome: Result<(usize, usize), String> =
+                match tokio::time::timeout(std::time::Duration::from_secs(60), attempt).await {
+                    Ok(r) => r,
+                    Err(_) => Err("attempt exceeded the 60s total deadline (stalled node?); \
+                         will retry on next storage.sync"
+                        .to_string()),
+                };
+
+            match outcome {
+                Ok((acks, total)) => {
+                    PUBLISH_CONFIRMED.store(true, Ordering::Release);
+                    info!(
+                        "registry publish ({trigger}): device tree visible on {acks}/{total} nodes (quorum ok)"
+                    );
+                }
+                Err(e) => warn!("registry publish ({trigger}): {e}"),
+            }
+            PUBLISH_IN_FLIGHT.store(false, Ordering::Release);
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(task);
+        } else {
+            std::thread::spawn(move || {
+                if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    rt.block_on(task);
+                } else {
+                    PUBLISH_IN_FLIGHT.store(false, Ordering::Release);
+                }
+            });
+        }
+    }
+
     /// Read the current authoritative Device Tree frontier for `genesis_hash`:
     /// `(sorted device_ids, version_number, root)`. Used by the admitting (existing) device to fill
     /// an `AddDeviceAdmission`'s parent frontier and by the gated insert to verify it. An empty
