@@ -187,6 +187,46 @@ pub trait AppRouter: Send + Sync {
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
 static APP_ROUTER: Lazy<RwLock<Option<Arc<dyn AppRouter>>>> = Lazy::new(|| RwLock::new(None));
 
+/// The device_id the *full* [`AppRouterImpl`] currently in [`APP_ROUTER`] was built for; `None`
+/// while the MinimalBootstrapRouter (or nothing) occupies the slot. `app_router().is_some()`
+/// cannot distinguish the two (both occupy the single slot), so the post-genesis / post-unlock
+/// hot-swap paths key idempotency off this marker instead — otherwise `ensureAppRouterInstalled`
+/// would either rebuild the router on every call or (its original bug) short-circuit on the
+/// *minimal* router and never upgrade.
+///
+/// Identity-keyed (not a bool) because `AppRouterImpl::new` SNAPSHOTS the identity at construction
+/// (ContactManager, CoreSDK device info, wallet storage namespace): a bare "installed" bit would
+/// keep reporting ready if AppState's identity ever changed under it, silently serving routes as
+/// the OLD identity. Prod never resets `APP_ROUTER` (the only resets are `#[cfg(test)]`), so this
+/// marker only clears in those test resets.
+static FULL_APP_ROUTER_IDENTITY: Lazy<RwLock<Option<Vec<u8>>>> = Lazy::new(|| RwLock::new(None));
+
+/// Whether the full app router (not the MinimalBootstrapRouter) is installed AND was built for the
+/// CURRENT AppState identity. A mismatch (identity changed since the swap) reports `false` so
+/// install paths rebuild rather than serve routes under a stale identity.
+#[must_use]
+pub fn full_app_router_installed() -> bool {
+    let installed_for = match FULL_APP_ROUTER_IDENTITY.read() {
+        Ok(g) => g.clone(),
+        Err(_) => return false,
+    };
+    match (
+        installed_for,
+        crate::sdk::app_state::AppState::get_device_id(),
+    ) {
+        (Some(installed), Some(current)) => installed == current,
+        _ => false,
+    }
+}
+
+/// Record the device_id the full app router was built for. Called by the install helper after a
+/// successful swap.
+pub(crate) fn mark_full_app_router_installed(device_id: Vec<u8>) {
+    if let Ok(mut g) = FULL_APP_ROUTER_IDENTITY.write() {
+        *g = Some(device_id);
+    }
+}
+
 /// Install (or replace) the SDK app router.
 ///
 /// This is called:
@@ -319,6 +359,9 @@ pub fn se_slot_writer() -> Option<Arc<dyn SeSlotWriter>> {
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = FULL_APP_ROUTER_IDENTITY.write() {
         *guard = None;
     }
     if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
@@ -789,6 +832,9 @@ mod tests {
     pub unsafe fn reset_bridge_handlers_for_tests() {
         // APP_ROUTER and UNILATERAL_HANDLER are RwLock-based — safe to clear.
         if let Ok(mut guard) = APP_ROUTER.write() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = FULL_APP_ROUTER_IDENTITY.write() {
             *guard = None;
         }
         if let Ok(mut guard) = UNILATERAL_HANDLER.write() {

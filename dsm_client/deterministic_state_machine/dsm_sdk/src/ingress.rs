@@ -81,7 +81,11 @@ fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), p
     Ok(())
 }
 
-fn push_genesis_lifecycle_event(kind: i32, progress: u32) -> Result<(), pb::Error> {
+/// Push a genesis lifecycle event to the WebView (EventBridge maps kinds to the
+/// `genesis.securing-device*` topics the frontend renders). `pub(crate)` so the canonical
+/// Genesis v2 route (`system.createGenesisV2` in `handlers::system_routes`) drives the SAME
+/// securing-screen rail as this legacy bootstrap path.
+pub(crate) fn push_genesis_lifecycle_event(kind: i32, progress: u32) -> Result<(), pb::Error> {
     push_canonical_envelope_event(pb::envelope::Payload::GenesisLifecycle(
         pb::GenesisLifecycleEvent { kind, progress },
     ))

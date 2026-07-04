@@ -993,7 +993,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return
             }
 
-            val isLongRunningGenesisRequest = method == "createGenesis"
+            // Both genesis routes: the legacy MPC path AND the canonical mnemonic-rooted v2 path.
+            // Each must publish a fresh session snapshot after completing — without it React never
+            // sees phase=wallet_ready and the UI sits on the start screen despite the wallet existing.
+            val isLongRunningGenesisRequest = method == "createGenesis" || method == "createGenesisV2"
 
             // Genesis + heavy JNI run on the dedicated executor to avoid starving the general
             // bridge worker pool (Genesis v2 is mnemonic-rooted; no silicon enrollment).
@@ -1013,9 +1016,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
                         port.postMessage(WebMessageCompat(responseWithId))
                     }
-                    // After genesis finalizes, Rust SDK_READY flips to true. Publish a fresh
+                    // After genesis completes, Rust has_identity/SDK_READY are true. Publish a fresh
                     // session snapshot so React can transition to wallet_ready immediately.
-                    runOnUiThread { publishSessionState("createGenesis") }
+                    runOnUiThread { publishSessionState(method) }
                 }
                 return
             }

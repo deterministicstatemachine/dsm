@@ -21,7 +21,8 @@ use crate::bridge::install_bilateral_handler as install_sdk_bilateral_handler;
 use crate::bridge::install_unilateral_handler as install_sdk_unilateral_handler;
 use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
-    AppRouterImpl, BiImpl, UniImpl, handle_system_genesis_query, install_app_router_adapter,
+    handle_create_genesis_v2_query, handle_generate_mnemonic_query, handle_system_genesis_query,
+    install_app_router_adapter, AppRouterImpl, BiImpl, UniImpl,
 };
 use dsm::types::proto as pb;
 use prost::Message;
@@ -154,6 +155,67 @@ impl SdkConfig {
         }
         Ok(())
     }
+}
+
+/// Hot-swap the MinimalBootstrapRouter for the full [`AppRouterImpl`] once the canonical identity is
+/// ready (device_id present + wallet seed cached). This is the single install path for the
+/// *warm* swap — used by `system.createGenesisV2` (fresh wallet) and the JNI `ensureAppRouterInstalled`
+/// (post-unlock on restart) — both of which have no [`SdkConfig`] in hand, so it derives one from the
+/// storage-endpoint registry (falling back to env config). The cold-boot path in [`init_dsm_sdk`]
+/// keeps its caller-supplied `SdkConfig`.
+///
+/// Idempotent: keyed off [`crate::bridge::full_app_router_installed`] so repeated calls don't rebuild
+/// the router. The core adapter reads the router slot live, so the swap takes effect on the next
+/// query without touching the adapter registration.
+///
+/// Returns `Ok(true)` when the full router is installed (now or already), `Ok(false)` when the
+/// canonical identity is not yet ready, and `Err` on a hard construction/install failure.
+pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
+    // Identity-keyed idempotency: true only when the installed full router was built for the
+    // CURRENT identity (see bridge::full_app_router_installed) — an identity mismatch falls
+    // through and rebuilds instead of serving routes under a stale snapshot.
+    if crate::bridge::full_app_router_installed() {
+        return Ok(true);
+    }
+    // has_identity participates so a rolled-back failed genesis (which clears it) reads as
+    // not-ready here even while device_id/seed linger in the session.
+    let device_id = match crate::sdk::app_state::AppState::get_device_id() {
+        Some(d) => d,
+        None => return Ok(false),
+    };
+    let canonical_identity_ready = crate::sdk::app_state::AppState::get_has_identity()
+        && crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
+    if !canonical_identity_ready {
+        return Ok(false);
+    }
+    // Storage endpoints: registry first, env config fallback (same source as cold boot).
+    let storage_endpoints = match crate::network::list_storage_endpoints() {
+        Ok(list) if !list.is_empty() => list,
+        _ => match crate::network::NetworkConfigLoader::load_env_config() {
+            Ok(env) => env.nodes.into_iter().map(|n| n.endpoint).collect(),
+            Err(_) => Vec::new(),
+        },
+    };
+    let cfg = SdkConfig {
+        node_id: "default".to_string(),
+        storage_endpoints,
+        enable_offline: false,
+    };
+    let app_router = Arc::new(
+        AppRouterImpl::new(cfg).map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
+    );
+    install_sdk_app_router(app_router)
+        .map_err(|e| format!("Failed to install app router: {:?}", e))?;
+    install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
+    // Receiver-admit fold parity with the cold-boot full-router branch: pinned fused-anchor store so
+    // an admitted counterparty pin survives restarts. Does NOT enable live offline-bearer acceptance
+    // (the counter reader is a separate device-layer install; an incomplete pin fail-closes Path-B).
+    crate::bridge::install_anchor_enrollment_store(Arc::new(
+        crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
+    ));
+    crate::bridge::mark_full_app_router_installed(device_id);
+    log::info!("[SDK] Full AppRouter hot-swapped in (canonical identity ready)");
+    Ok(true)
 }
 
 /// Core bilateral handler that wraps SDK's async BiImpl
@@ -422,10 +484,11 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // WebView/bridge re-inits after createGenesisV2). Therefore, we must always prefer the
     // full router when identity is available, even if a MinimalBootstrapRouter was installed
     // earlier.
-    let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
+    let boot_device_id = crate::sdk::app_state::AppState::get_device_id();
+    let canonical_identity_ready = boot_device_id.is_some()
         && crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();
 
-    if canonical_identity_ready {
+    if let (true, Some(device_id)) = (canonical_identity_ready, boot_device_id) {
         let app_router = Arc::new(
             AppRouterImpl::new(cfg.clone())
                 .map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
@@ -441,6 +504,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         crate::bridge::install_anchor_enrollment_store(Arc::new(
             crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
         ));
+        crate::bridge::mark_full_app_router_installed(device_id);
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
     } else {
         // Install minimal bootstrap router for pre-genesis queries
@@ -475,6 +539,12 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                         }
                     }
                     "system.genesis" => handle_system_genesis_query(q),
+                    // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
+                    // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
+                    // wallet seed + establishes the identity — after which a re-init installs the full
+                    // router. Without these, a fresh device can never create a wallet (chicken-and-egg).
+                    "system.generateMnemonic" => handle_generate_mnemonic_query(),
+                    "system.createGenesisV2" => handle_create_genesis_v2_query(q),
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),
