@@ -29,6 +29,12 @@ use crate::reader::{dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_byt
 /// role at another free index (e.g. 2) — pass it explicitly.
 pub const VERIFIER_SLOT: u16 = 1;
 
+/// The device's lifetime offline-bearer budget = the maximum initial value of the TROPIC01 monotonic
+/// DOWN-counter (`tropic01`'s `MCOUNTER_VALUE_MAX`). `H0` (the enrolled starting counter the receiver
+/// pins) is set to this at device setup; each accepted offline transfer decrements it. NOT `1000`
+/// (that was only a bring-up placeholder).
+pub const MCOUNTER_MAX: u32 = 0xFFFF_FFFE;
+
 /// Pairing-key indices that MAY hold the verifier role — never slot 0 (host). The disclosure read
 /// scans these to locate the role wherever it was provisioned.
 pub const VERIFIER_SLOT_CANDIDATES: &[u16] = &[1, 2, 3];
@@ -457,6 +463,64 @@ pub fn commit_verifier_slot<C: SpiRelayChannel, F: Fn() -> C>(
     Ok((slot, stpub))
 }
 
+// ── Monotonic counter (the offline-bearer budget) — a SEPARATE device-setup concern from the ──────
+// verifier slot. Read is non-destructive; init is the explicit budget write. Both are slot-0 ops.
+
+/// Read `mcounter[0]` (the offline-bearer budget / current `H`) via the host slot-0 session.
+/// NON-DESTRUCTIVE.
+pub fn read_counter<C: SpiRelayChannel>(channel: C) -> Result<u32, ProvisionError> {
+    let mut chip = Tropic01::new(RemoteSpiDevice::new(channel));
+    let eh = fresh_ephemeral()?;
+    let mut s0 = chip
+        .session_start(
+            &X25519Dalek,
+            PublicKey::from(SH0PUB_PROD0),
+            StaticSecret::from(SH0PRIV_PROD0),
+            PublicKey::from(&eh),
+            eh,
+            0,
+        )
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 session_start: {e:?}")))?;
+    let v = s0
+        .mcounter_get(MCounterIndex::Index0)
+        .map_err(|e| ProvisionError::Chip(format!("mcounter_get: {e:?}")));
+    s0.session_abort()
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 abort: {e:?}")))?;
+    v
+}
+
+/// Initialize `mcounter[0]` to [`MCOUNTER_MAX`] (the device's lifetime offline-bearer budget) via the
+/// host slot-0 session — the explicit device-setup WRITE. Reads it back and confirms it equals
+/// `MCOUNTER_MAX`, returning the read-back value. Slot 0 only (the caged verifier slot is denied
+/// `mcounter_init`). MUST run only under an explicit setup gate, and BEFORE the verifier-slot cage.
+pub fn init_counter_max<C: SpiRelayChannel>(channel: C) -> Result<u32, ProvisionError> {
+    let mut chip = Tropic01::new(RemoteSpiDevice::new(channel));
+    let eh = fresh_ephemeral()?;
+    let mut s0 = chip
+        .session_start(
+            &X25519Dalek,
+            PublicKey::from(SH0PUB_PROD0),
+            StaticSecret::from(SH0PRIV_PROD0),
+            PublicKey::from(&eh),
+            eh,
+            0,
+        )
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 session_start: {e:?}")))?;
+    s0.mcounter_init(MCounterIndex::Index0, MCOUNTER_MAX)
+        .map_err(|e| ProvisionError::Chip(format!("mcounter_init(max): {e:?}")))?;
+    let readback = s0
+        .mcounter_get(MCounterIndex::Index0)
+        .map_err(|e| ProvisionError::Chip(format!("mcounter_get after init: {e:?}")))?;
+    s0.session_abort()
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 abort: {e:?}")))?;
+    if readback != MCOUNTER_MAX {
+        return Err(ProvisionError::CageVerify(format!(
+            "counter read-back {readback} != MCOUNTER_MAX {MCOUNTER_MAX}"
+        )));
+    }
+    Ok(readback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +547,14 @@ mod tests {
                 "sweep vs mask mismatch for slot {slot}"
             );
         }
+    }
+
+    #[test]
+    fn mcounter_max_is_the_hardware_ceiling() {
+        // The device budget = the TROPIC01 down-counter ceiling (tropic01 MCOUNTER_VALUE_MAX), NOT
+        // the old 1000 placeholder.
+        assert_eq!(MCOUNTER_MAX, 0xFFFF_FFFE);
+        assert!(MCOUNTER_MAX > 1000);
     }
 
     #[test]

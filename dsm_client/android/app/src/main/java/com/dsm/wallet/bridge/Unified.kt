@@ -107,6 +107,25 @@ object Unified {
     // slot-2 preflight on A's local chip, logging results to logcat under "se-slot". Lets an operator
     // inspect the chip THROUGH the phone (via adb) without moving it to a bench.
     @Keep @JvmStatic external fun verifierSlotStatus(): Int
+
+    // GATED device-setup WRITE (only in on_device_installs-feature .so builds; absent otherwise):
+    // initialize mcounter[0] to the max device budget on A's local chip, via slot 0. Returns the
+    // read-back counter (>= 0) or -1. Invoked deliberately by the operator over ADB (see
+    // DsmSetupOpReceiver); never from app boot or a transfer. Callers must catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun counterInitMax(): Long
+
+    // GATED verifier-slot BURN (only in on_device_installs-feature .so; absent otherwise): irreversibly
+    // provision + cage the fixed DSM verifier key into `slot` on A's local chip. Returns the slot index
+    // (>= 0) or -1. Invoked deliberately by the operator over ADB (DsmSetupOp path); never from boot or
+    // a transfer. Callers must catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun provisionVerifierSlot(slot: Int): Int
+
+    // GATED ACCEPT-ENABLING install (only in on_device_installs-feature .so; absent otherwise):
+    // installs the Path-B receiver reader + sender local-Pico + read-only SeSlotWriter into the global
+    // bilateral stack, wiring the counter read over the live BLE relay. Requires the BluetoothManager
+    // to be registered first (returns false otherwise). This is the accept-enabling step for the
+    // 2-phone test; still fail-closed until a complete pin + matching counter. Catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun installPathBTransports(): Boolean
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =

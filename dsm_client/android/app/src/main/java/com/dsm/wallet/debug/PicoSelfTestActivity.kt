@@ -103,6 +103,57 @@ class PicoSelfTestActivity : Activity() {
                 } catch (e: UnsatisfiedLinkError) {
                     Log.w(TAG, "verifierSlotStatus not in this .so: ${e.message}")
                 }
+                // GATED device-setup WRITE — counter-init to max. Runs ONLY when explicitly launched
+                // with `--ez run_counter_init true --es confirm yes-init-counter-max` (a normal
+                // USB-attach launch has neither, so it stays read-only). The counterInitMax symbol is
+                // present only in on_device_installs-feature .so builds.
+                val doCounterInit = intent?.getBooleanExtra("run_counter_init", false) == true
+                val confirm = intent?.getStringExtra("confirm")
+                if (doCounterInit) {
+                    if (confirm == "yes-init-counter-max") {
+                        val v = try {
+                            com.dsm.wallet.bridge.Unified.counterInitMax()
+                        } catch (e: UnsatisfiedLinkError) {
+                            Log.e(TAG, "counterInitMax not in this .so (needs on_device_installs): ${e.message}")
+                            -2L
+                        }
+                        Log.i(TAG, "*** counter-init result = $v (max=4294967294) ***")
+                    } else {
+                        Log.e(TAG, "counter-init REFUSED: confirm must be 'yes-init-counter-max' (got '$confirm')")
+                    }
+                }
+                // GATED accept-enabling Path-B install (for the 2-phone test). Runs ONLY when launched
+                // with `--ez install_path_b true`. Requires the app's BLE bilateral stack (BT manager)
+                // to be up; logs the result. Absent from the default .so.
+                if (intent?.getBooleanExtra("install_path_b", false) == true) {
+                    val ok = try {
+                        com.dsm.wallet.bridge.Unified.installPathBTransports()
+                    } catch (e: UnsatisfiedLinkError) {
+                        Log.e(TAG, "installPathBTransports not in this .so (needs on_device_installs): ${e.message}")
+                        false
+                    }
+                    Log.i(TAG, "*** installPathBTransports = $ok (false = BT manager not up yet) ***")
+                }
+                // GATED verifier-slot BURN (irreversible). Runs ONLY when launched with
+                // `--ez run_slot_commit true --ei slot N --es confirm yes-burn-slot-N`. The confirm
+                // MUST name the same slot (mismatch refused). A normal launch never reaches this.
+                val doSlotCommit = intent?.getBooleanExtra("run_slot_commit", false) == true
+                if (doSlotCommit) {
+                    val slot = intent?.getIntExtra("slot", -1) ?: -1
+                    if (slot in 1..3 && confirm == "yes-burn-slot-$slot") {
+                        Log.i(TAG, "*** slot-$slot BURN starting (irreversible) ***")
+                        val r = try {
+                            com.dsm.wallet.bridge.Unified.provisionVerifierSlot(slot)
+                        } catch (e: UnsatisfiedLinkError) {
+                            Log.e(TAG, "provisionVerifierSlot not in this .so (needs on_device_installs): ${e.message}")
+                            -2
+                        }
+                        if (r >= 0) Log.i(TAG, "*** slot-$slot BURN OK: verifier slot $r caged ***")
+                        else Log.e(TAG, "*** slot-$slot BURN FAILED (code $r) ***")
+                    } else {
+                        Log.e(TAG, "slot-commit REFUSED: need --ei slot N (1..3) + --es confirm yes-burn-slot-N (got slot=$slot confirm='$confirm')")
+                    }
+                }
             } else {
                 Log.e(TAG, "*** H2 FAIL: no real chip response (see resp above) ***")
             }

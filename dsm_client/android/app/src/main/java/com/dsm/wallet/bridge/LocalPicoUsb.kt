@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 package com.dsm.wallet.bridge
 
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
@@ -28,6 +30,7 @@ import android.util.Log
  */
 object LocalPicoUsb {
     private const val TAG = "LocalPicoUsb"
+    private const val USB_PERMISSION_ACTION = "com.dsm.wallet.USB_PERMISSION"
 
     // The DSM Anchor firmware sets its own CDC-ACM USB descriptor: vendor id 0x1209 (pid.codes
     // community VID), product id 0xD5A1, product string "DSM Anchor" — NOT the bare RP2350 VID
@@ -137,7 +140,18 @@ object LocalPicoUsb {
         Log.i(TAG, "USB device detected: vid=${device.vendorId} pid=${device.productId} ${device.productName}")
 
         if (!usb.hasPermission(device)) {
-            error("no USB permission for the Pico (grant via requestPermission / attach intent)")
+            // Request permission (shows the one-time "Allow DSM to access the USB device?" dialog).
+            // This attempt still fails closed; after the user taps Allow, the next call opens the Pico.
+            val ctx2 = appContext
+            if (ctx2 != null) {
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                val pi = PendingIntent.getBroadcast(
+                    ctx2, 0, Intent(USB_PERMISSION_ACTION).setPackage(ctx2.packageName), flags
+                )
+                usb.requestPermission(device, pi)
+                Log.i(TAG, "requested USB permission for the Pico — tap Allow, then retry")
+            }
+            error("no USB permission for the Pico (permission requested; tap Allow and retry)")
         }
         val (usbInterface, inEp, outEp) = findBulkEndpoints(device)
             ?: error("no CDC-data bulk endpoints on the Pico")

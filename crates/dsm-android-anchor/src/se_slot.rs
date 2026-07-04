@@ -21,11 +21,14 @@ use dsm_anchor_hw_verifier::{dsm_verifier_pairing_pubkey, ProvisionError};
 // behind the `on_device_installs` feature.
 #[cfg(target_os = "android")]
 use dsm_anchor_hw_verifier::{
-    find_provisioned_slot, preflight_verifier_slot, read_verifier_slot, VerifierSlotState,
-    VERIFIER_SLOT_CANDIDATES,
+    find_provisioned_slot, preflight_verifier_slot, read_counter, read_verifier_slot,
+    VerifierSlotState, MCOUNTER_MAX, VERIFIER_SLOT_CANDIDATES,
 };
 #[cfg(target_os = "android")]
 use dsm_anchor_verifier::{RelayError, SpiRelayChannel};
+// The counter-init + verifier-slot WRITES are gated setup ops — feature-gated, absent from default .so.
+#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+use dsm_anchor_hw_verifier::{commit_verifier_slot, init_counter_max};
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 use dsm_sdk::bridge::SeSlotWriter;
 
@@ -100,6 +103,20 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_verifierSlotStatus(
         Ok(None) => log::info!("[se-slot] no verifier role provisioned on any candidate index"),
         Err(e) => log::warn!("[se-slot] scan error {e:?}"),
     }
+    // Read-only counter status: current mcounter[0] vs the intended device budget (max).
+    match read_counter(JniLocalSpiChannel) {
+        Ok(v) => {
+            let note = if v == MCOUNTER_MAX {
+                "at max"
+            } else {
+                "NOT at max (placeholder/partial)"
+            };
+            log::info!(
+                "[se-slot] mcounter[0] current={v} intended-max(H0)={MCOUNTER_MAX} -> {note}"
+            )
+        }
+        Err(e) => log::warn!("[se-slot] counter read error {e:?}"),
+    }
     // Read-only preflight of the intended dev-chip slot (2). Writes nothing.
     match preflight_verifier_slot(2, JniLocalSpiChannel) {
         Ok(r) => log::info!(
@@ -111,6 +128,55 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_verifierSlotStatus(
     }
     log::info!("[se-slot] === verifier-slot STATUS done ===");
     0
+}
+
+/// GATED device-setup WRITE (absent from the default .so): initialize mcounter[0] to the max device
+/// budget (`MCOUNTER_MAX`) on A's local chip, via slot 0, and confirm the read-back. SEPARATE from the
+/// verifier-slot burn and run BEFORE it. Returns the read-back counter on success, or -1 fail. Invoked
+/// deliberately by the operator over ADB; never from app boot or a transfer.
+#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_counterInitMax(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) -> jni::sys::jlong {
+    log::info!("[se-slot] counter-init: setting mcounter[0] to MCOUNTER_MAX={MCOUNTER_MAX} ...");
+    match init_counter_max(JniLocalSpiChannel) {
+        Ok(v) => {
+            log::info!("[se-slot] counter-init OK: mcounter[0] read-back = {v} (== max)");
+            i64::from(v)
+        }
+        Err(e) => {
+            log::error!("[se-slot] counter-init FAILED: {e:?}");
+            -1
+        }
+    }
+}
+
+/// GATED verifier-slot BURN (absent from the default .so): irreversibly provision the fixed DSM
+/// verifier key into `slot` on A's local chip + cage it read-only (the reviewed `commit_verifier_slot`
+/// over the phone USB relay). SEPARATE from counter-init; run AFTER it. Returns the provisioned slot
+/// index (>= 0) on success, or -1 on failure. Invoked deliberately by the operator over ADB with an
+/// explicit slot + confirm; never from app boot or a transfer.
+#[cfg(all(target_os = "android", feature = "on_device_installs"))]
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_provisionVerifierSlot(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    slot: jni::sys::jint,
+) -> jni::sys::jint {
+    let slot = slot as u16;
+    log::info!("[se-slot] BURN: provisioning verifier slot {slot} (irreversible) ...");
+    match commit_verifier_slot(slot, || JniLocalSpiChannel) {
+        Ok((s, stpub)) => {
+            log::info!("[se-slot] BURN OK: slot {s} caged; stpub={stpub:02x?}");
+            i32::from(s as u8)
+        }
+        Err(e) => {
+            log::error!("[se-slot] BURN FAILED (nothing partial trusted): {e:?}");
+            -1
+        }
+    }
 }
 
 /// Read-only `SeSlotWriter`: discloses the verifier slot iff it is already provisioned + caged
