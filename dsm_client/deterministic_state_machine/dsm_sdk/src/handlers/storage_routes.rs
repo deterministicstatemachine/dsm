@@ -210,6 +210,13 @@ impl AppRouterImpl {
             "storage.sync" => {
                 log::info!("[DSM_SDK] storage.sync called");
 
+                // Registry-visibility heal (detached, best-effort, latched on success): wallets
+                // created offline — and pre-fix Genesis v2 wallets that never published — become
+                // verifiable by counterparties on the first sync with reachable storage nodes.
+                crate::sdk::storage_node_sdk::StorageNodeSDK::spawn_ensure_genesis_registry_published(
+                    "storage.sync",
+                );
+
                 // Check network connectivity before attempting sync
                 #[cfg(feature = "dev-discovery")]
                 let network_gate = get_network_gate();

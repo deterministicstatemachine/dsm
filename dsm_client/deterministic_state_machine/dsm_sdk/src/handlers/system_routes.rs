@@ -401,6 +401,13 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         }
     }
 
+    // 5c. Registry visibility (detached, best-effort): publish auth-registration + the initial
+    //     device tree so counterparties can verify this wallet during contact add. Offline-first —
+    //     genesis NEVER blocks on the network; storage.sync retries until quorum confirms.
+    crate::sdk::storage_node_sdk::StorageNodeSDK::spawn_ensure_genesis_registry_published(
+        "createGenesisV2",
+    );
+
     // Success rail (mirrors finalize_bootstrap_core): complete → ok. The wallet_ready screen
     // transition itself rides the fresh session snapshot Kotlin publishes after this response.
     emit(LifecycleKind::GenesisKindSecuringComplete, 0);
