@@ -129,10 +129,14 @@ for d in $serials; do
   adb -s "$d" shell run-as "$APP_PKG" mkdir -p files || true
 
   if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
-    # --- Remote mode (AWS or GCP) ---
-    echo "Pushing $MODE storage node config to $d..."
-    adb -s "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.toml
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
+    # --- Remote mode (AWS / GCP / Alibaba) ---
+    # MUST write the DEVELOPER OVERRIDE file, not files/dsm_env_config.toml: MainActivity
+    # unconditionally re-materializes the bundled asset over files/dsm_env_config.toml on every
+    # launch (FileOutputStream ... false), so a push there is clobbered. The override
+    # (dsm_env_config.override.toml) is checked first and wins.
+    echo "Pushing $MODE storage node config to $d (developer override)..."
+    adb -s "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.override.toml
+    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
 
     echo "Pushing CA cert to $d..."
     adb -s "$d" push "$CA_CERT" /data/local/tmp/ca.crt
@@ -143,8 +147,8 @@ for d in $serials; do
       adb -s "$d" reverse --remove tcp:$p 2>/dev/null || true
     done
 
-    echo "Config: $MODE storage nodes (HTTPS + custom CA)"
-    adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml files/ca.crt
+    echo "Config: $MODE storage nodes (HTTPS + custom CA, via override file)"
+    adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
 
   else
     # --- Local mode ---
