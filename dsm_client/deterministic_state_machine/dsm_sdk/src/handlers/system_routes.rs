@@ -222,6 +222,35 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         req.network_id.clone()
     };
 
+    // Genesis v2 lifecycle rail: drive the frontend securing screen through the SAME native
+    // events as the legacy bootstrap path (EventBridge maps these to `genesis.securing-device*`
+    // topics the useGenesisFlow hook already renders). The frontend is pure rendering — progress
+    // truth lives here. Emission is best-effort: a failed WebView dispatch must never fail the
+    // wallet creation itself.
+    use crate::generated::genesis_lifecycle_event::Kind as LifecycleKind;
+    let emit = |kind: LifecycleKind, progress: u32| {
+        if let Err(e) = crate::ingress::push_genesis_lifecycle_event(kind as i32, progress) {
+            log::warn!(
+                "system.createGenesisV2: lifecycle event dispatch failed (non-fatal): {:?}",
+                e
+            );
+        }
+    };
+    // Hold phase=securing_device for any concurrent session-state read until this function
+    // exits (success OR error), mirroring the finalize_bootstrap_core scope-guard discipline —
+    // otherwise a mid-genesis snapshot would report needs_genesis and flash the start screen.
+    crate::sdk::session_manager::BOOTSTRAP_SECURING.store(true, std::sync::atomic::Ordering::SeqCst);
+    struct ClearSecuringOnDrop;
+    impl Drop for ClearSecuringOnDrop {
+        fn drop(&mut self) {
+            crate::sdk::session_manager::BOOTSTRAP_SECURING
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _clear_securing = ClearSecuringOnDrop;
+    emit(LifecycleKind::GenesisKindStarted, 0);
+    emit(LifecycleKind::GenesisKindSecuringDevice, 0);
+
     // 1. Derive + cache the wallet seed from the mnemonic (the unlocked-session secret).
     if let Err(e) = crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&req.mnemonic) {
         return err(format!(
@@ -236,6 +265,7 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
             )
         }
     };
+    emit(LifecycleKind::GenesisKindSecuringProgress, 30);
 
     // 2. Canonical mnemonic-rooted genesis (self-attested AttA; no silicon/random/MPC).
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
@@ -254,6 +284,7 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
             ))
         }
     };
+    emit(LifecycleKind::GenesisKindSecuringProgress, 60);
     let genesis_state = &outcome.state;
     let devid = match genesis_state.device_id {
         Some(d) => d,
@@ -322,6 +353,32 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
             "system.createGenesisV2: SDK context init failed: {e}"
         ));
     }
+    emit(LifecycleKind::GenesisKindSecuringProgress, 85);
+
+    // 5b. Hot-swap the MinimalBootstrapRouter for the full AppRouter now that the canonical identity
+    //     exists (device_id set + wallet seed cached above). Without this the bootstrap router stays
+    //     installed for the rest of the session and every post-genesis route (identity.pairingQR,
+    //     wallet.*, contacts.*) fails with "requires genesis". The core adapter reads the router slot
+    //     live, so the swap takes effect on the very next query.
+    match crate::init::install_full_app_router_self_config() {
+        Ok(true) => {}
+        Ok(false) => {
+            return err(
+                "system.createGenesisV2: canonical identity not ready after genesis (fail closed)"
+                    .into(),
+            )
+        }
+        Err(e) => {
+            return err(format!(
+                "system.createGenesisV2: full AppRouter install failed: {e}"
+            ))
+        }
+    }
+
+    // Success rail (mirrors finalize_bootstrap_core): complete → ok. The wallet_ready screen
+    // transition itself rides the fresh session snapshot Kotlin publishes after this response.
+    emit(LifecycleKind::GenesisKindSecuringComplete, 0);
+    emit(LifecycleKind::GenesisKindOk, 0);
 
     // 6. Return the genesis envelope (device_entropy carries the PUBLIC genesis_nonce in v2).
     let resp = generated::GenesisCreated {
