@@ -301,6 +301,38 @@ pub fn anchor_enrollment_store(
     ANCHOR_ENROLLMENT_STORE.read().ok()?.clone()
 }
 
+/// SENDER-side fused-anchor appliance factory. Produces the fresh `AnchorAppliance` the offline-bearer
+/// release is built on. The device layer installs a factory that returns a `UsbAnchorAppliance`
+/// driving the physical RP2350/TROPIC01; `build_offline_bearer_release` calls it ONCE and caches the
+/// result (the appliance is stateful — its counter advances and its witness key erases on COMMIT).
+///
+/// `None` until installed. On device, an absent factory means offline-bearer is unavailable and the
+/// send FAILS CLOSED (no mock fallback) — "offline = chips". The in-process mock is used only by the
+/// SDK's own `#[cfg(test)]` release-path tests. The factory returns `Result` so a failed chip connect
+/// (e.g. STATUS unreadable) propagates as a fail-closed error rather than a silent mock.
+type AnchorApplianceFactory = Arc<
+    dyn Fn() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, dsm::types::error::DsmError>
+        + Send
+        + Sync,
+>;
+static ANCHOR_APPLIANCE_FACTORY: Lazy<RwLock<Option<AnchorApplianceFactory>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Install (or replace) the sender-side anchor-appliance factory (the physical-chip producer).
+pub fn install_anchor_appliance_factory(factory: AnchorApplianceFactory) {
+    if let Ok(mut g) = ANCHOR_APPLIANCE_FACTORY.write() {
+        *g = Some(factory);
+        log::info!(
+            "[SDK] AnchorApplianceFactory installed (offline-bearer release = physical chip)"
+        );
+    }
+}
+
+#[must_use]
+pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
+    ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
+}
+
 /// RECEIVER-side X25519 verifier pairing key deriver (Boot Fenced Fused Anchor receiver-admit).
 /// Produces the pairing PUBLIC key B offers in the first-transfer `AnchorEnrollRequest`, derived
 /// per-counterparty from B's identity seed (the private half is re-derived at read time by the

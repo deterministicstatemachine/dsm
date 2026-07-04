@@ -188,6 +188,26 @@ impl AuthorityPolicy {
     }
 }
 
+/// The canonical DSM offline-bearer authority policy (v1). ONE agreed value referenced by BOTH the
+/// sender (building the offline-bearer transfer operation) and the receiver (verifying the release
+/// commits to the same policy) — so the `policy_id` bound into the operation, the chip's PREPARE
+/// `authority_policy_hash`, and the receiver's accept check are provably identical bytes.
+/// `policy_id`/`anchor_set_id` are domain-separated constants; per-tenant policy-registry management
+/// is a later refinement layered on this default.
+pub fn canonical_offline_bearer_policy() -> AuthorityPolicy {
+    AuthorityPolicy {
+        mode: AuthorityMode::OfflineBearerRequired,
+        policy_id: crate::crypto::blake3::domain_hash_bytes(
+            "DSM/offline-bearer/policy-id/well-known/v1",
+            &[],
+        ),
+        anchor_set_id: crate::crypto::blake3::domain_hash_bytes(
+            "DSM/offline-bearer/anchor-set-id/well-known/v1",
+            &[],
+        ),
+    }
+}
+
 /// Primary state transition operation enum (no Serde in canonical path).
 ///
 /// Each variant represents a distinct kind of state transition in the DSM

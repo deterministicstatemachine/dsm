@@ -83,7 +83,14 @@ const XTAL_HZ: u32 = 12_000_000;
 const Q_BOOT: u16 = 5; // MACANDD boot-fence slot
 const Q_TX: u16 = 6; // MACANDD transfer-witness slot
 const COUNTER: MCounterIndex = MCounterIndex::Index0;
-const ENROLL_H0: u32 = 1000;
+// Enrollment counter H0 = the value the monotonic counter was PROVISIONED to (bench CLI:
+// `MCOUNTER_MAX`), NOT a bring-up placeholder. It is a FIXED constant so the birth ceremony is
+// deterministic across reboots (stable bundle/identity); the LIVE counter (`mcounter_get`) gives the
+// current H and the appliance derives u = H0 − H. The firmware ADOPTS the provisioned counter — it
+// must NOT re-init it (that would reset the counter and defeat the anti-double-spend guarantee).
+// NOTE (D2 reconciliation): `COUNTER` must be the SAME physical MCOUNTER index the CLI initialized AND
+// the caged verifier slot the receiver reads over the relay — confirm on hardware.
+const ENROLL_H0: u32 = 0xFFFF_FFFE; // tropic01 MCOUNTER_VALUE_MAX (4_294_967_294)
 
 /// The partition certificate scheme: BLAKE3-SPHINCS+ SPX128f (fast sign, 17,088 B
 /// signature, 64 B pk). The receiver verifies with the same scheme.
@@ -322,9 +329,14 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     partition_trng: &[u8; 32],
     host_nonce: &[u8; 32],
 ) -> Result<(u32, Birth), &'static str> {
-    sess.mcounter_init(COUNTER, ENROLL_H0)
-        .map_err(|_| "mcounter_init")?;
-    let h0 = sess.mcounter_get(COUNTER).map_err(|_| "mcounter_get")?;
+    // ADOPT the provisioned counter — do NOT `mcounter_init` (re-init resets the physical counter and
+    // would let a rebooted device re-spend already-consumed offline-bearer steps). `H0` is the fixed
+    // provisioning constant `ENROLL_H0`; the live read is only a sanity floor (a healthy provisioned
+    // chip reads at or below H0). Birth is deterministic over `ENROLL_H0`, so identity is stable.
+    let live = sess.mcounter_get(COUNTER).map_err(|_| "mcounter_get")?;
+    if live > ENROLL_H0 {
+        return Err("counter above enrollment H0 (unprovisioned/mis-provisioned chip)");
+    }
     // Arm both slots; capture the boot slot's output as the TROPIC birth witness.
     let birth_witness = *sess
         .mac_and_destroy(Q_BOOT.into(), &ARM0)
@@ -345,7 +357,8 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
         q_tx: Q_TX,
         genesis_root: &GENESIS,
     });
-    Ok((h0, b))
+    // Return the FIXED enrollment H0 (not the live read): the appliance derives u = H0 − live.
+    Ok((ENROLL_H0, b))
 }
 
 fn prepare_request() -> pb::ApplianceRequest {

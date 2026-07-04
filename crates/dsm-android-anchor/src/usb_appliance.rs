@@ -20,9 +20,9 @@ use dsm_sdk::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus};
 
 use crate::usb_pico::UsbTransceive;
 
-/// A physical-chip appliance driven over USB. `pin` is the chip's enrolled identity
-/// (`B`, `anchor_id`, `H0`, `partition_pk`), captured at admission because the appliance wire
-/// protocol has no host op that returns it (STATUS returns `B` but not the rest).
+/// A physical-chip appliance driven over USB. The `pin` is self-sourced from a STATUS round-trip
+/// at construction — the chip self-describes its enrolled identity (`B`, `anchor_id`, `H0`,
+/// `partition_pk`), so there is no host-side enrollment DB and the pin is always the REAL silicon's.
 pub struct UsbAnchorAppliance {
     usb: UsbTransceive,
     pin: AnchorPin,
@@ -33,41 +33,62 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], DsmError> {
         .map_err(|_| DsmError::invalid_operation("anchor appliance: expected 32-byte field"))
 }
 
+/// One appliance op over the transport: frame `LE32(len) ++ ApplianceRequest`, run the opaque USB
+/// round-trip, decode `ApplianceResponse`, and fail closed unless the chip reported `ok`. Free
+/// function so it is usable from `new()` before `self` exists.
+fn roundtrip(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
+    let body = encode_request(&req);
+    let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(&body);
+    let resp_body = usb(frame)?;
+    let resp = decode_response(&resp_body).map_err(|e| {
+        DsmError::invalid_operation(format!("anchor appliance: decode response: {e:?}"))
+    })?;
+    if !resp.ok {
+        return Err(DsmError::invalid_operation(format!(
+            "anchor appliance: op {} failed on-chip (error code {})",
+            resp.op, resp.error
+        )));
+    }
+    Ok(resp)
+}
+
+fn bare(op: pb::Op) -> pb::ApplianceRequest {
+    pb::ApplianceRequest {
+        op: op as i32,
+        ..Default::default()
+    }
+}
+
 impl UsbAnchorAppliance {
-    pub fn new(usb: UsbTransceive, pin: AnchorPin) -> Self {
-        Self { usb, pin }
+    /// Connect to the physical appliance and self-source its pin from one STATUS round-trip.
+    /// Fails closed if the chip is unreachable or STATUS omits the pin material (pre-STATUS-pin
+    /// firmware) — an appliance whose identity cannot be read must never produce releases.
+    pub fn connect(usb: UsbTransceive) -> Result<Self, DsmError> {
+        let s = roundtrip(&usb, bare(pb::Op::Status))?;
+        let pin = AnchorPin {
+            bundle: arr32(&s.anchor_bundle)?,
+            anchor_id: arr32(&s.pin_anchor_id)?,
+            enrolled_counter: s.pin_enrolled_counter,
+            partition_pk: s.pin_partition_pk,
+        };
+        if pin.partition_pk.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "anchor appliance: STATUS returned no partition_pk — firmware lacks STATUS pin \
+                 material; cannot produce verifiable releases (fail closed)",
+            ));
+        }
+        Ok(Self { usb, pin })
     }
 
-    /// One appliance op: frame `LE32(len) ++ ApplianceRequest`, run the opaque USB round-trip,
-    /// decode `ApplianceResponse`, and fail closed unless the chip reported `ok`.
     fn roundtrip(&self, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
-        let body = encode_request(&req);
-        let mut frame = (body.len() as u32).to_le_bytes().to_vec();
-        frame.extend_from_slice(&body);
-        let resp_body = (self.usb)(frame)?;
-        let resp = decode_response(&resp_body).map_err(|e| {
-            DsmError::invalid_operation(format!("anchor appliance: decode response: {e:?}"))
-        })?;
-        if !resp.ok {
-            return Err(DsmError::invalid_operation(format!(
-                "anchor appliance: op {} failed on-chip (error code {})",
-                resp.op, resp.error
-            )));
-        }
-        Ok(resp)
-    }
-
-    fn bare(op: pb::Op) -> pb::ApplianceRequest {
-        pb::ApplianceRequest {
-            op: op as i32,
-            ..Default::default()
-        }
+        roundtrip(&self.usb, req)
     }
 }
 
 impl AnchorAppliance for UsbAnchorAppliance {
     fn status(&mut self) -> Result<ApplianceStatus, DsmError> {
-        let r = self.roundtrip(Self::bare(pb::Op::Status))?;
+        let r = self.roundtrip(bare(pb::Op::Status))?;
         Ok(ApplianceStatus {
             root: arr32(&r.active_root)?,
             anchor_head: arr32(&r.active_anchor_head)?,
@@ -88,11 +109,11 @@ impl AnchorAppliance for UsbAnchorAppliance {
     }
 
     fn commit(&mut self) -> Result<(), DsmError> {
-        self.roundtrip(Self::bare(pb::Op::Commit)).map(|_| ())
+        self.roundtrip(bare(pb::Op::Commit)).map(|_| ())
     }
 
     fn emit(&mut self) -> Result<Vec<u8>, DsmError> {
-        let r = self.roundtrip(Self::bare(pb::Op::Emit))?;
+        let r = self.roundtrip(bare(pb::Op::Emit))?;
         let release = r.release.ok_or_else(|| {
             DsmError::invalid_operation("anchor appliance: EMIT returned no release")
         })?;
@@ -102,12 +123,12 @@ impl AnchorAppliance for UsbAnchorAppliance {
     }
 
     fn finalize(&mut self) -> Result<[u8; 32], DsmError> {
-        let r = self.roundtrip(Self::bare(pb::Op::Finalize))?;
+        let r = self.roundtrip(bare(pb::Op::Finalize))?;
         arr32(&r.active_root)
     }
 
     fn cancel(&mut self) -> Result<(), DsmError> {
-        self.roundtrip(Self::bare(pb::Op::Cancel)).map(|_| ())
+        self.roundtrip(bare(pb::Op::Cancel)).map(|_| ())
     }
 
     fn pin(&self) -> AnchorPin {

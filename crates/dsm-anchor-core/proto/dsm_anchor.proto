@@ -137,4 +137,10 @@ message ApplianceResponse {
   bytes active_committed_boot_head = 13; // OP_STATUS: committed boot head J_b (== active_boot_head at
                                          // rest; the PREV fused-anchor-state leaf commits THIS). The
                                          // USB appliance client needs it to build the next transition.
+  // OP_STATUS pin material — the chip self-describing the identity a receiver pins. `anchor_bundle`
+  // (field 6) is B; these three complete the AnchorPin so a USB client sources it from one STATUS
+  // round-trip (no host-side enrollment DB) and the sender's disclosure carries the REAL pin.
+  bytes  pin_anchor_id         = 14; // OP_STATUS: 32-byte anchor id
+  uint64 pin_enrolled_counter  = 15; // OP_STATUS: H0 (the live provisioned enrollment counter)
+  bytes  pin_partition_pk      = 16; // OP_STATUS: partition public key
 }
