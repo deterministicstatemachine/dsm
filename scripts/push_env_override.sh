@@ -5,12 +5,14 @@
 #   --local   (default)  Generate localhost config + adb reverse ports (dev nodes)
 #   --aws               Push pre-built AWS config + self-signed CA cert (production nodes)
 #   --gcp               Push pre-built GCP config + self-signed CA cert (production nodes)
+#   --alibaba           Push pre-built Alibaba config + self-signed CA cert (production nodes)
 #
 # Usage:
 #   ./push_env_override.sh             # local dev nodes (default)
 #   ./push_env_override.sh --local     # same as above, explicit
 #   ./push_env_override.sh --aws       # AWS storage nodes
 #   ./push_env_override.sh --gcp       # GCP storage nodes
+#   ./push_env_override.sh --alibaba   # Alibaba Cloud storage nodes (3 nodes, us-west-1)
 
 set -e
 
@@ -23,14 +25,16 @@ PORTS=(8080 8081 8082 8083 8084)
 MODE="local"
 for arg in "$@"; do
   case "$arg" in
-    --aws)   MODE="aws" ;;
-    --gcp)   MODE="gcp" ;;
-    --local) MODE="local" ;;
+    --aws)     MODE="aws" ;;
+    --gcp)     MODE="gcp" ;;
+    --alibaba) MODE="alibaba" ;;
+    --local)   MODE="local" ;;
     --help|-h)
-      echo "Usage: $0 [--local|--aws|--gcp]"
-      echo "  --local  (default) Local dev nodes via adb reverse"
-      echo "  --aws    AWS storage nodes (6 nodes, 3 regions)"
-      echo "  --gcp    GCP storage nodes (6 nodes, 3 regions)"
+      echo "Usage: $0 [--local|--aws|--gcp|--alibaba]"
+      echo "  --local    (default) Local dev nodes via adb reverse"
+      echo "  --aws      AWS storage nodes (6 nodes, 3 regions)"
+      echo "  --gcp      GCP storage nodes (6 nodes, 3 regions)"
+      echo "  --alibaba  Alibaba Cloud storage nodes (3 nodes, us-west-1)"
       exit 0
       ;;
     *) echo "Unknown argument: $arg"; exit 1 ;;
@@ -42,6 +46,7 @@ echo "Mode: $MODE"
 # --- Remote config paths ---
 AWS_CONFIG="$REPO_ROOT/scripts/dsm_env_config.aws.toml"
 GCP_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp.toml"
+ALIBABA_CONFIG="$REPO_ROOT/scripts/dsm_env_config.alibaba.toml"
 CA_CERT="$REPO_ROOT/dsm_storage_node/deploy/nodes/ca/ca.crt"
 CA_CERT_SCRIPTS="$REPO_ROOT/scripts/ca.crt"
 
@@ -51,6 +56,8 @@ if [[ "$MODE" == "aws" ]]; then
   REMOTE_CONFIG="$AWS_CONFIG"
 elif [[ "$MODE" == "gcp" ]]; then
   REMOTE_CONFIG="$GCP_CONFIG"
+elif [[ "$MODE" == "alibaba" ]]; then
+  REMOTE_CONFIG="$ALIBABA_CONFIG"
 fi
 
 if [[ -n "$REMOTE_CONFIG" ]]; then
@@ -121,7 +128,7 @@ for d in $serials; do
   # Ensure app-private files dir exists
   adb -s "$d" shell run-as "$APP_PKG" mkdir -p files || true
 
-  if [[ "$MODE" == "aws" || "$MODE" == "gcp" ]]; then
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
     # --- Remote mode (AWS or GCP) ---
     echo "Pushing $MODE storage node config to $d..."
     adb -s "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.toml
@@ -136,7 +143,7 @@ for d in $serials; do
       adb -s "$d" reverse --remove tcp:$p 2>/dev/null || true
     done
 
-    echo "Config: 6 $MODE storage nodes (HTTPS + custom CA)"
+    echo "Config: $MODE storage nodes (HTTPS + custom CA)"
     adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml files/ca.crt
 
   else
@@ -181,7 +188,7 @@ for d in $serials; do
 
   echo "Verifying startup logs for $d..."
   sleep 2
-  if [[ "$MODE" == "aws" || "$MODE" == "gcp" ]]; then
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
     adb -s "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
   else
     adb -s "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true
