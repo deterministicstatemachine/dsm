@@ -254,6 +254,29 @@ pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
+/// The local device's CURRENT ML-KEM-768 (Kyber) encapsulation key. Installed by
+/// `AppRouterImpl::new` right after `WalletSDK` initializes device keys — the keypair is
+/// deliberately RANDOMIZED per wallet init (no persisted device secret), so this snapshot is
+/// valid for the life of the wallet instance and is re-installed on every router (re)build.
+/// The bilateral BLE prepare exchange attaches it so counterparties can refresh their contact
+/// record (per-step EK receipts encapsulate to it). `None` -> prepare messages carry an empty
+/// key and the counterparty's receipt build fail-closes exactly as before.
+static LOCAL_KYBER_PUBKEY: Lazy<RwLock<Option<Vec<u8>>>> = Lazy::new(|| RwLock::new(None));
+
+/// Install (or replace) the local wallet's Kyber public key snapshot.
+pub fn install_local_kyber_pubkey(pk: Vec<u8>) {
+    if let Ok(mut g) = LOCAL_KYBER_PUBKEY.write() {
+        *g = Some(pk);
+        log::info!("[SDK] Local Kyber public key installed (bilateral prepare exchange)");
+    }
+}
+
+/// The local wallet's Kyber public key, if a wallet is initialized this session.
+#[must_use]
+pub fn local_kyber_pubkey() -> Option<Vec<u8>> {
+    LOCAL_KYBER_PUBKEY.read().ok()?.clone()
+}
+
 /// Receiver-side Path-B counter reader (D2 activation). Installed by the device layer with an
 /// implementation backed by the BLE relay + the excluded hardware verifier crate. `None` until
 /// installed, which keeps offline-bearer acceptance fail-closed (online recovery).

@@ -289,6 +289,8 @@ impl BilateralHandler for BiImpl {
                                         .unwrap_or_default(),
                                 receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
                                 anchor_enroll_request: None, // set by the BLE receiver path (first-transfer bearer enroll)
+                                responder_kyber_public_key: crate::bridge::local_kyber_pubkey()
+                                    .unwrap_or_default(),
                             };
 
                             return BiResult {
@@ -329,6 +331,8 @@ impl BilateralHandler for BiImpl {
                             crate::sdk::app_state::AppState::get_public_key().unwrap_or_default(),
                         receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
                         anchor_enroll_request: None, // set by the BLE receiver path (first-transfer bearer enroll)
+                        responder_kyber_public_key: crate::bridge::local_kyber_pubkey()
+                            .unwrap_or_default(),
                     };
 
                     BiResult {

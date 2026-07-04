@@ -1691,6 +1691,9 @@ impl BilateralBleHandler {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
+            // Randomized-per-init Kyber key: the receiver refreshes its contact copy from this
+            // (empty when no wallet key is installed — legacy behavior, receipt fail-closes).
+            sender_kyber_public_key: crate::bridge::local_kyber_pubkey().unwrap_or_default(),
         };
 
         let tip_override = {
@@ -2260,6 +2263,27 @@ impl BilateralBleHandler {
                 );
             }
 
+            // Refresh the sender's Kyber (ML-KEM-768) key alongside the signing key: it is
+            // randomized per wallet init on the peer, and the per-step EK receipt this transfer
+            // builds fail-closes without a current copy on the contact record.
+            if !prepare_request.sender_kyber_public_key.is_empty() {
+                match crate::storage::client_db::update_contact_kyber_key(
+                    &counterparty_device_id,
+                    &prepare_request.sender_kyber_public_key,
+                ) {
+                    Ok(()) => log::info!(
+                        "[BilateralBleHandler] ✅ Refreshed contact kyber_public_key from prepare request"
+                    ),
+                    Err(e) => log::warn!(
+                        "[BilateralBleHandler] ⚠️ Failed to persist contact kyber_public_key: {e}"
+                    ),
+                }
+            } else {
+                log::warn!(
+                    "[BilateralBleHandler] ⚠️ No sender_kyber_public_key in prepare request (legacy peer?)"
+                );
+            }
+
             // =====================================================================
             // CRITICAL: Update our view of sender's chain tip from prepare request
             // This enables proper state synchronization in multi-relationship scenarios
@@ -2702,6 +2726,9 @@ impl BilateralBleHandler {
             responder_signing_public_key: local_signing_key,
             receiver_challenge: receiver_challenge.to_vec(),
             anchor_enroll_request,
+            // Randomized-per-init Kyber key: the sender refreshes its contact copy from this
+            // before building the per-step EK receipt in the immediately following confirm.
+            responder_kyber_public_key: crate::bridge::local_kyber_pubkey().unwrap_or_default(),
         };
 
         // Wrap in envelope
@@ -3040,6 +3067,27 @@ impl BilateralBleHandler {
                 } else {
                     log::info!(
                         "[BilateralBleHandler] ✅ Persisted responder public_key to SQLite (handle_prepare_response)"
+                    );
+                }
+
+                // Refresh the responder's Kyber (ML-KEM-768) key alongside the signing key: the
+                // per-step EK receipt built in send_bilateral_confirm (immediately after this)
+                // encapsulates to it and fail-closes when the contact record has no current copy.
+                if !prepare_response.responder_kyber_public_key.is_empty() {
+                    match crate::storage::client_db::update_contact_kyber_key(
+                        &counterparty_device_id,
+                        &prepare_response.responder_kyber_public_key,
+                    ) {
+                        Ok(()) => log::info!(
+                            "[BilateralBleHandler] ✅ Refreshed contact kyber_public_key from prepare response"
+                        ),
+                        Err(e) => log::warn!(
+                            "[BilateralBleHandler] ⚠️ Failed to persist responder kyber_public_key: {e}"
+                        ),
+                    }
+                } else {
+                    log::warn!(
+                        "[BilateralBleHandler] ⚠️ No responder_kyber_public_key in prepare response (legacy peer?)"
                     );
                 }
             } else {

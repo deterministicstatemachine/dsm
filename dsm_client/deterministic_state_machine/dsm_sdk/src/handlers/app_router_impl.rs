@@ -538,6 +538,19 @@ impl AppRouterImpl {
             }
         };
 
+        // Publish the wallet's Kyber public key to the bridge slot so the bilateral BLE prepare
+        // exchange can attach it (the keypair is randomized per wallet init; counterparties must
+        // refresh their contact's copy every exchange or the per-step EK receipt fail-closes with
+        // "counterparty contact missing Kyber public key"). Warn-and-continue: an absent key just
+        // leaves prepare messages with an empty field, which is the legacy behavior.
+        match wallet.get_kyber_public_key() {
+            Ok(pk) => crate::bridge::install_local_kyber_pubkey(pk),
+            Err(e) => log::warn!(
+                "[DSM_SDK] local Kyber public key unavailable at router build (bilateral prepare \
+                 will omit it): {e}"
+            ),
+        }
+
         let bilateral_storage = if config.enable_offline {
             let cfg = BilateralStorageConfig {
                 offline_mode: true,
