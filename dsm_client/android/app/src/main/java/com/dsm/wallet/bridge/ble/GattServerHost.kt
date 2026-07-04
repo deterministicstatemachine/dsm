@@ -92,6 +92,10 @@ class GattServerHost(private val context: Context) {
         const val CHUNK_ACK_MARKER: Byte = 0xFF.toByte()
         /** Number of notification chunks to send before pausing for an ACK. */
         const val NOTIFICATION_WINDOW_SIZE = 10
+
+        // Whole-transfer retry on window-ACK timeout (transport-level; see sendChunkedNotifications).
+        const val TRANSFER_MAX_ATTEMPTS = 3
+        const val TRANSFER_RETRY_DELAY_MS = 500L
         /** Timeout waiting for client ACK write-back per window. */
         const val ACK_TIMEOUT_MS = 5000L
         /** Granularity for draining stale ACKs while still honoring ACK_TIMEOUT_MS overall. */
@@ -457,6 +461,12 @@ class GattServerHost(private val context: Context) {
         }
 
         return peer.notificationSendLock.withLock {
+            // Whole-transfer retry: BLE notification streams die routinely mid-flight (observed
+            // live: ACK timeout at chunk 150/295 killed a settled transfer's commit ack, leaving
+            // the sender undebited). Each attempt bumps the transfer nonce, which resets the
+            // client's per-transfer ACK counter, and the Rust reassembly layer dedupes
+            // re-received chunks by index — so a full resend is safe and self-consistent.
+            attempts@ for (attempt in 1..TRANSFER_MAX_ATTEMPTS) {
             // Increment transfer nonce so the client resets its ACK counter.
             // This eliminates reliance on idle-gap detection for transfer boundary.
             peer.serverTransferNonce = ((peer.serverTransferNonce.toInt() + 1) and 0xFF).toByte()
@@ -467,6 +477,7 @@ class GattServerHost(private val context: Context) {
             // Keep the channel bounded so a noisy peer cannot accumulate unbounded ACK state.
             val ackChannel = Channel<Int>(Channel.CONFLATED)
             peer.chunkAckChannel = ackChannel
+            var windowTimedOut = false
 
             try {
                 // Prepend [0xFF, nonce] to the first chunk so the client can
@@ -583,8 +594,12 @@ class GattServerHost(private val context: Context) {
                             }
 
                             if (ackCount == null) {
-                                Log.e("GattServerHost", "sendChunkedNotifications: ACK timeout at chunk $chunkNum/${chunks.size}")
-                                return@withLock false
+                                Log.e(
+                                    "GattServerHost",
+                                    "sendChunkedNotifications: ACK timeout at chunk $chunkNum/${chunks.size} (attempt $attempt/$TRANSFER_MAX_ATTEMPTS)"
+                                )
+                                windowTimedOut = true
+                                break
                             }
 
                             Log.d("GattServerHost", "sendChunkedNotifications: ACK confirmed $ackCount/$chunkNum")
@@ -601,12 +616,28 @@ class GattServerHost(private val context: Context) {
                     }
                 }
 
-                Log.i("GattServerHost", "sendChunkedNotifications: all ${chunks.size} chunks sent and ACK'd by $deviceAddress")
-                true
+                if (!windowTimedOut) {
+                    Log.i(
+                        "GattServerHost",
+                        "sendChunkedNotifications: all ${chunks.size} chunks sent and ACK'd by $deviceAddress (attempt $attempt)"
+                    )
+                    return@withLock true
+                }
             } finally {
                 peer.chunkAckChannel = null
                 ackChannel.close()
             }
+            // Window ACK timed out: pause briefly for the link to recover, then retry the
+            // whole transfer under a fresh nonce.
+            if (attempt < TRANSFER_MAX_ATTEMPTS) {
+                kotlinx.coroutines.delay(TRANSFER_RETRY_DELAY_MS)
+            }
+            }
+            Log.e(
+                "GattServerHost",
+                "sendChunkedNotifications: transfer to $deviceAddress failed after $TRANSFER_MAX_ATTEMPTS attempts"
+            )
+            false
         }
     }
 
