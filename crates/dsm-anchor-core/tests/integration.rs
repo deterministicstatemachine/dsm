@@ -508,16 +508,24 @@ fn recover_prepared_can_complete() {
 }
 
 #[test]
-fn recover_ready_stale_downgrades_and_ahead_fails_closed() {
+fn recover_ready_stale_adopts_live_and_ahead_fails_closed() {
+    // A Ready device whose model is BEHIND the chip (the normal state after any transfer + reboot,
+    // since the counter is permanently below H0 and the appliance re-births at u=0) must ADOPT the
+    // live counter — the chip is the source of truth. Adopting only shrinks the remaining budget and
+    // cannot enable a double-spend.
     let (mut a, _pk, _b) = app(H0);
     a.boot(1, &FW).unwrap();
     let t = make_transition(ROOT0, ROOT1, 0);
     a.prepare(&t.as_transition(), &RCHAL).unwrap();
     a.commit().unwrap();
     a.finalize().unwrap(); // counter at 99, u=1
-    a.active.anchor_counter = 0; // stale
-    assert_eq!(a.recover(), RecoverOutcome::DowngradeOnline);
+    a.active.anchor_counter = 0; // stale (behind the chip)
+    let root = a.active.root;
+    assert_eq!(a.recover(), RecoverOutcome::Accept(root)); // adopts live_u, ready to serve
+    assert_eq!(a.active.anchor_counter, 1); // reconciled to the live chip counter
 
+    // A device AHEAD of the chip (more spends than the down-counter shows) is impossible for a real
+    // monotonic down-counter (it would have to rise) -> fail closed.
     let (mut a, _pk, _b) = app(H0);
     a.boot(1, &FW).unwrap();
     a.active.anchor_counter = 5; // ahead

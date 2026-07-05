@@ -38,7 +38,6 @@ extern crate alloc;
 
 use panic_halt as _;
 
-use core::fmt::Write as _;
 
 use rp235x_hal as hal;
 
@@ -225,35 +224,80 @@ impl PartitionSig for SphincsPart {
     }
 }
 
-/// Bridge anchor-core's `Tropic` trait to a libtropic-rs active session. The same
-/// session serves both MACANDD slots (`q_boot`, `q_tx`) and the counter.
+/// Bridge anchor-core's `Tropic` trait to a libtropic-rs active session, WITH SESSION RECOVERY.
+///
+/// The TROPIC01 has exactly ONE L3 secure session. `OP_SPI_PASSTHROUGH` lets a remote receiver
+/// clock its OWN Noise handshake to the chip over raw SPI (the Path-B counter read), which re-keys
+/// the chip and leaves OUR `sess` (nonces/keys) STALE. If the next appliance op then talks over
+/// that dead session, it fails — this was the on-phone `op 2 (PREPARE) error 8` while the Mac (which
+/// never does a relay read) worked. So: mark the session dirty after every passthrough, and
+/// re-establish our own session (local reset + fresh `session_start`) before the NEXT appliance op.
 struct ChipTropic<'a, SPI: SpiDevice, CS: OutputPin> {
-    sess: &'a mut Tropic01<SPI, CS, ActiveSession>,
+    /// `Option` so we can move the session out to transition its typestate during re-handshake.
+    sess: &'a mut Option<Tropic01<SPI, CS, ActiveSession>>,
+    /// Seed (drawn once at boot) for deriving a fresh ephemeral key per re-handshake.
+    reseed: [u8; 32],
+    rehandshakes: u32,
+    dirty: bool,
+}
+impl<SPI: SpiDevice, CS: OutputPin> ChipTropic<'_, SPI, CS> {
+    /// Before an appliance op: if a passthrough may have re-keyed the chip, locally drop our stale
+    /// session typestate and re-handshake with a fresh ephemeral. No-op on the happy path.
+    fn ensure(&mut self) -> Result<&mut Tropic01<SPI, CS, ActiveSession>, TropicError> {
+        if self.dirty {
+            let stale = self.sess.take().ok_or(TropicError::Comm)?;
+            let ns = stale.reset_session_local();
+            self.rehandshakes = self.rehandshakes.wrapping_add(1);
+            let eh = anchor_core::hash::h(
+                "DSM/anchor/rehandshake-eph/v1",
+                &[&self.reseed, &self.rehandshakes.to_le_bytes()],
+            );
+            let ehpriv = StaticSecret::from(eh);
+            let ehpub = PublicKey::from(&ehpriv);
+            let fresh = ns
+                .session_start(
+                    &X25519Dalek,
+                    PublicKey::from(SH0PUB_PROD0),
+                    StaticSecret::from(SH0PRIV_PROD0),
+                    ehpub,
+                    ehpriv,
+                    0,
+                )
+                .map_err(|_| TropicError::Comm)?;
+            *self.sess = Some(fresh);
+            self.dirty = false;
+        }
+        self.sess.as_mut().ok_or(TropicError::Comm)
+    }
 }
 impl<SPI: SpiDevice, CS: OutputPin> Tropic for ChipTropic<'_, SPI, CS> {
     fn mac_and_destroy(&mut self, q: u16, x: &[u8; 32]) -> Result<[u8; 32], TropicError> {
-        self.sess
+        self.ensure()?
             .mac_and_destroy(q.into(), x)
             .map(|w| *w)
             .map_err(|_| TropicError::Comm)
     }
     fn counter_get(&mut self) -> Result<u32, TropicError> {
-        self.sess
+        self.ensure()?
             .mcounter_get(COUNTER)
             .map_err(|_| TropicError::Comm)
     }
     fn counter_update(&mut self) -> Result<(), TropicError> {
-        self.sess
+        self.ensure()?
             .mcounter_update(COUNTER)
             .map_err(|_| TropicError::CounterExhausted)
     }
 }
 impl<SPI: SpiDevice, CS: OutputPin> ChipTropic<'_, SPI, CS> {
     /// Transparent raw-SPI relay bridge (Path-B counter read): clock `buf` to TROPIC01 and read the
-    /// MISO back in place. The bytes are NOT interpreted — a remote receiver drives its own
-    /// libtropic session through these opaque transactions; this device is only the SPI bridge.
+    /// MISO back in place. Do NOT `ensure()` here — the bytes may BE a peer's handshake, and
+    /// re-handshaking mid relay-read would kill the peer's session. Mark dirty so the next appliance
+    /// op re-establishes ours.
     fn passthrough(&mut self, buf: &mut [u8]) -> Result<(), TropicError> {
-        self.sess.l1_passthrough(buf).map_err(|_| TropicError::Comm)
+        let sess = self.sess.as_mut().ok_or(TropicError::Comm)?;
+        let r = sess.l1_passthrough(buf).map_err(|_| TropicError::Comm);
+        self.dirty = true;
+        r
     }
 }
 
@@ -752,78 +796,19 @@ fn main() -> ! {
     put(&mut serial, b"[T2] session=OK\r\n");
     let _ = serial.flush();
 
-    // ---- Phase 4: T5 self-test (own appliance), reported briefly ----
+    // ---- Phase 4: boot self-test REMOVED (it was DESTRUCTIVE to the counter) ----
+    // The former [T5] self-test drove a full PREPARE -> COMMIT -> EMIT on the chip EVERY boot, and
+    // `Appliance::commit` calls `counter_update()` which DECREMENTS the physical monotonic counter.
+    // So every power cycle silently burned one anti-double-spend step, drifting the provisioned
+    // counter below MCOUNTER_MAX and desyncing the serving appliance (a real transfer then failed
+    // `CounterMismatch`). A provisioned/serving device must NEVER consume a counter step at boot. The
+    // appliance is exercised for real by the serve loop below; there is no destructive boot diagnostic.
     put(
         &mut serial,
-        b"[T5] self-test (boot-fenced fused protocol, secure-core seam)...\r\n",
+        b"[T5] boot self-test disabled (non-destructive boot; no counter spend)\r\n",
     );
     let _ = serial.flush();
     usb_dev.poll(&mut [&mut serial]);
-    let st = match enroll(&mut sess, &ident, &policy_hash) {
-        Ok((h0, b)) => {
-            let part_pk = b.partition_pk.clone();
-            let mut core = SecureCore {
-                app: Appliance::<_, WotsBlake3, SphincsPart>::new(
-                    ChipTropic { sess: &mut sess },
-                    h0,
-                    ident.anchor_id,
-                    Q_BOOT,
-                    Q_TX,
-                    ident.partition_device_id,
-                    GENESIS,
-                    b,
-                ),
-            };
-            self_test(&mut core, &part_pk, &ident.anchor_id, &policy_hash)
-        }
-        Err(e) => Err(e),
-    };
-    {
-        let mut w = BufW {
-            buf: [0u8; 256],
-            len: 0,
-        };
-        match &st {
-            Ok(r) => {
-                let pass = r.ops_ok
-                    && r.pk_len == 32
-                    && r.sig_tropic_len == 67 * 32
-                    && r.sig_partition_len == dsm_sphincs::signature_bytes(PART_VARIANT)
-                    && r.st_counter == 1
-                    && r.st_status == 0 // Ready
-                    && r.verify_ok
-                    && r.root_match;
-                let _ = write!(
-                    w,
-                    "[T5] {}  ops_ok={} pk={}B sigT={}B sigP={}B status(u={},st={}) verify={}({})\r\n",
-                    if pass { "PASS" } else { "FAIL" },
-                    r.ops_ok,
-                    r.pk_len,
-                    r.sig_tropic_len,
-                    r.sig_partition_len,
-                    r.st_counter,
-                    r.st_status,
-                    if r.verify_ok { "accepted" } else { "REJECTED" },
-                    if r.root_match { "root ok" } else { "root MISMATCH" },
-                );
-            }
-            Err(e) => {
-                let _ = write!(w, "[T5] FAIL at step: {}\r\n", e);
-            }
-        }
-        let report_until = timer.get_counter().ticks() + 4_000_000;
-        let mut last = timer.get_counter();
-        put(&mut serial, &w.buf[..w.len]);
-        let _ = serial.flush();
-        while timer.get_counter().ticks() < report_until {
-            usb_dev.poll(&mut [&mut serial]);
-            if (timer.get_counter() - last).to_millis() >= 2000 {
-                last = timer.get_counter();
-                put(&mut serial, &w.buf[..w.len]);
-                let _ = serial.flush();
-            }
-        }
-    }
 
     // ---- Phase 5: T6 serve the appliance over USB-CDC for an external host ----
     put(
@@ -851,9 +836,18 @@ fn main() -> ! {
         });
         (ENROLL_H0, b)
     });
+    // Move the live session into an Option so ChipTropic can re-handshake it after a passthrough
+    // re-keys the chip (see ChipTropic). One extra TRNG draw seeds the per-re-handshake ephemeral.
+    let reseed = draw();
+    let mut sess_opt = Some(sess);
     let mut core = SecureCore {
         app: Appliance::<_, WotsBlake3, SphincsPart>::new(
-            ChipTropic { sess: &mut sess },
+            ChipTropic {
+                sess: &mut sess_opt,
+                reseed,
+                rehandshakes: 0,
+                dirty: false,
+            },
             h0,
             ident.anchor_id,
             Q_BOOT,
