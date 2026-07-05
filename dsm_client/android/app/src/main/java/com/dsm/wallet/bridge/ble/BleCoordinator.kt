@@ -1171,10 +1171,26 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             }
         }
 
-        Log.w(
-            "BleCoordinator",
-            "resolveSession: no exact or identity-backed route for $address; refusing ready-peer fallback"
-        )
+        // 4. Single-peer fallback (restored — this existed in the "Harden BLE multi-peer fallback"
+        // version and was later dropped). RPA rotation moves the peer's advertised address faster
+        // than the frontend/SDK cache can follow, so the target address is often stale/unresolvable
+        // even while a LIVE session to the peer exists at the connected address. When there is EXACTLY
+        // ONE peer with a ready session, route to it. Guarded to a single ready peer, so a multi-peer
+        // scenario never routes ambiguously.
+        val readyAddresses = peers.entries.mapNotNull { (addr, peer) ->
+            if (peer.hasActiveClientSession ||
+                (peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID))
+            ) addr else null
+        }
+        when (readyAddresses.size) {
+            1 -> {
+                val freshAddr = readyAddresses.first()
+                Log.i("BleCoordinator", "resolveSession: single-peer fallback $address → $freshAddr")
+                return peers[freshAddr]!! to freshAddr
+            }
+            0 -> Log.w("BleCoordinator", "resolveSession: no route for $address (no ready peer)")
+            else -> Log.i("BleCoordinator", "resolveSession: refusing ambiguous fallback across ${readyAddresses.size} ready peers")
+        }
         return null
     }
 

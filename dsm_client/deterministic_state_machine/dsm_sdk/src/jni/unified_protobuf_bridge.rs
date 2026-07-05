@@ -3120,7 +3120,12 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                     == crate::generated::BleFrameType::BilateralPrepareReject as i32
                     || frame_type == crate::generated::BleFrameType::BilateralCommit as i32
                     || frame_type == crate::generated::BleFrameType::BilateralCommitResponse as i32
-                    || frame_type == crate::generated::BleFrameType::BilateralConfirm as i32;
+                    || frame_type == crate::generated::BleFrameType::BilateralConfirm as i32
+                    // Path-B relay reply (chip->receiver counter read): the REQUEST is chunked via
+                    // `queue_follow_up_chunks`, so the REPLY must be BleChunk-framed too — otherwise
+                    // the receiver decodes the raw `TropicSpiRelayPacket` as a `BleChunk` and fails
+                    // (`invalid tag value: 0`), dropping the reply and timing out the counter read.
+                    || frame_type == crate::generated::BleFrameType::TropicSpiRelay as i32;
 
                 if needs_chunking {
                     use_reliable_write = true;
