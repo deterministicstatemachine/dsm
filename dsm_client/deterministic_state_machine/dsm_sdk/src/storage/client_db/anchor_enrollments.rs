@@ -77,6 +77,59 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
     }))
 }
 
+/// The appliance root the receiver adopted from the holder's last ACCEPTED
+/// release (Def. 25 check 2), plus the anchor counter adopted with it.
+/// `None` = relationship genesis — the next release's own `prev_root` is
+/// adopted TOFU by the acceptance predicate.
+pub fn load_accepted_anchor_root(device_id: &[u8; 32]) -> Result<Option<([u8; 32], u64)>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("anchor_accepted_roots: db lock poisoned"))?;
+    let row = conn
+        .query_row(
+            "SELECT accepted_root, next_anchor_counter FROM anchor_accepted_roots
+             WHERE device_id = ?1",
+            params![device_id.as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((root, ctr)) => Ok(Some((
+            fixed32(root, "accepted_root")?,
+            u64::try_from(ctr).unwrap_or(0),
+        ))),
+        None => Ok(None),
+    }
+}
+
+/// Adopt the holder's successor appliance root after an accepted release's
+/// canonical commit. INSERT OR REPLACE: each accepted transfer moves the
+/// lineage frontier forward.
+pub fn store_accepted_anchor_root(
+    device_id: &[u8; 32],
+    accepted_root: &[u8; 32],
+    next_anchor_counter: u64,
+) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("anchor_accepted_roots: db lock poisoned"))?;
+    let now = crate::util::deterministic_time::tick() as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO anchor_accepted_roots
+            (device_id, accepted_root, next_anchor_counter, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            device_id.as_slice(),
+            accepted_root.as_slice(),
+            next_anchor_counter as i64,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 /// Admit (pin) a fused anchor. INSERT OR REPLACE: re-admission overwrites, matching the
 /// [`AnchorEnrollmentStore`](dsm::crypto::anchor_enrollment::AnchorEnrollmentStore) contract —
 /// the CALLER owns the authority rules (first-transfer TOFU / same-anchor upgrade only; a

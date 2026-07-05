@@ -378,21 +378,40 @@ impl CounterVerifier for TrustedTestCounter {
     }
 }
 
+/// The holder's successor appliance-lineage state, returned on acceptance so the
+/// receiver can ADOPT it (persist as the new accepted root) once the canonical
+/// commit succeeds. Def. 25 check 2 then pins the NEXT release's `prev_root` to
+/// this frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdoptedAnchorState {
+    /// The release's `next_root` — the appliance root the next transfer consumes.
+    pub next_root: [u8; 32],
+    /// The release's `next_anchor_counter` (`uᵢ + 1`) adopted with it.
+    pub next_anchor_counter: u64,
+}
+
 /// Apply the canonical Boot Fenced Fused Anchor acceptance predicate to an inbound
 /// offline-bearer confirm. Fail-closed: returns `Err(OfflineRecover)` (release no value,
 /// recover online) on a missing/malformed release, an un-enrolled anchor, or ANY failed
-/// predicate check — including the unauthenticated counter. On `Ok(())` the receiver may
-/// proceed to the canonical value-release commit.
+/// predicate check — including the unauthenticated counter. On `Ok(adopted)` the receiver
+/// may proceed to the canonical value-release commit, and after that commit succeeds must
+/// persist `adopted` as the holder's accepted appliance root.
+///
+/// `accepted_prev_root`: the appliance root adopted from the holder's last accepted
+/// release. `None` = relationship genesis (nothing adopted yet) — the release's own
+/// `prev_root` is adopted TOFU; its authenticity still rests on the anchor-state
+/// commitment proofs (checks 3–4) and the live authenticated counter (checks 17–19),
+/// the same trust root as the first-transfer pin admit.
 #[allow(clippy::too_many_arguments)]
 pub fn accept_offline_release(
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
-    accepted_prev_root: &[u8; 32],
+    accepted_prev_root: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
     binding: &AnchorStateBinding,
-) -> Result<(), OfflineRecover> {
+) -> Result<AdoptedAnchorState, OfflineRecover> {
     // Canonical production path: the Path-B authenticated-counter verifier is fail-closed until the
     // async raw-SPI relay read is wired into the receiver (D2 step 5). With `attested = None` the
     // predicate fails on the counter clause and the transfer recovers online. The live-relay path
@@ -418,13 +437,13 @@ pub fn accept_offline_release(
 pub fn accept_offline_release_with_relay_counter(
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
-    accepted_prev_root: &[u8; 32],
+    accepted_prev_root: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
     binding: &AnchorStateBinding,
     attested: Option<([u8; 32], u64)>,
-) -> Result<(), OfflineRecover> {
+) -> Result<AdoptedAnchorState, OfflineRecover> {
     accept_offline_release_with_counter(
         offline_release,
         pinned,
@@ -445,13 +464,13 @@ pub fn accept_offline_release_with_relay_counter(
 pub(crate) fn accept_offline_release_with_counter<C: CounterVerifier>(
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
-    accepted_prev_root: &[u8; 32],
+    accepted_prev_root: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
     binding: &AnchorStateBinding,
     counter: &C,
-) -> Result<(), OfflineRecover> {
+) -> Result<AdoptedAnchorState, OfflineRecover> {
     if offline_release.is_empty() {
         // Absent canonical release (or a legacy IslandAttestation-only confirm).
         return Err(OfflineRecover::MissingRelease);
@@ -462,8 +481,21 @@ pub(crate) fn accept_offline_release_with_counter<C: CounterVerifier>(
         .map_err(|_| OfflineRecover::Malformed)?;
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
 
+    // Def. 25 check 2 root: the adopted lineage frontier when one exists,
+    // else (relationship genesis) the release's own `prev_root` — TOFU,
+    // still bound to the pinned chip by checks 3–4 + the live counter.
+    let t = rel.transition.as_transition();
+    let effective_prev_root: [u8; 32] = match accepted_prev_root {
+        Some(r) => *r,
+        None => *t.prev_root,
+    };
+    let adopted = AdoptedAnchorState {
+        next_root: *t.next_root,
+        next_anchor_counter: t.next_anchor_counter,
+    };
+
     let ctx = VerifierContext {
-        accepted_prev_root,
+        accepted_prev_root: &effective_prev_root,
         pinned_bundle: &pinned.bundle,
         pinned_anchor_id: &pinned.anchor_id,
         expected_receiver_challenge,
@@ -476,7 +508,9 @@ pub(crate) fn accept_offline_release_with_counter<C: CounterVerifier>(
         partition_pk: &pinned.partition_pk,
         binding,
     };
-    accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, counter).map_err(OfflineRecover::Predicate)
+    accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, counter)
+        .map_err(OfflineRecover::Predicate)?;
+    Ok(adopted)
 }
 
 #[cfg(test)]
@@ -569,7 +603,7 @@ mod tests {
 
     #[test]
     fn missing_release_routes_online() {
-        let r = accept_offline_release(&[], Some(&pin()), &ZERO, &ZERO, &ZERO, &ZERO, &ZB);
+        let r = accept_offline_release(&[], Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZB);
         assert!(matches!(r, Err(OfflineRecover::MissingRelease)));
     }
 
@@ -582,7 +616,7 @@ mod tests {
         }
         .encode_to_vec();
         assert!(!bytes.is_empty());
-        let r = accept_offline_release(&bytes, Some(&pin()), &ZERO, &ZERO, &ZERO, &ZERO, &ZB);
+        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZB);
         assert!(matches!(r, Err(OfflineRecover::Malformed)));
     }
 
@@ -590,7 +624,7 @@ mod tests {
     fn unenrolled_anchor_routes_online() {
         // A decodable release with NO pinned anchor (the live Phase-4 seam) recovers online.
         let bytes = decodable_release_bytes();
-        let r = accept_offline_release(&bytes, None, &ZERO, &ZERO, &ZERO, &ZERO, &ZB);
+        let r = accept_offline_release(&bytes, None, Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZB);
         assert!(matches!(r, Err(OfflineRecover::AnchorNotEnrolled)));
     }
 
@@ -599,7 +633,7 @@ mod tests {
         // A decodable release WITH a pin reaches accept_offline and is rejected by the predicate
         // (proves the canonical predicate is wired and fail-closed — it can never accept here).
         let bytes = decodable_release_bytes();
-        let r = accept_offline_release(&bytes, Some(&pin()), &ZERO, &ZERO, &ZERO, &ZERO, &ZB);
+        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZB);
         assert!(matches!(r, Err(OfflineRecover::Predicate(_))));
     }
 

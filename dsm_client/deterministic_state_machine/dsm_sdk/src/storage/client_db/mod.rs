@@ -702,6 +702,46 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (relationship_key, side)
         );
 
+        -- §11.1 sender-side DEFERRED Local chain-head advance. The new
+        -- per-step EK (pubkey + AEAD-encrypted SK, same wrap scheme as
+        -- cert_chain_heads) signed into an outbound bilateral confirm is
+        -- held here, keyed by the bilateral commitment, until the
+        -- receiver's commit-response proves the step was accepted — then
+        -- it is promoted into cert_chain_heads.Local. Advancing at
+        -- confirm-BUILD time (the previous behavior) moved the Local head
+        -- past a step the receiver could still reject (e.g. MissingRelease)
+        -- or never see, after which every subsequent transfer signed a
+        -- cert the receiver could not chain back to its expected prior
+        -- head — permanently wedging the relationship. is_init records
+        -- whether the sign fell back to the root AK (relationship genesis,
+        -- no Local row yet) so promotion knows to INSERT (step 0) rather
+        -- than UPDATE.
+        CREATE TABLE IF NOT EXISTS pending_local_cert_heads(
+            relationship_key        BLOB NOT NULL,
+            commitment_hash         BLOB NOT NULL,
+            ek_pubkey               BLOB NOT NULL,
+            ek_sk_encrypted         BLOB NOT NULL,
+            is_init                 INTEGER NOT NULL CHECK(is_init IN (0, 1)),
+            created_at              INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, commitment_hash)
+        );
+
+        -- Offline-bearer receiver-side appliance-root lineage (Def. 25 check 2:
+        -- "previous root is the receiver's accepted root"). One row per HOLDER
+        -- (sender) device: the appliance root the receiver adopted from the last
+        -- ACCEPTED release's `next_root`, plus the anchor counter adopted with it.
+        -- Written only after the canonical commit succeeds (deferred, like the
+        -- §11.1 cert-chain mirrors). Absent row = relationship genesis: the first
+        -- release's own `prev_root` is adopted TOFU — its authenticity rests on
+        -- the anchor-state commitment proofs + the LIVE authenticated counter
+        -- (`H == H0 − (uᵢ+1)`), the same trust root as the first-transfer pin.
+        CREATE TABLE IF NOT EXISTS anchor_accepted_roots(
+            device_id            BLOB NOT NULL PRIMARY KEY,
+            accepted_root        BLOB NOT NULL,
+            next_anchor_counter  INTEGER NOT NULL,
+            updated_at           INTEGER NOT NULL
+        );
+
         -- Offline-bearer anti-clone (Boot Fenced Fused Anchor): the RECEIVER's pinned admission of
         -- a counterparty's fused anchor, keyed by the counterparty device id — the persistent
         -- backing for `dsm::crypto::anchor_enrollment::AnchorEnrollmentStore` (FusedAnchorPin

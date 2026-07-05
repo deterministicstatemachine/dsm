@@ -2956,7 +2956,7 @@ mod tests {
         accept_offline_release_with_counter(
             &art1.offline_release,
             Some(&pin1),
-            &art1.appliance_prev_root,
+            Some(&art1.appliance_prev_root),
             &recipient,
             &[0x55u8; 32],
             &policy_hash,
@@ -2974,7 +2974,7 @@ mod tests {
         crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
             &art1.offline_release,
             Some(&pin1),
-            &art1.appliance_prev_root,
+            Some(&art1.appliance_prev_root),
             &recipient,
             &[0x55u8; 32],
             &policy_hash,
@@ -2991,7 +2991,7 @@ mod tests {
             let r = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
                 &art1.offline_release,
                 Some(&pin1),
-                &art1.appliance_prev_root,
+                Some(&art1.appliance_prev_root),
                 &recipient,
                 &[0x55u8; 32],
                 &policy_hash,
@@ -3009,7 +3009,7 @@ mod tests {
         let replay = accept_offline_release_with_counter(
             &art1.offline_release,
             Some(&pin1),
-            &art1.appliance_next_root, // receiver has adopted the successor root
+            Some(&art1.appliance_next_root), // receiver has adopted the successor root
             &recipient,
             &[0x55u8; 32],
             &policy_hash,
@@ -3044,7 +3044,7 @@ mod tests {
         accept_offline_release_with_counter(
             &art2.offline_release,
             Some(&pin2),
-            &art2.appliance_prev_root,
+            Some(&art2.appliance_prev_root),
             &recipient,
             &[0x66u8; 32],
             &policy_hash,
@@ -3217,7 +3217,7 @@ mod tests {
             accept_offline_release_with_relay_counter(
                 &art.offline_release,
                 Some(&pinned),
-                &art.appliance_prev_root,
+                Some(&art.appliance_prev_root),
                 &recipient,
                 &r_r,
                 &policy_hash,
