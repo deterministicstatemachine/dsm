@@ -97,16 +97,70 @@ const ENROLL_H0: u32 = 0xFFFF_FFFE; // tropic01 MCOUNTER_VALUE_MAX (4_294_967_29
 const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
 
 // Enrollment / appliance / test parameters.
-const ANCHOR: [u8; 32] = [0xA0; 32]; // tropic_anchor_id
-const POLICY: [u8; 32] = [0xB0; 32];
-const GENESIS: [u8; 32] = [0x00; 32]; // active root hᵢ at anchor counter 0
+//
+// The device identity (anchor_id, device_id, partition_device_id, partition-key
+// seed, and the birth entropy inputs) is NOT a compile-time constant. It is
+// derived at runtime from the real TROPIC01 — its fused device-cert public key
+// (`stpub`) and `chip_id`, both read once before the secure session — so the
+// SAME chip yields the SAME identity across reboots and a DIFFERENT chip yields a
+// DIFFERENT identity. No per-boot RP2350 randomness enters anything the receiver
+// pins as long-term identity. See `ChipIdentity`. The load-bearing anti-clone
+// root is `stpub` + the live monotonic counter + the receiver pin + the DSM
+// predicate; the partition co-signer key derived here is an HONEST LABEL
+// (deterministic, chip-unique, NOT a silicon secret), attesting firmware
+// authenticity, not chip uniqueness.
+const GENESIS: [u8; 32] = [0x00; 32]; // active root hᵢ at counter 0 (genesis SMT root; host adopts A₀ via STATUS)
 const NEXT_ROOT: [u8; 32] = [0x11; 32]; // self-test successor root hᵢ₊₁
-const ARM0: [u8; 32] = [0xAA; 32]; // initial MAC-and-destroy slot arming seed
-const RCHAL: [u8; 32] = [0x55; 32]; // receiver challenge r_R
-const DEVICE: [u8; 32] = [0xD0; 32]; // DSM device id
-const PART_DEV: [u8; 32] = [0xBD; 32]; // partition device id
-const KEYSEED: [u8; 32] = [0x4E; 32]; // partition key birth seed (bring-up: fixed)
-const FW: [u8; 32] = [0xF0; 32]; // firmware measurement (bring-up: fixed)
+const ARM0: [u8; 32] = [0xAA; 32]; // MAC-and-destroy boot-fence arming input
+const RCHAL: [u8; 32] = [0x55; 32]; // self-test receiver challenge r_R
+const FW: [u8; 32] = [0xF0; 32]; // firmware measurement (boot-fence input; deterministic build label)
+
+/// The well-known offline-bearer policy id, computed identically to the host's
+/// `canonical_offline_bearer_policy().policy_id` =
+/// `domain_hash_bytes("DSM/offline-bearer/policy-id/well-known/v1", &[])` =
+/// `BLAKE3(tag ‖ 0x00)`. Baked into the anchor bundle so `B` commits the real
+/// policy. (On-chip PREPARE is policy-agnostic; the receiver enforces the
+/// canonical value fail-closed. This keeps the bundle honest.)
+const POLICY_ID_DOMAIN: &str = "DSM/offline-bearer/policy-id/well-known/v1";
+
+/// Deterministic, chip-rooted anchor identity. Every field is derived from the
+/// TROPIC01's fused identity (`stpub` from device cert 0 + `chip_id`). Same chip
+/// ⇒ same identity across reboots; different chip ⇒ different identity.
+struct ChipIdentity {
+    anchor_id: [u8; 32],
+    device_id: [u8; 32],
+    partition_device_id: [u8; 32],
+    /// Partition-key birth seed — an HONEST LABEL (deterministic + chip-unique,
+    /// NOT a silicon secret; derivable from the public `stpub`/`chip_id`). The
+    /// partition co-signer attests firmware authenticity, not anti-clone.
+    partition_key_seed: [u8; 32],
+    /// Deterministic stand-in for the birth entropy inputs (`partition_trng`,
+    /// `host_nonce`) so `s_birth` → `B` is stable across reboots. Chip-rooted,
+    /// not per-boot RP2350 RNG.
+    birth_entropy: [u8; 32],
+    birth_host_nonce: [u8; 32],
+    /// Deterministic chip-rooted birth witness. The LIVE per-boot MACANDD witness
+    /// stays in the boot fence (`Appliance::boot`); it must not enter the pinned
+    /// identity, which has to be stable across reboots.
+    birth_witness: [u8; 32],
+}
+impl ChipIdentity {
+    /// Derive from the chip's fused `stpub` (device-cert public key) and a
+    /// 32-byte digest of its `chip_id`.
+    fn derive(stpub: &[u8; 32], chip_id_hash: &[u8; 32]) -> Self {
+        use anchor_core::hash::h;
+        let root = h("DSM/anchor/chip-root/v1", &[stpub, chip_id_hash]);
+        Self {
+            anchor_id: h("DSM/anchor/anchor-id/v1", &[&root]),
+            device_id: h("DSM/anchor/device-id/v1", &[&root]),
+            partition_device_id: h("DSM/anchor/partition-device-id/v1", &[&root]),
+            partition_key_seed: h("DSM/anchor/partition-seed-label/v1", &[&root]),
+            birth_entropy: h("DSM/anchor/birth-entropy/v1", &[&root]),
+            birth_host_nonce: h("DSM/anchor/birth-host-nonce/v1", &[&root]),
+            birth_witness: h("DSM/anchor/birth-witness/v1", &[&root]),
+        }
+    }
+}
 const T_REL: [u8; 32] = [1; 32];
 const T_OBJ: [u8; 32] = [2; 32];
 const T_SND: [u8; 32] = [3; 32];
@@ -326,8 +380,8 @@ fn rt<SPI: SpiDevice, CS: OutputPin>(
 /// birth witness.
 fn enroll<SPI: SpiDevice, CS: OutputPin>(
     sess: &mut Tropic01<SPI, CS, ActiveSession>,
-    partition_trng: &[u8; 32],
-    host_nonce: &[u8; 32],
+    ident: &ChipIdentity,
+    policy_hash: &[u8; 32],
 ) -> Result<(u32, Birth), &'static str> {
     // ADOPT the provisioned counter — do NOT `mcounter_init` (re-init resets the physical counter and
     // would let a rebooted device re-spend already-consumed offline-bearer steps). `H0` is the fixed
@@ -337,21 +391,24 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     if live > ENROLL_H0 {
         return Err("counter above enrollment H0 (unprovisioned/mis-provisioned chip)");
     }
-    // Arm both slots; capture the boot slot's output as the TROPIC birth witness.
-    let birth_witness = *sess
-        .mac_and_destroy(Q_BOOT.into(), &ARM0)
+    // Exercise the boot-fence MACANDD slots (preserves the provisioned arming
+    // interaction). The birth witness is now deterministic + chip-rooted
+    // (`ident.birth_witness`), NOT this per-boot MACANDD output — so the pinned
+    // bundle `B` is stable across reboots. The live per-boot MACANDD witness
+    // still gates the boot fence inside `Appliance::boot`.
+    sess.mac_and_destroy(Q_BOOT.into(), &ARM0)
         .map_err(|_| "arm q_boot")?;
     sess.mac_and_destroy(Q_TX.into(), &ARM0)
         .map_err(|_| "arm q_tx")?;
     let b = birth::<SphincsPart>(&BirthInputs {
-        partition_trng,
-        tropic_birth_witness: &birth_witness,
-        host_nonce,
-        device_id: &DEVICE,
-        policy_hash: &POLICY,
-        partition_device_id: &PART_DEV,
-        tropic_anchor_id: &ANCHOR,
-        partition_key_seed: &KEYSEED,
+        partition_trng: &ident.birth_entropy,
+        tropic_birth_witness: &ident.birth_witness,
+        host_nonce: &ident.birth_host_nonce,
+        device_id: &ident.device_id,
+        policy_hash,
+        partition_device_id: &ident.partition_device_id,
+        tropic_anchor_id: &ident.anchor_id,
+        partition_key_seed: &ident.partition_key_seed,
         enrolled_counter: ENROLL_H0,
         q_boot: Q_BOOT,
         q_tx: Q_TX,
@@ -361,7 +418,7 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     Ok((ENROLL_H0, b))
 }
 
-fn prepare_request() -> pb::ApplianceRequest {
+fn prepare_request(policy_hash: &[u8; 32]) -> pb::ApplianceRequest {
     pb::ApplianceRequest {
         op: pb::Op::Prepare as i32,
         transition: Some(pb::TransitionPackage {
@@ -378,7 +435,7 @@ fn prepare_request() -> pb::ApplianceRequest {
             payload_hash: T_PAY.to_vec(),
             old_leaf_proof: LEAF_OLD.to_vec(),
             new_leaf_proof: LEAF_NEW.to_vec(),
-            authority_policy_hash: POLICY.to_vec(),
+            authority_policy_hash: policy_hash.to_vec(),
         }),
         receiver_challenge: RCHAL.to_vec(),
         ..Default::default()
@@ -401,13 +458,15 @@ struct SelfTest {
 fn self_test<SPI: SpiDevice, CS: OutputPin>(
     core: &mut SecureCore<'_, SPI, CS>,
     part_pk: &[u8],
+    anchor_id: &[u8; 32],
+    policy_hash: &[u8; 32],
 ) -> Result<SelfTest, &'static str> {
     let bundle = core.app.bundle;
     let mut ok_all = true;
     // Boot is device-internal: establish the fence with the device-authoritative
     // measurement directly (the host wire path has no boot op), as serve_forever does.
     ok_all &= core.app.boot(1, &FW).is_ok();
-    ok_all &= rt(core, &prepare_request())?.ok;
+    ok_all &= rt(core, &prepare_request(policy_hash))?.ok;
     ok_all &= rt(
         core,
         &pb::ApplianceRequest {
@@ -456,9 +515,9 @@ fn self_test<SPI: SpiDevice, CS: OutputPin>(
             let ctx = VerifierContext {
                 accepted_prev_root: &GENESIS,
                 pinned_bundle: &bundle,
-                pinned_anchor_id: &ANCHOR,
+                pinned_anchor_id: anchor_id,
                 expected_receiver_challenge: &RCHAL,
-                expected_policy_hash: &POLICY,
+                expected_policy_hash: policy_hash,
                 enrolled_counter: ENROLL_H0 as u64,
                 anchor_uncompromised: true,
             };
@@ -558,9 +617,10 @@ fn main() -> ! {
         }
         b
     };
+    // One TRNG draw: the secure-session handshake ephemeral (randomness is correct
+    // here). The anchor birth entropy is deterministic + chip-rooted (see
+    // `ChipIdentity`) — never per-boot RNG, so the pinned identity is stable.
     let eh = draw();
-    let part_trng = draw();
-    let host_nonce = draw();
 
     let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
     let sio = hal::Sio::new(pac.SIO);
@@ -616,12 +676,49 @@ fn main() -> ! {
         }
     }
 
-    // ---- Phase 2: L2 chip id ----
+    // ---- Phase 2: read the REAL chip identity (chip_id + device-cert stpub) ----
+    // These L2 getters are only callable BEFORE `session_start` consumes the
+    // NoSession handle. The pinned anchor identity is rooted here, in silicon:
+    // same chip ⇒ same identity across reboots. Fail closed (halt) if the chip
+    // will not disclose a real identity — never fall back to a fake one.
     usb_dev.poll(&mut [&mut serial]);
     let mut tropic = Tropic01::new(spi_dev);
-    let chip_ok = tropic.get_info_chip_id().is_ok();
-    put(&mut serial, b"[T1] chip id: ");
-    put(&mut serial, if chip_ok { b"OK\r\n" } else { b"FAIL\r\n" });
+    let chip_id_hash = match tropic.get_info_chip_id() {
+        Ok(id) => anchor_core::hash::h("DSM/anchor/chip-id/v1", &[id]),
+        Err(_) => {
+            put(&mut serial, b"[T1] chip id: FAIL (no real identity; halting)\r\n");
+            let _ = serial.flush();
+            loop {
+                usb_dev.poll(&mut [&mut serial]);
+            }
+        }
+    };
+    let stpub: [u8; 32] = match tropic.get_info_cert_store() {
+        Ok(cs) => match cs.public_key() {
+            Ok(k) => *k,
+            Err(_) => {
+                put(&mut serial, b"[T1] cert stpub: FAIL (no real identity; halting)\r\n");
+                let _ = serial.flush();
+                loop {
+                    usb_dev.poll(&mut [&mut serial]);
+                }
+            }
+        },
+        Err(_) => {
+            put(&mut serial, b"[T1] cert store: FAIL (no real identity; halting)\r\n");
+            let _ = serial.flush();
+            loop {
+                usb_dev.poll(&mut [&mut serial]);
+            }
+        }
+    };
+    // Deterministic, chip-rooted identity + the well-known canonical policy id.
+    let ident = ChipIdentity::derive(&stpub, &chip_id_hash);
+    let policy_hash = anchor_core::hash::h(POLICY_ID_DOMAIN, &[&[0u8][..]]);
+    put(
+        &mut serial,
+        b"[T1] chip identity: OK (stpub-rooted, deterministic across reboot)\r\n",
+    );
     let _ = serial.flush();
     usb_dev.poll(&mut [&mut serial]);
 
@@ -662,22 +759,22 @@ fn main() -> ! {
     );
     let _ = serial.flush();
     usb_dev.poll(&mut [&mut serial]);
-    let st = match enroll(&mut sess, &part_trng, &host_nonce) {
+    let st = match enroll(&mut sess, &ident, &policy_hash) {
         Ok((h0, b)) => {
             let part_pk = b.partition_pk.clone();
             let mut core = SecureCore {
                 app: Appliance::<_, WotsBlake3, SphincsPart>::new(
                     ChipTropic { sess: &mut sess },
                     h0,
-                    ANCHOR,
+                    ident.anchor_id,
                     Q_BOOT,
                     Q_TX,
-                    PART_DEV,
+                    ident.partition_device_id,
                     GENESIS,
                     b,
                 ),
             };
-            self_test(&mut core, &part_pk)
+            self_test(&mut core, &part_pk, &ident.anchor_id, &policy_hash)
         }
         Err(e) => Err(e),
     };
@@ -734,18 +831,19 @@ fn main() -> ! {
         b"[T6] serving boot-fenced fused appliance over USB-CDC (LE32-len-prefixed protobuf)\r\n",
     );
     let _ = serial.flush();
-    let (h0, b) = enroll(&mut sess, &part_trng, &host_nonce).unwrap_or_else(|_| {
-        // Re-enrollment should not fail after a good session; fall back to a fresh
-        // birth on the genesis seed so the device still serves.
+    let (h0, b) = enroll(&mut sess, &ident, &policy_hash).unwrap_or_else(|_| {
+        // Re-enrollment should not fail after a good session; fall back to a birth
+        // from the SAME deterministic chip-rooted identity so the device still
+        // serves the same anchor (never a fresh/fake one).
         let b = birth::<SphincsPart>(&BirthInputs {
-            partition_trng: &part_trng,
-            tropic_birth_witness: &ARM0,
-            host_nonce: &host_nonce,
-            device_id: &DEVICE,
-            policy_hash: &POLICY,
-            partition_device_id: &PART_DEV,
-            tropic_anchor_id: &ANCHOR,
-            partition_key_seed: &KEYSEED,
+            partition_trng: &ident.birth_entropy,
+            tropic_birth_witness: &ident.birth_witness,
+            host_nonce: &ident.birth_host_nonce,
+            device_id: &ident.device_id,
+            policy_hash: &policy_hash,
+            partition_device_id: &ident.partition_device_id,
+            tropic_anchor_id: &ident.anchor_id,
+            partition_key_seed: &ident.partition_key_seed,
             enrolled_counter: ENROLL_H0,
             q_boot: Q_BOOT,
             q_tx: Q_TX,
@@ -757,10 +855,10 @@ fn main() -> ! {
         app: Appliance::<_, WotsBlake3, SphincsPart>::new(
             ChipTropic { sess: &mut sess },
             h0,
-            ANCHOR,
+            ident.anchor_id,
             Q_BOOT,
             Q_TX,
-            PART_DEV,
+            ident.partition_device_id,
             GENESIS,
             b,
         ),

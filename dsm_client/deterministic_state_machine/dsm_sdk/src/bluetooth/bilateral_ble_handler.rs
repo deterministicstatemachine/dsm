@@ -4424,14 +4424,27 @@ impl BilateralBleHandler {
                 } => ap.policy_id,
                 _ => [0u8; 32],
             };
-            // Policy-binding trace (receiver verify): the policy_id this receiver enforces against the
+            // Policy-binding (receiver verify): the policy_id this receiver enforces against the
             // release MUST equal the canonical value the sender bound. A mismatch means the proof does
             // not attest what we think — reject rather than "run and mean nothing".
+            let canonical_policy_id =
+                dsm::types::operations::canonical_offline_bearer_policy().policy_id;
             info!(
                 "[BILATERAL][offline-bearer][receiver] verify policy_id={} (canonical_match={})",
                 bytes_to_base32(&policy_hash),
-                policy_hash == dsm::types::operations::canonical_offline_bearer_policy().policy_id
+                policy_hash == canonical_policy_id
             );
+            // ENFORCE the canonical binding fail-closed (owner directive: logging a mismatch is not
+            // enough). An offline-bearer release whose policy_id is not the well-known canonical value
+            // does not attest the offline-bearer tier — refuse it rather than accept a proof that
+            // means nothing.
+            if policy_hash != canonical_policy_id {
+                return Err(DsmError::invalid_operation(format!(
+                    "offline-bearer policy_id {} is not the canonical well-known value {}; refusing to accept",
+                    bytes_to_base32(&policy_hash),
+                    bytes_to_base32(&canonical_policy_id),
+                )));
+            }
             let expected_receiver_challenge = session.receiver_challenge.unwrap_or([0u8; 32]);
             // Anchor-state binding: the sender's device-SMT roots (before = pinned frontier,
             // after = adopted successor) and the two inclusion proofs, as carried on the confirm.
