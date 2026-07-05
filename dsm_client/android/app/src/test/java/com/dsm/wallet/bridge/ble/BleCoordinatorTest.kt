@@ -79,21 +79,22 @@ class BleCoordinatorTest {
     }
 
     /**
-     * Production `resolveSession` was deliberately hardened to REFUSE the
-     * "fall back to any ready peer when address is unknown" behaviour
-     * (see BleCoordinator.kt:1172-1176, log: "refusing ready-peer fallback").
-     * Routing an unknown peer's traffic to a random ready session is a
-     * privacy/safety hole — the local side would deliver bytes destined
-     * for peer A to peer B without any identity binding.
-     *
-     * This test is the regression guard: an unknown address with no
-     * identity hydration must return null, even when a ready peer exists.
-     * The sibling test below (`_doesNotFallbackWhenMultipleReadyPeersExist`)
-     * covers the multi-peer case; this one covers the single-ready-peer
-     * temptation.
+     * `resolveSession` routes an unknown/stale address to the SOLE ready
+     * session (restored single-peer fallback from the "Harden BLE multi-peer
+     * fallback" lineage). BLE RPA rotation moves a peer's advertised address
+     * faster than the frontend/SDK contact cache can follow, so the send
+     * target is routinely stale even while a live GATT session to that same
+     * peer exists at the (fixed) connected address — without this fallback
+     * every bilateral send eventually dead-ends with "no route". With exactly
+     * one ready session there is no ambiguity about where the traffic
+     * belongs; misdirected bytes are additionally rejected by the
+     * relationship-bound crypto envelope on the far side. The fallback stays
+     * guarded to a single ready peer: the sibling test below
+     * (`_doesNotFallbackWhenMultipleReadyPeersExist`) is the regression guard
+     * for the ambiguous multi-peer case, which is still refused.
      */
     @Test
-    fun resolveSession_refusesFallbackToReadyPeerForUnknownAddress() {
+    fun resolveSession_fallsBackToSoleReadyPeerForUnknownAddress() {
         val fallbackPeer = PeerSession(address = "fallback").apply {
             gattClientSession = activeGattClientSession("fallback")
             isConnected = true
@@ -102,11 +103,13 @@ class BleCoordinatorTest {
 
         val resolved = coordinator.resolveSession("unknown")
 
-        assertNull(
-            "resolveSession must refuse ready-peer fallback for an unknown " +
-                "address with no identity hydration (privacy guard)",
+        assertNotNull(
+            "resolveSession must route an unknown address to the sole ready " +
+                "session (RPA rotation makes cached addresses stale)",
             resolved,
         )
+        assertSame(fallbackPeer, resolved!!.first)
+        assertEquals("fallback", resolved.second)
     }
 
     @Test

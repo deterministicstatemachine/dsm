@@ -215,7 +215,7 @@ object LocalPicoUsb {
         val claimed = commIface?.let { conn.claimInterface(it, true) } ?: false
         Log.i(TAG, "comm iface=$commId claim=$claimed (ifaceCount=${device.interfaceCount})")
         var cls = setControlLine(conn, commId)
-        if (cls < 0 && claimed && commIface != null) {
+        if (cls < 0 && commIface != null && claimed) {
             // Some host stacks block class control transfers while the comm interface is claimed by
             // the app; release it and retry (control transfers target endpoint 0, not the interface).
             conn.releaseInterface(commIface)

@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.mock
@@ -49,8 +48,21 @@ class BleCoordinatorResolveSessionTest {
         assertEquals(identity, coordinator.addressIndex[staleAddress])
     }
 
+    /**
+     * RPA rotation moves a peer's ADVERTISED address faster than the contact
+     * cache can follow, while the live GATT session sits at the (fixed)
+     * connected address — so the target address is routinely stale even while
+     * a live session to the peer exists. With EXACTLY ONE ready session there
+     * is no ambiguity about where the bilateral traffic belongs, so
+     * `resolveSession` routes to it even without identity hydration (the
+     * restored single-peer fallback from the "Harden BLE multi-peer fallback"
+     * lineage, proven necessary for end-to-end transfer on hardware).
+     * Ambiguity across two or more ready peers is still refused — see
+     * `resolveSession_doesNotFallbackWhenMultipleReadyPeersExist` in
+     * BleCoordinatorTest.
+     */
     @Test
-    fun resolveSession_refusesSingleReadyPeerGuessWithoutIdentity() {
+    fun resolveSession_fallsBackToSoleReadyPeerWithoutIdentity() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val coordinator = BleCoordinator(
             context = context,
@@ -68,6 +80,7 @@ class BleCoordinatorResolveSessionTest {
 
         val resolved = coordinator.resolveSession("6B:CA:44:6D:D9:33")
 
-        assertNull(resolved)
+        assertNotNull(resolved)
+        assertEquals("49:63:1E:15:0A:AA", resolved?.second)
     }
 }
