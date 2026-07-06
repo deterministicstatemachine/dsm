@@ -1,0 +1,2858 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible
+}
+
+\lstdefinelanguage{TLA}{
+  morekeywords={VARIABLES,VARIABLE,LET,IN,IF,THEN,ELSE,UNCHANGED,
+    EXTENDS,CONSTANT,CONSTANTS,ASSUME,THEOREM,Next,Init,Spec},
+  morecomment=[l]{\\*},
+  sensitive=true,
+  morestring=[b]",
+}
+
+\lstdefinelanguage{proto}{
+  morekeywords={syntax,package,message,enum,bytes,uint32,uint64,bool,repeated,reserved},
+  morecomment=[l]{//},
+  sensitive=true,
+  morestring=[b]",
+}
+
+\newcommand{\concat}{\ensuremath{\mathbin{\Vert}}}
+\newcommand{\bits}{\ensuremath{\{0,1\}}}
+\newcommand{\Hf}{\ensuremath{\mathsf{H}}}
+\newcommand{\HKDF}{\ensuremath{\mathsf{HKDF}}}
+\newcommand{\MACD}{\ensuremath{\mathsf{MACANDD}}}
+\newcommand{\StepKeyGen}{\ensuremath{\mathsf{StepKeyGen}}}
+\newcommand{\StepSign}{\ensuremath{\mathsf{StepSign}}}
+\newcommand{\StepVerify}{\ensuremath{\mathsf{StepVerify}}}
+\newcommand{\PartSign}{\ensuremath{\mathsf{PartSign}}}
+\newcommand{\PartVerify}{\ensuremath{\mathsf{PartVerify}}}
+\newcommand{\SigCommit}{\ensuremath{\mathsf{SigCommit}}}
+\newcommand{\ctx}[1]{\texttt{"#1"}}
+\newcommand{\WOTS}{\textsc{wots}}
+
+\newcommand{\Tropic}{\textsc{TROPIC01}}
+\newcommand{\Pico}{\textsc{Raspberry Pi Pico 2 W}}
+\newcommand{\RP}{\textsc{RP2350}}
+\newcommand{\Lthree}{\ensuremath{\mathsf{L3}}}
+
+\newcommand{\Cert}{\ensuremath{\mathsf{Cert}}}
+\newcommand{\Pkg}{\ensuremath{\mathsf{Pkg}}}
+\newcommand{\Active}{\ensuremath{\mathsf{Active}}}
+\newcommand{\Ready}{\ensuremath{\mathsf{Ready}}}
+\newcommand{\Prepared}{\ensuremath{\mathsf{Prepared}}}
+\newcommand{\Committed}{\ensuremath{\mathsf{Committed}}}
+\newcommand{\Accept}{\ensuremath{\mathsf{Accept}}}
+\newcommand{\Reject}{\ensuremath{\mathsf{Reject}}}
+\newcommand{\Online}{\ensuremath{\mathsf{Online}}}
+
+\newcommand{\Bundle}{\ensuremath{B}}
+\newcommand{\Ahead}{\ensuremath{A}}
+\newcommand{\Bhead}{\ensuremath{J}}
+\newcommand{\BootTicket}{\ensuremath{\mathsf{BootTicket}}}
+\newcommand{\BootChain}{\ensuremath{\mathsf{BootChain}}}
+\newcommand{\pkhw}{\ensuremath{\mathsf{pk}_{\mathrm{hw}}}}
+\newcommand{\skhw}{\ensuremath{\mathsf{sk}_{\mathrm{hw}}}}
+\newcommand{\pkh}{\ensuremath{P_{\mathrm{hw}}}}
+
+\newcommand{\MACDcmd}{\texttt{MAC\_And\_Destroy}}
+\newcommand{\InitCmd}{\texttt{MCounter\_Init}}
+\newcommand{\GetCmd}{\texttt{MCounter\_Get}}
+\newcommand{\UpdateCmd}{\texttt{MCounter\_Update}}
+\newcommand{\Handle}{\ensuremath{\mathsf{handle}}}
+
+\title{\textbf{Boot Fenced Fused Anchor Authority\\
+for DSM Offline Bearer State}\\[4pt]
+\large One Way Birth Fuse, Fused Anchor Head, RP2350 Partition Witness,\\
+TROPIC01 MACANDD and Counter Evidence, Receiver Challenge,\\
+Public DSM Verification, Recovery, and Tripwire Reconciliation\\
+on Raspberry Pi Pico 2 W}
+\author{Brandon Ramsay (Cryptskii)\\\small Irrefutable Labs Inc.}
+\date{July 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+A Deterministic State Machine, or DSM, advances state by local deterministic acceptance rather
+than by global consensus. Ordinary DSM operation does not require a blockchain, validator set,
+sequencer, wall clock, or online settlement step on the common path.
+
+Offline bearer transfer is the hard case. A receiver accepts a transfer while offline. The receiver
+must not accept copied software pretending to be the live appliance, must not accept a second use
+of the same spendable parent, and must not allow copied enrollment data to resume on new hardware.
+
+This paper specifies a compact offline bearer authority for DSM using a Raspberry Pi Pico 2 W,
+the RP2350 secure partition, and a MIKROE 6559 Secure Tropic Click carrying a TROPIC01 secure
+element. The design does not put all trust in TROPIC01 and does not put all trust in the RP2350
+partition. Instead, DSM, the partition, and TROPIC01 are fused into one forward only lineage.
+
+The authority is based on four rules:
+
+\[
+\text{destroy the birth preimage,}
+\]
+
+\[
+\text{boot fence the appliance before offline use,}
+\]
+
+\[
+\text{advance one DSM root and one fused anchor head together,}
+\]
+
+\[
+\text{accept only authenticated TROPIC01 counter evidence and public DSM validity.}
+\]
+
+The DSM root commits to an immutable anchor bundle \(\Bundle\), a fused anchor head \(\Ahead_i\),
+a boot head \(\Bhead_b\), and an anchor counter \(u_i\). The anchor bundle binds the RP2350
+partition key, TROPIC01 anchor identifier, enrolled counter value \(H_0\), MACANDD slots, device
+identifier, policy hash, and the hash of a destroyed one way birth fuse. The fused anchor head
+binds the DSM root lineage, the partition lineage, and the TROPIC01 MACANDD and counter lineage.
+
+Every boot must produce a boot ticket chained from the DSM committed boot head. Every offline
+release must bind the current boot ticket. A copied state image on new hardware cannot resume
+offline bearer mode because new hardware cannot advance the committed boot head under the enrolled
+anchor bundle.
+
+A release is accepted only if the receiver verifies the DSM transition, the receiver challenge,
+the RP2350 partition certificate, the TROPIC01 MACANDD witness, authenticated TROPIC01 counter
+evidence, and the fused anchor head update. TROPIC01 evidence is necessary but not sufficient.
+RP2350 partition evidence is necessary but not sufficient. DSM validity remains public and
+receiver verified.
+\end{abstract}
+
+\section{Purpose and Scope}
+
+This document specifies an optional DSM offline bearer authority. It is used only when a receiver
+accepts a DSM transfer without online reconciliation at the moment of exchange.
+
+The authority provides:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item one active SMT root for the appliance;
+\item one immutable anchor bundle;
+\item one forward only fused anchor head;
+\item one boot fenced offline session head;
+\item one physical counter derived anchor counter;
+\item one certified root advance at a time;
+\item receiver challenge binding;
+\item public verification of the DSM transition;
+\item RP2350 secure partition release evidence;
+\item TROPIC01 hardware presence through MACANDD;
+\item TROPIC01 counter evidence not trusted through the host;
+\item recovery by re emitting the same committed root advance;
+\item online fallback when local state, counter evidence, boot evidence, or policy does not match;
+\item Tripwire exposure of any fork on reconciliation.
+\end{enumerate}
+
+The target hardware is:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Layer} & \textbf{Part} & \textbf{Role}\\
+\midrule
+Controller & Raspberry Pi Pico 2 W & host and transport board\\
+MCU & RP2350 & secure partition and appliance policy\\
+Secure element board & MIKROE 6559 Secure Tropic Click & TROPIC01 over SPI\\
+Secure element & TROPIC01 & MACANDD, counter, R memory, pairing policy\\
+Interface & SPI at 3.3 V & secure element command transport\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The design does not require the RP2350 to verify the entire DSM transition. The receiver verifies
+DSM validity. The RP2350 partition stores appliance state, signs partition certificates, advances
+the boot ratchet, and drives TROPIC01. The receiver does not accept a root advance merely because
+the RP2350 says it happened.
+
+The design also does not let TROPIC01 authorize DSM state. TROPIC01 contributes hardware witness
+output and authenticated counter evidence. DSM validity remains public and receiver verified.
+
+\section{Design Summary}
+
+The appliance state includes:
+
+\[
+\Active =
+(
+h_i,
+\Bundle,
+\Ahead_i,
+\Bhead_b,
+u_i,
+\mathsf{status},
+\mathsf{record}
+).
+\]
+
+Here:
+
+\begin{itemize}
+\item \(h_i\) is the active DSM SMT root;
+\item \(\Bundle\) is the immutable anchor bundle;
+\item \(\Ahead_i\) is the active fused anchor head;
+\item \(\Bhead_b\) is the last DSM committed boot head;
+\item \(u_i\) is the active anchor counter;
+\item \(\mathsf{status}\in\{\Ready,\Prepared,\Committed\}\);
+\item \(\mathsf{record}\) is empty, prepared, or committed.
+\end{itemize}
+
+The previous DSM state commits to:
+
+\[
+(
+\Bundle,
+\Ahead_i,
+\Bhead_b,
+u_i
+).
+\]
+
+A valid offline transfer from \(h_i\) must advance to a next root \(h_{i+1}\) that commits to:
+
+\[
+(
+\Bundle,
+\Ahead_{i+1},
+\Bhead_{b'},
+u_i+1
+).
+\]
+
+The release is not merely:
+
+\[
+(h_i,u_i)\rightarrow(h_{i+1},u_i+1).
+\]
+
+The fused form is:
+
+\[
+(h_i,\Ahead_i,\Bhead_b,u_i)
+\rightarrow
+(h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1).
+\]
+
+The receiver accepts only if:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item the previous root is the receiver accepted root for the object, under the accepted root
+frontier rule (adoption at relationship genesis, then strict continuity);
+\item the previous state commits to \(\Bundle,\Ahead_i,\Bhead_b,u_i\);
+\item a boot ticket or boot chain advances \(\Bhead_b\) to the current boot head \(\Bhead_{b'}\);
+\item the claimed next anchor counter is \(u_i+1\);
+\item the DSM proof verifies \(h_i\rightarrow h_{i+1}\);
+\item the next root commits to \(\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1\);
+\item the RP2350 partition certificate verifies over the same root advance message;
+\item the TROPIC01 MACANDD witness verifies over the same root advance message and partition
+commitment;
+\item authenticated TROPIC01 counter evidence shows the live physical counter corresponds to
+\(u_i+1\);
+\item the receiver challenge matches;
+\item no policy event invalidates the anchor.
+\end{enumerate}
+
+The core rule is:
+
+\[
+\boxed{
+\text{The receiver accepts only when DSM, the RP2350 partition, and TROPIC01 all bind the same
+root advance and fused anchor head.}
+}
+\]
+
+\section{Naming Discipline}
+
+The protocol uses the following names.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Name} & \textbf{Meaning}\\
+\midrule
+\texttt{prev\_root} & SMT root advanced from\\
+\texttt{next\_root} & SMT root advanced to\\
+\texttt{anchor\_counter} & derived increasing DSM value \(u=H_0-H\)\\
+\texttt{next\_anchor\_counter} & required next value \(u+1\)\\
+\texttt{enrolled\_counter} & enrolled TROPIC01 physical counter value \(H_0\)\\
+\texttt{attested\_live\_counter} & raw authenticated TROPIC01 value \(H\)\\
+\texttt{anchor\_bundle} & immutable enrollment digest \(\Bundle\)\\
+\texttt{anchor\_head} & fused anchor head \(\Ahead_i\)\\
+\texttt{boot\_head} & boot fence head \(\Bhead_b\)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The anchor counter is not the raw TROPIC01 counter. The anchor counter increases:
+
+\[
+u=H_0-H.
+\]
+
+The raw TROPIC01 counter counts down:
+
+\[
+H\leftarrow H-1.
+\]
+
+The receiver computes:
+
+\[
+u_{\mathrm{attested}}=H_0-H_{\mathrm{attested}}.
+\]
+
+The receiver accepts only if:
+
+\[
+u_{\mathrm{attested}}=u_i+1.
+\]
+
+\section{Why a Counter Alone Is Not the Design}
+
+A chip signature over transfer details and a counter gives an ordered hardware log. It does not
+by itself prove that a proposed transfer is a valid DSM successor from the receiver accepted
+previous root. It also does not prove that the release came from the correct fused appliance
+lineage.
+
+The useful object is not:
+
+\[
+\mathsf{Sign}_k(\mathsf{transfer}\concat u).
+\]
+
+The useful object is:
+
+\[
+(h_i,\Ahead_i,\Bhead_b,u_i)
+\rightarrow
+(h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1),
+\]
+
+where \(h_i\) is a DSM root the receiver recognizes, \(h_i\) commits to the current fused anchor
+state, and \(h_{i+1}\) is verified as the valid successor root for the transfer.
+
+The anchor counter orders hardware events. The fused anchor head binds the hardware lineages.
+DSM validity decides whether the state transition is real.
+
+\section{Cryptographic Preliminaries}
+
+Let \(\Hf\) denote BLAKE3 256, modeled as collision resistant and resistant to second preimages.
+Let \(\HKDF\) denote a domain separated key derivation function.
+
+Let \((\StepKeyGen,\StepSign,\StepVerify)\) be the witness signature scheme fixed by the appliance
+profile. The concrete profile in this document is \WOTS\ over BLAKE3.
+
+Let \((\PartSign,\PartVerify)\) be the RP2350 secure partition signature scheme under a partition
+key generated at appliance birth and bound into the anchor bundle.
+
+All structured objects use canonical byte encoding. If \(X\) is structured, \(\mathrm{enc}(X)\)
+means its canonical byte encoding. Verifiers reject non canonical encodings.
+
+\begin{definition}[DSM Root]
+A DSM root is the sparse Merkle tree root that commits to the current local DSM state, including
+relationship tips, object leaves, authority policy, anchor bundle, fused anchor head, boot head,
+and anchor counter used for offline bearer mode.
+\end{definition}
+
+\begin{definition}[Spendable Parent]
+A spendable parent is a DSM root \(h_i\) that commits to a spendable object, owner, relationship
+context, authority policy, anchor bundle \(\Bundle\), fused anchor head \(\Ahead_i\), boot head
+\(\Bhead_b\), and anchor counter \(u_i\). A valid offline bearer transfer must consume that
+spendable parent into one successor root.
+\end{definition}
+
+\begin{definition}[Offline Bearer Transfer]
+An offline bearer transfer is a DSM transition accepted without querying a network, storage node,
+ledger, validator, sequencer, or clock service at the moment of exchange. Acceptance is decided
+from canonical DSM bytes, SMT proofs, receiver challenge binding, boot ticket verification,
+partition certificate verification, hardware witness verification, authenticated TROPIC01 counter
+evidence, fused anchor head verification, and the receiver accepted previous root.
+\end{definition}
+
+\begin{definition}[Anchor Counter]
+The anchor counter is the derived increasing DSM value:
+
+\[
+u = H_0-H.
+\]
+
+Here \(H_0\) is the TROPIC01 counter value at enrollment and \(H\) is the live TROPIC01 counter
+value. TROPIC01 counters count down, so each successful counter update maps \(H\leftarrow H-1\)
+and \(u\leftarrow u+1\).
+\end{definition}
+
+\section{Threat Model}
+
+\begin{definition}[Software Clone]
+A software clone receives all host readable wallet state:
+
+\[
+\mathsf{Clone}
+=
+(
+\mathsf{seed},
+\mathsf{keys},
+\mathsf{chain\ history},
+\mathsf{local\ database},
+\mathsf{cached\ proofs},
+\mathsf{host\ files},
+\mathsf{application\ state}
+).
+\]
+
+The clone may run on another phone, emulator, rooted host, or modified controller. It does not
+receive RP2350 secure partition non exportable state or TROPIC01 internal MACANDD and counter
+state.
+\end{definition}
+
+\begin{definition}[New Hardware Clone]
+A new hardware clone is a device that has copied host readable state and enrollment data, but has
+different RP2350 partition state, different TROPIC01 state, different partition key, different
+TROPIC01 anchor identifier, different MACANDD slot state, or different physical counter state.
+\end{definition}
+
+\begin{definition}[RP2350 Partition Breach]
+An RP2350 partition breach means the attacker can make arbitrary policy side calls, modify local
+appliance state, or drive the software around TROPIC01 incorrectly. The protocol does not rely on
+RP2350 claims alone for receiver acceptance. Such a breach may cause denial of service, counter
+wasting, invalid certificates, or a bricked local anchor. It must not make an honest receiver accept
+an invalid DSM transition or a second valid successor from the same spendable parent unless the
+other required evidence also verifies.
+\end{definition}
+
+\begin{definition}[TROPIC01 Physical Break]
+A TROPIC01 physical break means the attacker extracts or forges the secure element state needed
+to produce MACANDD outputs or counterfeit counter evidence. This is outside ordinary TROPIC-only
+security. In this fused design, TROPIC01 break alone is still insufficient because receiver
+acceptance also requires the RP2350 partition certificate, DSM proof, boot ticket, and fused anchor
+head update.
+\end{definition}
+
+\begin{definition}[Perfect Live State Clone]
+A perfect live state clone is an adversary that extracts the exact current non exportable state of
+the RP2350 partition, the exact current non exportable TROPIC01 MACANDD and counter state, all
+DSM authority state, and can emulate those states perfectly without divergence. No offline-only
+protocol can distinguish such an exact emulation from the original device.
+\end{definition}
+
+\begin{definition}[Double Spend]
+A double spend exists if two distinct transitions:
+
+\[
+\tau_A:h_i\rightarrow h_A,\qquad
+\tau_B:h_i\rightarrow h_B,\qquad
+h_A\neq h_B,
+\]
+
+consume the same spendable parent \(h_i\) and both satisfy the DSM offline bearer acceptance
+predicate for honest receivers.
+\end{definition}
+
+\begin{definition}[Closed Branch]
+A closed branch is a branch created among devices controlled by the same adversary. It may be
+internally consistent only inside that adversary controlled set. Since new independent
+relationships require online reconciliation, the branch breaks when it meets real reconciliation
+or an honest counterparty that checks the fused anchor lineage, counter evidence, and DSM root
+lineage.
+\end{definition}
+
+\section{One Way Birth Fuse}
+
+The first hardening step is to make enrollment non recreatable from public enrollment data.
+
+\begin{definition}[One Way Birth Fuse]
+The one way birth fuse \(s_{\mathrm{birth}}\) is a secret enrollment preimage formed from RP2350
+partition entropy, TROPIC01 birth witness material, host entropy, device context, and authority
+policy. The public anchor bundle and initial fused heads commit only to \(\Hf(s_{\mathrm{birth}})\).
+The preimage \(s_{\mathrm{birth}}\) is destroyed immediately after deriving the initial private
+ratchet state.
+\end{definition}
+
+At birth, the appliance samples or derives:
+
+\[
+s_{\mathrm{birth}}
+=
+\Hf(
+  \ctx{DSM/anchor/birth-secret/v1}
+  \concat \mathsf{partition\_trng}
+  \concat \mathsf{tropic\_birth\_witness}
+  \concat \mathsf{host\_nonce}
+  \concat \mathsf{device\_id}
+  \concat \mathsf{policy\_hash}
+).
+\]
+
+The public birth commitment is:
+
+\[
+S_{\mathrm{birth}}=\Hf(s_{\mathrm{birth}}).
+\]
+
+The raw \(s_{\mathrm{birth}}\) is never exported.
+
+\begin{remark}
+The enrolled TROPIC01 counter value \(H_0\) is not destroyed. Receivers need \(H_0\), or a policy
+pinned equivalent, to verify \(u=H_0-H\). The destroyed value is the birth preimage
+\(s_{\mathrm{birth}}\), not \(H_0\).
+\end{remark}
+
+\section{Anchor Bundle}
+
+\begin{definition}[Anchor Bundle]
+The anchor bundle \(\Bundle\) is the immutable enrollment digest binding the partition public key,
+partition device identifier, TROPIC01 anchor identifier, enrolled TROPIC01 counter value \(H_0\),
+MACANDD boot slot, MACANDD transfer slot, DSM device identifier, authority policy, and the hash of
+the destroyed one way birth fuse.
+\end{definition}
+
+Let \(q_{\mathrm{boot}}\) be the MACANDD slot used for boot fencing. Let \(q_{\mathrm{tx}}\) be the
+MACANDD slot used for transfer witnesses. Then:
+
+\[
+\Bundle
+=
+\Hf(
+  \ctx{DSM/anchor-bundle/v1}
+  \concat \mathsf{partition\_pk}
+  \concat \mathsf{partition\_device\_id}
+  \concat \mathsf{tropic\_anchor\_id}
+  \concat H_0
+  \concat q_{\mathrm{boot}}
+  \concat q_{\mathrm{tx}}
+  \concat \mathsf{device\_id}
+  \concat \mathsf{policy\_hash}
+  \concat S_{\mathrm{birth}}
+).
+\]
+
+Offline bearer releases under a different bundle are not valid successors of roots committed to
+\(\Bundle\).
+
+\section{Initial Fused State}
+
+The first fused anchor head is:
+
+\[
+\Ahead_0
+=
+\Hf(
+  \ctx{DSM/fused-anchor-head/init/v1}
+  \concat \Bundle
+  \concat h_0
+  \concat 0
+  \concat S_{\mathrm{birth}}
+).
+\]
+
+The first boot head is:
+
+\[
+\Bhead_0
+=
+\Hf(
+  \ctx{DSM/fused-boot-head/init/v1}
+  \concat \Bundle
+  \concat \Ahead_0
+  \concat 0
+  \concat S_{\mathrm{birth}}
+).
+\]
+
+The initial partition ratchet is:
+
+\[
+p_0
+=
+\HKDF\!\left(
+  \mathsf{secret}=s_{\mathrm{birth}},
+  \mathsf{context}=
+  \ctx{DSM/partition-ratchet-seed/v1}
+  \concat \Bundle
+  \concat \Ahead_0
+  \concat \Bhead_0
+\right).
+\]
+
+After deriving \(p_0\), the appliance destroys:
+
+\[
+s_{\mathrm{birth}}\leftarrow\bot.
+\]
+
+The device carries only forward moving private state:
+
+\[
+(
+p_i,
+\mathsf{TROPIC01\ MACANDD\ boot\ slot},
+\mathsf{TROPIC01\ MACANDD\ transfer\ slot},
+H
+).
+\]
+
+The public DSM state carries:
+
+\[
+(
+\Bundle,
+\Ahead_i,
+\Bhead_b,
+u_i
+).
+\]
+
+\section{Fused Anchor Head}
+
+\begin{definition}[Fused Anchor Head]
+The fused anchor head \(\Ahead_i\) is the DSM committed digest of the current offline bearer
+anchor lineage. It binds the DSM root lineage, the RP2350 secure partition lineage, and the
+TROPIC01 MACANDD and counter lineage into one non interchangeable state.
+\end{definition}
+
+A candidate offline successor must advance:
+
+\[
+\Ahead_i\rightarrow\Ahead_{i+1}.
+\]
+
+The next DSM root must commit to \(\Ahead_{i+1}\). A release that does not produce the next fused
+anchor head is not an offline bearer successor.
+
+\section{Boot Fenced Fused Anchor}
+
+\begin{definition}[Boot Fenced Fused Anchor]
+Offline bearer mode is enabled only after the appliance produces a boot ticket chained from the
+DSM committed boot head. The boot ticket is produced internally by the firmware target from a
+device authoritative boot measurement, the RP2350 secure partition boot ratchet, and a TROPIC01
+boot MACANDD slot. A host request cannot drive boot head advancement and cannot supply an attacker
+chosen firmware measurement. Every offline release binds the current boot ticket or boot chain. A
+copied state image on new hardware cannot resume offline bearer mode because the new hardware
+cannot advance the committed boot head under the enrolled anchor bundle.
+\end{definition}
+
+On boot, the firmware target advances:
+
+\[
+\Bhead_b\rightarrow\Bhead_{b+1}.
+\]
+
+The boot input is formed from device internal state:
+
+\[
+X^{\mathrm{boot}}_{b+1}
+=
+\Hf(
+  \ctx{DSM/boot-fuse-input/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_b
+  \concat \mathsf{boot\_seq}
+  \concat \mathsf{firmware\_measurement}
+  \concat \mathsf{partition\_device\_id}
+).
+\]
+
+The values \(\mathsf{boot\_seq}\) and \(\mathsf{firmware\_measurement}\) are device supplied.
+They are not fields accepted from the host transport request.
+
+TROPIC01 consumes the boot MACANDD slot:
+
+\[
+W^{T,\mathrm{boot}}_{b+1}
+=
+\MACD(q_{\mathrm{boot}},X^{\mathrm{boot}}_{b+1}).
+\]
+
+The partition advances its boot ratchet:
+
+\[
+p_{b+1}
+=
+\Hf(
+  \ctx{DSM/partition-boot-ratchet/v1}
+  \concat p_b
+  \concat W^{T,\mathrm{boot}}_{b+1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_b
+  \concat \mathsf{boot\_seq}
+  \concat \mathsf{firmware\_measurement}
+).
+\]
+
+The old partition ratchet is erased:
+
+\[
+p_b\leftarrow\bot.
+\]
+
+The partition boot certificate message is:
+
+\[
+M^P_{\mathrm{boot},b+1}
+=
+\Hf(
+    \ctx{DSM/partition-boot-cert/v1}
+    \concat \Bundle
+    \concat \Ahead_i
+    \concat \Bhead_b
+    \concat X^{\mathrm{boot}}_{b+1}
+    \concat \Hf(W^{T,\mathrm{boot}}_{b+1})
+    \concat \mathsf{boot\_seq}
+    \concat \mathsf{firmware\_measurement}
+).
+\]
+
+The partition signs:
+
+\[
+\sigma^P_{\mathrm{boot},b+1}=\PartSign(M^P_{\mathrm{boot},b+1}).
+\]
+
+The fixed width boot signature commitment is:
+
+\[
+\Sigma^P_{\mathrm{boot},b+1}=\SigCommit(\sigma^P_{\mathrm{boot},b+1}).
+\]
+
+The new boot head is:
+
+\[
+\Bhead_{b+1}
+=
+\Hf(
+  \ctx{DSM/fused-boot-head/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_b
+  \concat X^{\mathrm{boot}}_{b+1}
+  \concat \Hf(p_{b+1})
+  \concat \Hf(W^{T,\mathrm{boot}}_{b+1})
+  \concat \Sigma^P_{\mathrm{boot},b+1}
+  \concat \mathsf{firmware\_measurement}
+).
+\]
+
+The boot ticket is:
+
+\[
+\BootTicket_{b+1}
+=
+(
+\Bundle,
+\Ahead_i,
+\Bhead_b,
+\Bhead_{b+1},
+\mathsf{boot\_seq},
+\mathsf{firmware\_measurement},
+\sigma^P_{\mathrm{boot},b+1},
+X^{\mathrm{boot}}_{b+1},
+\mathsf{tropic\_boot\_witness}
+).
+\]
+
+If multiple boots occur between DSM transfers, the release carries a boot chain:
+
+\[
+\BootChain =
+(\BootTicket_{b+1},\ldots,\BootTicket_{b+k}),
+\]
+
+which proves:
+
+\[
+\Bhead_b\rightarrow\Bhead_{b+k}.
+\]
+
+The next DSM root commits to the latest boot head used by the release.
+
+\section{State Bound to the Previous Root}
+
+The key simplification is to put the fused anchor state into the DSM state committed by the
+previous root.
+
+A spendable parent root \(h_i\) commits to:
+
+\[
+(
+\mathsf{object\_id},
+\mathsf{owner},
+\mathsf{balance\ or\ object\ state},
+\mathsf{relationship\ context},
+\mathsf{authority\ policy\ hash},
+\Bundle,
+\Ahead_i,
+\Bhead_b,
+u_i
+).
+\]
+
+Therefore the only valid offline successor anchor counter is:
+
+\[
+u_{i+1}=u_i+1.
+\]
+
+A receiver that sees a candidate transfer from \(h_i\) rejects it unless the candidate release
+proves:
+
+\[
+(h_i,\Ahead_i,\Bhead_b,u_i)
+\rightarrow
+(h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1).
+\]
+
+This removes the need for a table of offered or pending precommits. The previous root itself
+carries the expected fused anchor state.
+
+\section{TROPIC01 Counter Evidence}
+
+The receiver must not trust a host string that says ``the counter moved.'' The receiver must also
+not treat a sender supplied \(\mathsf{live\_counter}\) field as proof. That value is only a claim
+unless it is authenticated by TROPIC01.
+
+\begin{definition}[Counter Evidence]
+Counter evidence for a release is evidence that the pinned TROPIC01 counter has reached the live
+physical value corresponding to \(u_i+1\). It is accepted only if obtained by one of:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item a receiver operated authenticated \Lthree session to TROPIC01 through a verifier pairing
+slot, where the host only relays encrypted packets;
+\item a TROPIC01 primitive that directly authenticates the live counter value under a key pinned
+by the receiver;
+\item a provisioning transcript and live audit rule that is explicitly accepted by the authority
+policy.
+\end{enumerate}
+\end{definition}
+
+The accepted counter value is the value obtained by the receiver through an allowed counter
+evidence path. The preferred path is an authenticated \Lthree verifier session. The receiver is
+the endpoint and the phone or Pico only relays encrypted packets.
+
+The receiver reads the live counter value \(H_{\mathrm{attested}}\) from TROPIC01 and checks:
+
+\[
+H_{\mathrm{attested}} = H_0-(u_i+1).
+\]
+
+Equivalently, the receiver derives:
+
+\[
+u_{\mathrm{attested}} = H_0 - H_{\mathrm{attested}}
+\]
+
+and requires:
+
+\[
+u_{\mathrm{attested}}=u_i+1.
+\]
+
+The RP2350 may relay packets, but it is not the trusted endpoint. The release may carry a counter
+field for transport convenience, but that field is not trusted. The receiver accepts only the
+transcript attested value, or another policy approved TROPIC01 authenticated counter value.
+
+\begin{remark}
+The preferred path is implemented and validated on target hardware. The receiver device runs its
+own libtropic session end to end: the Noise handshake and the authenticated counter read are
+clocked to the chip as raw SPI frames through the appliance's transparent passthrough bridge
+(\texttt{OP\_SPI\_PASSTHROUGH}, Section~\ref{sec:wire}), carried device to device over the DSM
+BLE transport. The sender's phone and the sender's firmware relay opaque encrypted bytes only;
+neither can read or forge the attested value.
+\end{remark}
+
+\begin{remark}
+If the receiver cannot obtain authenticated counter evidence, the receiver does not accept offline
+bearer mode. The transfer routes to online checked mode.
+\end{remark}
+
+\section{TROPIC01 MACANDD Witness}
+
+MACANDD is used as a hardware witness. It is not used as standalone transaction authority.
+
+\begin{definition}[MACANDD Command Shape]
+A MACANDD call is modeled as:
+
+\[
+W=\MACD(q,X),
+\]
+
+where \(q\) is a MACANDD slot index, \(X\in\bits^{256}\) is a 32 byte input, and
+\(W\in\bits^{256}\) is the 32 byte output returned by TROPIC01 over an authenticated \Lthree
+session.
+\end{definition}
+
+\begin{definition}[MACANDD Slot Evolution]
+Let \(V_t\) be the old slot state before a MACANDD call. Let \(X\) be the input. The call computes
+a new state:
+
+\[
+V_{t+1}=F_1(X\concat q),
+\]
+
+stores \(V_{t+1}\), and returns:
+
+\[
+W_t=F_2(V_t\concat V_{t+1}\concat q).
+\]
+
+The functions \(F_1\) and \(F_2\) are keyed inside TROPIC01. The host does not know their keys.
+\end{definition}
+
+\section{DSM Transition Digest}
+
+Let \(\Delta_{i+1}\) be the canonical DSM transition package. It contains the action, recipient,
+object identifier, payload, old leaf proof, new leaf proof, and all data required for the receiver
+to verify:
+
+\[
+h_i\rightarrow h_{i+1}.
+\]
+
+The transition digest is:
+
+\[
+D_{i+1}=\Hf(
+  \ctx{DSM/root-advance/transition-digest/v1}
+  \concat \mathrm{enc}(\Delta_{i+1})
+).
+\]
+
+The receiver supplies a fresh random challenge:
+
+\[
+r_R \xleftarrow{\$} \bits^{256}.
+\]
+
+The challenge is bound into the boot fenced root advance message and release. A release for one
+receiver challenge is not accepted for another challenge.
+
+\section{Boot Bound Root Advance Message}
+
+Let \(\Bhead_{b'}\) be the current boot head proven by a boot ticket or boot chain from the DSM
+committed boot head \(\Bhead_b\).
+
+The boot bound root advance message is:
+
+\[
+M_{i+1}
+=
+\Hf(
+  \ctx{DSM/fused-root-advance-message/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_{b'}
+  \concat h_i
+  \concat h_{i+1}
+  \concat u_i
+  \concat (u_i+1)
+  \concat D_{i+1}
+  \concat \mathsf{recipient\_device\_id}
+  \concat \mathsf{object\_id}
+  \concat \mathsf{authority\_policy\_hash}
+  \concat r_R
+).
+\]
+
+Every partition certificate and TROPIC01 transfer witness must bind this same message.
+
+\section{Partition Commitment and TROPIC Cross Binding}
+
+The partition first commits to the root advance message. The code authoritative partition
+commitment has no partition epoch and no partition nonce. The wire certificate carries only the
+fields below, and the verifier recomputes the commitment from those fields:
+
+\[
+C^P_{i+1}
+=
+\Hf(
+  \ctx{DSM/partition-commit/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_{b'}
+  \concat M_{i+1}
+).
+\]
+
+The TROPIC01 transfer witness input includes that partition commitment:
+
+\[
+X^T_{i+1}
+=
+\Hf(
+  \ctx{DSM/tropic-fused-transfer-input/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_{b'}
+  \concat M_{i+1}
+  \concat C^P_{i+1}
+  \concat q_{\mathrm{tx}}
+).
+\]
+
+TROPIC01 returns:
+
+\[
+W^T_{i+1}=\MACD(q_{\mathrm{tx}},X^T_{i+1}).
+\]
+
+The witness signing seed is:
+
+\[
+K^T_{i+1}
+=
+\HKDF\!\left(
+  \mathsf{secret}=W^T_{i+1},
+  \mathsf{context}
+  =
+  \ctx{DSM/tropic/fused-transfer-witness-key/v1}
+  \concat X^T_{i+1}
+  \concat M_{i+1}
+  \concat \Bundle
+  \concat \Ahead_i
+\right).
+\]
+
+The witness key pair is:
+
+\[
+(\skhw,\pkhw)=\StepKeyGen(K^T_{i+1}).
+\]
+
+The public key handle is:
+
+\[
+\pkh=\Hf(\ctx{DSM/tropic/pk-hash/v1}\concat\pkhw).
+\]
+
+The TROPIC witness message is:
+
+\[
+M^T_{i+1}
+=
+\Hf(
+  \ctx{DSM/tropic/fused-transfer-witness-message/v1}
+  \concat M_{i+1}
+  \concat C^P_{i+1}
+  \concat X^T_{i+1}
+  \concat \pkh
+).
+\]
+
+The TROPIC witness signature is:
+
+\[
+\sigma^T_{i+1}=\StepSign(\skhw,M^T_{i+1}).
+\]
+
+The fixed width TROPIC signature commitment is:
+
+\[
+\Sigma^T_{i+1}=\SigCommit(\sigma^T_{i+1}).
+\]
+
+The partition final certificate binds the TROPIC witness commitment back into the partition
+lineage:
+
+\[
+M^P_{i+1}
+=
+\Hf(
+  \ctx{DSM/partition-final-cert/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_{b'}
+  \concat M_{i+1}
+  \concat C^P_{i+1}
+  \concat \pkh
+  \concat \Sigma^T_{i+1}
+  \concat (u_i+1)
+).
+\]
+
+The partition certificate is:
+
+\[
+\sigma^P_{i+1}=\PartSign(M^P_{i+1}).
+\]
+
+The fixed width partition signature commitment is:
+
+\[
+\Sigma^P_{i+1}=\SigCommit(\sigma^P_{i+1}).
+\]
+
+The cross binding is:
+
+\[
+C^P_{i+1}
+\rightarrow X^T_{i+1}
+\rightarrow \Sigma^T_{i+1}
+\rightarrow M^P_{i+1}
+\rightarrow \Sigma^P_{i+1}.
+\]
+
+Thus the TROPIC witness is bound to the partition commitment, and the partition final certificate
+is bound back to the TROPIC witness commitment. Neither proof can be swapped out for a proof from
+another device, another boot, another root transition, or another anchor bundle.
+
+\section{Next Fused Anchor Head}
+
+After the receiver obtains authenticated counter evidence, the next fused anchor head is:
+
+\[
+\Ahead_{i+1}
+=
+\Hf(
+  \ctx{DSM/fused-anchor-head/v1}
+  \concat \Bundle
+  \concat \Ahead_i
+  \concat \Bhead_{b'}
+  \concat M_{i+1}
+  \concat C^P_{i+1}
+  \concat \Sigma^P_{i+1}
+  \concat \pkh
+  \concat \Sigma^T_{i+1}
+  \concat H_{\mathrm{attested}}
+).
+\]
+
+The next DSM root \(h_{i+1}\) must commit to:
+
+\[
+(
+\Bundle,
+\Ahead_{i+1},
+\Bhead_{b'},
+u_i+1
+).
+\]
+
+The receiver verifies that \(h_i\) committed to the old fused anchor state and that \(h_{i+1}\)
+commits to the new fused anchor state.
+
+\section{Witness Signature Scheme}
+
+The appliance profile uses \WOTS\ over BLAKE3. The witness key signs exactly one digest, so a
+one time signature is sufficient.
+
+\begin{definition}[\WOTS\ Parameters]
+Let \(n=32\), \(w=16\), \(\ell_1=64\), \(\ell_2=3\), and \(\ell=67\). A signature is:
+
+\[
+\ell\cdot n=2144
+\]
+
+bytes. The compressed public key is 32 bytes.
+\end{definition}
+
+\begin{definition}[Chain Function]
+The chain function is:
+
+\[
+F(x)=\Hf(\ctx{DSM/anchor/wots-chain/v1}\concat x).
+\]
+
+For seed \(K\) and chain index \(j\):
+
+\[
+s_j=
+\HKDF(
+  \mathsf{secret}=K,\;
+  \mathsf{context}=\ctx{DSM/anchor/wots-sk/v1}\concat\mathrm{enc}_{16}(j)
+).
+\]
+\end{definition}
+
+\begin{definition}[\StepKeyGen, \StepSign, \StepVerify]
+The key generation, signing, and verification algorithms are the standard Winternitz chain
+construction over BLAKE3:
+
+\[
+\StepKeyGen(K)\rightarrow(\skhw,\pkhw),
+\]
+
+\[
+\StepSign(\skhw,d)\rightarrow\sigma,
+\]
+
+\[
+\StepVerify(\pkhw,d,\sigma)\rightarrow\{0,1\}.
+\]
+
+The secret key is the seed \(K\). It is retained only long enough to sign the release, then erased.
+\end{definition}
+
+\begin{assumption}[Witness Signature Security]
+Given \(\pkhw\) and one signature on digest \(d\), no efficient adversary can produce a valid
+signature on \(d'\neq d\) except with negligible probability, assuming the preimage and second
+preimage resistance of \(\Hf\).
+\end{assumption}
+
+\section{Root Advance Certificate}
+
+The root advance certificate is:
+
+\[
+\Cert_{i+1}
+=
+(
+\Bundle,
+\Ahead_i,
+\Ahead_{i+1},
+\Bhead_b,
+\Bhead_{b'},
+h_i,
+h_{i+1},
+u_i,
+u_i+1,
+D_{i+1},
+M_{i+1},
+C^P_{i+1},
+X^T_{i+1},
+\pkh,
+\pkhw,
+\sigma^T_{i+1},
+\sigma^P_{i+1},
+\mathsf{anchor\_id},
+q_{\mathrm{tx}},
+r_R
+).
+\]
+
+The release package is:
+
+\[
+\Pkg_{i+1}
+=
+(
+\Delta_{i+1},
+\BootChain,
+\Cert_{i+1},
+\mathsf{counter\_evidence}_{i+1}
+).
+\]
+
+\section{Compact Appliance Protocol}
+
+The appliance has three transfer states:
+
+\[
+\Ready,\qquad \Prepared,\qquad \Committed.
+\]
+
+Boot state is separate. Offline transfer is disabled until a valid boot ticket or boot chain exists
+for the current boot.
+
+\subsection{Boot}
+
+Boot is device internal. The host transport does not submit a boot operation, boot sequence, or
+firmware measurement. On boot, the appliance:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item reads the active \(\Bundle,\Ahead_i,\Bhead_b,u_i\);
+\item obtains the firmware and policy measurement from the firmware target;
+\item computes \(X^{\mathrm{boot}}_{b+1}\);
+\item consumes the TROPIC01 boot MACANDD slot;
+\item advances the partition boot ratchet;
+\item signs the boot certificate;
+\item records \(\BootTicket_{b+1}\);
+\item enables offline bearer mode only if the boot ticket verifies.
+\end{enumerate}
+
+If the boot ticket cannot be produced or verified, offline bearer mode is refused and the device
+routes to online recovery.
+
+\subsection{Prepare}
+
+The sender proposes \(\Delta_{i+1}\), \(h_i\), and \(h_{i+1}\). The receiver checks the proposed
+transfer at the human and DSM level, then supplies \(r_R\).
+
+The appliance checks:
+
+\[
+\Active.\mathsf{status}=\Ready,
+\]
+
+\[
+\Active.h=h_i,
+\]
+
+\[
+\Active.\Bundle=\Bundle,
+\]
+
+\[
+\Active.\Ahead=\Ahead_i,
+\]
+
+\[
+\Active.u=u_i,
+\]
+
+\[
+u_i=H_0-H.
+\]
+
+The expression \(H_0-H\) is computed with checked subtraction. If \(H>H_0\), the state is rejected
+as a counter mismatch because a down counter cannot report a value above its enrolled value.
+
+The appliance verifies that a boot ticket or boot chain exists from the DSM committed boot head
+to the current boot head \(\Bhead_{b'}\).
+
+It constructs \(D_{i+1}\), \(M_{i+1}\), \(C^P_{i+1}\), and \(X^T_{i+1}\). It calls MACANDD on the
+transfer slot, derives the witness key, forms the TROPIC witness, forms the partition final
+certificate, computes \(\Ahead_{i+1}\), and constructs \(\Cert_{i+1}\) without exporting it yet.
+
+It writes a durable prepared record:
+
+\[
+\Active
+\leftarrow
+(
+h_i,
+\Bundle,
+\Ahead_i,
+\Bhead_{b'},
+u_i,
+\Prepared,
+\Cert_{i+1},
+\Delta_{i+1},
+\skhw
+).
+\]
+
+No counter has moved. No release has been exported.
+
+\subsection{Commit}
+
+The appliance forms the release package without counter evidence and stores the committed candidate
+durably with:
+
+\[
+\mathsf{counter\_committed}=\mathsf{false}.
+\]
+
+Before moving the counter, the appliance re pins the live anchor counter:
+
+\[
+H_0-H=u_i.
+\]
+
+If this check fails, the operation downgrades to online recovery and does not move the counter.
+
+If \(H=0\), the operation returns:
+
+\[
+\mathsf{EXHAUSTED\_ONLINE\_ONLY}.
+\]
+
+No release is exported or committed from an exhausted counter.
+
+If \(H>0\), the appliance issues:
+
+\[
+\UpdateCmd.
+\]
+
+A successful counter update maps:
+
+\[
+H\leftarrow H-1.
+\]
+
+The appliance marks the committed candidate as:
+
+\[
+\mathsf{counter\_committed}=\mathsf{true}
+\]
+
+and erases \(\skhw\). The post commit physical counter value is the actual decremented reading
+\(H-1\), not a value reconstructed from \(H_0-(u_i+1)\).
+
+\subsection{Counter Evidence}
+
+The receiver obtains counter evidence from TROPIC01. In the preferred mode, the receiver opens an
+authenticated \Lthree verifier session through a verifier pairing slot, with the host relaying
+encrypted packets only.
+
+The receiver obtains \(H_{\mathrm{attested}}\) and checks:
+
+\[
+H_{\mathrm{attested}}=H_0-(u_i+1).
+\]
+
+If this check fails, the receiver rejects offline bearer acceptance.
+
+\subsection{Emit}
+
+The appliance may export the release only after the counter commit. The receiver attaches or
+records authenticated counter evidence and verifies \(\Pkg_{i+1}\).
+
+\subsection{Finalize}
+
+After emitting the release, the appliance may finalize only if the active anchor counter equals
+the live counter derived anchor counter:
+
+\[
+\Active.u = H_0-H.
+\]
+
+If this check fails, finalization is refused and the appliance enters online recovery.
+
+If the check holds, finalization writes:
+
+\[
+\Active
+\leftarrow
+(
+h_{i+1},
+\Bundle,
+\Ahead_{i+1},
+\Bhead_{b'},
+u_i+1,
+\Ready,
+\emptyset
+).
+\]
+
+If power fails before finalize, recovery re emits the same committed release and finalizes the same
+successor.
+
+\section{Receiver Acceptance Predicate}
+
+A receiver accepts an offline bearer transfer only if all checks hold.
+
+\begin{definition}[Accepted Root Frontier]\label{def:frontier}
+For each enrolled holder, the receiver maintains a durable adopted appliance root frontier. If a
+frontier value exists for the holder, the release previous root must equal it exactly. If no
+frontier value exists, the relationship is at its genesis: the receiver adopts the release's own
+previous root as the expected value. Genesis adoption is sound because the authenticity of that
+root is carried entirely by the other predicate checks --- the previous state commitment, the boot
+chain, the partition certificate, the TROPIC witness, and above all the authenticated counter
+evidence, which binds the claimed anchor counter to the live physical chip. After the receiver
+accepts the release \emph{and} completes its own canonical value commit, it persists the release
+next root as the new frontier for that holder. Frontier adoption is deliberately deferred until
+after the canonical commit: a release that verifies but fails to commit must not move the
+frontier.
+\end{definition}
+
+\begin{definition}[Boot Fenced Fused Root Advance Acceptance]
+Let \(\mathsf{Accept}_{\mathrm{off}}(\Pkg_{i+1})=1\) iff:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item all encodings are canonical;
+\item \(h_i\) is the receiver accepted previous root for the received object, under the accepted
+root frontier rule of Definition~\ref{def:frontier};
+\item \(h_i\) commits to \(\Bundle,\Ahead_i,\Bhead_b,u_i\);
+\item the boot ticket or boot chain verifies \(\Bhead_b\rightarrow\Bhead_{b'}\);
+\item the claimed next anchor counter is \(u_i+1\), using checked arithmetic;
+\item the receiver challenge \(r_R\) is the challenge supplied by this receiver;
+\item \(D_{i+1}\) recomputes from \(\Delta_{i+1}\);
+\item \(M_{i+1}\) recomputes from the bound fields;
+\item \(C^P_{i+1}\) recomputes from the partition commitment fields;
+\item \(X^T_{i+1}\) recomputes from \(\Bundle,\Ahead_i,\Bhead_{b'},M_{i+1},C^P_{i+1},q_{\mathrm{tx}}\);
+\item \(\pkh=\Hf(\ctx{DSM/tropic/pk-hash/v1}\concat\pkhw)\);
+\item \(M^T_{i+1}\) recomputes and
+\[
+\StepVerify(\pkhw,M^T_{i+1},\sigma^T_{i+1})=1;
+\]
+\item \(M^P_{i+1}\) recomputes and
+\[
+\PartVerify(\mathsf{partition\_pk},M^P_{i+1},\sigma^P_{i+1})=1;
+\]
+\item the DSM transition proof verifies \(h_i\rightarrow h_{i+1}\);
+\item the transfer gives the claimed object or value to the receiver;
+\item the authority policy hash matches the previous state;
+\item the receiver obtains an authenticated TROPIC01 counter value \(H_{\mathrm{attested}}\);
+\item the authenticated counter value satisfies
+\[
+H_{\mathrm{attested}} = H_0-(u_i+1);
+\]
+\item equivalently, the receiver derives
+\[
+u_{\mathrm{attested}}=H_0-H_{\mathrm{attested}}
+\]
+and verifies
+\[
+u_{\mathrm{attested}}=u_i+1;
+\]
+\item \(\Ahead_{i+1}\) recomputes from the fused anchor head formula;
+\item \(h_{i+1}\) commits to \(\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1\);
+\item no known firmware boundary event, physical compromise event, or policy event invalidates
+the anchor.
+\end{enumerate}
+\end{definition}
+
+The receiver trusts public DSM verification, the receiver challenge, the boot ticket, the partition
+certificate, the hardware witness signature, the fused anchor head update, and authenticated
+TROPIC01 counter evidence. The receiver does not trust host state, copied wallet files, a Pico
+reported counter value, or any unauthenticated counter field carried inside the release.
+
+\section{What Happens if RP2350 Is Breached}
+
+The design assumes the RP2350 may fail as a trusted policy speaker. Therefore an honest receiver
+does not accept any fact solely because the RP2350 says it.
+
+If the RP2350 partition is breached alone, the attacker may:
+
+\begin{itemize}
+\item feed arbitrary roots;
+\item waste MACANDD calls;
+\item burn counter steps;
+\item export invalid packages;
+\item corrupt local state;
+\item brick the appliance into online recovery.
+\end{itemize}
+
+These attacks do not become successful offline bearer transfers unless the receiver acceptance
+predicate is also satisfied.
+
+A partition certificate without a matching TROPIC01 transfer witness fails. A partition certificate
+without authenticated TROPIC01 counter evidence fails. A partition certificate over an invalid DSM
+transition fails.
+
+\section{What Happens if TROPIC01 Is Broken}
+
+TROPIC01 is not the sole authority.
+
+If TROPIC01 is broken alone, the attacker may try to forge hardware witness output or counter
+evidence. That is still not enough for an honest receiver because the release also requires:
+
+\begin{itemize}
+\item the DSM transition proof;
+\item the previous root commitment to \(\Bundle,\Ahead_i,\Bhead_b,u_i\);
+\item a valid boot ticket or boot chain;
+\item a valid RP2350 partition certificate;
+\item a valid fused anchor head update;
+\item the next root commitment to \(\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1\).
+\end{itemize}
+
+A TROPIC-only break becomes offline mode suspension and authority rotation unless the other fused
+anchor predicates also fail.
+
+\section{Why New Hardware Cannot Resume}
+
+A copied state image can contain:
+
+\[
+\Bundle,\Ahead_i,\Bhead_b,u_i,
+\mathsf{history},
+\mathsf{cached\ proofs},
+\mathsf{public\ enrollment\ data}.
+\]
+
+A new device cannot advance the boot head:
+
+\[
+\Bhead_b\rightarrow\Bhead_{b+1}
+\]
+
+unless it has the enrolled RP2350 partition boot ratchet and the enrolled TROPIC01 boot MACANDD
+slot state. A new partition key, new partition state, new TROPIC01 anchor identifier, new MACANDD
+slot state, or new physical counter gives a different lineage.
+
+Therefore a release from new hardware fails one of:
+
+\begin{itemize}
+\item anchor bundle equality;
+\item boot chain verification;
+\item partition certificate verification;
+\item TROPIC01 boot witness verification;
+\item TROPIC01 transfer witness verification;
+\item authenticated counter evidence;
+\item fused anchor head recomputation;
+\item next root commitment.
+\end{itemize}
+
+New hardware requires online authority rotation. It cannot continue offline from a root committed
+to another bundle and fused anchor head.
+
+\section{Power Loss Behavior}
+
+Power may fail between any two operations.
+
+\subsection{Before Boot Ticket Is Durable}
+
+Offline bearer mode is disabled. Recovery must produce a valid boot ticket or route to online
+checked recovery.
+
+\subsection{After Boot Ticket Is Durable}
+
+Offline bearer mode may proceed if the boot ticket verifies from the DSM committed boot head.
+If the boot ticket is malformed, stale, or not chained from the committed boot head, offline mode
+is refused.
+
+\subsection{Before Prepared Is Durable}
+
+No counter has moved and no release has been exported. Recovery returns to \Ready\ if anchor state
+is consistent. Otherwise the appliance enters online checked recovery.
+
+\subsection{After Prepared Is Durable}
+
+The prepared record may complete if \(\skhw\) and the partition record are present. If required
+private state is missing, the transfer cannot complete offline and must be cancelled or resolved
+online. No second transfer from the same active root is allowed while the prepared record exists.
+
+\subsection{After Release Is Durable but Before Counter Commit}
+
+Recovery may commit the same release if the previous root, boot head, fused anchor head, and policy
+still match. Since no release was exported before counter commit, no receiver has accepted an
+uncommitted spend.
+
+\subsection{After Counter Moved but Before Commit Flag Was Durable}
+
+If the physical counter moved but \(\mathsf{counter\_committed}\) was not durably written, recovery
+does not move the counter again. If the committed candidate target anchor counter already equals
+the live counter derived anchor counter, recovery marks the candidate committed and re emits the
+same release.
+
+\subsection{After Counter Commit but Before Export}
+
+The counter has moved and the release is durable. Recovery re emits the same release package. It
+does not sign a new one.
+
+\subsection{After Export but Before Finalize}
+
+Recovery re emits the same release and finalization advances to the same \(h_{i+1}\), guarded by:
+
+\[
+\Active.u = H_0-H.
+\]
+
+\section{Recovery}
+
+Recovery must preserve the exact committed release until it has been re emitted and finalized.
+It must not erase the committed release merely because recovery found it.
+
+The recovery rule is:
+
+\[
+\text{if a committed release exists, re emit that same release and finalize that same successor.}
+\]
+
+The appliance does not sign a new release during recovery.
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item If the appliance is in \(\Ready\), recovery compares the stored anchor counter with the live
+counter derived anchor counter. If the stored anchor counter is lower, the appliance adopts the
+live value: the physical chip is the counter authority, and adopting a higher \(u\) only shrinks
+the remaining budget --- it can never mint value or enable a double spend, because the physical
+counter has already moved. This is the normal state after any transfer followed by a restart of a
+build that does not yet persist \(\Active\) durably, since the counter is permanently below
+\(H_0\) while such a build re births at \(u=0\). If the stored anchor counter is higher than the
+live derived value, the appliance fails closed: a down counter cannot rise.
+
+\item If the appliance is in \(\Prepared\), recovery checks that the previous root still equals the
+active root, the boot head is valid, and the live anchor counter still equals the record anchor
+counter. If the witness key and partition record are present, the prepared record may complete. If
+required private state is missing, the record must be cancelled or resolved online.
+
+\item If a committed candidate exists with \(\mathsf{counter\_committed}=\mathsf{false}\) and its
+target anchor counter is \(u_{\mathrm{live}}+1\), recovery may complete the counter update only if
+the candidate previous root still equals the active root and the boot/fused anchor state still
+matches. This prevents recovery from burning a counter step for a stale or divergent previous root.
+
+\item If a committed candidate exists with \(\mathsf{counter\_committed}=\mathsf{false}\) but the
+live counter already equals the candidate target anchor counter, recovery marks the candidate
+committed without moving the counter again. This covers the interruption case where the physical
+counter moved but the committed flag was not durably written.
+
+\item If a committed candidate exists with \(\mathsf{counter\_committed}=\mathsf{true}\), recovery
+returns a re emit outcome. The record remains committed until the same release is emitted and
+finalized.
+
+\item Finalize is allowed only if the active anchor counter equals the live counter derived anchor
+counter:
+\[
+\Active.u = H_0-H.
+\]
+This prevents frontier advance when local state and the physical counter disagree.
+\end{enumerate}
+
+\section{Recovery Algorithm}
+
+\begin{lstlisting}
+recover(H0, H, Active):
+    live_anchor_counter = checked_sub(H0, H)
+    if live_anchor_counter == ERROR:
+        return COUNTER_MISMATCH
+
+    if firmware_boundary_invalid():
+        return DOWNGRADE_ONLINE
+
+    if rmemory_map_invalid():
+        return DOWNGRADE_ONLINE
+
+    if boot_ticket_required() and not valid_boot_ticket_or_chain():
+        return DOWNGRADE_ONLINE
+
+    if Active.status == COMMITTED:
+        rec = Active.record
+
+        if rec.counter_committed == TRUE:
+            if rec.next_anchor_counter != live_anchor_counter:
+                return DOWNGRADE_ONLINE
+            return REEMIT_COMMITTED(rec.next_root)
+
+        if rec.counter_committed == FALSE:
+            if rec.next_anchor_counter == live_anchor_counter:
+                mark_counter_committed(rec)
+                return REEMIT_COMMITTED(rec.next_root)
+
+            if rec.next_anchor_counter == live_anchor_counter + 1:
+                if rec.prev_root != Active.root:
+                    return DOWNGRADE_ONLINE
+                if rec.anchor_bundle != Active.anchor_bundle:
+                    return DOWNGRADE_ONLINE
+                if rec.prev_anchor_head != Active.anchor_head:
+                    return DOWNGRADE_ONLINE
+                counter_update()
+                mark_counter_committed(rec)
+                return REEMIT_COMMITTED(rec.next_root)
+
+            return DOWNGRADE_ONLINE
+
+    if Active.status == PREPARED:
+        if Active.anchor_counter != live_anchor_counter:
+            return DOWNGRADE_ONLINE
+
+        if Active.record.prev_root != Active.root:
+            return DOWNGRADE_ONLINE
+
+        if Active.record.prev_anchor_head != Active.anchor_head:
+            return DOWNGRADE_ONLINE
+
+        if witness_key_present(Active.record) and partition_record_present(Active.record):
+            return ACCEPT_PREPARED_CAN_COMPLETE
+
+        return ONLINE_CANCEL_OR_RESOLVE
+
+    if Active.status == READY:
+        if Active.anchor_counter < live_anchor_counter:
+            Active.anchor_counter = live_anchor_counter
+
+        if Active.anchor_counter > live_anchor_counter:
+            return FAIL_CLOSED
+
+        if H == 0:
+            return EXHAUSTED_ONLINE_ONLY
+
+        return ACCEPT(Active.root)
+
+    return DOWNGRADE_ONLINE
+\end{lstlisting}
+
+The \(\Ready\) branch adopts the live counter when the stored value is behind. The chip is the
+counter authority: adoption reconciles the model to the physical position and only shrinks the
+remaining spend budget. The fail closed branch is unchanged, because a stored value ahead of a
+down counter is physically impossible for an honest device.
+
+\section{Online Checked Mode and New Relationships}
+
+New independent relationships are not created under this offline bearer authority. They require
+online checked reconciliation. This matters for collusive closed branches.
+
+If the same adversary controls both sides of an offline exchange, it can create a private branch
+that only its own devices accept. That does not affect honest receivers. When the branch attempts
+to meet real reconciliation or a new independent relationship, the DSM root, anchor bundle, fused
+anchor head, boot head, anchor counter, and counter evidence no longer line up. The branch has
+become its own reality and breaks away from the accepted one.
+
+Therefore the meaningful security target is an honest receiver accepting value from a sender. A
+closed adversary branch is not a successful attack on anyone else.
+
+\section{Tripwire Composition}
+
+Tripwire supplies fork exposure on reconciliation. Each device commits relationship tips into a
+per device sparse Merkle tree. A valid receipt proves adjacency from an old root to a new root and
+binds the relevant relationship tip update.
+
+Tripwire does not make offline receivers instantly aware of each other. It exposes conflicting
+accepted tips when they are compared.
+
+\begin{assumption}[Tripwire Security]
+Assume the hash function is collision resistant and DSM signatures are secure against chosen
+message forgery. Then two distinct accepted successors from the same predecessor cannot survive
+reconciliation without a hash collision, signature forgery, violated DSM predicate, or violated
+hardware evidence condition.
+\end{assumption}
+
+\section{Security Claims}
+
+\begin{theorem}[Birth Non Recreation]
+Public enrollment data is insufficient to recreate the initial fused anchor lineage on new
+hardware.
+\end{theorem}
+
+\begin{proof}
+The anchor bundle, initial fused anchor head, initial boot head, and initial partition ratchet are
+derived from \(s_{\mathrm{birth}}\), but only \(\Hf(s_{\mathrm{birth}})\) is public. The preimage
+\(s_{\mathrm{birth}}\) is destroyed after deriving the initial private ratchet. A new device that
+has only public enrollment data cannot derive \(p_0\), the TROPIC01 MACANDD slot state, or the
+same fused anchor lineage except by inverting \(\Hf\), extracting the original non exportable
+state, or perfectly emulating the original device state.
+\end{proof}
+
+\begin{theorem}[No New Hardware Resume]
+Let a DSM root commit to anchor bundle \(\Bundle\), fused anchor head \(\Ahead_i\), boot head
+\(\Bhead_b\), and anchor counter \(u_i\). A device with different partition hardware state or
+different TROPIC01 boot state cannot produce an accepted offline bearer successor from that root,
+except by forging the partition boot certificate, forging the TROPIC01 boot witness, breaking the
+hash binding, or extracting and perfectly emulating the original non exportable live states.
+\end{theorem}
+
+\begin{proof}
+An accepted release requires a boot ticket or boot chain from \(\Bhead_b\) to \(\Bhead_{b'}\).
+The boot ticket is produced from the RP2350 partition boot ratchet and the TROPIC01 boot MACANDD
+slot under the committed bundle \(\Bundle\). New hardware has a different partition state,
+different TROPIC01 state, or a different bundle. Therefore it cannot advance the committed boot
+head to the accepted current boot head unless it forges the required evidence or exactly emulates
+the original non exportable live states.
+\end{proof}
+
+\begin{theorem}[Clone Exclusion]
+A software clone cannot produce an accepted offline bearer root advance for an enrolled authority
+unless it obtains the original partition evidence and TROPIC01 MACANDD output, or forges one of
+the required signatures.
+\end{theorem}
+
+\begin{proof}
+An accepted release requires a valid boot ticket, partition certificate, TROPIC witness signature,
+authenticated TROPIC01 counter evidence, DSM transition proof, and fused anchor head update. A
+software clone may copy host files and wallet state, but it does not have the RP2350 partition
+ratchet, partition signing state, TROPIC01 MACANDD slot state, or live counter. Therefore it cannot
+produce the accepted evidence set unless it obtains those non exportable states or forges the
+required evidence.
+\end{proof}
+
+\begin{theorem}[Root Rebinding Exclusion]
+A witness produced for one root advance cannot be accepted for another root advance except with
+negligible probability.
+\end{theorem}
+
+\begin{proof}
+The boot bound root advance message \(M_{i+1}\), partition commitment \(C^P_{i+1}\), TROPIC input
+\(X^T_{i+1}\), partition certificate, TROPIC witness, and fused anchor head bind the anchor bundle,
+previous fused anchor head, current boot head, previous root, next root, anchor counter, next
+anchor counter, transition digest, recipient, object, policy, and receiver challenge. Changing any
+of those values changes the verified messages. The old evidence no longer verifies except through
+hash collision, signature forgery, or a break of the witness scheme.
+\end{proof}
+
+\begin{assumption}[One-Use Physical Counter Witness]
+The offline-bearer exclusion treats the authenticated counter advance \(u_i\to u_i+1\) as a
+\emph{one-use physical lineage witness}: a genuine advance of the physical counter that authorizes
+exactly one accepted successor from the anchor state committing \(u_i\). A bare authenticated counter
+\emph{reading} --- evidence that the live physical counter equals \(H_0-(u_i+1)\) --- is a scalar, not
+a per-transition witness: it is satisfied by \emph{any} release claiming the step \(u_i\to u_i+1\), so a
+single genuine advance is corroborated for two distinct same-step releases delivered to two isolated
+receivers. The one-use property therefore does not follow from monotonicity alone; it is an assumption
+on the anchor evidence (the offline anchor evidence assumption of the DSM formal kernel). A chip
+signature over a transfer and a counter value is likewise not sufficient by itself. Where the physical
+realization provides only the scalar reading, exclusion of a second same-step successor holds within a
+single receiver's realized history --- the consumed parent set is threaded through one \(\Sigma\) ---
+and, across isolated receivers, degrades to Tripwire exposure on reconciliation rather than local
+rejection.
+\end{assumption}
+
+\begin{theorem}[Counter Step Uniqueness]
+For a previous root that commits to \(u_i\), an honest receiver accepts only a release whose
+authenticated TROPIC01 counter evidence proves the next anchor counter \(u_i+1\).
+\end{theorem}
+
+\begin{proof}
+The receiver reads \(u_i\) from the previous DSM state and requires \(u_i+1\) as the next anchor
+counter. Authenticated counter evidence must show the live TROPIC01 counter value:
+
+\[
+H_0-(u_i+1).
+\]
+
+Within a single receiver's realized history the consumed parent set records the step, so a second
+successor from the same parent fails the linearity check. Across two isolated receivers the physical
+counter neither increases nor resets, yet each reads the same genuine value \(H_0-(u_i+1)\); a scalar
+reading is satisfied by any release claiming the step \(u_i\to u_i+1\). By the One-Use Physical Counter
+Witness assumption the genuine advance authorizes exactly one accepted successor. Where only the scalar
+reading is realized, a second same-step successor to a second isolated receiver is not rejected by the
+local predicate and is exposed on reconciliation.
+\end{proof}
+
+\begin{theorem}[TROPIC01 Is Necessary but Not Sufficient]
+A TROPIC01 witness and counter value alone do not authorize an offline bearer transfer.
+\end{theorem}
+
+\begin{proof}
+The receiver acceptance predicate also requires public DSM transition validity, previous root
+commitment to the fused anchor state, boot ticket verification, partition certificate verification,
+receiver challenge binding, fused anchor head recomputation, and next root commitment to the new
+fused anchor state. TROPIC01 evidence alone cannot satisfy those checks.
+\end{proof}
+
+\begin{theorem}[Partition Is Necessary but Not Sufficient]
+An RP2350 partition certificate alone does not authorize an offline bearer transfer.
+\end{theorem}
+
+\begin{proof}
+The receiver acceptance predicate also requires a TROPIC01 transfer witness, authenticated TROPIC01
+counter evidence, DSM transition proof, receiver challenge binding, boot ticket verification, and
+fused anchor head recomputation. A partition certificate alone cannot satisfy those checks.
+\end{proof}
+
+\begin{theorem}[Replay Idempotence]
+Re emitting the same release package does not create a second spend.
+\end{theorem}
+
+\begin{proof}
+The same package has the same previous root, next root, transition digest, boot chain, partition
+certificate, TROPIC witness, receiver challenge, fused anchor head, and counter evidence. A
+receiver that already accepted it recognizes the same transition. Re emission is duplicate
+delivery, not a distinct successor.
+\end{proof}
+
+\begin{theorem}[Recoverable Commit]
+If the counter moves for a release whose committed candidate is durable, recovery either re emits
+the same release or downgrades to online recovery. It does not sign a different release for the
+same counter step.
+\end{theorem}
+
+\begin{proof}
+The recovery algorithm treats a committed record as a re emission obligation. If the committed flag
+is true and the record next anchor counter matches the live counter derived anchor counter,
+recovery returns \(\mathsf{REEMIT\_COMMITTED}\). If the physical counter moved but the committed
+flag was not durably written, then the record target anchor counter equals the live counter derived
+anchor counter, so recovery marks the same record committed and returns
+\(\mathsf{REEMIT\_COMMITTED}\). If the counter has not moved and the target anchor counter is the
+next physical step, recovery may move the counter only after checking that the committed candidate
+previous root, bundle, and fused anchor head still equal the active state. In no branch does
+recovery derive a new witness key or sign a different release.
+\end{proof}
+
+\begin{theorem}[No Accepted Offline Bearer Double Spend]
+Under the stated assumptions, no adversary can produce two distinct accepted offline bearer
+successors from the same spendable parent except with negligible probability. If a conflicting
+branch is created outside the model, it is exposed on reconciliation.
+\end{theorem}
+
+\begin{proof}
+For a previous root \(h_i\), the previous state commits to anchor bundle \(\Bundle\), fused anchor
+head \(\Ahead_i\), boot head \(\Bhead_b\), and anchor counter \(u_i\). An honest receiver accepts
+only a transition to \(h_{i+1}\) with next anchor counter \(u_i+1\), valid DSM proof, valid boot
+ticket, valid partition certificate, valid TROPIC witness, authenticated TROPIC01 counter evidence,
+valid fused anchor head update, and next root commitment to the new fused anchor state.
+
+A software clone cannot produce the partition and TROPIC evidence. A new hardware clone cannot
+resume the committed boot head. A broken TROPIC01 alone cannot fake the partition certificate, DSM
+proof, boot ticket, and fused anchor head update. A breached RP2350 alone cannot forge counter
+evidence --- but it does not need to: a single genuine advance to \(u_i+1\) is a scalar corroborated
+for every same-step release, so exclusion of a second accepted package from the same anchor counter
+rests on the One-Use Physical Counter Witness assumption, not on monotonicity. Under that assumption
+the genuine advance authorizes exactly one accepted successor, and a different successor is rejected by
+the receiver predicate. Where the realization provides only the scalar counter reading and the RP2350
+partition is breached --- so the partition certificate and witness are attacker-produced --- two
+distinct same-step successors delivered to two isolated receivers each satisfy the local predicate; the
+second is not rejected locally and is exposed on reconciliation. The exclusion is then a property of a
+single reconciled realized history against a live consumed parent set, not of the isolated per-receiver
+predicate. This is the boundary of the offline claim: prevention while the one-use witness holds and the
+partition is uncompromised; Tripwire detection and attribution on reconciliation otherwise.
+\end{proof}
+
+\section{TLA\texorpdfstring{\textsuperscript{+}}{+} Model}
+
+\begin{lstlisting}[language=TLA]
+VARIABLES H, Active, CurrentRoot, step, delivered
+
+LiveAnchorCounter == H0 - H
+NextAnchorCounter == LiveAnchorCounter + 1
+
+OfflineReady ==
+    /\ Active.root = CurrentRoot
+    /\ Active.anchor_counter = LiveAnchorCounter
+    /\ Active.status = "ready"
+    /\ Active.boot_valid = TRUE
+    /\ H > 0
+    /\ RMemoryMapOk
+    /\ FirmwareBoundaryOk
+    /\ LockoutOk
+
+Boot ==
+    /\ step = "boot_required"
+    /\ BootWitnessGenerated
+    /\ PartitionBootCertValid
+    /\ Active' = [Active EXCEPT !.boot_head = NextBootHead,
+                                !.boot_valid = TRUE]
+    /\ step' = "idle"
+    /\ UNCHANGED <<H, CurrentRoot, delivered>>
+
+Prepare ==
+    /\ step = "idle"
+    /\ OfflineReady
+    /\ ReceiverChallengeFresh
+    /\ TransitionDigestOk
+    /\ PartitionCommitGenerated
+    /\ TropicWitnessGenerated
+    /\ PartitionFinalCertGenerated
+    /\ NextAnchorHeadComputed
+    /\ Active' = [
+         root           |-> Active.root,
+         anchor_bundle  |-> Active.anchor_bundle,
+         anchor_head    |-> Active.anchor_head,
+         boot_head      |-> Active.boot_head,
+         anchor_counter |-> Active.anchor_counter,
+         boot_valid     |-> Active.boot_valid,
+         status         |-> "prepared",
+         record         |-> [
+             prev_root           |-> Active.root,
+             next_root           |-> NextRoot,
+             prev_anchor_head    |-> Active.anchor_head,
+             next_anchor_head    |-> NextAnchorHead,
+             boot_head           |-> Active.boot_head,
+             anchor_counter      |-> LiveAnchorCounter,
+             next_anchor_counter |-> NextAnchorCounter,
+             challenge           |-> ReceiverChallenge,
+             release             |-> ReleasePkg,
+             committed           |-> FALSE
+         ]
+       ]
+    /\ step' = "prepared"
+    /\ UNCHANGED <<H, CurrentRoot, delivered>>
+
+CommitStart ==
+    /\ step = "prepared"
+    /\ Active.status = "prepared"
+    /\ Active.record.prev_root = Active.root
+    /\ Active.record.prev_anchor_head = Active.anchor_head
+    /\ Active.anchor_counter = LiveAnchorCounter
+    /\ ReleaseDurable
+    /\ Active' = [
+         root           |-> Active.root,
+         anchor_bundle  |-> Active.anchor_bundle,
+         anchor_head    |-> Active.anchor_head,
+         boot_head      |-> Active.boot_head,
+         anchor_counter |-> Active.anchor_counter,
+         boot_valid     |-> Active.boot_valid,
+         status         |-> "committed",
+         record         |-> Active.record
+       ]
+    /\ step' = "commit_started"
+    /\ UNCHANGED <<H, CurrentRoot, delivered>>
+
+CommitCounter ==
+    /\ step = "commit_started"
+    /\ Active.status = "committed"
+    /\ Active.record.committed = FALSE
+    /\ Active.record.next_anchor_counter = LiveAnchorCounter + 1
+    /\ Active.record.prev_root = Active.root
+    /\ Active.record.prev_anchor_head = Active.anchor_head
+    /\ H > 0
+    /\ H' = H - 1
+    /\ Active' = [Active EXCEPT !.record.committed = TRUE,
+                                !.anchor_counter =
+                                  Active.record.next_anchor_counter]
+    /\ step' = "committed"
+    /\ UNCHANGED <<CurrentRoot, delivered>>
+
+Emit ==
+    /\ step = "committed"
+    /\ Active.status = "committed"
+    /\ Active.record.committed = TRUE
+    /\ Active.anchor_counter = LiveAnchorCounter
+    /\ delivered' = delivered \cup {Active.record.release}
+    /\ step' = "emitted"
+    /\ UNCHANGED <<H, Active, CurrentRoot>>
+
+Finalize ==
+    /\ step \in {"committed", "emitted"}
+    /\ Active.status = "committed"
+    /\ Active.record.committed = TRUE
+    /\ Active.anchor_counter = LiveAnchorCounter
+    /\ Active' = [
+         root           |-> Active.record.next_root,
+         anchor_bundle  |-> Active.anchor_bundle,
+         anchor_head    |-> Active.record.next_anchor_head,
+         boot_head      |-> Active.record.boot_head,
+         anchor_counter |-> Active.record.next_anchor_counter,
+         boot_valid     |-> Active.boot_valid,
+         status         |-> "ready",
+         record         |-> EmptyRec
+       ]
+    /\ CurrentRoot' = Active.record.next_root
+    /\ step' = "idle"
+    /\ UNCHANGED <<H, delivered>>
+
+PowerLoss ==
+    /\ step' = "recover"
+    /\ UNCHANGED <<H, Active, CurrentRoot, delivered>>
+
+RecoverCommitted ==
+    /\ step = "recover"
+    /\ Active.status = "committed"
+    /\ Active.record.committed = TRUE
+    /\ Active.record.next_anchor_counter = LiveAnchorCounter
+    /\ delivered' = delivered \cup {Active.record.release}
+    /\ Active' = Active
+    /\ CurrentRoot' = CurrentRoot
+    /\ step' = "emitted"
+    /\ UNCHANGED H
+
+RecoverCommitFlagLost ==
+    /\ step = "recover"
+    /\ Active.status = "committed"
+    /\ Active.record.committed = FALSE
+    /\ Active.record.next_anchor_counter = LiveAnchorCounter
+    /\ Active' = [Active EXCEPT !.record.committed = TRUE,
+                                !.anchor_counter =
+                                  Active.record.next_anchor_counter]
+    /\ delivered' = delivered \cup {Active.record.release}
+    /\ CurrentRoot' = CurrentRoot
+    /\ step' = "emitted"
+    /\ UNCHANGED H
+
+RecoverCommitNotMoved ==
+    /\ step = "recover"
+    /\ Active.status = "committed"
+    /\ Active.record.committed = FALSE
+    /\ Active.record.next_anchor_counter = LiveAnchorCounter + 1
+    /\ Active.record.prev_root = Active.root
+    /\ Active.record.prev_anchor_head = Active.anchor_head
+    /\ H > 0
+    /\ H' = H - 1
+    /\ Active' = [Active EXCEPT !.record.committed = TRUE,
+                                !.anchor_counter =
+                                  Active.record.next_anchor_counter]
+    /\ delivered' = delivered \cup {Active.record.release}
+    /\ CurrentRoot' = CurrentRoot
+    /\ step' = "emitted"
+
+RecoverPrepared ==
+    /\ step = "recover"
+    /\ Active.status = "prepared"
+    /\ Active.anchor_counter = LiveAnchorCounter
+    /\ Active.record.prev_root = Active.root
+    /\ Active.record.prev_anchor_head = Active.anchor_head
+    /\ Active' = Active
+    /\ delivered' = delivered
+    /\ CurrentRoot' = CurrentRoot
+    /\ step' = "prepared"
+    /\ UNCHANGED H
+
+RecoverIdle ==
+    /\ step = "recover"
+    /\ Active.status = "ready"
+    /\ Active.anchor_counter = LiveAnchorCounter
+    /\ Active' = Active
+    /\ delivered' = delivered
+    /\ CurrentRoot' = CurrentRoot
+    /\ step' = "idle"
+    /\ UNCHANGED H
+
+RecoverIdleAdopt ==
+    /\ step = "recover"
+    /\ Active.status = "ready"
+    /\ Active.anchor_counter < LiveAnchorCounter
+    /\ Active' = [Active EXCEPT !.anchor_counter = LiveAnchorCounter]
+    /\ delivered' = delivered
+    /\ CurrentRoot' = CurrentRoot
+    /\ step' = "idle"
+    /\ UNCHANGED H
+
+OnlineAdvance ==
+    /\ step = "idle"
+    /\ CurrentRoot' = OnlineSuccessor(CurrentRoot)
+    /\ step' = "idle"
+    /\ UNCHANGED <<H, Active, delivered>>
+
+Next ==
+    Boot
+    \/ Prepare
+    \/ CommitStart
+    \/ CommitCounter
+    \/ Emit
+    \/ Finalize
+    \/ PowerLoss
+    \/ RecoverCommitted
+    \/ RecoverCommitFlagLost
+    \/ RecoverCommitNotMoved
+    \/ RecoverPrepared
+    \/ RecoverIdle
+    \/ RecoverIdleAdopt
+    \/ OnlineAdvance
+\end{lstlisting}
+
+The model obligations are:
+
+\begin{description}[leftmargin=1.8em,style=nextline]
+\item[Single active root.]
+The appliance has one active root and one active anchor counter.
+
+\item[One fused anchor head.]
+The active root commits to one fused anchor head.
+
+\item[Boot before offline.]
+Offline transfer is disabled unless a boot ticket or boot chain verifies from the DSM committed
+boot head.
+
+\item[No export before commit.]
+A release is emitted only after the counter moves.
+
+\item[Replay is idempotent.]
+The same committed release may be re emitted without creating a new successor.
+
+\item[Prepared state blocks replacement.]
+A prepared record blocks another preparation from the same active root.
+
+\item[Recovery repeats the same successor.]
+Recovery emits the same committed successor. It does not sign a new one.
+
+\item[Chip counter authority on recovery.]
+A \(\Ready\) appliance whose stored anchor counter is behind the live counter derived value adopts
+the live value (\(\mathsf{RecoverIdleAdopt}\)); adoption only shrinks the remaining budget. An
+appliance ahead of the live value fails closed.
+
+\item[Finalize guard.]
+Finalize requires \(\Active.u=H_0-H\), equivalently
+\(\Active.\mathsf{anchor\_counter}=H_0-H\).
+
+\item[Online separation.]
+If online state advances without the anchor, offline bearer mode is refused until resync.
+\end{description}
+
+\section{Wire Protocol}\label{sec:wire}
+
+The transport uses protocol buffers. The secure core exposes one entry point:
+
+\[
+\Handle:\mathsf{bytes}\rightarrow\mathsf{bytes}.
+\]
+
+The host may relay packets, but receiver acceptance is based on public proofs, boot evidence,
+partition evidence, fused anchor head verification, and authenticated TROPIC01 counter evidence.
+Boot fencing is device internal. The host transport does not expose a callable boot operation, and
+it does not accept host supplied boot sequence or firmware measurement fields.
+
+\begin{lstlisting}[language=proto]
+syntax = "proto3";
+package dsm.anchor;
+
+message TransitionPackage {
+  bytes relationship_id = 1;
+  bytes object_id = 2;
+  bytes sender_device_id = 3;
+  bytes recipient_device_id = 4;
+  bytes prev_root = 5;
+  bytes next_root = 6;
+  uint64 anchor_counter = 7;
+  uint64 next_anchor_counter = 8;
+  uint32 action_type = 9;
+  bytes action_fields = 10;
+  bytes payload_hash = 11;
+  bytes old_leaf_proof = 12;
+  bytes new_leaf_proof = 13;
+  bytes authority_policy_hash = 14;
+}
+
+message BootTicket {
+  bytes anchor_bundle = 1;
+  bytes anchor_head = 2;
+  bytes prev_boot_head = 3;
+  bytes next_boot_head = 4;
+  uint64 boot_seq = 5;
+  bytes firmware_measurement = 6;
+  bytes partition_boot_signature = 7;
+  bytes tropic_boot_input = 8;
+  bytes tropic_boot_witness = 9;
+}
+
+message RootAdvanceCertificate {
+  bytes anchor_bundle = 1;
+  bytes prev_anchor_head = 2;
+  bytes next_anchor_head = 3;
+  bytes prev_boot_head = 4;
+  bytes current_boot_head = 5;
+  bytes prev_root = 6;
+  bytes next_root = 7;
+  uint64 anchor_counter = 8;
+  uint64 next_anchor_counter = 9;
+  bytes transition_digest = 10;
+  bytes root_advance_message = 11;
+  bytes partition_commitment = 12;
+  bytes tropic_transfer_input = 13;
+  bytes pk_hash = 14;
+  bytes pk_hw = 15;
+  bytes sigma_tropic = 16;
+  bytes sigma_partition = 17;
+  bytes anchor_id = 18;
+  uint32 transfer_slot = 19;
+  bytes receiver_challenge = 20;
+}
+
+message CounterEvidence {
+  bytes anchor_id = 1;
+  uint64 enrolled_counter = 2;
+  uint64 live_counter_claim = 3;
+  uint64 derived_anchor_counter_claim = 4;
+  bytes verifier_transcript = 5;
+}
+
+message OfflineRelease {
+  TransitionPackage transition = 1;
+  repeated BootTicket boot_chain = 2;
+  RootAdvanceCertificate cert = 3;
+  CounterEvidence counter = 4;
+}
+
+enum Op {
+  OP_UNSPECIFIED = 0;
+  reserved 1;
+  reserved "OP_BOOT";
+  OP_PREPARE = 2;
+  OP_COMMIT = 3;
+  OP_EMIT = 4;
+  OP_FINALIZE = 5;
+  OP_STATUS = 6;
+  OP_CANCEL = 7;
+  OP_SPI_PASSTHROUGH = 8;
+}
+
+message ApplianceRequest {
+  Op op = 1;
+  TransitionPackage transition = 2;
+  bytes receiver_challenge = 3;
+  reserved 4, 5;
+  bytes spi_payload = 6;
+}
+
+message ApplianceResponse {
+  Op op = 1;
+  bool ok = 2;
+  uint32 error = 3;
+  OfflineRelease release = 4;
+  bytes active_root = 5;
+  bytes anchor_bundle = 6;
+  bytes active_anchor_head = 7;
+  bytes active_boot_head = 8;
+  uint64 active_anchor_counter = 9;
+  uint32 status = 10;
+  bool boot_valid = 11;
+  bytes spi_response = 12;
+  bytes active_committed_boot_head = 13;
+  bytes pk_anchor_id = 14;
+  uint64 pk_enrolled_counter = 15;
+  bytes pk_partition_pk = 16;
+}
+\end{lstlisting}
+
+The enum value 1 and the name \texttt{OP\_BOOT} are reserved, deliberately, so old host driven
+boot semantics do not reappear. \texttt{ApplianceRequest} fields 4 and 5 are also reserved. They
+must not be reused for host supplied \texttt{boot\_seq} or \texttt{firmware\_measurement}. Those
+values are device internal boot data recorded in the \texttt{BootTicket}.
+
+\texttt{OP\_SPI\_PASSTHROUGH} is not an appliance operation. It is a transparent raw SPI bridge:
+\texttt{spi\_payload} carries opaque MOSI bytes that the firmware clocks to TROPIC01 unmodified,
+and \texttt{spi\_response} returns the raw MISO bytes. This is the transport for the receiver
+operated counter evidence path: the remote receiver runs its own authenticated libtropic session
+end to end against the chip, and this device is a wire. The firmware never interprets, buffers,
+or replays passthrough content.
+
+Because TROPIC01 maintains a single authenticated \Lthree session, a receiver's passthrough
+handshake re keys the chip and invalidates the appliance's own session. The firmware therefore
+marks its session stale after any passthrough traffic and re establishes a fresh authenticated
+session, with a fresh ephemeral key, before executing the next appliance operation. Without this
+rule, the first appliance operation after a relayed counter read fails on a dead session.
+
+The \texttt{OP\_STATUS} response fields 13 through 16 let a host client assemble the next
+transition and the receiver pin material from a single status round trip: the committed boot head
+(what the previous fused anchor state leaf commits), the enrolled anchor identity, the enrolled
+counter value \(H_0\), and the partition public key. These are the chip self describing the
+identity a receiver pins; they are convenience transport, not trusted acceptance inputs.
+
+The partition commitment in \texttt{RootAdvanceCertificate} is recomputed from
+\(\Bundle,\Ahead_i,\Bhead_{b'}\), and \(M_{i+1}\) only. It does not carry and does not
+hash a partition epoch or partition nonce.
+
+The fields \texttt{live\_counter\_claim} and \texttt{derived\_anchor\_counter\_claim} are
+transport claims. They are not accepted as proof. The receiver verifier must parse or obtain an
+authenticated TROPIC01 value from \texttt{verifier\_transcript}, or through another policy
+approved authenticated counter evidence path.
+
+The signature fields \texttt{sigma\_tropic} and \texttt{sigma\_partition} are variable length.
+Whenever either signature is bound into another digest, the implementation uses
+\(\SigCommit(\sigma)\), not raw concatenation and not a bare \(\Hf(\sigma)\).
+
+\section{Reference Implementation}
+
+The reference implementation has three visible parts:
+
+\begin{itemize}
+\item \texttt{crates/dsm-anchor-core}, the Rust protocol core;
+\item \texttt{crates/dsm-anchor-pico}, the firmware target;
+\item the DSM SDK receiver adapter that routes offline bearer acceptance through the anchor
+predicate.
+\end{itemize}
+
+The protocol core implements:
+
+\begin{itemize}
+\item canonical encodings;
+\item anchor bundle construction;
+\item birth fuse commitment;
+\item boot ticket verification;
+\item root advance digest construction;
+\item partition commitment construction without partition epoch or partition nonce;
+\item TROPIC01 witness input construction;
+\item \WOTS\ witness signatures;
+\item BLAKE3-SPHINCS\textsuperscript{+} SPX128f partition signature handling;
+\item fixed width \(\SigCommit(\sigma)\) binding for variable length signatures;
+\item partition certificate verification;
+\item fused anchor head construction;
+\item public receiver acceptance;
+\item recovery, with live counter adoption for a \(\Ready\) appliance behind the chip;
+\item protocol buffer wire encoding.
+\end{itemize}
+
+The firmware target is the Rust \texttt{dsm-anchor-pico} crate. It drives TROPIC01 through
+\texttt{libtropic-rs} bindings over SPI at 3.3 V under an authenticated \Lthree\ session. The
+protocol does not require a missing C firmware layer. The RP2350 code is a transport and partition
+state machine layer. Receiver acceptance is not based on trusting RP2350 statements. The firmware
+implements the single session recovery rule of Section~\ref{sec:wire}: after any raw SPI
+passthrough traffic it re establishes its own authenticated session before the next appliance
+operation.
+
+Boot fencing is performed by the device. The host operation value formerly used for boot is
+reserved. The host does not provide the boot sequence or firmware measurement used by the boot
+ratchet.
+
+The receiver acceptance implementation separates the counter evidence parser from the release
+fields. The counter verifier returns the authenticated counter value obtained from TROPIC01, and
+the acceptance predicate compares that value to the expected \(H_0-(u_i+1)\).
+
+The receiver adapter implements the accepted root frontier of Definition~\ref{def:frontier} as a
+durable per holder table. The acceptance entry point takes the adopted frontier as an optional
+input --- absent means relationship genesis, adopt the release's own previous root --- and returns
+the adopted successor state \((\mathsf{next\_root},u_i+1)\), which the adapter persists only after
+its own canonical value commit succeeds. The receiver's mirror of the sender's per step signing
+lineage follows the same commit gated discipline: nothing the receiver stores about the sender
+advances on a release that did not commit.
+
+Verifier trait names should follow the same semantics:
+
+\begin{itemize}
+\item \texttt{prev\_root\_commits\_anchor\_state};
+\item \texttt{verify\_transition(prev\_root, next\_root, ...)};
+\item \texttt{verify\_boot\_chain};
+\item \texttt{verify\_partition\_certificate};
+\item \texttt{read\_authentic\_counter};
+\item \texttt{next\_root\_commits\_anchor\_state}.
+\end{itemize}
+
+\section{Implementation Status}
+
+The host side appliance state machine, fused root advance, receiver predicate, canonical wire
+validation, and Pico firmware target are implemented in the reference code. Host tests are green
+for the implemented anchor core behavior.
+
+Receiver side offline bearer acceptance is live end to end on target hardware. On 5 July 2026 the
+complete path was exercised between two production Android handsets, with the appliance (Pico 2 W
+and TROPIC01) attached to the sender over USB and the handsets connected over BLE. All previously
+listed producer inputs were present together: the sender carried a real \texttt{OfflineRelease} on
+the transfer confirmation; the DSM SMT anchor state leaf committed the anchor tuple
+\((\Bundle,\Ahead_i,\Bhead_b,u_i)\), reconciled to the live chip state; and the receiver operated
+its own authenticated \Lthree\ verifier session through the raw SPI passthrough bridge and
+obtained the attested counter. The full acceptance predicate passed every check, the anchor
+counter advanced by exactly one, both sides committed canonically, and value was delivered. The
+receiver adapter retains its fail closed posture: an absent or incomplete pin, an absent counter
+reader, or a failed authenticated read still routes the transfer to online checked recovery.
+
+Device side durable recovery is specified by the protocol and implemented in host logic, but it is
+not yet a hardware backed cross power cycle property unless \(\Active\) is persisted in TROPIC01
+R memory. A firmware build that keeps \(\Active\) in RAM and re enrolls on boot is an early
+bringup build, not a complete hardware backed recovery implementation. The recovery rule for a
+\(\Ready\) appliance behind the live counter --- adopt the live value --- makes that bringup mode
+safe in practice: a re birth on an already provisioned chip reconciles to the true physical
+counter position instead of failing on the mismatch, and adoption can only shrink the remaining
+budget.
+
+Firmware measurement is specified by the protocol, but a fixed test constant is only a bringup
+stub. A production measured boot claim requires replacing that constant with a real measurement of
+firmware and policy state.
+
+The TLA\texorpdfstring{\textsuperscript{+}}{+} model in this paper is the boot fenced fused
+anchor model, including the \(\mathsf{RecoverIdleAdopt}\) action matching the implemented
+recovery rule. It should exist in the repository as
+\texttt{tla/DSM\_BootFencedFusedAnchor.tla}; at the time of writing the model file has not yet
+landed there, and the listing in this paper is the normative model. Older offline finality or
+Tripwire models do not replace this model because they use different variables and prove a
+different machine.
+
+One residual is known and documented in the Limits section: the physical counter and appliance
+root advance when a release is produced, even if that particular receiver ultimately rejects the
+confirm, so a rejected attempt opens a gap between the sender lineage and that receiver's adopted
+frontier. An online re admission flow for that receiver is specified as future work; a first
+transfer to any receiver is unaffected because of genesis adoption.
+
+\section{Validation Plan}
+
+\begin{description}[leftmargin=1.8em,style=nextline]
+\item[T1. Hardware bringup.]
+Connect Raspberry Pi Pico 2 W to Secure Tropic Click over SPI at 3.3 V and confirm TROPIC01
+communication.
+
+\item[T2. TROPIC identity.]
+Read chip identity and bind \(\mathsf{anchor\_id}\) to the authority policy.
+
+\item[T3. Secure session.]
+Establish authenticated \Lthree and confirm encrypted communication.
+
+\item[T4. Birth fuse.]
+Generate \(s_{\mathrm{birth}}\), derive \(\Bundle,\Ahead_0,\Bhead_0,p_0\), destroy
+\(s_{\mathrm{birth}}\), and verify public enrollment data cannot recreate \(p_0\).
+
+\item[T5. Boot ticket.]
+Produce a boot ticket from the partition boot ratchet and TROPIC01 boot MACANDD slot. Expected
+result: offline bearer mode is disabled until the ticket verifies.
+
+\item[T6. New hardware resume.]
+Copy host state to a different RP2350/TROPIC01 pair. Expected result: boot ticket cannot be
+chained from the committed boot head under the enrolled bundle.
+
+\item[T7. Counter direction.]
+Initialize counter at \(H_0\), update it, and confirm \(u=H_0-H\) increases by one.
+
+\item[T8. Counter evidence.]
+Have the receiver act as verifier endpoint and read the live counter through an authenticated
+\Lthree session.
+
+\item[T9. MACANDD transfer witness.]
+Run MACANDD on the fused transfer input and derive a witness key.
+
+\item[T10. Public witness verification.]
+Produce a release and verify the TROPIC witness signature under the public acceptance predicate.
+
+\item[T11. Partition cross binding.]
+Mutate the partition commitment, TROPIC witness, or partition final certificate. Expected result:
+receiver rejects.
+
+\item[T12. DSM proof verification.]
+Mutate old leaf proof, new leaf proof, recipient, payload, object, previous root, or next root.
+Expected result: receiver rejects.
+
+\item[T13. Fused anchor head verification.]
+Mutate \(\Ahead_i\), \(\Ahead_{i+1}\), \(\Bhead_b\), or \(\Bhead_{b'}\). Expected result: receiver
+rejects.
+
+\item[T14. Counter mismatch.]
+Attempt to reuse the same previous root after one counter commit. Expected result: receiver rejects
+because the previous state committed anchor counter and authenticated TROPIC counter evidence do
+not match.
+
+\item[T15. RP2350 breach simulation.]
+Feed arbitrary next roots, wrong previous roots, stale anchor counters, forged boot heads, and
+forged status outputs. Expected result: receiver rejects unless DSM proof, partition evidence,
+TROPIC witness, counter evidence, and fused anchor head are valid.
+
+\item[T16. Counter trust seam.]
+Create a release with a forged host supplied counter claim but a transcript attested counter value
+that does not match. Expected result: receiver rejects. The accepted value is the authenticated
+TROPIC01 value, not the host claim.
+
+\item[T17. Power loss after boot ticket.]
+Cut power after boot ticket generation. Expected result: boot chain either verifies or offline
+mode remains disabled.
+
+\item[T18. Power loss after prepared.]
+Cut power after prepared record is durable. Expected result: complete the same record, cancel it,
+or route online. Do not create a second record from the same active root.
+
+\item[T19. Power loss after release durable before counter commit.]
+Cut power after the committed candidate is durable but before the counter moves. Expected result:
+recovery may commit the same release only if the candidate previous root and fused anchor state
+still equal the active state.
+
+\item[T20. Power loss after counter moved before commit flag.]
+Cut power after the physical counter moves but before the committed flag is durable. Expected
+result: recovery marks the same candidate committed, does not move the counter again, and re emits
+the same release.
+
+\item[T21. Replay.]
+Emit the same release twice. Expected result: duplicate delivery of the same successor.
+
+\item[T22. Online stale.]
+Advance DSM online without the anchor. Expected result: offline bearer mode refused until resync.
+
+\item[T23. Physical compromise policy.]
+Mark anchor physically suspect. Expected result: offline mode suspended and authority rotation
+required.
+\end{description}
+
+\section{Validation Results on Target Hardware}
+
+The hardware bringup and the end to end activation exercised the target stack:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Stage} & \textbf{Result} & \textbf{Meaning}\\
+\midrule
+Chip identity &
+TROPIC01 identity read; silicon revision \texttt{ACAB} &
+anchor can be pinned\\
+Secure session &
+X25519 handshake, encrypted \Lthree, echo and TRNG checked &
+authenticated command path works\\
+Counter &
+counter initialized at \(H_0=1000\), updated to \(H=997\) &
+\(u=H_0-H\) advances\\
+MACANDD &
+reproducible witness after rearm, distinct output without rearm &
+stateful witness behavior confirmed\\
+Witness flow &
+\(\MACD\rightarrow K\rightarrow\WOTS\), 32 byte public key, 2144 byte signature &
+public witness path works\\
+Core acceptance &
+release verified and successor frontier matched in host validation &
+public predicate accepts the constructed release when required evidence is present\\
+USB host &
+external host drove status and offer flow over USB CDC &
+appliance can be driven externally\\
+Counter evidence over relay &
+receiver handset ran its own authenticated \Lthree session through the raw SPI passthrough
+bridge over BLE and read the live counter &
+receiver operated counter evidence works on target hardware (T8)\\
+End to end acceptance &
+two handset offline bearer transfer accepted under the full predicate; anchor counter advanced by
+one; canonical commit and value delivery on both sides (5 July 2026) &
+the offline bearer path is live on target hardware\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{End to End Activation Run, 5 July 2026}
+
+The end to end activation was a real value transfer between two production Android handsets
+(Samsung SM-A165M class devices), with the appliance --- a Raspberry Pi Pico 2 W carrying the
+TROPIC01 click board --- attached to the sender's handset over USB CDC, and the two handsets
+connected only over BLE. No network path participated in acceptance. The concrete observed facts
+of the accepted run:
+
+\begin{itemize}
+\item The sender's appliance reconciled its anchor state leaf to the live chip before the
+transfer: the DSM device root committed \((\Bundle,\Ahead_i,\Bhead_b,u_i)\) with \(u_i=12\),
+sourced from the chip's own status rather than any host record. Earlier rejected attempts and
+appliance restarts had advanced the physical counter past the host's view; the chip as counter
+authority (and, on recovery, the adopt rule of the \(\Ready\) branch) reconciled every one of
+them without a counter mismatch.
+\item The appliance drove \(\mathsf{PREPARE}\rightarrow\mathsf{COMMIT}\rightarrow\mathsf{EMIT}\)
+against the live chip and produced a real \texttt{OfflineRelease}: MACANDD transfer witness,
+\WOTS\ witness signature (2144 bytes), partition certificate, and boot chain, all bound to the
+receiver's fresh challenge \(r_R\). The physical counter moved by exactly one step
+(\(u:12\rightarrow 13\); on the enrolled bench chip with \(H_0=1000\), a live reading of
+\(H=987\)).
+\item The confirm message carrying the release together with the DSM receipts totaled roughly
+221 kilobytes on the wire, dominated by post quantum signature material, and was chunked over
+BLE GATT without loss under the transport retry rules.
+\item The receiver ran its own authenticated \Lthree\ verifier session end to end --- X25519
+handshake and authenticated counter read --- as raw SPI frames through the
+\texttt{OP\_SPI\_PASSTHROUGH} bridge, relayed device to device over BLE. Individual relay round
+trips were observed at roughly 150 milliseconds. The sender's handset and firmware relayed
+opaque encrypted bytes only. The receiver verified
+\(H_{\mathrm{attested}}=H_0-(u_i+1)=987\).
+\item The full acceptance predicate passed every check. This was the first transfer from this
+holder, so the accepted root frontier was adopted at genesis and persisted, with
+\(\mathsf{next\_anchor\_counter}=13\), only after the receiver's canonical commit succeeded.
+\item Both sides committed canonically and a 42 unit token balance moved from sender to receiver
+(sender \(100\rightarrow 58\), receiver \(0\rightarrow 42\)), with the sender's own signing
+lineage advanced only at commit time under the same deferred discipline.
+\end{itemize}
+
+Relative to the validation plan, this run discharges T1 through T3 and T7 through T10 live on
+target hardware, and executes the boot fence gating and boot chain verification of T5 inside the
+accepted release. The adversarial mutation cases (T11 through T16) remain discharged by host
+tests against the same predicate implementation; the power loss cases (T17 through T20) are
+specified and host validated but await hardware backed durable \(\Active\) persistence to be
+meaningful across a physical power cycle.
+
+For this boot fenced fused anchor version, the remaining work is TROPIC01 R memory backed durable
+\(\Active\) persistence, replacement of the firmware measurement test constant with a real
+measurement, landing the boot fenced fused anchor TLA\texorpdfstring{\textsuperscript{+}}{+}
+model file in the repository, and the online re admission flow for a receiver whose adopted
+frontier has fallen behind the sender lineage after a rejected attempt.
+
+\section{Security Summary}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Part} & \textbf{Provides} & \textbf{Does not provide}\\
+\midrule
+Birth fuse & non recreatable enrollment preimage & live clone detection by itself\\
+Anchor bundle & immutable hardware and policy binding & forward motion by itself\\
+Boot ticket & new hardware resume resistance & DSM validity\\
+Previous DSM root & object state and expected fused anchor state & hardware presence\\
+Receiver challenge & freshness and recipient binding & uniqueness by itself\\
+DSM transition proof & valid root update & hardware presence\\
+RP2350 partition cert & appliance partition lineage & DSM validity by itself\\
+TROPIC01 MACANDD & enrolled hardware witness & DSM validity\\
+TROPIC01 counter evidence & exact next physical counter state & recipient binding\\
+Fused anchor head & binds DSM, partition, and TROPIC lineage & value validity by itself\\
+Accepted root frontier & receiver side lineage continuity & authenticity by itself at genesis\\
+RP2350 host path & transport and local state machine & trusted receiver facts\\
+Recovery record & no orphaned committed release & new authority by itself\\
+Tripwire & fork exposure on reconciliation & instant awareness\\
+ & cryptographic security\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Limits}
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item \textbf{Perfect live state emulation is outside offline distinguishability.}
+If an attacker extracts and perfectly emulates the exact current non exportable state of the
+partition, TROPIC01, and DSM authority state, no offline-only protocol can distinguish that from
+the original.
+
+\item \textbf{TROPIC01 physical extraction alone is not sufficient, but it is serious.}
+If the secure element is physically broken, offline bearer mode should be suspended and authority
+rotation should occur unless policy explicitly allows continued risk.
+
+\item \textbf{RP2350 breach can still cause denial of service.}
+A breached RP2350 can waste counter steps, corrupt local state, or force online recovery.
+
+\item \textbf{Boot fencing is load bearing for new hardware rejection.}
+A copied state image must not be allowed to produce offline releases unless it first proves a boot
+chain from the committed boot head.
+
+\item \textbf{Receiver counter evidence is load bearing.}
+The receiver must not accept host reported counter state.
+
+\item \textbf{DSM proof verification is load bearing.}
+The receiver must verify \(h_i\rightarrow h_{i+1}\). A hardware certificate over an invalid root
+does not create value.
+
+\item \textbf{Recovery durability is load bearing for liveness.}
+If the counter moved, the same release must remain recoverable. Otherwise the appliance risks an
+orphaned commit, which is a liveness failure.
+
+\item \textbf{New relationships remain online checked.}
+A closed adversary branch does not affect honest parties because independent relationships and
+reconciliation require valid root lineage and counter evidence.
+
+\item \textbf{Tripwire exposes later.}
+Tripwire exposes forks on reconciliation.
+
+\item \textbf{Strict frontier continuity requires online re admission after a rejected attempt.}
+The physical counter and the appliance root advance when a release is produced, even if the
+receiver ultimately rejects that confirm. A rejected attempt therefore opens a gap between the
+sender lineage and that particular receiver's adopted frontier, and a later transfer to the same
+receiver is refused at the frontier check until an online re admission reconciles the frontier.
+This is a liveness limitation, not a safety one: the frontier can only be re admitted online,
+under the same authenticated counter evidence that guards genesis adoption, and a first transfer
+to any receiver is unaffected because of genesis adoption.
+\end{enumerate}
+
+\section{Conclusion}
+
+The boot fenced fused anchor authority is the compact form of the DSM offline bearer appliance.
+
+It does not need a large precommit table. It does not need separate offered, pending, armed, and
+released protocol names. The load bearing object is the fused transition:
+
+\[
+(h_i,\Ahead_i,\Bhead_b,u_i)
+\rightarrow
+(h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1).
+\]
+
+The previous DSM root commits to the anchor bundle, fused anchor head, boot head, and anchor
+counter. The receiver verifies the DSM transition to \(h_{i+1}\). The receiver challenge binds the
+release to the actual counterparty. The RP2350 partition certificate proves the partition lineage
+participated. TROPIC01 MACANDD proves enrolled hardware witness participation. Authenticated
+TROPIC01 counter evidence proves the physical counter corresponds to the exact next anchor counter.
+The fused anchor head binds these into a single non interchangeable lineage.
+
+TROPIC01 is necessary but not sufficient. The RP2350 partition is necessary but not sufficient.
+DSM validity remains public and receiver verified.
+
+A copied state image cannot resume offline bearer mode on new hardware because offline release
+requires a boot ticket chained from the DSM committed boot head under the enrolled anchor bundle.
+New hardware requires online authority rotation.
+
+If RP2350 is breached, the attacker can brick the appliance or force online recovery, but cannot
+make an honest receiver accept an invalid root transition or a second valid successor from the same
+spendable parent without also satisfying DSM verification, boot evidence, partition evidence,
+authenticated TROPIC01 counter evidence, and fused anchor head verification.
+
+If the counter moves, the same release must remain recoverable. Recovery therefore re emits the
+same committed release and finalization is guarded by the live counter derived anchor counter.
+
+This design is no longer only specified: the complete path --- chip produced release, receiver
+operated authenticated counter evidence over a relay, the full acceptance predicate, and canonical
+value delivery --- has been exercised end to end on the target hardware.
+
+The whole design reduces to one sentence:
+
+\[
+\boxed{
+\text{The receiver accepts only a publicly valid DSM root advance whose boot ticket, partition
+certificate, TROPIC01 witness, authenticated counter evidence, and fused anchor head all verify
+over the same exact successor.}
+}
+\]
+
+\begin{thebibliography}{9}
+
+\bibitem{dsm}
+Cryptskii.
+\emph{DSM: Deterministic State Machines}.
+Irrefutable Labs Inc., 2026.
+
+\bibitem{tropic}
+Tropic Square.
+\emph{TROPIC01 Datasheet, API, Application Notes, and Libtropic Documentation}.
+Manufacturer documentation.
+
+\bibitem{macandd}
+Tropic Square.
+\emph{TROPIC01 PIN Verification Application Note}.
+ODN TR01 app 002, Version 1.2, 2026.
+
+\bibitem{wots}
+Johannes Buchmann, Erik Dahmen, Sarah Ereth, Andreas H\"ulsing, and Markus R\"uckert.
+\emph{On the Security of the Winternitz One Time Signature Scheme}.
+AFRICACRYPT 2011.
+
+\bibitem{tla}
+Leslie Lamport.
+\emph{Specifying Systems: The TLA plus Language and Tools for Hardware and Software Engineers}.
+Addison Wesley, 2002.
+
+\end{thebibliography}
+
+\end{document}
