@@ -2867,6 +2867,42 @@ is a bounded, in person, doubly attributed fraud with an inverted risk to reward
 conservation, identifiability, and deployment discipline rather than by a hardware primitive that, as
 shown, does not exist on the secure element.
 
+\section{Relationship to Consensus Based Prevention}
+
+It is useful to place these guarantees against the consensus model, because the two are frequently
+conflated. A Nakamoto style chain prevents double spend \emph{probabilistically under an honest
+majority assumption}: a party controlling a majority of the ordering resource can reorganize the chain,
+spend, and repeat the spend, and finality is a function of confirmation depth. Online DSM prevents the
+same double spend \emph{deterministically and without a majority assumption}, because two conflicting
+successors consume the same canonical resource key and a realized history cannot mark that key absent
+twice. There is no majority to capture and no global chain to reorganize, so the corresponding attack
+class does not exist.
+
+The tradeoff, stated honestly, is global ordering. A consensus chain provides a single, globally
+ordered, objectively final ledger that any third party can audit without trusting a counterparty. DSM
+deliberately does not provide, and does not require, a global total order; its exclusion is conflict
+local and relative to reconciliation between the involved parties. The correct comparison is therefore
+not that one dominates the other, but that online DSM has the \emph{stronger double spend guarantee}
+--- deterministic, and free of any assumption on adversary fraction --- and the \emph{weaker global
+ordering guarantee} --- none, by design.
+
+Offline bearer mode should not be compared to a consensus chain online at all, because a consensus
+chain has no offline mode: it cannot settle a transfer without the network that carries its ordering.
+Offline bearer mode provides bounded, attributable, non scalable double spend resistance in exactly the
+regime --- zero connectivity at the moment of exchange --- where a consensus system provides no
+settlement whatsoever. The failure modes differ in kind: a consensus chain whose majority assumption is
+violated fails in a sustained and repeatable way, while offline bearer under physical authority
+extraction fails once, within a fixed bound, and exposes itself on reconciliation.
+
+Finally, the strength of the offline containment does not rest on any particular monetary cost of
+physical extraction, which depends on the specific device and is not claimed here. It rests on
+structure that holds even if extraction were free: the take is capped at the attacker's own balance,
+the device is consumed after one contention event, the actor is physically present and on record at
+every irreversible pickup, the fork is cryptographically attributed to one enrolled lineage, and
+nothing about the attack repeats or automates. These properties remove precisely the ingredients ---
+low marginal cost, repeatability, scale, and anonymity --- that make fraud a viable operation. The
+residual is a single, in person, self incriminating event, not a scalable exploit.
+
 \section{Conclusion}
 
 The boot fenced fused anchor authority is the compact form of the DSM offline bearer appliance.
