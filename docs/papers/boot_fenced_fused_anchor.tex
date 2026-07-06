@@ -2907,20 +2907,27 @@ blacklisted and the attack self extinguishes as the blacklist propagates. The ri
 a bad check written in person, or an in person use of a stolen card: bounded, doubly identified,
 prosecutable, and self limiting.
 
-\subsection{Sequential transfer discipline forces simultaneity}
+\subsection{Sequential transfer discipline forces overlapping contention}
 
 For a high value transfer the receiver may require the amount to be delivered as a sequence of smaller
 transfers, each completed and verified before goods are released. This is transparent to an honest
-payer --- it is ordinary split tender --- and it changes the shape of the residual. Without it, the
-fork is sequential: the adversary completes receiver A, leaves the counter frozen at \(u_i+1\), and
-completes receiver B later, as two unremarkable transactions separated in time. With a required
-sequence of steps, the sequential path fails: A's own steps advance the counter through \(u_i+1\),
-\(u_i+2\), and so on, and a forked transfer to B needs the counter at the intermediate positions,
-which have passed, so B's step rejects on its counter evidence. The only remaining path is to
-interleave the two transfers in real time --- all first steps at \(u_i+1\), then all second steps at
-\(u_i+2\) --- which requires both purchases to be live and alternating in the same counter window. The
-discipline converts a quiet, time separated fork into a conspicuous, simultaneous, multi target
-operation, most visibly when the acceptors are co located.
+payer --- it is ordinary split tender --- and it constrains the shape of the residual. A device has a
+single state tree that advances one transition at a time, so acceptances are always serialized: there
+is no simultaneous acceptance, and an honest device, which advances after each transfer and never
+rewinds, cannot fork at all. A breached device forks only by rewinding its own software state between
+transactions. Without the split, that fork is cleanly time separated: the adversary completes receiver
+A, leaves the physical counter frozen at \(u_i+1\), and completes receiver B at any later time, since
+B's single step reads the same frozen value. With a required sequence of steps this clean separation
+fails: completing A first advances the counter through \(u_i+1\), \(u_i+2\), and so on, and a forked
+transfer to B needs the counter at each intermediate position, which has passed, so B's step rejects
+on its counter evidence. The adversary is therefore forced to interleave the two forks within a single
+counter window --- all first steps at \(u_i+1\), then all second steps at \(u_i+2\), rewinding the
+state tree between each --- holding both contending transactions partially open at once. This does not
+by itself defeat the fork, and it is not simultaneous acceptance, which the single state tree
+precludes; it removes the quiet, time separated single step fork and replaces it with two concurrently
+open contending transactions in one counter window, which raises the adversary's coordination cost and
+makes the contention observable to an attentive acceptor, most visibly when the acceptors are co
+located.
 
 \subsection{Deployment envelope}
 
