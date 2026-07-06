@@ -86,6 +86,21 @@ const CAGE_CHECK: &[u16] = &[
     0x160, // MAC_AND_DESTROY
 ];
 
+/// Registers REVOKED from slot 0 (SH0 / host) by the **birth burn** ([`birth_cage_slot0`]). Denying
+/// `MCOUNTER_INIT` makes the monotonic counter permanently one-way: no holder of the (public) `PROD0`
+/// pairing key — not a breached RP2350 partition, not a passthrough host — can ever reset `H` and
+/// replay consumed offline-bearer steps. `PAIRING_KEY_WRITE`/`INVALIDATE` freeze slot 0's identity;
+/// `I_CONFIG_WRITE` is LAST so the cage self-locks (the slot can never loosen its own cage). Left
+/// factory-open: `MCOUNTER_UPDATE` (0x158), `MCOUNTER_GET` (0x154), `MAC_AND_DESTROY` (0x160) — the
+/// appliance's runtime surface. This deny set is deliberately NARROWER than the verifier-slot [`DENY`]
+/// (which is MCOUNTER_GET-only), because slot 0 still has to run the appliance.
+pub const SLOT0_BIRTH_DENY: &[(u16, &str)] = &[
+    (0x150, "MCOUNTER_INIT"),
+    (0x020, "PAIRING_KEY_WRITE"),
+    (0x028, "PAIRING_KEY_INVALIDATE"),
+    (0x040, "I_CONFIG_WRITE"), // LAST — self-locks the cage
+];
+
 /// The UAP access mask across the 4 lanes for the given pairing slot's session bit (SH`slot`). Zero
 /// in the masked bits means that session is denied the command. `slot` is 1..=3 (session bit = slot).
 fn sh_mask_for(slot: u16) -> u32 {
@@ -519,6 +534,115 @@ pub fn init_counter_max<C: SpiRelayChannel>(channel: C) -> Result<u32, Provision
         )));
     }
     Ok(readback)
+}
+
+/// The irreversible **birth burn** on slot 0 — the event that brings the anchor into existence by
+/// permanently revoking the counter-reset authority (and slot-0 re-keying) per [`SLOT0_BIRTH_DENY`].
+/// After this, the counter's one-way monotonicity is a HARDWARE birth invariant, not a provisioning
+/// assumption: `H0` was written exactly once (by [`init_counter_max`]) and can never be re-`init`ed.
+/// The anchor identity attests this caged surface, and the receiver re-verifies it (`i_config_read`)
+/// in its own chip-authenticated session — an un-caged slot 0 means "not born" ⇒ not enrolled.
+///
+/// ORDER: this runs **LAST** in device setup — AFTER [`init_counter_max`] (which needs slot-0
+/// `mcounter_init`) and AFTER [`commit_verifier_slot`] (which needs slot-0 `i_config_write` to cage
+/// the verifier slot). i-config is boot-latched, so it reboots to latch the cage, then verifies the
+/// sealed surface. Returns the now-immutable `H0`. IRREVERSIBLE — run only under the setup gate.
+pub fn birth_cage_slot0<C: SpiRelayChannel>(channel: C) -> Result<u32, ProvisionError> {
+    let chip = Tropic01::new(RemoteSpiDevice::new(channel));
+    let eh = fresh_ephemeral()?;
+    let mut s0 = chip
+        .session_start(
+            &X25519Dalek,
+            PublicKey::from(SH0PUB_PROD0),
+            StaticSecret::from(SH0PRIV_PROD0),
+            PublicKey::from(&eh),
+            eh,
+            0,
+        )
+        .map_err(|(_, e)| ProvisionError::Chip(format!("slot-0 session_start: {e:?}")))?;
+
+    // Precondition: the counter must already hold its lifetime budget — birth seals it forever.
+    let h0 = s0
+        .mcounter_get(MCounterIndex::Index0)
+        .map_err(|e| ProvisionError::Precondition(format!("mcounter unreadable: {e:?}")))?;
+
+    // Precondition: slot 0 must still be factory-open on every register we are about to revoke, or the
+    // chip was already (partially) caged — refuse to burn on an ambiguous surface.
+    let mask = sh_mask_for(0);
+    for (addr, name) in SLOT0_BIRTH_DENY {
+        let r = s0.r_config_read(U16::new(*addr));
+        let i = s0.i_config_read(U16::new(*addr));
+        match (r, i) {
+            (Ok(r), Ok(i)) if r & mask == mask && i & mask == mask => {}
+            (r, i) => {
+                return Err(ProvisionError::Precondition(format!(
+                    "0x{addr:03x} {name}: slot-0 access not factory-open (r={r:?} i={i:?}); refusing birth burn"
+                )))
+            }
+        }
+    }
+
+    // Burn: revoke SH0's access to each register across all 4 lanes (I_CONFIG_WRITE last, by order).
+    for (addr, _name) in SLOT0_BIRTH_DENY {
+        for lane in SH_LANES {
+            // SH0's access bit in each lane is the lane base (session bit 0).
+            s0.i_config_write(U16::new(*addr), lane).map_err(|e| {
+                ProvisionError::Chip(format!("i_config_write(0x{addr:03x} bit {lane}): {e:?}"))
+            })?;
+        }
+    }
+
+    // Boot-latch the cage, then reopen slot 0.
+    let mut chip = s0
+        .session_abort()
+        .map_err(|(_, e)| ProvisionError::Chip(format!("post-write abort: {e:?}")))?;
+    chip.startup_req(StartupReq::Reboot)
+        .map_err(|e| ProvisionError::Chip(format!("startup_req(Reboot): {e:?}")))?;
+    let dl = Instant::now() + Duration::from_secs(10);
+    loop {
+        match chip.get_info_chip_id() {
+            Ok(_) => break,
+            Err(_) if Instant::now() < dl => {}
+            Err(e) => {
+                return Err(ProvisionError::Chip(format!(
+                    "chip did not return after reboot: {e:?}"
+                )))
+            }
+        }
+    }
+
+    // Verify the sealed surface as slot 0: MCOUNTER_GET still ok (the appliance reads/decrements);
+    // MCOUNTER_INIT / PAIRING_KEY_WRITE / I_CONFIG_WRITE denied (reset + re-key + un-cage are gone).
+    // pairing_key_write re-writes the SAME PROD0 key, so a (failed-cage) success is idempotent.
+    let eh = fresh_ephemeral()?;
+    let mut s0 = chip
+        .session_start(
+            &X25519Dalek,
+            PublicKey::from(SH0PUB_PROD0),
+            StaticSecret::from(SH0PRIV_PROD0),
+            PublicKey::from(&eh),
+            eh,
+            0,
+        )
+        .map_err(|(_, e)| ProvisionError::CageVerify(format!("slot-0 re-open: {e:?}")))?;
+    let get = s0.mcounter_get(MCounterIndex::Index0);
+    let init = s0.mcounter_init(MCounterIndex::Index0, MCOUNTER_MAX);
+    let pkw = s0.pairing_key_write(U16::new(0), &SH0PUB_PROD0);
+    let icw = s0.i_config_write(U16::new(0x040), 0);
+    let _ = s0.session_abort();
+
+    if !is_unauthorized(&init) {
+        log::warn!(
+            "[provisioner] birth-cage: mcounter_init denial used a non-Unauthorized code (still denied)"
+        );
+    }
+    let pass = get.is_ok() && init.is_err() && pkw.is_err() && icw.is_err();
+    if !pass {
+        return Err(ProvisionError::CageVerify(format!(
+            "birth-cage surface wrong: get={get:?} init={init:?} pkw={pkw:?} icw={icw:?}"
+        )));
+    }
+    Ok(h0)
 }
 
 #[cfg(test)]
