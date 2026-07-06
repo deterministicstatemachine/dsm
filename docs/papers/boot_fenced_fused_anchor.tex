@@ -1944,42 +1944,37 @@ of those values changes the verified messages. The old evidence no longer verifi
 hash collision, signature forgery, or a break of the witness scheme.
 \end{proof}
 
-\begin{assumption}[One-Use Physical Counter Witness]
-The offline-bearer exclusion treats the authenticated counter advance \(u_i\to u_i+1\) as a
-\emph{one-use physical lineage witness}: a genuine advance of the physical counter that authorizes
-exactly one accepted successor from the anchor state committing \(u_i\). A bare authenticated counter
-\emph{reading} --- evidence that the live physical counter equals \(H_0-(u_i+1)\) --- is a scalar, not
-a per-transition witness: it is satisfied by \emph{any} release claiming the step \(u_i\to u_i+1\), so a
-single genuine advance is corroborated for two distinct same-step releases delivered to two isolated
-receivers. The one-use property therefore does not follow from monotonicity alone; it is an assumption
-on the anchor evidence (the offline anchor evidence assumption of the DSM formal kernel). A chip
-signature over a transfer and a counter value is likewise not sufficient by itself. Where the physical
-realization provides only the scalar reading, exclusion of a second same-step successor holds within a
-single receiver's realized history --- the consumed parent set is threaded through one \(\Sigma\) ---
-and, across isolated receivers, degrades to Tripwire exposure on reconciliation rather than local
-rejection.
-\end{assumption}
+\begin{definition}[Counter-Positioned Commit]
+The spendable token balance \(B_n\) is bound \emph{into} the sender state \(S_n\): a valid update
+satisfies \(B_{n+1}=B_n+\Delta_{n+1}\) with \(B_{n+1}\ge 0\), so spend power lives in the single
+forward-only state lineage, not in a free-floating scalar. Each accepted offline transition
+\emph{commits} by advancing the physical TROPIC01 counter from the parent state's committed position
+\(u_i\) to \(u_i+1\). The counter is birth-caged --- forward-only and non-resettable --- and is a
+\emph{single} physical resource for the whole appliance. The acceptance predicate binds acceptance to
+that advance being taken \emph{from the parent's committed position}: the receiver verifies, over its
+own authenticated libtropic session to the enrolled chip, that the live counter is consistent with the
+parent state \(S_n\) being the appliance's current position (\(u_i\)) and that the transition consumes
+the forward advance to \(u_i+1\). A predicate that instead reads only the post-advance value
+\(H_0-(u_i+1)\) as a scalar is \emph{insufficient}: that value is satisfied by any release claiming the
+step and does not witness that the advance was taken from \(S_n\)'s position. The discriminating check
+is against the \emph{parent} position, not the child value.
+\end{definition}
 
 \begin{theorem}[Counter Step Uniqueness]
-For a previous root that commits to \(u_i\), an honest receiver accepts only a release whose
-authenticated TROPIC01 counter evidence proves the next anchor counter \(u_i+1\).
+At most one accepted offline successor can commit the advance from a given parent counter position
+\(u_i\), and any later successor claiming that same parent is exposed at the receiver on sight.
 \end{theorem}
 
 \begin{proof}
-The receiver reads \(u_i\) from the previous DSM state and requires \(u_i+1\) as the next anchor
-counter. Authenticated counter evidence must show the live TROPIC01 counter value:
-
-\[
-H_0-(u_i+1).
-\]
-
-Within a single receiver's realized history the consumed parent set records the step, so a second
-successor from the same parent fails the linearity check. Across two isolated receivers the physical
-counter neither increases nor resets, yet each reads the same genuine value \(H_0-(u_i+1)\); a scalar
-reading is satisfied by any release claiming the step \(u_i\to u_i+1\). By the One-Use Physical Counter
-Witness assumption the genuine advance authorizes exactly one accepted successor. Where only the scalar
-reading is realized, a second same-step successor to a second isolated receiver is not rejected by the
-local predicate and is exposed on reconciliation.
+The counter leaves position \(u_i\) exactly once and can never return, because it is forward-only and
+non-resettable. The first accepted successor consumes the commit advance \(u_i\to u_i+1\). Any second
+successor claiming the same parent \(S_n\) --- which commits to \(u_i\) --- is verified against a live
+physical counter already at \(u_i+1\). The parent is therefore provably stale: the appliance has
+advanced past it, and by forward-onlyness it can never be at \(u_i\) again. Under the Counter-Positioned
+Commit predicate the receiver reads the live counter directly over its own authenticated session and
+observes it past the parent position, so the stale successor is rejected immediately. No reconciliation
+with any other receiver is required: the single forward-only counter is itself the witness that \(S_n\)
+was already consumed.
 \end{proof}
 
 \begin{theorem}[TROPIC01 Is Necessary but Not Sufficient]
@@ -2033,32 +2028,30 @@ recovery derive a new witness key or sign a different release.
 \end{proof}
 
 \begin{theorem}[No Accepted Offline Bearer Double Spend]
-Under the stated assumptions, no adversary can produce two distinct accepted offline bearer
-successors from the same spendable parent except with negligible probability. If a conflicting
-branch is created outside the model, it is exposed on reconciliation.
+No adversary --- including one that has breached the RP2350 secure partition --- can obtain two
+accepted offline successors of the same spendable parent state \(S_n\). The exclusion is enforced at
+the receiver on sight, not deferred to reconciliation.
 \end{theorem}
 
 \begin{proof}
-For a previous root \(h_i\), the previous state commits to anchor bundle \(\Bundle\), fused anchor
-head \(\Ahead_i\), boot head \(\Bhead_b\), and anchor counter \(u_i\). An honest receiver accepts
-only a transition to \(h_{i+1}\) with next anchor counter \(u_i+1\), valid DSM proof, valid boot
-ticket, valid partition certificate, valid TROPIC witness, authenticated TROPIC01 counter evidence,
-valid fused anchor head update, and next root commitment to the new fused anchor state.
+The spendable balance \(B_n\) is bound into \(S_n\) (Counter-Positioned Commit), so a double spend is
+exactly two accepted successors of \(S_n\) that allocate \(B_n\) to different recipients. Each such
+successor must commit by advancing the counter from \(S_n\)'s committed position \(u_i\). By Counter
+Step Uniqueness the single, forward-only, serial counter admits exactly one such advance; the second
+successor is verified against a counter already at \(u_i+1\) and is rejected as a stale parent.
 
-A software clone cannot produce the partition and TROPIC evidence. A new hardware clone cannot
-resume the committed boot head. A broken TROPIC01 alone cannot fake the partition certificate, DSM
-proof, boot ticket, and fused anchor head update. A breached RP2350 alone cannot forge counter
-evidence --- but it does not need to: a single genuine advance to \(u_i+1\) is a scalar corroborated
-for every same-step release, so exclusion of a second accepted package from the same anchor counter
-rests on the One-Use Physical Counter Witness assumption, not on monotonicity. Under that assumption
-the genuine advance authorizes exactly one accepted successor, and a different successor is rejected by
-the receiver predicate. Where the realization provides only the scalar counter reading and the RP2350
-partition is breached --- so the partition certificate and witness are attacker-produced --- two
-distinct same-step successors delivered to two isolated receivers each satisfy the local predicate; the
-second is not rejected locally and is exposed on reconciliation. The exclusion is then a property of a
-single reconciled realized history against a live consumed parent set, not of the isolated per-receiver
-predicate. This is the boundary of the offline claim: prevention while the one-use witness holds and the
-partition is uncompromised; Tripwire detection and attribution on reconciliation otherwise.
+A breached partition can forge the certificate, the witness, and the state bytes, but it cannot make
+one physical counter advance twice from \(u_i\), cannot make it run backward to \(u_i\), and cannot
+fabricate the receiver's own counter read --- the receiver reads the live counter directly over an
+authenticated session to the enrolled chip, whose static key a partition breach does not hold. There is
+likewise no window in which two successors both commit from \(u_i\): two commits from one position are
+two advances of a single serial physical resource, which cannot run concurrently, and after the first
+advance the position is gone. A second transaction cannot begin its commit from \(u_i\) while the first
+holds it, and once the first releases it the counter stands at \(u_i+1\). The exclusion is therefore a
+\emph{door} guarantee: the forward-only serializing counter, bound to the parent position by the
+acceptance predicate, makes a stale parent self-exposing on sight, even under partition breach. Tripwire
+remains as an independent second net for any branch presented outside this predicate, exposed when
+branches meet.
 \end{proof}
 
 \section{TLA\texorpdfstring{\textsuperscript{+}}{+} Model}
@@ -2802,7 +2795,7 @@ Receiver challenge & freshness and recipient binding & uniqueness by itself\\
 DSM transition proof & valid root update & hardware presence\\
 RP2350 partition cert & appliance partition lineage & DSM validity by itself\\
 TROPIC01 MACANDD & enrolled hardware witness & DSM validity\\
-TROPIC01 counter evidence & exact next physical counter state & recipient binding\\
+TROPIC01 counter (parent-positioned) & instant stale-parent exposure; serializes commits & distinguishing a perfect live-state clone\\
 Fused anchor head & binds DSM, partition, and TROPIC lineage & value validity by itself\\
 Accepted root frontier & receiver side lineage continuity & authenticity by itself at genesis\\
 RP2350 host path & transport and local state machine & trusted receiver facts\\
@@ -2862,28 +2855,37 @@ to any receiver is unaffected because of genesis adoption.
 
 \section{Operational Security and Deployment Envelope}
 
-The safety claims establish that offline bearer acceptance prevents a same parent fork under the
-One-Use Physical Counter Witness assumption and exposes it on reconciliation otherwise. This section
-characterizes the residual --- a fork produced by an adversary who has physically extracted the
-partition authority --- and shows that it is contained by conservation, identifiability, and
-deployment discipline, not by a further cryptographic primitive. An exhaustive search over the
-TROPIC01 command surface confirms that no chip primitive supplies a receiver verifiable, transition
-bound, once per counter position witness under key extraction: the only receiver verifiable signing
-operation is repeatable, and there is no counter gated signature. The residual is therefore intrinsic
-to offline bearer transfer, and is the same residual every offline value transfer system carries.
+The safety claims establish that offline bearer acceptance prevents a fork of a spendable parent state
+\emph{at the receiver, on sight}, via the Counter-Positioned Commit: the balance lives in the state,
+and the single forward-only counter serializes commits, so a second successor of the same parent is
+verified against a counter already past that parent's position and rejected as stale. This holds even
+under a breached RP2350 partition, because a breach can forge bytes but can neither rewind one physical
+counter nor advance it twice from a position, and the receiver reads the live counter directly over its
+own authenticated session. The mechanism deliberately does not rely on a chip-signed per-transition
+witness: an exhaustive search over the TROPIC01 command surface confirms none exists --- the only
+receiver-verifiable signing operation is repeatable, and there is no counter-gated signature --- so
+exclusion rests instead on the live forward-only counter read against the parent position. This section
+characterizes what is left \emph{after} the door guarantee: the perfect live state clone (Limits,
+item~1), an adversary who extracts and perfectly emulates the entire non-exportable chip state ---
+including the counter register --- onto a second physical device, yielding two independent forward-only
+counters. No offline-only protocol can distinguish a perfect clone; this residual is contained by
+conservation, identifiability, and deployment discipline, and is the same residual every offline value
+transfer system carries.
 
 \subsection{The residual attack and its shape}
 
-The residual requires physical extraction of the RP2350 partition signing authority --- fault
-injection or side channel analysis on a specific device, the RP2350 being a microcontroller rather
-than a certified secure element. It is not a clone. One device holds its software DSM state at
-\(h_i\), performs one physical counter decrement \(u_i\rightarrow u_i+1\), builds two software
-successors \(h_{i+1}^A\) and \(h_{i+1}^B\), forges a partition certificate for each with the extracted
-key, and lets two receivers each read the one physical counter over their own authenticated session.
-Both read the genuine \(H_0-(u_i+1)\) and both accept. The anti clone construction is silent because
-the chip is the genuine enrolled chip; what forks is the software state around it, and the single
-physical counter tick is shared because its evidence is a value both branches read rather than a token
-bound to one branch.
+The single-device software fork does not survive the Counter-Positioned Commit: one device has one
+forward-only counter, so once it commits the advance from \(u_i\) the position is gone, and a second
+successor of the same parent is rejected on sight as stale. Partition-key extraction alone therefore
+does not enable a double spend --- it leaves a single counter, and the single counter serializes the
+commits. What remains is strictly stronger: a \emph{perfect live state clone}. The adversary must
+extract and perfectly emulate the entire non-exportable chip state, including the counter register,
+onto a second physical device, so that two independent counters each sit at \(u_i\) and each advance
+once. This is duplication of the secure element's live internal state --- which the TROPIC01 is built
+to resist and which no offline-only protocol can distinguish from the original --- not the mere key
+extraction the single-device fork would have needed. Only with two genuine forward-only counters can
+two successors of the same parent each commit a real advance from \(u_i\); and even then the two
+branches are two distinct enrolled lineages, exposed the moment they meet.
 
 \subsection{Conservation bounds the take}
 
@@ -2978,11 +2980,14 @@ ordering guarantee} --- none, by design.
 
 Offline bearer mode should not be compared to a consensus chain online at all, because a consensus
 chain has no offline mode: it cannot settle a transfer without the network that carries its ordering.
-Offline bearer mode provides bounded, attributable, non scalable double spend resistance in exactly the
+Offline bearer mode provides double spend resistance \emph{at the receiver, on sight}, in exactly the
 regime --- zero connectivity at the moment of exchange --- where a consensus system provides no
-settlement whatsoever. The failure modes differ in kind: a consensus chain whose majority assumption is
-violated fails in a sustained and repeatable way, while offline bearer under physical authority
-extraction fails once, within a fixed bound, and exposes itself on reconciliation.
+settlement whatsoever: the forward-only serializing counter rejects a fork of a spendable parent at the
+door, even under partition breach. The failure modes differ in kind. A consensus chain whose majority
+assumption is violated fails in a sustained and repeatable way. Offline bearer is defeated only by a
+perfect live-state clone of the secure element --- duplication of the non-exportable counter itself,
+not partition-key extraction --- and even that residual is bounded, non-scalable, and exposed the
+moment the two enrolled lineages meet.
 
 Finally, the strength of the offline containment does not rest on any particular monetary cost of
 physical extraction, which depends on the specific device and is not claimed here. It rests on
