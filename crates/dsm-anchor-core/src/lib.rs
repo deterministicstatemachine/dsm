@@ -35,5 +35,6 @@ pub mod proto;
 pub mod root_advance;
 pub mod service;
 pub mod sig;
+pub mod tbca;
 pub mod tropic;
 pub mod util;

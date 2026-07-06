@@ -52,6 +52,11 @@ pub const FUSED_ANCHOR_HEAD_V1: &str = "DSM/fused-anchor-head/v1";
 /// Committed public-witness-key handle `P_hw = H(tag ‖ pk_hw)`.
 pub const PK_HASH_V1: &str = "DSM/tropic/pk-hash/v1";
 
+// --- Transition-Bound Counter Attestation (TBCA) ---
+/// TBCA message — the enrolled-anchor ECC key signs the counter movement bound to
+/// the exact transition: `H(tag ‖ anchor_id ‖ H_old ‖ H_new ‖ M ‖ hᵢ ‖ hᵢ₊₁ ‖ r_R)`.
+pub const TBCA_MESSAGE_V1: &str = "DSM/anchor/transition-bound-counter-attestation/v1";
+
 // --- WOTS-over-BLAKE3 witness signature (§19) ---
 /// WOTS chain step function F.
 pub const WOTS_CHAIN_V1: &str = "DSM/anchor/wots-chain/v1";
