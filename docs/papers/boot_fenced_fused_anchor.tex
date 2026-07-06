@@ -2777,6 +2777,96 @@ under the same authenticated counter evidence that guards genesis adoption, and 
 to any receiver is unaffected because of genesis adoption.
 \end{enumerate}
 
+\section{Operational Security and Deployment Envelope}
+
+The safety claims establish that offline bearer acceptance prevents a same parent fork under the
+One-Use Physical Counter Witness assumption and exposes it on reconciliation otherwise. This section
+characterizes the residual --- a fork produced by an adversary who has physically extracted the
+partition authority --- and shows that it is contained by conservation, identifiability, and
+deployment discipline, not by a further cryptographic primitive. An exhaustive search over the
+TROPIC01 command surface confirms that no chip primitive supplies a receiver verifiable, transition
+bound, once per counter position witness under key extraction: the only receiver verifiable signing
+operation is repeatable, and there is no counter gated signature. The residual is therefore intrinsic
+to offline bearer transfer, and is the same residual every offline value transfer system carries.
+
+\subsection{The residual attack and its shape}
+
+The residual requires physical extraction of the RP2350 partition signing authority --- fault
+injection or side channel analysis on a specific device, the RP2350 being a microcontroller rather
+than a certified secure element. It is not a clone. One device holds its software DSM state at
+\(h_i\), performs one physical counter decrement \(u_i\rightarrow u_i+1\), builds two software
+successors \(h_{i+1}^A\) and \(h_{i+1}^B\), forges a partition certificate for each with the extracted
+key, and lets two receivers each read the one physical counter over their own authenticated session.
+Both read the genuine \(H_0-(u_i+1)\) and both accept. The anti clone construction is silent because
+the chip is the genuine enrolled chip; what forks is the software state around it, and the single
+physical counter tick is shared because its evidence is a value both branches read rather than a token
+bound to one branch.
+
+\subsection{Conservation bounds the take}
+
+Each branch debits the attacker's own balance and is checked against \(h_i\), so no branch can exceed
+the attacker's real balance \(X\). The adversary cannot mint. A fork to \(N\) receivers moves the same
+\(X\) to each, for a maximum theft of \((N-1)X\), at the cost of the attacker's own staked \(X\). Only
+irreversible on the spot value profits: a token credit delivered to a party that reconciles later is
+invalidated the moment the two branches meet, so digital value reverses. The profitable target is
+therefore physical goods or cash handed over before reconciliation.
+
+\subsection{Two independent attributions}
+
+The attack is doubly de anonymized. Cryptographically, two accepted successors of the same parent form
+a portable fraud proof that names the enrolled device lineage --- birth commitment, chip identity, and
+static key. Physically, offline bearer is proximity based and the profitable target requires in person
+pickup of irreversible goods, so the actor appears in person, on camera, at every one of the \(N\)
+points, at known times. Neither trail is escapable by the attack's own structure: mules move the
+physical trail to identifiable accomplices while the device lineage still names one origin, and the
+fork is exposed and attributed on the first reconciliation, after which the compromised anchor is
+blacklisted and the attack self extinguishes as the blacklist propagates. The risk profile is that of
+a bad check written in person, or an in person use of a stolen card: bounded, doubly identified,
+prosecutable, and self limiting.
+
+\subsection{Sequential transfer discipline forces simultaneity}
+
+For a high value transfer the receiver may require the amount to be delivered as a sequence of smaller
+transfers, each completed and verified before goods are released. This is transparent to an honest
+payer --- it is ordinary split tender --- and it changes the shape of the residual. Without it, the
+fork is sequential: the adversary completes receiver A, leaves the counter frozen at \(u_i+1\), and
+completes receiver B later, as two unremarkable transactions separated in time. With a required
+sequence of steps, the sequential path fails: A's own steps advance the counter through \(u_i+1\),
+\(u_i+2\), and so on, and a forked transfer to B needs the counter at the intermediate positions,
+which have passed, so B's step rejects on its counter evidence. The only remaining path is to
+interleave the two transfers in real time --- all first steps at \(u_i+1\), then all second steps at
+\(u_i+2\) --- which requires both purchases to be live and alternating in the same counter window. The
+discipline converts a quiet, time separated fork into a conspicuous, simultaneous, multi target
+operation, most visibly when the acceptors are co located.
+
+\subsection{Deployment envelope}
+
+The value and the attendance dimensions are correlated in the protective direction. High value
+acceptance is human attended or online authorized; an online authorization runs the transfer through
+online DSM, where the consumed parent set makes the fork unconstructible, so the prevention claim
+applies rather than the detection claim. Unattended acceptance --- vending, transit fare, parking,
+toll --- is intrinsically low value, and against a low value target the fixed cost of physical key
+extraction and a burned, fingerprinted device exceeds any bounded, per item, in person spree by orders
+of magnitude. There is no regime in which the residual is both easy and worth committing: where value
+justifies the extraction cost there is a human or an online check, and where the acceptor is
+unattended the value does not justify the cost. This is the floor limit discipline that card networks
+have used for decades, and offline bearer mode is deployed inside exactly that envelope:
+
+\begin{enumerate}[label=(\arabic*),leftmargin=2em]
+\item accept fully offline only up to a per transaction floor, where the residual is bounded and
+attributable;
+\item above the floor, require online authorization, which places the transfer under the online DSM
+fork exclusion invariant;
+\item do not accept high value offline at an unattended terminal, where the human red flag is absent;
+\item for attended high value offline acceptance, require a verified sequence of sub transfers before
+release.
+\end{enumerate}
+
+The safety boundary the proofs establish is thus contained operationally: the offline bearer residual
+is a bounded, in person, doubly attributed fraud with an inverted risk to reward, guarded by
+conservation, identifiability, and deployment discipline rather than by a hardware primitive that, as
+shown, does not exist on the secure element.
+
 \section{Conclusion}
 
 The boot fenced fused anchor authority is the compact form of the DSM offline bearer appliance.
