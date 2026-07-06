@@ -129,8 +129,9 @@ The authority is based on four rules:
 \text{accept only authenticated TROPIC01 counter evidence and public DSM validity.}
 \]
 
-The DSM root commits to an immutable anchor bundle \(\Bundle\), a fused anchor head \(\Ahead_i\),
-a boot head \(\Bhead_b\), and an anchor counter \(u_i\). The anchor bundle binds the RP2350
+The sender's DSM device root commits an immutable anchor bundle \(\Bundle\), a fused anchor head
+\(\Ahead_i\), a boot head \(\Bhead_b\), and an anchor counter \(u_i\) through a dedicated anchor
+state leaf. The anchor bundle binds the RP2350
 partition key, TROPIC01 anchor identifier, enrolled counter value \(H_0\), MACANDD slots, device
 identifier, policy hash, and the hash of a destroyed one way birth fuse. The fused anchor head
 binds the DSM root lineage, the partition lineage, and the TROPIC01 MACANDD and counter lineage.
@@ -215,7 +216,7 @@ u_i,
 Here:
 
 \begin{itemize}
-\item \(h_i\) is the active DSM SMT root;
+\item \(h_i\) is the active appliance root (Definition~\ref{def:approot});
 \item \(\Bundle\) is the immutable anchor bundle;
 \item \(\Ahead_i\) is the active fused anchor head;
 \item \(\Bhead_b\) is the last DSM committed boot head;
@@ -297,8 +298,9 @@ The protocol uses the following names.
 \toprule
 \textbf{Name} & \textbf{Meaning}\\
 \midrule
-\texttt{prev\_root} & SMT root advanced from\\
-\texttt{next\_root} & SMT root advanced to\\
+\texttt{prev\_root} & appliance root advanced from\\
+\texttt{next\_root} & appliance root advanced to\\
+\texttt{device\_root} & per device SMT root carrying the anchor state leaf\\
 \texttt{anchor\_counter} & derived increasing DSM value \(u=H_0-H\)\\
 \texttt{next\_anchor\_counter} & required next value \(u+1\)\\
 \texttt{enrolled\_counter} & enrolled TROPIC01 physical counter value \(H_0\)\\
@@ -355,7 +357,7 @@ The useful object is:
 (h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1),
 \]
 
-where \(h_i\) is a DSM root the receiver recognizes, \(h_i\) commits to the current fused anchor
+where \(h_i\) is an appliance root the receiver recognizes, \(h_i\) commits to the current fused anchor
 state, and \(h_{i+1}\) is verified as the valid successor root for the transfer.
 
 The anchor counter orders hardware events. The fused anchor head binds the hardware lineages.
@@ -375,17 +377,51 @@ key generated at appliance birth and bound into the anchor bundle.
 All structured objects use canonical byte encoding. If \(X\) is structured, \(\mathrm{enc}(X)\)
 means its canonical byte encoding. Verifiers reject non canonical encodings.
 
-\begin{definition}[DSM Root]
-A DSM root is the sparse Merkle tree root that commits to the current local DSM state, including
-relationship tips, object leaves, authority policy, anchor bundle, fused anchor head, boot head,
-and anchor counter used for offline bearer mode.
+\begin{definition}[Appliance Root]\label{def:approot}
+The appliance root is a dedicated forward only hash lineage owned by the offline bearer appliance
+and advanced exactly once per offline bearer transfer:
+
+\[
+h_{i+1}
+=
+\Hf(\ctx{DSM/anchor-root-advance/v1}\concat h_i\concat \mathsf{payload\_hash}).
+\]
+
+The lineage is seeded at enrollment by the genesis root \(h_0\). The \texttt{prev\_root} and
+\texttt{next\_root} of a release are appliance roots, and the accepted root frontier of
+Definition~\ref{def:frontier} tracks this lineage. The successor is computable from \(h_i\) and
+the transfer payload alone: no fused anchor head, boot head, or anchor counter is an input to any
+appliance root. The appliance root is not the bilateral relationship tip and not the device root;
+the appliance treats it as an opaque value it checks and records.
+\end{definition}
+
+\begin{definition}[Device Root]\label{def:devroot}
+The device root is the per device sparse Merkle tree root committing the holder's current local
+DSM state: relationship tips, object leaves, authority policy, and one anchor state leaf, keyed by
+the anchor bundle, whose value commits \((\Bundle,\Ahead_i,\Bhead_b,u_i)\). Write \(R_i\) for the
+sender's pre advance device root and \(R_{i+1}\) for the post advance device root of a transfer.
+The anchor state leaf update is applied atomically with the canonical relationship advance of the
+same transfer, so a committed device root and the on wire proofs match or the transfer does not
+commit.
+\end{definition}
+
+\begin{definition}[Fused Anchor Commitment]\label{def:anchorcommit}
+An appliance root \(h_i\) \emph{commits to} the fused anchor state
+\((\Bundle,\Ahead_i,\Bhead_b,u_i)\) iff the sender's device root of the same step includes the
+anchor state leaf with exactly that value, proven by an inclusion proof delivered with the
+transfer, and the release evidence signs the same values: the root advance message and the
+certificates of Section~\ref{sec:crossbind} bind \(h_i\), \(h_{i+1}\), \(\Ahead_i\), \(u_i\), and
+\(u_i+1\), the leaf value must equal those signed fields, and the boot chain must verify from the
+committed boot head \(\Bhead_b\) the same leaf carries. Every statement of the form ``\(h_i\)
+commits to \(\Bundle,\Ahead_i,\Bhead_b,u_i\)'' in this document is read under this relation.
 \end{definition}
 
 \begin{definition}[Spendable Parent]
-A spendable parent is a DSM root \(h_i\) that commits to a spendable object, owner, relationship
-context, authority policy, anchor bundle \(\Bundle\), fused anchor head \(\Ahead_i\), boot head
-\(\Bhead_b\), and anchor counter \(u_i\). A valid offline bearer transfer must consume that
-spendable parent into one successor root.
+A spendable parent is an appliance root \(h_i\) whose transfer step is bound, under
+Definition~\ref{def:anchorcommit}, to a device state committing a spendable object, owner,
+relationship context, authority policy, anchor bundle \(\Bundle\), fused anchor head \(\Ahead_i\),
+boot head \(\Bhead_b\), and anchor counter \(u_i\). A valid offline bearer transfer must consume
+that spendable parent into one successor root.
 \end{definition}
 
 \begin{definition}[Offline Bearer Transfer]
@@ -643,7 +679,7 @@ A candidate offline successor must advance:
 \Ahead_i\rightarrow\Ahead_{i+1}.
 \]
 
-The next DSM root must commit to \(\Ahead_{i+1}\). A release that does not produce the next fused
+The next appliance root must commit to \(\Ahead_{i+1}\). A release that does not produce the next fused
 anchor head is not an offline bearer successor.
 
 \section{Boot Fenced Fused Anchor}
@@ -792,28 +828,32 @@ which proves:
 \Bhead_b\rightarrow\Bhead_{b+k}.
 \]
 
-The next DSM root commits to the latest boot head used by the release.
+The next appliance root commits to the latest boot head used by the release.
 
 \section{State Bound to the Previous Root}
 
-The key simplification is to put the fused anchor state into the DSM state committed by the
-previous root.
+The key simplification is to bind the fused anchor state to the previous root through the sender's
+device root, so the transfer itself carries the expected fused anchor state.
 
-A spendable parent root \(h_i\) commits to:
+The appliance root is a bare lineage value and the relationship tip is a symmetric bilateral
+object; neither carries one party's device local anchor state directly. The sender's pre advance
+device root \(R_i\) carries the anchor state leaf
 
 \[
-(
-\mathsf{object\_id},
-\mathsf{owner},
-\mathsf{balance\ or\ object\ state},
-\mathsf{relationship\ context},
-\mathsf{authority\ policy\ hash},
-\Bundle,
-\Ahead_i,
-\Bhead_b,
-u_i
-).
+(\Bundle,\Ahead_i,\Bhead_b,u_i),
 \]
+
+and the post advance device root \(R_{i+1}\) carries
+
+\[
+(\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1).
+\]
+
+The transfer travels with both inclusion proofs, and the leaf values must equal the fused anchor
+fields the release evidence signs (Definition~\ref{def:anchorcommit}). The anchor state leaf
+update is applied atomically with the canonical relationship advance of the same transfer, and
+the same canonical receipts bind the sender's device roots to the accepted bilateral relationship
+transition.
 
 Therefore the only valid offline successor anchor counter is:
 
@@ -830,8 +870,8 @@ proves:
 (h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1).
 \]
 
-This removes the need for a table of offered or pending precommits. The previous root itself
-carries the expected fused anchor state.
+This removes the need for a table of offered or pending precommits. The previous root, through
+the device root commitment bound to it, carries the expected fused anchor state.
 
 \section{TROPIC01 Counter Evidence}
 
@@ -983,7 +1023,7 @@ M_{i+1}
 
 Every partition certificate and TROPIC01 transfer witness must bind this same message.
 
-\section{Partition Commitment and TROPIC Cross Binding}
+\section{Partition Commitment and TROPIC Cross Binding}\label{sec:crossbind}
 
 The partition first commits to the root advance message. The code authoritative partition
 commitment has no partition epoch and no partition nonce. The wire certificate carries only the
@@ -1125,7 +1165,9 @@ another device, another boot, another root transition, or another anchor bundle.
 
 \section{Next Fused Anchor Head}
 
-After the receiver obtains authenticated counter evidence, the next fused anchor head is:
+The sender computes the next fused anchor head at prepare. Its final input is the post commit
+physical counter value, which prepare already determines: the prepare pin \(H_0-H=u_i\) fixes the
+post commit reading at \(H-1=H_0-(u_i+1)\). The producer therefore binds:
 
 \[
 \Ahead_{i+1}
@@ -1140,11 +1182,16 @@ After the receiver obtains authenticated counter evidence, the next fused anchor
   \concat \Sigma^P_{i+1}
   \concat \pkh
   \concat \Sigma^T_{i+1}
-  \concat H_{\mathrm{attested}}
+  \concat \bigl(H_0-(u_i+1)\bigr)
 ).
 \]
 
-The next DSM root \(h_{i+1}\) must commit to:
+The receiver recomputes the head with its own attested reading \(H_{\mathrm{attested}}\) in the
+final position. The two computations agree exactly when the counter evidence check
+\(H_{\mathrm{attested}}=H_0-(u_i+1)\) holds, so head recomputation and counter evidence are one
+consistency condition rather than two orderings.
+
+The next appliance root \(h_{i+1}\) must commit to
 
 \[
 (
@@ -1152,11 +1199,37 @@ The next DSM root \(h_{i+1}\) must commit to:
 \Ahead_{i+1},
 \Bhead_{b'},
 u_i+1
-).
+)
 \]
 
-The receiver verifies that \(h_i\) committed to the old fused anchor state and that \(h_{i+1}\)
-commits to the new fused anchor state.
+under Definition~\ref{def:anchorcommit}. The receiver verifies that \(h_i\) committed to the old
+fused anchor state and that \(h_{i+1}\) commits to the new fused anchor state.
+
+\paragraph{No commitment cycle.}
+The head binds the successor appliance root \(h_{i+1}\) through \(M_{i+1}\). The root that commits
+the head is not \(h_{i+1}\); it is the post advance device root \(R_{i+1}\), which carries the
+anchor state leaf \((\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1)\) and is computed after the head.
+The appliance root successor itself takes no fused anchor input
+(Definition~\ref{def:approot}). The dependency order of one transfer is strictly forward:
+
+\[
+h_{i+1}
+\rightarrow D_{i+1}
+\rightarrow M_{i+1}
+\rightarrow C^P_{i+1}
+\rightarrow X^T_{i+1}
+\rightarrow W^T_{i+1}
+\rightarrow \pkh
+\rightarrow \Sigma^T_{i+1}
+\rightarrow \Sigma^P_{i+1}
+\rightarrow \Ahead_{i+1}
+\rightarrow R_{i+1}.
+\]
+
+The same rule holds at enrollment: \(\Ahead_0\) binds the appliance genesis root \(h_0\), fixed
+before any anchor state leaf exists, and the device root that first commits \(\Ahead_0\) is
+written after \(\Ahead_0\) is derived. No fused anchor head takes as input any root that commits
+it.
 
 \section{Witness Signature Scheme}
 
@@ -1471,7 +1544,9 @@ Let \(\mathsf{Accept}_{\mathrm{off}}(\Pkg_{i+1})=1\) iff:
 \item all encodings are canonical;
 \item \(h_i\) is the receiver accepted previous root for the received object, under the accepted
 root frontier rule of Definition~\ref{def:frontier};
-\item \(h_i\) commits to \(\Bundle,\Ahead_i,\Bhead_b,u_i\);
+\item \(h_i\) commits to \(\Bundle,\Ahead_i,\Bhead_b,u_i\): the anchor state leaf of the pre
+advance device root carries exactly the release's previous fused anchor values, with a verifying
+inclusion proof (Definition~\ref{def:anchorcommit});
 \item the boot ticket or boot chain verifies \(\Bhead_b\rightarrow\Bhead_{b'}\);
 \item the claimed next anchor counter is \(u_i+1\), using checked arithmetic;
 \item the receiver challenge \(r_R\) is the challenge supplied by this receiver;
@@ -1505,7 +1580,9 @@ and verifies
 u_{\mathrm{attested}}=u_i+1;
 \]
 \item \(\Ahead_{i+1}\) recomputes from the fused anchor head formula;
-\item \(h_{i+1}\) commits to \(\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1\);
+\item \(h_{i+1}\) commits to \(\Bundle,\Ahead_{i+1},\Bhead_{b'},u_i+1\): the anchor state leaf
+of the post advance device root carries exactly the recomputed successor fused anchor values,
+with a verifying inclusion proof (Definition~\ref{def:anchorcommit});
 \item no known firmware boundary event, physical compromise event, or policy event invalidates
 the anchor.
 \end{enumerate}
@@ -1822,8 +1899,8 @@ state, or perfectly emulating the original device state.
 \end{proof}
 
 \begin{theorem}[No New Hardware Resume]
-Let a DSM root commit to anchor bundle \(\Bundle\), fused anchor head \(\Ahead_i\), boot head
-\(\Bhead_b\), and anchor counter \(u_i\). A device with different partition hardware state or
+Let an appliance root commit, under Definition~\ref{def:anchorcommit}, to anchor bundle
+\(\Bundle\), fused anchor head \(\Ahead_i\), boot head \(\Bhead_b\), and anchor counter \(u_i\). A device with different partition hardware state or
 different TROPIC01 boot state cannot produce an accepted offline bearer successor from that root,
 except by forging the partition boot certificate, forging the TROPIC01 boot witness, breaking the
 hash binding, or extracting and perfectly emulating the original non exportable live states.
@@ -2393,6 +2470,12 @@ transition and the receiver pin material from a single status round trip: the co
 counter value \(H_0\), and the partition public key. These are the chip self describing the
 identity a receiver pins; they are convenience transport, not trusted acceptance inputs.
 
+The \texttt{prev\_root} and \texttt{next\_root} fields are appliance roots
+(Definition~\ref{def:approot}). The device roots and the anchor state leaf inclusion proofs, pre
+advance and post advance, travel with the transfer's canonical DSM receipts on the confirm rather
+than inside \texttt{OfflineRelease}; the same receipts bind the sender's device roots to the
+accepted bilateral relationship transition.
+
 The partition commitment in \texttt{RootAdvanceCertificate} is recomputed from
 \(\Bundle,\Ahead_i,\Bhead_{b'}\), and \(M_{i+1}\) only. It does not carry and does not
 hash a partition epoch or partition nonce.
@@ -2916,7 +2999,7 @@ released protocol names. The load bearing object is the fused transition:
 (h_{i+1},\Ahead_{i+1},\Bhead_{b'},u_i+1).
 \]
 
-The previous DSM root commits to the anchor bundle, fused anchor head, boot head, and anchor
+The previous appliance root commits to the anchor bundle, fused anchor head, boot head, and anchor
 counter. The receiver verifies the DSM transition to \(h_{i+1}\). The receiver challenge binds the
 release to the actual counterparty. The RP2350 partition certificate proves the partition lineage
 participated. TROPIC01 MACANDD proves enrolled hardware witness participation. Authenticated
