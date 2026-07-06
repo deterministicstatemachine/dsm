@@ -114,25 +114,45 @@ impl AnchorCounterReader for RelayCounterReader {
             sh_priv: sh_priv.to_bytes(),
             pinned_static_pubkey: stpub,
         };
-        let ephemeral: Option<[u8; 32]> = dsm::crypto::rng::random_bytes(32).try_into().ok();
         let transport = self.transport.clone();
 
         Box::pin(async move {
-            let Some(ephemeral) = ephemeral else {
-                log::warn!("[hw-verifier] counter read refused: CSPRNG ephemeral unavailable");
-                return None;
-            };
-            match read_counter_over_relay(cred, ephemeral, move |mosi| {
-                (transport)(peer_device_id, commitment, mosi)
-            })
-            .await
-            {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    log::warn!("[hw-verifier] Path-B counter read failed (fail-closed): {e}");
-                    None
+            // The counter read is a READ (no chip/relationship state change), so retrying the WHOLE
+            // exchange is idempotent and safe. Each attempt opens a FRESH Noise session (fresh
+            // ephemeral) — a single dropped relay chunk kills one session's round-trip (15s timeout)
+            // but a fresh session recovers. Without this retry a transient BLE drop fails the confirm
+            // AND diverges the cert-chain (per-step-EK passed + anchor pinned, then rejected), so the
+            // retry is load-bearing for correctness, not just latency.
+            const MAX_ATTEMPTS: u32 = 4;
+            for attempt in 1..=MAX_ATTEMPTS {
+                let ephemeral: [u8; 32] = match dsm::crypto::rng::random_bytes(32).try_into() {
+                    Ok(e) => e,
+                    Err(_) => {
+                        log::warn!(
+                            "[hw-verifier] counter read refused: CSPRNG ephemeral unavailable"
+                        );
+                        return None;
+                    }
+                };
+                let t = transport.clone();
+                let cred = cred.clone();
+                match read_counter_over_relay(cred, ephemeral, move |mosi| {
+                    (t)(peer_device_id, commitment, mosi)
+                })
+                .await
+                {
+                    Ok(h) => return Some(h),
+                    Err(e) => {
+                        log::warn!(
+                            "[hw-verifier] Path-B counter read attempt {attempt}/{MAX_ATTEMPTS} failed (fresh session on retry): {e}"
+                        );
+                    }
                 }
             }
+            log::warn!(
+                "[hw-verifier] Path-B counter read failed after {MAX_ATTEMPTS} attempts (fail-closed)"
+            );
+            None
         })
     }
 }

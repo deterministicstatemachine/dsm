@@ -384,6 +384,134 @@ pub fn advance_cert_chain_for_relationship(
     }
 }
 
+/// Stash a freshly-derived per-step EK as a PENDING Local chain-head
+/// advance for one bilateral commitment (§11.1 sender side). The SK is
+/// AEAD-encrypted under the same chain-head wrap key scheme as
+/// `cert_chain_heads`. Nothing in `cert_chain_heads` changes until
+/// `promote_pending_local_head` runs at commit-response time — a confirm
+/// the receiver rejects or never sees therefore never moves the Local
+/// head, and the next transfer signs from the same prior head the
+/// receiver still expects.
+///
+/// Idempotent per commitment: a rebuild of the same confirm re-derives
+/// the same deterministic EK and simply replaces the row.
+pub fn stash_pending_local_head(
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+    ek_pubkey: &[u8],
+    ek_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+    is_init: bool,
+) -> Result<()> {
+    let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let now = tick() as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO pending_local_cert_heads
+            (relationship_key, commitment_hash, ek_pubkey, ek_sk_encrypted, is_init, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            relationship_key.as_slice(),
+            commitment_hash.as_slice(),
+            ek_pubkey,
+            encrypted_sk,
+            is_init as i64,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+/// Promote a pending Local chain-head advance into `cert_chain_heads`
+/// after the receiver's commit-response proves the step was accepted.
+/// The encrypted SK blob moves verbatim (it is never decrypted here).
+/// Returns the resulting step count, or `None` if no pending row exists
+/// for that (relationship, commitment) pair — e.g. already promoted, or
+/// dropped by a failure path.
+pub fn promote_pending_local_head(
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+) -> Result<Option<u64>> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let tx = conn.transaction()?;
+    let row: Option<(Vec<u8>, Vec<u8>, i64)> = tx
+        .query_row(
+            "SELECT ek_pubkey, ek_sk_encrypted, is_init FROM pending_local_cert_heads
+             WHERE relationship_key = ?1 AND commitment_hash = ?2",
+            params![relationship_key.as_slice(), commitment_hash.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((ek_pk, sk_ct, is_init)) = row else {
+        return Ok(None);
+    };
+    let now = tick() as i64;
+    if is_init != 0 {
+        // Relationship genesis: the sign fell back to the root AK because
+        // no Local row existed. Record EK_1 as the step-0 head. If a row
+        // appeared in the interim (should not happen — sign-time load and
+        // this promote are serialized per relationship), the INSERT is
+        // ignored and the UPDATE below advances instead.
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO cert_chain_heads
+                (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted, step_count, updated_at)
+             VALUES (?1, 0, ?2, ?3, 0, ?4)",
+            params![relationship_key.as_slice(), ek_pk, sk_ct, now],
+        )?;
+        if inserted == 0 {
+            tx.execute(
+                "UPDATE cert_chain_heads
+                 SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
+                     step_count = step_count + 1, updated_at = ?3
+                 WHERE relationship_key = ?4 AND side = 0",
+                params![ek_pk, sk_ct, now, relationship_key.as_slice()],
+            )?;
+        }
+    } else {
+        tx.execute(
+            "UPDATE cert_chain_heads
+             SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
+                 step_count = step_count + 1, updated_at = ?3
+             WHERE relationship_key = ?4 AND side = 0",
+            params![ek_pk, sk_ct, now, relationship_key.as_slice()],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM pending_local_cert_heads
+         WHERE relationship_key = ?1 AND commitment_hash = ?2",
+        params![relationship_key.as_slice(), commitment_hash.as_slice()],
+    )?;
+    let step: Option<i64> = tx
+        .query_row(
+            "SELECT step_count FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 0",
+            params![relationship_key.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    tx.commit()?;
+    Ok(step.map(|s| s as u64))
+}
+
+/// Drop a pending Local chain-head advance whose confirm terminally
+/// failed (receiver rejected, or the session was abandoned on restore).
+/// Returns `true` if a row was deleted.
+pub fn drop_pending_local_head(
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let deleted = conn.execute(
+        "DELETE FROM pending_local_cert_heads
+         WHERE relationship_key = ?1 AND commitment_hash = ?2",
+        params![relationship_key.as_slice(), commitment_hash.as_slice()],
+    )?;
+    Ok(deleted > 0)
+}
+
 /// Load the full chain head record (pubkey + step_count + timestamp).
 pub fn load_cert_chain_head(
     relationship_key: &[u8; 32],
@@ -757,6 +885,120 @@ mod tests {
             advance_local_cert_chain_head_with_sk(&r, &[0x77; 64], &[0x88; 96], &[0x99; 32])
                 .unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Pending (deferred) Local chain-head advance (§11.1 sender side) ──
+
+    /// Genesis flow: stash (is_init) leaves cert_chain_heads untouched;
+    /// promote creates the step-0 Local row with the EK and its SK; the
+    /// pending row is consumed.
+    #[test]
+    #[serial_test::serial]
+    fn pending_local_head_stash_promote_genesis() {
+        reset_database_for_tests();
+        let r = rel(0xC1);
+        let commitment = [0xD1; 32];
+        let ek_pk = vec![0x10; 64];
+        let ek_sk = vec![0x11; 96];
+        let wrap = [0x12; 32];
+
+        stash_pending_local_head(&r, &commitment, &ek_pk, &ek_sk, &wrap, true).unwrap();
+        // Nothing promoted yet — the Local head must be unchanged (absent).
+        assert!(load_cert_chain_head_pubkey(&r, CertChainSide::Local)
+            .unwrap()
+            .is_none());
+
+        let step = promote_pending_local_head(&r, &commitment).unwrap();
+        assert_eq!(step, Some(0), "genesis promote records EK_1 at step 0");
+        assert_eq!(
+            load_cert_chain_head_pubkey(&r, CertChainSide::Local)
+                .unwrap()
+                .unwrap(),
+            ek_pk
+        );
+        // The SK ciphertext moved verbatim and still decrypts.
+        assert_eq!(
+            load_local_chain_head_sk(&r, &wrap).unwrap(),
+            Some(ek_sk.clone())
+        );
+        // Pending row consumed — second promote is a no-op.
+        assert_eq!(promote_pending_local_head(&r, &commitment).unwrap(), None);
+    }
+
+    /// Steady-state flow: with an existing Local row, promote advances it
+    /// (step + 1, new pubkey + SK).
+    #[test]
+    #[serial_test::serial]
+    fn pending_local_head_promote_advances_existing_row() {
+        reset_database_for_tests();
+        let r = rel(0xC2);
+        let wrap = [0x21; 32];
+        init_local_cert_chain_head_with_sk(&r, &[0xA0; 64], &[0xA1; 96], &wrap).unwrap();
+
+        let commitment = [0xD2; 32];
+        let ek_pk = vec![0xB0; 64];
+        let ek_sk = vec![0xB1; 96];
+        stash_pending_local_head(&r, &commitment, &ek_pk, &ek_sk, &wrap, false).unwrap();
+
+        let step = promote_pending_local_head(&r, &commitment).unwrap();
+        assert_eq!(step, Some(1));
+        assert_eq!(
+            load_cert_chain_head_pubkey(&r, CertChainSide::Local)
+                .unwrap()
+                .unwrap(),
+            ek_pk
+        );
+        assert_eq!(load_local_chain_head_sk(&r, &wrap).unwrap(), Some(ek_sk));
+    }
+
+    /// Rejected confirm: drop removes the pending row and the Local head
+    /// never moves — the divergence-on-failure hazard this table exists
+    /// to prevent.
+    #[test]
+    #[serial_test::serial]
+    fn pending_local_head_drop_on_failure_leaves_head_untouched() {
+        reset_database_for_tests();
+        let r = rel(0xC3);
+        let wrap = [0x31; 32];
+        let ak_pk = vec![0xA0; 64];
+        init_local_cert_chain_head_with_sk(&r, &ak_pk, &[0xA1; 96], &wrap).unwrap();
+
+        let commitment = [0xD3; 32];
+        stash_pending_local_head(&r, &commitment, &[0xB0; 64], &[0xB1; 96], &wrap, false).unwrap();
+        assert!(drop_pending_local_head(&r, &commitment).unwrap());
+
+        // Head unchanged; promote after drop is a no-op.
+        assert_eq!(
+            load_cert_chain_head_pubkey(&r, CertChainSide::Local)
+                .unwrap()
+                .unwrap(),
+            ak_pk
+        );
+        assert_eq!(promote_pending_local_head(&r, &commitment).unwrap(), None);
+        // Dropping again reports nothing deleted.
+        assert!(!drop_pending_local_head(&r, &commitment).unwrap());
+    }
+
+    /// Re-stash for the same commitment replaces the row (idempotent
+    /// rebuild of the same confirm).
+    #[test]
+    #[serial_test::serial]
+    fn pending_local_head_restash_replaces() {
+        reset_database_for_tests();
+        let r = rel(0xC4);
+        let wrap = [0x41; 32];
+        let commitment = [0xD4; 32];
+        stash_pending_local_head(&r, &commitment, &[0x50; 64], &[0x51; 96], &wrap, true).unwrap();
+        let ek_pk2 = vec![0x60; 64];
+        stash_pending_local_head(&r, &commitment, &ek_pk2, &[0x61; 96], &wrap, true).unwrap();
+
+        promote_pending_local_head(&r, &commitment).unwrap();
+        assert_eq!(
+            load_cert_chain_head_pubkey(&r, CertChainSide::Local)
+                .unwrap()
+                .unwrap(),
+            ek_pk2
+        );
     }
 
     #[test]

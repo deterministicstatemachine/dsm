@@ -636,8 +636,16 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
                 }
             }
             Status::Ready => {
+                // The chip's monotonic counter is the source of truth (it can only fall). If it reads
+                // LOWER than the appliance's model (`active < live_u` — more steps consumed than we
+                // tracked, e.g. a fresh birth on a provisioned chip whose counter is already below H0),
+                // ADOPT the live position rather than downgrading. Adopting a HIGHER `u` only shrinks
+                // the remaining budget — it can never mint value or enable a double-spend (the counter
+                // already moved) — and it restores `active.anchor_counter == live_u` so PREPARE's
+                // counter check passes on a Ready device. `active > live_u` is still impossible for a
+                // real down-counter (would require the counter to rise) -> fail closed.
                 if self.active.anchor_counter < live_u {
-                    return RecoverOutcome::DowngradeOnline;
+                    self.active.anchor_counter = live_u;
                 }
                 if self.active.anchor_counter > live_u {
                     return RecoverOutcome::FailClosed;

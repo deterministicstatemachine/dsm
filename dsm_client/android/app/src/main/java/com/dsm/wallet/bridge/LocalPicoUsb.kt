@@ -45,14 +45,24 @@ object LocalPicoUsb {
     private const val DRAIN_QUIET_POLLS = 4   // ~800ms of silence ends the drain
     private const val DRAIN_MAX_POLLS = 40    // hard cap (~8s worst case) so boot chatter can finish
     // Max idle bulk-IN polls before failing closed (each blocks up to READ_TIMEOUT_MS). Bounds the
-    // total read wait deterministically without a wall-clock deadline (repo invariant).
-    private const val MAX_EMPTY_POLLS = 16
+    // total read wait deterministically without a wall-clock deadline (repo invariant). The appliance
+    // PREPARE runs a BLAKE3-SPHINCS+ (SPX128f) keygen + sign on the RP2350 and takes ~7s on real
+    // silicon, during which the firmware sends nothing; 40 polls x 500ms = ~20s covers it with margin
+    // (16 = ~8s was too tight and intermittently timed out a valid PREPARE -> false online recovery).
+    private const val MAX_EMPTY_POLLS = 40
 
     @Volatile private var appContext: Context? = null
     private var connection: UsbDeviceConnection? = null
     private var iface: UsbInterface? = null
     private var epIn: UsbEndpoint? = null
     private var epOut: UsbEndpoint? = null
+    // Bytes pulled off the bulk-IN endpoint that belong to a LATER read. Android's `bulkTransfer`
+    // hands back one whole USB packet at a time; the firmware coalesces the `LE32 len` and the body
+    // into a single 64-byte packet, so a read for the 4-byte length over-runs into the body. Those
+    // surplus bytes MUST be carried to the next read, not discarded — discarding desyncs the stream,
+    // the following body read then blocks until timeout, and a valid response comes back empty (Rust
+    // decodes it as a default `ok=false, error=0` frame). Per-connection; cleared on reset/reopen.
+    private var residual = ByteArray(0)
 
     /** Cache the application context so the static `Unified.picoUsbTransceive` can reach UsbManager. */
     @JvmStatic
@@ -99,16 +109,26 @@ object LocalPicoUsb {
     private fun resetAndFail(): ByteArray {
         try { iface?.let { connection?.releaseInterface(it) } } catch (_: Exception) {}
         try { connection?.close() } catch (_: Exception) {}
-        connection = null; iface = null; epIn = null; epOut = null
+        connection = null; iface = null; epIn = null; epOut = null; residual = ByteArray(0)
         return ByteArray(0)
     }
 
     /** Read exactly `n` bytes off the bulk-IN endpoint (accumulating across USB packets), or null.
      * Bounded by a poll COUNT (not wall-clock — repo invariant): each `bulkTransfer` already blocks
-     * up to `READ_TIMEOUT_MS`, so at most `MAX_EMPTY_POLLS` idle polls elapse before we fail closed. */
+     * up to `READ_TIMEOUT_MS`, so at most `MAX_EMPTY_POLLS` idle polls elapse before we fail closed.
+     * A `bulkTransfer` returns a whole USB packet, which may run PAST `n` (the firmware coalesces the
+     * length prefix and body into one packet); the surplus is carried in [residual] for the next read
+     * rather than dropped — dropping it desyncs the frame and silently truncates the next response. */
     private fun readExact(conn: UsbDeviceConnection, ep: UsbEndpoint, n: Int): ByteArray? {
         val out = ByteArray(n)
         var got = 0
+        // Serve carried-over bytes from a prior over-read before touching the endpoint.
+        if (residual.isNotEmpty()) {
+            val take = minOf(residual.size, n)
+            System.arraycopy(residual, 0, out, 0, take)
+            got += take
+            residual = residual.copyOfRange(take, residual.size)
+        }
         val buf = ByteArray(ep.maxPacketSize.coerceAtLeast(64))
         var emptyPolls = 0
         while (got < n) {
@@ -125,6 +145,11 @@ object LocalPicoUsb {
             val take = minOf(r, n - got)
             System.arraycopy(buf, 0, out, got, take)
             got += take
+            if (r > take) {
+                // Packet ran past this read's target — stash the tail for the next readExact.
+                val extra = buf.copyOfRange(take, r)
+                residual = if (residual.isEmpty()) extra else residual + extra
+            }
         }
         return out
     }
@@ -172,6 +197,7 @@ object LocalPicoUsb {
         // Discard the firmware boot banner / self-test output before the first transaction so the
         // response read frames on the OP_SPI_PASSTHROUGH reply, not on stale boot chatter.
         drainInput(conn, inEp)
+        residual = ByteArray(0)
         return conn
     }
 
@@ -189,7 +215,7 @@ object LocalPicoUsb {
         val claimed = commIface?.let { conn.claimInterface(it, true) } ?: false
         Log.i(TAG, "comm iface=$commId claim=$claimed (ifaceCount=${device.interfaceCount})")
         var cls = setControlLine(conn, commId)
-        if (cls < 0 && claimed && commIface != null) {
+        if (cls < 0 && commIface != null && claimed) {
             // Some host stacks block class control transfers while the comm interface is claimed by
             // the app; release it and retry (control transfers target endpoint 0, not the interface).
             conn.releaseInterface(commIface)

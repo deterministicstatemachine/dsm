@@ -245,29 +245,59 @@ impl BilateralBleHandler {
         };
         let signing_out = crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)?;
 
+        let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
         match side {
             BilateralSide::A => {
                 receipt.set_ek_pk_a(signing_out.ek_pk.clone());
                 receipt.set_ek_cert_a(signing_out.ek_cert);
                 receipt.set_kyber_ct_a(signing_out.kyber_ct);
                 receipt.add_sig_a(signing_out.sig);
+
+                // §11.1 sender side: DEFER the Local chain-head advance to
+                // commit-response time (`mark_sender_committed_with_post_state_hash`
+                // promotes it). Advancing here — at confirm BUILD — moved the
+                // Local head past a step the receiver could still reject
+                // (e.g. offline-bearer MissingRelease) or never see; every
+                // subsequent transfer then signed a cert the receiver could
+                // not chain back to its expected prior head, permanently
+                // wedging the relationship. The receiver's own mirror of this
+                // chain (Counterparty side) already advances only at commit;
+                // stashing keeps the two in lockstep.
+                crate::storage::client_db::stash_pending_local_head(
+                    &rel_key,
+                    &commitment_hash,
+                    &signing_out.ek_pk,
+                    &signing_out.ek_sk,
+                    &at_rest_key,
+                    signing_out.used_root_ak,
+                )
+                .map_err(|e| {
+                    DsmError::invalid_operation(format!("stash pending local chain head: {e}"))
+                })?;
+                debug!(
+                    "[BILATERAL] §11.1 stashed pending Local chain-head advance (used_root_ak={}) for commitment {}",
+                    signing_out.used_root_ak,
+                    bytes_to_base32(&commitment_hash[..8]),
+                );
             }
             BilateralSide::B => {
                 receipt.set_ek_pk_b(signing_out.ek_pk.clone());
                 receipt.set_ek_cert_b(signing_out.ek_cert);
                 receipt.set_kyber_ct_b(signing_out.kyber_ct);
                 receipt.add_sig_b(signing_out.sig);
+
+                // §11.1 receiver side: the B-side counter-sign runs AFTER
+                // the canonical commit succeeded in `handle_confirm_request`,
+                // so advancing immediately here is already commit-gated.
+                crate::sdk::receipts::advance_local_chain_head_after_signing(
+                    &rel_key,
+                    &signing_out.ek_pk,
+                    &signing_out.ek_sk,
+                    &at_rest_key,
+                    signing_out.used_root_ak,
+                )?;
             }
         }
-
-        let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
-        crate::sdk::receipts::advance_local_chain_head_after_signing(
-            &rel_key,
-            &signing_out.ek_pk,
-            &signing_out.ek_sk,
-            &at_rest_key,
-            signing_out.used_root_ak,
-        )?;
 
         receipt.to_full_protobuf()
     }
@@ -1120,6 +1150,37 @@ impl BilateralBleHandler {
                     e
                 );
                 continue;
+            }
+
+            // §11.1 — the session is abandoned; drop any pending Local
+            // chain-head advance stashed for it so the EK material does
+            // not linger. The Local head itself never moved (promotion is
+            // commit-gated), so the next transfer signs from the prior
+            // head both sides still agree on.
+            if let Some(counterparty_id) = counterparty_device_id_arr {
+                if record.commitment_hash.len() == 32 {
+                    let mut ch = [0u8; 32];
+                    ch.copy_from_slice(&record.commitment_hash);
+                    let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                        &self.device_id,
+                        &counterparty_id,
+                    );
+                    match crate::storage::client_db::drop_pending_local_head(&rel_key, &ch) {
+                        Ok(true) => {
+                            debug!(
+                                "[BLE_HANDLER] §11.1 dropped pending Local chain-head stash for abandoned session {}",
+                                bytes_to_base32(&ch[..8])
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            warn!(
+                                "[BLE_HANDLER] §11.1 failed to drop pending Local chain-head stash during restore: {}",
+                                e
+                            );
+                        }
+                    }
+                }
             }
 
             failed_count += 1;
@@ -3454,7 +3515,13 @@ impl BilateralBleHandler {
                             payload_hash,
                             authority_policy_hash,
                             0,
-                            op_bytes.clone(),
+                            // action_fields: EMPTY. The operation is already bound into the transition
+                            // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
+                            // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
+                            // once the OfflineBearerRequired policy tail is appended (~266 B) — the chip
+                            // PREPARE then fails `BAD_PROTO`. The receiver recomputes the digest from the
+                            // transition carried in the release, so empty is consistent end-to-end.
+                            Vec::new(),
                             r_r,
                         ) {
                             Ok(art) => Some(art),
@@ -4315,6 +4382,7 @@ impl BilateralBleHandler {
                         )
                         .ok()
                         .flatten();
+                    let had_cp_head = prev_pk_from_chain.is_some();
                     let expected_prev_pk = match prev_pk_from_chain {
                         Some(pk) => pk,
                         None => {
@@ -4324,6 +4392,17 @@ impl BilateralBleHandler {
                             counterparty_pubkey.clone()
                         }
                     };
+
+                    // §11.1 verification provenance: which prior key the
+                    // sender's ek_cert is expected to chain back to (the
+                    // Counterparty head when one exists, else the contact's
+                    // AK root). Key prefixes only.
+                    debug!(
+                        "[BILATERAL] §11.1 A-side verify: counterparty_head_row={} expected_prev_pk={} parent_tip={}",
+                        had_cp_head,
+                        bytes_to_base32(&expected_prev_pk[..8.min(expected_prev_pk.len())]),
+                        bytes_to_base32(&receipt.parent_tip[..8.min(receipt.parent_tip.len())]),
+                    );
 
                     crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
                         &receipt,
@@ -4408,15 +4487,14 @@ impl BilateralBleHandler {
         // receiver-side admit is still gated: no fused anchor is pinned (`pinned = None`) and the
         // relay counter-verifier slot is unfilled, so this still always recovers online. Ordinary
         // transfers are unaffected (the predicate is false for them).
+        let mut adopted_anchor_state: Option<crate::bluetooth::anchor_accept::AdoptedAnchorState> =
+            None;
         if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
             &session.operation,
         ) {
-            // The receiver supplies no fused-anchor pin yet: `pinned = None` routes every
-            // offline-bearer transfer to online recovery. `h_n` is the receiver's accepted
-            // relationship tip. `expected_receiver_challenge` is the r_R this receiver generated in
+            // `expected_receiver_challenge` is the r_R this receiver generated in
             // its prepare-response and stashed against the session — the release must bind it, so a
-            // release minted for a different receiver session is rejected (defense-in-depth; the
-            // absent pin already short-circuits to recovery before this check).
+            // release minted for a different receiver session is rejected (defense-in-depth).
             let policy_hash = match &session.operation {
                 Operation::Transfer {
                     authority_policy: Some(ap),
@@ -4424,14 +4502,27 @@ impl BilateralBleHandler {
                 } => ap.policy_id,
                 _ => [0u8; 32],
             };
-            // Policy-binding trace (receiver verify): the policy_id this receiver enforces against the
+            // Policy-binding (receiver verify): the policy_id this receiver enforces against the
             // release MUST equal the canonical value the sender bound. A mismatch means the proof does
             // not attest what we think — reject rather than "run and mean nothing".
+            let canonical_policy_id =
+                dsm::types::operations::canonical_offline_bearer_policy().policy_id;
             info!(
                 "[BILATERAL][offline-bearer][receiver] verify policy_id={} (canonical_match={})",
                 bytes_to_base32(&policy_hash),
-                policy_hash == dsm::types::operations::canonical_offline_bearer_policy().policy_id
+                policy_hash == canonical_policy_id
             );
+            // ENFORCE the canonical binding fail-closed (owner directive: logging a mismatch is not
+            // enough). An offline-bearer release whose policy_id is not the well-known canonical value
+            // does not attest the offline-bearer tier — refuse it rather than accept a proof that
+            // means nothing.
+            if policy_hash != canonical_policy_id {
+                return Err(DsmError::invalid_operation(format!(
+                    "offline-bearer policy_id {} is not the canonical well-known value {}; refusing to accept",
+                    bytes_to_base32(&policy_hash),
+                    bytes_to_base32(&canonical_policy_id),
+                )));
+            }
             let expected_receiver_challenge = session.receiver_challenge.unwrap_or([0u8; 32]);
             // Anchor-state binding: the sender's device-SMT roots (before = pinned frontier,
             // after = adopted successor) and the two inclusion proofs, as carried on the confirm.
@@ -4569,17 +4660,32 @@ impl BilateralBleHandler {
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
-            crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-                &confirm_request.offline_release,
-                pinned.as_ref(),
-                &h_n,
-                &self.device_id,
-                &expected_receiver_challenge,
-                &policy_hash,
-                &binding,
-                attested,
-            )
-            .map_err(|r| r.into_dsm_error())?;
+            // Def. 25 check 2: the appliance root adopted from this holder's last
+            // ACCEPTED release. Absent row = relationship genesis — the predicate
+            // adopts the release's own `prev_root` TOFU (authenticated by the
+            // anchor-state proofs + the live counter, same trust root as the pin).
+            let accepted_root =
+                crate::storage::client_db::anchor_enrollments::load_accepted_anchor_root(
+                    &sender_device_id,
+                )
+                .ok()
+                .flatten();
+            let adopted =
+                crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
+                    &confirm_request.offline_release,
+                    pinned.as_ref(),
+                    accepted_root.as_ref().map(|(r, _)| r),
+                    &self.device_id,
+                    &expected_receiver_challenge,
+                    &policy_hash,
+                    &binding,
+                    attested,
+                )
+                .map_err(|r| r.into_dsm_error())?;
+            // Persisted AFTER the canonical commit below succeeds (deferred, like
+            // the §11.1 cert-chain mirrors) — a commit failure must not move the
+            // accepted lineage frontier.
+            adopted_anchor_state = Some(adopted);
             info!(
                 "[BILATERAL] offline-bearer release accepted (canonical Boot Fenced Fused predicate) for commitment {}",
                 bytes_to_base32(&commitment_hash[..8])
@@ -4638,6 +4744,28 @@ impl BilateralBleHandler {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
             })?;
 
+        // Offline-bearer post-commit: ADOPT the holder's successor appliance
+        // root (Def. 25 "receiver adopts next_root on acceptance"). Deferred
+        // to here so a canonical-commit failure never moves the accepted
+        // lineage frontier past a release that delivered no value.
+        if let Some(adopted) = adopted_anchor_state {
+            match crate::storage::client_db::anchor_enrollments::store_accepted_anchor_root(
+                &session.counterparty_device_id,
+                &adopted.next_root,
+                adopted.next_anchor_counter,
+            ) {
+                Ok(()) => info!(
+                    "[BILATERAL] adopted holder appliance root (next_anchor_counter={}) for commitment {}",
+                    adopted.next_anchor_counter,
+                    bytes_to_base32(&commitment_hash[..8])
+                ),
+                Err(e) => error!(
+                    "[BILATERAL] failed to persist adopted appliance root: {} — the next transfer from this holder will fail check 2 until reconciled",
+                    e
+                ),
+            }
+        }
+
         // §11.1 post-commit: advance the local mirror of the SENDER's
         // cert chain head (Counterparty side from receiver's POV). Done
         // *after* canonical commit succeeds — if the advance call above
@@ -4660,14 +4788,35 @@ impl BilateralBleHandler {
                     );
                 }
                 Ok(None) => {
-                    // No row to update — relationship was never seeded via
-                    // init_cert_chain_for_relationship. Verification still
-                    // succeeded against the contact's AK_pk root above,
-                    // but the mirror row must be initialized before the next
-                    // step can verify against the fresh EK head.
-                    warn!(
-                        "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk root; multi-step will degrade until init_cert_chain_for_relationship is called"
-                    );
+                    // First committed transfer on this relationship — no
+                    // Counterparty row exists yet. Verification chained the
+                    // sender's cert to their AK_pk root above; record the
+                    // sender's EK_pk_1 as the step-0 Counterparty head so the
+                    // NEXT step's `expected_prev_pk` resolves to the fresh EK
+                    // head instead of falling back to the AK and rejecting.
+                    match crate::storage::client_db::init_cert_chain_head(
+                        &rel_key,
+                        crate::storage::client_db::CertChainSide::Counterparty,
+                        ek_pk_a,
+                    ) {
+                        Ok(true) => {
+                            info!(
+                                "[BILATERAL] §11.1 initialized Counterparty cert chain head at sender EK_pk_1 for commitment {}",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "[BILATERAL] §11.1 Counterparty cert chain head appeared concurrently — leaving existing row"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "[BILATERAL] §11.1 failed to initialize Counterparty cert chain head: {} — multi-step verification will degrade until reconciled",
+                                e
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     // Advancement is bookkeeping; canonical commit
@@ -5481,6 +5630,40 @@ impl BilateralBleHandler {
             }
         }
 
+        // §11.1 — promote the PENDING Local chain-head advance stashed at
+        // confirm-build time. The receiver's commit-response proves it
+        // verified our A-side cert and advanced its Counterparty mirror,
+        // so our Local head may now move to the EK that signed this step.
+        // Doing this only here (never at build) means a rejected or lost
+        // confirm leaves the Local head untouched and the relationship
+        // convergent.
+        {
+            let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                &self.device_id,
+                &counterparty_device_id,
+            );
+            match crate::storage::client_db::promote_pending_local_head(&rel_key, commitment_hash) {
+                Ok(Some(step)) => {
+                    info!(
+                        "[BILATERAL] §11.1 promoted pending Local chain head to EK_pk_{step} for commitment {}",
+                        bytes_to_base32(&commitment_hash[..8])
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        "[BILATERAL] §11.1 no pending Local chain head to promote for commitment {} — head not advanced (already promoted, or stash lost); next step may need reconciliation",
+                        bytes_to_base32(&commitment_hash[..8])
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "[BILATERAL] §11.1 failed to promote pending Local chain head: {} — next outbound step will sign from the stale head",
+                        e
+                    );
+                }
+            }
+        }
+
         // §11.1 Item 8 (B-tight) — advance the local mirror of the
         // RECEIVER's cert chain head (Counterparty side from sender's
         // POV) immediately before deleting the session row. Sourcing
@@ -5513,9 +5696,33 @@ impl BilateralBleHandler {
                             );
                         }
                         Ok(None) => {
-                            warn!(
-                                "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk root"
-                            );
+                            // First committed transfer — no Counterparty row
+                            // yet. Record the receiver's EK_pk_1 as the step-0
+                            // head so the next step verifies against it
+                            // instead of falling back to the AK and rejecting.
+                            match crate::storage::client_db::init_cert_chain_head(
+                                &rel_key,
+                                crate::storage::client_db::CertChainSide::Counterparty,
+                                &receipt.ek_pk_b,
+                            ) {
+                                Ok(true) => {
+                                    info!(
+                                        "[BILATERAL] §11.1 (B-tight) initialized Counterparty cert chain head at receiver EK_pk_1 for commitment {}",
+                                        bytes_to_base32(&commitment_hash[..8])
+                                    );
+                                }
+                                Ok(false) => {
+                                    warn!(
+                                        "[BILATERAL] §11.1 (B-tight) Counterparty cert chain head appeared concurrently — leaving existing row"
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "[BILATERAL] §11.1 (B-tight) failed to initialize Counterparty cert chain head: {} — startup reconciliation sweep will retry from session row",
+                                        e
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             error!(
