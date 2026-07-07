@@ -2648,6 +2648,36 @@ impl AppRouter for AppRouterImpl {
         )
     }
 
+    fn prepare_offline_bearer_release(
+        &self,
+        relationship_id: [u8; 32],
+        recipient_device_id: [u8; 32],
+        object_id: [u8; 32],
+        payload_hash: [u8; 32],
+        authority_policy_hash: [u8; 32],
+        action_type: u32,
+        action_fields: Vec<u8>,
+        receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::PreparedOfflineBearer, dsm::types::error::DsmError> {
+        self.core_sdk.prepare_offline_bearer_release(
+            relationship_id,
+            recipient_device_id,
+            object_id,
+            payload_hash,
+            authority_policy_hash,
+            action_type,
+            action_fields,
+            receiver_challenge,
+        )
+    }
+
+    fn commit_offline_bearer_release(
+        &self,
+        prepared: &crate::sdk::core_sdk::PreparedOfflineBearer,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+        self.core_sdk.commit_offline_bearer_release(prepared)
+    }
+
     // ====================== QUERY ======================
     async fn query(&self, q: AppQuery) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;
