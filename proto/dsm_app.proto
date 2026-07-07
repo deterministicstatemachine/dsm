@@ -1767,6 +1767,25 @@ message AnchorDisclosure {
   bytes  chip_static_pubkey    = 8 [(dsm_max_len)=32];     // A's chip Noise stpub; empty => none
 }
 
+// Counter-Positioned Commit first-transfer round-trip (§21). On a FIRST offline-bearer transfer the
+// receiver holds no pinned anchor until the sender discloses it, so the sender must expose a PREPARED
+// (uncommitted, counter still at u_i) state and disclose the pin BEFORE committing — otherwise the
+// receiver cannot take the authenticated FROM read (H0 - u_i) and offline acceptance fails closed.
+// Sender -> Receiver, after the accept (which carried the enroll pairing pubkey): the sender has
+// PREPARED the transfer (no counter move) and provisioned the verifier slot; the disclosure lets the
+// receiver admit the pin and read the FROM coordinate live before the sender commits.
+message BilateralBearerPrepared {
+  Hash32 commitment_hash        = 1;
+  AnchorDisclosure anchor_disclosure = 2;   // bundle/anchor_id/H0/partition_pk + provisioned slot + stpub
+}
+
+// Receiver -> Sender: the receiver has admitted the disclosed pin and captured the authenticated FROM
+// read against the still-Prepared sender. Only on receiving this does the sender COMMIT (move the
+// counter u_i -> u_i+1) and send the confirm. Serializes the commit behind the receiver's FROM read.
+message BilateralBearerProceed {
+  Hash32 commitment_hash        = 1;
+}
+
 message BilateralPrepareResponse {
   Hash32 commitment_hash        = 1;
   bytes  local_signature        = 2 [(dsm_max_len)=65535];
@@ -2687,6 +2706,11 @@ message Envelope {
     // admission). New device → existing device, then existing → new device.
     AddDeviceAdmissionRequestV1       device_admission_request         = 108;
     AddDeviceAdmissionV1              device_admission                 = 109;
+
+    // Counter-Positioned Commit first-transfer round-trip (§21): sender exposes a PREPARED state +
+    // pin disclosure before committing; receiver acknowledges after its FROM read. See the message defs.
+    BilateralBearerPrepared           bilateral_bearer_prepared        = 110;
+    BilateralBearerProceed            bilateral_bearer_proceed         = 111;
   }
 }
 
