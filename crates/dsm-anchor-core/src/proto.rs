@@ -238,7 +238,11 @@ impl CounterReadEvidence {
 impl pb::CounterAdvanceEvidence {
     pub fn to_evidence(&self) -> Result<CounterAdvanceEvidence, ProtoError> {
         Ok(CounterAdvanceEvidence {
-            pre: self.pre.as_ref().ok_or(ProtoError::MissingField)?.to_read()?,
+            pre: self
+                .pre
+                .as_ref()
+                .ok_or(ProtoError::MissingField)?
+                .to_read()?,
             post: self
                 .post
                 .as_ref()

@@ -2942,9 +2942,16 @@ mod tests {
             .to_release()
             .expect("to_release");
         assert_eq!(rel.cert.anchor_counter, 0, "FROM coordinate uᵢ");
-        assert_eq!(rel.cert.next_anchor_counter, 1, "TO coordinate uᵢ+1 (advanced once)");
+        assert_eq!(
+            rel.cert.next_anchor_counter, 1,
+            "TO coordinate uᵢ+1 (advanced once)"
+        );
         let h_post = h0 - rel.cert.next_anchor_counter;
-        assert_eq!(h_pre, h_post + 1, "one physical advance: H_pre = H_post + 1");
+        assert_eq!(
+            h_pre,
+            h_post + 1,
+            "one physical advance: H_pre = H_post + 1"
+        );
 
         // The producer's CounterAdvanceEvidence carries both witnessed coordinates.
         assert_eq!(
@@ -3138,8 +3145,14 @@ mod tests {
         for (bad_pre, bad_post) in [
             (None, Some((pin1.anchor_id, h_post))), // no FROM read -> fail closed
             (Some((pin1.anchor_id, h_pre)), None),  // no TO read
-            (Some((pin1.anchor_id, h_pre + 1)), Some((pin1.anchor_id, h_post))), // wrong FROM
-            (Some((pin1.anchor_id, h_pre)), Some((pin1.anchor_id, h_post + 1))), // wrong TO
+            (
+                Some((pin1.anchor_id, h_pre + 1)),
+                Some((pin1.anchor_id, h_post)),
+            ), // wrong FROM
+            (
+                Some((pin1.anchor_id, h_pre)),
+                Some((pin1.anchor_id, h_post + 1)),
+            ), // wrong TO
             (Some(([0xEEu8; 32], h_pre)), Some((pin1.anchor_id, h_post))), // FROM read from another chip
         ] {
             let r = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(

@@ -6632,8 +6632,7 @@ mod tests {
 
         // Verified contact for the sender (REAL signing key) so establish_relationship succeeds and
         // get_chain_tip_for(sender) returns a tip — create_prepare_accept needs it.
-        let sender_kp =
-            SignatureKeyPair::generate_from_entropy(b"sender-signing-key").expect("kp");
+        let sender_kp = SignatureKeyPair::generate_from_entropy(b"sender-signing-key").expect("kp");
         let contact = dsm::types::contact_types::DsmVerifiedContact {
             alias: "sender".to_string(),
             device_id: sender,
@@ -6652,7 +6651,9 @@ mod tests {
         {
             let mut m = bilateral_manager.write().await;
             m.add_verified_contact(contact).expect("contact");
-            m.establish_relationship(&sender).await.expect("relationship");
+            m.establish_relationship(&sender)
+                .await
+                .expect("relationship");
         }
 
         // A COMPLETE pin admitted for the sender (verifier slot + chip key + uncompromised).

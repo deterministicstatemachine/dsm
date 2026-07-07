@@ -586,7 +586,10 @@ fn accept_rejects_spliced_counter_read() {
     let mut c = ctx(&b);
     let other_dev = [0x7E; 32];
     c.sender_device_root_before = &other_dev;
-    assert_eq!(check(&rel, &c, &pk), Err(AcceptError::CounterBindingInvalid));
+    assert_eq!(
+        check(&rel, &c, &pk),
+        Err(AcceptError::CounterBindingInvalid)
+    );
 }
 
 #[test]

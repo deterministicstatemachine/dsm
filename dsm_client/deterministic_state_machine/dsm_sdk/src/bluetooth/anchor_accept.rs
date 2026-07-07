@@ -485,7 +485,8 @@ pub fn restamp_counter_binding(
     sender_device_root_after: &[u8; 32],
 ) -> Result<Vec<u8>, OfflineRecover> {
     use anchor_core::proto::arr32;
-    let mut rel = pb::OfflineRelease::decode(offline_release).map_err(|_| OfflineRecover::Malformed)?;
+    let mut rel =
+        pb::OfflineRelease::decode(offline_release).map_err(|_| OfflineRecover::Malformed)?;
     let cert = rel.cert.as_ref().ok_or(OfflineRecover::Malformed)?;
     let a32 = |v: &[u8]| arr32(v).map_err(|_| OfflineRecover::Malformed);
     let binding = CounterAdvanceBinding {
@@ -623,7 +624,10 @@ mod tests {
 
     /// A counter-advance binding + matching evidence pinned to `anchor`, so the binding check
     /// passes and the test isolates the authenticated-read / anchor-gate behaviour.
-    fn bound_evidence(anchor: [u8; 32], host_claim: u64) -> (CounterAdvanceBinding, CounterAdvanceEvidence) {
+    fn bound_evidence(
+        anchor: [u8; 32],
+        host_claim: u64,
+    ) -> (CounterAdvanceBinding, CounterAdvanceEvidence) {
         let binding = CounterAdvanceBinding {
             anchor_id: anchor,
             receiver_challenge: ZERO,

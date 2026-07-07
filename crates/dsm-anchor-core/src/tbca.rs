@@ -275,20 +275,55 @@ mod tests {
         };
         assert!(!verify_tbca::<MockTbca>(&f(0x99), &aid, uc, nuc, &a)); // wrong anchor pk
         assert!(!verify_tbca::<MockTbca>(&pk, &f(0x99), uc, nuc, &a)); // wrong anchor id
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.receiver_challenge = f(0x99))));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.transition_digest = f(0x99))));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.root_advance_message = f(0x99))));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.sender_device_root_before = f(0x99))));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.sender_device_root_after = f(0x99))));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.appliance_root_before = f(0x99))));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
-            &tamper(a.clone(), &|t| t.appliance_root_after = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.receiver_challenge = f(0x99))
+        ));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.transition_digest = f(0x99))
+        ));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.root_advance_message = f(0x99))
+        ));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.sender_device_root_before = f(0x99))
+        ));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.sender_device_root_after = f(0x99))
+        ));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.appliance_root_before = f(0x99))
+        ));
+        assert!(!verify_tbca::<MockTbca>(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            &tamper(a.clone(), &|t| t.appliance_root_after = f(0x99))
+        ));
         // Wrong coordinate pair (message binds uᵢ/uᵢ+1) — but keep the unit step so the
         // rejection is the binding, not the arithmetic guard.
         assert!(!verify_tbca::<MockTbca>(&pk, &aid, 5, 6, &a));
@@ -304,7 +339,19 @@ mod tests {
         assert!(!verify_tbca::<MockTbca>(&pk, &aid, 0, 2, &a));
 
         // And a wraparound (next == 0) is rejected.
-        let a0 = att(&pk, &aid, u64::MAX, 0, f(5), f(2), f(3), f(6), f(7), f(8), f(9));
+        let a0 = att(
+            &pk,
+            &aid,
+            u64::MAX,
+            0,
+            f(5),
+            f(2),
+            f(3),
+            f(6),
+            f(7),
+            f(8),
+            f(9),
+        );
         assert!(!verify_tbca::<MockTbca>(&pk, &aid, u64::MAX, 0, &a0));
     }
 
@@ -314,8 +361,32 @@ mod tests {
         let aid = f(1);
         let (uc, nuc) = (0u64, 1u64);
         // Same counter coordinate, two distinct successors (different M / roots / r_R).
-        let a = att(&pk, &aid, uc, nuc, f(5), f(0x2A), f(0x1A), f(6), f(0x7A), f(8), f(0x9A));
-        let b = att(&pk, &aid, uc, nuc, f(6), f(0x2B), f(0x1B), f(6), f(0x7B), f(8), f(0x9B));
+        let a = att(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            f(5),
+            f(0x2A),
+            f(0x1A),
+            f(6),
+            f(0x7A),
+            f(8),
+            f(0x9A),
+        );
+        let b = att(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            f(6),
+            f(0x2B),
+            f(0x1B),
+            f(6),
+            f(0x7B),
+            f(8),
+            f(0x9B),
+        );
 
         let proof = TbcaDoubleAttestation {
             anchor_id: aid,
@@ -332,7 +403,19 @@ mod tests {
         let pk = f(0xAB);
         let aid = f(1);
         let (uc, nuc) = (0u64, 1u64);
-        let a = att(&pk, &aid, uc, nuc, f(5), f(0x2A), f(0x1A), f(6), f(0x7A), f(8), f(0x9A));
+        let a = att(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            f(5),
+            f(0x2A),
+            f(0x1A),
+            f(6),
+            f(0x7A),
+            f(8),
+            f(0x9A),
+        );
 
         // Same M on both sides is not a fork — reject.
         let same = TbcaDoubleAttestation {
@@ -345,7 +428,19 @@ mod tests {
         assert!(!same.verify::<MockTbca>(&pk));
 
         // Distinct transitions but one signature is invalid — reject.
-        let mut bad_b = att(&pk, &aid, uc, nuc, f(6), f(0x2B), f(0x1B), f(6), f(0x7B), f(8), f(0x9B));
+        let mut bad_b = att(
+            &pk,
+            &aid,
+            uc,
+            nuc,
+            f(6),
+            f(0x2B),
+            f(0x1B),
+            f(6),
+            f(0x7B),
+            f(8),
+            f(0x9B),
+        );
         bad_b.sig = vec![0u8; 32]; // not a valid mock signature
         let bad = TbcaDoubleAttestation {
             anchor_id: aid,
