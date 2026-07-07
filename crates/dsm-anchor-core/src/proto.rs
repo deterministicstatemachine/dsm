@@ -12,7 +12,7 @@ use prost::Message;
 
 use crate::boot::BootTicket;
 use crate::root_advance::{
-    Certificate, CounterAdvanceEvidence, CounterRead, OfflineRelease, OwnedTransition,
+    Certificate, CounterAdvanceEvidence, CounterReadEvidence, OfflineRelease, OwnedTransition,
 };
 
 /// prost-generated message types (package `dsm.anchor`).
@@ -210,37 +210,27 @@ impl Certificate {
     }
 }
 
-// --- CounterRead / CounterAdvanceEvidence <-> pb ---
+// --- CounterReadEvidence / CounterAdvanceEvidence <-> pb ---
 
-impl pb::CounterRead {
-    pub fn to_read(&self) -> Result<CounterRead, ProtoError> {
+impl pb::CounterReadEvidence {
+    pub fn to_read(&self) -> Result<CounterReadEvidence, ProtoError> {
         bounded(&self.verifier_transcript, MAX_TRANSCRIPT)?;
-        Ok(CounterRead {
+        Ok(CounterReadEvidence {
             anchor_id: arr32(&self.anchor_id)?,
-            receiver_challenge: arr32(&self.receiver_challenge)?,
-            root_advance_message: arr32(&self.root_advance_message)?,
-            prev_root: arr32(&self.prev_root)?,
-            next_root: arr32(&self.next_root)?,
-            anchor_counter: self.anchor_counter,
-            next_anchor_counter: self.next_anchor_counter,
             attested_raw_counter: self.attested_raw_counter,
             verifier_transcript: self.verifier_transcript.clone(),
+            binding_hash: arr32(&self.binding_hash)?,
         })
     }
 }
 
-impl CounterRead {
-    pub fn to_pb(&self) -> pb::CounterRead {
-        pb::CounterRead {
+impl CounterReadEvidence {
+    pub fn to_pb(&self) -> pb::CounterReadEvidence {
+        pb::CounterReadEvidence {
             anchor_id: self.anchor_id.to_vec(),
-            receiver_challenge: self.receiver_challenge.to_vec(),
-            root_advance_message: self.root_advance_message.to_vec(),
-            prev_root: self.prev_root.to_vec(),
-            next_root: self.next_root.to_vec(),
-            anchor_counter: self.anchor_counter,
-            next_anchor_counter: self.next_anchor_counter,
             attested_raw_counter: self.attested_raw_counter,
             verifier_transcript: self.verifier_transcript.clone(),
+            binding_hash: self.binding_hash.to_vec(),
         }
     }
 }

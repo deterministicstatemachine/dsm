@@ -17,33 +17,23 @@
 
 use crate::boot::BootTicket;
 use crate::root_advance::{
-    counter_advance_binding, next_anchor_head, partition_commit, partition_final_cert_message,
-    pk_hash, root_advance_message, transition_digest, tropic_transfer_input,
-    tropic_witness_message, Certificate, CounterRead, OfflineRelease, Transition,
+    next_anchor_head, partition_commit, partition_final_cert_message, pk_hash,
+    root_advance_message, transition_digest, tropic_transfer_input, tropic_witness_message,
+    CounterAdvanceBinding, CounterAdvanceEvidence, CounterAdvanceReads, CounterEvidenceError,
+    OfflineRelease, Transition,
 };
 use crate::tropic::WitnessSig;
 use crate::util::ct_eq_32;
 
-/// (21) A receiver-side authenticated counter read must be pinned to exactly this
-/// transition: its self-describing fields equal the certificate's, and its named
-/// root-advance message equals the recomputed `M`. This blocks splicing a stale or
-/// foreign authenticated read (from another session or transition) into this one.
-fn counter_reads_bound_to_transition(read: &CounterRead, cert: &Certificate, m: &[u8; 32]) -> bool {
-    ct_eq_32(&read.anchor_id, &cert.anchor_id)
-        && ct_eq_32(&read.receiver_challenge, &cert.receiver_challenge)
-        && ct_eq_32(&read.root_advance_message, m)
-        && ct_eq_32(&read.prev_root, &cert.prev_root)
-        && ct_eq_32(&read.next_root, &cert.next_root)
-        && read.anchor_counter == cert.anchor_counter
-        && read.next_anchor_counter == cert.next_anchor_counter
-}
-
 /// DSM-state + partition verifier the receiver supplies (checks 3, 4, 13, 14, 15, 21).
 pub trait DsmVerifier {
-    /// (3) The previous DSM root commits to `(B, Aᵢ, J_b, uᵢ)`.
-    fn prev_root_commits_anchor_state(
+    /// (3) The sender **device** SMT root before the transfer (`R_i`) commits the anchor
+    /// state `(B, Aᵢ, J_b, uᵢ)`. `appliance_root` is the appliance frontier `hᵢ` the
+    /// release binds that committed state to — passed for context; the receiver checks
+    /// its own pinned `R_i` (never treats the appliance root as the device SMT root).
+    fn sender_device_root_before_commits_anchor_state(
         &self,
-        prev_root: &[u8; 32],
+        appliance_root: &[u8; 32],
         bundle: &[u8; 32],
         anchor_head: &[u8; 32],
         boot_head: &[u8; 32],
@@ -71,9 +61,9 @@ pub trait DsmVerifier {
     fn delivers_to_receiver(&self, t: &Transition) -> bool;
 
     /// (21) The next DSM root commits to `(B, Aᵢ₊₁, J_{b'}, uᵢ+1)`.
-    fn next_root_commits_anchor_state(
+    fn sender_device_root_after_commits_anchor_state(
         &self,
-        next_root: &[u8; 32],
+        appliance_root: &[u8; 32],
         bundle: &[u8; 32],
         next_anchor_head: &[u8; 32],
         boot_head: &[u8; 32],
@@ -81,19 +71,26 @@ pub trait DsmVerifier {
     ) -> bool;
 }
 
-/// The counter-evidence verifier the receiver supplies (checks 17–20). Each method
-/// returns the live TROPIC01 counter value `H` the receiver itself read over an
-/// authenticated L3 verifier-pairing-slot session — derived from
-/// `ev.verifier_transcript`, NOT from the host-supplied `ev.attested_raw_counter`.
-/// `None` if the read is absent, inauthentic, or from a different anchor. The two
-/// reads are the FROM (pre-commit) and TO (post-commit) ends of one physical
-/// advance; the predicate requires both (Remark 22): a post-only read cannot
-/// witness that the sender began at the FROM coordinate `uᵢ`.
+/// The counter-evidence verifier the receiver supplies (checks 17–21). Verifies the
+/// transition binding of both reads and returns the two live TROPIC01 counter values
+/// `H` the receiver itself read over an authenticated L3 verifier-pairing-slot session
+/// — derived from `verifier_transcript`, NOT from the host-supplied
+/// `attested_raw_counter`. The two reads are the FROM (pre-commit) and TO (post-commit)
+/// ends of one physical advance; a post-only read cannot witness that the sender began
+/// at the FROM coordinate `uᵢ` (Remark 22). It must NOT return a bare scalar: both
+/// authenticated readings are returned so the predicate can position each against
+/// `H₀ − uᵢ` / `H₀ − (uᵢ+1)`.
 pub trait CounterVerifier {
-    /// (17) The authenticated pre-commit read at the FROM coordinate (`H₀ − uᵢ`).
-    fn read_authentic_pre(&self, anchor_id: &[u8; 32], ev: &CounterRead) -> Option<u64>;
-    /// (19) The authenticated post-commit read at the TO coordinate (`H₀ − (uᵢ+1)`).
-    fn read_authentic_post(&self, anchor_id: &[u8; 32], ev: &CounterRead) -> Option<u64>;
+    /// Verify `evidence` is bound to this exact transition (the receiver recomputed
+    /// `binding` from the accepted transition) and return both authenticated raw reads.
+    /// Rejects a wrong anchor id, a wrong/absent binding, a pre/post binding mismatch, a
+    /// missing read, or a host scalar with no valid transcript.
+    fn verify_counter_advance(
+        &self,
+        pinned_anchor_id: &[u8; 32],
+        evidence: &CounterAdvanceEvidence,
+        binding: &CounterAdvanceBinding,
+    ) -> Result<CounterAdvanceReads, CounterEvidenceError>;
 }
 
 /// Receiver-side context: the values this receiver pinned/supplied, plus the
@@ -111,6 +108,14 @@ pub struct VerifierContext<'a> {
     pub expected_policy_hash: &'a [u8; 32],
     /// Enrolled counter `H₀` for the pinned anchor.
     pub enrolled_counter: u64,
+    /// The sender **device** SMT root before the transfer (`R_i`) the receiver verified
+    /// (from its accepted `rel_proof_parent`) — bound into the counter-advance binding so
+    /// the counter movement is tied to the exact device-committed state, never the
+    /// appliance frontier alone.
+    pub sender_device_root_before: &'a [u8; 32],
+    /// The sender **device** SMT root after the transfer (`R_{i+1}`) the receiver verified
+    /// (from its accepted `rel_proof_child`) — bound into the counter-advance binding.
+    pub sender_device_root_after: &'a [u8; 32],
     /// (22) `true` iff no firmware-boundary / physical-compromise / policy event
     /// invalidates the anchor.
     pub anchor_uncompromised: bool,
@@ -151,15 +156,21 @@ pub enum AcceptError {
     NotDeliveredToReceiver,
     /// (16) Authority policy hash mismatch.
     PolicyMismatch,
-    /// (17–18) Pre-commit counter read absent/inauthentic or not `H₀ − uᵢ` (the FROM
-    /// coordinate). A second successor of the same counter-positioned sender state
-    /// fails here on sight: the live counter has already left `uᵢ`.
+    /// (17) A counter read is absent, inauthentic, or a host scalar with no valid
+    /// verifier transcript; or `H₀ − uᵢ` / `H₀ − (uᵢ+1)` underflows the enrolled counter.
+    CounterEvidenceInvalid,
+    /// (18) Pre-commit counter read is not `H₀ − uᵢ` (the FROM coordinate). A second
+    /// successor of the same counter-positioned sender state fails here on sight: the
+    /// live counter has already left `uᵢ`.
     CounterFromCoordinateInvalid,
-    /// (19–20) Post-commit counter read absent/inauthentic or not `H₀ − (uᵢ+1)`.
+    /// (19) Post-commit counter read is not `H₀ − (uᵢ+1)` (the TO coordinate).
     CounterToCoordinateInvalid,
-    /// (21) Pre/post reads are not bound to this exact transition (`anchor_id, r_R,
-    /// M, R_i, R_{i+1}, uᵢ, uᵢ+1`), or the advance binding hash does not recompute.
-    CounterAdvanceUnbound,
+    /// (20) A read's `anchor_id`/`binding_hash` does not match the binding the receiver
+    /// recomputed from the accepted transition (`anchor_id, r_R, D, M, R_i, R_{i+1}, hᵢ,
+    /// hᵢ₊₁, uᵢ, uᵢ+1`) — a stale or foreign read cannot be spliced in.
+    CounterBindingInvalid,
+    /// (21) The pre and post reads carry different bindings — not one physical advance.
+    CounterPrePostMismatch,
     /// (22) `Aᵢ₊₁` does not recompute from the fused-anchor-head formula.
     NextAnchorHeadMismatch,
     /// (23) Next DSM state does not commit to `(B, Aᵢ₊₁, J_{b'}, uᵢ+1)`.
@@ -201,8 +212,9 @@ where
         return Err(AcceptError::PrevRootNotAccepted);
     }
 
-    // (3) Previous DSM state commits to (B, Aᵢ, J_b, uᵢ).
-    if !dsm.prev_root_commits_anchor_state(
+    // (3) The sender device root before the transfer (Rᵢ) commits (B, Aᵢ, J_b, uᵢ);
+    // `t.prev_root` is the appliance frontier hᵢ passed for context.
+    if !dsm.sender_device_root_before_commits_anchor_state(
         t.prev_root,
         &cert.anchor_bundle,
         &cert.prev_anchor_head,
@@ -318,58 +330,54 @@ where
         return Err(AcceptError::PolicyMismatch);
     }
 
-    // (17–18) FROM coordinate. The receiver's own authenticated pre-commit read
-    // must prove the live counter is at the position `uᵢ` that `prev_root` commits
-    // (check 3): H_pre = H₀ − uᵢ. This is the discriminating check — a second
-    // successor of the same counter-positioned sender state finds the live counter
-    // already at `uᵢ+1` and fails here on sight, before reconciliation (§4, Thm 41).
-    let expects_pre = ctx
+    // (17–21) Transition-bound counter advance. The receiver's own authenticated FROM
+    // (pre-commit) and TO (post-commit) reads must witness one physical step of the very
+    // chip this release is pinned to, bound to THIS transition. The expected binding is
+    // recomputed here from the accepted transition (both root pairs: the sender device
+    // roots Rᵢ/Rᵢ₊₁ the receiver verified, and the appliance frontier roots hᵢ/hᵢ₊₁), never
+    // taken from a host field. `verify_counter_advance` checks the binding + anchor id +
+    // pre/post agreement and returns the two authenticated raw reads; the coordinate
+    // checks below position them.
+    let expected_pre = ctx
         .enrolled_counter
         .checked_sub(t.anchor_counter)
-        .ok_or(AcceptError::CounterFromCoordinateInvalid)?;
-    let h_pre = counter
-        .read_authentic_pre(ctx.pinned_anchor_id, &ev.pre)
-        .ok_or(AcceptError::CounterFromCoordinateInvalid)?;
-    if !ct_eq_32(&ev.pre.anchor_id, ctx.pinned_anchor_id) || h_pre != expects_pre {
-        return Err(AcceptError::CounterFromCoordinateInvalid);
-    }
-
-    // (19–20) TO coordinate. The authenticated post-commit read must prove the
-    // counter advanced to `uᵢ+1`: H_post = H₀ − (uᵢ+1). Keeping BOTH ends is
-    // mandatory (Remark 22): replacing the post read with the FROM read alone would
-    // reject every honest transfer, since the live read here is post-commit.
-    let expects_post = ctx
+        .ok_or(AcceptError::CounterEvidenceInvalid)?;
+    let expected_post = ctx
         .enrolled_counter
         .checked_sub(t.next_anchor_counter)
-        .ok_or(AcceptError::CounterToCoordinateInvalid)?;
-    let h_post = counter
-        .read_authentic_post(ctx.pinned_anchor_id, &ev.post)
-        .ok_or(AcceptError::CounterToCoordinateInvalid)?;
-    if !ct_eq_32(&ev.post.anchor_id, ctx.pinned_anchor_id) || h_post != expects_post {
+        .ok_or(AcceptError::CounterEvidenceInvalid)?;
+    let binding = CounterAdvanceBinding {
+        anchor_id: *ctx.pinned_anchor_id,
+        receiver_challenge: cert.receiver_challenge,
+        transition_digest: d,
+        root_advance_message: m,
+        sender_device_root_before: *ctx.sender_device_root_before,
+        sender_device_root_after: *ctx.sender_device_root_after,
+        appliance_root_before: cert.prev_root,
+        appliance_root_after: cert.next_root,
+        anchor_counter: t.anchor_counter,
+        next_anchor_counter: t.next_anchor_counter,
+    };
+    let reads = counter
+        .verify_counter_advance(ctx.pinned_anchor_id, ev, &binding)
+        .map_err(|e| match e {
+            CounterEvidenceError::BindingMismatch => AcceptError::CounterBindingInvalid,
+            CounterEvidenceError::PrePostMismatch => AcceptError::CounterPrePostMismatch,
+            CounterEvidenceError::Inauthentic => AcceptError::CounterEvidenceInvalid,
+        })?;
+
+    // (18) FROM coordinate: the discriminating check. A second successor of the same
+    // counter-positioned sender state finds the live counter already at `uᵢ+1` and fails
+    // here on sight, before reconciliation (§4, Thm 41).
+    if reads.pre_raw_counter != expected_pre {
+        return Err(AcceptError::CounterFromCoordinateInvalid);
+    }
+    // (19) TO coordinate: the counter advanced to `uᵢ+1`. Keeping BOTH ends is mandatory
+    // (Remark 22): the FROM read alone is post-commit for an honest transfer.
+    if reads.post_raw_counter != expected_post {
         return Err(AcceptError::CounterToCoordinateInvalid);
     }
-
-    // (21) Both reads are bound to this exact transition. The pinned fields of each
-    // read must equal the certificate's (anchor_id, r_R, M, R_i, R_{i+1}, uᵢ, uᵢ+1),
-    // and the advance binding hash must recompute over the trusted H_pre/H_post — so
-    // a stale or foreign authenticated read cannot be spliced into this transfer.
-    if !counter_reads_bound_to_transition(&ev.pre, cert, &m)
-        || !counter_reads_bound_to_transition(&ev.post, cert, &m)
-    {
-        return Err(AcceptError::CounterAdvanceUnbound);
-    }
-    let binding = counter_advance_binding(
-        ctx.pinned_anchor_id,
-        h_pre,
-        h_post,
-        &m,
-        &cert.prev_root,
-        &cert.next_root,
-        &cert.receiver_challenge,
-    );
-    if !ct_eq_32(&binding, &ev.binding_hash) {
-        return Err(AcceptError::CounterAdvanceUnbound);
-    }
+    let h_post = reads.post_raw_counter;
 
     // (22) A_{i+1} recomputes from the fused-anchor-head formula (using H_post).
     let a_next = next_anchor_head(
@@ -387,8 +395,9 @@ where
         return Err(AcceptError::NextAnchorHeadMismatch);
     }
 
-    // (23) Next DSM state commits to (B, Aᵢ₊₁, J_{b'}, uᵢ+1).
-    if !dsm.next_root_commits_anchor_state(
+    // (23) The sender device root after the transfer (Rᵢ₊₁) commits (B, Aᵢ₊₁, J_{b'}, uᵢ+1);
+    // `cert.next_root` is the appliance frontier hᵢ₊₁ passed for context.
+    if !dsm.sender_device_root_after_commits_anchor_state(
         &cert.next_root,
         &cert.anchor_bundle,
         &cert.next_anchor_head,

@@ -50,67 +50,97 @@ pub trait TbcaSig {
     fn verify(anchor_pk: &[u8], msg: &[u8; 32], sig: &[u8]) -> bool;
 }
 
-/// The TBCA message the enrolled anchor ECC key signs:
-/// `H(tag ‖ anchor_id ‖ H_old ‖ H_new ‖ M ‖ hᵢ ‖ hᵢ₊₁ ‖ r_R)`.
+/// The canonical transition-bound counter-advance binding the enrolled anchor ECC
+/// key signs, and the same vehicle the receiver's [`crate::root_advance::CounterAdvanceBinding`]
+/// hashes to. Covers the full ten-field transition identity:
+/// `H(tag ‖ anchor_id ‖ r_R ‖ D ‖ M ‖ R_i ‖ R_{i+1} ‖ hᵢ ‖ hᵢ₊₁ ‖ uᵢ ‖ uᵢ+1)`.
 ///
-/// `H_old`/`H_new` are the live TROPIC down-counter values before/after the step
-/// (`H_new = H_old − 1`); `M` is the root-advance message (which already binds the
-/// full transition — recipient, object, roots, counters, policy, challenge); the
-/// roots and `r_R` are named explicitly so the attestation is self-describing and
-/// a fraud proof needs no external context to check.
+/// * `anchor_id`, `receiver_challenge` (`r_R`) — who attested, for which receiver;
+/// * `transition_digest` (`D`), `root_advance_message` (`M`) — the transition;
+/// * `sender_device_root_before/after` (`R_i`, `R_{i+1}`) — the sender **device** SMT
+///   roots that commit the anchor state `(B, Aᵢ, J_b, uᵢ)` / `(B, A_{i+1}, J_{b'}, uᵢ+1)`;
+/// * `appliance_root_before/after` (`hᵢ`, `hᵢ₊₁`) — the appliance frontier the release
+///   binds that committed state to (distinct from the device roots — never conflated);
+/// * `anchor_counter`, `next_anchor_counter` (`uᵢ`, `uᵢ+1`) — the counter coordinate pair.
+///
+/// The counter movement is the coordinate pair `uᵢ → uᵢ+1`; the receiver's live reads
+/// prove the physical position `H = H₀ − u`. Binding both root pairs is load-bearing:
+/// a stale or foreign read cannot be spliced into another transition even if it names
+/// the same counter position, and a device-root vs appliance-root confusion is impossible.
+#[allow(clippy::too_many_arguments)]
 pub fn tbca_message(
     anchor_id: &[u8; 32],
-    h_old: u64,
-    h_new: u64,
-    m: &[u8; 32],
-    prev_root: &[u8; 32],
-    next_root: &[u8; 32],
     receiver_challenge: &[u8; 32],
+    transition_digest: &[u8; 32],
+    root_advance_message: &[u8; 32],
+    sender_device_root_before: &[u8; 32],
+    sender_device_root_after: &[u8; 32],
+    appliance_root_before: &[u8; 32],
+    appliance_root_after: &[u8; 32],
+    anchor_counter: u64,
+    next_anchor_counter: u64,
 ) -> [u8; 32] {
     h(
         domain::TBCA_MESSAGE_V1,
         &[
             anchor_id,
-            &u64_le(h_old),
-            &u64_le(h_new),
-            m,
-            prev_root,
-            next_root,
             receiver_challenge,
+            transition_digest,
+            root_advance_message,
+            sender_device_root_before,
+            sender_device_root_after,
+            appliance_root_before,
+            appliance_root_after,
+            &u64_le(anchor_counter),
+            &u64_le(next_anchor_counter),
         ],
     )
 }
 
-/// Verify a single TBCA: the counter moved by exactly one step and the enrolled
-/// anchor signed that movement bound to this exact transition. This is the
+/// One enrolled-anchor attestation over a transition-bound counter advance: every
+/// field [`tbca_message`] binds except the shared `(anchor_id, uᵢ, uᵢ+1)` (which
+/// [`TbcaDoubleAttestation`] carries once). Self-describing so a fraud proof needs
+/// no external context.
+#[derive(Clone)]
+pub struct TbcaAttestation {
+    pub receiver_challenge: [u8; 32],
+    pub transition_digest: [u8; 32],
+    pub root_advance_message: [u8; 32],
+    pub sender_device_root_before: [u8; 32],
+    pub sender_device_root_after: [u8; 32],
+    pub appliance_root_before: [u8; 32],
+    pub appliance_root_after: [u8; 32],
+    pub sig: Vec<u8>,
+}
+
+/// Verify a single TBCA: the counter advanced by exactly one coordinate step and the
+/// enrolled anchor signed that movement bound to this exact transition. This is the
 /// transition-bound replacement for a bare authenticated scalar counter read.
-#[allow(clippy::too_many_arguments)]
 pub fn verify_tbca<T: TbcaSig>(
     anchor_pk: &[u8],
     anchor_id: &[u8; 32],
-    h_old: u64,
-    h_new: u64,
-    m: &[u8; 32],
-    prev_root: &[u8; 32],
-    next_root: &[u8; 32],
-    receiver_challenge: &[u8; 32],
-    sig: &[u8],
+    anchor_counter: u64,
+    next_anchor_counter: u64,
+    att: &TbcaAttestation,
 ) -> bool {
-    // A transfer consumes exactly one counter step: H_new = H_old − 1
-    // (equivalently uᵢ → uᵢ+1, since H = H₀ − u).
-    if h_old.checked_sub(1) != Some(h_new) {
+    // A transfer consumes exactly one counter step: uᵢ → uᵢ+1 (equivalently
+    // H_new = H_old − 1, since H = H₀ − u).
+    if anchor_counter.checked_add(1) != Some(next_anchor_counter) {
         return false;
     }
     let msg = tbca_message(
         anchor_id,
-        h_old,
-        h_new,
-        m,
-        prev_root,
-        next_root,
-        receiver_challenge,
+        &att.receiver_challenge,
+        &att.transition_digest,
+        &att.root_advance_message,
+        &att.sender_device_root_before,
+        &att.sender_device_root_after,
+        &att.appliance_root_before,
+        &att.appliance_root_after,
+        anchor_counter,
+        next_anchor_counter,
     );
-    T::verify(anchor_pk, &msg, sig)
+    T::verify(anchor_pk, &msg, &att.sig)
 }
 
 /// A TBCA double-attestation fraud proof: the enrolled anchor signed two TBCAs
@@ -122,49 +152,33 @@ pub fn verify_tbca<T: TbcaSig>(
 /// transition-identifying fields it was signed over.
 pub struct TbcaDoubleAttestation {
     pub anchor_id: [u8; 32],
-    pub h_old: u64,
-    pub h_new: u64,
-    pub m_a: [u8; 32],
-    pub prev_root_a: [u8; 32],
-    pub next_root_a: [u8; 32],
-    pub receiver_challenge_a: [u8; 32],
-    pub sig_a: Vec<u8>,
-    pub m_b: [u8; 32],
-    pub prev_root_b: [u8; 32],
-    pub next_root_b: [u8; 32],
-    pub receiver_challenge_b: [u8; 32],
-    pub sig_b: Vec<u8>,
+    pub anchor_counter: u64,
+    pub next_anchor_counter: u64,
+    pub a: TbcaAttestation,
+    pub b: TbcaAttestation,
 }
 
 impl TbcaDoubleAttestation {
     /// Valid iff both TBCAs verify under `anchor_pk`, share the exact same counter
-    /// movement, and name two distinct transitions (`M_a ≠ M_b`). Two valid
+    /// coordinate movement, and name two distinct transitions (`M_a ≠ M_b`). Two valid
     /// attestations of one counter position for two transitions = the fork.
     pub fn verify<T: TbcaSig>(&self, anchor_pk: &[u8]) -> bool {
         // Distinct transitions — else it is the same attestation twice, not a fork.
-        if ct_eq_32(&self.m_a, &self.m_b) {
+        if ct_eq_32(&self.a.root_advance_message, &self.b.root_advance_message) {
             return false;
         }
         verify_tbca::<T>(
             anchor_pk,
             &self.anchor_id,
-            self.h_old,
-            self.h_new,
-            &self.m_a,
-            &self.prev_root_a,
-            &self.next_root_a,
-            &self.receiver_challenge_a,
-            &self.sig_a,
+            self.anchor_counter,
+            self.next_anchor_counter,
+            &self.a,
         ) && verify_tbca::<T>(
             anchor_pk,
             &self.anchor_id,
-            self.h_old,
-            self.h_new,
-            &self.m_b,
-            &self.prev_root_b,
-            &self.next_root_b,
-            &self.receiver_challenge_b,
-            &self.sig_b,
+            self.anchor_counter,
+            self.next_anchor_counter,
+            &self.b,
         )
     }
 }
@@ -216,70 +230,99 @@ mod tests {
         [b; 32]
     }
 
+    /// Build a signed [`TbcaAttestation`] over the ten-field binding (mock sk == pk).
+    #[allow(clippy::too_many_arguments)]
+    fn att(
+        sk: &[u8; 32],
+        aid: &[u8; 32],
+        uc: u64,
+        nuc: u64,
+        rc: [u8; 32],
+        d: [u8; 32],
+        m: [u8; 32],
+        rib: [u8; 32],
+        ria: [u8; 32],
+        hib: [u8; 32],
+        hia: [u8; 32],
+    ) -> TbcaAttestation {
+        let msg = tbca_message(aid, &rc, &d, &m, &rib, &ria, &hib, &hia, uc, nuc);
+        TbcaAttestation {
+            receiver_challenge: rc,
+            transition_digest: d,
+            root_advance_message: m,
+            sender_device_root_before: rib,
+            sender_device_root_after: ria,
+            appliance_root_before: hib,
+            appliance_root_after: hia,
+            sig: mock_sign(sk, &msg),
+        }
+    }
+
     #[test]
     fn tbca_roundtrip_and_field_binding() {
         let pk = f(0xAB); // sk == pk for the mock
-        let (aid, m, pr, nr, rc) = (f(1), f(2), f(3), f(4), f(5));
-        let (h_old, h_new) = (1000u64, 999u64);
-        let msg = tbca_message(&aid, h_old, h_new, &m, &pr, &nr, &rc);
-        let sig = mock_sign(&pk, &msg);
+        let aid = f(1);
+        let (uc, nuc) = (0u64, 1u64);
+        let a = att(&pk, &aid, uc, nuc, f(5), f(2), f(3), f(6), f(7), f(8), f(9));
+        assert!(verify_tbca::<MockTbca>(&pk, &aid, uc, nuc, &a));
 
-        assert!(verify_tbca::<MockTbca>(
-            &pk, &aid, h_old, h_new, &m, &pr, &nr, &rc, &sig
-        ));
-
-        // Every bound field is load-bearing: flipping any one breaks verification.
-        assert!(!verify_tbca::<MockTbca>(&pk, &f(9), h_old, h_new, &m, &pr, &nr, &rc, &sig));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, h_old, h_new, &f(9), &pr, &nr, &rc, &sig));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, h_old, h_new, &m, &f(9), &nr, &rc, &sig));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, h_old, h_new, &m, &pr, &f(9), &rc, &sig));
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, h_old, h_new, &m, &pr, &nr, &f(9), &sig));
-        // Wrong anchor key.
-        assert!(!verify_tbca::<MockTbca>(&f(0xCD), &aid, h_old, h_new, &m, &pr, &nr, &rc, &sig));
+        // Every bound field is load-bearing: flipping any one breaks verification. The
+        // mock signs the ten-field message, so tampering a field after signing yields a
+        // sig over a stale message that no longer recomputes.
+        let tamper = |mut t: TbcaAttestation, f: &dyn Fn(&mut TbcaAttestation)| {
+            f(&mut t);
+            t
+        };
+        assert!(!verify_tbca::<MockTbca>(&f(0x99), &aid, uc, nuc, &a)); // wrong anchor pk
+        assert!(!verify_tbca::<MockTbca>(&pk, &f(0x99), uc, nuc, &a)); // wrong anchor id
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.receiver_challenge = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.transition_digest = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.root_advance_message = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.sender_device_root_before = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.sender_device_root_after = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.appliance_root_before = f(0x99))));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, uc, nuc,
+            &tamper(a.clone(), &|t| t.appliance_root_after = f(0x99))));
+        // Wrong coordinate pair (message binds uᵢ/uᵢ+1) — but keep the unit step so the
+        // rejection is the binding, not the arithmetic guard.
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, 5, 6, &a));
     }
 
     #[test]
     fn tbca_rejects_non_unit_counter_step() {
         let pk = f(0xAB);
-        let (aid, m, pr, nr, rc) = (f(1), f(2), f(3), f(4), f(5));
-        // H_new must be exactly H_old − 1; a 2-step (or 0-step) claim is rejected
-        // even with an otherwise valid signature over the claimed values.
-        let (h_old, h_new) = (1000u64, 998u64);
-        let msg = tbca_message(&aid, h_old, h_new, &m, &pr, &nr, &rc);
-        let sig = mock_sign(&pk, &msg);
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, h_old, h_new, &m, &pr, &nr, &rc, &sig));
+        let aid = f(1);
+        // next must be exactly counter + 1; a 2-step (or 0-step) claim is rejected even
+        // with an otherwise valid signature over the claimed coordinates.
+        let a = att(&pk, &aid, 0, 2, f(5), f(2), f(3), f(6), f(7), f(8), f(9));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, 0, 2, &a));
 
-        // And H_old == 0 (would underflow) is rejected.
-        let msg0 = tbca_message(&aid, 0, 0, &m, &pr, &nr, &rc);
-        let sig0 = mock_sign(&pk, &msg0);
-        assert!(!verify_tbca::<MockTbca>(&pk, &aid, 0, 0, &m, &pr, &nr, &rc, &sig0));
+        // And a wraparound (next == 0) is rejected.
+        let a0 = att(&pk, &aid, u64::MAX, 0, f(5), f(2), f(3), f(6), f(7), f(8), f(9));
+        assert!(!verify_tbca::<MockTbca>(&pk, &aid, u64::MAX, 0, &a0));
     }
 
     #[test]
     fn tbca_double_attestation_is_a_valid_fraud_proof() {
         let pk = f(0xAB);
-        let (aid, rc_a, rc_b) = (f(1), f(5), f(6));
-        let (h_old, h_new) = (1000u64, 999u64);
-        // Same counter movement, two distinct successors (different M and next_root).
-        let (m_a, pr, nr_a) = (f(0x1A), f(3), f(0x4A));
-        let (m_b, nr_b) = (f(0x1B), f(0x4B));
-        let sig_a = mock_sign(&pk, &tbca_message(&aid, h_old, h_new, &m_a, &pr, &nr_a, &rc_a));
-        let sig_b = mock_sign(&pk, &tbca_message(&aid, h_old, h_new, &m_b, &pr, &nr_b, &rc_b));
+        let aid = f(1);
+        let (uc, nuc) = (0u64, 1u64);
+        // Same counter coordinate, two distinct successors (different M / roots / r_R).
+        let a = att(&pk, &aid, uc, nuc, f(5), f(0x2A), f(0x1A), f(6), f(0x7A), f(8), f(0x9A));
+        let b = att(&pk, &aid, uc, nuc, f(6), f(0x2B), f(0x1B), f(6), f(0x7B), f(8), f(0x9B));
 
         let proof = TbcaDoubleAttestation {
             anchor_id: aid,
-            h_old,
-            h_new,
-            m_a,
-            prev_root_a: pr,
-            next_root_a: nr_a,
-            receiver_challenge_a: rc_a,
-            sig_a,
-            m_b,
-            prev_root_b: pr,
-            next_root_b: nr_b,
-            receiver_challenge_b: rc_b,
-            sig_b,
+            anchor_counter: uc,
+            next_anchor_counter: nuc,
+            a,
+            b,
         };
         assert!(proof.verify::<MockTbca>(&pk));
     }
@@ -287,45 +330,29 @@ mod tests {
     #[test]
     fn tbca_double_attestation_rejects_same_transition_and_bad_sig() {
         let pk = f(0xAB);
-        let (aid, rc) = (f(1), f(5));
-        let (h_old, h_new) = (1000u64, 999u64);
-        let (m, pr, nr) = (f(0x1A), f(3), f(0x4A));
-        let sig = mock_sign(&pk, &tbca_message(&aid, h_old, h_new, &m, &pr, &nr, &rc));
+        let aid = f(1);
+        let (uc, nuc) = (0u64, 1u64);
+        let a = att(&pk, &aid, uc, nuc, f(5), f(0x2A), f(0x1A), f(6), f(0x7A), f(8), f(0x9A));
 
         // Same M on both sides is not a fork — reject.
         let same = TbcaDoubleAttestation {
             anchor_id: aid,
-            h_old,
-            h_new,
-            m_a: m,
-            prev_root_a: pr,
-            next_root_a: nr,
-            receiver_challenge_a: rc,
-            sig_a: sig.clone(),
-            m_b: m,
-            prev_root_b: pr,
-            next_root_b: nr,
-            receiver_challenge_b: rc,
-            sig_b: sig.clone(),
+            anchor_counter: uc,
+            next_anchor_counter: nuc,
+            a: a.clone(),
+            b: a.clone(),
         };
         assert!(!same.verify::<MockTbca>(&pk));
 
         // Distinct transitions but one signature is invalid — reject.
-        let m_b = f(0x1B);
+        let mut bad_b = att(&pk, &aid, uc, nuc, f(6), f(0x2B), f(0x1B), f(6), f(0x7B), f(8), f(0x9B));
+        bad_b.sig = vec![0u8; 32]; // not a valid mock signature
         let bad = TbcaDoubleAttestation {
             anchor_id: aid,
-            h_old,
-            h_new,
-            m_a: m,
-            prev_root_a: pr,
-            next_root_a: nr,
-            receiver_challenge_a: rc,
-            sig_a: sig,
-            m_b,
-            prev_root_b: pr,
-            next_root_b: f(0x4B),
-            receiver_challenge_b: rc,
-            sig_b: vec![0u8; 32], // not a valid mock signature
+            anchor_counter: uc,
+            next_anchor_counter: nuc,
+            a,
+            b: bad_b,
         };
         assert!(!bad.verify::<MockTbca>(&pk));
     }

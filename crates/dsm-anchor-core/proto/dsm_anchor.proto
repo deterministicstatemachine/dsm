@@ -72,32 +72,30 @@ message RootAdvanceCertificate {
 }
 
 // One receiver-side authenticated TROPIC01 counter read, pinned to exactly one
-// transition (§13/§32). Used for both the FROM (pre-commit) and TO (post-commit)
-// ends of a single physical advance. The receiver authenticates verifier_transcript;
-// attested_raw_counter is an untrusted transport claim of H (§33). The remaining
-// fields pin the read to (anchor_id, r_R, M, R_i, R_{i+1}, uᵢ, uᵢ+1) so a stale or
-// foreign read cannot be spliced into another transition.
-message CounterRead {
+// transition by binding_hash (§13/§32). Used for both the FROM (pre-commit) and TO
+// (post-commit) ends of a single physical advance. The receiver authenticates
+// verifier_transcript; attested_raw_counter is an untrusted transport claim of H (§33).
+// No per-read transition fields are carried: binding_hash must equal the
+// CounterAdvanceBinding the receiver recomputes from the accepted transition, so a stale
+// or foreign read cannot be spliced in.
+message CounterReadEvidence {
   bytes anchor_id             = 1;  // 32
-  bytes receiver_challenge    = 2;  // 32  r_R
-  bytes root_advance_message  = 3;  // 32  M
-  bytes prev_root             = 4;  // 32  R_i (sender device root before; commits uᵢ)
-  bytes next_root             = 5;  // 32  R_{i+1}
-  uint64 anchor_counter       = 6;  //     uᵢ
-  uint64 next_anchor_counter  = 7;  //     uᵢ+1
-  uint64 attested_raw_counter = 8;  //     untrusted transport claim of H for this read
-  bytes verifier_transcript   = 9;  // authenticated L3 read — the trusted value
+  uint64 attested_raw_counter = 2;  //     untrusted transport claim of H for this read
+  bytes verifier_transcript   = 3;  // authenticated L3 read — the trusted value
+  bytes binding_hash          = 4;  // 32  the transition-bound counter-advance binding
 }
 
 // Transition-bound counter-advance evidence (§13/§32). One physical advance
 // witnessed at both ends: pre at the FROM coordinate (H_pre = H0 − uᵢ), post at
 // the TO coordinate (H_post = H0 − (uᵢ+1)); binding_hash ties the movement to one
-// transition. The old single post-only CounterEvidence is intentionally removed —
-// a post scalar is not sufficient offline-bearer evidence (§4, §33).
+// transition. All three binding_hash fields (pre, post, envelope) must equal the
+// receiver-recomputed binding. The old single post-only CounterEvidence is intentionally
+// removed — a post scalar is not sufficient offline-bearer evidence (§4, §33).
 message CounterAdvanceEvidence {
-  CounterRead pre    = 1;
-  CounterRead post   = 2;
-  bytes binding_hash = 3;  // 32  H(anchor_id ‖ H_pre ‖ H_post ‖ M ‖ R_i ‖ R_{i+1} ‖ r_R)
+  CounterReadEvidence pre  = 1;
+  CounterReadEvidence post = 2;
+  // 32  H(anchor_id ‖ r_R ‖ D ‖ M ‖ R_i ‖ R_{i+1} ‖ hᵢ ‖ hᵢ₊₁ ‖ uᵢ ‖ uᵢ+1)
+  bytes binding_hash       = 3;
 }
 
 // The exported release package Pkg = (Δ, BootChain, Cert, counter-advance evidence) (§20).
