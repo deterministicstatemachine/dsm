@@ -152,6 +152,14 @@ pub struct BilateralBleSession {
     /// this transfer's confirm. `None` for ordinary transfers / already-pinned counterparties.
     /// In-memory only: lost on restart, the next bearer transfer simply re-requests (fail-safe).
     pub pending_enroll_pubkey: Option<Vec<u8>>,
+    /// RECEIVER-only (Counter-Positioned Commit §21.3): the authenticated FROM counter read
+    /// `(anchor_id, H_pre = H0 − uᵢ)` the receiver took over the relay while the sender was still
+    /// uncommitted — captured in `create_prepare_accept_envelope_*` BEFORE the accept-response (which
+    /// is what triggers the sender's commit). Consumed by `handle_confirm_request` as `attested_pre`
+    /// so the predicate enforces the full FROM→TO proof. `None` (fail-closed FROM) for ordinary
+    /// transfers, first transfers with no complete pin yet, or when no relay reader is installed.
+    /// In-memory only: lost on restart, the next bearer transfer simply re-reads (fail-safe).
+    pub attested_pre: Option<([u8; 32], u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -528,6 +536,7 @@ impl SessionStore {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
         })
     }
 }
@@ -556,6 +565,7 @@ mod tests {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
         }
     }
 

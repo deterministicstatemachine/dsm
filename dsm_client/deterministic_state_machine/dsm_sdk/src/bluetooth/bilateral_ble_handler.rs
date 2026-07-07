@@ -605,6 +605,7 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
         })
     }
 
@@ -1638,6 +1639,7 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
         };
 
         {
@@ -2595,6 +2597,7 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
         };
 
         {
@@ -2770,6 +2773,39 @@ impl BilateralBleHandler {
             } else {
                 None
             };
+
+        // Counter-Positioned Commit FROM read (§21.3): for an offline-bearer transfer whose sender
+        // anchor is ALREADY pinned with a COMPLETE pin (verifier slot + chip key), read the sender's
+        // live counter over the relay NOW — while the sender is still uncommitted, its counter at uᵢ.
+        // The prepare-response this method sends is exactly what triggers the sender's commit
+        // (`handle_prepare_response` → `send_bilateral_confirm`), so this read is GUARANTEED to precede
+        // that commit and captures `H_pre = H0 − uᵢ`. `handle_confirm_request` then re-reads
+        // `H_post = H0 − (uᵢ+1)` and the predicate enforces the full FROM→TO proof. First transfers
+        // (pin not yet complete) and no-reader (production) skip → fail-closed on the FROM check.
+        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+            &session.operation,
+        ) {
+            let pin = crate::bridge::anchor_enrollment_store()
+                .and_then(|s| s.get(&counterparty_device_id))
+                .map(|e| e.pin);
+            let attested_pre = crate::bluetooth::anchor_accept::resolve_attested_counter(
+                pin.as_ref(),
+                crate::bridge::anchor_counter_reader(),
+                counterparty_device_id,
+                origin_commitment_hash,
+            )
+            .await;
+            if attested_pre.is_some() {
+                let mut sessions = self.sessions.sessions.lock().await;
+                if let Some(s) = sessions.get_mut(&origin_commitment_hash) {
+                    s.attested_pre = attested_pre;
+                }
+                info!(
+                    "[BILATERAL][offline-bearer][receiver] captured FROM read (H_pre) pre-commit for commitment {}",
+                    bytes_to_base32(&origin_commitment_hash[..8])
+                );
+            }
+        }
 
         // Build prepare response
         let prepare_response = generated::BilateralPrepareResponse {
@@ -4658,9 +4694,12 @@ impl BilateralBleHandler {
                     commitment_hash,
                 )
                 .await;
-            // The FROM (pre-commit) read is produced by the interactive handshake not yet built on
-            // this single-confirm path; without it the predicate fails the FROM check (fail-closed).
-            let attested_pre: Option<([u8; 32], u64)> = None;
+            // The FROM (pre-commit) read `H_pre = H0 − uᵢ` was captured by the receiver's accept path
+            // (`create_prepare_accept_envelope_*`) BEFORE the accept-response triggered this sender's
+            // commit, and stashed on the session. `None` (fail-closed FROM) for first transfers with
+            // no complete pin yet, no installed reader, or a post-restart session rebuilt from SQLite
+            // (the FROM read is in-memory only) — the predicate then rejects and recovers online.
+            let attested_pre: Option<([u8; 32], u64)> = session.attested_pre;
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
@@ -6180,6 +6219,7 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
         };
 
         // Insert into active sessions
@@ -6522,6 +6562,7 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
             })
             .await;
 
@@ -6627,6 +6668,7 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
             })
             .await;
 
@@ -6697,6 +6739,7 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
             })
             .await;
         handler
@@ -6719,6 +6762,7 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
             })
             .await;
 
