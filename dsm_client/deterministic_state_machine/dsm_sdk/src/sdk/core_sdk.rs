@@ -1566,6 +1566,11 @@ impl CoreSDK {
 /// Producer-side offline-bearer artifacts from driving the device fused-anchor appliance for one
 /// transfer: the wire release + the fused-anchor leaf update the DSM advance must apply + the
 /// appliance root lineage the receiver pins/adopts + the pin material to admit the anchor.
+///
+/// `Clone`/`Debug` so the first-transfer round-trip can stash the COMMITTED artifacts on the sender
+/// session (`BilateralBleSession.committed_bearer`) between `handle_bearer_proceed` (which commits)
+/// and `send_bilateral_confirm` (which builds the confirm from them).
+#[derive(Clone, Debug)]
 pub struct OfflineBearerArtifacts {
     /// prost-encoded `dsm.anchor.OfflineRelease` (goes on `BilateralConfirmRequest.offline_release`).
     pub offline_release: Vec<u8>,

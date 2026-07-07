@@ -167,6 +167,13 @@ pub struct BilateralBleSession {
     /// release. `None` for non-bearer / subsequent transfers. In-memory only: lost on restart, the
     /// transfer re-prepares (fail-safe).
     pub prepared_bearer: Option<crate::sdk::core_sdk::PreparedOfflineBearer>,
+    /// SENDER-only (§21 first-transfer round-trip): the COMMITTED offline-bearer artifacts produced by
+    /// `handle_bearer_proceed` (which moved the counter uᵢ→uᵢ+1 only AFTER the receiver's authenticated
+    /// FROM read) — consumed by `send_bilateral_confirm`, which builds the confirm from these instead of
+    /// re-driving the appliance. It must be impossible to confirm on the first-transfer path without
+    /// this stored committed release. `None` for the ordinary path (where `send_bilateral_confirm`
+    /// drives the appliance itself). In-memory only: lost on restart, the transfer re-runs (fail-safe).
+    pub committed_bearer: Option<crate::sdk::core_sdk::OfflineBearerArtifacts>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -545,6 +552,7 @@ impl SessionStore {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         })
     }
 }
@@ -575,6 +583,7 @@ mod tests {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         }
     }
 

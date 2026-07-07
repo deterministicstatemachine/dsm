@@ -607,6 +607,7 @@ impl BilateralBleHandler {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         })
     }
 
@@ -1642,6 +1643,7 @@ impl BilateralBleHandler {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         };
 
         {
@@ -2601,6 +2603,7 @@ impl BilateralBleHandler {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         };
 
         {
@@ -3513,70 +3516,72 @@ impl BilateralBleHandler {
         // roots ever diverge the commit-side guard fails closed. Ordinary transfers (predicate
         // false) and bearer transfers lacking a receiver challenge produce no artifacts, so the
         // release rides empty and the receiver fails closed to online recovery.
-        let bearer_artifacts =
-            if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
-                &session.operation,
-            ) {
-                match (session.receiver_challenge, &session.operation) {
-                    (
-                        Some(r_r),
-                        Operation::Transfer {
-                            token_id,
-                            authority_policy,
-                            ..
-                        },
-                    ) => {
-                        let object_id = dsm::crypto::blake3::domain_hash_bytes(
-                            "DSM/bearer-object/v1",
-                            token_id,
-                        );
-                        let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
-                            "DSM/bearer-payload/v1",
-                            &op_bytes,
-                        );
-                        let authority_policy_hash = authority_policy
-                            .as_ref()
-                            .map(|ap| ap.policy_id)
-                            .unwrap_or([0u8; 32]);
-                        // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
-                        // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
-                        // proof is meaningless. Compared against the canonical value here.
-                        info!(
+        let bearer_artifacts = if let Some(committed) = session.committed_bearer.clone() {
+            // First-transfer round-trip (§21): the release was already COMMITTED in
+            // `handle_bearer_proceed` — the physical counter moved uᵢ→uᵢ+1 only AFTER the receiver's
+            // authenticated FROM read arrived as `BilateralBearerProceed`. Use those artifacts
+            // verbatim; re-driving the appliance here would move the counter a SECOND time. The old
+            // path (no stored committed bearer) is byte-identical to before.
+            Some(committed)
+        } else if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+            &session.operation,
+        ) {
+            match (session.receiver_challenge, &session.operation) {
+                (
+                    Some(r_r),
+                    Operation::Transfer {
+                        token_id,
+                        authority_policy,
+                        ..
+                    },
+                ) => {
+                    let object_id =
+                        dsm::crypto::blake3::domain_hash_bytes("DSM/bearer-object/v1", token_id);
+                    let payload_hash =
+                        dsm::crypto::blake3::domain_hash_bytes("DSM/bearer-payload/v1", &op_bytes);
+                    let authority_policy_hash = authority_policy
+                        .as_ref()
+                        .map(|ap| ap.policy_id)
+                        .unwrap_or([0u8; 32]);
+                    // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
+                    // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
+                    // proof is meaningless. Compared against the canonical value here.
+                    info!(
                             "[BILATERAL][offline-bearer][sender] chip PREPARE authority_policy_hash={} (canonical_match={})",
                             bytes_to_base32(&authority_policy_hash),
                             authority_policy_hash
                                 == dsm::types::operations::canonical_offline_bearer_policy().policy_id
                         );
-                        match router.build_offline_bearer_release(
-                            rel_key,
-                            session.counterparty_device_id,
-                            object_id,
-                            payload_hash,
-                            authority_policy_hash,
-                            0,
-                            // action_fields: EMPTY. The operation is already bound into the transition
-                            // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
-                            // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
-                            // once the OfflineBearerRequired policy tail is appended (~266 B) — the chip
-                            // PREPARE then fails `BAD_PROTO`. The receiver recomputes the digest from the
-                            // transition carried in the release, so empty is consistent end-to-end.
-                            Vec::new(),
-                            r_r,
-                        ) {
-                            Ok(art) => Some(art),
-                            Err(e) => {
-                                log::warn!(
+                    match router.build_offline_bearer_release(
+                        rel_key,
+                        session.counterparty_device_id,
+                        object_id,
+                        payload_hash,
+                        authority_policy_hash,
+                        0,
+                        // action_fields: EMPTY. The operation is already bound into the transition
+                        // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
+                        // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
+                        // once the OfflineBearerRequired policy tail is appended (~266 B) — the chip
+                        // PREPARE then fails `BAD_PROTO`. The receiver recomputes the digest from the
+                        // transition carried in the release, so empty is consistent end-to-end.
+                        Vec::new(),
+                        r_r,
+                    ) {
+                        Ok(art) => Some(art),
+                        Err(e) => {
+                            log::warn!(
                                     "[bilateral_ble] offline-bearer release build failed (fail closed to online recovery): {e}"
                                 );
-                                None
-                            }
+                            None
                         }
                     }
-                    _ => None,
                 }
-            } else {
-                None
-            };
+                _ => None,
+            }
+        } else {
+            None
+        };
         // Receiver-admit fold: when this bearer transfer's prepare-response carried the receiver's
         // first-transfer enrollment request, disclose the fused-anchor pin material on the SAME
         // confirm (bound to this transfer — never a standalone message). bundle/anchor_id/H0/
@@ -3584,39 +3589,46 @@ impl BilateralBleHandler {
         // are provisioned ONLY when the receiver offered a real 32-byte pairing pubkey AND the
         // SE slot-writer is installed (device layer). Otherwise they ride empty and the receiver's
         // admitted pin stays incomplete -> Path-B counter verification stays fail-closed.
-        let anchor_disclosure = match (
-            bearer_artifacts.as_ref(),
-            session.pending_enroll_pubkey.as_ref(),
-        ) {
-            (Some(art), Some(enroll_pubkey)) => {
-                let provisioned = <[u8; 32]>::try_from(enroll_pubkey.as_slice())
-                    .ok()
-                    .and_then(|pk| {
-                        crate::bridge::se_slot_writer().and_then(|w| {
-                            w.provision_verifier_slot(session.counterparty_device_id, pk)
-                        })
-                    });
-                let policy_hash = match &session.operation {
-                    Operation::Transfer {
-                        authority_policy: Some(ap),
-                        ..
-                    } => ap.policy_id,
-                    _ => [0u8; 32],
-                };
-                Some(generated::AnchorDisclosure {
-                    bundle: art.pin.bundle.to_vec(),
-                    anchor_id: art.pin.anchor_id.to_vec(),
-                    enrolled_counter: art.pin.enrolled_counter,
-                    partition_pk: art.pin.partition_pk.clone(),
-                    policy_hash: policy_hash.to_vec(),
-                    verifier_slot: provisioned.map(|(s, _)| u32::from(s)).unwrap_or_default(),
-                    verifier_slot_present: provisioned.is_some(),
-                    chip_static_pubkey: provisioned
-                        .map(|(_, stpub)| stpub.to_vec())
-                        .unwrap_or_default(),
-                })
+        // On the first-transfer ROUND-TRIP path (§21) the pin was already disclosed in
+        // `BilateralBearerPrepared` and the verifier slot provisioned there, so the confirm carries no
+        // disclosure and does NOT re-provision. The ordinary / single-shot path is unchanged.
+        let anchor_disclosure = if session.committed_bearer.is_some() {
+            None
+        } else {
+            match (
+                bearer_artifacts.as_ref(),
+                session.pending_enroll_pubkey.as_ref(),
+            ) {
+                (Some(art), Some(enroll_pubkey)) => {
+                    let provisioned = <[u8; 32]>::try_from(enroll_pubkey.as_slice())
+                        .ok()
+                        .and_then(|pk| {
+                            crate::bridge::se_slot_writer().and_then(|w| {
+                                w.provision_verifier_slot(session.counterparty_device_id, pk)
+                            })
+                        });
+                    let policy_hash = match &session.operation {
+                        Operation::Transfer {
+                            authority_policy: Some(ap),
+                            ..
+                        } => ap.policy_id,
+                        _ => [0u8; 32],
+                    };
+                    Some(generated::AnchorDisclosure {
+                        bundle: art.pin.bundle.to_vec(),
+                        anchor_id: art.pin.anchor_id.to_vec(),
+                        enrolled_counter: art.pin.enrolled_counter,
+                        partition_pk: art.pin.partition_pk.clone(),
+                        policy_hash: policy_hash.to_vec(),
+                        verifier_slot: provisioned.map(|(s, _)| u32::from(s)).unwrap_or_default(),
+                        verifier_slot_present: provisioned.is_some(),
+                        chip_static_pubkey: provisioned
+                            .map(|(_, stpub)| stpub.to_vec())
+                            .unwrap_or_default(),
+                    })
+                }
+                _ => None,
             }
-            _ => None,
         };
         let sim_outcome = router.simulate_advance_for_confirm(
             rel_key,
@@ -6241,6 +6253,7 @@ impl BilateralBleHandler {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         };
 
         // Insert into active sessions
@@ -6585,6 +6598,7 @@ mod tests {
                 pending_enroll_pubkey: None,
                 attested_pre: None,
                 prepared_bearer: None,
+                committed_bearer: None,
             })
             .await;
 
@@ -6732,6 +6746,7 @@ mod tests {
             pending_enroll_pubkey: None,
             attested_pre: None,
             prepared_bearer: None,
+            committed_bearer: None,
         };
 
         // Transfer 1: sender uncommitted, counter at u_i=0 (H=100). Accept captures the FROM read.
@@ -6864,6 +6879,7 @@ mod tests {
                 pending_enroll_pubkey: None,
                 attested_pre: None,
                 prepared_bearer: None,
+                committed_bearer: None,
             })
             .await;
 
@@ -6936,6 +6952,7 @@ mod tests {
                 pending_enroll_pubkey: None,
                 attested_pre: None,
                 prepared_bearer: None,
+                committed_bearer: None,
             })
             .await;
         handler
@@ -6960,6 +6977,7 @@ mod tests {
                 pending_enroll_pubkey: None,
                 attested_pre: None,
                 prepared_bearer: None,
+                committed_bearer: None,
             })
             .await;
 
