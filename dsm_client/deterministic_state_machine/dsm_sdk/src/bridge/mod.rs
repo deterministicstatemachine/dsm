@@ -301,6 +301,15 @@ pub fn anchor_counter_reader(
     ANCHOR_COUNTER_READER.read().ok()?.clone()
 }
 
+/// Test-only: clear the installed counter reader so a `#[serial]` test leaves the global bridge as
+/// it found it (other tests assert the fail-closed `None` path).
+#[cfg(test)]
+pub(crate) fn uninstall_anchor_counter_reader() {
+    if let Ok(mut g) = ANCHOR_COUNTER_READER.write() {
+        *g = None;
+    }
+}
+
 /// Receiver-side pinned fused-anchor enrollment store. Installed by the device layer; supplies the
 /// `FusedAnchorPin` the receiver admitted for a counterparty. `None` until installed -> no pin ->
 /// offline-bearer acceptance fail-closed.
@@ -315,6 +324,14 @@ pub fn install_anchor_enrollment_store(
     if let Ok(mut g) = ANCHOR_ENROLLMENT_STORE.write() {
         *g = Some(store);
         log::info!("[SDK] AnchorEnrollmentStore installed");
+    }
+}
+
+/// Test-only: clear the installed enrollment store (see [`uninstall_anchor_counter_reader`]).
+#[cfg(test)]
+pub(crate) fn uninstall_anchor_enrollment_store() {
+    if let Ok(mut g) = ANCHOR_ENROLLMENT_STORE.write() {
+        *g = None;
     }
 }
 

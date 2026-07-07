@@ -6580,6 +6580,176 @@ mod tests {
         );
     }
 
+    /// Handler-level integration proof of the Counter-Positioned Commit FROM read: the REAL receiver
+    /// accept path (`create_prepare_accept_envelope`) captures the LIVE authenticated FROM read
+    /// `H_pre = H0 − uᵢ` over the relay while the sender is still uncommitted, and a LATER attempt
+    /// (after the sender's commit advanced the counter) reads the ADVANCED value — exactly the stale
+    /// FROM the predicate rejects (anchor-core `accept_rejects_same_from_coordinate_replay`). Proves
+    /// the DSM handler wiring cannot bypass the before-read: acceptance is bound to whatever the live
+    /// counter reads at accept time, not to a host claim. (The confirm-side TO read + full two-party
+    /// envelope flow is exercised at the producer/predicate level in core_sdk's activation tests.)
+    #[tokio::test]
+    #[serial]
+    async fn accept_path_captures_live_from_read_before_commit() {
+        use crate::bluetooth::tropic_relay::{AnchorCounterReader, PicoFuture};
+        use dsm::crypto::anchor_enrollment::{
+            AnchorEnrollment, AnchorEnrollmentStore, FusedAnchorPin, InMemoryAnchorEnrollmentStore,
+        };
+        use std::sync::{Arc, Mutex};
+
+        init_test_db();
+        let device_id = [51u8; 32]; // receiver
+        let genesis_hash = [52u8; 32];
+        let sender = [53u8; 32];
+        let sender_genesis = [54u8; 32];
+        let anchor_id = [0xA1u8; 32];
+        let h0: u32 = 100;
+
+        let (bilateral_manager, handler) =
+            make_test_handler(device_id, genesis_hash, b"accept-from-read");
+
+        // Verified contact for the sender (REAL signing key) so establish_relationship succeeds and
+        // get_chain_tip_for(sender) returns a tip — create_prepare_accept needs it.
+        let sender_kp =
+            SignatureKeyPair::generate_from_entropy(b"sender-signing-key").expect("kp");
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "sender".to_string(),
+            device_id: sender,
+            genesis_hash: sender_genesis,
+            public_key: sender_kp.public_key().to_vec(),
+            genesis_material: vec![5u8; 32],
+            chain_tip: Some([6u8; 32]),
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1000,
+            added_at_commit_height: 1000,
+            last_updated_commit_height: 1000,
+            verifying_storage_nodes: vec![],
+            ble_address: Some(String::new()),
+        };
+        {
+            let mut m = bilateral_manager.write().await;
+            m.add_verified_contact(contact).expect("contact");
+            m.establish_relationship(&sender).await.expect("relationship");
+        }
+
+        // A COMPLETE pin admitted for the sender (verifier slot + chip key + uncompromised).
+        let pin = FusedAnchorPin {
+            bundle: [0xB1; 32],
+            anchor_id,
+            enrolled_counter: h0 as u64,
+            partition_pk: vec![7; 64],
+            uncompromised: true,
+            verifier_slot: Some(1),
+            chip_static_pubkey: Some([0xCC; 32]),
+        };
+        let store = InMemoryAnchorEnrollmentStore::default();
+        store
+            .admit(AnchorEnrollment {
+                device_id: sender,
+                policy_hash: [0u8; 32],
+                pin: pin.clone(),
+            })
+            .expect("admit");
+        crate::bridge::install_anchor_enrollment_store(Arc::new(store));
+
+        // Mock relay reader backed by a shared counter cell = the sender's live chip counter.
+        let counter = Arc::new(Mutex::new(h0)); // u_i=0 → live H = H0
+        struct MockReader {
+            counter: Arc<Mutex<u32>>,
+        }
+        impl AnchorCounterReader for MockReader {
+            fn read_counter(
+                &self,
+                _peer: [u8; 32],
+                _c: [u8; 32],
+                _pin: FusedAnchorPin,
+            ) -> PicoFuture<Option<u32>> {
+                let h = *self.counter.lock().expect("counter");
+                Box::pin(async move { Some(h) })
+            }
+        }
+        crate::bridge::install_anchor_counter_reader(Arc::new(MockReader {
+            counter: counter.clone(),
+        }));
+
+        let bearer_op = |nonce: u8| Operation::Transfer {
+            policy_commit: [0u8; 32],
+            to_device_id: device_id.to_vec(),
+            amount: Balance::from_state(1, [1u8; 32]),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![nonce],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: device_id.to_vec(),
+            to: device_id.to_vec(),
+            message: "bearer".to_string(),
+            signature: Vec::new(),
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+        };
+        let session = |commitment: [u8; 32], op: Operation| BilateralBleSession {
+            commitment_hash: commitment,
+            local_commitment_hash: None,
+            counterparty_device_id: sender,
+            counterparty_genesis_hash: Some(sender_genesis),
+            operation: op,
+            phase: BilateralPhase::PendingUserAction,
+            local_signature: None,
+            counterparty_signature: None,
+            created_at_ticks: 1,
+            expires_at_ticks: 1_000_000,
+            sender_ble_address: None,
+            created_at_wall: Instant::now(),
+            pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
+            receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
+            pending_enroll_pubkey: None,
+            attested_pre: None,
+        };
+
+        // Transfer 1: sender uncommitted, counter at u_i=0 (H=100). Accept captures the FROM read.
+        let c1 = [0x01u8; 32];
+        handler.test_insert_session(session(c1, bearer_op(1))).await;
+        handler
+            .create_prepare_accept_envelope(c1)
+            .await
+            .expect("accept 1");
+        {
+            let s = handler.sessions.sessions.lock().await;
+            assert_eq!(
+                s.get(&c1).expect("session 1").attested_pre,
+                Some((anchor_id, h0 as u64)),
+                "accept captures the live FROM read H_pre = H0 − u_i = 100 (u_i=0), pre-commit"
+            );
+        }
+
+        // Sender commits → the physical counter advances u_i 0→1 (H 100→99).
+        *counter.lock().expect("counter") = h0 - 1;
+
+        // A later attempt now reads the ADVANCED counter (99). A release still claiming FROM u_i=0
+        // would fail the predicate FROM check (expects H0 − 0 = 100) — the Alice/Bob rejection.
+        let c2 = [0x02u8; 32];
+        handler.test_insert_session(session(c2, bearer_op(2))).await;
+        handler
+            .create_prepare_accept_envelope(c2)
+            .await
+            .expect("accept 2");
+        {
+            let s = handler.sessions.sessions.lock().await;
+            assert_eq!(
+                s.get(&c2).expect("session 2").attested_pre,
+                Some((anchor_id, (h0 - 1) as u64)),
+                "a later accept reads the advanced counter (99); a stale u_i=0 release fails FROM"
+            );
+        }
+
+        crate::bridge::uninstall_anchor_counter_reader();
+        crate::bridge::uninstall_anchor_enrollment_store();
+    }
+
     #[tokio::test]
     async fn test_fail_session_by_commitment_cleans_receiver_accepted_session() {
         let device_id = [41u8; 32];
