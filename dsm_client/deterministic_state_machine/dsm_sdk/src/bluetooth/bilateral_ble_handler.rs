@@ -606,6 +606,7 @@ impl BilateralBleHandler {
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
             attested_pre: None,
+            prepared_bearer: None,
         })
     }
 
@@ -1640,6 +1641,7 @@ impl BilateralBleHandler {
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
             attested_pre: None,
+            prepared_bearer: None,
         };
 
         {
@@ -2598,6 +2600,7 @@ impl BilateralBleHandler {
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
             attested_pre: None,
+            prepared_bearer: None,
         };
 
         {
@@ -6220,6 +6223,7 @@ impl BilateralBleHandler {
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
             attested_pre: None,
+            prepared_bearer: None,
         };
 
         // Insert into active sessions
@@ -6563,6 +6567,7 @@ mod tests {
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
                 attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
 
@@ -6708,6 +6713,7 @@ mod tests {
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
             attested_pre: None,
+            prepared_bearer: None,
         };
 
         // Transfer 1: sender uncommitted, counter at u_i=0 (H=100). Accept captures the FROM read.
@@ -6839,6 +6845,7 @@ mod tests {
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
                 attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
 
@@ -6910,6 +6917,7 @@ mod tests {
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
                 attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
         handler
@@ -6933,6 +6941,7 @@ mod tests {
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
                 attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
 

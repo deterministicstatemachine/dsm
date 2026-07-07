@@ -1587,6 +1587,7 @@ pub struct OfflineBearerArtifacts {
 /// [`CoreSDK::commit_offline_bearer_release`], which moves the counter to `uᵢ+1` and emits the
 /// release. Between the two, `Status::Prepared` holds the appliance (§26.4: no second transfer while
 /// a prepared record exists — the serialization the Counter-Positioned Commit relies on).
+#[derive(Clone, Debug)]
 pub struct PreparedOfflineBearer {
     /// The appliance DSM root this transfer consumes (the receiver's `accepted_prev_root`).
     pub appliance_prev_root: [u8; 32],
