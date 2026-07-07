@@ -514,6 +514,18 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     BleFrameType::Unspecified,
                     message.payload,
                 )]),
+                // §21 first-transfer round-trip. Handlers are wired in later stages (#3 stages 5–6);
+                // until then these are fail-closed no-ops. The sender does not emit these frames yet
+                // (stage 4), so they are unreachable in production — a peer sending one early is
+                // dropped and first-transfer simply stays on the online fallback.
+                BleFrameType::BilateralBearerPrepared => {
+                    debug!("BilateralBearerPrepared received before handler wired; dropping (fail-closed)");
+                    Ok(Vec::new())
+                }
+                BleFrameType::BilateralBearerProceed => {
+                    debug!("BilateralBearerProceed received before handler wired; dropping (fail-closed)");
+                    Ok(Vec::new())
+                }
                 _ => {
                     debug!("Ignoring unknown BLE frame type: {:?}", message.frame_type);
                     Ok(Vec::new())

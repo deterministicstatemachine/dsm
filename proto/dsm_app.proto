@@ -2425,6 +2425,8 @@ enum BleFrameType {
   BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST  = 13; // Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
   BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14; // Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
   BLE_FRAME_TYPE_TROPIC_SPI_RELAY          = 15; // TropicSpiRelayPacket: opaque raw-SPI transaction relay (Path B counter read, L1 raw-SPI tunnel)
+  BLE_FRAME_TYPE_BILATERAL_BEARER_PREPARED = 16; // Envelope w/ BilateralBearerPrepared (§21 first-transfer: sender prepared + disclosure, pre-commit)
+  BLE_FRAME_TYPE_BILATERAL_BEARER_PROCEED  = 17; // Envelope w/ BilateralBearerProceed (§21 first-transfer: receiver did FROM read, sender may commit)
 }
 
 // Opaque TROPIC01 raw-SPI relay packet (Boot Fenced Fused Anchor §13, Path B counter
