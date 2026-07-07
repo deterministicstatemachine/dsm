@@ -3154,6 +3154,34 @@ mod tests {
             );
         }
 
+        // (b) Alice/Bob double-spend defense at the counter coordinate, through the real accept path.
+        // Alice accepted above: her live FROM read was H0 (100) and TO read H0-1 (99). A SECOND (Bob)
+        // attempt presenting the SAME u_i=0 release AFTER Alice's commit advanced the physical counter
+        // — so Bob's live FROM read is now 99, not 100 — is rejected SPECIFICALLY on the FROM
+        // coordinate. The counter has left u_i and cannot return: the same counter-positioned sender
+        // state cannot be spent twice. This is the door, and the rejection is the production predicate,
+        // not a test shortcut.
+        let bob = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&art1.appliance_prev_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &binding1,
+            Some((pin1.anchor_id, h_post)), // Bob's live FROM read is 99 (counter already past u_i=0)
+            Some((pin1.anchor_id, h_post - 1)),
+        );
+        assert!(
+            matches!(
+                bob,
+                Err(crate::bluetooth::anchor_accept::OfflineRecover::Predicate(
+                    anchor_core::accept::AcceptError::CounterFromCoordinateInvalid
+                ))
+            ),
+            "Bob's stale u_i=0 attempt must be rejected on the FROM coordinate (live counter now 99), got {bob:?}"
+        );
+
         // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `appliance_next_root`
         // is rejected — the consumed appliance root is no longer the accepted root.
         let replay = accept_offline_release_with_counter(
