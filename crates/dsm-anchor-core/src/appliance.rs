@@ -21,10 +21,10 @@ use crate::boot::{
 use crate::enrollment::{commit, Birth};
 use crate::proto::MAX_BOOT_CHAIN;
 use crate::root_advance::{
-    next_anchor_head, partition_commit, partition_final_cert_message, pk_hash,
-    root_advance_message, transfer_witness_key, transition_digest, tropic_transfer_input,
-    tropic_witness_message, Certificate, CounterEvidence, OfflineRelease, OwnedTransition,
-    Transition,
+    counter_advance_binding, next_anchor_head, partition_commit, partition_final_cert_message,
+    pk_hash, root_advance_message, transfer_witness_key, transition_digest, tropic_transfer_input,
+    tropic_witness_message, Certificate, CounterAdvanceEvidence, CounterRead, OfflineRelease,
+    OwnedTransition, Transition,
 };
 use crate::tropic::{PartitionSig, Tropic, TropicError, WitnessSig};
 use crate::util::{ct_eq_32, zeroize, zeroize_vec};
@@ -447,17 +447,45 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
             return Err(ApplianceError::CounterMismatch);
         }
 
+        // The counter sits at the FROM coordinate `uᵢ` here (pinned above), so
+        // `h = H₀ − uᵢ = H_pre` and `h − 1 = H₀ − (uᵢ+1) = H_post`. The producer
+        // fills the transition-binding fields; the receiver attaches its own
+        // authenticated pre/post reads (verifier transcripts) before acceptance.
+        let h_pre = h as u64;
+        let h_post = (h - 1) as u64;
+        let pre = CounterRead {
+            anchor_id: self.anchor_id,
+            receiver_challenge: p.cert.receiver_challenge,
+            root_advance_message: p.cert.root_advance_message,
+            prev_root: p.cert.prev_root,
+            next_root: p.cert.next_root,
+            anchor_counter: p.cert.anchor_counter,
+            next_anchor_counter: p.cert.next_anchor_counter,
+            attested_raw_counter: h_pre,
+            verifier_transcript: Vec::new(),
+        };
+        let post = CounterRead {
+            attested_raw_counter: h_post,
+            ..pre.clone()
+        };
+        let counter = CounterAdvanceEvidence {
+            binding_hash: counter_advance_binding(
+                &self.anchor_id,
+                h_pre,
+                h_post,
+                &p.cert.root_advance_message,
+                &p.cert.prev_root,
+                &p.cert.next_root,
+                &p.cert.receiver_challenge,
+            ),
+            pre,
+            post,
+        };
         let release = OfflineRelease {
             transition: p.txn.clone(),
             boot_chain: p.boot_chain.clone(),
             cert: p.cert.clone(),
-            counter: CounterEvidence {
-                anchor_id: self.anchor_id,
-                enrolled_counter: self.h0 as u64,
-                live_counter_claim: (h - 1) as u64,
-                derived_anchor_counter_claim: p.cert.next_anchor_counter,
-                verifier_transcript: Vec::new(),
-            },
+            counter,
         };
         let prev_root = p.cert.prev_root;
         let next_root = p.cert.next_root;

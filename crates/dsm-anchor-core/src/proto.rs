@@ -11,7 +11,9 @@ use alloc::vec::Vec;
 use prost::Message;
 
 use crate::boot::BootTicket;
-use crate::root_advance::{Certificate, CounterEvidence, OfflineRelease, OwnedTransition};
+use crate::root_advance::{
+    Certificate, CounterAdvanceEvidence, CounterRead, OfflineRelease, OwnedTransition,
+};
 
 /// prost-generated message types (package `dsm.anchor`).
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
@@ -208,29 +210,61 @@ impl Certificate {
     }
 }
 
-// --- CounterEvidence <-> CounterEvidence ---
+// --- CounterRead / CounterAdvanceEvidence <-> pb ---
 
-impl pb::CounterEvidence {
-    pub fn to_evidence(&self) -> Result<CounterEvidence, ProtoError> {
+impl pb::CounterRead {
+    pub fn to_read(&self) -> Result<CounterRead, ProtoError> {
         bounded(&self.verifier_transcript, MAX_TRANSCRIPT)?;
-        Ok(CounterEvidence {
+        Ok(CounterRead {
             anchor_id: arr32(&self.anchor_id)?,
-            enrolled_counter: self.enrolled_counter,
-            live_counter_claim: self.live_counter_claim,
-            derived_anchor_counter_claim: self.derived_anchor_counter_claim,
+            receiver_challenge: arr32(&self.receiver_challenge)?,
+            root_advance_message: arr32(&self.root_advance_message)?,
+            prev_root: arr32(&self.prev_root)?,
+            next_root: arr32(&self.next_root)?,
+            anchor_counter: self.anchor_counter,
+            next_anchor_counter: self.next_anchor_counter,
+            attested_raw_counter: self.attested_raw_counter,
             verifier_transcript: self.verifier_transcript.clone(),
         })
     }
 }
 
-impl CounterEvidence {
-    pub fn to_pb(&self) -> pb::CounterEvidence {
-        pb::CounterEvidence {
+impl CounterRead {
+    pub fn to_pb(&self) -> pb::CounterRead {
+        pb::CounterRead {
             anchor_id: self.anchor_id.to_vec(),
-            enrolled_counter: self.enrolled_counter,
-            live_counter_claim: self.live_counter_claim,
-            derived_anchor_counter_claim: self.derived_anchor_counter_claim,
+            receiver_challenge: self.receiver_challenge.to_vec(),
+            root_advance_message: self.root_advance_message.to_vec(),
+            prev_root: self.prev_root.to_vec(),
+            next_root: self.next_root.to_vec(),
+            anchor_counter: self.anchor_counter,
+            next_anchor_counter: self.next_anchor_counter,
+            attested_raw_counter: self.attested_raw_counter,
             verifier_transcript: self.verifier_transcript.clone(),
+        }
+    }
+}
+
+impl pb::CounterAdvanceEvidence {
+    pub fn to_evidence(&self) -> Result<CounterAdvanceEvidence, ProtoError> {
+        Ok(CounterAdvanceEvidence {
+            pre: self.pre.as_ref().ok_or(ProtoError::MissingField)?.to_read()?,
+            post: self
+                .post
+                .as_ref()
+                .ok_or(ProtoError::MissingField)?
+                .to_read()?,
+            binding_hash: arr32(&self.binding_hash)?,
+        })
+    }
+}
+
+impl CounterAdvanceEvidence {
+    pub fn to_pb(&self) -> pb::CounterAdvanceEvidence {
+        pb::CounterAdvanceEvidence {
+            pre: Some(self.pre.to_pb()),
+            post: Some(self.post.to_pb()),
+            binding_hash: self.binding_hash.to_vec(),
         }
     }
 }

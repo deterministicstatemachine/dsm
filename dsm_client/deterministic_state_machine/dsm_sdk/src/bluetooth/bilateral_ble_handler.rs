@@ -4637,19 +4637,20 @@ impl BilateralBleHandler {
             }
             // D2 activation seam: look up the pinned fused anchor this receiver admitted for the
             // sender, then read the sender's live TROPIC01 counter over the relay via the injected
-            // reader. Reader + COMPLETE pin present AND the read succeeds -> live accept with the
-            // authenticated counter (predicate enforces `H == H0 - (u_i+1)`). Any absent -> pin
-            // `None` / attested `None` -> fail-closed to online recovery. The store is installed
-            // (pins persist), but the reader + the slot/stpub provisioning are device-layer
-            // hardware installs — until they land, this stays fail-closed.
+            // reader. The Counter-Positioned Commit predicate (Def. 30) requires TWO authenticated
+            // reads: the FROM read `H0 − uᵢ` taken while the sender is `Prepared` (before its
+            // commit), and the TO read `H0 − (uᵢ+1)` taken after. This single-confirm seam supplies
+            // only the post-commit (TO) read; the FROM read requires the interactive pre-commit
+            // handshake, a device-layer activation follow-up. Until it lands, `attested_pre` is
+            // `None` and the FROM check keeps the path fail-closed to online recovery.
             let pin = crate::bridge::anchor_enrollment_store()
                 .and_then(|s| s.get(&sender_device_id))
                 .map(|e| e.pin);
             // Admission never implies acceptance: `resolve_attested_counter` gates on a COMPLETE pin
             // (slot + chip key + uncompromised) and only then reads the live counter over the relay
             // via the installed reader — an incomplete first-transfer pin or an absent reader can
-            // never yield `attested = Some`. Same logic exercised in-process in the Phase H0 test.
-            let attested: Option<([u8; 32], u64)> =
+            // never yield `Some`. Same logic exercised in-process in the Phase H0 test.
+            let attested_post: Option<([u8; 32], u64)> =
                 crate::bluetooth::anchor_accept::resolve_attested_counter(
                     pin.as_ref(),
                     crate::bridge::anchor_counter_reader(),
@@ -4657,10 +4658,13 @@ impl BilateralBleHandler {
                     commitment_hash,
                 )
                 .await;
+            // The FROM (pre-commit) read is produced by the interactive handshake not yet built on
+            // this single-confirm path; without it the predicate fails the FROM check (fail-closed).
+            let attested_pre: Option<([u8; 32], u64)> = None;
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
-            // Def. 25 check 2: the appliance root adopted from this holder's last
+            // Def. 30 check 2: the appliance root adopted from this holder's last
             // ACCEPTED release. Absent row = relationship genesis — the predicate
             // adopts the release's own `prev_root` TOFU (authenticated by the
             // anchor-state proofs + the live counter, same trust root as the pin).
@@ -4679,7 +4683,8 @@ impl BilateralBleHandler {
                     &expected_receiver_challenge,
                     &policy_hash,
                     &binding,
-                    attested,
+                    attested_pre,
+                    attested_post,
                 )
                 .map_err(|r| r.into_dsm_error())?;
             // Persisted AFTER the canonical commit below succeeds (deferred, like

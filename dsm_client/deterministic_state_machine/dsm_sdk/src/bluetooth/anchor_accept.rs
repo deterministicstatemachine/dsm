@@ -1,29 +1,32 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Canonical offline-bearer acceptance for the bilateral RECEIVER path: the Boot
-//! Fenced Fused Anchor predicate (`anchor_core::accept::accept_offline`, 22 checks).
+//! Fenced Fused Anchor predicate (`anchor_core::accept::accept_offline`, Def. 30, 24 checks).
 //!
 //! This is the canonical replacement for the legacy Safe 7 IslandAttestation receiver
 //! acceptance. The DSM app supplies two adapters and NEVER reimplements anchor crypto:
 //!   - [`DsmStateVerifier`] (`DsmVerifier`): DSM SMT/root commitments, the DSM transition
 //!     proof, the boot chain, and the partition certificate — the partition cert reuses the
 //!     existing `dsm::crypto::sphincs` verifier under the receiver-pinned partition key.
-//!   - [`DsmCounterVerifier`] (`CounterVerifier`): the authenticated TROPIC01 counter, read
-//!     ONLY from `ev.verifier_transcript`, NEVER a host-supplied `*_claim` field.
+//!   - [`DsmCounterVerifier`] (`CounterVerifier`): the receiver's own authenticated TROPIC01
+//!     reads at the FROM coordinate (pre-commit, `H₀ − uᵢ`) and the TO coordinate (post-commit,
+//!     `H₀ − (uᵢ+1)`) — from the verifier session, NEVER a host-supplied `*_claim` field. A
+//!     post-only scalar is not sufficient (§4): the FROM read is the discriminating check.
 //!
 //! Fail-closed posture. The sender now rides a real `OfflineRelease` + anchor-state proofs and
 //! the receiver pins the disclosed fused anchor on the first bearer transfer, but ACCEPTANCE is
-//! still gated on the authenticated Path-B counter read: the pin must be COMPLETE (verifier
+//! still gated on the authenticated Path-B counter reads: the pin must be COMPLETE (verifier
 //! slot + chip static key, hardware-provisioned) and a live `AnchorCounterReader` must attest
-//! `H == H₀ − (uᵢ+1)` from the pinned chip. Until the device layer installs that reader, every
-//! offline-bearer transfer routes to ONLINE RECOVERY — an absent/malformed release, an
-//! un-enrolled anchor, an incomplete pin, or ANY failed predicate check rejects before any
-//! value is released. There is no IslandAttestation fallback and no degraded-acceptance path.
+//! the FROM read `H₀ − uᵢ` (before the sender's commit) and the TO read `H₀ − (uᵢ+1)` (after)
+//! from the pinned chip. Until the device layer installs that reader, every offline-bearer
+//! transfer routes to ONLINE RECOVERY — an absent/malformed release, an un-enrolled anchor, an
+//! incomplete pin, or ANY failed predicate check rejects before any value is released. There is
+//! no IslandAttestation fallback and no degraded-acceptance path.
 
 use anchor_core::accept::{accept_offline, AcceptError, CounterVerifier, DsmVerifier, VerifierContext};
 use anchor_core::boot::BootTicket;
 use anchor_core::proto::pb;
-use anchor_core::root_advance::{CounterEvidence, Transition};
+use anchor_core::root_advance::{CounterRead, Transition};
 use anchor_core::sig::WotsBlake3;
 use prost::Message;
 
@@ -212,36 +215,47 @@ impl DsmVerifier for DsmStateVerifier<'_> {
     }
 }
 
-/// Path-B authenticated-counter verifier (`CounterVerifier`). Holds the counter `H` the receiver
-/// ALREADY read from the holder's TROPIC01 over its OWN authenticated libtropic-rs session (via the
-/// raw-SPI relay; see `dsm-anchor-verifier`), out of band from this sync predicate — because the
-/// read is many async BLE round-trips and the predicate is sync. `attested = Some((anchor_id, H))`
-/// only when that authenticated read succeeded against the pinned chip; `None` = no verifier slot,
-/// no live relay, or the read failed -> FAIL-CLOSED (online recovery). NEVER reads the host-supplied
-/// `ev.live_counter_claim` / `ev.derived_anchor_counter_claim`.
+/// Path-B authenticated-counter verifier (`CounterVerifier`). Holds the two counter values `H` the
+/// receiver ALREADY read from the holder's TROPIC01 over its OWN authenticated libtropic-rs session
+/// (via the raw-SPI relay; see `dsm-anchor-verifier`), out of band from this sync predicate — the
+/// FROM read taken while the sender is `Prepared` (counter at `uᵢ`) and the TO read after the
+/// sender's commit (counter at `uᵢ+1`). Each is `Some((anchor_id, H))` only when that authenticated
+/// read succeeded against the pinned chip; `None` = no verifier slot, no live relay, or the read
+/// failed -> FAIL-CLOSED (online recovery). NEVER reads the host-supplied `attested_raw_counter`.
 struct DsmCounterVerifier {
-    /// The authenticated live counter `H` pre-read via the relay session, tagged with the
-    /// `anchor_id` it was read from (must match the release's pinned anchor). `None` -> fail-closed.
-    attested: Option<([u8; 32], u64)>,
+    /// The authenticated FROM read (`H₀ − uᵢ`), tagged with the `anchor_id` it was read from.
+    attested_pre: Option<([u8; 32], u64)>,
+    /// The authenticated TO read (`H₀ − (uᵢ+1)`), tagged with the `anchor_id` it was read from.
+    attested_post: Option<([u8; 32], u64)>,
 }
 
 impl DsmCounterVerifier {
-    /// The production default until the async relay read is wired: no authenticated counter -> the
-    /// predicate fails closed on the counter clause and the transfer recovers online.
+    /// The production default until the async relay reads are wired: no authenticated counter -> the
+    /// predicate fails closed on the FROM counter clause and the transfer recovers online.
     fn fail_closed() -> Self {
-        Self { attested: None }
+        Self {
+            attested_pre: None,
+            attested_post: None,
+        }
     }
 }
 
+/// Return a pre-read authentic counter ONLY if it was read from the very chip this release is
+/// pinned to; a read from a different anchor is not evidence for this one.
+fn authentic_for(attested: &Option<([u8; 32], u64)>, anchor_id: &[u8; 32]) -> Option<u64> {
+    let (read_from, h) = attested.as_ref()?;
+    if read_from != anchor_id {
+        return None;
+    }
+    Some(*h)
+}
+
 impl CounterVerifier for DsmCounterVerifier {
-    fn read_authentic_counter(&self, anchor_id: &[u8; 32], _ev: &CounterEvidence) -> Option<u64> {
-        // Return the pre-read authentic counter ONLY if it was read from the very chip this
-        // release is pinned to; a counter read from a different anchor is not evidence for this one.
-        let (read_from, h) = self.attested.as_ref()?;
-        if read_from != anchor_id {
-            return None;
-        }
-        Some(*h)
+    fn read_authentic_pre(&self, anchor_id: &[u8; 32], _ev: &CounterRead) -> Option<u64> {
+        authentic_for(&self.attested_pre, anchor_id)
+    }
+    fn read_authentic_post(&self, anchor_id: &[u8; 32], _ev: &CounterRead) -> Option<u64> {
+        authentic_for(&self.attested_post, anchor_id)
     }
 }
 
@@ -363,18 +377,21 @@ pub(crate) async fn resolve_attested_counter(
 }
 
 /// Test-only stand-in for the D2 receiver-operated authenticated L3 counter session. It returns the
-/// counter an authentic verifier session WOULD attest — `H = H₀ − (uᵢ+1)`, computed from the pinned
-/// enrolled counter and the transition's `next_anchor_counter` — so the full producer → accept →
-/// adopt chain can be exercised. It is NOT wired into the production [`accept_offline_release`];
-/// live accept keeps [`DsmCounterVerifier`] and stays fail-closed until the real L3 verifier lands.
+/// counter an authentic verifier session WOULD attest for each read — the `attested_raw_counter` the
+/// producer witnessed (`H₀ − uᵢ` at the FROM coordinate, `H₀ − (uᵢ+1)` at the TO coordinate) — so the
+/// full producer → accept → adopt chain can be exercised. It is NOT wired into the production
+/// [`accept_offline_release`]; live accept keeps [`DsmCounterVerifier`] and stays fail-closed until
+/// the real L3 verifier lands.
 #[cfg(test)]
 pub(crate) struct TrustedTestCounter;
 
 #[cfg(test)]
 impl CounterVerifier for TrustedTestCounter {
-    fn read_authentic_counter(&self, _anchor_id: &[u8; 32], ev: &CounterEvidence) -> Option<u64> {
-        ev.enrolled_counter
-            .checked_sub(ev.derived_anchor_counter_claim)
+    fn read_authentic_pre(&self, _anchor_id: &[u8; 32], ev: &CounterRead) -> Option<u64> {
+        Some(ev.attested_raw_counter)
+    }
+    fn read_authentic_post(&self, _anchor_id: &[u8; 32], ev: &CounterRead) -> Option<u64> {
+        Some(ev.attested_raw_counter)
     }
 }
 
@@ -428,11 +445,13 @@ pub fn accept_offline_release(
     )
 }
 
-/// Path-B live-relay acceptance: identical to [`accept_offline_release`] but supplied the counter
-/// `H` the receiver ALREADY read from the holder's TROPIC01 over its own authenticated libtropic-rs
-/// session (via the raw-SPI relay), tagged with the `anchor_id` it was read from. The predicate then
-/// enforces `H == H0 - (u_i + 1)` exactly (anchor-core check 19). Pass `attested = None` to stay
-/// fail-closed (no verifier slot / no live relay / read failed).
+/// Path-B live-relay acceptance: identical to [`accept_offline_release`] but supplied the two
+/// counter values `H` the receiver ALREADY read from the holder's TROPIC01 over its own
+/// authenticated libtropic-rs session (via the raw-SPI relay), each tagged with the `anchor_id` it
+/// was read from: `attested_pre` = the FROM read taken while the sender is `Prepared`,
+/// `attested_post` = the TO read after the sender's commit. The predicate enforces
+/// `H_pre == H0 − uᵢ` (check 18) and `H_post == H0 − (uᵢ+1)` (check 20). Pass `None` for either to
+/// stay fail-closed (no verifier slot / no live relay / read failed).
 #[allow(clippy::too_many_arguments)]
 pub fn accept_offline_release_with_relay_counter(
     offline_release: &[u8],
@@ -442,7 +461,8 @@ pub fn accept_offline_release_with_relay_counter(
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
     binding: &AnchorStateBinding,
-    attested: Option<([u8; 32], u64)>,
+    attested_pre: Option<([u8; 32], u64)>,
+    attested_post: Option<([u8; 32], u64)>,
 ) -> Result<AdoptedAnchorState, OfflineRecover> {
     accept_offline_release_with_counter(
         offline_release,
@@ -452,7 +472,10 @@ pub fn accept_offline_release_with_relay_counter(
         expected_receiver_challenge,
         expected_policy_hash,
         binding,
-        &DsmCounterVerifier { attested },
+        &DsmCounterVerifier {
+            attested_pre,
+            attested_post,
+        },
     )
 }
 
@@ -585,12 +608,21 @@ mod tests {
             transfer_slot: 6,
             receiver_challenge: z(),
         };
-        let counter = pb::CounterEvidence {
+        let read = |h: u64| pb::CounterRead {
             anchor_id: z(),
-            enrolled_counter: 100,
-            live_counter_claim: 99,
-            derived_anchor_counter_claim: 1,
+            receiver_challenge: z(),
+            root_advance_message: z(),
+            prev_root: z(),
+            next_root: z(),
+            anchor_counter: 0,
+            next_anchor_counter: 1,
+            attested_raw_counter: h,
             verifier_transcript: vec![],
+        };
+        let counter = pb::CounterAdvanceEvidence {
+            pre: Some(read(100)),
+            post: Some(read(99)),
+            binding_hash: z(),
         };
         pb::OfflineRelease {
             transition: Some(transition),
@@ -611,7 +643,7 @@ mod tests {
     fn malformed_release_routes_online() {
         // Non-empty but not a complete OfflineRelease (transition absent): decodes, to_release fails.
         let bytes = pb::OfflineRelease {
-            counter: Some(pb::CounterEvidence::default()),
+            counter: Some(pb::CounterAdvanceEvidence::default()),
             ..Default::default()
         }
         .encode_to_vec();
@@ -638,30 +670,37 @@ mod tests {
     }
 
     #[test]
-    fn counter_verifier_uses_pre_read_counter_never_host_claim() {
-        // Host-supplied claims are always present in the evidence; the verifier must NEVER echo them.
-        let ev = CounterEvidence {
+    fn counter_verifier_uses_authenticated_reads_never_host_claim() {
+        // The host-supplied attested_raw_counter is always present; the verifier must NEVER echo it.
+        let read = CounterRead {
             anchor_id: ZERO,
-            enrolled_counter: 100,
-            live_counter_claim: 99,             // host says H = 99
-            derived_anchor_counter_claim: 1,    // host says u = 1
-            verifier_transcript: vec![1, 2, 3], // even a populated transcript must not be trusted here
+            receiver_challenge: ZERO,
+            root_advance_message: ZERO,
+            prev_root: ZERO,
+            next_root: ZERO,
+            anchor_counter: 0,
+            next_anchor_counter: 1,
+            attested_raw_counter: 99, // host claim — never trusted
+            verifier_transcript: vec![1, 2, 3],
         };
 
-        // Fail-closed default: no authenticated relay read -> None, regardless of the host claims.
+        // Fail-closed default: no authenticated relay reads -> None for both, regardless of claims.
         let v = DsmCounterVerifier::fail_closed();
-        assert_eq!(v.read_authentic_counter(&ZERO, &ev), None);
+        assert_eq!(v.read_authentic_pre(&ZERO, &read), None);
+        assert_eq!(v.read_authentic_post(&ZERO, &read), None);
 
-        // With a pre-read authentic counter for the matching anchor: return THAT value (42), never
-        // the host's live_counter_claim (99).
+        // With authenticated reads for the matching anchor: return THOSE values, never the host claim.
         let anchor = [0xA7u8; 32];
         let v = DsmCounterVerifier {
-            attested: Some((anchor, 42)),
+            attested_pre: Some((anchor, 100)),
+            attested_post: Some((anchor, 99)),
         };
-        assert_eq!(v.read_authentic_counter(&anchor, &ev), Some(42));
+        assert_eq!(v.read_authentic_pre(&anchor, &read), Some(100));
+        assert_eq!(v.read_authentic_post(&anchor, &read), Some(99));
 
-        // A counter read from a DIFFERENT anchor is not evidence for this one -> fail closed.
-        assert_eq!(v.read_authentic_counter(&ZERO, &ev), None);
+        // A read from a DIFFERENT anchor is not evidence for this one -> fail closed.
+        assert_eq!(v.read_authentic_pre(&ZERO, &read), None);
+        assert_eq!(v.read_authentic_post(&ZERO, &read), None);
     }
 
     #[test]
@@ -856,16 +895,24 @@ mod tests {
             .and_then(reader);
         assert_eq!(attested, None, "incomplete pin must never be counter-read");
 
-        // ...and with attested=None the counter verifier refuses, so the 22-check predicate can
+        // ...and with both reads None the counter verifier refuses, so the 24-check predicate can
         // never see an authentic counter: acceptance is impossible, online recovery only.
-        let v = DsmCounterVerifier { attested };
-        let ev = CounterEvidence {
+        let v = DsmCounterVerifier {
+            attested_pre: attested,
+            attested_post: attested,
+        };
+        let read = CounterRead {
             anchor_id: incomplete.anchor_id,
-            enrolled_counter: 1_000_000,
-            live_counter_claim: would_be_correct_h, // host claims are never trusted
-            derived_anchor_counter_claim: 1,
+            receiver_challenge: ZERO,
+            root_advance_message: ZERO,
+            prev_root: ZERO,
+            next_root: ZERO,
+            anchor_counter: 0,
+            next_anchor_counter: 1,
+            attested_raw_counter: would_be_correct_h, // host claims are never trusted
             verifier_transcript: Vec::new(),
         };
-        assert_eq!(v.read_authentic_counter(&incomplete.anchor_id, &ev), None);
+        assert_eq!(v.read_authentic_pre(&incomplete.anchor_id, &read), None);
+        assert_eq!(v.read_authentic_post(&incomplete.anchor_id, &read), None);
     }
 }

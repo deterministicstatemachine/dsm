@@ -1,5 +1,5 @@
 //! End-to-end tests for the Boot Fenced Fused Anchor appliance: the boot fence,
-//! the 3-state transfer lifecycle, the §22 (Def. 25) 23-check receiver predicate
+//! the 3-state transfer lifecycle, the §22 (Def. 30) 24-check receiver predicate
 //! (valid + representative tampered checks), §27 recovery, and the wire protocol.
 #![allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
 
@@ -10,7 +10,7 @@ use anchor_core::appliance::{Appliance, ApplianceError, Record, RecoverOutcome, 
 use anchor_core::boot::BootTicket;
 use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::proto::{decode_request, decode_response, encode_request, pb};
-use anchor_core::root_advance::{CounterEvidence, OfflineRelease, OwnedTransition, Transition};
+use anchor_core::root_advance::{CounterRead, OfflineRelease, OwnedTransition, Transition};
 use anchor_core::service::{err, handle};
 use anchor_core::sig::WotsBlake3;
 use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
@@ -161,10 +161,16 @@ impl DsmVerifier for Dsm {
     }
 }
 
+/// A faithful chip: the receiver's own authenticated pre/post reads return the
+/// live counter the producer witnessed (`H_pre` at the FROM coordinate, `H_post`
+/// at the TO coordinate), i.e. the `attested_raw_counter` each `CounterRead` names.
 struct OkCounter;
 impl CounterVerifier for OkCounter {
-    fn read_authentic_counter(&self, _: &[u8; 32], ev: &CounterEvidence) -> Option<u64> {
-        Some(ev.live_counter_claim)
+    fn read_authentic_pre(&self, _: &[u8; 32], ev: &CounterRead) -> Option<u64> {
+        Some(ev.attested_raw_counter)
+    }
+    fn read_authentic_post(&self, _: &[u8; 32], ev: &CounterRead) -> Option<u64> {
+        Some(ev.attested_raw_counter)
     }
 }
 
@@ -430,36 +436,111 @@ fn accept_rejects_dsm_state_failures() {
 fn accept_rejects_counter_problems() {
     let (rel, pk, b) = valid_release();
 
-    // Wrong claimed value -> faithful chip read disagrees with H0 - next.
+    // Wrong post read (faithful chip returns attested_raw_counter) -> TO check fails.
     let mut r = rel.clone();
-    r.counter.live_counter_claim += 1;
+    r.counter.post.attested_raw_counter += 1;
     assert_eq!(
         check(&r, &ctx(&b), &pk),
-        Err(AcceptError::CounterEvidenceInvalid)
+        Err(AcceptError::CounterToCoordinateInvalid)
     );
 
-    // Inauthentic transcript.
+    // Wrong pre read -> FROM check fails first (the discriminating check).
+    let mut r = rel.clone();
+    r.counter.pre.attested_raw_counter += 1;
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::CounterFromCoordinateInvalid)
+    );
+
+    // Inauthentic pre read (transcript missing/invalid) -> FROM check fails.
     struct FailCounter;
     impl CounterVerifier for FailCounter {
-        fn read_authentic_counter(&self, _: &[u8; 32], _: &CounterEvidence) -> Option<u64> {
+        fn read_authentic_pre(&self, _: &[u8; 32], _: &CounterRead) -> Option<u64> {
+            None
+        }
+        fn read_authentic_post(&self, _: &[u8; 32], _: &CounterRead) -> Option<u64> {
             None
         }
     }
     assert_eq!(
         accept_offline::<WotsBlake3, _, _>(&rel, &ctx(&b), &Dsm::ok(&pk), &FailCounter),
-        Err(AcceptError::CounterEvidenceInvalid)
+        Err(AcceptError::CounterFromCoordinateInvalid)
     );
 
-    // Breached RP2350 forges the claim, but the receiver's chip read disagrees.
+    // Breached RP2350 forges the claims, but the receiver's own chip reads disagree
+    // with H0 - u_i / H0 - (u_i+1).
     struct LyingChip;
     impl CounterVerifier for LyingChip {
-        fn read_authentic_counter(&self, _: &[u8; 32], _: &CounterEvidence) -> Option<u64> {
+        fn read_authentic_pre(&self, _: &[u8; 32], _: &CounterRead) -> Option<u64> {
+            Some(42)
+        }
+        fn read_authentic_post(&self, _: &[u8; 32], _: &CounterRead) -> Option<u64> {
             Some(42)
         }
     }
     assert_eq!(
         accept_offline::<WotsBlake3, _, _>(&rel, &ctx(&b), &Dsm::ok(&pk), &LyingChip),
-        Err(AcceptError::CounterEvidenceInvalid)
+        Err(AcceptError::CounterFromCoordinateInvalid)
+    );
+}
+
+/// §34.3 — the core double-spend rejection. A second release of the SAME
+/// counter-positioned sender state, presented after the first commit advanced the
+/// chip past `uᵢ`, fails the live FROM read (`H_pre != H0 − uᵢ`) on sight. Modeled
+/// by a chip stuck one step ahead: it returns the post value for the pre read too.
+#[test]
+fn accept_rejects_same_from_coordinate_replay() {
+    let (rel, pk, b) = valid_release();
+    // The physical counter has moved to uᵢ+1 (H0-(uᵢ+1)); a replay still claims FROM
+    // = uᵢ, so the receiver's live pre read no longer equals H0 - uᵢ.
+    struct AdvancedChip {
+        post: u64,
+    }
+    impl CounterVerifier for AdvancedChip {
+        fn read_authentic_pre(&self, _: &[u8; 32], _: &CounterRead) -> Option<u64> {
+            Some(self.post) // chip already at the TO coordinate — not the FROM one
+        }
+        fn read_authentic_post(&self, _: &[u8; 32], ev: &CounterRead) -> Option<u64> {
+            Some(ev.attested_raw_counter)
+        }
+    }
+    let chip = AdvancedChip {
+        post: rel.counter.post.attested_raw_counter,
+    };
+    assert_eq!(
+        accept_offline::<WotsBlake3, _, _>(&rel, &ctx(&b), &Dsm::ok(&pk), &chip),
+        Err(AcceptError::CounterFromCoordinateInvalid)
+    );
+}
+
+/// §34.4/§34.5 — a pre read spliced from another transition (wrong `r_R`, `M`, or
+/// roots) is rejected by the binding check, even if its value is correct.
+#[test]
+fn accept_rejects_spliced_counter_read() {
+    let (rel, pk, b) = valid_release();
+
+    // Foreign receiver challenge on the pre read -> binding mismatch.
+    let mut r = rel.clone();
+    r.counter.pre.receiver_challenge = [0xEE; 32];
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::CounterAdvanceUnbound)
+    );
+
+    // Foreign transition digest / M on the post read -> binding mismatch.
+    let mut r = rel.clone();
+    r.counter.post.root_advance_message = [0xEE; 32];
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::CounterAdvanceUnbound)
+    );
+
+    // Tampered advance binding hash -> unbound.
+    let mut r = rel.clone();
+    r.counter.binding_hash[0] ^= 0xFF;
+    assert_eq!(
+        check(&r, &ctx(&b), &pk),
+        Err(AcceptError::CounterAdvanceUnbound)
     );
 }
 

@@ -340,27 +340,74 @@ pub struct Certificate {
     pub receiver_challenge: [u8; 32],
 }
 
-/// TROPIC01 counter evidence (§13 / wire `CounterEvidence`). The receiver obtains
-/// the authoritative counter value from the chip (verifier pairing slot) by
-/// authenticating `verifier_transcript`. The `*_claim` fields are untrusted
-/// transport conveniences (§33) — the acceptance predicate never trusts them.
+/// One receiver-side authenticated TROPIC01 counter read, pinned to exactly one
+/// transition (§13 / wire `CounterEvidencePre`/`CounterEvidencePost`). The receiver
+/// obtains the authoritative live counter value `H` from the chip over its own
+/// authenticated verifier-pairing-slot session, proven by `verifier_transcript`;
+/// the acceptance predicate takes the trusted value from [`crate::accept::CounterVerifier`],
+/// NOT from `attested_raw_counter` (an untrusted transport convenience, §33). The
+/// remaining fields pin the read to `(anchor_id, r_R, M, R_i, R_{i+1}, u_i, u_i+1)`
+/// so a stale or foreign read cannot be spliced into another transition.
 #[derive(Clone)]
-pub struct CounterEvidence {
+pub struct CounterRead {
     pub anchor_id: [u8; 32],
-    pub enrolled_counter: u64,
-    /// Untrusted host claim of the live counter `H`; proof comes from
-    /// `verifier_transcript`, not this field.
-    pub live_counter_claim: u64,
-    /// Untrusted host claim of the derived anchor counter `u = H₀ − H`.
-    pub derived_anchor_counter_claim: u64,
+    pub receiver_challenge: [u8; 32],
+    pub root_advance_message: [u8; 32],
+    pub prev_root: [u8; 32],
+    pub next_root: [u8; 32],
+    pub anchor_counter: u64,
+    pub next_anchor_counter: u64,
+    /// Untrusted host claim of the live counter `H` for this read; proof comes from
+    /// `verifier_transcript` + the predicate's authenticated read, not this field.
+    pub attested_raw_counter: u64,
     pub verifier_transcript: Vec<u8>,
 }
 
-/// The exported release package `Pkg = (Δ, BootChain, Cert, counter-evidence)` (§20).
+/// Transition-bound counter-advance evidence (§13 / wire `CounterAdvanceEvidence`).
+/// A single physical advance witnessed at both ends: `pre` at the FROM coordinate
+/// (`H_pre = H₀ − uᵢ`) before the commit, `post` at the TO coordinate
+/// (`H_post = H₀ − (uᵢ+1)`) after it. `binding_hash` ties the movement to exactly
+/// one transition — see [`counter_advance_binding`]. A post-only scalar is not
+/// accepted (§4, §33): it cannot witness that the sender began at `uᵢ`.
+#[derive(Clone)]
+pub struct CounterAdvanceEvidence {
+    pub pre: CounterRead,
+    pub post: CounterRead,
+    pub binding_hash: [u8; 32],
+}
+
+/// The transition-binding hash over one counter advance: the enrolled anchor / the
+/// receiver's authenticated reads bind the movement `H_pre → H_post` (`H_post =
+/// H_pre − 1`) to the exact transition `(M, R_i, R_{i+1}, r_R)`. Reuses the TBCA
+/// message shape (`crate::tbca`) so a `CounterAdvanceEvidence` and a fraud proof
+/// share one canonical encoding.
+pub fn counter_advance_binding(
+    anchor_id: &[u8; 32],
+    h_pre: u64,
+    h_post: u64,
+    root_advance_message: &[u8; 32],
+    prev_root: &[u8; 32],
+    next_root: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> [u8; 32] {
+    crate::tbca::tbca_message(
+        anchor_id,
+        h_pre,
+        h_post,
+        root_advance_message,
+        prev_root,
+        next_root,
+        receiver_challenge,
+    )
+}
+
+/// The exported release package `Pkg = (Δ, BootChain, Cert, counter-advance-evidence)`
+/// (§20/§32). The producer fills the transition-binding fields of `counter`; the
+/// receiver attaches its own authenticated pre/post reads before acceptance.
 #[derive(Clone)]
 pub struct OfflineRelease {
     pub transition: OwnedTransition,
     pub boot_chain: Vec<BootTicket>,
     pub cert: Certificate,
-    pub counter: CounterEvidence,
+    pub counter: CounterAdvanceEvidence,
 }

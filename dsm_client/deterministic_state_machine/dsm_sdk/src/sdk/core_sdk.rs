@@ -2966,11 +2966,14 @@ mod tests {
         .expect("transfer 1 must be accepted under an authenticated counter");
         let _ = sender_dev;
 
-        // (a') The PRODUCTION relay-counter entry point: supplied the counter H the receiver would
-        // read from A's chip over the raw-SPI relay (H = H0 - (u_i+1) = enrolled - 1 for transfer 1),
-        // tagged with the pinned anchor_id, it accepts. A wrong H, a wrong anchor_id, or None (no
-        // authenticated read) all fail closed — proving the exact check flows through the real path.
-        let expected_h = pin1.enrolled_counter - 1;
+        // (a') The PRODUCTION relay-counter entry point: supplied the TWO counter values the receiver
+        // would read from A's chip over the raw-SPI relay — the FROM read `H_pre = H0 - u_i`
+        // (= enrolled for transfer 1, u_i=0) taken before A's commit, and the TO read
+        // `H_post = H0 - (u_i+1)` (= enrolled - 1) after — each tagged with the pinned anchor_id, it
+        // accepts. A missing FROM read, a missing TO read, a wrong value, or a read from a different
+        // chip all fail closed — proving the FROM→TO coordinate proof flows through the real path.
+        let h_pre = pin1.enrolled_counter; // H0 - u_i, u_i = 0
+        let h_post = pin1.enrolled_counter - 1; // H0 - (u_i+1)
         crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
             &art1.offline_release,
             Some(&pin1),
@@ -2979,14 +2982,16 @@ mod tests {
             &[0x55u8; 32],
             &policy_hash,
             &binding1,
-            Some((pin1.anchor_id, expected_h)),
+            Some((pin1.anchor_id, h_pre)),
+            Some((pin1.anchor_id, h_post)),
         )
-        .expect("relay-counter accept with the exact authenticated H");
-        for bad in [
-            None,
-            Some((pin1.anchor_id, expected_h + 1)), // wrong counter
-            Some((pin1.anchor_id, expected_h - 1)), // wrong counter
-            Some(([0xEEu8; 32], expected_h)),       // counter read from a different chip
+        .expect("relay-counter accept with the exact authenticated FROM+TO reads");
+        for (bad_pre, bad_post) in [
+            (None, Some((pin1.anchor_id, h_post))), // no FROM read -> fail closed
+            (Some((pin1.anchor_id, h_pre)), None),  // no TO read
+            (Some((pin1.anchor_id, h_pre + 1)), Some((pin1.anchor_id, h_post))), // wrong FROM
+            (Some((pin1.anchor_id, h_pre)), Some((pin1.anchor_id, h_post + 1))), // wrong TO
+            (Some(([0xEEu8; 32], h_pre)), Some((pin1.anchor_id, h_post))), // FROM read from another chip
         ] {
             let r = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
                 &art1.offline_release,
@@ -2996,11 +3001,12 @@ mod tests {
                 &[0x55u8; 32],
                 &policy_hash,
                 &binding1,
-                bad,
+                bad_pre,
+                bad_post,
             );
             assert!(
                 r.is_err(),
-                "relay-counter must fail closed for {bad:?}, got {r:?}"
+                "relay-counter must fail closed for pre={bad_pre:?} post={bad_post:?}, got {r:?}"
             );
         }
 
@@ -3208,12 +3214,17 @@ mod tests {
             chip_static_pubkey: Some([0xCC; 32]),
         };
         let pinned = PinnedAnchor::from_fused(&pin);
-        let expected_h = (pin.enrolled_counter - 1) as u32; // H = H0 - (u_i+1), transfer 1
+        let expected_h = (pin.enrolled_counter - 1) as u32; // H_post = H0 - (u_i+1), transfer 1
         let commitment = [0x42u8; 32];
+        // The FROM read `H_pre = H0 - u_i` (= enrolled for transfer 1, u_i=0). This test drives the
+        // TO (post-commit) read through the relay; the FROM read is supplied directly so the seam's
+        // fail-closed behavior on the relay-read TO value is what is under test.
+        let attested_pre = Some((pin.anchor_id, pin.enrolled_counter));
 
         // Helper: run the exact confirm seam (`resolve_attested_counter` -> predicate) and report the
-        // acceptance result, mirroring `handle_confirm_request` byte-for-byte.
-        let accept_with = |attested: Option<([u8; 32], u64)>| {
+        // acceptance result, mirroring `handle_confirm_request` byte-for-byte. `attested_post` is the
+        // TO read the relay produced.
+        let accept_with = |attested_post: Option<([u8; 32], u64)>| {
             accept_offline_release_with_relay_counter(
                 &art.offline_release,
                 Some(&pinned),
@@ -3222,7 +3233,8 @@ mod tests {
                 &r_r,
                 &policy_hash,
                 &binding,
-                attested,
+                attested_pre,
+                attested_post,
             )
         };
 
