@@ -3793,9 +3793,26 @@ impl BilateralBleHandler {
             // device fused-anchor appliance above. Non-bearer transfers (or a bearer transfer with
             // no receiver challenge / a failed appliance drive) leave these empty and the receiver
             // fails closed to online recovery.
+            // Re-stamp the release's counter-advance binding with the sender's DEVICE SMT roots
+            // (Rᵢ = pre-advance `pre_root`, Rᵢ₊₁ = post-advance `sender_smt_root`) — the appliance
+            // stamped zero placeholders since it cannot know them until this advance materializes
+            // them. The receiver recomputes the same binding from its verified device roots, so a
+            // failed re-stamp rides empty and the receiver fails closed to online recovery.
             offline_release: bearer_artifacts
                 .as_ref()
-                .map(|a| a.offline_release.clone())
+                .and_then(|a| {
+                    crate::bluetooth::anchor_accept::restamp_counter_binding(
+                        &a.offline_release,
+                        &pre_root,
+                        &sender_smt_root,
+                    )
+                    .map_err(|e| {
+                        log::warn!(
+                            "[bilateral_ble] offline-bearer binding re-stamp failed (fail closed): {e:?}"
+                        )
+                    })
+                    .ok()
+                })
                 .unwrap_or_default(),
             anchor_state_prev_proof: sim_outcome
                 .anchor_proofs

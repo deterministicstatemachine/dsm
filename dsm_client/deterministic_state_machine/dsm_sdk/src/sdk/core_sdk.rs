@@ -2972,8 +2972,8 @@ mod tests {
     #[serial]
     fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
         use crate::bluetooth::anchor_accept::{
-            accept_offline_release_with_counter, AnchorStateBinding, OfflineRecover, PinnedAnchor,
-            TrustedTestCounter,
+            accept_offline_release_with_counter, restamp_counter_binding, AnchorStateBinding,
+            OfflineRecover, PinnedAnchor, TrustedTestCounter,
         };
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
@@ -3089,6 +3089,10 @@ mod tests {
         let pin1 = pin_from(&art1.pin);
         let before1 = out1.smt_proofs.pre_root;
         let after1 = out1.child_r_a;
+        // The sender re-stamps the release binding with its real DEVICE roots (the appliance stamped
+        // zero placeholders) — exactly what the handler does post-`simulate_advance_for_confirm`.
+        let release1 = restamp_counter_binding(art1.offline_release.as_slice(), &before1, &after1)
+            .expect("re-stamp transfer 1 device roots");
         let binding1 = AnchorStateBinding {
             sender_smt_root: &after1,
             sender_smt_root_before: &before1,
@@ -3099,7 +3103,7 @@ mod tests {
         // (a) Receiver accepts the real release once the counter is authenticated. `accepted_prev_root`
         // is the appliance root this transfer consumes.
         accept_offline_release_with_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_prev_root),
             &recipient,
@@ -3120,7 +3124,7 @@ mod tests {
         let h_pre = pin1.enrolled_counter; // H0 - u_i, u_i = 0
         let h_post = pin1.enrolled_counter - 1; // H0 - (u_i+1)
         crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_prev_root),
             &recipient,
@@ -3139,7 +3143,7 @@ mod tests {
             (Some(([0xEEu8; 32], h_pre)), Some((pin1.anchor_id, h_post))), // FROM read from another chip
         ] {
             let r = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-                &art1.offline_release,
+                &release1,
                 Some(&pin1),
                 Some(&art1.appliance_prev_root),
                 &recipient,
@@ -3163,7 +3167,7 @@ mod tests {
         // state cannot be spent twice. This is the door, and the rejection is the production predicate,
         // not a test shortcut.
         let bob = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_prev_root),
             &recipient,
@@ -3186,7 +3190,7 @@ mod tests {
         // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `appliance_next_root`
         // is rejected — the consumed appliance root is no longer the accepted root.
         let replay = accept_offline_release_with_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_next_root), // receiver has adopted the successor root
             &recipient,
@@ -3214,6 +3218,8 @@ mod tests {
         let pin2 = pin_from(&art2.pin);
         let before2 = out2.smt_proofs.pre_root;
         let after2 = out2.child_r_a;
+        let release2 = restamp_counter_binding(art2.offline_release.as_slice(), &before2, &after2)
+            .expect("re-stamp transfer 2 device roots");
         let binding2 = AnchorStateBinding {
             sender_smt_root: &after2,
             sender_smt_root_before: &before2,
@@ -3221,7 +3227,7 @@ mod tests {
             next_proof: &ap2.child,
         };
         accept_offline_release_with_counter(
-            &art2.offline_release,
+            &release2,
             Some(&pin2),
             Some(&art2.appliance_prev_root),
             &recipient,
@@ -3243,7 +3249,7 @@ mod tests {
     async fn phase_h0_relay_counter_flows_end_to_end_with_mock_transports() {
         use crate::bluetooth::anchor_accept::{
             accept_offline_release_with_relay_counter, resolve_attested_counter,
-            AnchorStateBinding, OfflineRecover, PinnedAnchor,
+            restamp_counter_binding, AnchorStateBinding, OfflineRecover, PinnedAnchor,
         };
         use crate::bluetooth::tropic_relay::{
             AnchorCounterReader, LocalPicoTransport, PicoFuture, TropicRelayRouter,
@@ -3370,6 +3376,9 @@ mod tests {
         let ap = out.anchor_proofs.clone().expect("anchor proofs");
         let before = out.smt_proofs.pre_root;
         let after = out.child_r_a;
+        // Sender re-stamps the release binding with its real device roots (as the handler does).
+        let release = restamp_counter_binding(art.offline_release.as_slice(), &before, &after)
+            .expect("re-stamp device roots");
         let binding = AnchorStateBinding {
             sender_smt_root: &after,
             sender_smt_root_before: &before,
@@ -3399,7 +3408,7 @@ mod tests {
         // TO read the relay produced.
         let accept_with = |attested_post: Option<([u8; 32], u64)>| {
             accept_offline_release_with_relay_counter(
-                &art.offline_release,
+                &release,
                 Some(&pinned),
                 Some(&art.appliance_prev_root),
                 &recipient,

@@ -26,7 +26,10 @@
 use anchor_core::accept::{accept_offline, AcceptError, CounterVerifier, DsmVerifier, VerifierContext};
 use anchor_core::boot::BootTicket;
 use anchor_core::proto::pb;
-use anchor_core::root_advance::{CounterRead, Transition};
+use anchor_core::root_advance::{
+    CounterAdvanceBinding, CounterAdvanceEvidence, CounterAdvanceReads, CounterEvidenceError,
+    Transition,
+};
 use anchor_core::sig::WotsBlake3;
 use prost::Message;
 
@@ -123,17 +126,17 @@ impl DsmStateVerifier<'_> {
 }
 
 impl DsmVerifier for DsmStateVerifier<'_> {
-    fn prev_root_commits_anchor_state(
+    fn sender_device_root_before_commits_anchor_state(
         &self,
-        _prev_root: &[u8; 32],
+        _appliance_root: &[u8; 32],
         bundle: &[u8; 32],
         anchor_head: &[u8; 32],
         boot_head: &[u8; 32],
         anchor_counter: u64,
     ) -> bool {
         // The fused anchor state `(B, Aᵢ, J_b, uᵢ)` is committed by the per-device anchor-state leaf
-        // in the sender's PRE-advance device root (`sender_smt_root_before`), NOT the relationship
-        // tip `prev_root` (which is symmetric). The receiver already binds `sender_smt_root_before`
+        // in the sender's PRE-advance device root (`sender_smt_root_before` = Rᵢ), NOT the appliance
+        // frontier `hᵢ` passed as `_appliance_root`. The receiver already binds `sender_smt_root_before`
         // to the accepted `h_n` via the handler's `rel_proof_parent` check that gates this predicate.
         dsm::core::bilateral_transaction_manager::verify_anchor_state_commitment(
             self.binding.sender_smt_root_before,
@@ -192,18 +195,18 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         t.recipient_device_id == self.receiver_device_id
     }
 
-    fn next_root_commits_anchor_state(
+    fn sender_device_root_after_commits_anchor_state(
         &self,
-        _next_root: &[u8; 32],
+        _appliance_root: &[u8; 32],
         bundle: &[u8; 32],
         next_anchor_head: &[u8; 32],
         boot_head: &[u8; 32],
         next_anchor_counter: u64,
     ) -> bool {
         // The successor fused state `(B, A_{i+1}, J_{b'}, uᵢ+1)` is committed by the same per-device
-        // anchor-state leaf in the sender's POST-advance device root (`sender_smt_root`), bound to
-        // the accepted `h_{n+1}` via the handler's `rel_proof_child` check. See
-        // `prev_root_commits_anchor_state`.
+        // anchor-state leaf in the sender's POST-advance device root (`sender_smt_root` = Rᵢ₊₁), bound
+        // to the accepted `h_{n+1}` via the handler's `rel_proof_child` check. See
+        // `sender_device_root_before_commits_anchor_state`.
         dsm::core::bilateral_transaction_manager::verify_anchor_state_commitment(
             self.binding.sender_smt_root,
             bundle,
@@ -251,11 +254,25 @@ fn authentic_for(attested: &Option<([u8; 32], u64)>, anchor_id: &[u8; 32]) -> Op
 }
 
 impl CounterVerifier for DsmCounterVerifier {
-    fn read_authentic_pre(&self, anchor_id: &[u8; 32], _ev: &CounterRead) -> Option<u64> {
-        authentic_for(&self.attested_pre, anchor_id)
-    }
-    fn read_authentic_post(&self, anchor_id: &[u8; 32], _ev: &CounterRead) -> Option<u64> {
-        authentic_for(&self.attested_post, anchor_id)
+    fn verify_counter_advance(
+        &self,
+        pinned_anchor_id: &[u8; 32],
+        evidence: &CounterAdvanceEvidence,
+        binding: &CounterAdvanceBinding,
+    ) -> Result<CounterAdvanceReads, CounterEvidenceError> {
+        // The release's evidence must be bound to THIS transition (the receiver recomputed
+        // `binding` from the accepted transition + its own verified device roots) and name the
+        // pinned anchor. Only then do the receiver's OWN authenticated relay reads count — never
+        // the host-supplied `attested_raw_counter`.
+        evidence.check_binding(pinned_anchor_id, binding)?;
+        let pre_raw_counter = authentic_for(&self.attested_pre, pinned_anchor_id)
+            .ok_or(CounterEvidenceError::Inauthentic)?;
+        let post_raw_counter = authentic_for(&self.attested_post, pinned_anchor_id)
+            .ok_or(CounterEvidenceError::Inauthentic)?;
+        Ok(CounterAdvanceReads {
+            pre_raw_counter,
+            post_raw_counter,
+        })
     }
 }
 
@@ -387,11 +404,19 @@ pub(crate) struct TrustedTestCounter;
 
 #[cfg(test)]
 impl CounterVerifier for TrustedTestCounter {
-    fn read_authentic_pre(&self, _anchor_id: &[u8; 32], ev: &CounterRead) -> Option<u64> {
-        Some(ev.attested_raw_counter)
-    }
-    fn read_authentic_post(&self, _anchor_id: &[u8; 32], ev: &CounterRead) -> Option<u64> {
-        Some(ev.attested_raw_counter)
+    fn verify_counter_advance(
+        &self,
+        pinned_anchor_id: &[u8; 32],
+        evidence: &CounterAdvanceEvidence,
+        binding: &CounterAdvanceBinding,
+    ) -> Result<CounterAdvanceReads, CounterEvidenceError> {
+        // Verify the transition binding exactly as the live verifier does, then stand in for the
+        // authenticated L3 session by returning the counter each read names (`attested_raw_counter`).
+        evidence.check_binding(pinned_anchor_id, binding)?;
+        Ok(CounterAdvanceReads {
+            pre_raw_counter: evidence.pre.attested_raw_counter,
+            post_raw_counter: evidence.post.attested_raw_counter,
+        })
     }
 }
 
@@ -443,6 +468,53 @@ pub fn accept_offline_release(
         binding,
         &DsmCounterVerifier::fail_closed(),
     )
+}
+
+/// Re-stamp the offline release's counter-advance binding with the sender's DEVICE SMT roots
+/// (`R_i` = pre-advance device root, `R_{i+1}` = post-advance device root). The appliance cannot
+/// know these when it produces the release — they are materialized only by the post-transfer DSM
+/// advance — so it stamps zero placeholders; the sender calls this once both roots exist (after
+/// `simulate_advance_for_confirm`), before the release goes on the confirm. The binding is
+/// recomputed from the release's OWN certificate (appliance frontier roots hᵢ/hᵢ₊₁, `M`, `D`,
+/// coordinates, `r_R`, anchor_id) plus the supplied device roots — exactly what the receiver
+/// recomputes from its verified device roots, so an un-re-stamped (zero-device-root) release fails
+/// closed. Returns the re-encoded release bytes.
+pub fn restamp_counter_binding(
+    offline_release: &[u8],
+    sender_device_root_before: &[u8; 32],
+    sender_device_root_after: &[u8; 32],
+) -> Result<Vec<u8>, OfflineRecover> {
+    use anchor_core::proto::arr32;
+    let mut rel = pb::OfflineRelease::decode(offline_release).map_err(|_| OfflineRecover::Malformed)?;
+    let cert = rel.cert.as_ref().ok_or(OfflineRecover::Malformed)?;
+    let a32 = |v: &[u8]| arr32(v).map_err(|_| OfflineRecover::Malformed);
+    let binding = CounterAdvanceBinding {
+        anchor_id: a32(&cert.anchor_id)?,
+        receiver_challenge: a32(&cert.receiver_challenge)?,
+        transition_digest: a32(&cert.transition_digest)?,
+        root_advance_message: a32(&cert.root_advance_message)?,
+        sender_device_root_before: *sender_device_root_before,
+        sender_device_root_after: *sender_device_root_after,
+        appliance_root_before: a32(&cert.prev_root)?,
+        appliance_root_after: a32(&cert.next_root)?,
+        anchor_counter: cert.anchor_counter,
+        next_anchor_counter: cert.next_anchor_counter,
+    };
+    let bh = binding.hash().to_vec();
+    let mut counter = rel.counter.take().ok_or(OfflineRecover::Malformed)?;
+    counter
+        .pre
+        .as_mut()
+        .ok_or(OfflineRecover::Malformed)?
+        .binding_hash = bh.clone();
+    counter
+        .post
+        .as_mut()
+        .ok_or(OfflineRecover::Malformed)?
+        .binding_hash = bh.clone();
+    counter.binding_hash = bh;
+    rel.counter = Some(counter);
+    Ok(rel.encode_to_vec())
 }
 
 /// Path-B live-relay acceptance: identical to [`accept_offline_release`] but supplied the two
@@ -524,6 +596,11 @@ pub(crate) fn accept_offline_release_with_counter<C: CounterVerifier>(
         expected_receiver_challenge,
         expected_policy_hash,
         enrolled_counter: pinned.enrolled_counter,
+        // The sender device roots the receiver verified from the confirm's rel_proof_parent/child
+        // (bound to the accepted tips h_n / h_{n+1}); the counter advance is bound to THESE, never
+        // the appliance frontier alone. The sender re-stamps the release binding with the same roots.
+        sender_device_root_before: binding.sender_smt_root_before,
+        sender_device_root_after: binding.sender_smt_root,
         anchor_uncompromised: pinned.uncompromised,
     };
     let dsm = DsmStateVerifier {
@@ -540,8 +617,39 @@ pub(crate) fn accept_offline_release_with_counter<C: CounterVerifier>(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use anchor_core::root_advance::CounterReadEvidence;
 
     const ZERO: [u8; 32] = [0u8; 32];
+
+    /// A counter-advance binding + matching evidence pinned to `anchor`, so the binding check
+    /// passes and the test isolates the authenticated-read / anchor-gate behaviour.
+    fn bound_evidence(anchor: [u8; 32], host_claim: u64) -> (CounterAdvanceBinding, CounterAdvanceEvidence) {
+        let binding = CounterAdvanceBinding {
+            anchor_id: anchor,
+            receiver_challenge: ZERO,
+            transition_digest: ZERO,
+            root_advance_message: ZERO,
+            sender_device_root_before: ZERO,
+            sender_device_root_after: ZERO,
+            appliance_root_before: ZERO,
+            appliance_root_after: ZERO,
+            anchor_counter: 0,
+            next_anchor_counter: 1,
+        };
+        let bh = binding.hash();
+        let read = CounterReadEvidence {
+            anchor_id: anchor,
+            attested_raw_counter: host_claim, // host claim — never trusted
+            verifier_transcript: vec![1, 2, 3],
+            binding_hash: bh,
+        };
+        let ev = CounterAdvanceEvidence {
+            pre: read.clone(),
+            post: read,
+            binding_hash: bh,
+        };
+        (binding, ev)
+    }
 
     fn pin() -> PinnedAnchor {
         PinnedAnchor {
@@ -608,16 +716,11 @@ mod tests {
             transfer_slot: 6,
             receiver_challenge: z(),
         };
-        let read = |h: u64| pb::CounterRead {
+        let read = |h: u64| pb::CounterReadEvidence {
             anchor_id: z(),
-            receiver_challenge: z(),
-            root_advance_message: z(),
-            prev_root: z(),
-            next_root: z(),
-            anchor_counter: 0,
-            next_anchor_counter: 1,
             attested_raw_counter: h,
             verifier_transcript: vec![],
+            binding_hash: z(),
         };
         let counter = pb::CounterAdvanceEvidence {
             pre: Some(read(100)),
@@ -671,36 +774,39 @@ mod tests {
 
     #[test]
     fn counter_verifier_uses_authenticated_reads_never_host_claim() {
-        // The host-supplied attested_raw_counter is always present; the verifier must NEVER echo it.
-        let read = CounterRead {
-            anchor_id: ZERO,
-            receiver_challenge: ZERO,
-            root_advance_message: ZERO,
-            prev_root: ZERO,
-            next_root: ZERO,
-            anchor_counter: 0,
-            next_anchor_counter: 1,
-            attested_raw_counter: 99, // host claim — never trusted
-            verifier_transcript: vec![1, 2, 3],
-        };
+        // The host-supplied attested_raw_counter is always present (99); the verifier must NEVER echo it.
+        let anchor = [0xA7u8; 32];
+        let (binding, ev) = bound_evidence(anchor, 99);
 
-        // Fail-closed default: no authenticated relay reads -> None for both, regardless of claims.
+        // Fail-closed default: no authenticated relay reads -> Inauthentic, regardless of host claims
+        // (the binding still verifies — it is the missing authenticated read that fails closed).
         let v = DsmCounterVerifier::fail_closed();
-        assert_eq!(v.read_authentic_pre(&ZERO, &read), None);
-        assert_eq!(v.read_authentic_post(&ZERO, &read), None);
+        assert_eq!(
+            v.verify_counter_advance(&anchor, &ev, &binding),
+            Err(CounterEvidenceError::Inauthentic)
+        );
 
         // With authenticated reads for the matching anchor: return THOSE values, never the host claim.
-        let anchor = [0xA7u8; 32];
         let v = DsmCounterVerifier {
             attested_pre: Some((anchor, 100)),
             attested_post: Some((anchor, 99)),
         };
-        assert_eq!(v.read_authentic_pre(&anchor, &read), Some(100));
-        assert_eq!(v.read_authentic_post(&anchor, &read), Some(99));
+        assert_eq!(
+            v.verify_counter_advance(&anchor, &ev, &binding),
+            Ok(CounterAdvanceReads {
+                pre_raw_counter: 100,
+                post_raw_counter: 99
+            })
+        );
 
-        // A read from a DIFFERENT anchor is not evidence for this one -> fail closed.
-        assert_eq!(v.read_authentic_pre(&ZERO, &read), None);
-        assert_eq!(v.read_authentic_post(&ZERO, &read), None);
+        // A read from a DIFFERENT anchor is not evidence for this one -> fail closed. The evidence +
+        // binding are pinned to `other`, so the binding check passes and the anchor gate is what rejects.
+        let other = ZERO;
+        let (ob, oev) = bound_evidence(other, 99);
+        assert_eq!(
+            v.verify_counter_advance(&other, &oev, &ob),
+            Err(CounterEvidenceError::Inauthentic)
+        );
     }
 
     #[test]
@@ -714,8 +820,8 @@ mod tests {
         };
         // A zero device root + empty proof can never satisfy the fused-anchor-state inclusion —
         // the receiver fails closed when the producer did not carry real anchor-state proofs.
-        assert!(!v.prev_root_commits_anchor_state(&ZERO, &ZERO, &ZERO, &ZERO, 0));
-        assert!(!v.next_root_commits_anchor_state(&ZERO, &ZERO, &ZERO, &ZERO, 1));
+        assert!(!v.sender_device_root_before_commits_anchor_state(&ZERO, &ZERO, &ZERO, &ZERO, 0));
+        assert!(!v.sender_device_root_after_commits_anchor_state(&ZERO, &ZERO, &ZERO, &ZERO, 1));
     }
 
     /// The fused-anchor-state binding accepts a REAL inclusion proof produced by
@@ -745,11 +851,11 @@ mod tests {
             binding: &binding,
         };
         // Accepts the exact fused state under the committing root.
-        assert!(v.prev_root_commits_anchor_state(&ZERO, &b, &a, &j, u));
-        assert!(v.next_root_commits_anchor_state(&ZERO, &b, &a, &j, u));
+        assert!(v.sender_device_root_before_commits_anchor_state(&ZERO, &b, &a, &j, u));
+        assert!(v.sender_device_root_after_commits_anchor_state(&ZERO, &b, &a, &j, u));
         // Off-by-one counter / wrong head reject.
-        assert!(!v.prev_root_commits_anchor_state(&ZERO, &b, &a, &j, u + 1));
-        assert!(!v.next_root_commits_anchor_state(&ZERO, &b, &[0u8; 32], &j, u));
+        assert!(!v.sender_device_root_before_commits_anchor_state(&ZERO, &b, &a, &j, u + 1));
+        assert!(!v.sender_device_root_after_commits_anchor_state(&ZERO, &b, &[0u8; 32], &j, u));
     }
 
     // ------------------------------------------------------------------
@@ -896,23 +1002,17 @@ mod tests {
         assert_eq!(attested, None, "incomplete pin must never be counter-read");
 
         // ...and with both reads None the counter verifier refuses, so the 24-check predicate can
-        // never see an authentic counter: acceptance is impossible, online recovery only.
+        // never see an authentic counter: acceptance is impossible, online recovery only. Even with
+        // a perfectly-bound evidence carrying the exactly-correct host claim, verify_counter_advance
+        // returns Inauthentic (no authenticated relay read behind the gate).
         let v = DsmCounterVerifier {
             attested_pre: attested,
             attested_post: attested,
         };
-        let read = CounterRead {
-            anchor_id: incomplete.anchor_id,
-            receiver_challenge: ZERO,
-            root_advance_message: ZERO,
-            prev_root: ZERO,
-            next_root: ZERO,
-            anchor_counter: 0,
-            next_anchor_counter: 1,
-            attested_raw_counter: would_be_correct_h, // host claims are never trusted
-            verifier_transcript: Vec::new(),
-        };
-        assert_eq!(v.read_authentic_pre(&incomplete.anchor_id, &read), None);
-        assert_eq!(v.read_authentic_post(&incomplete.anchor_id, &read), None);
+        let (binding, ev) = bound_evidence(incomplete.anchor_id, would_be_correct_h);
+        assert_eq!(
+            v.verify_counter_advance(&incomplete.anchor_id, &ev, &binding),
+            Err(CounterEvidenceError::Inauthentic)
+        );
     }
 }
