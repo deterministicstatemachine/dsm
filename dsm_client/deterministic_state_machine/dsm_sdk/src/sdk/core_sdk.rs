@@ -2992,6 +2992,87 @@ mod tests {
         );
     }
 
+    /// Exactly-once commit (Step 3). Complements the two-phase test (PREPARE holds uᵢ, COMMIT advances
+    /// by one) by proving the counter cannot move TWICE and that post-commit cleanup never re-moves or
+    /// erases it: a second `commit_offline_bearer_release` from the SAME prepared is rejected (the
+    /// appliance has left `Prepared` and the live counter no longer sits at uᵢ), `cancel` after commit
+    /// is a safe no-op (§28 — a committed release is re-emitted/downgraded online, never cancelled),
+    /// and the appliance is left `Ready` at the advanced coordinate so the NEXT transfer starts from
+    /// uᵢ+1. This is the producer-side serialization the Counter-Positioned Commit relies on.
+    #[test]
+    #[serial]
+    fn commit_is_exactly_once_and_cancel_after_commit_is_noop() {
+        use dsm::types::device_state::DeviceState;
+
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let recipient = [4u8; 32];
+
+        let prepared = sdk
+            .prepare_offline_bearer_release(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
+            )
+            .expect("prepare");
+        assert_eq!(
+            prepared.anchor_counter, 0,
+            "PREPARE exposes uᵢ without moving the counter"
+        );
+
+        // COMMIT once — the counter advances uᵢ → uᵢ+1.
+        let art = sdk
+            .commit_offline_bearer_release(&prepared)
+            .expect("commit once");
+        {
+            use prost::Message as _;
+            let rel = anchor_core::proto::pb::OfflineRelease::decode(&art.offline_release[..])
+                .expect("decode")
+                .to_release()
+                .expect("to_release");
+            assert_eq!(rel.cert.next_anchor_counter, 1, "exactly one advance");
+        }
+
+        // A SECOND commit from the SAME prepared must be rejected — the counter cannot move twice
+        // (the appliance has left `Prepared`; the live counter has left the FROM coordinate uᵢ).
+        assert!(
+            sdk.commit_offline_bearer_release(&prepared).is_err(),
+            "double-commit from the same prepared is rejected (exactly once)"
+        );
+
+        // Cleanup after a commit is a no-op: it must NEVER re-move the counter or erase the committed
+        // release.
+        sdk.cancel_offline_bearer_release()
+            .expect("cancel after commit is a safe no-op");
+
+        // The appliance is left Ready at the ADVANCED coordinate, so the next transfer starts at uᵢ+1
+        // — proof the counter advanced exactly once and nothing was double-moved or lost.
+        let prepared2 = sdk
+            .prepare_offline_bearer_release(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xCD],
+                [0x66u8; 32],
+            )
+            .expect("prepare 2");
+        assert_eq!(
+            prepared2.anchor_counter, 1,
+            "the next transfer starts from the advanced FROM coordinate uᵢ+1"
+        );
+    }
+
     /// End-to-end producer → receiver-predicate → adopt → replay-reject over TWO real bearer
     /// transfers. This is the activation boundary for the producer-driving cluster: the SENDER
     /// drives the real fused-anchor appliance (`build_offline_bearer_release`), commits the emitted
