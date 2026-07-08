@@ -24,7 +24,7 @@ use crate::boot::BootTicket;
 use crate::domain;
 use crate::enrollment::commit;
 use crate::hash::{h, kdf};
-use crate::util::{push_var, u16_le, u32_le, u64_le};
+use crate::util::{ct_eq_32, push_var, u16_le, u32_le, u64_le};
 
 /// The canonical DSM transition package `Δᵢ₊₁` (the wire `TransitionPackage`).
 /// It carries everything the receiver needs to verify `hᵢ → hᵢ₊₁` and to bind
@@ -340,27 +340,143 @@ pub struct Certificate {
     pub receiver_challenge: [u8; 32],
 }
 
-/// TROPIC01 counter evidence (§13 / wire `CounterEvidence`). The receiver obtains
-/// the authoritative counter value from the chip (verifier pairing slot) by
-/// authenticating `verifier_transcript`. The `*_claim` fields are untrusted
-/// transport conveniences (§33) — the acceptance predicate never trusts them.
+/// One receiver-side authenticated TROPIC01 counter read, pinned to exactly one
+/// transition by its `binding_hash` (§13 / wire `CounterReadEvidence`). The receiver
+/// obtains the authoritative live counter value `H` from the chip over its own
+/// authenticated verifier-pairing-slot session, proven by `verifier_transcript`; the
+/// acceptance predicate takes the trusted value from [`crate::accept::CounterVerifier`],
+/// NOT from `attested_raw_counter` (an untrusted transport convenience, §33).
+/// `binding_hash` equals the [`CounterAdvanceBinding`] the receiver recomputes from the
+/// accepted transition, so a stale or foreign read (from another session or transition)
+/// cannot be spliced into this one — no per-read transition fields are carried or trusted.
 #[derive(Clone)]
-pub struct CounterEvidence {
+pub struct CounterReadEvidence {
     pub anchor_id: [u8; 32],
-    pub enrolled_counter: u64,
-    /// Untrusted host claim of the live counter `H`; proof comes from
-    /// `verifier_transcript`, not this field.
-    pub live_counter_claim: u64,
-    /// Untrusted host claim of the derived anchor counter `u = H₀ − H`.
-    pub derived_anchor_counter_claim: u64,
+    /// Untrusted host claim of the live counter `H` for this read; proof comes from
+    /// `verifier_transcript` + the predicate's authenticated read, not this field.
+    pub attested_raw_counter: u64,
     pub verifier_transcript: Vec<u8>,
+    /// The transition-bound counter-advance binding this read is pinned to; must equal
+    /// the [`CounterAdvanceBinding`] the receiver recomputes from the accepted transition.
+    pub binding_hash: [u8; 32],
 }
 
-/// The exported release package `Pkg = (Δ, BootChain, Cert, counter-evidence)` (§20).
+/// The expected transition-bound counter-advance binding, recomputed by the receiver
+/// from the ACCEPTED transition — never taken from a host-supplied field (§13). Its
+/// [`hash`](CounterAdvanceBinding::hash) is the value every [`CounterReadEvidence`] and the
+/// [`CounterAdvanceEvidence`] envelope must carry. It binds BOTH root pairs — the sender
+/// **device** SMT roots `R_i`/`R_{i+1}` (which commit the anchor state `(B, Aᵢ, J_b, uᵢ)`
+/// / `(B, A_{i+1}, J_{b'}, uᵢ+1)`) AND the appliance frontier roots `hᵢ`/`hᵢ₊₁` (which the
+/// release binds that committed state to) — so the two are never conflated and the counter
+/// coordinate is pinned to a globally unique root position.
+#[derive(Clone)]
+pub struct CounterAdvanceBinding {
+    pub anchor_id: [u8; 32],
+    pub receiver_challenge: [u8; 32],
+    pub transition_digest: [u8; 32],
+    pub root_advance_message: [u8; 32],
+    pub sender_device_root_before: [u8; 32],
+    pub sender_device_root_after: [u8; 32],
+    pub appliance_root_before: [u8; 32],
+    pub appliance_root_after: [u8; 32],
+    pub anchor_counter: u64,
+    pub next_anchor_counter: u64,
+}
+
+impl CounterAdvanceBinding {
+    /// The canonical binding hash — the production TBCA vehicle
+    /// ([`crate::tbca::tbca_message`]), so a `CounterAdvanceEvidence` and a TBCA fraud
+    /// proof share one canonical encoding.
+    pub fn hash(&self) -> [u8; 32] {
+        crate::tbca::tbca_message(
+            &self.anchor_id,
+            &self.receiver_challenge,
+            &self.transition_digest,
+            &self.root_advance_message,
+            &self.sender_device_root_before,
+            &self.sender_device_root_after,
+            &self.appliance_root_before,
+            &self.appliance_root_after,
+            self.anchor_counter,
+            self.next_anchor_counter,
+        )
+    }
+}
+
+/// The two authenticated raw counter values a
+/// [`CounterVerifier`](crate::accept::CounterVerifier) returns for one advance: the FROM
+/// read (`H_pre`, pre-commit) and the TO read (`H_post`, post-commit). The predicate
+/// checks `H_pre == H₀ − uᵢ` (FROM coordinate) and `H_post == H₀ − (uᵢ+1)` (TO coordinate).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CounterAdvanceReads {
+    pub pre_raw_counter: u64,
+    pub post_raw_counter: u64,
+}
+
+/// Why a [`CounterAdvanceEvidence`] failed its transition binding, returned by
+/// [`CounterVerifier::verify_counter_advance`](crate::accept::CounterVerifier).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CounterEvidenceError {
+    /// A per-read/envelope `binding_hash`, or a read's `anchor_id`, does not match the
+    /// binding the receiver recomputed from the accepted transition.
+    BindingMismatch,
+    /// The pre and post reads carry different `binding_hash` values — not one advance.
+    PrePostMismatch,
+    /// A read is absent, inauthentic, or a host scalar with no valid `verifier_transcript`.
+    Inauthentic,
+}
+
+/// Transition-bound counter-advance evidence (§13 / wire `CounterAdvanceEvidence`).
+/// A single physical advance witnessed at both ends: `pre` at the FROM coordinate
+/// (`H_pre = H₀ − uᵢ`) before the commit, `post` at the TO coordinate
+/// (`H_post = H₀ − (uᵢ+1)`) after it. All three `binding_hash` fields must equal the
+/// [`CounterAdvanceBinding`] the receiver recomputes. A post-only scalar is not accepted
+/// (§4, §33): it cannot witness that the sender began at `uᵢ`.
+#[derive(Clone)]
+pub struct CounterAdvanceEvidence {
+    pub pre: CounterReadEvidence,
+    pub post: CounterReadEvidence,
+    pub binding_hash: [u8; 32],
+}
+
+impl CounterAdvanceEvidence {
+    /// The pure binding check a receiver's
+    /// [`CounterVerifier`](crate::accept::CounterVerifier) runs before returning
+    /// authenticated reads: the pre/post bindings agree, both reads and the envelope
+    /// carry the expected binding, and both reads name the pinned anchor. `binding` is
+    /// recomputed from the accepted transition — never a carried field.
+    pub fn check_binding(
+        &self,
+        pinned_anchor_id: &[u8; 32],
+        binding: &CounterAdvanceBinding,
+    ) -> Result<(), CounterEvidenceError> {
+        // pre and post must witness the SAME advance.
+        if !ct_eq_32(&self.pre.binding_hash, &self.post.binding_hash) {
+            return Err(CounterEvidenceError::PrePostMismatch);
+        }
+        let expected = binding.hash();
+        if !ct_eq_32(&self.pre.binding_hash, &expected)
+            || !ct_eq_32(&self.post.binding_hash, &expected)
+            || !ct_eq_32(&self.binding_hash, &expected)
+        {
+            return Err(CounterEvidenceError::BindingMismatch);
+        }
+        if !ct_eq_32(&self.pre.anchor_id, pinned_anchor_id)
+            || !ct_eq_32(&self.post.anchor_id, pinned_anchor_id)
+        {
+            return Err(CounterEvidenceError::BindingMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// The exported release package `Pkg = (Δ, BootChain, Cert, counter-advance-evidence)`
+/// (§20/§32). The producer fills the transition-binding fields of `counter`; the
+/// receiver attaches its own authenticated pre/post reads before acceptance.
 #[derive(Clone)]
 pub struct OfflineRelease {
     pub transition: OwnedTransition,
     pub boot_chain: Vec<BootTicket>,
     pub cert: Certificate,
-    pub counter: CounterEvidence,
+    pub counter: CounterAdvanceEvidence,
 }

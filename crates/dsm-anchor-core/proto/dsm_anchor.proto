@@ -71,22 +71,39 @@ message RootAdvanceCertificate {
   bytes receiver_challenge     = 20; // 32  r_R
 }
 
-// TROPIC01 counter evidence (§13). The receiver authenticates verifier_transcript;
-// the *_claim fields are untrusted transport conveniences (§33).
-message CounterEvidence {
-  bytes anchor_id                     = 1;  // 32
-  uint64 enrolled_counter             = 2;  // H0
-  uint64 live_counter_claim           = 3;  // untrusted transport claim of H
-  uint64 derived_anchor_counter_claim = 4;  // untrusted transport claim of u = H0 − H
-  bytes verifier_transcript           = 5;  // authenticated L3 read — the only trusted value
+// One receiver-side authenticated TROPIC01 counter read, pinned to exactly one
+// transition by binding_hash (§13/§32). Used for both the FROM (pre-commit) and TO
+// (post-commit) ends of a single physical advance. The receiver authenticates
+// verifier_transcript; attested_raw_counter is an untrusted transport claim of H (§33).
+// No per-read transition fields are carried: binding_hash must equal the
+// CounterAdvanceBinding the receiver recomputes from the accepted transition, so a stale
+// or foreign read cannot be spliced in.
+message CounterReadEvidence {
+  bytes anchor_id             = 1;  // 32
+  uint64 attested_raw_counter = 2;  //     untrusted transport claim of H for this read
+  bytes verifier_transcript   = 3;  // authenticated L3 read — the trusted value
+  bytes binding_hash          = 4;  // 32  the transition-bound counter-advance binding
 }
 
-// The exported release package Pkg = (Δ, BootChain, Cert, counter evidence) (§20).
+// Transition-bound counter-advance evidence (§13/§32). One physical advance
+// witnessed at both ends: pre at the FROM coordinate (H_pre = H0 − uᵢ), post at
+// the TO coordinate (H_post = H0 − (uᵢ+1)); binding_hash ties the movement to one
+// transition. All three binding_hash fields (pre, post, envelope) must equal the
+// receiver-recomputed binding. The old single post-only CounterEvidence is intentionally
+// removed — a post scalar is not sufficient offline-bearer evidence (§4, §33).
+message CounterAdvanceEvidence {
+  CounterReadEvidence pre  = 1;
+  CounterReadEvidence post = 2;
+  // 32  H(anchor_id ‖ r_R ‖ D ‖ M ‖ R_i ‖ R_{i+1} ‖ hᵢ ‖ hᵢ₊₁ ‖ uᵢ ‖ uᵢ+1)
+  bytes binding_hash       = 3;
+}
+
+// The exported release package Pkg = (Δ, BootChain, Cert, counter-advance evidence) (§20).
 message OfflineRelease {
   TransitionPackage transition   = 1;
   repeated BootTicket boot_chain = 2;
   RootAdvanceCertificate cert    = 3;
-  CounterEvidence counter        = 4;
+  CounterAdvanceEvidence counter = 4;
 }
 
 // Appliance operation selector (§21). Boot is a device-internal operation, not a

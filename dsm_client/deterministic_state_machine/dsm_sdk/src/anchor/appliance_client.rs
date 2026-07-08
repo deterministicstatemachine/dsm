@@ -257,7 +257,13 @@ mod tests {
     use anchor_core::accept::{accept_offline, CounterVerifier, DsmVerifier, VerifierContext};
     use anchor_core::boot::BootTicket;
     use anchor_core::proto::pb;
-    use anchor_core::root_advance::CounterEvidence;
+    use anchor_core::root_advance::{
+        CounterAdvanceBinding, CounterAdvanceEvidence, CounterAdvanceReads, CounterEvidenceError,
+    };
+
+    /// The appliance stamps zero sender device roots (it cannot know them); this test
+    /// pins the same zeros so an honest release binds without an SDK re-stamp.
+    const ZERO_DEVROOT: [u8; 32] = [0u8; 32];
 
     const H0: u32 = 100;
     const GENESIS: [u8; 32] = [0x11; 32];
@@ -315,7 +321,7 @@ mod tests {
         }
     }
     impl DsmVerifier for TestDsm {
-        fn prev_root_commits_anchor_state(
+        fn sender_device_root_before_commits_anchor_state(
             &self,
             _: &[u8; 32],
             _: &[u8; 32],
@@ -355,7 +361,7 @@ mod tests {
         fn delivers_to_receiver(&self, t: &Transition) -> bool {
             t.recipient_device_id == &RECIP
         }
-        fn next_root_commits_anchor_state(
+        fn sender_device_root_after_commits_anchor_state(
             &self,
             _: &[u8; 32],
             _: &[u8; 32],
@@ -367,13 +373,25 @@ mod tests {
         }
     }
 
-    /// Stand-in for the Path-B L3 read: returns the post-commit raw counter `H = H0 - (u_i+1)`.
+    /// Stand-in for the Path-B L3 reads: verifies the transition binding, then returns the
+    /// FROM read `H_pre = H0 - u_i` (pre-commit) and the TO read `H_post = H0 - (u_i+1)`
+    /// (post-commit).
     struct TestCounter {
-        expected_h: u64,
+        pre: u64,
+        post: u64,
     }
     impl CounterVerifier for TestCounter {
-        fn read_authentic_counter(&self, _: &[u8; 32], _: &CounterEvidence) -> Option<u64> {
-            Some(self.expected_h)
+        fn verify_counter_advance(
+            &self,
+            pinned: &[u8; 32],
+            ev: &CounterAdvanceEvidence,
+            binding: &CounterAdvanceBinding,
+        ) -> Result<CounterAdvanceReads, CounterEvidenceError> {
+            ev.check_binding(pinned, binding)?;
+            Ok(CounterAdvanceReads {
+                pre_raw_counter: self.pre,
+                post_raw_counter: self.post,
+            })
         }
     }
 
@@ -408,12 +426,15 @@ mod tests {
             expected_receiver_challenge: &RCHAL,
             expected_policy_hash: &POLICY,
             enrolled_counter: pin.enrolled_counter,
+            sender_device_root_before: &ZERO_DEVROOT,
+            sender_device_root_after: &ZERO_DEVROOT,
             anchor_uncompromised: true,
         };
         let dsm = TestDsm { part_pk };
-        // Post-commit physical counter: H0 - (u_i + 1) = 100 - 1 = 99.
+        // FROM read H0 - u_i = 100 - 0 = 100; TO read H0 - (u_i+1) = 100 - 1 = 99.
         let counter = TestCounter {
-            expected_h: H0 as u64 - 1,
+            pre: H0 as u64,
+            post: H0 as u64 - 1,
         };
 
         accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, &counter)
@@ -440,12 +461,16 @@ mod tests {
             expected_receiver_challenge: &RCHAL,
             expected_policy_hash: &POLICY,
             enrolled_counter: pin.enrolled_counter,
+            sender_device_root_before: &ZERO_DEVROOT,
+            sender_device_root_after: &ZERO_DEVROOT,
             anchor_uncompromised: true,
         };
         let dsm = TestDsm { part_pk };
-        // A counter value off by one (not the exact post-commit H) must be rejected.
+        // A TO read off by one (not the exact post-commit H0-(u_i+1)) must be rejected. The FROM read
+        // is correct, so the failure is the TO-coordinate check.
         let counter = TestCounter {
-            expected_h: H0 as u64,
+            pre: H0 as u64,
+            post: H0 as u64,
         };
         assert!(accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, &counter).is_err());
     }

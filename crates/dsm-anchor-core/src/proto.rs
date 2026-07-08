@@ -11,7 +11,9 @@ use alloc::vec::Vec;
 use prost::Message;
 
 use crate::boot::BootTicket;
-use crate::root_advance::{Certificate, CounterEvidence, OfflineRelease, OwnedTransition};
+use crate::root_advance::{
+    Certificate, CounterAdvanceEvidence, CounterReadEvidence, OfflineRelease, OwnedTransition,
+};
 
 /// prost-generated message types (package `dsm.anchor`).
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
@@ -208,29 +210,55 @@ impl Certificate {
     }
 }
 
-// --- CounterEvidence <-> CounterEvidence ---
+// --- CounterReadEvidence / CounterAdvanceEvidence <-> pb ---
 
-impl pb::CounterEvidence {
-    pub fn to_evidence(&self) -> Result<CounterEvidence, ProtoError> {
+impl pb::CounterReadEvidence {
+    pub fn to_read(&self) -> Result<CounterReadEvidence, ProtoError> {
         bounded(&self.verifier_transcript, MAX_TRANSCRIPT)?;
-        Ok(CounterEvidence {
+        Ok(CounterReadEvidence {
             anchor_id: arr32(&self.anchor_id)?,
-            enrolled_counter: self.enrolled_counter,
-            live_counter_claim: self.live_counter_claim,
-            derived_anchor_counter_claim: self.derived_anchor_counter_claim,
+            attested_raw_counter: self.attested_raw_counter,
             verifier_transcript: self.verifier_transcript.clone(),
+            binding_hash: arr32(&self.binding_hash)?,
         })
     }
 }
 
-impl CounterEvidence {
-    pub fn to_pb(&self) -> pb::CounterEvidence {
-        pb::CounterEvidence {
+impl CounterReadEvidence {
+    pub fn to_pb(&self) -> pb::CounterReadEvidence {
+        pb::CounterReadEvidence {
             anchor_id: self.anchor_id.to_vec(),
-            enrolled_counter: self.enrolled_counter,
-            live_counter_claim: self.live_counter_claim,
-            derived_anchor_counter_claim: self.derived_anchor_counter_claim,
+            attested_raw_counter: self.attested_raw_counter,
             verifier_transcript: self.verifier_transcript.clone(),
+            binding_hash: self.binding_hash.to_vec(),
+        }
+    }
+}
+
+impl pb::CounterAdvanceEvidence {
+    pub fn to_evidence(&self) -> Result<CounterAdvanceEvidence, ProtoError> {
+        Ok(CounterAdvanceEvidence {
+            pre: self
+                .pre
+                .as_ref()
+                .ok_or(ProtoError::MissingField)?
+                .to_read()?,
+            post: self
+                .post
+                .as_ref()
+                .ok_or(ProtoError::MissingField)?
+                .to_read()?,
+            binding_hash: arr32(&self.binding_hash)?,
+        })
+    }
+}
+
+impl CounterAdvanceEvidence {
+    pub fn to_pb(&self) -> pb::CounterAdvanceEvidence {
+        pb::CounterAdvanceEvidence {
+            pre: Some(self.pre.to_pb()),
+            post: Some(self.post.to_pb()),
+            binding_hash: self.binding_hash.to_vec(),
         }
     }
 }

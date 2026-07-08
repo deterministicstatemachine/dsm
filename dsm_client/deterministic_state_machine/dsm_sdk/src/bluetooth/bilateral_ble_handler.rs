@@ -605,6 +605,8 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
         })
     }
 
@@ -1638,6 +1640,8 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
         };
 
         {
@@ -2595,6 +2599,8 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
         };
 
         {
@@ -2770,6 +2776,39 @@ impl BilateralBleHandler {
             } else {
                 None
             };
+
+        // Counter-Positioned Commit FROM read (§21.3): for an offline-bearer transfer whose sender
+        // anchor is ALREADY pinned with a COMPLETE pin (verifier slot + chip key), read the sender's
+        // live counter over the relay NOW — while the sender is still uncommitted, its counter at uᵢ.
+        // The prepare-response this method sends is exactly what triggers the sender's commit
+        // (`handle_prepare_response` → `send_bilateral_confirm`), so this read is GUARANTEED to precede
+        // that commit and captures `H_pre = H0 − uᵢ`. `handle_confirm_request` then re-reads
+        // `H_post = H0 − (uᵢ+1)` and the predicate enforces the full FROM→TO proof. First transfers
+        // (pin not yet complete) and no-reader (production) skip → fail-closed on the FROM check.
+        if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+            &session.operation,
+        ) {
+            let pin = crate::bridge::anchor_enrollment_store()
+                .and_then(|s| s.get(&counterparty_device_id))
+                .map(|e| e.pin);
+            let attested_pre = crate::bluetooth::anchor_accept::resolve_attested_counter(
+                pin.as_ref(),
+                crate::bridge::anchor_counter_reader(),
+                counterparty_device_id,
+                origin_commitment_hash,
+            )
+            .await;
+            if attested_pre.is_some() {
+                let mut sessions = self.sessions.sessions.lock().await;
+                if let Some(s) = sessions.get_mut(&origin_commitment_hash) {
+                    s.attested_pre = attested_pre;
+                }
+                info!(
+                    "[BILATERAL][offline-bearer][receiver] captured FROM read (H_pre) pre-commit for commitment {}",
+                    bytes_to_base32(&origin_commitment_hash[..8])
+                );
+            }
+        }
 
         // Build prepare response
         let prepare_response = generated::BilateralPrepareResponse {
@@ -3754,9 +3793,26 @@ impl BilateralBleHandler {
             // device fused-anchor appliance above. Non-bearer transfers (or a bearer transfer with
             // no receiver challenge / a failed appliance drive) leave these empty and the receiver
             // fails closed to online recovery.
+            // Re-stamp the release's counter-advance binding with the sender's DEVICE SMT roots
+            // (Rᵢ = pre-advance `pre_root`, Rᵢ₊₁ = post-advance `sender_smt_root`) — the appliance
+            // stamped zero placeholders since it cannot know them until this advance materializes
+            // them. The receiver recomputes the same binding from its verified device roots, so a
+            // failed re-stamp rides empty and the receiver fails closed to online recovery.
             offline_release: bearer_artifacts
                 .as_ref()
-                .map(|a| a.offline_release.clone())
+                .and_then(|a| {
+                    crate::bluetooth::anchor_accept::restamp_counter_binding(
+                        &a.offline_release,
+                        &pre_root,
+                        &sender_smt_root,
+                    )
+                    .map_err(|e| {
+                        log::warn!(
+                            "[bilateral_ble] offline-bearer binding re-stamp failed (fail closed): {e:?}"
+                        )
+                    })
+                    .ok()
+                })
                 .unwrap_or_default(),
             anchor_state_prev_proof: sim_outcome
                 .anchor_proofs
@@ -4637,19 +4693,20 @@ impl BilateralBleHandler {
             }
             // D2 activation seam: look up the pinned fused anchor this receiver admitted for the
             // sender, then read the sender's live TROPIC01 counter over the relay via the injected
-            // reader. Reader + COMPLETE pin present AND the read succeeds -> live accept with the
-            // authenticated counter (predicate enforces `H == H0 - (u_i+1)`). Any absent -> pin
-            // `None` / attested `None` -> fail-closed to online recovery. The store is installed
-            // (pins persist), but the reader + the slot/stpub provisioning are device-layer
-            // hardware installs — until they land, this stays fail-closed.
+            // reader. The Counter-Positioned Commit predicate (Def. 30) requires TWO authenticated
+            // reads: the FROM read `H0 − uᵢ` taken while the sender is `Prepared` (before its
+            // commit), and the TO read `H0 − (uᵢ+1)` taken after. This single-confirm seam supplies
+            // only the post-commit (TO) read; the FROM read requires the interactive pre-commit
+            // handshake, a device-layer activation follow-up. Until it lands, `attested_pre` is
+            // `None` and the FROM check keeps the path fail-closed to online recovery.
             let pin = crate::bridge::anchor_enrollment_store()
                 .and_then(|s| s.get(&sender_device_id))
                 .map(|e| e.pin);
             // Admission never implies acceptance: `resolve_attested_counter` gates on a COMPLETE pin
             // (slot + chip key + uncompromised) and only then reads the live counter over the relay
             // via the installed reader — an incomplete first-transfer pin or an absent reader can
-            // never yield `attested = Some`. Same logic exercised in-process in the Phase H0 test.
-            let attested: Option<([u8; 32], u64)> =
+            // never yield `Some`. Same logic exercised in-process in the Phase H0 test.
+            let attested_post: Option<([u8; 32], u64)> =
                 crate::bluetooth::anchor_accept::resolve_attested_counter(
                     pin.as_ref(),
                     crate::bridge::anchor_counter_reader(),
@@ -4657,10 +4714,16 @@ impl BilateralBleHandler {
                     commitment_hash,
                 )
                 .await;
+            // The FROM (pre-commit) read `H_pre = H0 − uᵢ` was captured by the receiver's accept path
+            // (`create_prepare_accept_envelope_*`) BEFORE the accept-response triggered this sender's
+            // commit, and stashed on the session. `None` (fail-closed FROM) for first transfers with
+            // no complete pin yet, no installed reader, or a post-restart session rebuilt from SQLite
+            // (the FROM read is in-memory only) — the predicate then rejects and recovers online.
+            let attested_pre: Option<([u8; 32], u64)> = session.attested_pre;
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
-            // Def. 25 check 2: the appliance root adopted from this holder's last
+            // Def. 30 check 2: the appliance root adopted from this holder's last
             // ACCEPTED release. Absent row = relationship genesis — the predicate
             // adopts the release's own `prev_root` TOFU (authenticated by the
             // anchor-state proofs + the live counter, same trust root as the pin).
@@ -4679,7 +4742,8 @@ impl BilateralBleHandler {
                     &expected_receiver_challenge,
                     &policy_hash,
                     &binding,
-                    attested,
+                    attested_pre,
+                    attested_post,
                 )
                 .map_err(|r| r.into_dsm_error())?;
             // Persisted AFTER the canonical commit below succeeds (deferred, like
@@ -6175,6 +6239,8 @@ impl BilateralBleHandler {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
         };
 
         // Insert into active sessions
@@ -6517,6 +6583,8 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
 
@@ -6532,6 +6600,178 @@ mod tests {
                 .has_pending_commitment(&local_pending_hash),
             "stale cleanup must remove the receiver-local pending commitment key"
         );
+    }
+
+    /// Handler-level integration proof of the Counter-Positioned Commit FROM read: the REAL receiver
+    /// accept path (`create_prepare_accept_envelope`) captures the LIVE authenticated FROM read
+    /// `H_pre = H0 − uᵢ` over the relay while the sender is still uncommitted, and a LATER attempt
+    /// (after the sender's commit advanced the counter) reads the ADVANCED value — exactly the stale
+    /// FROM the predicate rejects (anchor-core `accept_rejects_same_from_coordinate_replay`). Proves
+    /// the DSM handler wiring cannot bypass the before-read: acceptance is bound to whatever the live
+    /// counter reads at accept time, not to a host claim. (The confirm-side TO read + full two-party
+    /// envelope flow is exercised at the producer/predicate level in core_sdk's activation tests.)
+    #[tokio::test]
+    #[serial]
+    async fn accept_path_captures_live_from_read_before_commit() {
+        use crate::bluetooth::tropic_relay::{AnchorCounterReader, PicoFuture};
+        use dsm::crypto::anchor_enrollment::{
+            AnchorEnrollment, AnchorEnrollmentStore, FusedAnchorPin, InMemoryAnchorEnrollmentStore,
+        };
+        use std::sync::{Arc, Mutex};
+
+        init_test_db();
+        let device_id = [51u8; 32]; // receiver
+        let genesis_hash = [52u8; 32];
+        let sender = [53u8; 32];
+        let sender_genesis = [54u8; 32];
+        let anchor_id = [0xA1u8; 32];
+        let h0: u32 = 100;
+
+        let (bilateral_manager, handler) =
+            make_test_handler(device_id, genesis_hash, b"accept-from-read");
+
+        // Verified contact for the sender (REAL signing key) so establish_relationship succeeds and
+        // get_chain_tip_for(sender) returns a tip — create_prepare_accept needs it.
+        let sender_kp = SignatureKeyPair::generate_from_entropy(b"sender-signing-key").expect("kp");
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "sender".to_string(),
+            device_id: sender,
+            genesis_hash: sender_genesis,
+            public_key: sender_kp.public_key().to_vec(),
+            genesis_material: vec![5u8; 32],
+            chain_tip: Some([6u8; 32]),
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1000,
+            added_at_commit_height: 1000,
+            last_updated_commit_height: 1000,
+            verifying_storage_nodes: vec![],
+            ble_address: Some(String::new()),
+        };
+        {
+            let mut m = bilateral_manager.write().await;
+            m.add_verified_contact(contact).expect("contact");
+            m.establish_relationship(&sender)
+                .await
+                .expect("relationship");
+        }
+
+        // A COMPLETE pin admitted for the sender (verifier slot + chip key + uncompromised).
+        let pin = FusedAnchorPin {
+            bundle: [0xB1; 32],
+            anchor_id,
+            enrolled_counter: h0 as u64,
+            partition_pk: vec![7; 64],
+            uncompromised: true,
+            verifier_slot: Some(1),
+            chip_static_pubkey: Some([0xCC; 32]),
+        };
+        let store = InMemoryAnchorEnrollmentStore::default();
+        store
+            .admit(AnchorEnrollment {
+                device_id: sender,
+                policy_hash: [0u8; 32],
+                pin: pin.clone(),
+            })
+            .expect("admit");
+        crate::bridge::install_anchor_enrollment_store(Arc::new(store));
+
+        // Mock relay reader backed by a shared counter cell = the sender's live chip counter.
+        let counter = Arc::new(Mutex::new(h0)); // u_i=0 → live H = H0
+        struct MockReader {
+            counter: Arc<Mutex<u32>>,
+        }
+        impl AnchorCounterReader for MockReader {
+            fn read_counter(
+                &self,
+                _peer: [u8; 32],
+                _c: [u8; 32],
+                _pin: FusedAnchorPin,
+            ) -> PicoFuture<Option<u32>> {
+                let h = *self.counter.lock().expect("counter");
+                Box::pin(async move { Some(h) })
+            }
+        }
+        crate::bridge::install_anchor_counter_reader(Arc::new(MockReader {
+            counter: counter.clone(),
+        }));
+
+        let bearer_op = |nonce: u8| Operation::Transfer {
+            policy_commit: [0u8; 32],
+            to_device_id: device_id.to_vec(),
+            amount: Balance::from_state(1, [1u8; 32]),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![nonce],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: device_id.to_vec(),
+            to: device_id.to_vec(),
+            message: "bearer".to_string(),
+            signature: Vec::new(),
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+        };
+        let session = |commitment: [u8; 32], op: Operation| BilateralBleSession {
+            commitment_hash: commitment,
+            local_commitment_hash: None,
+            counterparty_device_id: sender,
+            counterparty_genesis_hash: Some(sender_genesis),
+            operation: op,
+            phase: BilateralPhase::PendingUserAction,
+            local_signature: None,
+            counterparty_signature: None,
+            created_at_ticks: 1,
+            expires_at_ticks: 1_000_000,
+            sender_ble_address: None,
+            created_at_wall: Instant::now(),
+            pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
+            receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
+            pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
+        };
+
+        // Transfer 1: sender uncommitted, counter at u_i=0 (H=100). Accept captures the FROM read.
+        let c1 = [0x01u8; 32];
+        handler.test_insert_session(session(c1, bearer_op(1))).await;
+        handler
+            .create_prepare_accept_envelope(c1)
+            .await
+            .expect("accept 1");
+        {
+            let s = handler.sessions.sessions.lock().await;
+            assert_eq!(
+                s.get(&c1).expect("session 1").attested_pre,
+                Some((anchor_id, h0 as u64)),
+                "accept captures the live FROM read H_pre = H0 − u_i = 100 (u_i=0), pre-commit"
+            );
+        }
+
+        // Sender commits → the physical counter advances u_i 0→1 (H 100→99).
+        *counter.lock().expect("counter") = h0 - 1;
+
+        // A later attempt now reads the ADVANCED counter (99). A release still claiming FROM u_i=0
+        // would fail the predicate FROM check (expects H0 − 0 = 100) — the Alice/Bob rejection.
+        let c2 = [0x02u8; 32];
+        handler.test_insert_session(session(c2, bearer_op(2))).await;
+        handler
+            .create_prepare_accept_envelope(c2)
+            .await
+            .expect("accept 2");
+        {
+            let s = handler.sessions.sessions.lock().await;
+            assert_eq!(
+                s.get(&c2).expect("session 2").attested_pre,
+                Some((anchor_id, (h0 - 1) as u64)),
+                "a later accept reads the advanced counter (99); a stale u_i=0 release fails FROM"
+            );
+        }
+
+        crate::bridge::uninstall_anchor_counter_reader();
+        crate::bridge::uninstall_anchor_enrollment_store();
     }
 
     #[tokio::test]
@@ -6622,6 +6862,8 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
 
@@ -6692,6 +6934,8 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
         handler
@@ -6714,6 +6958,8 @@ mod tests {
                 anchor_leaf: None,
                 anchor_sim_root: None,
                 pending_enroll_pubkey: None,
+                attested_pre: None,
+                prepared_bearer: None,
             })
             .await;
 

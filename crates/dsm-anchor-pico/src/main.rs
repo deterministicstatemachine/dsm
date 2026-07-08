@@ -60,7 +60,10 @@ use anchor_core::appliance::{Appliance, RecoverOutcome};
 use anchor_core::boot::BootTicket;
 use anchor_core::enrollment::{birth, Birth, BirthInputs};
 use anchor_core::proto::{decode_request, decode_response, encode_request, encode_response, pb};
-use anchor_core::root_advance::{CounterEvidence, Transition};
+use anchor_core::root_advance::{
+    CounterAdvanceBinding, CounterAdvanceEvidence, CounterAdvanceReads, CounterEvidenceError,
+    Transition,
+};
 use anchor_core::service;
 use anchor_core::sig::WotsBlake3;
 use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
@@ -343,7 +346,7 @@ struct FwDsm {
     part_pk: Vec<u8>,
 }
 impl DsmVerifier for FwDsm {
-    fn prev_root_commits_anchor_state(
+    fn sender_device_root_before_commits_anchor_state(
         &self,
         _: &[u8; 32],
         _: &[u8; 32],
@@ -389,7 +392,7 @@ impl DsmVerifier for FwDsm {
     fn delivers_to_receiver(&self, _: &Transition) -> bool {
         true
     }
-    fn next_root_commits_anchor_state(
+    fn sender_device_root_after_commits_anchor_state(
         &self,
         _: &[u8; 32],
         _: &[u8; 32],
@@ -401,12 +404,22 @@ impl DsmVerifier for FwDsm {
     }
 }
 
-/// Self-test counter verifier: models a faithful chip read attesting the claimed
-/// value. A real receiver opens its own authenticated L3 verifier session.
+/// Self-test counter verifier: verifies the transition binding, then models a faithful
+/// chip attesting the claimed FROM/TO reads. A real receiver opens its own authenticated
+/// L3 verifier session over the raw-SPI relay.
 struct SelfCounter;
 impl CounterVerifier for SelfCounter {
-    fn read_authentic_counter(&self, _anchor: &[u8; 32], ev: &CounterEvidence) -> Option<u64> {
-        Some(ev.live_counter_claim)
+    fn verify_counter_advance(
+        &self,
+        pinned_anchor_id: &[u8; 32],
+        evidence: &CounterAdvanceEvidence,
+        binding: &CounterAdvanceBinding,
+    ) -> Result<CounterAdvanceReads, CounterEvidenceError> {
+        evidence.check_binding(pinned_anchor_id, binding)?;
+        Ok(CounterAdvanceReads {
+            pre_raw_counter: evidence.pre.attested_raw_counter,
+            post_raw_counter: evidence.post.attested_raw_counter,
+        })
     }
 }
 
@@ -556,6 +569,9 @@ fn self_test<SPI: SpiDevice, CS: OutputPin>(
 
     let verify_ok = match relpb.as_ref().and_then(|r| r.to_release().ok()) {
         Some(rel) => {
+            // The appliance stamps zero sender device roots (it cannot know them); this in-process
+            // self-test pins the same zeros so the binding matches without an SDK re-stamp.
+            const ZERO_DEVROOT: [u8; 32] = [0u8; 32];
             let ctx = VerifierContext {
                 accepted_prev_root: &GENESIS,
                 pinned_bundle: &bundle,
@@ -563,6 +579,8 @@ fn self_test<SPI: SpiDevice, CS: OutputPin>(
                 expected_receiver_challenge: &RCHAL,
                 expected_policy_hash: policy_hash,
                 enrolled_counter: ENROLL_H0 as u64,
+                sender_device_root_before: &ZERO_DEVROOT,
+                sender_device_root_after: &ZERO_DEVROOT,
                 anchor_uncompromised: true,
             };
             let dsm = FwDsm {

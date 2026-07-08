@@ -242,6 +242,33 @@ async fn queue_follow_up_chunks(
     ))
 }
 
+/// Route a `handle_prepare_response` reply to its BLE frame by the returned envelope's payload
+/// (§21 first-transfer split). `handle_prepare_response` returns EITHER the confirm (ordinary +
+/// subsequent bearer) OR a `BilateralBearerPrepared` disclosure (first-transfer bearer, pre-commit).
+/// Exhaustive + hostile by default: only those two are routable; anything else is `None` →
+/// fail-closed at the call site (never a best-effort frame guess).
+fn classify_prepare_response_reply(envelope_bytes: &[u8]) -> Option<BleFrameType> {
+    let env = crate::envelope::from_canonical_bytes(envelope_bytes).ok()?;
+    match env.payload {
+        // The confirm rides a UniversalTx with the "bilateral.confirm" invoke method.
+        Some(crate::generated::envelope::Payload::UniversalTx(ref tx)) => tx
+            .ops
+            .first()
+            .is_some_and(|op| {
+                matches!(
+                    &op.kind,
+                    Some(crate::generated::universal_op::Kind::Invoke(inv))
+                        if inv.method == "bilateral.confirm"
+                )
+            })
+            .then_some(BleFrameType::BilateralConfirm),
+        Some(crate::generated::envelope::Payload::BilateralBearerPrepared(_)) => {
+            Some(BleFrameType::BilateralBearerPrepared)
+        }
+        _ => None,
+    }
+}
+
 impl BleTransportDelegate for BilateralTransportAdapter {
     fn on_transport_message(
         &self,
@@ -310,10 +337,20 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         .handle_prepare_response(&message.payload)
                         .await
                     {
-                        Ok((commit_envelope, _meta)) => Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralConfirm,
-                            commit_envelope,
-                        )]),
+                        // Payload-type routing (§21 first-transfer split): the reply is EITHER the
+                        // confirm or the BilateralBearerPrepared disclosure. Route by payload,
+                        // exhaustively and fail-closed — never guess the frame.
+                        Ok((reply_envelope, _meta)) => {
+                            match classify_prepare_response_reply(&reply_envelope) {
+                                Some(frame) => {
+                                    Ok(vec![TransportOutbound::new(frame, reply_envelope)])
+                                }
+                                None => Err(DsmError::invalid_operation(
+                                    "handle_prepare_response returned an unroutable reply (fail-closed)"
+                                        .to_string(),
+                                )),
+                            }
+                        }
                         Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
                             warn!("Silently dropping duplicate Prepare Response.");
                             Ok(Vec::new())
@@ -514,6 +551,18 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     BleFrameType::Unspecified,
                     message.payload,
                 )]),
+                // §21 first-transfer round-trip. Handlers are wired in later stages (#3 stages 5–6);
+                // until then these are fail-closed no-ops. The sender does not emit these frames yet
+                // (stage 4), so they are unreachable in production — a peer sending one early is
+                // dropped and first-transfer simply stays on the online fallback.
+                BleFrameType::BilateralBearerPrepared => {
+                    debug!("BilateralBearerPrepared received before handler wired; dropping (fail-closed)");
+                    Ok(Vec::new())
+                }
+                BleFrameType::BilateralBearerProceed => {
+                    debug!("BilateralBearerProceed received before handler wired; dropping (fail-closed)");
+                    Ok(Vec::new())
+                }
                 _ => {
                     debug!("Ignoring unknown BLE frame type: {:?}", message.frame_type);
                     Ok(Vec::new())

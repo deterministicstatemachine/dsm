@@ -1579,11 +1579,36 @@ pub struct OfflineBearerArtifacts {
     pub pin: crate::anchor::AnchorPin,
 }
 
+/// A PREPARED offline-bearer transfer: the appliance has formed the cross-bound certificate but has
+/// NOT moved the counter (§21.2). The physical counter therefore still sits at the FROM coordinate
+/// `uᵢ`, so this is exactly the window in which the receiver takes its authenticated FROM read
+/// (`H_pre = H0 − uᵢ`) before the sender commits. Returned by
+/// [`CoreSDK::prepare_offline_bearer_release`]; consumed by
+/// [`CoreSDK::commit_offline_bearer_release`], which moves the counter to `uᵢ+1` and emits the
+/// release. Between the two, `Status::Prepared` holds the appliance (§26.4: no second transfer while
+/// a prepared record exists — the serialization the Counter-Positioned Commit relies on).
+#[derive(Clone, Debug)]
+pub struct PreparedOfflineBearer {
+    /// The appliance DSM root this transfer consumes (the receiver's `accepted_prev_root`).
+    pub appliance_prev_root: [u8; 32],
+    /// The successor appliance DSM root the receiver adopts after acceptance.
+    pub appliance_next_root: [u8; 32],
+    /// The FROM counter coordinate `uᵢ` the receiver must witness live (`H_pre = H0 − uᵢ`) BEFORE
+    /// the sender commits.
+    pub anchor_counter: u64,
+    /// The pin material — the receiver opens its authenticated relay session to `pin.anchor_id` and
+    /// checks the FROM read against `pin.enrolled_counter − anchor_counter`.
+    pub pin: crate::anchor::AnchorPin,
+}
+
 impl CoreSDK {
-    /// Drive the device fused-anchor appliance for one offline-bearer transfer (Boot Fenced Fused
-    /// Anchor §21): lazily birth the appliance (bootstrapping `commit_0` into the DeviceState
-    /// anchor-state leaf), then PREPARE(r_R)→COMMIT→EMIT→FINALIZE, and return the wire release +
-    /// the successor [`AnchorLeafUpdate`] + the appliance root lineage + the pin material.
+    /// Phase 1 of the Counter-Positioned Commit producer (Boot Fenced Fused Anchor §21.2): lazily
+    /// birth the appliance (bootstrapping `commit_0` into the DeviceState anchor-state leaf), then
+    /// PREPARE(r_R) — form the cross-bound certificate WITHOUT moving the counter. The appliance is
+    /// left `Prepared` with the physical counter still at the FROM coordinate `uᵢ`, so the receiver
+    /// can take its authenticated FROM read (`H_pre = H0 − uᵢ`) before [`commit_offline_bearer_release`]
+    /// moves the counter. The returned [`PreparedOfflineBearer`] carries `uᵢ` and the pin the receiver
+    /// needs to read and check that FROM coordinate.
     ///
     /// The appliance certifies its OWN opaque root lineage (advances only on bearer transfers —
     /// not the per-relationship tip nor the multi-relationship device root); the receiver pins
@@ -1591,7 +1616,7 @@ impl CoreSDK {
     /// leaf proofs in the anchor `Δ` are left empty here: the receiver validates the DSM
     /// transition via the confirm's `rel_proof_parent/child` + §C1 recompute that gate acceptance.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_offline_bearer_release(
+    pub fn prepare_offline_bearer_release(
         &self,
         relationship_id: [u8; 32],
         recipient_device_id: [u8; 32],
@@ -1601,7 +1626,7 @@ impl CoreSDK {
         action_type: u32,
         action_fields: Vec<u8>,
         receiver_challenge: [u8; 32],
-    ) -> Result<OfflineBearerArtifacts, DsmError> {
+    ) -> Result<PreparedOfflineBearer, DsmError> {
         use dsm::core::bilateral_transaction_manager::{anchor_state_commit, anchor_state_leaf_key};
 
         let dev = self.device_info.device_id;
@@ -1662,8 +1687,6 @@ impl CoreSDK {
             DsmError::state_machine("offline-bearer: anchor appliance not birthed")
         })?;
         let pin = app.pin();
-        let bundle = pin.bundle;
-        let key = anchor_state_leaf_key(&bundle);
 
         // Pre-drive state: the appliance root this transfer consumes + the current counter.
         let before = app.status()?;
@@ -1689,8 +1712,38 @@ impl CoreSDK {
             authority_policy_hash,
         };
 
-        // PREPARE(r_R) → COMMIT → EMIT → FINALIZE.
+        // §21.2 PREPARE only — no counter move. The appliance is now `Prepared` with the physical
+        // counter still at the FROM coordinate `uᵢ`; the receiver reads `H_pre = H0 − uᵢ` against
+        // this state before [`commit_offline_bearer_release`] moves the counter.
         app.prepare(&owned.as_transition(), &receiver_challenge)?;
+
+        Ok(PreparedOfflineBearer {
+            appliance_prev_root,
+            appliance_next_root,
+            anchor_counter: before.anchor_counter,
+            pin,
+        })
+    }
+
+    /// Phase 2 of the Counter-Positioned Commit producer (§21.3–§21.6): COMMIT the prepared transfer
+    /// — move the physical counter `uᵢ → uᵢ+1` — then EMIT the release and FINALIZE the active fused
+    /// state. Call ONLY after the receiver has taken its authenticated FROM read against the
+    /// `Prepared` appliance. Returns the wire release + the successor [`AnchorLeafUpdate`] + the
+    /// appliance root lineage + the pin material.
+    pub fn commit_offline_bearer_release(
+        &self,
+        prepared: &PreparedOfflineBearer,
+    ) -> Result<OfflineBearerArtifacts, DsmError> {
+        use dsm::core::bilateral_transaction_manager::{anchor_state_commit, anchor_state_leaf_key};
+
+        let mut guard = self.anchor_appliance.lock();
+        let app = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not prepared")
+        })?;
+        let bundle = prepared.pin.bundle;
+        let key = anchor_state_leaf_key(&bundle);
+
+        // §21.3 COMMIT (moves the counter uᵢ → uᵢ+1) → §21.5 EMIT → §21.6 FINALIZE.
         app.commit()?;
         let offline_release = app.emit()?;
         app.finalize()?;
@@ -1711,10 +1764,40 @@ impl CoreSDK {
         Ok(OfflineBearerArtifacts {
             offline_release,
             anchor_leaf,
-            appliance_prev_root,
-            appliance_next_root,
-            pin,
+            appliance_prev_root: prepared.appliance_prev_root,
+            appliance_next_root: prepared.appliance_next_root,
+            pin: prepared.pin.clone(),
         })
+    }
+
+    /// Single-shot producer: PREPARE then immediately COMMIT (the non-interactive path, used where
+    /// the receiver's FROM read is not interleaved — e.g. the current single-confirm seam, which
+    /// stays fail-closed on the missing FROM read). The interactive Counter-Positioned Commit flow
+    /// calls [`prepare_offline_bearer_release`] and [`commit_offline_bearer_release`] separately,
+    /// with the receiver's authenticated FROM read taken in between.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_offline_bearer_release(
+        &self,
+        relationship_id: [u8; 32],
+        recipient_device_id: [u8; 32],
+        object_id: [u8; 32],
+        payload_hash: [u8; 32],
+        authority_policy_hash: [u8; 32],
+        action_type: u32,
+        action_fields: Vec<u8>,
+        receiver_challenge: [u8; 32],
+    ) -> Result<OfflineBearerArtifacts, DsmError> {
+        let prepared = self.prepare_offline_bearer_release(
+            relationship_id,
+            recipient_device_id,
+            object_id,
+            payload_hash,
+            authority_policy_hash,
+            action_type,
+            action_fields,
+            receiver_challenge,
+        )?;
+        self.commit_offline_bearer_release(&prepared)
     }
 }
 
@@ -2812,6 +2895,75 @@ mod tests {
         assert_eq!(rel2.cert.receiver_challenge, r_r_2);
     }
 
+    /// The Counter-Positioned Commit producer is two-phase: PREPARE exposes the FROM coordinate `uᵢ`
+    /// WITHOUT moving the counter (so the receiver can take its authenticated FROM read `H0 − uᵢ`),
+    /// then COMMIT moves the counter to `uᵢ+1`. Proves the split holds `uᵢ` pre-commit, advances by
+    /// exactly one at commit, and that the emitted evidence carries BOTH coordinates (`H_pre =
+    /// H_post + 1`) — the interactive handshake the receiver's FROM→TO check consumes.
+    #[test]
+    #[serial]
+    fn two_phase_producer_exposes_from_coordinate_before_commit() {
+        use dsm::types::device_state::DeviceState;
+
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let recipient = [4u8; 32];
+
+        // Phase 1 — PREPARE: form the cert, DO NOT move the counter. The FROM coordinate is exposed.
+        let prepared = sdk
+            .prepare_offline_bearer_release(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
+            )
+            .expect("prepare");
+        assert_eq!(
+            prepared.anchor_counter, 0,
+            "PREPARE exposes the FROM coordinate uᵢ without moving the counter"
+        );
+        let h0 = prepared.pin.enrolled_counter;
+        // The value the receiver must witness LIVE against the Prepared appliance, before commit.
+        let h_pre = h0 - prepared.anchor_counter;
+
+        // Phase 2 — COMMIT: move the counter uᵢ → uᵢ+1 and emit the release.
+        let art = sdk
+            .commit_offline_bearer_release(&prepared)
+            .expect("commit");
+        let rel = anchor_core::proto::pb::OfflineRelease::decode(&art.offline_release[..])
+            .expect("decode")
+            .to_release()
+            .expect("to_release");
+        assert_eq!(rel.cert.anchor_counter, 0, "FROM coordinate uᵢ");
+        assert_eq!(
+            rel.cert.next_anchor_counter, 1,
+            "TO coordinate uᵢ+1 (advanced once)"
+        );
+        let h_post = h0 - rel.cert.next_anchor_counter;
+        assert_eq!(
+            h_pre,
+            h_post + 1,
+            "one physical advance: H_pre = H_post + 1"
+        );
+
+        // The producer's CounterAdvanceEvidence carries both witnessed coordinates.
+        assert_eq!(
+            rel.counter.pre.attested_raw_counter, h_pre,
+            "pre evidence carries the FROM raw counter H0 − uᵢ"
+        );
+        assert_eq!(
+            rel.counter.post.attested_raw_counter, h_post,
+            "post evidence carries the TO raw counter H0 − (uᵢ+1)"
+        );
+    }
+
     /// End-to-end producer → receiver-predicate → adopt → replay-reject over TWO real bearer
     /// transfers. This is the activation boundary for the producer-driving cluster: the SENDER
     /// drives the real fused-anchor appliance (`build_offline_bearer_release`), commits the emitted
@@ -2827,8 +2979,8 @@ mod tests {
     #[serial]
     fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
         use crate::bluetooth::anchor_accept::{
-            accept_offline_release_with_counter, AnchorStateBinding, OfflineRecover, PinnedAnchor,
-            TrustedTestCounter,
+            accept_offline_release_with_counter, restamp_counter_binding, AnchorStateBinding,
+            OfflineRecover, PinnedAnchor, TrustedTestCounter,
         };
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
@@ -2944,6 +3096,10 @@ mod tests {
         let pin1 = pin_from(&art1.pin);
         let before1 = out1.smt_proofs.pre_root;
         let after1 = out1.child_r_a;
+        // The sender re-stamps the release binding with its real DEVICE roots (the appliance stamped
+        // zero placeholders) — exactly what the handler does post-`simulate_advance_for_confirm`.
+        let release1 = restamp_counter_binding(art1.offline_release.as_slice(), &before1, &after1)
+            .expect("re-stamp transfer 1 device roots");
         let binding1 = AnchorStateBinding {
             sender_smt_root: &after1,
             sender_smt_root_before: &before1,
@@ -2954,7 +3110,7 @@ mod tests {
         // (a) Receiver accepts the real release once the counter is authenticated. `accepted_prev_root`
         // is the appliance root this transfer consumes.
         accept_offline_release_with_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_prev_root),
             &recipient,
@@ -2966,48 +3122,88 @@ mod tests {
         .expect("transfer 1 must be accepted under an authenticated counter");
         let _ = sender_dev;
 
-        // (a') The PRODUCTION relay-counter entry point: supplied the counter H the receiver would
-        // read from A's chip over the raw-SPI relay (H = H0 - (u_i+1) = enrolled - 1 for transfer 1),
-        // tagged with the pinned anchor_id, it accepts. A wrong H, a wrong anchor_id, or None (no
-        // authenticated read) all fail closed — proving the exact check flows through the real path.
-        let expected_h = pin1.enrolled_counter - 1;
+        // (a') The PRODUCTION relay-counter entry point: supplied the TWO counter values the receiver
+        // would read from A's chip over the raw-SPI relay — the FROM read `H_pre = H0 - u_i`
+        // (= enrolled for transfer 1, u_i=0) taken before A's commit, and the TO read
+        // `H_post = H0 - (u_i+1)` (= enrolled - 1) after — each tagged with the pinned anchor_id, it
+        // accepts. A missing FROM read, a missing TO read, a wrong value, or a read from a different
+        // chip all fail closed — proving the FROM→TO coordinate proof flows through the real path.
+        let h_pre = pin1.enrolled_counter; // H0 - u_i, u_i = 0
+        let h_post = pin1.enrolled_counter - 1; // H0 - (u_i+1)
         crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_prev_root),
             &recipient,
             &[0x55u8; 32],
             &policy_hash,
             &binding1,
-            Some((pin1.anchor_id, expected_h)),
+            Some((pin1.anchor_id, h_pre)),
+            Some((pin1.anchor_id, h_post)),
         )
-        .expect("relay-counter accept with the exact authenticated H");
-        for bad in [
-            None,
-            Some((pin1.anchor_id, expected_h + 1)), // wrong counter
-            Some((pin1.anchor_id, expected_h - 1)), // wrong counter
-            Some(([0xEEu8; 32], expected_h)),       // counter read from a different chip
+        .expect("relay-counter accept with the exact authenticated FROM+TO reads");
+        for (bad_pre, bad_post) in [
+            (None, Some((pin1.anchor_id, h_post))), // no FROM read -> fail closed
+            (Some((pin1.anchor_id, h_pre)), None),  // no TO read
+            (
+                Some((pin1.anchor_id, h_pre + 1)),
+                Some((pin1.anchor_id, h_post)),
+            ), // wrong FROM
+            (
+                Some((pin1.anchor_id, h_pre)),
+                Some((pin1.anchor_id, h_post + 1)),
+            ), // wrong TO
+            (Some(([0xEEu8; 32], h_pre)), Some((pin1.anchor_id, h_post))), // FROM read from another chip
         ] {
             let r = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-                &art1.offline_release,
+                &release1,
                 Some(&pin1),
                 Some(&art1.appliance_prev_root),
                 &recipient,
                 &[0x55u8; 32],
                 &policy_hash,
                 &binding1,
-                bad,
+                bad_pre,
+                bad_post,
             );
             assert!(
                 r.is_err(),
-                "relay-counter must fail closed for {bad:?}, got {r:?}"
+                "relay-counter must fail closed for pre={bad_pre:?} post={bad_post:?}, got {r:?}"
             );
         }
+
+        // (b) Alice/Bob double-spend defense at the counter coordinate, through the real accept path.
+        // Alice accepted above: her live FROM read was H0 (100) and TO read H0-1 (99). A SECOND (Bob)
+        // attempt presenting the SAME u_i=0 release AFTER Alice's commit advanced the physical counter
+        // — so Bob's live FROM read is now 99, not 100 — is rejected SPECIFICALLY on the FROM
+        // coordinate. The counter has left u_i and cannot return: the same counter-positioned sender
+        // state cannot be spent twice. This is the door, and the rejection is the production predicate,
+        // not a test shortcut.
+        let bob = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
+            &release1,
+            Some(&pin1),
+            Some(&art1.appliance_prev_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &binding1,
+            Some((pin1.anchor_id, h_post)), // Bob's live FROM read is 99 (counter already past u_i=0)
+            Some((pin1.anchor_id, h_post - 1)),
+        );
+        assert!(
+            matches!(
+                bob,
+                Err(crate::bluetooth::anchor_accept::OfflineRecover::Predicate(
+                    anchor_core::accept::AcceptError::CounterFromCoordinateInvalid
+                ))
+            ),
+            "Bob's stale u_i=0 attempt must be rejected on the FROM coordinate (live counter now 99), got {bob:?}"
+        );
 
         // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `appliance_next_root`
         // is rejected — the consumed appliance root is no longer the accepted root.
         let replay = accept_offline_release_with_counter(
-            &art1.offline_release,
+            &release1,
             Some(&pin1),
             Some(&art1.appliance_next_root), // receiver has adopted the successor root
             &recipient,
@@ -3035,6 +3231,8 @@ mod tests {
         let pin2 = pin_from(&art2.pin);
         let before2 = out2.smt_proofs.pre_root;
         let after2 = out2.child_r_a;
+        let release2 = restamp_counter_binding(art2.offline_release.as_slice(), &before2, &after2)
+            .expect("re-stamp transfer 2 device roots");
         let binding2 = AnchorStateBinding {
             sender_smt_root: &after2,
             sender_smt_root_before: &before2,
@@ -3042,7 +3240,7 @@ mod tests {
             next_proof: &ap2.child,
         };
         accept_offline_release_with_counter(
-            &art2.offline_release,
+            &release2,
             Some(&pin2),
             Some(&art2.appliance_prev_root),
             &recipient,
@@ -3064,7 +3262,7 @@ mod tests {
     async fn phase_h0_relay_counter_flows_end_to_end_with_mock_transports() {
         use crate::bluetooth::anchor_accept::{
             accept_offline_release_with_relay_counter, resolve_attested_counter,
-            AnchorStateBinding, OfflineRecover, PinnedAnchor,
+            restamp_counter_binding, AnchorStateBinding, OfflineRecover, PinnedAnchor,
         };
         use crate::bluetooth::tropic_relay::{
             AnchorCounterReader, LocalPicoTransport, PicoFuture, TropicRelayRouter,
@@ -3191,6 +3389,9 @@ mod tests {
         let ap = out.anchor_proofs.clone().expect("anchor proofs");
         let before = out.smt_proofs.pre_root;
         let after = out.child_r_a;
+        // Sender re-stamps the release binding with its real device roots (as the handler does).
+        let release = restamp_counter_binding(art.offline_release.as_slice(), &before, &after)
+            .expect("re-stamp device roots");
         let binding = AnchorStateBinding {
             sender_smt_root: &after,
             sender_smt_root_before: &before,
@@ -3208,21 +3409,27 @@ mod tests {
             chip_static_pubkey: Some([0xCC; 32]),
         };
         let pinned = PinnedAnchor::from_fused(&pin);
-        let expected_h = (pin.enrolled_counter - 1) as u32; // H = H0 - (u_i+1), transfer 1
+        let expected_h = (pin.enrolled_counter - 1) as u32; // H_post = H0 - (u_i+1), transfer 1
         let commitment = [0x42u8; 32];
+        // The FROM read `H_pre = H0 - u_i` (= enrolled for transfer 1, u_i=0). This test drives the
+        // TO (post-commit) read through the relay; the FROM read is supplied directly so the seam's
+        // fail-closed behavior on the relay-read TO value is what is under test.
+        let attested_pre = Some((pin.anchor_id, pin.enrolled_counter));
 
         // Helper: run the exact confirm seam (`resolve_attested_counter` -> predicate) and report the
-        // acceptance result, mirroring `handle_confirm_request` byte-for-byte.
-        let accept_with = |attested: Option<([u8; 32], u64)>| {
+        // acceptance result, mirroring `handle_confirm_request` byte-for-byte. `attested_post` is the
+        // TO read the relay produced.
+        let accept_with = |attested_post: Option<([u8; 32], u64)>| {
             accept_offline_release_with_relay_counter(
-                &art.offline_release,
+                &release,
                 Some(&pinned),
                 Some(&art.appliance_prev_root),
                 &recipient,
                 &r_r,
                 &policy_hash,
                 &binding,
-                attested,
+                attested_pre,
+                attested_post,
             )
         };
 

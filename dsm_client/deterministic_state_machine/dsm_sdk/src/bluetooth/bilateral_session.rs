@@ -152,6 +152,21 @@ pub struct BilateralBleSession {
     /// this transfer's confirm. `None` for ordinary transfers / already-pinned counterparties.
     /// In-memory only: lost on restart, the next bearer transfer simply re-requests (fail-safe).
     pub pending_enroll_pubkey: Option<Vec<u8>>,
+    /// RECEIVER-only (Counter-Positioned Commit §21.3): the authenticated FROM counter read
+    /// `(anchor_id, H_pre = H0 − uᵢ)` the receiver took over the relay while the sender was still
+    /// uncommitted — captured in `create_prepare_accept_envelope_*` BEFORE the accept-response (which
+    /// is what triggers the sender's commit). Consumed by `handle_confirm_request` as `attested_pre`
+    /// so the predicate enforces the full FROM→TO proof. `None` (fail-closed FROM) for ordinary
+    /// transfers, first transfers with no complete pin yet, or when no relay reader is installed.
+    /// In-memory only: lost on restart, the next bearer transfer simply re-reads (fail-safe).
+    pub attested_pre: Option<([u8; 32], u64)>,
+    /// SENDER-only (§21 first-transfer round-trip): the PREPARED offline-bearer transfer whose
+    /// physical counter has NOT yet moved — held between sending `BilateralBearerPrepared` and
+    /// receiving `BilateralBearerProceed`, at which point the sender commits and builds the confirm
+    /// from it. It must be impossible to confirm a first-transfer bearer without this stored prepared
+    /// release. `None` for non-bearer / subsequent transfers. In-memory only: lost on restart, the
+    /// transfer re-prepares (fail-safe).
+    pub prepared_bearer: Option<crate::sdk::core_sdk::PreparedOfflineBearer>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -528,6 +543,8 @@ impl SessionStore {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
         })
     }
 }
@@ -556,6 +573,8 @@ mod tests {
             anchor_leaf: None,
             anchor_sim_root: None,
             pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
         }
     }
 

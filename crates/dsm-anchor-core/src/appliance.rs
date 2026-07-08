@@ -23,8 +23,8 @@ use crate::proto::MAX_BOOT_CHAIN;
 use crate::root_advance::{
     next_anchor_head, partition_commit, partition_final_cert_message, pk_hash,
     root_advance_message, transfer_witness_key, transition_digest, tropic_transfer_input,
-    tropic_witness_message, Certificate, CounterEvidence, OfflineRelease, OwnedTransition,
-    Transition,
+    tropic_witness_message, Certificate, CounterAdvanceBinding, CounterAdvanceEvidence,
+    CounterReadEvidence, OfflineRelease, OwnedTransition, Transition,
 };
 use crate::tropic::{PartitionSig, Tropic, TropicError, WitnessSig};
 use crate::util::{ct_eq_32, zeroize, zeroize_vec};
@@ -447,17 +447,50 @@ impl<T: Tropic, S: WitnessSig, P: PartitionSig> Appliance<T, S, P> {
             return Err(ApplianceError::CounterMismatch);
         }
 
+        // The counter sits at the FROM coordinate `uᵢ` here (pinned above), so
+        // `h = H₀ − uᵢ = H_pre` and `h − 1 = H₀ − (uᵢ+1) = H_post`. The appliance stamps
+        // the transition-bound binding over everything it knows (anchor id, r_R, D, M,
+        // appliance frontier roots hᵢ/hᵢ₊₁, coordinates); the sender **device** SMT roots
+        // Rᵢ/Rᵢ₊₁ are NOT known here (they are DSM-layer, materialized only by the post-
+        // transfer advance), so they ride as zero and the SDK sender re-stamps the binding
+        // once both device roots exist. The receiver recomputes the full binding from its
+        // OWN verified device roots, so an un-restamped (zero-device-root) release fails
+        // closed. The receiver attaches its own authenticated pre/post reads before accept.
+        let h_pre = h as u64;
+        let h_post = (h - 1) as u64;
+        let binding = CounterAdvanceBinding {
+            anchor_id: self.anchor_id,
+            receiver_challenge: p.cert.receiver_challenge,
+            transition_digest: p.cert.transition_digest,
+            root_advance_message: p.cert.root_advance_message,
+            sender_device_root_before: [0u8; 32],
+            sender_device_root_after: [0u8; 32],
+            appliance_root_before: p.cert.prev_root,
+            appliance_root_after: p.cert.next_root,
+            anchor_counter: p.cert.anchor_counter,
+            next_anchor_counter: p.cert.next_anchor_counter,
+        };
+        let binding_hash = binding.hash();
+        let pre = CounterReadEvidence {
+            anchor_id: self.anchor_id,
+            attested_raw_counter: h_pre,
+            verifier_transcript: Vec::new(),
+            binding_hash,
+        };
+        let post = CounterReadEvidence {
+            attested_raw_counter: h_post,
+            ..pre.clone()
+        };
+        let counter = CounterAdvanceEvidence {
+            pre,
+            post,
+            binding_hash,
+        };
         let release = OfflineRelease {
             transition: p.txn.clone(),
             boot_chain: p.boot_chain.clone(),
             cert: p.cert.clone(),
-            counter: CounterEvidence {
-                anchor_id: self.anchor_id,
-                enrolled_counter: self.h0 as u64,
-                live_counter_claim: (h - 1) as u64,
-                derived_anchor_counter_claim: p.cert.next_anchor_counter,
-                verifier_transcript: Vec::new(),
-            },
+            counter,
         };
         let prev_root = p.cert.prev_root;
         let next_root = p.cert.next_root;
