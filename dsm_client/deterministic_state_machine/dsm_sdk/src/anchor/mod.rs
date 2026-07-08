@@ -15,6 +15,8 @@
 
 pub mod appliance_client;
 
+pub use anchor_core::appliance::RecoverOutcome;
 pub use appliance_client::{
-    AnchorAppliance, AnchorPin, ApplianceStatus, BirthConfig, InProcessAnchorAppliance,
+    recovery_action, AnchorAppliance, AnchorPin, ApplianceStatus, BirthConfig,
+    InProcessAnchorAppliance, RecoveryAction,
 };

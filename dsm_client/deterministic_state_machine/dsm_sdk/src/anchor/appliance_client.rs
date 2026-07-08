@@ -11,7 +11,7 @@
 
 use prost::Message;
 
-use anchor_core::appliance::{Appliance, ApplianceError};
+use anchor_core::appliance::{Appliance, ApplianceError, RecoverOutcome};
 use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::root_advance::Transition;
 use anchor_core::sig::WotsBlake3;
@@ -69,6 +69,65 @@ pub trait AnchorAppliance {
     fn cancel(&mut self) -> Result<(), DsmError>;
     /// The receiver pin material for this anchor (pinned at admission).
     fn pin(&self) -> AnchorPin;
+
+    /// `OP_RECOVER` (§27) — OBSERVATION ONLY. Report the appliance's recovery state after a power
+    /// loss / host re-attach. This NEVER cancels, commits, moves the counter, or erases a release:
+    /// the host decides what to do from the returned [`RecoverOutcome`] (see [`recovery_action`]).
+    /// The default is the fail-safe `DowngradeOnline` for appliances that have not yet implemented
+    /// on-device recovery — never auto-cancel an appliance whose true state is unknown.
+    fn recover(&mut self) -> Result<RecoverOutcome, DsmError> {
+        Ok(RecoverOutcome::DowngradeOnline)
+    }
+}
+
+/// The host's policy decision after OBSERVING a [`RecoverOutcome`]. `recover()` observes; this
+/// decides; the caller executes. The only state that is auto-cancelled is an orphaned uncommitted
+/// `Prepared` (no owning session, counter not moved). A committed release is re-emitted, never
+/// erased (§28); anything ambiguous downgrades online.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RecoveryAction {
+    /// Appliance is `Ready` at its active root — nothing to do.
+    Ready,
+    /// Orphaned uncommitted `Prepared` with no owning session — cancel it back to `Ready`. The
+    /// counter has not moved, so nothing is lost.
+    CancelOrphanedPrepared,
+    /// A `Prepared` record an in-flight/durable session still owns — leave it for that owner to
+    /// complete or cancel; do NOT touch it.
+    LeavePreparedForOwner,
+    /// A committed successor is pending — re-emit + finalize the SAME release; never cancel/erase.
+    ReemitCommitted,
+    /// Ambiguous, mismatched, exhausted, or an appliance without on-device recovery — resolve via
+    /// online reconciliation. Never guess.
+    DowngradeOnline,
+}
+
+/// Host recovery policy (§27/§28): a PURE decision from an observed [`RecoverOutcome`] plus whether
+/// an in-flight/durable session still owns the prepared bearer.
+///
+/// Guardrails (owner-mandated): auto-cancel happens ONLY for an orphaned uncommitted `Prepared`;
+/// `Committed`/`ReemitCommitted` is NEVER cancelled or erased (it is re-emitted or resolved online);
+/// a possibly-counter-moved or mismatched state downgrades online rather than guessing.
+#[must_use]
+pub fn recovery_action(outcome: RecoverOutcome, prepared_owned_by_session: bool) -> RecoveryAction {
+    match outcome {
+        RecoverOutcome::Accept(_) => RecoveryAction::Ready,
+        // A committed successor carrying hᵢ₊₁: re-emit + finalize the SAME release. NEVER cancel or
+        // erase — the counter may have moved.
+        RecoverOutcome::ReemitCommitted(_) => RecoveryAction::ReemitCommitted,
+        // `Prepared`, uncommitted, counter NOT moved (recover only returns these two for a prepared
+        // record whose counter still sits at uᵢ). Cancel ONLY when no session owns it.
+        RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
+            if prepared_owned_by_session {
+                RecoveryAction::LeavePreparedForOwner
+            } else {
+                RecoveryAction::CancelOrphanedPrepared
+            }
+        }
+        // Counter mismatch, exhausted, or any ambiguity: online reconciliation, never a guess.
+        RecoverOutcome::DowngradeOnline
+        | RecoverOutcome::FailClosed
+        | RecoverOutcome::ExhaustedOnlineOnly => RecoveryAction::DowngradeOnline,
+    }
 }
 
 // --- in-process secure-element mock (silicon only; crypto is real) ---
@@ -241,6 +300,12 @@ impl AnchorAppliance for InProcessAnchorAppliance {
         self.app.cancel().map_err(map_err)
     }
 
+    fn recover(&mut self) -> Result<RecoverOutcome, DsmError> {
+        // Pure observation — delegates to the anchor-core §27 recovery classifier, which never
+        // cancels or signs a new release. The host applies `recovery_action` to decide.
+        Ok(self.app.recover())
+    }
+
     fn pin(&self) -> AnchorPin {
         AnchorPin {
             bundle: self.app.bundle,
@@ -268,6 +333,68 @@ mod tests {
     const H0: u32 = 100;
     const GENESIS: [u8; 32] = [0x11; 32];
     const NEXT_ROOT: [u8; 32] = [0x22; 32];
+
+    /// The host recovery policy (§27/§28): `recover()` OBSERVES, `recovery_action` DECIDES. Auto-cancel
+    /// is reserved for an orphaned uncommitted `Prepared`; `Committed` is never cancelled/erased;
+    /// anything ambiguous downgrades online. Ownership only matters for the `Prepared` states.
+    #[test]
+    fn recovery_action_cancels_only_orphaned_uncommitted_prepared() {
+        let root = [7u8; 32];
+
+        // Ready — nothing to do, regardless of ownership.
+        assert_eq!(
+            recovery_action(RecoverOutcome::Accept(root), false),
+            RecoveryAction::Ready
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::Accept(root), true),
+            RecoveryAction::Ready
+        );
+
+        // Committed — re-emit, NEVER cancel/erase, regardless of ownership (§28).
+        assert_eq!(
+            recovery_action(RecoverOutcome::ReemitCommitted(root), false),
+            RecoveryAction::ReemitCommitted
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::ReemitCommitted(root), true),
+            RecoveryAction::ReemitCommitted
+        );
+
+        // Prepared (uncommitted, counter not moved) with NO owning session — cancel to Ready.
+        assert_eq!(
+            recovery_action(RecoverOutcome::AcceptPreparedCanComplete, false),
+            RecoveryAction::CancelOrphanedPrepared
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::OnlineCancelOrResolve, false),
+            RecoveryAction::CancelOrphanedPrepared
+        );
+
+        // Prepared with an OWNING in-flight/durable session — leave it, do NOT cancel.
+        assert_eq!(
+            recovery_action(RecoverOutcome::AcceptPreparedCanComplete, true),
+            RecoveryAction::LeavePreparedForOwner
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::OnlineCancelOrResolve, true),
+            RecoveryAction::LeavePreparedForOwner
+        );
+
+        // Counter mismatch / exhausted / ambiguous — online reconciliation, never a guess.
+        assert_eq!(
+            recovery_action(RecoverOutcome::DowngradeOnline, false),
+            RecoveryAction::DowngradeOnline
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::FailClosed, false),
+            RecoveryAction::DowngradeOnline
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::ExhaustedOnlineOnly, false),
+            RecoveryAction::DowngradeOnline
+        );
+    }
     const POLICY: [u8; 32] = [0x33; 32];
     const RECIP: [u8; 32] = [0x44; 32];
     const RCHAL: [u8; 32] = [0x55; 32];
