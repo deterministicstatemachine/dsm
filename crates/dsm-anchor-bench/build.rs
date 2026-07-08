@@ -31,4 +31,6 @@ fn main() {
     // Workspace `.git` is two levels up from this crate.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+    // Also re-stamp (updating the -dirty flag) when the source itself is edited.
+    println!("cargo:rerun-if-changed=src/main.rs");
 }

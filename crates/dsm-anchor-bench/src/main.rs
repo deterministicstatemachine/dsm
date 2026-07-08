@@ -221,6 +221,22 @@ fn open(args: &Args) -> Result<Box<dyn serialport::SerialPort>, String> {
         .map_err(|e| format!("open {}: {e}", args.port))
 }
 
+/// Reopen with a bounded backoff. After a USB-CDC drop, macOS can briefly report the `/dev/cu`
+/// device as "Device or resource busy" before it releases the previous handle.
+fn open_retry(args: &Args) -> Result<Box<dyn serialport::SerialPort>, String> {
+    let mut last = String::new();
+    for _ in 0..20 {
+        match open(args) {
+            Ok(p) => return Ok(p),
+            Err(e) => {
+                last = e;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    Err(format!("reconnect failed after retries: {last}"))
+}
+
 /// The chip's Base32 Crockford anchor-id, read via STATUS (non-mutating). This is chip-unique and
 /// stable (derived on-chip from `stpub`+`chip_id`), so it identifies the physical chip regardless of
 /// bench-adopt vs production mode.
@@ -387,16 +403,16 @@ fn phase1(port: &mut dyn serialport::SerialPort, repeats: usize) -> Result<(), S
 /// Phase 2: prepare/cancel proof. PREPARE exposes FROM = H0 without moving the counter, CANCEL
 /// returns to Ready, a reconnect still shows u=0, and it repeats.
 fn phase2(
-    port_box: &mut Box<dyn serialport::SerialPort>,
+    mut port: Box<dyn serialport::SerialPort>,
     args: &Args,
     expected_id: &str,
 ) -> Result<(), String> {
     println!("\n== Phase 2: prepare/cancel proof (no counter movement) ==");
-    let (_, h0, _) = status(port_box.as_mut())?;
+    let (_, h0, _) = status(port.as_mut())?;
     for round in 1..=2 {
-        let prev_root = status(port_box.as_mut())?.2;
-        prepare(port_box.as_mut(), &prev_root)?;
-        let (u_prep, h0_prep, _) = status(port_box.as_mut())?;
+        let prev_root = status(port.as_mut())?.2;
+        prepare(port.as_mut(), &prev_root)?;
+        let (u_prep, h0_prep, _) = status(port.as_mut())?;
         if u_prep != 0 || h0_prep != h0 {
             return Err(format!(
                 "round {round}: after PREPARE expected u=0 (FROM = H0 = {h0}), got u={u_prep}, H0={h0_prep}"
@@ -406,26 +422,29 @@ fn phase2(
             "  round {round}: PREPARE ok — FROM coordinate = H0 = {h0}, u = 0 (no counter move)"
         );
 
-        cancel(port_box.as_mut())?;
-        let (u_cancel, _, _) = status(port_box.as_mut())?;
+        cancel(port.as_mut())?;
+        let (u_cancel, _, _) = status(port.as_mut())?;
         if u_cancel != 0 {
             return Err(format!(
                 "round {round}: after CANCEL expected u=0, got u={u_cancel}"
             ));
         }
 
-        // Reconnect: drop + reopen the USB-CDC port and confirm the abandoned Prepared did not strand
-        // the appliance or move the counter.
-        std::thread::sleep(Duration::from_millis(300));
-        *port_box = open(args)?;
-        let seen = read_anchor_id(port_box.as_mut())?;
+        // Reconnect: drop the handle FIRST, then reopen — macOS refuses a second open() of the same
+        // /dev/cu device this process already holds ("Device or resource busy"), so evaluating the
+        // reopen while the old handle is still live deadlocks. Confirm the abandoned Prepared did not
+        // strand the appliance or move the counter.
+        drop(port);
+        std::thread::sleep(Duration::from_millis(800));
+        port = open_retry(args)?;
+        let seen = read_anchor_id(port.as_mut())?;
         if seen != expected_id {
             return Err(format!(
                 "round {round}: after reconnect the chip anchor-id CHANGED ({seen} != {expected_id}) \
                  — a different chip is connected; aborting"
             ));
         }
-        let (u_re, h0_re, _) = status(port_box.as_mut())?;
+        let (u_re, h0_re, _) = status(port.as_mut())?;
         if u_re != 0 || h0_re != h0 {
             return Err(format!(
                 "round {round}: after CANCEL + reconnect expected u=0 & H0={h0}, got u={u_re}, H0={h0_re} \
@@ -482,7 +501,7 @@ fn run() -> Result<(), String> {
     bench_log(port.as_mut(), &args, &chip_id)?;
     println!("[CHIP] confirmed USED bench chip {chip_id} — running Phases 1-2");
     phase1(port.as_mut(), args.repeats)?;
-    phase2(&mut port, &args, &chip_id)?;
+    phase2(port, &args, &chip_id)?;
 
     println!(
         "\nALL SAFE PHASES PASSED. The used chip is adopted (u=0), reads are stable, and abandoned"
