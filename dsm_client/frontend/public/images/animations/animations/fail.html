@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSM FX — TX FAILED</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0b0b; }
+  body { display: flex; align-items: center; justify-content: center; }
+  fx-canvas { width: min(100vw, 480px); display: block; }
+</style>
+</head>
+<body>
+<fx-canvas anim="fail" fps="10"></fx-canvas>
+<script src="fx-canvas.js"></script>
+<script>
+  // click / tap anywhere to replay (also unlocks sound)
+  document.body.addEventListener('pointerdown', function () {
+    if (window.StateBoyFX) window.StateBoyFX.play('fail');
+  });
+  // mute hook: set window.STATEBOY_MUTED = true from your SELECT button
+</script>
+</body>
+</html>
