@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{middleware, Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
@@ -21,16 +20,12 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use config::{Config, File};
 use log::info;
-use once_cell::sync::OnceCell;
 use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use dsm_sdk::util::text_id;
-
-// Prometheus metrics handle (installed once per-process)
-static PROM_HANDLE: OnceCell<metrics_exporter_prometheus::PrometheusHandle> = OnceCell::new();
 
 use dsm_storage_node::{api, auth, db, replication, AppState};
 
@@ -258,21 +253,9 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
                                                                                      // Returning `Router<()>` here is important (see Axum docs).
                                                                                      // Request metrics for Prometheus scraping
 
-    let app = Router::new()
+    Router::new()
         // Health check endpoint (lightweight, no DB access)
         .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
-        // Prometheus metrics scrape endpoint
-        .route(
-            "/metrics",
-            get(|| async move {
-                if let Some(handle) = PROM_HANDLE.get() {
-                    let body = handle.render();
-                    (StatusCode::OK, body).into_response()
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "metrics_not_ready").into_response()
-                }
-            }),
-        )
         .merge(object_read_router)
         .merge(object_write_router)
         .merge(object_list_router)
@@ -296,9 +279,7 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
         .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
         .layer(TraceLayer::new_for_http())
-        .layer(Extension(state));
-
-    app
+        .layer(Extension(state))
 }
 
 // Ensure a rustls CryptoProvider is installed once per-process (required by rustls >= 0.23)
@@ -346,20 +327,6 @@ async fn async_main() -> Result<()> {
     }
 
     let server_config = load_server_config(&opts).context("failed to load server configuration")?;
-
-    // Install Prometheus recorder (idempotent)
-    if PROM_HANDLE.get().is_none() {
-        let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-        match builder.install_recorder() {
-            Ok(handle) => {
-                let _ = PROM_HANDLE.set(handle);
-                info!("prometheus recorder installed");
-            }
-            Err(e) => {
-                log::error!("failed to install prometheus recorder: {}", e);
-            }
-        }
-    }
 
     // Initialize database
     info!("Initializing database connection pool...");

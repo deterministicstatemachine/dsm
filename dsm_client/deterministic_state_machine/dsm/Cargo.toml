@@ -23,7 +23,6 @@ threadsafe = []
 test-mock  = []
 jni = ["dep:jni"]                         # JNI feature for Android integration
 examples = []                    # Gate example/demo-only items to avoid prod warnings
-bridge = ["dep:sled"]    # Geo-faucet bridge feature
 web-stack = ["dep:axum", "dep:tower"]
 perf = []                         # Performance utilities and benchmarks
 # Enable additional test-only APIs and helpers in core when building tests/integration
@@ -114,7 +113,6 @@ tokio-stream = { version = "0.1.14", optional = true, features = ["sync"] }
 
 # Storage - Optional for server-side components only (mobile apps use HTTP API)
 rocksdb = { version = "0.24.0", features = ["multi-threaded-cf"], optional = true }
-sled = { version = "0.34", optional = true }
 once_cell = "1.19"
 # Removed dsm-storage-node dependency to avoid circular dependency
 
@@ -155,7 +153,6 @@ axum = { version = "0.8", features = ["tracing"], optional = true }
 tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"], optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"] }
 mockall = "0.15.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.21", features = ["trace"] }
@@ -166,7 +163,6 @@ serial_test = "3.5.0"
 
 [build-dependencies]
 prost-build = "0.14"
-metrics-exporter-prometheus = "0.18.3"
 protoc-bin-vendored = "3"
 
 [lib]
