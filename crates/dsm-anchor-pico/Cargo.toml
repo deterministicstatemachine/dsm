@@ -66,3 +66,12 @@ cortex-m-rt = "0.7"
 # ecc-gate-probe: default build is a READ-ONLY pre-flight (UAP + virgin slot read, nothing
 # written). `commit` enables the destructive generate/sign/verify/persistence phase.
 commit = ["dep:ed25519-dalek"]
+# Bench-only enrollment mode for ALREADY-USED chips. Runs the REAL production enrollment/birth
+# path, but ADOPTS the chip's current authenticated MCOUNTER value as this bench anchor's H0
+# (so u = H0 − live = 0) instead of the fixed provisioning constant, and domain-separates the
+# bundle so it can never collide with a production (fresh-birth) anchor. This lets already-used
+# chips prove transport, read-ordering, commit/decrement, and cancel/recover WITHOUT spending a
+# virgin chip. It proves NOTHING about fresh birth or clone exclusion — that is the virgin chip's
+# job. OFF by default (production = fresh birth over the fixed provisioned H0). No mock, no bypass,
+# no host-supplied counter, no software counter.
+bench-adopt-existing-chip = []
