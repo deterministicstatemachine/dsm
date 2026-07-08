@@ -1798,6 +1798,39 @@ impl CoreSDK {
         Ok(())
     }
 
+    /// §27/§28 host recovery seam. OBSERVE the sender appliance's recovery state at a re-attach
+    /// (process restart / power loss) via [`AnchorAppliance::recover`], then apply the host cancel
+    /// policy ([`crate::anchor::recovery_action`]): cancel ONLY an orphaned uncommitted `Prepared` —
+    /// one with no in-flight/durable session owning it and whose counter has not moved. A committed
+    /// release is NEVER cancelled or erased here (it is re-emitted or resolved online); a mismatch
+    /// downgrades online. `recover()` observes; this method decides and executes ONLY the
+    /// orphaned-`Prepared` cancel.
+    ///
+    /// `prepared_owned_by_session` is supplied by the caller — the bilateral handler knows whether an
+    /// in-flight session still holds the matching prepared bearer. Pass `false` at a cold re-attach
+    /// where the in-memory sessions are gone. Returns the decided [`crate::anchor::RecoveryAction`].
+    pub fn resolve_prepared_on_reattach(
+        &self,
+        prepared_owned_by_session: bool,
+    ) -> Result<crate::anchor::RecoveryAction, DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let Some(app) = guard.as_mut() else {
+            // No appliance attached yet -> nothing is prepared -> Ready.
+            return Ok(crate::anchor::RecoveryAction::Ready);
+        };
+        let outcome = app.recover()?;
+        let action = crate::anchor::recovery_action(outcome, prepared_owned_by_session);
+        if action == crate::anchor::RecoveryAction::CancelOrphanedPrepared {
+            // Host policy executes the cancel — `recover()` did not. Only an orphaned uncommitted
+            // Prepared reaches here (no owning session, counter not moved), so nothing is lost.
+            app.cancel()?;
+            log::info!(
+                "[offline-bearer] re-attach cancelled an orphaned prepared bearer (appliance → Ready)"
+            );
+        }
+        Ok(action)
+    }
+
     /// Single-shot producer: PREPARE then immediately COMMIT (the non-interactive path, used where
     /// the receiver's FROM read is not interleaved — e.g. the current single-confirm seam, which
     /// stays fail-closed on the missing FROM read). The interactive Counter-Positioned Commit flow
@@ -3070,6 +3103,75 @@ mod tests {
         assert_eq!(
             prepared2.anchor_counter, 1,
             "the next transfer starts from the advanced FROM coordinate uᵢ+1"
+        );
+    }
+
+    /// §27/§28 host recovery seam (Step 4). At a re-attach the host cancels ONLY an orphaned
+    /// uncommitted `Prepared` (no owning session) and moves no counter doing so; a `Prepared` an
+    /// in-flight session still owns is left untouched. `recover()` observes; the host decides.
+    #[test]
+    #[serial]
+    fn reattach_cancels_orphaned_prepared_not_owned_and_moves_no_counter() {
+        use crate::anchor::RecoveryAction;
+        use dsm::types::device_state::DeviceState;
+
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let recipient = [4u8; 32];
+
+        // No appliance attached yet -> nothing prepared -> Ready.
+        assert_eq!(
+            sdk.resolve_prepared_on_reattach(false).expect("reattach"),
+            RecoveryAction::Ready
+        );
+
+        // Drive the appliance to PREPARED (the FROM coordinate uᵢ is exposed; NO counter move).
+        let prepared = sdk
+            .prepare_offline_bearer_release(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
+            )
+            .expect("prepare");
+        assert_eq!(prepared.anchor_counter, 0, "PREPARE moved no counter");
+
+        // An in-flight session OWNS this prepared bearer -> the host must NOT cancel it.
+        assert_eq!(
+            sdk.resolve_prepared_on_reattach(true).expect("owned"),
+            RecoveryAction::LeavePreparedForOwner
+        );
+
+        // Orphaned (the owning session was lost on restart) -> cancel it back to Ready.
+        assert_eq!(
+            sdk.resolve_prepared_on_reattach(false).expect("orphan"),
+            RecoveryAction::CancelOrphanedPrepared
+        );
+
+        // The appliance is Ready again and NO counter moved: a fresh transfer still starts at uᵢ=0,
+        // so a lost/abandoned prepare does not strand future sends (and burned no counter).
+        let prepared2 = sdk
+            .prepare_offline_bearer_release(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xCD],
+                [0x66u8; 32],
+            )
+            .expect("prepare after cancel");
+        assert_eq!(
+            prepared2.anchor_counter, 0,
+            "cancel moved no counter — the FROM coordinate uᵢ is unchanged, future sends not stranded"
         );
     }
 
