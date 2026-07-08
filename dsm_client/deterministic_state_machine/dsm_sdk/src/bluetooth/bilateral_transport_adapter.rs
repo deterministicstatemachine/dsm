@@ -551,17 +551,42 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     BleFrameType::Unspecified,
                     message.payload,
                 )]),
-                // §21 first-transfer round-trip. Handlers are wired in later stages (#3 stages 5–6);
-                // until then these are fail-closed no-ops. The sender does not emit these frames yet
-                // (stage 4), so they are unreachable in production — a peer sending one early is
-                // dropped and first-transfer simply stays on the online fallback.
+                // §21 first-transfer round-trip. The RECEIVER handles BilateralBearerPrepared (admit
+                // pin + FROM read) and replies BilateralBearerProceed; the SENDER handles the proceed
+                // (commit the prepared release) and replies BilateralConfirm. The handlers validate the
+                // payload type and fail closed — an unexpected payload, a missing FROM read, or a
+                // missing stored prepared bearer yields no reply, so first-transfer stays on the online
+                // fallback. The sender only EMITS BilateralBearerPrepared once activation (stage F) is
+                // wired, so these are unreachable until then.
                 BleFrameType::BilateralBearerPrepared => {
-                    debug!("BilateralBearerPrepared received before handler wired; dropping (fail-closed)");
-                    Ok(Vec::new())
+                    match bilateral_handler
+                        .handle_bearer_prepared(&message.payload)
+                        .await
+                    {
+                        Ok(reply) => Ok(vec![TransportOutbound::new(
+                            BleFrameType::BilateralBearerProceed,
+                            reply,
+                        )]),
+                        Err(e) => {
+                            warn!("[BILATERAL] handle_bearer_prepared failed (fail-closed, recover online): {e}");
+                            Ok(Vec::new())
+                        }
+                    }
                 }
                 BleFrameType::BilateralBearerProceed => {
-                    debug!("BilateralBearerProceed received before handler wired; dropping (fail-closed)");
-                    Ok(Vec::new())
+                    match bilateral_handler
+                        .handle_bearer_proceed(&message.payload)
+                        .await
+                    {
+                        Ok((confirm_envelope, _meta)) => Ok(vec![TransportOutbound::new(
+                            BleFrameType::BilateralConfirm,
+                            confirm_envelope,
+                        )]),
+                        Err(e) => {
+                            warn!("[BILATERAL] handle_bearer_proceed failed (fail-closed, recover online): {e}");
+                            Ok(Vec::new())
+                        }
+                    }
                 }
                 _ => {
                     debug!("Ignoring unknown BLE frame type: {:?}", message.frame_type);
