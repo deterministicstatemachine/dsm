@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+[package]
+name = "dsm-anchor-bench"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Host-side used-chip bench harness. Drives the RP2350/TROPIC01 DSM anchor appliance over USB-CDC to run the NON-MUTATING adoption proof (Phase 1) and the prepare/cancel proof (Phase 2) against an ALREADY-USED chip flashed with the bench-adopt firmware — without spending a virgin chip and without moving the counter. RELEASE-only. Excluded from the workspace (native serial dep)."
+
+# Excluded from the root workspace (native serialport dep + hardware-facing bench tool). Build from
+# inside this dir: `cargo build --release && ./target/release/used-chip-bench --port <serial>`.
+
+[[bin]]
+name = "used-chip-bench"
+path = "src/main.rs"
+
+[dependencies]
+# The appliance wire protocol (ApplianceRequest/Response, Op, TransitionPackage, encode/decode).
+# Package `dsm-anchor-core`, imported as the lib `anchor_core`.
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+# Host USB-CDC serial transport to the Pico.
+serialport = "4"
