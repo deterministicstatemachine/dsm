@@ -64,6 +64,9 @@ use crate::jni::bilateral_poll::{
 // these `use`s restore the android+bluetooth build, which had not been recompiled since).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::bluetooth::bilateral_transport_adapter::BleTransportDelegate;
+use crate::bluetooth::frame_classify::{
+    ble_frame_needs_chunking, detect_ble_frame_type_from_bytes, strip_envelope_v3_framing,
+};
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::jni::state::{parse_hex_32, DEVICE_ID_TO_ADDR};
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -1283,6 +1286,16 @@ fn process_envelope_v3_impl(
                 }
                 Some(pb::envelope::Payload::BilateralCommitResponse(_)) => {
                     Some(pb::BleFrameType::BilateralCommitResponse)
+                }
+                // §21 first-transfer round-trip: a complete-envelope (unchunked)
+                // BilateralBearerPrepared / BilateralBearerProceed must route to the
+                // BLE adapter (admit-disclosure+FROM-read / commit) instead of the core
+                // bridge, exactly like the other bilateral frames above.
+                Some(pb::envelope::Payload::BilateralBearerPrepared(_)) => {
+                    Some(pb::BleFrameType::BilateralBearerPrepared)
+                }
+                Some(pb::envelope::Payload::BilateralBearerProceed(_)) => {
+                    Some(pb::BleFrameType::BilateralBearerProceed)
                 }
                 Some(pb::envelope::Payload::UniversalTx(tx)) => {
                     // Detect bilateral.confirm invoke for 3-step protocol
@@ -2723,70 +2736,11 @@ pub(crate) fn send_ble_chunks_via_unified<'a>(
     Ok(result.z().unwrap_or(false))
 }
 
-fn strip_envelope_v3_framing(bytes: &[u8]) -> &[u8] {
-    if bytes.first() == Some(&0x03) {
-        &bytes[1..]
-    } else {
-        bytes
-    }
-}
-
-fn detect_ble_frame_type_from_bytes(bytes: &[u8]) -> i32 {
-    let raw = strip_envelope_v3_framing(bytes);
-
-    if let Ok(env) = crate::envelope::from_canonical_bytes(raw) {
-        return match env.payload {
-            Some(pb::envelope::Payload::BilateralPrepareResponse(_)) => {
-                pb::BleFrameType::BilateralPrepareResponse as i32
-            }
-            Some(pb::envelope::Payload::BilateralPrepareReject(_)) => {
-                pb::BleFrameType::BilateralPrepareReject as i32
-            }
-            Some(pb::envelope::Payload::BilateralCommitResponse(_)) => {
-                pb::BleFrameType::BilateralCommitResponse as i32
-            }
-            Some(pb::envelope::Payload::UniversalTx(tx)) => {
-                if let Some(op) = tx.ops.first() {
-                    if let Some(pb::universal_op::Kind::Invoke(inv)) = op.kind.as_ref() {
-                        if inv.method == "bilateral.prepare" {
-                            return pb::BleFrameType::BilateralPrepare as i32;
-                        }
-                        if inv.method == "bilateral.confirm" {
-                            return pb::BleFrameType::BilateralConfirm as i32;
-                        }
-                        if inv.method == "bilateral.commit" {
-                            return pb::BleFrameType::BilateralCommit as i32;
-                        }
-                    }
-                }
-                pb::BleFrameType::Unspecified as i32
-            }
-            _ => pb::BleFrameType::Unspecified as i32,
-        };
-    }
-
-    if let Ok(env) = pb::BilateralMessageEnvelope::decode(raw) {
-        if let Some(msg) = env.msg {
-            return match msg {
-                pb::bilateral_message_envelope::Msg::ChainHistoryRequest(_) => {
-                    pb::BleFrameType::ChainHistoryRequest as i32
-                }
-                pb::bilateral_message_envelope::Msg::ChainHistoryResponse(_) => {
-                    pb::BleFrameType::ChainHistoryResponse as i32
-                }
-                pb::bilateral_message_envelope::Msg::ReconciliationRequest(_) => {
-                    pb::BleFrameType::ReconciliationRequest as i32
-                }
-                pb::bilateral_message_envelope::Msg::ReconciliationResponse(_) => {
-                    pb::BleFrameType::ReconciliationResponse as i32
-                }
-                _ => pb::BleFrameType::Unspecified as i32,
-            };
-        }
-    }
-
-    pb::BleFrameType::Unspecified as i32
-}
+// BLE frame-type classification (`detect_ble_frame_type_from_bytes`,
+// `strip_envelope_v3_framing`) and chunking eligibility (`ble_frame_needs_chunking`)
+// live in the host-compiled `crate::bluetooth::frame_classify` module so they are unit
+// tested in host CI (this JNI shim only compiles for `target_os = "android"`). They are
+// imported at the top of this module; this shim only routes and frames.
 
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -3116,16 +3070,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                     continue;
                 }
                 let frame_type = outbound.frame_type as i32;
-                let needs_chunking = frame_type
-                    == crate::generated::BleFrameType::BilateralPrepareReject as i32
-                    || frame_type == crate::generated::BleFrameType::BilateralCommit as i32
-                    || frame_type == crate::generated::BleFrameType::BilateralCommitResponse as i32
-                    || frame_type == crate::generated::BleFrameType::BilateralConfirm as i32
-                    // Path-B relay reply (chip->receiver counter read): the REQUEST is chunked via
-                    // `queue_follow_up_chunks`, so the REPLY must be BleChunk-framed too — otherwise
-                    // the receiver decodes the raw `TropicSpiRelayPacket` as a `BleChunk` and fails
-                    // (`invalid tag value: 0`), dropping the reply and timing out the counter read.
-                    || frame_type == crate::generated::BleFrameType::TropicSpiRelay as i32;
+                let needs_chunking = ble_frame_needs_chunking(frame_type);
 
                 if needs_chunking {
                     use_reliable_write = true;
