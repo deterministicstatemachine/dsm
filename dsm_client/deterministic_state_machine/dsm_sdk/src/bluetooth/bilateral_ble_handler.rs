@@ -7337,6 +7337,148 @@ mod tests {
         );
     }
 
+    /// Test mock for the sender-side SE verifier-slot provisioner. Discloses a fixed
+    /// `(slot, chip_static_pubkey)` so the first-transfer activation gate can be armed in-process
+    /// with no hardware — the seam that stays `None` (fail-closed) on any real build without a chip.
+    struct MockSlotWriter;
+    impl crate::bridge::SeSlotWriter for MockSlotWriter {
+        fn provision_verifier_slot(&self, _r: [u8; 32], _p: [u8; 32]) -> Option<(u8, [u8; 32])> {
+            Some((1u8, [0xAB; 32]))
+        }
+    }
+
+    /// §21 activation-gate inertness (Step 2). The first-transfer bearer round-trip is armed by
+    /// exactly one thing: `se_slot_writer().is_some()`. This drives the real `handle_prepare_response`
+    /// with the other two gate conjuncts satisfied — a folded enroll request (`pending_enroll_pubkey`)
+    /// and a bearer operation — but NO SE slot-writer installed, and proves the round-trip stays off:
+    /// no `prepared_bearer`, no `committed_bearer`. The `uninstall_se_slot_writer` seam resets the
+    /// global so `#[serial]` tests that DO install a writer cannot leak activation into this one.
+    #[tokio::test]
+    #[serial]
+    async fn first_transfer_bearer_gate_inert_without_se_slot_writer() {
+        init_test_db();
+        let sender = [81u8; 32]; // local (this handler)
+        let sender_genesis = [82u8; 32];
+        let receiver = [83u8; 32];
+        let receiver_genesis = [84u8; 32];
+        let (bilateral_manager, handler) =
+            make_test_handler(sender, sender_genesis, b"bearer-gate-inert");
+
+        // Verified receiver contact whose key produces σ_B (so `handle_prepare_response` reaches the
+        // gate instead of failing the signature check first).
+        let receiver_kp =
+            SignatureKeyPair::generate_from_entropy(b"bearer-gate-receiver-key").expect("kp");
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "receiver".to_string(),
+            device_id: receiver,
+            genesis_hash: receiver_genesis,
+            public_key: receiver_kp.public_key().to_vec(),
+            genesis_material: vec![5u8; 32],
+            chain_tip: Some([6u8; 32]),
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1000,
+            added_at_commit_height: 1000,
+            last_updated_commit_height: 1000,
+            verifying_storage_nodes: vec![],
+            ble_address: Some(String::new()),
+        };
+        {
+            let mut m = bilateral_manager.write().await;
+            m.add_verified_contact(contact).expect("contact");
+        }
+
+        // Clean bridge state: prove we start with no writer (the whole point).
+        crate::bridge::uninstall_se_slot_writer();
+        crate::bridge::uninstall_anchor_counter_reader();
+        assert!(
+            crate::bridge::se_slot_writer().is_none(),
+            "precondition: no SE slot-writer installed"
+        );
+
+        let commitment = [0x31u8; 32];
+        let bearer_op = Operation::Transfer {
+            policy_commit: [0u8; 32],
+            to_device_id: receiver.to_vec(),
+            amount: Balance::from_state(1, [1u8; 32]),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![1],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: receiver.to_vec(),
+            to: receiver.to_vec(),
+            message: "bearer".to_string(),
+            signature: Vec::new(),
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+        };
+        assert!(
+            dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(&bearer_op),
+            "bearer op qualifies (gate conjunct 3 satisfied)"
+        );
+
+        let mut sess = bearer_test_session(commitment, receiver, BilateralPhase::PendingUserAction);
+        sess.operation = bearer_op;
+        sess.counterparty_genesis_hash = Some(receiver_genesis);
+        handler.test_insert_session(sess).await;
+
+        // Receiver prepare-response: enroll request (folds `pending_enroll_pubkey`, gate conjunct 1)
+        // + a valid σ_B over "DSM/bilateral-sign\0" || commitment.
+        let sigma_b = {
+            let mut m = Vec::with_capacity(19 + 32);
+            m.extend_from_slice(b"DSM/bilateral-sign\0");
+            m.extend_from_slice(&commitment);
+            receiver_kp.sign(&m).expect("sign σ_B")
+        };
+        let resp = generated::BilateralPrepareResponse {
+            commitment_hash: Some(generated::Hash32 {
+                v: commitment.to_vec(),
+            }),
+            local_signature: sigma_b,
+            expires_iterations: 1_000_000,
+            counterparty_state_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            local_state_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            responder_signing_public_key: Vec::new(),
+            receiver_challenge: vec![9u8; 32],
+            anchor_enroll_request: Some(generated::AnchorEnrollRequest {
+                verifier_pairing_pubkey: vec![7u8; 32],
+            }),
+            responder_kyber_public_key: Vec::new(),
+        };
+        let env = handler
+            .create_envelope(generated::envelope::Payload::BilateralPrepareResponse(resp))
+            .await
+            .expect("env");
+        let mut buf = Vec::new();
+        env.encode(&mut buf).expect("encode");
+
+        // Drive it. No writer ⇒ gate false ⇒ ordinary confirm path; the bearer round-trip must NOT arm.
+        // (The confirm path's own outcome is irrelevant here — the invariant is that activation is off.)
+        let _ = handler.handle_prepare_response(&buf).await;
+        {
+            let s = handler.sessions.sessions.lock().await;
+            let sess = s.get(&commitment).expect("session");
+            assert!(
+                sess.pending_enroll_pubkey.is_some(),
+                "enroll request was folded — gate conjuncts 1 & 3 were live, so only the absent writer kept it off"
+            );
+            assert!(
+                sess.prepared_bearer.is_none(),
+                "no SE slot-writer ⇒ first-transfer bearer must NOT arm (prepared_bearer stays None)"
+            );
+            assert!(
+                sess.committed_bearer.is_none(),
+                "no committed bearer without an armed round-trip"
+            );
+        }
+
+        // The writer is the sole activation toggle, and the uninstall seam resets it cleanly.
+        crate::bridge::install_se_slot_writer(Arc::new(MockSlotWriter));
+        assert!(crate::bridge::se_slot_writer().is_some());
+        crate::bridge::uninstall_se_slot_writer();
+        assert!(crate::bridge::se_slot_writer().is_none());
+    }
+
     /// §21 invariant (tests 13/14): the RECEIVER sends NO `BilateralBearerProceed` — so the sender
     /// never commits — unless it captured an authenticated FROM read. With no relay reader / no
     /// complete pin installed, `handle_bearer_prepared` fails closed and no `attested_pre` is stored.

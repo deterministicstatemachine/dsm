@@ -470,6 +470,18 @@ pub fn se_slot_writer() -> Option<Arc<dyn SeSlotWriter>> {
     SE_SLOT_WRITER.read().ok()?.clone()
 }
 
+/// Test-only: clear the installed SE slot-writer so a `#[serial]` test leaves the global bridge as
+/// it found it. The first-transfer bearer activation gate is exactly `se_slot_writer().is_some()`
+/// (with an enroll request + a bearer op), so the inertness tests toggle this seam to prove the
+/// round-trip stays off without a writer and arms only with one. Mirrors
+/// [`uninstall_anchor_counter_reader`].
+#[cfg(test)]
+pub(crate) fn uninstall_se_slot_writer() {
+    if let Ok(mut g) = SE_SLOT_WRITER.write() {
+        *g = None;
+    }
+}
+
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {
