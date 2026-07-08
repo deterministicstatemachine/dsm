@@ -3352,6 +3352,31 @@ impl BilateralBleHandler {
             );
         }
 
+        // §21 first-transfer round-trip ACTIVATION (the ONLY gate — everything upstream is inert
+        // without it): a bearer op where the receiver asked to enroll (first transfer, not yet pinned)
+        // AND this sender can provision the verifier slot. Then PREPARE + disclose
+        // (`BilateralBearerPrepared`) WITHOUT committing — the receiver takes its authenticated FROM
+        // read against the still-`uᵢ` counter and replies `BilateralBearerProceed`, which drives the
+        // commit. Absent the enroll request or the SE slot-writer, the ordinary single-shot path runs
+        // byte-identical to before (subsequent/pinned transfers, and first transfers with no hardware
+        // — which stay fail-closed exactly as today).
+        let first_transfer_bearer = updated_session.pending_enroll_pubkey.is_some()
+            && crate::bridge::se_slot_writer().is_some()
+            && dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &updated_session.operation,
+            );
+        if first_transfer_bearer {
+            info!(
+                "[BILATERAL] first-transfer bearer: PREPARE + disclose (BilateralBearerPrepared), deferring commit to BilateralBearerProceed for {}",
+                bytes_to_base32(&commitment_hash[..8])
+            );
+            let prepared_envelope = self.prepare_bilateral_bearer(commitment_hash).await?;
+            return Ok((
+                prepared_envelope,
+                crate::sdk::transfer_hooks::TransferMeta::default(),
+            ));
+        }
+
         // 3-step protocol: sender builds BilateralConfirmRequest, finalizes, and sends confirm.
         // The receiver will finalize upon receiving the confirm message.
         info!("Building bilateral confirm message (3-step protocol, step 3)");
@@ -3898,6 +3923,107 @@ impl BilateralBleHandler {
 
         info!("[BILATERAL] send_bilateral_confirm: confirm envelope built ({} bytes), session ConfirmPending, confirm persisted for re-delivery", buffer.len());
         Ok((buffer, crate::sdk::transfer_hooks::TransferMeta::default()))
+    }
+
+    /// SENDER, §21 first-transfer round-trip step 1: PREPARE the offline-bearer transfer — form the
+    /// cross-bound certificate WITHOUT moving the counter — stash it as `prepared_bearer`, and emit
+    /// `BilateralBearerPrepared` carrying the fused-anchor pin disclosure so the receiver can admit the
+    /// pin and take its authenticated FROM read while the sender is still at `uᵢ`. The counter moves
+    /// only later, in `handle_bearer_proceed`. Returns the prepared envelope bytes.
+    async fn prepare_bilateral_bearer(
+        &self,
+        commitment_hash: [u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        let session = {
+            let sessions = self.sessions.sessions.lock().await;
+            sessions.get(&commitment_hash).cloned().ok_or_else(|| {
+                DsmError::invalid_operation("prepare_bilateral_bearer: session not found")
+            })?
+        };
+        let r_r = session.receiver_challenge.ok_or_else(|| {
+            DsmError::invalid_operation("first-transfer bearer requires a receiver challenge")
+        })?;
+        let enroll_pubkey = session.pending_enroll_pubkey.clone().ok_or_else(|| {
+            DsmError::invalid_operation("first-transfer bearer requires a pending enroll pubkey")
+        })?;
+        let (object_id, payload_hash, authority_policy_hash) = match &session.operation {
+            Operation::Transfer {
+                token_id,
+                authority_policy,
+                ..
+            } => {
+                let op_bytes = session.operation.to_bytes();
+                (
+                    dsm::crypto::blake3::domain_hash_bytes("DSM/bearer-object/v1", token_id),
+                    dsm::crypto::blake3::domain_hash_bytes("DSM/bearer-payload/v1", &op_bytes),
+                    authority_policy
+                        .as_ref()
+                        .map(|ap| ap.policy_id)
+                        .unwrap_or([0u8; 32]),
+                )
+            }
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "first-transfer bearer requires a Transfer op",
+                ))
+            }
+        };
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &self.device_id,
+            &session.counterparty_device_id,
+        );
+        let router = crate::bridge::app_router().ok_or_else(|| {
+            DsmError::state_machine("prepare_bilateral_bearer: app_router not installed")
+        })?;
+        // §21.2 PREPARE only — no counter move. Action fields EMPTY (the op is bound via payload_hash;
+        // matches the single-shot build path). The appliance is left `Prepared` at `uᵢ`.
+        let prepared = router.prepare_offline_bearer_release(
+            rel_key,
+            session.counterparty_device_id,
+            object_id,
+            payload_hash,
+            authority_policy_hash,
+            0,
+            Vec::new(),
+            r_r,
+        )?;
+        let disclosure = self.build_anchor_disclosure(
+            session.counterparty_device_id,
+            &enroll_pubkey,
+            &prepared.pin,
+            &session.operation,
+        );
+        // Stash the prepared bearer (consumed by handle_bearer_proceed; a confirm on this path is
+        // impossible without it).
+        {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&commitment_hash) {
+                s.prepared_bearer = Some(prepared);
+            }
+        }
+        info!(
+            "[BILATERAL][offline-bearer][sender] PREPARED first-transfer bearer + disclosing pin (deferring commit to proceed) for {}",
+            bytes_to_base32(&commitment_hash[..8])
+        );
+        let msg = generated::BilateralBearerPrepared {
+            commitment_hash: Some(generated::Hash32 {
+                v: commitment_hash.to_vec(),
+            }),
+            anchor_disclosure: Some(disclosure),
+        };
+        let envelope = self
+            .create_envelope(generated::envelope::Payload::BilateralBearerPrepared(msg))
+            .await?;
+        let mut buffer = Vec::new();
+        envelope.encode(&mut buffer).map_err(|e| {
+            DsmError::serialization_error(
+                "encode_bearer_prepared",
+                "protobuf",
+                Some(e.to_string()),
+                Some(e),
+            )
+        })?;
+        Ok(buffer)
     }
 
     /// Build the fused-anchor pin disclosure the sender attaches when the receiver asked to enroll on
