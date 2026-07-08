@@ -13,6 +13,7 @@ pub mod bilateral_envelope;
 pub mod bilateral_session;
 pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
+pub mod frame_classify;
 pub mod pairing_orchestrator;
 pub mod tropic_relay;
 
