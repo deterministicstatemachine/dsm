@@ -1782,8 +1782,12 @@ message BilateralBearerPrepared {
 // Receiver -> Sender: the receiver has admitted the disclosed pin and captured the authenticated FROM
 // read against the still-Prepared sender. Only on receiving this does the sender COMMIT (move the
 // counter u_i -> u_i+1) and send the confirm. Serializes the commit behind the receiver's FROM read.
+// receiver_signature authenticates the proceed: the receiver signs "DSM/bilateral-bearer-proceed\0" ||
+// commitment_hash with its bilateral signing key, so ONLY the authenticated receiver can drive the
+// sender's counter move (a spoofed/observed-commitment proceed cannot burn a counter step).
 message BilateralBearerProceed {
   Hash32 commitment_hash        = 1;
+  bytes  receiver_signature     = 2;
 }
 
 message BilateralPrepareResponse {

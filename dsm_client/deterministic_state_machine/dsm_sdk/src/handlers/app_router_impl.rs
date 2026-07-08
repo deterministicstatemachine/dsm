@@ -2678,6 +2678,10 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.commit_offline_bearer_release(prepared)
     }
 
+    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
+        self.core_sdk.cancel_offline_bearer_release()
+    }
+
     // ====================== QUERY ======================
     async fn query(&self, q: AppQuery) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;

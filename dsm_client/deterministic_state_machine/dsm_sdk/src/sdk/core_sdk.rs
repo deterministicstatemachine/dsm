@@ -1775,6 +1775,29 @@ impl CoreSDK {
         })
     }
 
+    /// §21 first-transfer round-trip cleanup: drive an ABANDONED prepared bearer back to `Ready`. If
+    /// the receiver never replies `BilateralBearerProceed` (no relay reader / BLE drop / app killed),
+    /// [`prepare_offline_bearer_release`] left the appliance `Prepared` with the one-time q_tx witness
+    /// spent and the counter still at `uᵢ`; without this, the next offline-bearer send fails
+    /// `WrongState` forever. `cancel()` erases the witness key and returns the appliance to `Ready` —
+    /// no counter ever moved, so nothing is lost. Idempotent and best-effort: a no-op when there is no
+    /// appliance or it is not `Prepared`.
+    pub fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        if let Some(app) = guard.as_mut() {
+            match app.cancel() {
+                Ok(()) => log::info!(
+                    "[offline-bearer] cancelled an abandoned prepared bearer (appliance → Ready)"
+                ),
+                // `cancel()` is only valid in `Prepared`; a not-Prepared appliance is already fine.
+                Err(e) => {
+                    log::debug!("[offline-bearer] cancel no-op (appliance not Prepared): {e}")
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Single-shot producer: PREPARE then immediately COMMIT (the non-interactive path, used where
     /// the receiver's FROM read is not interleaved — e.g. the current single-confirm seam, which
     /// stays fail-closed on the missing FROM read). The interactive Counter-Positioned Commit flow

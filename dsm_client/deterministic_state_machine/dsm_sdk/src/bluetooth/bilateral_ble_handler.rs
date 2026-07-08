@@ -1863,6 +1863,27 @@ impl BilateralBleHandler {
     /// Called when the BLE send of the prepare message fails so that the next
     /// attempt is not blocked by a stale `Prepared` session sitting in the
     /// `active_sessions` map.
+    /// §21 first-transfer round-trip: if a torn-down SENDER session still holds a PREPARED bearer that
+    /// never committed (the receiver never replied `BilateralBearerProceed`), release the appliance
+    /// back to `Ready` so future offline-bearer sends do not fail closed on a stuck `Prepared` state.
+    /// No counter ever moved, so nothing is lost. No-op for non-bearer / already-committed sessions.
+    fn release_abandoned_prepared_bearer(&self, session: &BilateralBleSession) {
+        if session.prepared_bearer.is_some() && session.committed_bearer.is_none() {
+            if let Some(router) = crate::bridge::app_router() {
+                match router.cancel_offline_bearer_release() {
+                    Ok(()) => info!(
+                        "[BILATERAL] released abandoned prepared bearer for {} (appliance → Ready)",
+                        bytes_to_base32(&session.commitment_hash[..8])
+                    ),
+                    Err(e) => warn!(
+                        "[BILATERAL] failed to release abandoned prepared bearer for {}: {e}",
+                        bytes_to_base32(&session.commitment_hash[..8])
+                    ),
+                }
+            }
+        }
+    }
+
     pub async fn cancel_prepared_session_for_counterparty(&self, counterparty_device_id: [u8; 32]) {
         if let Some((commitment_hash, _phase, _created)) = self
             .detect_inflight_counterparty_session(&counterparty_device_id)
@@ -1873,17 +1894,21 @@ impl BilateralBleHandler {
                 crate::util::text_id::encode_base32_crockford(&commitment_hash[..8]),
                 crate::util::text_id::encode_base32_crockford(&counterparty_device_id[..8]),
             );
-            let pending_key = {
+            let (pending_key, abandoned) = {
                 let mut sessions = self.sessions.sessions.lock().await;
                 if let Some(session) = sessions.get_mut(&commitment_hash) {
                     session.phase = BilateralPhase::Failed;
                     let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
+                    let abandoned = session.clone();
                     sessions.remove(&commitment_hash);
-                    pending_key
+                    (pending_key, Some(abandoned))
                 } else {
-                    commitment_hash
+                    (commitment_hash, None)
                 }
             };
+            if let Some(s) = abandoned.as_ref() {
+                self.release_abandoned_prepared_bearer(s);
+            }
             // Keep failed sessions in SQLite for poller visibility
             if let Err(e) = crate::storage::client_db::update_bilateral_session_phase(
                 &commitment_hash,
@@ -1942,6 +1967,9 @@ impl BilateralBleHandler {
             bytes_to_base32(&session.counterparty_device_id[..8]),
             reason
         );
+
+        // §21: a failed first-transfer round-trip must release the sender's stuck-Prepared appliance.
+        self.release_abandoned_prepared_bearer(&session);
 
         let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
         {
@@ -4230,10 +4258,18 @@ impl BilateralBleHandler {
             bytes_to_base32(&commitment_hash[..8])
         );
 
+        // Authenticate the proceed with the receiver's bilateral key over a DISTINCT domain, so ONLY
+        // this receiver can drive the sender's counter move (a spoofed/observed-commitment proceed
+        // cannot burn a counter step).
+        let receiver_signature = {
+            let m = self.bilateral_tx_manager.read().await;
+            m.sign_bearer_proceed(&commitment_hash)?
+        };
         let proceed = generated::BilateralBearerProceed {
             commitment_hash: Some(generated::Hash32 {
                 v: commitment_hash.to_vec(),
             }),
+            receiver_signature,
         };
         let out_envelope = self
             .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
@@ -4285,6 +4321,45 @@ impl BilateralBleHandler {
             .clone()
             .try_into()
             .map_err(|_| DsmError::invalid_operation("commitment hash must be 32 bytes"))?;
+
+        // Authenticate the proceed BEFORE touching the appliance: only the counterparty (receiver) that
+        // took the FROM read may drive this sender's counter move. Verify the receiver signature over
+        // the DISTINCT proceed domain under the counterparty's contact key — a spoofed or
+        // observed-commitment proceed fails closed here without burning a counter step.
+        let counterparty_device_id = {
+            let sessions = self.sessions.sessions.lock().await;
+            sessions
+                .get(&commitment_hash)
+                .map(|s| s.counterparty_device_id)
+                .ok_or_else(|| {
+                    DsmError::invalid_operation("no session for BilateralBearerProceed commitment")
+                })?
+        };
+        let counterparty_pubkey = {
+            let mgr = self.bilateral_tx_manager.read().await;
+            mgr.get_contact(&counterparty_device_id)
+                .ok_or_else(|| DsmError::invalid_operation("missing counterparty contact"))?
+                .public_key
+                .clone()
+        };
+        let mut proceed_msg = Vec::with_capacity(29 + 32);
+        proceed_msg.extend_from_slice(b"DSM/bilateral-bearer-proceed\0");
+        proceed_msg.extend_from_slice(&commitment_hash);
+        if !crate::crypto::signatures::SignatureKeyPair::verify_raw(
+            &proceed_msg,
+            &proceed.receiver_signature,
+            &counterparty_pubkey,
+        )
+        .map_err(|e| {
+            DsmError::crypto(
+                format!("verify bearer-proceed signature failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })? {
+            return Err(DsmError::invalid_operation(
+                "invalid receiver signature on BilateralBearerProceed (fail-closed)",
+            ));
+        }
 
         // The sender must hold a PREPARED bearer for this transfer AND be in Accepted phase — no
         // proceed-driven commit without the stored prepared release.
@@ -7149,39 +7224,74 @@ mod tests {
         }
     }
 
-    /// §21 invariant (tests 13/15): `BilateralBearerProceed` cannot drive a commit — and so no confirm
-    /// can be built on the first-transfer path — without a stored `prepared_bearer`. Also enforces the
-    /// phase gate. No `MCounter_Update`, no `committed_bearer`, on either failure.
+    /// §21 invariants (tests 13/14/15): `BilateralBearerProceed` cannot drive a commit — and so no
+    /// confirm can be built on the first-transfer path — unless it is AUTHENTICATED by the receiver AND
+    /// a `prepared_bearer` is stored in the Accepted phase. An unsigned/forged proceed, a wrong phase,
+    /// a missing prepared bearer, or an unknown commitment all fail closed with no `MCounter_Update`
+    /// and no `committed_bearer`.
     #[tokio::test]
     #[serial]
     async fn bearer_proceed_fails_closed_without_prepared_bearer() {
         init_test_db();
-        let device_id = [61u8; 32]; // sender
+        let device_id = [61u8; 32]; // sender (local)
         let genesis_hash = [62u8; 32];
         let receiver = [63u8; 32];
-        let (_m, handler) =
+        let (bilateral_manager, handler) =
             make_test_handler(device_id, genesis_hash, b"bearer-proceed-failclosed");
 
-        let proceed_envelope = |c: [u8; 32]| generated::BilateralBearerProceed {
-            commitment_hash: Some(generated::Hash32 { v: c.to_vec() }),
+        // The receiver's real signing key + a verified contact, so a VALID receiver_signature on the
+        // proceed can be produced and checked (mirrors the σ_B contact setup).
+        let receiver_kp =
+            SignatureKeyPair::generate_from_entropy(b"bearer-proceed-receiver-key").expect("kp");
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "receiver".to_string(),
+            device_id: receiver,
+            genesis_hash: [64u8; 32],
+            public_key: receiver_kp.public_key().to_vec(),
+            genesis_material: vec![5u8; 32],
+            chain_tip: Some([6u8; 32]),
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1000,
+            added_at_commit_height: 1000,
+            last_updated_commit_height: 1000,
+            verifying_storage_nodes: vec![],
+            ble_address: Some(String::new()),
         };
+        {
+            let mut m = bilateral_manager.write().await;
+            m.add_verified_contact(contact).expect("contact");
+        }
+        let sign_proceed = |c: [u8; 32]| {
+            let mut msg = Vec::with_capacity(29 + 32);
+            msg.extend_from_slice(b"DSM/bilateral-bearer-proceed\0");
+            msg.extend_from_slice(&c);
+            receiver_kp.sign(&msg).expect("sign proceed")
+        };
+        async fn buf_for(handler: &BilateralBleHandler, c: [u8; 32], sig: Vec<u8>) -> Vec<u8> {
+            let env = handler
+                .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
+                    generated::BilateralBearerProceed {
+                        commitment_hash: Some(generated::Hash32 { v: c.to_vec() }),
+                        receiver_signature: sig,
+                    },
+                ))
+                .await
+                .expect("env");
+            let mut buf = Vec::new();
+            env.encode(&mut buf).expect("encode");
+            buf
+        }
 
-        // Accepted phase but NO prepared bearer -> reject, no committed bearer stored.
+        // Valid sig, Accepted phase, but NO prepared bearer -> reject, no committed bearer stored.
         let c = [0x11u8; 32];
         handler
             .test_insert_session(bearer_test_session(c, receiver, BilateralPhase::Accepted))
             .await;
-        let env = handler
-            .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
-                proceed_envelope(c),
-            ))
-            .await
-            .expect("env");
-        let mut buf = Vec::new();
-        env.encode(&mut buf).expect("encode");
+        let buf = buf_for(&handler, c, sign_proceed(c)).await;
         assert!(
             handler.handle_bearer_proceed(&buf).await.is_err(),
-            "proceed without a stored prepared bearer must fail closed (no commit)"
+            "an authenticated proceed with no stored prepared bearer must fail closed (no commit)"
         );
         {
             let s = handler.sessions.sessions.lock().await;
@@ -7191,7 +7301,19 @@ mod tests {
             );
         }
 
-        // Wrong phase (not Accepted) -> reject before touching the appliance.
+        // Forged/absent receiver signature -> reject before touching the appliance (the counter-move
+        // authorization must be authenticated).
+        let cb = [0x14u8; 32];
+        handler
+            .test_insert_session(bearer_test_session(cb, receiver, BilateralPhase::Accepted))
+            .await;
+        let buf_bad = buf_for(&handler, cb, vec![0u8; 64]).await;
+        assert!(
+            handler.handle_bearer_proceed(&buf_bad).await.is_err(),
+            "an invalid receiver signature must fail closed"
+        );
+
+        // Wrong phase (not Accepted), even with a valid sig -> reject.
         let c2 = [0x12u8; 32];
         handler
             .test_insert_session(bearer_test_session(
@@ -7200,17 +7322,7 @@ mod tests {
                 BilateralPhase::PendingUserAction,
             ))
             .await;
-        let proceed2 = generated::BilateralBearerProceed {
-            commitment_hash: Some(generated::Hash32 { v: c2.to_vec() }),
-        };
-        let env2 = handler
-            .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
-                proceed2,
-            ))
-            .await
-            .expect("env2");
-        let mut buf2 = Vec::new();
-        env2.encode(&mut buf2).expect("encode2");
+        let buf2 = buf_for(&handler, c2, sign_proceed(c2)).await;
         assert!(
             handler.handle_bearer_proceed(&buf2).await.is_err(),
             "proceed for a non-Accepted session must fail closed"
@@ -7218,17 +7330,7 @@ mod tests {
 
         // No session at all -> reject.
         let c3 = [0x13u8; 32];
-        let proceed3 = generated::BilateralBearerProceed {
-            commitment_hash: Some(generated::Hash32 { v: c3.to_vec() }),
-        };
-        let env3 = handler
-            .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
-                proceed3,
-            ))
-            .await
-            .expect("env3");
-        let mut buf3 = Vec::new();
-        env3.encode(&mut buf3).expect("encode3");
+        let buf3 = buf_for(&handler, c3, sign_proceed(c3)).await;
         assert!(
             handler.handle_bearer_proceed(&buf3).await.is_err(),
             "proceed for an unknown commitment must fail closed"

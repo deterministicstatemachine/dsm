@@ -188,6 +188,14 @@ pub trait AppRouter: Send + Sync {
         ))
     }
 
+    /// §21 first-transfer round-trip cleanup: release an ABANDONED prepared bearer (receiver never
+    /// sent `BilateralBearerProceed`) so the appliance returns to `Ready` and future offline-bearer
+    /// sends do not fail closed. Best-effort no-op default; overridden to delegate to
+    /// [`CoreSDK::cancel_offline_bearer_release`].
+    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
+        Ok(())
+    }
+
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
     ///
