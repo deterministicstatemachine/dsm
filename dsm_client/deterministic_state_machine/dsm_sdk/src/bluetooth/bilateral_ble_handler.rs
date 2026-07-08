@@ -7117,6 +7117,175 @@ mod tests {
         crate::bridge::uninstall_anchor_enrollment_store();
     }
 
+    /// Build a minimal sender-side session for the first-transfer round-trip fail-closed tests.
+    #[cfg(test)]
+    fn bearer_test_session(
+        commitment: [u8; 32],
+        counterparty: [u8; 32],
+        phase: BilateralPhase,
+    ) -> BilateralBleSession {
+        BilateralBleSession {
+            commitment_hash: commitment,
+            local_commitment_hash: None,
+            counterparty_device_id: counterparty,
+            counterparty_genesis_hash: None,
+            operation: Operation::Noop,
+            phase,
+            local_signature: None,
+            counterparty_signature: None,
+            created_at_ticks: 1,
+            expires_at_ticks: 1_000_000,
+            sender_ble_address: None,
+            created_at_wall: Instant::now(),
+            pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
+            receiver_challenge: None,
+            anchor_leaf: None,
+            anchor_sim_root: None,
+            pending_enroll_pubkey: None,
+            attested_pre: None,
+            prepared_bearer: None,
+            committed_bearer: None,
+        }
+    }
+
+    /// §21 invariant (tests 13/15): `BilateralBearerProceed` cannot drive a commit — and so no confirm
+    /// can be built on the first-transfer path — without a stored `prepared_bearer`. Also enforces the
+    /// phase gate. No `MCounter_Update`, no `committed_bearer`, on either failure.
+    #[tokio::test]
+    #[serial]
+    async fn bearer_proceed_fails_closed_without_prepared_bearer() {
+        init_test_db();
+        let device_id = [61u8; 32]; // sender
+        let genesis_hash = [62u8; 32];
+        let receiver = [63u8; 32];
+        let (_m, handler) =
+            make_test_handler(device_id, genesis_hash, b"bearer-proceed-failclosed");
+
+        let proceed_envelope = |c: [u8; 32]| generated::BilateralBearerProceed {
+            commitment_hash: Some(generated::Hash32 { v: c.to_vec() }),
+        };
+
+        // Accepted phase but NO prepared bearer -> reject, no committed bearer stored.
+        let c = [0x11u8; 32];
+        handler
+            .test_insert_session(bearer_test_session(c, receiver, BilateralPhase::Accepted))
+            .await;
+        let env = handler
+            .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
+                proceed_envelope(c),
+            ))
+            .await
+            .expect("env");
+        let mut buf = Vec::new();
+        env.encode(&mut buf).expect("encode");
+        assert!(
+            handler.handle_bearer_proceed(&buf).await.is_err(),
+            "proceed without a stored prepared bearer must fail closed (no commit)"
+        );
+        {
+            let s = handler.sessions.sessions.lock().await;
+            assert!(
+                s.get(&c).expect("session").committed_bearer.is_none(),
+                "no committed bearer may be stored without a prepared bearer"
+            );
+        }
+
+        // Wrong phase (not Accepted) -> reject before touching the appliance.
+        let c2 = [0x12u8; 32];
+        handler
+            .test_insert_session(bearer_test_session(
+                c2,
+                receiver,
+                BilateralPhase::PendingUserAction,
+            ))
+            .await;
+        let proceed2 = generated::BilateralBearerProceed {
+            commitment_hash: Some(generated::Hash32 { v: c2.to_vec() }),
+        };
+        let env2 = handler
+            .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
+                proceed2,
+            ))
+            .await
+            .expect("env2");
+        let mut buf2 = Vec::new();
+        env2.encode(&mut buf2).expect("encode2");
+        assert!(
+            handler.handle_bearer_proceed(&buf2).await.is_err(),
+            "proceed for a non-Accepted session must fail closed"
+        );
+
+        // No session at all -> reject.
+        let c3 = [0x13u8; 32];
+        let proceed3 = generated::BilateralBearerProceed {
+            commitment_hash: Some(generated::Hash32 { v: c3.to_vec() }),
+        };
+        let env3 = handler
+            .create_envelope(generated::envelope::Payload::BilateralBearerProceed(
+                proceed3,
+            ))
+            .await
+            .expect("env3");
+        let mut buf3 = Vec::new();
+        env3.encode(&mut buf3).expect("encode3");
+        assert!(
+            handler.handle_bearer_proceed(&buf3).await.is_err(),
+            "proceed for an unknown commitment must fail closed"
+        );
+    }
+
+    /// §21 invariant (tests 13/14): the RECEIVER sends NO `BilateralBearerProceed` — so the sender
+    /// never commits — unless it captured an authenticated FROM read. With no relay reader / no
+    /// complete pin installed, `handle_bearer_prepared` fails closed and no `attested_pre` is stored.
+    #[tokio::test]
+    #[serial]
+    async fn bearer_prepared_fails_closed_without_relay_reader() {
+        init_test_db();
+        let device_id = [71u8; 32]; // receiver
+        let genesis_hash = [72u8; 32];
+        let sender = [73u8; 32];
+        let (_m, handler) =
+            make_test_handler(device_id, genesis_hash, b"bearer-prepared-failclosed");
+
+        // Ensure no reader / no enrollment store is installed for this test.
+        crate::bridge::uninstall_anchor_counter_reader();
+        crate::bridge::uninstall_anchor_enrollment_store();
+
+        let c = [0x21u8; 32];
+        handler
+            .test_insert_session(bearer_test_session(
+                c,
+                sender,
+                BilateralPhase::PendingUserAction,
+            ))
+            .await;
+        let prepared = generated::BilateralBearerPrepared {
+            commitment_hash: Some(generated::Hash32 { v: c.to_vec() }),
+            anchor_disclosure: None,
+        };
+        let env = handler
+            .create_envelope(generated::envelope::Payload::BilateralBearerPrepared(
+                prepared,
+            ))
+            .await
+            .expect("env");
+        let mut buf = Vec::new();
+        env.encode(&mut buf).expect("encode");
+
+        assert!(
+            handler.handle_bearer_prepared(&buf).await.is_err(),
+            "no relay reader / complete pin -> no FROM read -> fail closed (no proceed sent)"
+        );
+        {
+            let s = handler.sessions.sessions.lock().await;
+            assert!(
+                s.get(&c).expect("session").attested_pre.is_none(),
+                "no FROM read may be stashed without an authenticated read"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_fail_session_by_commitment_cleans_receiver_accepted_session() {
         let device_id = [41u8; 32];
