@@ -26,6 +26,9 @@ fn main() {
         "cargo:rustc-env=HARNESS_GIT_DIRTY={}",
         if dirty { "-dirty" } else { "" }
     );
-    // Best-effort: re-stamp when HEAD moves (workspace .git is two levels up from this crate).
+    // Re-stamp when a commit lands. `git commit` moves the branch REF, not `.git/HEAD`, so watch the
+    // reflog (`.git/logs/HEAD`, appended on every commit/checkout) plus HEAD for branch switches.
+    // Workspace `.git` is two levels up from this crate.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
 }
