@@ -46,6 +46,11 @@ struct Args {
     /// Explicitly denied anchor-ids (e.g. the clean fresh-birth chip). A denied chip HARD-refuses
     /// even if also allowed.
     deny: Vec<String>,
+    /// Operator chip label for the bench log (e.g. "used chip A").
+    label: Option<String>,
+    /// Operator-supplied firmware build hash/commit for the bench log (the harness cannot read it
+    /// off the chip; you built + flashed it, so you record it).
+    fw_commit: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -54,6 +59,8 @@ fn parse_args() -> Result<Args, String> {
     let mut repeats = 5usize;
     let mut allow = Vec::new();
     let mut deny = Vec::new();
+    let mut label = None;
+    let mut fw_commit = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -72,6 +79,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--allow" => allow.push(norm_id(&it.next().ok_or("--allow needs an anchor-id")?)),
             "--deny" => deny.push(norm_id(&it.next().ok_or("--deny needs an anchor-id")?)),
+            "--label" => label = it.next(),
+            "--fw-commit" => fw_commit = it.next(),
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -82,6 +91,8 @@ fn parse_args() -> Result<Args, String> {
         repeats: repeats.max(2),
         allow,
         deny,
+        label,
+        fw_commit,
     })
 }
 
@@ -285,6 +296,62 @@ fn gate_chip(port: &mut dyn serialport::SerialPort, args: &Args) -> Result<Strin
     Ok(id)
 }
 
+/// The harness's own build stamp (git commit + dirty flag), embedded by `build.rs`.
+fn harness_build() -> String {
+    format!(
+        "{}{}",
+        env!("HARNESS_GIT_COMMIT"),
+        env!("HARNESS_GIT_DIRTY")
+    )
+}
+
+/// Emit the bench-log header — the audit record for this run. Reads STATUS once (non-mutating) for
+/// the live anchor coordinates and stamps the operator context + build provenance. Copy this block
+/// into the bench log before the phases run.
+fn bench_log(
+    port: &mut dyn serialport::SerialPort,
+    args: &Args,
+    chip_id: &str,
+) -> Result<(), String> {
+    let (u, h0, _) = status(port)?;
+    println!("\n==================== BENCH LOG ====================");
+    println!(
+        "  chip label        : {}",
+        args.label
+            .as_deref()
+            .unwrap_or("(unlabelled — pass --label)")
+    );
+    println!("  anchor id         : {chip_id}");
+    println!("  H0 (adopted)      : {h0}");
+    println!("  initial u         : {u}");
+    println!(
+        "  bench-adopt       : {}",
+        if u == 0 {
+            "confirmed (u=0 on a used chip)"
+        } else {
+            "NOT confirmed (u != 0!)"
+        }
+    );
+    println!(
+        "  firmware commit   : {}",
+        args.fw_commit
+            .as_deref()
+            .unwrap_or("(unrecorded — pass --fw-commit)")
+    );
+    println!("  harness commit    : {}", harness_build());
+    println!("  release mode      : yes (debug_assertions=false)");
+    println!(
+        "  clean chip (deny) : {}",
+        if args.deny.is_empty() {
+            "(none listed)".to_string()
+        } else {
+            args.deny.join(", ")
+        }
+    );
+    println!("==================================================");
+    Ok(())
+}
+
 /// Phase 1: non-mutating adoption proof. STATUS reports u=0, repeated authenticated reads are
 /// identical, and nothing commits or decrements.
 fn phase1(port: &mut dyn serialport::SerialPort, repeats: usize) -> Result<(), String> {
@@ -384,7 +451,8 @@ fn run() -> Result<(), String> {
     }
     const USAGE: &str =
         "usage: used-chip-bench --port <serial> --allow <anchor-id> [--allow <id> ...] \
-                         [--deny <id> ...] [--baud 115200] [--repeats 5]\n  \
+                         [--deny <id> ...] [--label \"used chip A\"] [--fw-commit <hash>] \
+                         [--baud 115200] [--repeats 5]\n  \
                          (run once with no --allow to print the connected chip's anchor-id)";
     let args = parse_args().map_err(|e| {
         if e == "help" {
@@ -394,7 +462,10 @@ fn run() -> Result<(), String> {
         }
     })?;
 
-    println!("[BUILD] mode=release debug_assertions=false hw=production");
+    println!(
+        "[BUILD] mode=release debug_assertions=false hw=production harness={}",
+        harness_build()
+    );
     println!(
         "[BENCH] used-chip harness: Phases 1-2 only (NON-mutating + prepare/cancel). No COMMIT."
     );
@@ -408,6 +479,7 @@ fn run() -> Result<(), String> {
     // it is an explicitly allow-listed USED bench chip (never the sealed clean/virgin chip), with a
     // typed operator confirmation. Non-mutating: the gate itself only sends STATUS.
     let chip_id = gate_chip(port.as_mut(), &args)?;
+    bench_log(port.as_mut(), &args, &chip_id)?;
     println!("[CHIP] confirmed USED bench chip {chip_id} — running Phases 1-2");
     phase1(port.as_mut(), args.repeats)?;
     phase2(&mut port, &args, &chip_id)?;
