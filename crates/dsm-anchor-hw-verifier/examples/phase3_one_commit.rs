@@ -60,6 +60,11 @@ const RCHAL: [u8; 32] = [0x55; 32];
 struct Args {
     port: String,
     baud: u32,
+    /// The caged verifier slot index on this chip's TROPIC01 (where the fixed DSM verifier key is
+    /// provisioned). Defaults to `VERIFIER_SLOT` (1); pass `--slot N` for a chip whose verifier role
+    /// was burned elsewhere (e.g. `--slot 2` when slot 1 was already spent at provisioning time).
+    /// Confirm with `usb_verifier_slot status` before running. A wrong slot fails the FROM read closed.
+    slot: u16,
     /// Allowed bench chip anchor-ids (Base32 Crockford). The run REFUSES unless the connected chip's
     /// anchor-id is listed — this is what stops the harness from ever committing on the sealed
     /// clean/virgin chip or any chip the operator did not explicitly designate.
@@ -75,6 +80,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut port = None;
     let mut baud = 115_200u32;
+    let mut slot = VERIFIER_SLOT;
     let mut allow = Vec::new();
     let mut deny = Vec::new();
     let mut label = None;
@@ -89,6 +95,12 @@ fn parse_args() -> Result<Args, String> {
                     .and_then(|v| v.parse().ok())
                     .ok_or("--baud needs a number")?
             }
+            "--slot" => {
+                slot = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--slot needs a number")?
+            }
             "--allow" => allow.push(norm_id(&it.next().ok_or("--allow needs an anchor-id")?)),
             "--deny" => deny.push(norm_id(&it.next().ok_or("--deny needs an anchor-id")?)),
             "--label" => label = it.next(),
@@ -100,6 +112,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         port: port.ok_or("missing --port <serial device>")?,
         baud,
+        slot,
         allow,
         deny,
         label,
@@ -315,10 +328,14 @@ fn read_stpub(port: &mut dyn serialport::SerialPort) -> Result<[u8; 32], String>
 ///
 /// FAIL-CLOSED: if the verifier slot is not burned, `session_start` fails and this returns `Err`. No
 /// STATUS fallback: the caller must treat `Err` here as "do not commit".
-fn read_caged_counter(port: &mut dyn serialport::SerialPort, stpub: [u8; 32]) -> Result<u32, String> {
+fn read_caged_counter(
+    port: &mut dyn serialport::SerialPort,
+    slot: u16,
+    stpub: [u8; 32],
+) -> Result<u32, String> {
     let sh = StaticSecret::from(dsm_verifier_pairing_secret_bytes());
     let cred = VerifierSessionCredential {
-        slot: VERIFIER_SLOT as u8,
+        slot: slot as u8,
         sh_pub: PublicKey::from(&sh).to_bytes(),
         sh_priv: sh.to_bytes(),
         pinned_static_pubkey: stpub,
@@ -431,7 +448,10 @@ fn bench_log(port: &mut dyn serialport::SerialPort, args: &Args, chip_id: &str) 
     );
     println!("  harness commit    : {}", harness_build());
     println!("  release mode      : yes (debug_assertions=false)");
-    println!("  verifier slot     : {VERIFIER_SLOT} (caged MCOUNTER_GET-only — must be burned)");
+    println!(
+        "  verifier slot     : {} (caged MCOUNTER_GET-only; confirm with `usb_verifier_slot status`)",
+        args.slot
+    );
     println!(
         "  clean chip (deny) : {}",
         if args.deny.is_empty() {
@@ -447,8 +467,13 @@ fn bench_log(port: &mut dyn serialport::SerialPort, args: &Args, chip_id: &str) 
 /// Phase 3: exactly ONE transfer. PREPARE -> caged FROM read -> proceed -> COMMIT -> caged TO read
 /// -> assert `u:0->1` and `H:H0->H0-1` -> prove a second COMMIT is refused. Fail-closed at the FROM
 /// read (gate 4): an un-burned verifier slot cancels the prepared record and returns without COMMIT.
-fn phase3(mut port: Box<dyn serialport::SerialPort>, expected_id: &str) -> Result<(), String> {
+fn phase3(
+    mut port: Box<dyn serialport::SerialPort>,
+    expected_id: &str,
+    verifier_slot: u16,
+) -> Result<(), String> {
     println!("\n== Phase 3: one-COMMIT transfer (real caged FROM/TO reads) ==");
+    println!("  caged verifier slot: {verifier_slot}");
 
     // Pre-state: must be an adopted used chip at rest (Ready, u = 0).
     let (u_i, h0_u64, st, active_root) = status(port.as_mut())?;
@@ -471,12 +496,12 @@ fn phase3(mut port: Box<dyn serialport::SerialPort>, expected_id: &str) -> Resul
     println!("  PREPARE ok — witness/cert formed (counter not moved)");
 
     // (receiver) FROM read on the CAGED VERIFIER SLOT. GATE 4 — fail-closed if the slot is not burned.
-    let h_pre = match read_caged_counter(port.as_mut(), stpub) {
+    let h_pre = match read_caged_counter(port.as_mut(), verifier_slot, stpub) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("\n== FROM read (caged verifier slot) FAILED — FAIL-CLOSED ==");
+            eprintln!("\n== FROM read (caged verifier slot {verifier_slot}) FAILED — FAIL-CLOSED ==");
             eprintln!("  {e}");
-            eprintln!("  Expected when the verifier slot is NOT burned or the reader is not installed.");
+            eprintln!("  Expected when the verifier slot is NOT burned / wrong --slot / reader absent.");
             // Do not strand the appliance: cancel the abandoned (uncommitted) Prepared.
             match cancel(port.as_mut()) {
                 Ok(()) => eprintln!("  prepared record CANCELLED (appliance back to Ready)"),
@@ -513,7 +538,7 @@ fn phase3(mut port: Box<dyn serialport::SerialPort>, expected_id: &str) -> Resul
     println!("  COMMIT sent (exactly one)");
 
     // (receiver) TO read on the caged slot — must be H0-(u_i+1) == H_pre-1.
-    let h_post = read_caged_counter(port.as_mut(), stpub)
+    let h_post = read_caged_counter(port.as_mut(), verifier_slot, stpub)
         .map_err(|e| format!("TO read AFTER commit failed: {e}"))?;
     let expected_to = h0 - (u_i as u32 + 1);
     if h_post != expected_to || h_post != h_pre - 1 {
@@ -538,7 +563,7 @@ fn phase3(mut port: Box<dyn serialport::SerialPort>, expected_id: &str) -> Resul
         Err(_) => println!("  second COMMIT correctly REFUSED by the appliance"),
         Ok(()) => return Err("DOUBLE-SPEND: a SECOND COMMIT succeeded — ABORT".to_string()),
     }
-    let h_after2 = read_caged_counter(port.as_mut(), stpub)
+    let h_after2 = read_caged_counter(port.as_mut(), verifier_slot, stpub)
         .map_err(|e| format!("post-refusal read failed: {e}"))?;
     if h_after2 != h_post {
         return Err(format!(
@@ -564,10 +589,10 @@ fn run() -> Result<(), String> {
         );
     }
     const USAGE: &str =
-        "usage: phase3-one-commit --port <serial> --allow <anchor-id> [--deny <id> ...] \
+        "usage: phase3-one-commit --port <serial> --allow <anchor-id> [--slot N] [--deny <id> ...] \
                          [--label \"used chip A\"] [--fw-commit <hash>] [--baud 115200]\n  \
                          Sends EXACTLY ONE COMMIT after a real caged-slot FROM read. Fails closed \
-                         (no COMMIT) if the verifier slot is not burned.";
+                         (no COMMIT) if the caged read at --slot N (default 1) does not succeed at H0.";
     let args = parse_args().map_err(|e| {
         if e == "help" {
             USAGE.to_string()
@@ -587,7 +612,7 @@ fn run() -> Result<(), String> {
     let chip_id = gate_chip(port.as_mut(), &args)?;
     bench_log(port.as_mut(), &args, &chip_id)?;
     println!("[CHIP] confirmed USED bench chip {chip_id} — running Phase 3");
-    phase3(port, &chip_id)?;
+    phase3(port, &chip_id, args.slot)?;
     Ok(())
 }
 
