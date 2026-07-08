@@ -154,6 +154,48 @@ pub trait AppRouter: Send + Sync {
         ))
     }
 
+    /// Phase 1 of the first-transfer round-trip (§21.2): drive the appliance PREPARE only — form the
+    /// cross-bound certificate WITHOUT moving the counter — and return the [`PreparedOfflineBearer`]
+    /// (the FROM coordinate `uᵢ` + the pin the receiver reads and admits). Delegates to
+    /// [`CoreSDK::prepare_offline_bearer_release`].
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_offline_bearer_release(
+        &self,
+        _relationship_id: [u8; 32],
+        _recipient_device_id: [u8; 32],
+        _object_id: [u8; 32],
+        _payload_hash: [u8; 32],
+        _authority_policy_hash: [u8; 32],
+        _action_type: u32,
+        _action_fields: Vec<u8>,
+        _receiver_challenge: [u8; 32],
+    ) -> Result<crate::sdk::core_sdk::PreparedOfflineBearer, dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "prepare_offline_bearer_release not implemented on this router",
+        ))
+    }
+
+    /// Phase 2 of the first-transfer round-trip (§21.3–§21.6): COMMIT the prepared transfer — move the
+    /// counter `uᵢ → uᵢ+1` — then EMIT + FINALIZE, returning the [`OfflineBearerArtifacts`]. Called
+    /// ONLY after the receiver's authenticated FROM read arrived (`BilateralBearerProceed`). Delegates
+    /// to [`CoreSDK::commit_offline_bearer_release`].
+    fn commit_offline_bearer_release(
+        &self,
+        _prepared: &crate::sdk::core_sdk::PreparedOfflineBearer,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "commit_offline_bearer_release not implemented on this router",
+        ))
+    }
+
+    /// §21 first-transfer round-trip cleanup: release an ABANDONED prepared bearer (receiver never
+    /// sent `BilateralBearerProceed`) so the appliance returns to `Ready` and future offline-bearer
+    /// sends do not fail closed. Best-effort no-op default; overridden to delegate to
+    /// [`CoreSDK::cancel_offline_bearer_release`].
+    fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
+        Ok(())
+    }
+
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
     ///

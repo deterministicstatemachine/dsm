@@ -799,6 +799,21 @@ impl BilateralTransactionManager {
         Ok(sig)
     }
 
+    /// Sign a `BilateralBearerProceed` (§21 first-transfer round-trip): the receiver authorizes the
+    /// sender to COMMIT (move the counter uᵢ→uᵢ+1). Uses a DISTINCT domain from `sign_commitment` so an
+    /// observed σ_B cannot be replayed as a proceed — only the authenticated receiver can drive the
+    /// sender's counter move. Verified by the sender with `SignatureKeyPair::verify_raw` over the same
+    /// message under the receiver's contact public key.
+    pub fn sign_bearer_proceed(&self, commitment_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+        let mut msg = Vec::with_capacity(29 + 32);
+        msg.extend_from_slice(b"DSM/bilateral-bearer-proceed\0");
+        msg.extend_from_slice(commitment_hash);
+        self.signature_keypair.sign(&msg).map_err(|e| {
+            error!("[BTM] sign_bearer_proceed: failed to sign: {}", e);
+            e
+        })
+    }
+
     pub fn add_verified_contact(&mut self, c: DsmVerifiedContact) -> Result<(), DsmError> {
         self.contact_manager.add_verified_contact(c)
     }

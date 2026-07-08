@@ -1566,6 +1566,11 @@ impl CoreSDK {
 /// Producer-side offline-bearer artifacts from driving the device fused-anchor appliance for one
 /// transfer: the wire release + the fused-anchor leaf update the DSM advance must apply + the
 /// appliance root lineage the receiver pins/adopts + the pin material to admit the anchor.
+///
+/// `Clone`/`Debug` so the first-transfer round-trip can stash the COMMITTED artifacts on the sender
+/// session (`BilateralBleSession.committed_bearer`) between `handle_bearer_proceed` (which commits)
+/// and `send_bilateral_confirm` (which builds the confirm from them).
+#[derive(Clone, Debug)]
 pub struct OfflineBearerArtifacts {
     /// prost-encoded `dsm.anchor.OfflineRelease` (goes on `BilateralConfirmRequest.offline_release`).
     pub offline_release: Vec<u8>,
@@ -1768,6 +1773,29 @@ impl CoreSDK {
             appliance_next_root: prepared.appliance_next_root,
             pin: prepared.pin.clone(),
         })
+    }
+
+    /// §21 first-transfer round-trip cleanup: drive an ABANDONED prepared bearer back to `Ready`. If
+    /// the receiver never replies `BilateralBearerProceed` (no relay reader / BLE drop / app killed),
+    /// [`prepare_offline_bearer_release`] left the appliance `Prepared` with the one-time q_tx witness
+    /// spent and the counter still at `uᵢ`; without this, the next offline-bearer send fails
+    /// `WrongState` forever. `cancel()` erases the witness key and returns the appliance to `Ready` —
+    /// no counter ever moved, so nothing is lost. Idempotent and best-effort: a no-op when there is no
+    /// appliance or it is not `Prepared`.
+    pub fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        if let Some(app) = guard.as_mut() {
+            match app.cancel() {
+                Ok(()) => log::info!(
+                    "[offline-bearer] cancelled an abandoned prepared bearer (appliance → Ready)"
+                ),
+                // `cancel()` is only valid in `Prepared`; a not-Prepared appliance is already fine.
+                Err(e) => {
+                    log::debug!("[offline-bearer] cancel no-op (appliance not Prepared): {e}")
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Single-shot producer: PREPARE then immediately COMMIT (the non-interactive path, used where
