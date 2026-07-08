@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! BLE frame-type classification and chunking eligibility.
 //!
 //! These helpers decide, for a canonical DSM envelope or a frame type, which
