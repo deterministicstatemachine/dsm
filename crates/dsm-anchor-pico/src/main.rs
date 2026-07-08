@@ -73,6 +73,15 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
+// Release-only. A debug firmware pins the CPU on SPHINCS+ (the self-test alone can wedge USB enumeration)
+// and invalidates BLE / FROM->TO counter-order timing — it must not exist. Building without --release
+// turns `debug_assertions` on and fails the build here, before any chip is touched.
+#[cfg(debug_assertions)]
+compile_error!(
+    "dsm-anchor-pico must be built with --release: debug SPHINCS+ is too slow (pins the CPU) and \
+     invalidates BLE / FROM->TO timing. Build with `cargo build --release`."
+);
+
 const XTAL_HZ: u32 = 12_000_000;
 const COUNTER: MCounterIndex = MCounterIndex::Index0;
 /// ECC key slot holding the resident non-exportable Ed25519 identity key (`σ^chip`). Generated
@@ -543,6 +552,26 @@ fn main() -> ! {
     put(
         &mut serial,
         b"[T6] serving software-authority appliance over USB-CDC (LE32-len-prefixed protobuf)\r\n",
+    );
+    let _ = serial.flush();
+    // Build-mode banner. A debug build fails to compile (module-level `compile_error!`), so if this
+    // line runs the firmware is a release build. Confirms the exact profile before any chip work.
+    // Enrollment above is FAIL-CLOSED for ALL profiles: any enroll failure (including a failed live
+    // authenticated counter read in bench-adopt) halts — never a fallback identity, never ENROLL_H0
+    // adopted by a bench build.
+    put(
+        &mut serial,
+        b"[BUILD] mode=release debug_assertions=false sphincs+=on hw=production\r\n",
+    );
+    #[cfg(feature = "bench-adopt-existing-chip")]
+    put(
+        &mut serial,
+        b"[BUILD] bench-adopt-existing-chip=ENABLED (used-chip adopt: H0=live, u=0)\r\n",
+    );
+    #[cfg(not(feature = "bench-adopt-existing-chip"))]
+    put(
+        &mut serial,
+        b"[BUILD] bench-adopt-existing-chip=disabled (production fresh-birth)\r\n",
     );
     let _ = serial.flush();
     #[cfg(feature = "bench-adopt-existing-chip")]
