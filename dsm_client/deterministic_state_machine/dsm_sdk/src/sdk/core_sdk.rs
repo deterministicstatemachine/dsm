@@ -1564,64 +1564,53 @@ impl CoreSDK {
 }
 
 /// Producer-side offline-bearer artifacts from driving the device fused-anchor appliance for one
-/// transfer: the wire release + the fused-anchor leaf update the DSM advance must apply + the
-/// appliance root lineage the receiver pins/adopts + the pin material to admit the anchor.
-///
-/// `Clone`/`Debug` so the first-transfer round-trip can stash the COMMITTED artifacts on the sender
-/// session (`BilateralBleSession.committed_bearer`) between `handle_bearer_proceed` (which commits)
-/// and `send_bilateral_confirm` (which builds the confirm from them).
+/// transfer: the wire release + the anchor-state leaf update the DSM advance must apply + the
+/// appliance frontier lineage the receiver pins/adopts + the pin material to admit the anchor.
 #[derive(Clone, Debug)]
 pub struct OfflineBearerArtifacts {
     /// prost-encoded `dsm.anchor.OfflineRelease` (goes on `BilateralConfirmRequest.offline_release`).
     pub offline_release: Vec<u8>,
-    /// The fused-anchor-state leaf update to pass to `DeviceState::advance` (`Some(...)`).
+    /// The anchor-state leaf update the DSM advance applied (`Some(...)` on the canonical commit).
     pub anchor_leaf: dsm::types::device_state::AnchorLeafUpdate,
-    /// The appliance DSM root this transfer consumes (the receiver's `accepted_prev_root`).
+    /// The appliance frontier `h_i` this transfer consumes (the receiver's accepted frontier).
     pub appliance_prev_root: [u8; 32],
-    /// The successor appliance DSM root the receiver adopts after acceptance.
+    /// The successor frontier `h_{i+1}` the receiver adopts after acceptance.
     pub appliance_next_root: [u8; 32],
-    /// The pin material (B, anchor_id, H0, partition_pk) the receiver admits for this anchor.
+    /// The pin material (B, anchor_id, H0, pk_host, pk_chip) the receiver admits for this anchor.
     pub pin: crate::anchor::AnchorPin,
 }
 
-/// A PREPARED offline-bearer transfer: the appliance has formed the cross-bound certificate but has
-/// NOT moved the counter (§21.2). The physical counter therefore still sits at the FROM coordinate
-/// `uᵢ`, so this is exactly the window in which the receiver takes its authenticated FROM read
-/// (`H_pre = H0 − uᵢ`) before the sender commits. Returned by
-/// [`CoreSDK::prepare_offline_bearer_release`]; consumed by
-/// [`CoreSDK::commit_offline_bearer_release`], which moves the counter to `uᵢ+1` and emits the
-/// release. Between the two, `Status::Prepared` holds the appliance (§26.4: no second transfer while
-/// a prepared record exists — the serialization the Counter-Positioned Commit relies on).
-#[derive(Clone, Debug)]
-pub struct PreparedOfflineBearer {
-    /// The appliance DSM root this transfer consumes (the receiver's `accepted_prev_root`).
+/// A STAGED offline-bearer transition (v2 producer phase 1): the transition `Δ` and its successor
+/// anchor-state leaf are fully determined from the appliance's active state, but NOTHING has been
+/// signed or committed — the appliance is untouched. The DSM layer runs its advance simulation over
+/// `anchor_leaf` to materialize the real device SMT roots `R_i`/`R_{i+1}` and the inclusion proofs
+/// `Π_i`/`Π_{i+1}`, then feeds those into [`CoreSDK::release_offline_bearer`] so the release is
+/// born with the real roots in its signed transcript (no placeholder stamping, no re-stamp).
+#[derive(Clone)]
+pub struct StagedBearerTransition {
+    /// The fully-formed transition `Δ` (owned; `as_transition()` for the appliance call).
+    pub transition: anchor_core::root_advance::OwnedTransition,
+    /// The successor anchor-state leaf `L_{i+1} = H("DSM/anchor-state/v2" ‖ B ‖ h_{i+1} ‖ u_{i+1})`
+    /// at the stable per-device key — what the DSM advance commits atomically with the transfer.
+    pub anchor_leaf: dsm::types::device_state::AnchorLeafUpdate,
+    /// The appliance frontier `h_i` this transfer consumes.
     pub appliance_prev_root: [u8; 32],
-    /// The successor appliance DSM root the receiver adopts after acceptance.
+    /// The successor frontier `h_{i+1} = H(h_i ‖ D)`.
     pub appliance_next_root: [u8; 32],
-    /// The FROM counter coordinate `uᵢ` the receiver must witness live (`H_pre = H0 − uᵢ`) BEFORE
-    /// the sender commits.
-    pub anchor_counter: u64,
-    /// The pin material — the receiver opens its authenticated relay session to `pin.anchor_id` and
-    /// checks the FROM read against `pin.enrolled_counter − anchor_counter`.
+    /// The pin material the receiver admits.
     pub pin: crate::anchor::AnchorPin,
 }
 
 impl CoreSDK {
-    /// Phase 1 of the Counter-Positioned Commit producer (Boot Fenced Fused Anchor §21.2): lazily
-    /// birth the appliance (bootstrapping `commit_0` into the DeviceState anchor-state leaf), then
-    /// PREPARE(r_R) — form the cross-bound certificate WITHOUT moving the counter. The appliance is
-    /// left `Prepared` with the physical counter still at the FROM coordinate `uᵢ`, so the receiver
-    /// can take its authenticated FROM read (`H_pre = H0 − uᵢ`) before [`commit_offline_bearer_release`]
-    /// moves the counter. The returned [`PreparedOfflineBearer`] carries `uᵢ` and the pin the receiver
-    /// needs to read and check that FROM coordinate.
-    ///
-    /// The appliance certifies its OWN opaque root lineage (advances only on bearer transfers —
-    /// not the per-relationship tip nor the multi-relationship device root); the receiver pins
-    /// `appliance_prev_root` at admission and adopts `appliance_next_root` on acceptance. The DSM
-    /// leaf proofs in the anchor `Δ` are left empty here: the receiver validates the DSM
-    /// transition via the confirm's `rel_proof_parent/child` + §C1 recompute that gate acceptance.
+    /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance
+    /// (reconciling the DeviceState anchor-state leaf to the chip's CURRENT active state), then
+    /// deterministically stage the next transition — compute `D`, the successor frontier
+    /// `h_{i+1} = H(h_i ‖ D)`, and the successor anchor-state leaf. NO appliance mutation, NO
+    /// signatures, NO counter move: the caller first simulates the DSM advance over `anchor_leaf`
+    /// to obtain the real device roots `R_i`/`R_{i+1}`, then calls
+    /// [`release_offline_bearer`](Self::release_offline_bearer).
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_offline_bearer_release(
+    pub fn stage_offline_bearer_transition(
         &self,
         relationship_id: [u8; 32],
         recipient_device_id: [u8; 32],
@@ -1631,8 +1620,9 @@ impl CoreSDK {
         action_type: u32,
         action_fields: Vec<u8>,
         receiver_challenge: [u8; 32],
-    ) -> Result<PreparedOfflineBearer, DsmError> {
-        use dsm::core::bilateral_transaction_manager::{anchor_state_commit, anchor_state_leaf_key};
+    ) -> Result<StagedBearerTransition, DsmError> {
+        use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
+        use dsm::core::bilateral_transaction_manager::anchor_state_leaf_key;
 
         let dev = self.device_info.device_id;
         let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
@@ -1647,28 +1637,20 @@ impl CoreSDK {
                     Some(factory) => factory()?,
                     None => hardware_appliance_or_fail(&seed, dev)?,
                 };
-            // Reconcile the DeviceState anchor-state leaf to the appliance's CURRENT committed fused
-            // state, sourced from the chip's own status()/pin() (chip identity for hardware; seeds for
-            // the test mock). The CHIP is the source of truth for the counter, so this uses its live
-            // `anchor_counter` (u), NOT a hardcoded 0:
-            //   * fresh provisioned chip -> u == 0 (H == H0), the genesis commit;
-            //   * process restart with k prior offline-bearer transfers (possibly with ONLINE transfers
-            //     in between — those advance the device SMT but never touch the chip counter) -> u == k,
-            //     so the leaf adopts the true post-k state instead of resetting to genesis;
-            //   * device-state/chip divergence -> the hardware wins (a monotonic counter cannot lie).
-            // Writing the current committed state is idempotent when the leaf already matches.
+            // Reconcile the DeviceState anchor-state leaf to the appliance's CURRENT active state
+            // (v2 leaf: B, frontier h_i, counter floor u_i), sourced from the chip's own
+            // status()/pin(). The CHIP is the source of truth for the counter, so this uses its
+            // live `anchor_counter` (u), NOT a hardcoded 0:
+            //   * fresh provisioned chip -> u == 0, the genesis leaf;
+            //   * process restart with k prior offline-bearer transfers (possibly with ONLINE
+            //     transfers in between — those advance the device SMT but never touch the chip
+            //     counter) -> u == k, so the leaf adopts the true post-k state;
+            //   * device-state/chip divergence -> the hardware wins.
+            // Writing the current active state is idempotent when the leaf already matches.
             {
                 let s = a.status()?;
                 let pin = a.pin();
-                // Commit the COMMITTED boot head (what the next transfer's cert reports as
-                // `prev_boot_head`), NOT the live `boot_head` — a boot advance moves the live head past
-                // the committed one until the next finalize.
-                let committed = anchor_state_commit(
-                    &pin.bundle,
-                    &s.anchor_head,
-                    &s.committed_boot_head,
-                    s.anchor_counter,
-                );
+                let value = anchor_state_leaf(&pin.bundle, &s.root, s.anchor_counter);
                 log::info!(
                     "[offline-bearer] anchor-state leaf reconciled to chip state: u(anchor_counter)={} (online-transfer-safe; chip is source of truth)",
                     s.anchor_counter
@@ -1681,7 +1663,7 @@ impl CoreSDK {
                             "offline-bearer: DeviceState not initialized (genesis first)",
                         )
                     })?;
-                    let bootstrapped = ds.with_anchor_state_leaf(&key, &committed)?;
+                    let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
                     sm.set_device_head(bootstrapped);
                 }
                 *guard = Some(a);
@@ -1693,20 +1675,19 @@ impl CoreSDK {
         })?;
         let pin = app.pin();
 
-        // Pre-drive state: the appliance root this transfer consumes + the current counter.
+        // Active state: the frontier this transfer consumes + the current counter floor.
         let before = app.status()?;
         let appliance_prev_root = before.root;
-        let appliance_next_root =
-            blake3_cat(&[b"DSM/anchor-root-advance/v1", &before.root, &payload_hash]);
 
-        // Build the anchor transition Δ (DSM leaf proofs left empty — see method doc).
-        let owned = anchor_core::root_advance::OwnedTransition {
+        // Stage Δ°: the digest excludes `next_root`, so D is computable first and the successor
+        // frontier is derived, never invented.
+        let mut owned = anchor_core::root_advance::OwnedTransition {
             relationship_id,
             object_id,
             sender_device_id: dev,
             recipient_device_id,
             prev_root: appliance_prev_root,
-            next_root: appliance_next_root,
+            next_root: [0u8; 32],
             anchor_counter: before.anchor_counter,
             next_anchor_counter: before.anchor_counter + 1,
             action_type,
@@ -1716,72 +1697,94 @@ impl CoreSDK {
             new_leaf_proof: Vec::new(),
             authority_policy_hash,
         };
+        let d = transition_digest(&owned.as_transition(), &receiver_challenge);
+        let appliance_next_root = anchor_root_advance(&appliance_prev_root, &d);
+        owned.next_root = appliance_next_root;
 
-        // §21.2 PREPARE only — no counter move. The appliance is now `Prepared` with the physical
-        // counter still at the FROM coordinate `uᵢ`; the receiver reads `H_pre = H0 − uᵢ` against
-        // this state before [`commit_offline_bearer_release`] moves the counter.
-        app.prepare(&owned.as_transition(), &receiver_challenge)?;
+        // Successor anchor-state leaf: what the device SMT holds AFTER this transfer commits.
+        let anchor_leaf = dsm::types::device_state::AnchorLeafUpdate {
+            key: anchor_state_leaf_key(&pin.bundle),
+            new_value: anchor_state_leaf(
+                &pin.bundle,
+                &appliance_next_root,
+                before.anchor_counter + 1,
+            ),
+        };
 
-        Ok(PreparedOfflineBearer {
+        Ok(StagedBearerTransition {
+            transition: owned,
+            anchor_leaf,
             appliance_prev_root,
             appliance_next_root,
-            anchor_counter: before.anchor_counter,
             pin,
         })
     }
 
-    /// Phase 2 of the Counter-Positioned Commit producer (§21.3–§21.6): COMMIT the prepared transfer
-    /// — move the physical counter `uᵢ → uᵢ+1` — then EMIT the release and FINALIZE the active fused
-    /// state. Call ONLY after the receiver has taken its authenticated FROM read against the
-    /// `Prepared` appliance. Returns the wire release + the successor [`AnchorLeafUpdate`] + the
-    /// appliance root lineage + the pin material.
-    pub fn commit_offline_bearer_release(
+    /// v2 producer phase 2: drive the appliance PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT →
+    /// FINALIZE for a staged transition, with the REAL device SMT roots the caller's advance
+    /// simulation produced. The release is emitted with those roots inside the signed transcript
+    /// (σ^DSM binding is the caller's; σ^chip + σ^host are produced here) — there is no placeholder
+    /// stamping and no post-hoc re-stamp. The anchor-state inclusion proofs `Π_i`/`Π_{i+1}` (from
+    /// the same simulation) are attached to the release package here — they sit OUTSIDE all three
+    /// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
+    /// them mutates no signed bytes. Fails closed if the appliance's post-finalize frontier
+    /// diverges from the staged successor.
+    pub fn release_offline_bearer(
         &self,
-        prepared: &PreparedOfflineBearer,
+        staged: &StagedBearerTransition,
+        receiver_challenge: [u8; 32],
+        sender_device_root_before: [u8; 32],
+        sender_device_root_after: [u8; 32],
+        anchor_smt_proof_before: Vec<u8>,
+        anchor_smt_proof_after: Vec<u8>,
     ) -> Result<OfflineBearerArtifacts, DsmError> {
-        use dsm::core::bilateral_transaction_manager::{anchor_state_commit, anchor_state_leaf_key};
+        use prost::Message;
 
         let mut guard = self.anchor_appliance.lock();
         let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not prepared")
+            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
         })?;
-        let bundle = prepared.pin.bundle;
-        let key = anchor_state_leaf_key(&bundle);
 
-        // §21.3 COMMIT (moves the counter uᵢ → uᵢ+1) → §21.5 EMIT → §21.6 FINALIZE.
+        app.prepare(
+            &staged.transition.as_transition(),
+            &receiver_challenge,
+            &sender_device_root_before,
+            &sender_device_root_after,
+        )?;
         app.commit()?;
-        let offline_release = app.emit()?;
-        app.finalize()?;
+        let emitted = app.emit()?;
+        let new_frontier = app.finalize()?;
+        if new_frontier != staged.appliance_next_root {
+            return Err(DsmError::state_machine(
+                "offline-bearer: post-finalize frontier diverged from the staged successor (fail closed)",
+            ));
+        }
 
-        // Successor fused state (post-finalize) → the leaf update the DSM advance applies.
-        let after = app.status()?;
-        let successor_commit = anchor_state_commit(
-            &bundle,
-            &after.anchor_head,
-            &after.boot_head,
-            after.anchor_counter,
-        );
-        let anchor_leaf = dsm::types::device_state::AnchorLeafUpdate {
-            key,
-            new_value: successor_commit,
-        };
+        // Attach Π_i/Π_{i+1} to the package (unsigned carrier fields; see method doc).
+        let mut rel = anchor_core::proto::pb::OfflineRelease::decode(&emitted[..]).map_err(|e| {
+            DsmError::serialization_error(
+                "OfflineRelease",
+                "protobuf",
+                Some(e.to_string()),
+                Some(e),
+            )
+        })?;
+        rel.anchor_smt_proof_before = anchor_smt_proof_before;
+        rel.anchor_smt_proof_after = anchor_smt_proof_after;
 
         Ok(OfflineBearerArtifacts {
-            offline_release,
-            anchor_leaf,
-            appliance_prev_root: prepared.appliance_prev_root,
-            appliance_next_root: prepared.appliance_next_root,
-            pin: prepared.pin.clone(),
+            offline_release: rel.encode_to_vec(),
+            anchor_leaf: staged.anchor_leaf.clone(),
+            appliance_prev_root: staged.appliance_prev_root,
+            appliance_next_root: staged.appliance_next_root,
+            pin: staged.pin.clone(),
         })
     }
 
-    /// §21 first-transfer round-trip cleanup: drive an ABANDONED prepared bearer back to `Ready`. If
-    /// the receiver never replies `BilateralBearerProceed` (no relay reader / BLE drop / app killed),
-    /// [`prepare_offline_bearer_release`] left the appliance `Prepared` with the one-time q_tx witness
-    /// spent and the counter still at `uᵢ`; without this, the next offline-bearer send fails
-    /// `WrongState` forever. `cancel()` erases the witness key and returns the appliance to `Ready` —
-    /// no counter ever moved, so nothing is lost. Idempotent and best-effort: a no-op when there is no
-    /// appliance or it is not `Prepared`.
+    /// Cleanup: drive an ABANDONED prepared release back to `Ready` (e.g. the confirm build failed
+    /// between PREPARE and COMMIT). `cancel()` discards the uncommitted record — no counter ever
+    /// moved, so nothing is lost. Idempotent and best-effort: a no-op when there is no appliance or
+    /// it is not `Prepared`.
     pub fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
         let mut guard = self.anchor_appliance.lock();
         if let Some(app) = guard.as_mut() {
@@ -1830,66 +1833,33 @@ impl CoreSDK {
         }
         Ok(action)
     }
-
-    /// Single-shot producer: PREPARE then immediately COMMIT (the non-interactive path, used where
-    /// the receiver's FROM read is not interleaved — e.g. the current single-confirm seam, which
-    /// stays fail-closed on the missing FROM read). The interactive Counter-Positioned Commit flow
-    /// calls [`prepare_offline_bearer_release`] and [`commit_offline_bearer_release`] separately,
-    /// with the receiver's authenticated FROM read taken in between.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_offline_bearer_release(
-        &self,
-        relationship_id: [u8; 32],
-        recipient_device_id: [u8; 32],
-        object_id: [u8; 32],
-        payload_hash: [u8; 32],
-        authority_policy_hash: [u8; 32],
-        action_type: u32,
-        action_fields: Vec<u8>,
-        receiver_challenge: [u8; 32],
-    ) -> Result<OfflineBearerArtifacts, DsmError> {
-        let prepared = self.prepare_offline_bearer_release(
-            relationship_id,
-            recipient_device_id,
-            object_id,
-            payload_hash,
-            authority_policy_hash,
-            action_type,
-            action_fields,
-            receiver_challenge,
-        )?;
-        self.commit_offline_bearer_release(&prepared)
-    }
 }
 
 /* ------------------------------ Private helpers ------------------------- */
 
 /// The sender-side appliance when NO hardware factory is installed. Test builds get the in-process
-/// mock so the release-path unit tests keep exercising `build_offline_bearer_release`; real device
-/// builds FAIL CLOSED — offline-bearer strictly requires the physical chip ("offline = chips").
+/// mock so the release-path unit tests keep exercising the v2 producer; real device builds FAIL
+/// CLOSED — offline-bearer strictly requires the physical chip ("offline = chips").
 #[cfg(test)]
 fn hardware_appliance_or_fail(
     seed: &impl Fn(&str) -> [u8; 32],
     dev: [u8; 32],
 ) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
     use crate::anchor::{BirthConfig, InProcessAnchorAppliance};
-    Ok(Box::new(InProcessAnchorAppliance::birth_and_boot(
-        &BirthConfig {
-            partition_trng: seed("DSM/anchor/partition-trng/v1"),
-            host_nonce: seed("DSM/anchor/host-nonce/v1"),
-            device_id: dev,
-            policy_hash: seed("DSM/anchor/policy-hash/v1"),
-            partition_device_id: seed("DSM/anchor/partition-device-id/v1"),
-            anchor_id: seed("DSM/anchor/anchor-id/v1"),
-            partition_key_seed: seed("DSM/anchor/partition-key-seed/v1"),
-            enrolled_counter: 1_000_000,
-            q_boot: 5,
-            q_tx: 6,
-            genesis_root: seed("DSM/anchor/genesis-root/v1"),
-            firmware_measurement: seed("DSM/anchor/firmware-measurement/v1"),
-            se_secret: seed("DSM/anchor/se-secret/v1"),
-        },
-    )?))
+    Ok(Box::new(InProcessAnchorAppliance::birth(&BirthConfig {
+        partition_trng: seed("DSM/anchor/partition-trng/v1"),
+        host_nonce: seed("DSM/anchor/host-nonce/v1"),
+        device_id: dev,
+        policy_hash: seed("DSM/anchor/policy-hash/v1"),
+        partition_device_id: seed("DSM/anchor/partition-device-id/v1"),
+        anchor_id: seed("DSM/anchor/anchor-id/v1"),
+        partition_key_seed: seed("DSM/anchor/partition-key-seed/v1"),
+        enrolled_counter: 1_000_000,
+        genesis_root: seed("DSM/anchor/genesis-root/v1"),
+        chip_birth_witness: seed("DSM/anchor/chip-birth-witness/v1"),
+        chip_seed: seed("DSM/anchor/chip-seed/v1"),
+        online_id_pk: Vec::new(),
+    })?))
 }
 
 #[cfg(not(test))]
@@ -2878,12 +2848,15 @@ mod tests {
         }
     }
 
+    /// v2 producer phases: STAGE determines the transition + successor leaf with NO appliance
+    /// mutation; RELEASE (PREPARE→COMMIT→EMIT→FINALIZE) is born with the caller-supplied real
+    /// device roots in its signed transcript and the Π proofs attached — and the frontier lineage
+    /// advances exactly once per release.
     #[test]
     #[serial]
-    fn build_offline_bearer_release_drives_appliance_binds_challenge_and_advances_lineage() {
+    fn stage_then_release_binds_roots_challenge_and_advances_lineage() {
         use prost::Message as _;
         let sdk = test_sdk();
-        // Give the device a head so the fused-anchor leaf can bootstrap.
         {
             let ds = dsm::types::device_state::DeviceState::new(
                 [9u8; 32],
@@ -2893,12 +2866,12 @@ mod tests {
             );
             sdk.state_machine.lock().set_device_head(ds);
         }
-
         let recipient = [4u8; 32];
+
         // ---- Transfer 1 ----
         let r_r_1 = [0x55u8; 32];
-        let art1 = sdk
-            .build_offline_bearer_release(
+        let staged1 = sdk
+            .stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -2908,8 +2881,32 @@ mod tests {
                 vec![0xAB],
                 r_r_1,
             )
-            .expect("drive 1");
-        // (2) release constructs + decodes; (3) the producer challenge r_R is bound into the cert.
+            .expect("stage 1");
+        assert_eq!(staged1.transition.anchor_counter, 0);
+        assert_eq!(staged1.transition.next_anchor_counter, 1);
+        assert_eq!(staged1.transition.prev_root, staged1.appliance_prev_root);
+        assert_eq!(staged1.transition.next_root, staged1.appliance_next_root);
+        // Staging mutated nothing: staging again yields the identical transition.
+        let staged1b = sdk
+            .stage_offline_bearer_transition(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                r_r_1,
+            )
+            .expect("re-stage");
+        assert_eq!(staged1b.appliance_prev_root, staged1.appliance_prev_root);
+        assert_eq!(staged1b.appliance_next_root, staged1.appliance_next_root);
+
+        let r_i = [0x51u8; 32];
+        let r_next = [0x52u8; 32];
+        let art1 = sdk
+            .release_offline_bearer(&staged1, r_r_1, r_i, r_next, vec![0xAA; 40], vec![0xCC; 40])
+            .expect("release 1");
         let rel = anchor_core::proto::pb::OfflineRelease::decode(&art1.offline_release[..])
             .expect("decode")
             .to_release()
@@ -2918,14 +2915,32 @@ mod tests {
             rel.cert.receiver_challenge, r_r_1,
             "r_R must bind into the cert"
         );
+        assert_eq!(
+            rel.cert.sender_device_root_before, r_i,
+            "the REAL pre-advance device root is in the signed transcript (no placeholder)"
+        );
+        assert_eq!(
+            rel.cert.sender_device_root_after, r_next,
+            "the REAL post-advance device root is in the signed transcript (no re-stamp)"
+        );
         assert_eq!(rel.transition.recipient_device_id, recipient);
         assert_eq!(rel.cert.anchor_counter, 0);
         assert_eq!(rel.cert.next_anchor_counter, 1);
+        assert_eq!(
+            rel.anchor_smt_proof_before,
+            vec![0xAA; 40],
+            "Pi_i attached to the package"
+        );
+        assert_eq!(
+            rel.anchor_smt_proof_after,
+            vec![0xCC; 40],
+            "Pi_i+1 attached to the package"
+        );
 
-        // ---- Transfer 2: appliance lineage advances (prev == prior next), counter + leaf advance ----
+        // ---- Transfer 2: frontier lineage advances (prev == prior next), counter + leaf advance ----
         let r_r_2 = [0x66u8; 32];
-        let art2 = sdk
-            .build_offline_bearer_release(
+        let staged2 = sdk
+            .stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -2935,19 +2950,26 @@ mod tests {
                 vec![0xCD],
                 r_r_2,
             )
-            .expect("drive 2");
+            .expect("stage 2");
         assert_eq!(
-            art2.appliance_prev_root, art1.appliance_next_root,
-            "appliance root lineage must advance (transfer 2 consumes transfer 1's successor root)"
+            staged2.appliance_prev_root, art1.appliance_next_root,
+            "frontier lineage must advance (transfer 2 consumes transfer 1's successor)"
         );
         assert_ne!(
-            art2.anchor_leaf.new_value, art1.anchor_leaf.new_value,
-            "the successor fused-anchor commit advances each transfer"
+            staged2.anchor_leaf.new_value, staged1.anchor_leaf.new_value,
+            "the successor anchor-state leaf advances each transfer"
         );
-        assert_eq!(
-            art2.pin.bundle, art1.pin.bundle,
-            "same device anchor bundle B"
-        );
+        assert_eq!(staged2.pin.bundle, staged1.pin.bundle);
+        let art2 = sdk
+            .release_offline_bearer(
+                &staged2,
+                r_r_2,
+                r_next,
+                [0x53u8; 32],
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("release 2");
         let rel2 = anchor_core::proto::pb::OfflineRelease::decode(&art2.offline_release[..])
             .unwrap()
             .to_release()
@@ -2956,14 +2978,12 @@ mod tests {
         assert_eq!(rel2.cert.receiver_challenge, r_r_2);
     }
 
-    /// The Counter-Positioned Commit producer is two-phase: PREPARE exposes the FROM coordinate `uᵢ`
-    /// WITHOUT moving the counter (so the receiver can take its authenticated FROM read `H0 − uᵢ`),
-    /// then COMMIT moves the counter to `uᵢ+1`. Proves the split holds `uᵢ` pre-commit, advances by
-    /// exactly one at commit, and that the emitted evidence carries BOTH coordinates (`H_pre =
-    /// H_post + 1`) — the interactive handshake the receiver's FROM→TO check consumes.
+    /// Exactly-once release: re-releasing the SAME staged transition is rejected (its `prev_root`
+    /// was consumed — the appliance frontier moved), cancel after a committed release is a safe
+    /// no-op, and the next stage starts from the advanced coordinate.
     #[test]
     #[serial]
-    fn two_phase_producer_exposes_from_coordinate_before_commit() {
+    fn release_is_exactly_once_and_cancel_after_is_noop() {
         use dsm::types::device_state::DeviceState;
 
         let sdk = test_sdk();
@@ -2972,10 +2992,10 @@ mod tests {
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
+        let r_r = [0x55u8; 32];
 
-        // Phase 1 — PREPARE: form the cert, DO NOT move the counter. The FROM coordinate is exposed.
-        let prepared = sdk
-            .prepare_offline_bearer_release(
+        let staged = sdk
+            .stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -2983,113 +3003,27 @@ mod tests {
                 [3u8; 32],
                 0,
                 vec![0xAB],
-                [0x55u8; 32],
+                r_r,
             )
-            .expect("prepare");
-        assert_eq!(
-            prepared.anchor_counter, 0,
-            "PREPARE exposes the FROM coordinate uᵢ without moving the counter"
-        );
-        let h0 = prepared.pin.enrolled_counter;
-        // The value the receiver must witness LIVE against the Prepared appliance, before commit.
-        let h_pre = h0 - prepared.anchor_counter;
+            .expect("stage");
+        sdk.release_offline_bearer(&staged, r_r, [0x51u8; 32], [0x52u8; 32], vec![], vec![])
+            .expect("release once");
 
-        // Phase 2 — COMMIT: move the counter uᵢ → uᵢ+1 and emit the release.
-        let art = sdk
-            .commit_offline_bearer_release(&prepared)
-            .expect("commit");
-        let rel = anchor_core::proto::pb::OfflineRelease::decode(&art.offline_release[..])
-            .expect("decode")
-            .to_release()
-            .expect("to_release");
-        assert_eq!(rel.cert.anchor_counter, 0, "FROM coordinate uᵢ");
-        assert_eq!(
-            rel.cert.next_anchor_counter, 1,
-            "TO coordinate uᵢ+1 (advanced once)"
-        );
-        let h_post = h0 - rel.cert.next_anchor_counter;
-        assert_eq!(
-            h_pre,
-            h_post + 1,
-            "one physical advance: H_pre = H_post + 1"
-        );
-
-        // The producer's CounterAdvanceEvidence carries both witnessed coordinates.
-        assert_eq!(
-            rel.counter.pre.attested_raw_counter, h_pre,
-            "pre evidence carries the FROM raw counter H0 − uᵢ"
-        );
-        assert_eq!(
-            rel.counter.post.attested_raw_counter, h_post,
-            "post evidence carries the TO raw counter H0 − (uᵢ+1)"
-        );
-    }
-
-    /// Exactly-once commit (Step 3). Complements the two-phase test (PREPARE holds uᵢ, COMMIT advances
-    /// by one) by proving the counter cannot move TWICE and that post-commit cleanup never re-moves or
-    /// erases it: a second `commit_offline_bearer_release` from the SAME prepared is rejected (the
-    /// appliance has left `Prepared` and the live counter no longer sits at uᵢ), `cancel` after commit
-    /// is a safe no-op (§28 — a committed release is re-emitted/downgraded online, never cancelled),
-    /// and the appliance is left `Ready` at the advanced coordinate so the NEXT transfer starts from
-    /// uᵢ+1. This is the producer-side serialization the Counter-Positioned Commit relies on.
-    #[test]
-    #[serial]
-    fn commit_is_exactly_once_and_cancel_after_commit_is_noop() {
-        use dsm::types::device_state::DeviceState;
-
-        let sdk = test_sdk();
-        {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let recipient = [4u8; 32];
-
-        let prepared = sdk
-            .prepare_offline_bearer_release(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xAB],
-                [0x55u8; 32],
-            )
-            .expect("prepare");
-        assert_eq!(
-            prepared.anchor_counter, 0,
-            "PREPARE exposes uᵢ without moving the counter"
-        );
-
-        // COMMIT once — the counter advances uᵢ → uᵢ+1.
-        let art = sdk
-            .commit_offline_bearer_release(&prepared)
-            .expect("commit once");
-        {
-            use prost::Message as _;
-            let rel = anchor_core::proto::pb::OfflineRelease::decode(&art.offline_release[..])
-                .expect("decode")
-                .to_release()
-                .expect("to_release");
-            assert_eq!(rel.cert.next_anchor_counter, 1, "exactly one advance");
-        }
-
-        // A SECOND commit from the SAME prepared must be rejected — the counter cannot move twice
-        // (the appliance has left `Prepared`; the live counter has left the FROM coordinate uᵢ).
+        // A SECOND release from the SAME staged transition must be rejected — its prev_root was
+        // consumed; the counter cannot move twice for one staged transfer.
         assert!(
-            sdk.commit_offline_bearer_release(&prepared).is_err(),
-            "double-commit from the same prepared is rejected (exactly once)"
+            sdk.release_offline_bearer(&staged, r_r, [0x51u8; 32], [0x52u8; 32], vec![], vec![])
+                .is_err(),
+            "double-release from the same staged transition is rejected (exactly once)"
         );
 
-        // Cleanup after a commit is a no-op: it must NEVER re-move the counter or erase the committed
-        // release.
+        // Cleanup after a committed release is a no-op: it never re-moves the counter.
         sdk.cancel_offline_bearer_release()
-            .expect("cancel after commit is a safe no-op");
+            .expect("cancel after release is a safe no-op");
 
-        // The appliance is left Ready at the ADVANCED coordinate, so the next transfer starts at uᵢ+1
-        // — proof the counter advanced exactly once and nothing was double-moved or lost.
-        let prepared2 = sdk
-            .prepare_offline_bearer_release(
+        // The next stage starts from the advanced coordinate u_i+1 / the advanced frontier.
+        let staged2 = sdk
+            .stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -3099,16 +3033,17 @@ mod tests {
                 vec![0xCD],
                 [0x66u8; 32],
             )
-            .expect("prepare 2");
+            .expect("stage 2");
         assert_eq!(
-            prepared2.anchor_counter, 1,
-            "the next transfer starts from the advanced FROM coordinate uᵢ+1"
+            staged2.transition.anchor_counter, 1,
+            "the next transfer starts from the advanced coordinate u_i+1"
         );
+        assert_eq!(staged2.appliance_prev_root, staged.appliance_next_root);
     }
 
-    /// §27/§28 host recovery seam (Step 4). At a re-attach the host cancels ONLY an orphaned
-    /// uncommitted `Prepared` (no owning session) and moves no counter doing so; a `Prepared` an
-    /// in-flight session still owns is left untouched. `recover()` observes; the host decides.
+    /// §26 host recovery seam. At a re-attach the host cancels ONLY an orphaned uncommitted
+    /// `Prepared` (no owning session) and moves no counter doing so; a `Prepared` an in-flight
+    /// session still owns is left untouched. `recover()` observes; the host decides.
     #[test]
     #[serial]
     fn reattach_cancels_orphaned_prepared_not_owned_and_moves_no_counter() {
@@ -3121,6 +3056,7 @@ mod tests {
             sdk.state_machine.lock().set_device_head(ds);
         }
         let recipient = [4u8; 32];
+        let r_r = [0x55u8; 32];
 
         // No appliance attached yet -> nothing prepared -> Ready.
         assert_eq!(
@@ -3128,9 +3064,10 @@ mod tests {
             RecoveryAction::Ready
         );
 
-        // Drive the appliance to PREPARED (the FROM coordinate uᵢ is exposed; NO counter move).
-        let prepared = sdk
-            .prepare_offline_bearer_release(
+        // Stage, then drive the appliance to PREPARED directly (a crash between PREPARE and COMMIT
+        // — the window `release_offline_bearer` normally closes atomically).
+        let staged = sdk
+            .stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -3138,12 +3075,22 @@ mod tests {
                 [3u8; 32],
                 0,
                 vec![0xAB],
-                [0x55u8; 32],
+                r_r,
+            )
+            .expect("stage");
+        {
+            let mut guard = sdk.anchor_appliance.lock();
+            let app = guard.as_mut().expect("appliance attached by stage");
+            app.prepare(
+                &staged.transition.as_transition(),
+                &r_r,
+                &[0x51u8; 32],
+                &[0x52u8; 32],
             )
             .expect("prepare");
-        assert_eq!(prepared.anchor_counter, 0, "PREPARE moved no counter");
+        }
 
-        // An in-flight session OWNS this prepared bearer -> the host must NOT cancel it.
+        // An in-flight session OWNS this prepared record -> the host must NOT cancel it.
         assert_eq!(
             sdk.resolve_prepared_on_reattach(true).expect("owned"),
             RecoveryAction::LeavePreparedForOwner
@@ -3155,10 +3102,10 @@ mod tests {
             RecoveryAction::CancelOrphanedPrepared
         );
 
-        // The appliance is Ready again and NO counter moved: a fresh transfer still starts at uᵢ=0,
+        // The appliance is Ready again and NO counter moved: a fresh stage still starts at u_i=0,
         // so a lost/abandoned prepare does not strand future sends (and burned no counter).
-        let prepared2 = sdk
-            .prepare_offline_bearer_release(
+        let staged2 = sdk
+            .stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -3168,30 +3115,27 @@ mod tests {
                 vec![0xCD],
                 [0x66u8; 32],
             )
-            .expect("prepare after cancel");
+            .expect("stage after cancel");
         assert_eq!(
-            prepared2.anchor_counter, 0,
-            "cancel moved no counter — the FROM coordinate uᵢ is unchanged, future sends not stranded"
+            staged2.transition.anchor_counter, 0,
+            "cancel moved no counter — u_i unchanged, future sends not stranded"
         );
     }
 
     /// End-to-end producer → receiver-predicate → adopt → replay-reject over TWO real bearer
-    /// transfers. This is the activation boundary for the producer-driving cluster: the SENDER
-    /// drives the real fused-anchor appliance (`build_offline_bearer_release`), commits the emitted
-    /// successor leaf into a real per-device SMT advance, and the RECEIVER runs the full 22-check
-    /// Boot Fenced Fused predicate (`accept_offline_release_with_counter`) against the real release +
-    /// real inclusion proofs + real pin. The ONLY stub is the authenticated L3 counter session
-    /// (`TrustedTestCounter`), which stands in for the not-yet-built D2 verifier; the production path
-    /// keeps `DsmCounterVerifier` and stays fail-closed. Proves: (a) a real release is accepted once
-    /// the counter is authenticated, (b) the receiver adopts the appliance-root + fused-state
-    /// frontier, (c) replaying transfer 1 after adoption is rejected, (d) transfer 2 chains from the
-    /// adopted frontier.
+    /// transfers, v2 shape. The SENDER stages, commits the staged successor leaf into a REAL
+    /// per-device SMT advance (real roots + real Π inclusion proofs), then releases with those
+    /// roots; the RECEIVER runs the full v2 predicate (`accept_offline_release`: σ^chip + σ^host
+    /// verified against the pin, Π verified against the device roots, frontier pin) with NO
+    /// counter read on the path. Proves: (a) a real release is accepted, (b) the receiver adopts
+    /// the successor frontier, (c) replaying transfer 1 after adoption is rejected, (d) transfer 2
+    /// chains from the adopted frontier, (e) cert roots that differ from the verified device roots
+    /// are rejected.
     #[test]
     #[serial]
     fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
         use crate::bluetooth::anchor_accept::{
-            accept_offline_release_with_counter, restamp_counter_binding, AnchorStateBinding,
-            OfflineRecover, PinnedAnchor, TrustedTestCounter,
+            accept_offline_release, OfflineRecover, PinnedAnchor,
         };
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
@@ -3203,24 +3147,23 @@ mod tests {
             let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
             sdk.state_machine.lock().set_device_head(ds);
         }
-        let sender_dev = sdk.device_info.device_id;
         let recipient = [4u8; 32];
         let policy_hash = [3u8; 32];
 
-        // Build the receiver PinnedAnchor from the producer's own enrolled pin (uncompromised).
         let pin_from = |p: &crate::anchor::AnchorPin| PinnedAnchor {
             bundle: p.bundle,
             anchor_id: p.anchor_id,
             enrolled_counter: p.enrolled_counter,
             partition_pk: p.partition_pk.clone(),
+            pk_chip: p.pk_chip.clone(),
             uncompromised: true,
         };
 
-        // One real bearer transfer: drive the appliance, then commit the emitted successor leaf into
-        // a real per-device SMT advance from `dev`. Returns (artifacts, advance outcome).
-        let drive = |dev: &DeviceState, cp_tag: u8, r_r: [u8; 32]| {
-            let art = sdk
-                .build_offline_bearer_release(
+        // One real bearer transfer from `head`: stage, advance the REAL per-device SMT with the
+        // staged successor leaf (producing real roots + Π), then release with those roots.
+        let drive = |head: &DeviceState, cp_tag: u8, r_r: [u8; 32]| {
+            let staged = sdk
+                .stage_offline_bearer_transition(
                     [1u8; 32],
                     recipient,
                     [2u8; 32],
@@ -3230,15 +3173,15 @@ mod tests {
                     vec![0xAB],
                     r_r,
                 )
-                .expect("drive appliance");
+                .expect("stage");
             let cp = {
                 let mut c = [0u8; 32];
                 c[0] = cp_tag;
                 c
             };
-            let rk = compute_smt_key(&dev.devid(), &cp);
-            let init = initial_chain_tip_from_device_ids(&dev.devid(), &cp);
-            let out = dev
+            let rk = compute_smt_key(&head.devid(), &cp);
+            let init = initial_chain_tip_from_device_ids(&head.devid(), &cp);
+            let out = head
                 .advance(
                     rk,
                     cp,
@@ -3248,317 +3191,33 @@ mod tests {
                     &[],
                     Some(init),
                     Some(AnchorLeafUpdate {
-                        key: art.anchor_leaf.key,
-                        new_value: art.anchor_leaf.new_value,
+                        key: staged.anchor_leaf.key,
+                        new_value: staged.anchor_leaf.new_value,
                     }),
                 )
                 .expect("bearer advance");
-            (art, out)
-        };
-
-        // Snapshot the bootstrapped device head (holds commit_0) to start the sender's SMT chain.
-        // The first `drive` call bootstraps commit_0 into the SDK head; take it after.
-        let (art1, out1) = {
-            // Prime commit_0 by driving once against the current head, then re-advance from the head
-            // the bootstrap wrote. `build_offline_bearer_release` bootstraps on its first call.
+            let proofs = out
+                .anchor_proofs
+                .clone()
+                .expect("bearer advance emits anchor proofs");
             let art = sdk
-                .build_offline_bearer_release(
-                    [1u8; 32],
-                    recipient,
-                    [2u8; 32],
-                    [9u8; 32],
-                    policy_hash,
-                    0,
-                    vec![0xAB],
-                    [0x55u8; 32],
+                .release_offline_bearer(
+                    &staged,
+                    r_r,
+                    out.smt_proofs.pre_root,
+                    out.child_r_a,
+                    proofs.parent,
+                    proofs.child,
                 )
-                .expect("prime bootstrap");
-            let head = sdk
-                .state_machine
-                .lock()
-                .device_head()
-                .expect("bootstrapped head")
-                .clone();
-            let cp = [0xC0u8; 32];
-            let rk = compute_smt_key(&head.devid(), &cp);
-            let init = initial_chain_tip_from_device_ids(&head.devid(), &cp);
-            let out = head
-                .advance(
-                    rk,
-                    cp,
-                    DsmOperation::Noop,
-                    vec![0xC0u8; 32],
-                    None,
-                    &[],
-                    Some(init),
-                    Some(AnchorLeafUpdate {
-                        key: art.anchor_leaf.key,
-                        new_value: art.anchor_leaf.new_value,
-                    }),
-                )
-                .expect("bearer advance 1");
+                .expect("release");
             (art, out)
         };
 
-        let ap1 = out1
-            .anchor_proofs
-            .clone()
-            .expect("transfer 1 emits anchor proofs");
-        let pin1 = pin_from(&art1.pin);
-        let before1 = out1.smt_proofs.pre_root;
-        let after1 = out1.child_r_a;
-        // The sender re-stamps the release binding with its real DEVICE roots (the appliance stamped
-        // zero placeholders) — exactly what the handler does post-`simulate_advance_for_confirm`.
-        let release1 = restamp_counter_binding(art1.offline_release.as_slice(), &before1, &after1)
-            .expect("re-stamp transfer 1 device roots");
-        let binding1 = AnchorStateBinding {
-            sender_smt_root: &after1,
-            sender_smt_root_before: &before1,
-            prev_proof: &ap1.parent,
-            next_proof: &ap1.child,
-        };
-
-        // (a) Receiver accepts the real release once the counter is authenticated. `accepted_prev_root`
-        // is the appliance root this transfer consumes.
-        accept_offline_release_with_counter(
-            &release1,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &binding1,
-            &TrustedTestCounter,
-        )
-        .expect("transfer 1 must be accepted under an authenticated counter");
-        let _ = sender_dev;
-
-        // (a') The PRODUCTION relay-counter entry point: supplied the TWO counter values the receiver
-        // would read from A's chip over the raw-SPI relay — the FROM read `H_pre = H0 - u_i`
-        // (= enrolled for transfer 1, u_i=0) taken before A's commit, and the TO read
-        // `H_post = H0 - (u_i+1)` (= enrolled - 1) after — each tagged with the pinned anchor_id, it
-        // accepts. A missing FROM read, a missing TO read, a wrong value, or a read from a different
-        // chip all fail closed — proving the FROM→TO coordinate proof flows through the real path.
-        let h_pre = pin1.enrolled_counter; // H0 - u_i, u_i = 0
-        let h_post = pin1.enrolled_counter - 1; // H0 - (u_i+1)
-        crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-            &release1,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &binding1,
-            Some((pin1.anchor_id, h_pre)),
-            Some((pin1.anchor_id, h_post)),
-        )
-        .expect("relay-counter accept with the exact authenticated FROM+TO reads");
-        for (bad_pre, bad_post) in [
-            (None, Some((pin1.anchor_id, h_post))), // no FROM read -> fail closed
-            (Some((pin1.anchor_id, h_pre)), None),  // no TO read
-            (
-                Some((pin1.anchor_id, h_pre + 1)),
-                Some((pin1.anchor_id, h_post)),
-            ), // wrong FROM
-            (
-                Some((pin1.anchor_id, h_pre)),
-                Some((pin1.anchor_id, h_post + 1)),
-            ), // wrong TO
-            (Some(([0xEEu8; 32], h_pre)), Some((pin1.anchor_id, h_post))), // FROM read from another chip
-        ] {
-            let r = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-                &release1,
-                Some(&pin1),
-                Some(&art1.appliance_prev_root),
-                &recipient,
-                &[0x55u8; 32],
-                &policy_hash,
-                &binding1,
-                bad_pre,
-                bad_post,
-            );
-            assert!(
-                r.is_err(),
-                "relay-counter must fail closed for pre={bad_pre:?} post={bad_post:?}, got {r:?}"
-            );
-        }
-
-        // (b) Alice/Bob double-spend defense at the counter coordinate, through the real accept path.
-        // Alice accepted above: her live FROM read was H0 (100) and TO read H0-1 (99). A SECOND (Bob)
-        // attempt presenting the SAME u_i=0 release AFTER Alice's commit advanced the physical counter
-        // — so Bob's live FROM read is now 99, not 100 — is rejected SPECIFICALLY on the FROM
-        // coordinate. The counter has left u_i and cannot return: the same counter-positioned sender
-        // state cannot be spent twice. This is the door, and the rejection is the production predicate,
-        // not a test shortcut.
-        let bob = crate::bluetooth::anchor_accept::accept_offline_release_with_relay_counter(
-            &release1,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &binding1,
-            Some((pin1.anchor_id, h_post)), // Bob's live FROM read is 99 (counter already past u_i=0)
-            Some((pin1.anchor_id, h_post - 1)),
-        );
-        assert!(
-            matches!(
-                bob,
-                Err(crate::bluetooth::anchor_accept::OfflineRecover::Predicate(
-                    anchor_core::accept::AcceptError::CounterFromCoordinateInvalid
-                ))
-            ),
-            "Bob's stale u_i=0 attempt must be rejected on the FROM coordinate (live counter now 99), got {bob:?}"
-        );
-
-        // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `appliance_next_root`
-        // is rejected — the consumed appliance root is no longer the accepted root.
-        let replay = accept_offline_release_with_counter(
-            &release1,
-            Some(&pin1),
-            Some(&art1.appliance_next_root), // receiver has adopted the successor root
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &binding1,
-            &TrustedTestCounter,
-        );
-        assert!(
-            matches!(replay, Err(OfflineRecover::Predicate(_))),
-            "replay of the consumed appliance root must be rejected, got {replay:?}"
-        );
-
-        // (d) Transfer 2 chains from the adopted frontier: appliance lineage advances and the second
-        // release is accepted against the newly adopted appliance root.
-        let (art2, out2) = drive(&out1.new_device_state, 0xC1, [0x66u8; 32]);
-        assert_eq!(
-            art2.appliance_prev_root, art1.appliance_next_root,
-            "transfer 2 must consume transfer 1's successor appliance root"
-        );
-        let ap2 = out2
-            .anchor_proofs
-            .clone()
-            .expect("transfer 2 emits anchor proofs");
-        let pin2 = pin_from(&art2.pin);
-        let before2 = out2.smt_proofs.pre_root;
-        let after2 = out2.child_r_a;
-        let release2 = restamp_counter_binding(art2.offline_release.as_slice(), &before2, &after2)
-            .expect("re-stamp transfer 2 device roots");
-        let binding2 = AnchorStateBinding {
-            sender_smt_root: &after2,
-            sender_smt_root_before: &before2,
-            prev_proof: &ap2.parent,
-            next_proof: &ap2.child,
-        };
-        accept_offline_release_with_counter(
-            &release2,
-            Some(&pin2),
-            Some(&art2.appliance_prev_root),
-            &recipient,
-            &[0x66u8; 32],
-            &policy_hash,
-            &binding2,
-            &TrustedTestCounter,
-        )
-        .expect("transfer 2 must be accepted from the adopted frontier");
-    }
-
-    /// PHASE H0 — prove the whole phone-to-chip relay path with FAKE PIPES before any Android/BLE:
-    /// receiver resolves the counter through the REAL `TropicRelayRouter` round-trip (B -> in-process
-    /// "BLE" -> A.handle_inbound -> A's mock Pico -> reply -> B), feeds it through the exact confirm
-    /// seam (`resolve_attested_counter`), and the canonical predicate accepts iff the counter matches.
-    /// Every missing install / wrong counter fails closed to online recovery. No `tropic01`, no
-    /// hardware — replace the fake pipes with Android USB/BLE in H2/H3.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn phase_h0_relay_counter_flows_end_to_end_with_mock_transports() {
-        use crate::bluetooth::anchor_accept::{
-            accept_offline_release_with_relay_counter, resolve_attested_counter,
-            restamp_counter_binding, AnchorStateBinding, OfflineRecover, PinnedAnchor,
-        };
-        use crate::bluetooth::tropic_relay::{
-            AnchorCounterReader, LocalPicoTransport, PicoFuture, TropicRelayRouter,
-        };
-        use dsm::crypto::anchor_enrollment::FusedAnchorPin;
-        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
-        use dsm::types::error::DsmError;
-        use std::sync::Arc;
-
-        // A mock Pico A: for any MOSI, return the 4-byte LE counter `h` as MISO (stands in for a
-        // real libtropic mcounter_get over the raw-SPI passthrough).
-        struct MockPico {
-            h: u32,
-        }
-        impl LocalPicoTransport for MockPico {
-            fn spi_passthrough(&self, _spi: Vec<u8>) -> PicoFuture<Result<Vec<u8>, DsmError>> {
-                let h = self.h;
-                Box::pin(async move { Ok(h.to_le_bytes().to_vec()) })
-            }
-        }
-
-        // Mock receiver-side reader standing in for the real `RelayCounterReader`: it drives the REAL
-        // router round-trip through sender A's router (which owns a mock Pico), then decodes H. Fails
-        // closed on an incomplete pin (mirrors the hardware reader) or any relay failure (e.g. A has
-        // no local Pico). `a` is `None` to simulate "no sender router at all".
-        struct RelayMockReader {
-            a: Option<Arc<TropicRelayRouter>>,
-        }
-        impl AnchorCounterReader for RelayMockReader {
-            fn read_counter(
-                &self,
-                _peer: [u8; 32],
-                commitment: [u8; 32],
-                pin: FusedAnchorPin,
-            ) -> PicoFuture<Option<u32>> {
-                if pin.verifier_slot.is_none()
-                    || pin.chip_static_pubkey.is_none()
-                    || !pin.uncompromised
-                {
-                    return Box::pin(async { None });
-                }
-                let a = self.a.clone();
-                Box::pin(async move {
-                    let b = Arc::new(TropicRelayRouter::new());
-                    let b2 = b.clone();
-                    let miso = b
-                        .round_trip(commitment, vec![0u8], move |frame| {
-                            let a = a.clone();
-                            let b2 = b2.clone();
-                            async move {
-                                let a = a.ok_or_else(|| {
-                                    DsmError::invalid_operation(
-                                        "no sender A router (fake pipe down)",
-                                    )
-                                })?;
-                                // A services the relayed request against its local Pico, or errors
-                                // fail-closed if it has no Pico installed.
-                                let reply = a.handle_inbound(&frame).await?.ok_or_else(|| {
-                                    DsmError::invalid_operation("A produced no reply")
-                                })?;
-                                b2.handle_inbound(&reply).await?;
-                                Ok(())
-                            }
-                        })
-                        .await
-                        .ok()?;
-                    let arr: [u8; 4] = miso.get(..4)?.try_into().ok()?;
-                    Some(u32::from_le_bytes(arr))
-                })
-            }
-        }
-
-        // ---- One real bearer release + a COMPLETE receiver pin (slot + stpub) ----------------------
-        let sdk = test_sdk();
-        {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let sender_dev = sdk.device_info.device_id;
-        let recipient = [4u8; 32];
-        let policy_hash = [3u8; 32];
-        let r_r = [0x55u8; 32];
-
-        let art = sdk
-            .build_offline_bearer_release(
+        // Transfer 1 runs from the head the stage-time reconcile bootstrapped (it writes the
+        // current anchor-state leaf into the device head on first attach).
+        let (art1, out1) = {
+            // Prime the bootstrap: stage once so the reconciled head exists, then drive from it.
+            sdk.stage_offline_bearer_transition(
                 [1u8; 32],
                 recipient,
                 [2u8; 32],
@@ -3566,162 +3225,101 @@ mod tests {
                 policy_hash,
                 0,
                 vec![0xAB],
-                r_r,
+                [0x55u8; 32],
             )
             .expect("prime bootstrap");
-        let head = sdk
-            .state_machine
-            .lock()
-            .device_head()
-            .expect("bootstrapped head")
-            .clone();
-        let cp = [0xC0u8; 32];
-        let rk = dsm::core::bilateral_transaction_manager::compute_smt_key(&head.devid(), &cp);
-        let init = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &head.devid(),
-            &cp,
-        );
-        let out = head
-            .advance(
-                rk,
-                cp,
-                DsmOperation::Noop,
-                vec![0xC0u8; 32],
-                None,
-                &[],
-                Some(init),
-                Some(AnchorLeafUpdate {
-                    key: art.anchor_leaf.key,
-                    new_value: art.anchor_leaf.new_value,
-                }),
-            )
-            .expect("bearer advance");
-
-        let ap = out.anchor_proofs.clone().expect("anchor proofs");
-        let before = out.smt_proofs.pre_root;
-        let after = out.child_r_a;
-        // Sender re-stamps the release binding with its real device roots (as the handler does).
-        let release = restamp_counter_binding(art.offline_release.as_slice(), &before, &after)
-            .expect("re-stamp device roots");
-        let binding = AnchorStateBinding {
-            sender_smt_root: &after,
-            sender_smt_root_before: &before,
-            prev_proof: &ap.parent,
-            next_proof: &ap.child,
+            let head = sdk
+                .state_machine
+                .lock()
+                .device_head()
+                .expect("bootstrapped head")
+                .clone();
+            drive(&head, 0xC0, [0x55u8; 32])
         };
-        // COMPLETE pin = the producer's own enrolled material + the slot/stpub A would provision.
-        let pin = FusedAnchorPin {
-            bundle: art.pin.bundle,
-            anchor_id: art.pin.anchor_id,
-            enrolled_counter: art.pin.enrolled_counter,
-            partition_pk: art.pin.partition_pk.clone(),
-            uncompromised: true,
-            verifier_slot: Some(1),
-            chip_static_pubkey: Some([0xCC; 32]),
-        };
-        let pinned = PinnedAnchor::from_fused(&pin);
-        let expected_h = (pin.enrolled_counter - 1) as u32; // H_post = H0 - (u_i+1), transfer 1
-        let commitment = [0x42u8; 32];
-        // The FROM read `H_pre = H0 - u_i` (= enrolled for transfer 1, u_i=0). This test drives the
-        // TO (post-commit) read through the relay; the FROM read is supplied directly so the seam's
-        // fail-closed behavior on the relay-read TO value is what is under test.
-        let attested_pre = Some((pin.anchor_id, pin.enrolled_counter));
+        let pin1 = pin_from(&art1.pin);
+        let before1 = out1.smt_proofs.pre_root;
+        let after1 = out1.child_r_a;
 
-        // Helper: run the exact confirm seam (`resolve_attested_counter` -> predicate) and report the
-        // acceptance result, mirroring `handle_confirm_request` byte-for-byte. `attested_post` is the
-        // TO read the relay produced.
-        let accept_with = |attested_post: Option<([u8; 32], u64)>| {
-            accept_offline_release_with_relay_counter(
-                &release,
-                Some(&pinned),
-                Some(&art.appliance_prev_root),
-                &recipient,
-                &r_r,
-                &policy_hash,
-                &binding,
-                attested_pre,
-                attested_post,
-            )
-        };
-
-        // ---- (1) HAPPY PATH: correct counter through the relay -> ACCEPT ---------------------------
-        let a = Arc::new(TropicRelayRouter::new());
-        a.set_local_pico(Arc::new(MockPico { h: expected_h }));
-        let reader: Arc<dyn AnchorCounterReader> = Arc::new(RelayMockReader { a: Some(a) });
-        let attested =
-            resolve_attested_counter(Some(&pin), Some(reader.clone()), sender_dev, commitment)
-                .await;
-        assert_eq!(
-            attested,
-            Some((pin.anchor_id, expected_h as u64)),
-            "the counter must flow through the relay to the seam"
-        );
-        accept_with(attested).expect("correct relay counter must accept");
-
-        // ---- (2) NO READER INSTALLED -> None -> online recovery ------------------------------------
-        let attested = resolve_attested_counter(Some(&pin), None, sender_dev, commitment).await;
-        assert_eq!(attested, None, "no reader must yield no counter");
-        assert!(
-            matches!(accept_with(attested), Err(OfflineRecover::Predicate(_))),
-            "no reader must recover online"
-        );
-
-        // ---- (3) NO LOCAL PICO on A (relay pipe down) -> None -> online recovery -------------------
-        let a_nopico = Arc::new(TropicRelayRouter::new()); // no set_local_pico
-        let reader_nopico: Arc<dyn AnchorCounterReader> =
-            Arc::new(RelayMockReader { a: Some(a_nopico) });
-        let attested =
-            resolve_attested_counter(Some(&pin), Some(reader_nopico), sender_dev, commitment).await;
-        assert_eq!(
-            attested, None,
-            "no local Pico must fail the relay read closed"
-        );
-        assert!(matches!(
-            accept_with(attested),
-            Err(OfflineRecover::Predicate(_))
-        ));
-
-        // ---- (4) INCOMPLETE PIN (no slot writer / no deriver provisioned it) -> None -> recovery ---
-        // A first-transfer pin admitted before HW provisioning has verifier_slot = None; that is the
-        // receiver-observable form of "no SeSlotWriter" and "no VerifierPairingDeriver" (the sender
-        // never provisioned the slot / B never offered a pairing key), so the read is never attempted.
-        let incomplete = FusedAnchorPin {
-            verifier_slot: None,
-            chip_static_pubkey: None,
-            ..pin.clone()
-        };
-        let attested = resolve_attested_counter(
-            Some(&incomplete),
-            Some(reader.clone()),
-            sender_dev,
-            commitment,
+        // (a) The receiver accepts the real release: three signatures + Π against the REAL device
+        // roots + frontier pin (genesis: accepted_frontier=None adopts prev_root TOFU).
+        let adopted = accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            None,
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &before1,
+            &after1,
         )
-        .await;
-        assert_eq!(
-            attested, None,
-            "an incomplete pin must never be counter-read"
-        );
-        assert!(matches!(
-            accept_with(attested),
-            Err(OfflineRecover::Predicate(_))
-        ));
+        .expect("transfer 1 must be accepted by the v2 predicate");
+        assert_eq!(adopted.next_root, art1.appliance_next_root);
+        assert_eq!(adopted.next_anchor_counter, 1);
 
-        // ---- (5) WRONG COUNTER through the relay -> predicate rejects -> recovery ------------------
-        let a_wrong = Arc::new(TropicRelayRouter::new());
-        a_wrong.set_local_pico(Arc::new(MockPico { h: expected_h + 1 }));
-        let reader_wrong: Arc<dyn AnchorCounterReader> =
-            Arc::new(RelayMockReader { a: Some(a_wrong) });
-        let attested =
-            resolve_attested_counter(Some(&pin), Some(reader_wrong), sender_dev, commitment).await;
-        assert_eq!(
-            attested,
-            Some((pin.anchor_id, (expected_h + 1) as u64)),
-            "the (wrong) counter still flows to the seam"
+        // (a') Pinning the frontier explicitly also accepts.
+        accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&art1.appliance_prev_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &before1,
+            &after1,
+        )
+        .expect("accept with the pinned frontier");
+
+        // (e) Cert roots that are NOT the verified device roots are rejected (parallel-tree cert).
+        let wrong = accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&art1.appliance_prev_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &[0xEEu8; 32],
+            &after1,
         );
         assert!(
-            matches!(accept_with(attested), Err(OfflineRecover::Predicate(_))),
-            "a wrong counter must be rejected by the predicate"
+            matches!(wrong, Err(OfflineRecover::Predicate(_))),
+            "cert/device root mismatch must be rejected, got {wrong:?}"
         );
+
+        // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `next_root` is
+        // rejected — the consumed frontier is no longer the accepted one.
+        let replay = accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&adopted.next_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &before1,
+            &after1,
+        );
+        assert!(
+            matches!(replay, Err(OfflineRecover::Predicate(_))),
+            "replay of the consumed frontier must be rejected, got {replay:?}"
+        );
+
+        // (d) Transfer 2 chains from the adopted frontier.
+        let (art2, out2) = drive(&out1.new_device_state, 0xC1, [0x66u8; 32]);
+        assert_eq!(
+            art2.appliance_prev_root, art1.appliance_next_root,
+            "transfer 2 must consume transfer 1's successor frontier"
+        );
+        let pin2 = pin_from(&art2.pin);
+        accept_offline_release(
+            &art2.offline_release,
+            Some(&pin2),
+            Some(&adopted.next_root),
+            &recipient,
+            &[0x66u8; 32],
+            &policy_hash,
+            &out2.smt_proofs.pre_root,
+            &out2.child_r_a,
+        )
+        .expect("transfer 2 must be accepted from the adopted frontier");
     }
 
     /// SAFETY RAIL for the sender-release thread (both-or-neither): the SIMULATED post-root the
@@ -3734,7 +3332,7 @@ mod tests {
     #[serial]
     fn sim_post_root_equals_canonical_committed_post_root_with_anchor_leaf() {
         use dsm::core::bilateral_transaction_manager::{
-            anchor_state_commit, anchor_state_leaf_key, compute_smt_key,
+            anchor_state_leaf_key, compute_smt_key,
             initial_chain_tip_from_device_ids,
         };
         use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
@@ -3751,7 +3349,7 @@ mod tests {
         let b = [0xB7u8; 32];
         let leaf = AnchorLeafUpdate {
             key: anchor_state_leaf_key(&b),
-            new_value: anchor_state_commit(&b, &[0xA1u8; 32], &[0x51u8; 32], 1),
+            new_value: anchor_core::root_advance::anchor_state_leaf(&b, &[0xA1u8; 32], 1),
         };
 
         // `simulate_advance_for_confirm` is PURE (no head mutation), so we can call it twice.

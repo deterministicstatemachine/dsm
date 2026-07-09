@@ -81,44 +81,19 @@ fn envelope_v3_validation() {
     assert!(crate::envelope::from_canonical_bytes(&wrong_size.encode_to_vec()).is_err());
 }
 
-/// Receiver-admit fold (Boot Fenced Fused Anchor): the enroll-request and disclosure piggybacks
-/// must round-trip byte-exactly on the two bilateral messages they ride, including the
-/// slot-absent encoding (`verifier_slot_present = false`) that keeps Path-B fail-closed.
+/// Receiver-admit fold (v2): the pin disclosure must round-trip byte-exactly on the confirm it
+/// rides, including the required `pk_chip` (resident chip Ed25519 key).
 #[test]
-fn anchor_enroll_and_disclosure_roundtrip_on_bilateral_messages() {
-    use crate::generated::{
-        AnchorDisclosure, AnchorEnrollRequest, BilateralConfirmRequest, BilateralPrepareResponse,
-    };
+fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
+    use crate::generated::{AnchorDisclosure, BilateralConfirmRequest};
 
-    let prep = BilateralPrepareResponse {
-        commitment_hash: None,
-        local_signature: Vec::new(),
-        expires_iterations: 7,
-        counterparty_state_hash: None,
-        local_state_hash: None,
-        responder_signing_public_key: Vec::new(),
-        receiver_challenge: vec![0x5A; 32],
-        anchor_enroll_request: Some(AnchorEnrollRequest {
-            verifier_pairing_pubkey: vec![0xB0; 32],
-        }),
-        responder_kyber_public_key: vec![],
-    };
-    let prep2 = BilateralPrepareResponse::decode(prep.encode_to_vec().as_slice()).unwrap();
-    assert_eq!(
-        prep2.anchor_enroll_request.unwrap().verifier_pairing_pubkey,
-        vec![0xB0; 32]
-    );
-
-    // Pre-HW disclosure: slot + stpub absent (the fail-closed shape).
     let disclosure = AnchorDisclosure {
         bundle: vec![0xB1; 32],
         anchor_id: vec![0xA1; 32],
         enrolled_counter: 1_000_000,
         partition_pk: vec![0x07; 64],
         policy_hash: vec![0x9A; 32],
-        verifier_slot: 0,
-        verifier_slot_present: false,
-        chip_static_pubkey: Vec::new(),
+        pk_chip: vec![0xCC; 32],
     };
     let confirm = BilateralConfirmRequest {
         commitment_hash: None,
@@ -131,8 +106,6 @@ fn anchor_enroll_and_disclosure_roundtrip_on_bilateral_messages() {
         pre_entropy: Vec::new(),
         sender_smt_root_before: vec![0; 32],
         offline_release: Vec::new(),
-        anchor_state_prev_proof: Vec::new(),
-        anchor_state_next_proof: Vec::new(),
         anchor_disclosure: Some(disclosure),
     };
     let confirm2 = BilateralConfirmRequest::decode(confirm.encode_to_vec().as_slice()).unwrap();
@@ -142,24 +115,5 @@ fn anchor_enroll_and_disclosure_roundtrip_on_bilateral_messages() {
     assert_eq!(d.enrolled_counter, 1_000_000);
     assert_eq!(d.partition_pk, vec![0x07; 64]);
     assert_eq!(d.policy_hash, vec![0x9A; 32]);
-    assert!(
-        !d.verifier_slot_present,
-        "pre-HW disclosure carries no slot"
-    );
-    assert!(
-        d.chip_static_pubkey.is_empty(),
-        "pre-HW disclosure carries no stpub"
-    );
-
-    // Post-HW disclosure: slot + stpub present round-trip intact.
-    let hw = AnchorDisclosure {
-        verifier_slot: 2,
-        verifier_slot_present: true,
-        chip_static_pubkey: vec![0xCC; 32],
-        ..AnchorDisclosure::decode(d.encode_to_vec().as_slice()).unwrap()
-    };
-    let hw2 = AnchorDisclosure::decode(hw.encode_to_vec().as_slice()).unwrap();
-    assert_eq!(hw2.verifier_slot, 2);
-    assert!(hw2.verifier_slot_present);
-    assert_eq!(hw2.chip_static_pubkey, vec![0xCC; 32]);
+    assert_eq!(d.pk_chip, vec![0xCC; 32]);
 }

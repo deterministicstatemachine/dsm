@@ -1885,25 +1885,17 @@ message BilateralConfirmRequest {
   bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
   bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
   reserved 10, 11; // removed: legacy Safe-7 island_attestation / anchor_expiry_tick (replaced by field 12)
-  // Canonical offline-bearer release (Boot Fenced Fused Anchor): the prost-encoded
-  // dsm.anchor.OfflineRelease (Δ + boot chain + fused root-advance cert + counter evidence),
-  // carried as opaque bytes so the dsm.anchor namespace stays decoupled from dsm_app. The receiver
-  // decodes it and applies anchor_core::accept::accept_offline (the 22-check predicate). Until the
-  // producer side ships (Phase 5) this is empty and the transfer fails closed to online recovery;
-  // no value is released on an absent or invalid release.
+  // Canonical offline-bearer release (Software-Authority / Hardware-Identity v2): the prost-encoded
+  // dsm.anchor.OfflineRelease (Δ + Π_i/Π_{i+1} anchor-state inclusion proofs + the v2 certificate
+  // carrying σ^chip + σ^host), carried as opaque bytes so the dsm.anchor namespace stays decoupled
+  // from dsm_app. The receiver decodes it and applies anchor_core::accept::accept_offline. Empty
+  // for ordinary transfers; an absent or invalid release fails closed to online recovery — no value
+  // is released on it.
   bytes offline_release = 12 [(dsm_max_len)=262144];
-  // Fused-anchor-state leaf inclusion proofs (Boot Fenced Fused Anchor §12), siblings of
-  // rel_proof_parent/child. `anchor_state_prev_proof` proves the OLD fused commit
-  // H("DSM/fused-anchor-state/v1"‖B‖Aᵢ‖J_b‖uᵢ) ∈ sender_smt_root_before; `anchor_state_next_proof`
-  // proves the SUCCESSOR commit (…A_{i+1}‖J_{b'}‖uᵢ+1) ∈ sender_smt_root. The receiver recomputes
-  // both commits from the release cert's fused fields and verifies inclusion against those device
-  // roots (verify_anchor_state_commitment). Present iff offline_release is; absent for ordinary
-  // transfers (which never touch the fused-anchor leaf).
-  bytes anchor_state_prev_proof = 13 [(dsm_max_len)=131072];
-  bytes anchor_state_next_proof = 14 [(dsm_max_len)=131072];
+  reserved 13, 14; // removed v1 counter-era anchor_state_prev/next_proof (Π now rides IN the release)
   // Receiver-admit fold: A's fused-anchor pin disclosure, present iff this confirm carries a bearer
-  // release AND the prepare-response asked to enroll (first-transfer). B pins/upgrades it under the
-  // already-verified contact, bound to this transfer. Absent for ordinary transfers. See AnchorDisclosure.
+  // release. B pins it TOFU on the first transfer (already-verified contact, bound to this
+  // transfer) and verifies same-anchor on every subsequent one. Absent for ordinary transfers.
   AnchorDisclosure anchor_disclosure = 15;
 }
 

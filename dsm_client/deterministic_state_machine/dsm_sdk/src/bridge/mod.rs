@@ -132,13 +132,14 @@ pub trait AppRouter: Send + Sync {
         ))
     }
 
-    /// Drive the Boot Fenced Fused Anchor appliance (PREPARE → COMMIT → EMIT) for an
-    /// offline-bearer transfer and return the artifacts the sender puts on the confirm:
-    /// the prost-encoded `dsm.anchor.OfflineRelease`, the fused-anchor-state leaf update to
-    /// commit into the per-device SMT advance, the consumed/successor appliance roots, and the
-    /// pin the receiver admits. Delegates to [`CoreSDK::build_offline_bearer_release`].
+    /// v2 producer phase 1 (Software-Authority / Hardware-Identity): stage the next offline-bearer
+    /// transition from the appliance's active state — the transition `Δ`, the successor frontier,
+    /// and the successor anchor-state leaf — WITHOUT any appliance mutation. The caller simulates
+    /// the DSM advance over the returned leaf to get `R_i`/`R_{i+1}` + `Π_i`/`Π_{i+1}`, then calls
+    /// [`release_offline_bearer`](Self::release_offline_bearer). Delegates to
+    /// [`CoreSDK::stage_offline_bearer_transition`].
     #[allow(clippy::too_many_arguments)]
-    fn build_offline_bearer_release(
+    fn stage_offline_bearer_transition(
         &self,
         _relationship_id: [u8; 32],
         _recipient_device_id: [u8; 32],
@@ -148,49 +149,32 @@ pub trait AppRouter: Send + Sync {
         _action_type: u32,
         _action_fields: Vec<u8>,
         _receiver_challenge: [u8; 32],
-    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
-            "build_offline_bearer_release not implemented on this router",
+            "stage_offline_bearer_transition not implemented on this router",
         ))
     }
 
-    /// Phase 1 of the first-transfer round-trip (§21.2): drive the appliance PREPARE only — form the
-    /// cross-bound certificate WITHOUT moving the counter — and return the [`PreparedOfflineBearer`]
-    /// (the FROM coordinate `uᵢ` + the pin the receiver reads and admits). Delegates to
-    /// [`CoreSDK::prepare_offline_bearer_release`].
-    #[allow(clippy::too_many_arguments)]
-    fn prepare_offline_bearer_release(
+    /// v2 producer phase 2: PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE with the real
+    /// device SMT roots from the caller's advance simulation, attaching `Π_i`/`Π_{i+1}` to the
+    /// release package. Delegates to [`CoreSDK::release_offline_bearer`].
+    fn release_offline_bearer(
         &self,
-        _relationship_id: [u8; 32],
-        _recipient_device_id: [u8; 32],
-        _object_id: [u8; 32],
-        _payload_hash: [u8; 32],
-        _authority_policy_hash: [u8; 32],
-        _action_type: u32,
-        _action_fields: Vec<u8>,
+        _staged: &crate::sdk::core_sdk::StagedBearerTransition,
         _receiver_challenge: [u8; 32],
-    ) -> Result<crate::sdk::core_sdk::PreparedOfflineBearer, dsm::types::error::DsmError> {
-        Err(dsm::types::error::DsmError::invalid_operation(
-            "prepare_offline_bearer_release not implemented on this router",
-        ))
-    }
-
-    /// Phase 2 of the first-transfer round-trip (§21.3–§21.6): COMMIT the prepared transfer — move the
-    /// counter `uᵢ → uᵢ+1` — then EMIT + FINALIZE, returning the [`OfflineBearerArtifacts`]. Called
-    /// ONLY after the receiver's authenticated FROM read arrived (`BilateralBearerProceed`). Delegates
-    /// to [`CoreSDK::commit_offline_bearer_release`].
-    fn commit_offline_bearer_release(
-        &self,
-        _prepared: &crate::sdk::core_sdk::PreparedOfflineBearer,
+        _sender_device_root_before: [u8; 32],
+        _sender_device_root_after: [u8; 32],
+        _anchor_smt_proof_before: Vec<u8>,
+        _anchor_smt_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
-            "commit_offline_bearer_release not implemented on this router",
+            "release_offline_bearer not implemented on this router",
         ))
     }
 
-    /// §21 first-transfer round-trip cleanup: release an ABANDONED prepared bearer (receiver never
-    /// sent `BilateralBearerProceed`) so the appliance returns to `Ready` and future offline-bearer
-    /// sends do not fail closed. Best-effort no-op default; overridden to delegate to
+    /// Cleanup: release an ABANDONED prepared bearer (e.g. the confirm build failed between
+    /// PREPARE and COMMIT) so the appliance returns to `Ready` and future offline-bearer sends do
+    /// not fail closed. Best-effort no-op default; overridden to delegate to
     /// [`CoreSDK::cancel_offline_bearer_release`].
     fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
         Ok(())

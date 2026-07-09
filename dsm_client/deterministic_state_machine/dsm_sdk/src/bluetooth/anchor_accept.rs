@@ -224,6 +224,8 @@ pub fn accept_offline_release(
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
+    expected_sender_device_root_before: &[u8; 32],
+    expected_sender_device_root_after: &[u8; 32],
 ) -> Result<AdoptedAnchorState, OfflineRecover> {
     if offline_release.is_empty() {
         return Err(OfflineRecover::MissingRelease);
@@ -233,6 +235,16 @@ pub fn accept_offline_release(
         .to_release()
         .map_err(|_| OfflineRecover::Malformed)?;
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
+
+    // Tie the cert's device roots to the roots the handler INDEPENDENTLY verified from the confirm
+    // (rel_proof_parent/child + §C1 recompute). The predicate checks Π against the CERT roots; if
+    // the cert roots were not the actual verified device roots, the sender could sign an arbitrary
+    // parallel tree — reject before running the predicate.
+    if rel.cert.sender_device_root_before != *expected_sender_device_root_before
+        || rel.cert.sender_device_root_after != *expected_sender_device_root_after
+    {
+        return Err(OfflineRecover::Predicate(AcceptError::TransitionProofInvalid));
+    }
 
     let t = rel.transition.as_transition();
     // The receiver's adopted frontier for this holder, or (genesis) the release's own prev_root TOFU.
@@ -336,21 +348,26 @@ mod tests {
 
     #[test]
     fn missing_release_routes_online() {
-        let r = accept_offline_release(&[], Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO);
+        let r = accept_offline_release(&[], Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
         assert!(matches!(r, Err(OfflineRecover::MissingRelease)));
     }
 
     #[test]
     fn malformed_release_routes_online() {
-        let bytes = pb::OfflineRelease { ..Default::default() }.encode_to_vec();
-        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO);
+        // Non-empty bytes with no transition/cert: decodes as a proto but fails `to_release`.
+        let bytes = pb::OfflineRelease {
+            anchor_smt_proof_before: vec![0x01],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
         assert!(matches!(r, Err(OfflineRecover::Malformed)));
     }
 
     #[test]
     fn unenrolled_anchor_routes_online() {
         let bytes = decodable_release_bytes();
-        let r = accept_offline_release(&bytes, None, Some(&ZERO), &ZERO, &ZERO, &ZERO);
+        let r = accept_offline_release(&bytes, None, Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
         assert!(matches!(r, Err(OfflineRecover::AnchorNotEnrolled)));
     }
 
@@ -359,7 +376,7 @@ mod tests {
         // A decodable release WITH a pin reaches accept_offline and is rejected (proves the canonical
         // predicate is wired + fail-closed — an all-zero cert can never satisfy it).
         let bytes = decodable_release_bytes();
-        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO);
+        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
         assert!(matches!(r, Err(OfflineRecover::Predicate(_))));
     }
 
