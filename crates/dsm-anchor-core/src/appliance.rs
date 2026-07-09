@@ -157,7 +157,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// `H ≤ H₀`; a reported `H > H₀` is impossible and is rejected.
     pub fn live_index(&mut self) -> Result<u64, ApplianceError> {
         let h = self.tropic.counter_get().map_err(ApplianceError::Tropic)?;
-        let u = self.h0.checked_sub(h).ok_or(ApplianceError::CounterMismatch)?;
+        let u = self
+            .h0
+            .checked_sub(h)
+            .ok_or(ApplianceError::CounterMismatch)?;
         Ok(u as u64)
     }
 
@@ -195,7 +198,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         if h == 0 {
             return Err(ApplianceError::CounterExhausted);
         }
-        let live_u = self.h0.checked_sub(h).ok_or(ApplianceError::CounterMismatch)? as u64;
+        let live_u = self
+            .h0
+            .checked_sub(h)
+            .ok_or(ApplianceError::CounterMismatch)? as u64;
         if self.active.anchor_counter != live_u {
             return Err(ApplianceError::CounterMismatch);
         }
@@ -268,7 +274,10 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         if h == 0 {
             return Err(ApplianceError::CounterExhausted);
         }
-        let live_u = self.h0.checked_sub(h).ok_or(ApplianceError::CounterMismatch)? as u64;
+        let live_u = self
+            .h0
+            .checked_sub(h)
+            .ok_or(ApplianceError::CounterMismatch)? as u64;
         if live_u != p.cert.anchor_counter {
             return Err(ApplianceError::CounterMismatch);
         }
@@ -364,9 +373,12 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         match self.active.status {
             Status::Committed => {
                 let (committed, rec_u, next_frontier, prev_frontier) = match &self.active.record {
-                    Record::Committed(c) => {
-                        (c.committed, c.next_anchor_counter, c.next_frontier, c.prev_frontier)
-                    }
+                    Record::Committed(c) => (
+                        c.committed,
+                        c.next_anchor_counter,
+                        c.next_frontier,
+                        c.prev_frontier,
+                    ),
                     _ => return RecoverOutcome::DowngradeOnline,
                 };
                 if committed {

@@ -198,7 +198,11 @@ where
 
     // (3) Π_i proves R_i commits the anchor-state leaf (B, h_i, u_i).
     let leaf_i = anchor_state_leaf(ctx.pinned_bundle, &cert.prev_frontier, cert.anchor_counter);
-    if !dsm.verify_smt_leaf(&cert.sender_device_root_before, &rel.anchor_smt_proof_before, &leaf_i) {
+    if !dsm.verify_smt_leaf(
+        &cert.sender_device_root_before,
+        &rel.anchor_smt_proof_before,
+        &leaf_i,
+    ) {
         return Err(AcceptError::PrevStateUncommitted);
     }
 
@@ -228,7 +232,11 @@ where
     verify_cert_frontier_and_sigs::<C, P>(cert, ctx.pinned_pk_chip, ctx.pinned_pk_host)?;
 
     // (12) DSM transition (σ^DSM + R_i → R_{i+1}).
-    if !dsm.verify_transition(&cert.transition_digest, &cert.prev_frontier, &cert.next_frontier) {
+    if !dsm.verify_transition(
+        &cert.transition_digest,
+        &cert.prev_frontier,
+        &cert.next_frontier,
+    ) {
         return Err(AcceptError::TransitionProofInvalid);
     }
 
@@ -238,9 +246,16 @@ where
     }
 
     // (14) Π_{i+1} proves R_{i+1} commits (B, h_{i+1}, u_i+1).
-    let leaf_next =
-        anchor_state_leaf(ctx.pinned_bundle, &cert.next_frontier, cert.next_anchor_counter);
-    if !dsm.verify_smt_leaf(&cert.sender_device_root_after, &rel.anchor_smt_proof_after, &leaf_next) {
+    let leaf_next = anchor_state_leaf(
+        ctx.pinned_bundle,
+        &cert.next_frontier,
+        cert.next_anchor_counter,
+    );
+    if !dsm.verify_smt_leaf(
+        &cert.sender_device_root_after,
+        &rel.anchor_smt_proof_after,
+        &leaf_next,
+    ) {
         return Err(AcceptError::NextStateUncommitted);
     }
 
@@ -312,7 +327,12 @@ mod tests {
     }
     impl Default for MockDsm {
         fn default() -> Self {
-            Self { transition_ok: true, delivery_ok: true, smt_ok: true, upgrade_ok: true }
+            Self {
+                transition_ok: true,
+                delivery_ok: true,
+                smt_ok: true,
+                upgrade_ok: true,
+            }
         }
     }
     impl DsmVerifier for MockDsm {
@@ -365,10 +385,21 @@ mod tests {
         let h_next = anchor_root_advance(&prev_frontier, &d);
         owned.next_root = h_next;
 
-        let r_before = h("mock/root-before", &[&B, &prev_frontier, &u64::to_le_bytes(u)]);
+        let r_before = h(
+            "mock/root-before",
+            &[&B, &prev_frontier, &u64::to_le_bytes(u)],
+        );
         let r_after = h("mock/root-after", &[&B, &h_next, &u64::to_le_bytes(next_u)]);
         let m = root_advance_message(
-            &B, &r_before, &r_after, &prev_frontier, &h_next, u, next_u, &d, &RECIPIENT,
+            &B,
+            &r_before,
+            &r_after,
+            &prev_frontier,
+            &h_next,
+            u,
+            next_u,
+            &d,
+            &RECIPIENT,
             &R_CHALLENGE,
         );
 
@@ -420,16 +451,76 @@ mod tests {
         let base = root_advance_message(
             &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32], &[10; 32],
         );
-        assert_ne!(base, root_advance_message(&[0; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[0; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[0; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[0; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[4; 32], &[0; 32], 6, 7, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 0, 7, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 0, &[8; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[0; 32], &[9; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[0; 32], &[10; 32]));
-        assert_ne!(base, root_advance_message(&[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32], &[0; 32]));
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[0; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[0; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[0; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[0; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[0; 32], 6, 7, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 0, 7, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 0, &[8; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[0; 32], &[9; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[0; 32],
+                &[10; 32]
+            )
+        );
+        assert_ne!(
+            base,
+            root_advance_message(
+                &[1; 32], &[2; 32], &[3; 32], &[4; 32], &[5; 32], 6, 7, &[8; 32], &[9; 32],
+                &[0; 32]
+            )
+        );
 
         let mut rel = valid_release(H0, 0);
         rel.cert.root_advance_message[0] ^= 1;
@@ -453,7 +544,10 @@ mod tests {
     #[test]
     fn rejects_missing_dsm_signature() {
         let rel = valid_release(H0, 0);
-        let dsm = MockDsm { transition_ok: false, ..MockDsm::default() };
+        let dsm = MockDsm {
+            transition_ok: false,
+            ..MockDsm::default()
+        };
         assert_eq!(
             accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&H0), &dsm),
             Err(AcceptError::TransitionProofInvalid)
@@ -565,7 +659,11 @@ mod tests {
         let rel = valid_release(H0, 0);
         let already_consumed = [0xF0; 32];
         assert_eq!(
-            accept_offline::<_, MockChip, MockHost>(&rel, &ctx(&already_consumed), &MockDsm::default()),
+            accept_offline::<_, MockChip, MockHost>(
+                &rel,
+                &ctx(&already_consumed),
+                &MockDsm::default()
+            ),
             Err(AcceptError::FrontierNotAccepted)
         );
     }
@@ -581,7 +679,16 @@ mod tests {
         let r_b = h("mock/hop-rb", &[&old]);
         let r_a = h("mock/hop-ra", &[&h_bridge]);
         let m_hop = root_advance_message(
-            &B, &r_b, &r_a, &old, &h_bridge, 0, 1, &d_hop, &RECIPIENT, &R_CHALLENGE,
+            &B,
+            &r_b,
+            &r_a,
+            &old,
+            &h_bridge,
+            0,
+            1,
+            &d_hop,
+            &RECIPIENT,
+            &R_CHALLENGE,
         );
         let hop = Certificate {
             anchor_bundle: B,

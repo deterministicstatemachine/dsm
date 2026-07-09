@@ -3428,65 +3428,70 @@ impl BilateralBleHandler {
         // with placeholders and never re-stamped). Ordinary transfers (predicate false) and bearer
         // transfers lacking a receiver challenge stage nothing, so the release rides empty and the
         // receiver fails closed to online recovery.
-        let staged_bearer = if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
-            &session.operation,
-        ) {
-            match (session.receiver_challenge, &session.operation) {
-                (
-                    Some(r_r),
-                    Operation::Transfer {
-                        token_id,
-                        authority_policy,
-                        ..
-                    },
-                ) => {
-                    let object_id =
-                        dsm::crypto::blake3::domain_hash_bytes("DSM/bearer-object/v1", token_id);
-                    let payload_hash =
-                        dsm::crypto::blake3::domain_hash_bytes("DSM/bearer-payload/v1", &op_bytes);
-                    let authority_policy_hash = authority_policy
-                        .as_ref()
-                        .map(|ap| ap.policy_id)
-                        .unwrap_or([0u8; 32]);
-                    // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
-                    // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
-                    // proof is meaningless. Compared against the canonical value here.
-                    info!(
+        let staged_bearer =
+            if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &session.operation,
+            ) {
+                match (session.receiver_challenge, &session.operation) {
+                    (
+                        Some(r_r),
+                        Operation::Transfer {
+                            token_id,
+                            authority_policy,
+                            ..
+                        },
+                    ) => {
+                        let object_id = dsm::crypto::blake3::domain_hash_bytes(
+                            "DSM/bearer-object/v1",
+                            token_id,
+                        );
+                        let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
+                            "DSM/bearer-payload/v1",
+                            &op_bytes,
+                        );
+                        let authority_policy_hash = authority_policy
+                            .as_ref()
+                            .map(|ap| ap.policy_id)
+                            .unwrap_or([0u8; 32]);
+                        // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
+                        // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
+                        // proof is meaningless. Compared against the canonical value here.
+                        info!(
                             "[BILATERAL][offline-bearer][sender] staging authority_policy_hash={} (canonical_match={})",
                             bytes_to_base32(&authority_policy_hash),
                             authority_policy_hash
                                 == dsm::types::operations::canonical_offline_bearer_policy().policy_id
                         );
-                    match router.stage_offline_bearer_transition(
-                        rel_key,
-                        session.counterparty_device_id,
-                        object_id,
-                        payload_hash,
-                        authority_policy_hash,
-                        0,
-                        // action_fields: EMPTY. The operation is already bound into the transition
-                        // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
-                        // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
-                        // once the OfflineBearerRequired policy tail is appended (~266 B). The
-                        // receiver recomputes the digest from the transition carried in the
-                        // release, so empty is consistent end-to-end.
-                        Vec::new(),
-                        r_r,
-                    ) {
-                        Ok(staged) => Some((staged, r_r)),
-                        Err(e) => {
-                            log::warn!(
+                        match router.stage_offline_bearer_transition(
+                            rel_key,
+                            session.counterparty_device_id,
+                            object_id,
+                            payload_hash,
+                            authority_policy_hash,
+                            0,
+                            // action_fields: EMPTY. The operation is already bound into the transition
+                            // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
+                            // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
+                            // once the OfflineBearerRequired policy tail is appended (~266 B). The
+                            // receiver recomputes the digest from the transition carried in the
+                            // release, so empty is consistent end-to-end.
+                            Vec::new(),
+                            r_r,
+                        ) {
+                            Ok(staged) => Some((staged, r_r)),
+                            Err(e) => {
+                                log::warn!(
                                     "[bilateral_ble] offline-bearer staging failed (fail closed to online recovery): {e}"
                                 );
-                            None
+                                None
+                            }
                         }
                     }
+                    _ => None,
                 }
-                _ => None,
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let sim_outcome = router.simulate_advance_for_confirm(
             rel_key,
             session.counterparty_device_id,

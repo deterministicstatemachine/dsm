@@ -43,7 +43,9 @@ pub enum OfflineRecover {
 
 impl OfflineRecover {
     pub fn into_dsm_error(self) -> DsmError {
-        DsmError::invalid_operation(format!("offline transfer rejected (recover online): {self:?}"))
+        DsmError::invalid_operation(format!(
+            "offline transfer rejected (recover online): {self:?}"
+        ))
     }
 }
 
@@ -120,7 +122,12 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         // `leaf` = anchor_state_leaf(B, h, u) (computed by the predicate). Check the SMT inclusion
         // proof binds exactly this leaf value, at key anchor_state_leaf_key(B), under `root` (= R_i
         // or R_{i+1}). An empty/absent proof (producer has not attached Π yet) fails closed.
-        dsm::core::bilateral_transaction_manager::verify_anchor_state_leaf(root, self.bundle, leaf, proof)
+        dsm::core::bilateral_transaction_manager::verify_anchor_state_leaf(
+            root,
+            self.bundle,
+            leaf,
+            proof,
+        )
     }
 
     fn verify_transition(
@@ -244,7 +251,9 @@ pub fn accept_offline_release(
     if rel.cert.sender_device_root_before != *expected_sender_device_root_before
         || rel.cert.sender_device_root_after != *expected_sender_device_root_after
     {
-        return Err(OfflineRecover::Predicate(AcceptError::TransitionProofInvalid));
+        return Err(OfflineRecover::Predicate(
+            AcceptError::TransitionProofInvalid,
+        ));
     }
 
     let t = rel.transition.as_transition();
@@ -349,7 +358,16 @@ mod tests {
 
     #[test]
     fn missing_release_routes_online() {
-        let r = accept_offline_release(&[], Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
+        let r = accept_offline_release(
+            &[],
+            Some(&pin()),
+            Some(&ZERO),
+            &ZERO,
+            &ZERO,
+            &ZERO,
+            &ZERO,
+            &ZERO,
+        );
         assert!(matches!(r, Err(OfflineRecover::MissingRelease)));
     }
 
@@ -361,14 +379,24 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec();
-        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
+        let r = accept_offline_release(
+            &bytes,
+            Some(&pin()),
+            Some(&ZERO),
+            &ZERO,
+            &ZERO,
+            &ZERO,
+            &ZERO,
+            &ZERO,
+        );
         assert!(matches!(r, Err(OfflineRecover::Malformed)));
     }
 
     #[test]
     fn unenrolled_anchor_routes_online() {
         let bytes = decodable_release_bytes();
-        let r = accept_offline_release(&bytes, None, Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
+        let r =
+            accept_offline_release(&bytes, None, Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
         assert!(matches!(r, Err(OfflineRecover::AnchorNotEnrolled)));
     }
 
@@ -377,7 +405,16 @@ mod tests {
         // A decodable release WITH a pin reaches accept_offline and is rejected (proves the canonical
         // predicate is wired + fail-closed — an all-zero cert can never satisfy it).
         let bytes = decodable_release_bytes();
-        let r = accept_offline_release(&bytes, Some(&pin()), Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
+        let r = accept_offline_release(
+            &bytes,
+            Some(&pin()),
+            Some(&ZERO),
+            &ZERO,
+            &ZERO,
+            &ZERO,
+            &ZERO,
+            &ZERO,
+        );
         assert!(matches!(r, Err(OfflineRecover::Predicate(_))));
     }
 

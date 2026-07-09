@@ -27,8 +27,7 @@ use crate::types::operations::Operation;
 use crate::types::state_types::{PreCommitment, State};
 use crate::core::utility::labeling;
 use crate::common::domain_tags::{
-    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY,
-    TAG_TIP,
+    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY, TAG_TIP,
 };
 
 // -------------------- Cryptographic Progress (strictly increasing, clockless) --------------------
@@ -1535,22 +1534,52 @@ mod tests {
         // Bootstrap leaf_0, then the "parent" proof against prev_root.
         let parent_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf0).expect("set0");
         let prev_root = *smt.root();
-        assert!(verify_anchor_state_leaf(&prev_root, &b, &leaf0, &parent_proof));
+        assert!(verify_anchor_state_leaf(
+            &prev_root,
+            &b,
+            &leaf0,
+            &parent_proof
+        ));
 
         // Advance the leaf to the successor leaf_1; "child" proof vs next_root.
         let child_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf1).expect("set1");
         let next_root = *smt.root();
-        assert!(verify_anchor_state_leaf(&next_root, &b, &leaf1, &child_proof));
+        assert!(verify_anchor_state_leaf(
+            &next_root,
+            &b,
+            &leaf1,
+            &child_proof
+        ));
 
         // Fail-closed rejections:
         // wrong leaf value under next_root.
-        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf0, &child_proof));
+        assert!(!verify_anchor_state_leaf(
+            &next_root,
+            &b,
+            &leaf0,
+            &child_proof
+        ));
         // right value but wrong root (child proof does not verify under prev_root).
-        assert!(!verify_anchor_state_leaf(&prev_root, &b, &leaf1, &child_proof));
+        assert!(!verify_anchor_state_leaf(
+            &prev_root,
+            &b,
+            &leaf1,
+            &child_proof
+        ));
         // parent (old) state is NOT committed by next_root.
-        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf0, &parent_proof));
+        assert!(!verify_anchor_state_leaf(
+            &next_root,
+            &b,
+            &leaf0,
+            &parent_proof
+        ));
         // wrong bundle (wrong leaf KEY) rejects even with the right value + root.
-        assert!(!verify_anchor_state_leaf(&next_root, &[9u8; 32], &leaf1, &child_proof));
+        assert!(!verify_anchor_state_leaf(
+            &next_root,
+            &[9u8; 32],
+            &leaf1,
+            &child_proof
+        ));
         // an empty proof rejects (a release with no attached proof routes online).
         assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf1, &[]));
     }

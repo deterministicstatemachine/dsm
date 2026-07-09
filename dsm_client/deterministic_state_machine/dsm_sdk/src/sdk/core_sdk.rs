@@ -1761,14 +1761,15 @@ impl CoreSDK {
         }
 
         // Attach Π_i/Π_{i+1} to the package (unsigned carrier fields; see method doc).
-        let mut rel = anchor_core::proto::pb::OfflineRelease::decode(&emitted[..]).map_err(|e| {
-            DsmError::serialization_error(
-                "OfflineRelease",
-                "protobuf",
-                Some(e.to_string()),
-                Some(e),
-            )
-        })?;
+        let mut rel =
+            anchor_core::proto::pb::OfflineRelease::decode(&emitted[..]).map_err(|e| {
+                DsmError::serialization_error(
+                    "OfflineRelease",
+                    "protobuf",
+                    Some(e.to_string()),
+                    Some(e),
+                )
+            })?;
         rel.anchor_smt_proof_before = anchor_smt_proof_before;
         rel.anchor_smt_proof_after = anchor_smt_proof_after;
 
@@ -3134,9 +3135,7 @@ mod tests {
     #[test]
     #[serial]
     fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
-        use crate::bluetooth::anchor_accept::{
-            accept_offline_release, OfflineRecover, PinnedAnchor,
-        };
+        use crate::bluetooth::anchor_accept::{accept_offline_release, OfflineRecover, PinnedAnchor};
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
         };
@@ -3332,8 +3331,7 @@ mod tests {
     #[serial]
     fn sim_post_root_equals_canonical_committed_post_root_with_anchor_leaf() {
         use dsm::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key,
-            initial_chain_tip_from_device_ids,
+            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
         };
         use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
 

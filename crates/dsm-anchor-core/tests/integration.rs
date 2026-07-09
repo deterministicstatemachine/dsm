@@ -99,7 +99,12 @@ struct Dsm {
 }
 impl Dsm {
     fn ok() -> Self {
-        Self { smt_ok: true, transition_ok: true, delivers: true, upgrade_ok: true }
+        Self {
+            smt_ok: true,
+            transition_ok: true,
+            delivers: true,
+            upgrade_ok: true,
+        }
     }
 }
 impl DsmVerifier for Dsm {
@@ -147,7 +152,13 @@ fn fixture(h: u32) -> Fixture {
     let bundle = b.bundle;
     let frontier0 = b.genesis_frontier;
     let a = Appliance::new(MockTropic::with_h(h), H0, ANCHOR, PART_DEV, b);
-    Fixture { a, part_pk, chip_pk, bundle, frontier0 }
+    Fixture {
+        a,
+        part_pk,
+        chip_pk,
+        bundle,
+        frontier0,
+    }
 }
 
 /// A transition advancing from `prev_frontier` at counter `u`. `next_root` is the derived
@@ -178,7 +189,8 @@ fn make_transition(prev_frontier: [u8; 32], u: u64) -> OwnedTransition {
 fn valid_release() -> (OfflineRelease, Vec<u8>, Vec<u8>, [u8; 32], [u8; 32]) {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
-    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     f.a.commit().unwrap();
     let rel = f.a.emit().unwrap().clone();
     (rel, f.part_pk, f.chip_pk, f.bundle, f.frontier0)
@@ -212,7 +224,8 @@ fn full_lifecycle_prepare_commit_emit_finalize() {
     let t = make_transition(f.frontier0, 0);
     let next_frontier = t.next_root;
 
-    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     assert_eq!(f.a.active.status, Status::Prepared);
     assert_eq!(f.a.active.root, f.frontier0); // frontier stays until finalize
 
@@ -236,13 +249,15 @@ fn two_sequential_transfers() {
     let mut f = fixture(H0);
     let t0 = make_transition(f.frontier0, 0);
     let frontier1 = t0.next_root;
-    f.a.prepare(&t0.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t0.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     f.a.commit().unwrap();
     assert_eq!(f.a.finalize().unwrap(), frontier1);
 
     let t1 = make_transition(frontier1, 1);
     let frontier2 = t1.next_root;
-    f.a.prepare(&t1.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t1.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     f.a.commit().unwrap();
     assert_eq!(f.a.active.anchor_counter, 2);
     assert_eq!(f.a.finalize().unwrap(), frontier2);
@@ -273,17 +288,26 @@ fn accept_rejects_dsm_state_failures() {
     let (rel, part_pk, chip_pk, bundle, frontier0) = valid_release();
     let c = ctx(&bundle, &chip_pk, &part_pk, &frontier0);
 
-    let d = Dsm { smt_ok: false, ..Dsm::ok() };
+    let d = Dsm {
+        smt_ok: false,
+        ..Dsm::ok()
+    };
     assert_eq!(
         accept_offline::<_, MockChip, MockPart>(&rel, &c, &d),
         Err(AcceptError::PrevStateUncommitted)
     );
-    let d = Dsm { transition_ok: false, ..Dsm::ok() };
+    let d = Dsm {
+        transition_ok: false,
+        ..Dsm::ok()
+    };
     assert_eq!(
         accept_offline::<_, MockChip, MockPart>(&rel, &c, &d),
         Err(AcceptError::TransitionProofInvalid)
     );
-    let d = Dsm { delivers: false, ..Dsm::ok() };
+    let d = Dsm {
+        delivers: false,
+        ..Dsm::ok()
+    };
     assert_eq!(
         accept_offline::<_, MockChip, MockPart>(&rel, &c, &d),
         Err(AcceptError::NotDeliveredToReceiver)
@@ -321,9 +345,13 @@ fn recover_committed_reemits() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
     let next_frontier = t.next_root;
-    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     f.a.commit().unwrap();
-    assert_eq!(f.a.recover(), RecoverOutcome::ReemitCommitted(next_frontier));
+    assert_eq!(
+        f.a.recover(),
+        RecoverOutcome::ReemitCommitted(next_frontier)
+    );
     assert_eq!(f.a.emit().unwrap().cert.next_frontier, next_frontier);
     assert_eq!(f.a.finalize().unwrap(), next_frontier);
 }
@@ -332,7 +360,8 @@ fn recover_committed_reemits() {
 fn recover_prepared_can_complete() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
-    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     assert_eq!(f.a.recover(), RecoverOutcome::AcceptPreparedCanComplete);
 }
 
@@ -340,7 +369,8 @@ fn recover_prepared_can_complete() {
 fn recover_ready_stale_adopts_live_and_ahead_fails_closed() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
-    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     f.a.commit().unwrap();
     f.a.finalize().unwrap(); // counter at 99, u=1
     f.a.active.anchor_counter = 0; // stale (behind the chip)
@@ -357,7 +387,8 @@ fn recover_ready_stale_adopts_live_and_ahead_fails_closed() {
 fn cancel_returns_to_ready() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
-    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
     f.a.cancel().unwrap();
     assert_eq!(f.a.active.status, Status::Ready);
     assert!(matches!(f.a.active.record, Record::Empty));
@@ -393,21 +424,37 @@ fn service_handle_full_flow() {
     let r = decode_response(&handle(&mut f.a, &encode_request(&prep))).unwrap();
     assert!(r.ok, "prepare failed: {}", r.error);
 
-    let commit = pb::ApplianceRequest { op: pb::Op::Commit as i32, ..Default::default() };
-    assert!(decode_response(&handle(&mut f.a, &encode_request(&commit))).unwrap().ok);
+    let commit = pb::ApplianceRequest {
+        op: pb::Op::Commit as i32,
+        ..Default::default()
+    };
+    assert!(
+        decode_response(&handle(&mut f.a, &encode_request(&commit)))
+            .unwrap()
+            .ok
+    );
 
-    let emit = pb::ApplianceRequest { op: pb::Op::Emit as i32, ..Default::default() };
+    let emit = pb::ApplianceRequest {
+        op: pb::Op::Emit as i32,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut f.a, &encode_request(&emit))).unwrap();
     assert!(r.ok);
     let rel = r.release.unwrap().to_release().unwrap();
     let c = ctx(&f.bundle, &f.chip_pk, &f.part_pk, &f.frontier0);
     accept_offline::<_, MockChip, MockPart>(&rel, &c, &Dsm::ok()).unwrap();
 
-    let fin = pb::ApplianceRequest { op: pb::Op::Finalize as i32, ..Default::default() };
+    let fin = pb::ApplianceRequest {
+        op: pb::Op::Finalize as i32,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut f.a, &encode_request(&fin))).unwrap();
     assert_eq!(r.active_root, next_frontier.to_vec());
 
-    let status = pb::ApplianceRequest { op: pb::Op::Status as i32, ..Default::default() };
+    let status = pb::ApplianceRequest {
+        op: pb::Op::Status as i32,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut f.a, &encode_request(&status))).unwrap();
     assert_eq!(r.active_anchor_counter, 1);
     assert_eq!(r.status, 0);
@@ -419,7 +466,10 @@ fn service_rejects_host_boot() {
     // The former OP_BOOT (wire value 1) is reserved: boot is device-internal, so a host
     // frame carrying it must be rejected as an unknown op.
     let mut f = fixture(H0);
-    let req = pb::ApplianceRequest { op: 1, ..Default::default() };
+    let req = pb::ApplianceRequest {
+        op: 1,
+        ..Default::default()
+    };
     let r = decode_response(&handle(&mut f.a, &encode_request(&req))).unwrap();
     assert!(!r.ok);
     assert_eq!(r.error, err::BAD_OP);

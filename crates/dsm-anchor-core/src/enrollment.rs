@@ -129,7 +129,10 @@ pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Birth {
         inp.policy_hash,
         &birth_commitment,
     );
-    let genesis_frontier = h(domain::ANCHOR_FRONTIER_GENESIS_V2, &[&bundle, inp.genesis_root]);
+    let genesis_frontier = h(
+        domain::ANCHOR_FRONTIER_GENESIS_V2,
+        &[&bundle, inp.genesis_root],
+    );
 
     Birth {
         bundle,

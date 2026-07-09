@@ -217,7 +217,10 @@ impl InProcessAnchorAppliance {
         });
         let partition_pk = b.partition_pk.clone();
         let pk_chip = b.chip_pk.clone();
-        let tropic = InProcTropic { h: cfg.enrolled_counter, chip };
+        let tropic = InProcTropic {
+            h: cfg.enrolled_counter,
+            chip,
+        };
         let app = Appliance::<_, SphincsPart>::new(
             tropic,
             cfg.enrolled_counter,
@@ -225,7 +228,11 @@ impl InProcessAnchorAppliance {
             cfg.partition_device_id,
             b,
         );
-        Ok(Self { app, partition_pk, pk_chip })
+        Ok(Self {
+            app,
+            partition_pk,
+            pk_chip,
+        })
     }
 
     /// The pinned partition public key `pk_host`.
@@ -255,7 +262,12 @@ impl AnchorAppliance for InProcessAnchorAppliance {
         sender_device_root_after: &[u8; 32],
     ) -> Result<(), DsmError> {
         self.app
-            .prepare(t, receiver_challenge, sender_device_root_before, sender_device_root_after)
+            .prepare(
+                t,
+                receiver_challenge,
+                sender_device_root_before,
+                sender_device_root_after,
+            )
             .map_err(map_err)
     }
 
@@ -313,10 +325,8 @@ mod tests {
     struct Ed25519ChipSig;
     impl ChipSig for Ed25519ChipSig {
         fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
-            let (Ok(pk), Ok(sig)) = (
-                <[u8; 32]>::try_from(pk_chip),
-                <[u8; 64]>::try_from(sig),
-            ) else {
+            let (Ok(pk), Ok(sig)) = (<[u8; 32]>::try_from(pk_chip), <[u8; 64]>::try_from(sig))
+            else {
                 return false;
             };
             dsm::crypto::classical_verify::verify_ed25519(&pk, message, &sig).is_ok()
@@ -385,8 +395,14 @@ mod tests {
     #[test]
     fn recovery_action_cancels_only_orphaned_uncommitted_prepared() {
         let root = [7u8; 32];
-        assert_eq!(recovery_action(RecoverOutcome::Accept(root), false), RecoveryAction::Ready);
-        assert_eq!(recovery_action(RecoverOutcome::Accept(root), true), RecoveryAction::Ready);
+        assert_eq!(
+            recovery_action(RecoverOutcome::Accept(root), false),
+            RecoveryAction::Ready
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::Accept(root), true),
+            RecoveryAction::Ready
+        );
         assert_eq!(
             recovery_action(RecoverOutcome::ReemitCommitted(root), false),
             RecoveryAction::ReemitCommitted
@@ -432,7 +448,8 @@ mod tests {
         // STATUS → PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE.
         let txn = transition(h0_frontier, 0);
         let next_frontier = txn.next_root;
-        app.prepare(&txn.as_transition(), &RCHAL, &R_I, &R_NEXT).expect("prepare");
+        app.prepare(&txn.as_transition(), &RCHAL, &R_I, &R_NEXT)
+            .expect("prepare");
         app.commit().expect("commit");
         let release_bytes = app.emit().expect("emit");
         assert_eq!(app.finalize().expect("finalize"), next_frontier);
@@ -468,7 +485,8 @@ mod tests {
         let part_pk = pin.partition_pk.clone();
         let h0_frontier = app.status().unwrap().root;
         let txn = transition(h0_frontier, 0);
-        app.prepare(&txn.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+        app.prepare(&txn.as_transition(), &RCHAL, &R_I, &R_NEXT)
+            .unwrap();
         app.commit().unwrap();
         let rel = pb::OfflineRelease::decode(&app.emit().unwrap()[..])
             .unwrap()

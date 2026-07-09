@@ -753,8 +753,8 @@ mod tests {
         // Append field 110 (wire type 2, empty message body) — a minimal stale
         // bilateral_bearer_prepared payload.
         env_bytes.extend_from_slice(&[0xf2, 0x06, 0x00]);
-        let err = from_canonical_bytes(&env_bytes)
-            .expect_err("removed bearer tag 110 must be rejected");
+        let err =
+            from_canonical_bytes(&env_bytes).expect_err("removed bearer tag 110 must be rejected");
         assert!(
             err.to_string().contains("field 110 is reserved"),
             "unexpected error: {err}"

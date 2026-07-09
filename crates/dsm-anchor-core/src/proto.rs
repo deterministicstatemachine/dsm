@@ -166,7 +166,11 @@ impl pb::OfflineRelease {
             .as_ref()
             .ok_or(ProtoError::MissingField)?
             .to_owned_transition()?;
-        let cert = self.cert.as_ref().ok_or(ProtoError::MissingField)?.to_cert()?;
+        let cert = self
+            .cert
+            .as_ref()
+            .ok_or(ProtoError::MissingField)?
+            .to_cert()?;
         let mut branch_proof = Vec::with_capacity(self.branch_proof.len());
         for c in &self.branch_proof {
             branch_proof.push(c.to_cert()?);
