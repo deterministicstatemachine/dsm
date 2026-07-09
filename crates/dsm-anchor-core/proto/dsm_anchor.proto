@@ -1,140 +1,101 @@
-// DSM offline-bearer anchor — wire schema for the on-device appliance protocol.
+// DSM offline anchor — wire schema for the on-device appliance protocol (v2).
 //
 // The shared contract between the RP2350 anchor firmware (which compiles it with
 // prost in no_std + alloc) and the DSM backend. Conventions mirror dsm_app.proto:
 // proto3, package under `dsm`, 32-byte BLAKE3 identifiers/hashes as `bytes`.
 // Fixed lengths are validated on decode by anchor-core (not via custom options).
 //
-// Authority model: Boot Fenced Fused Anchor (§2). The receiver accepts only a
-// publicly valid DSM root advance whose boot ticket, partition certificate,
-// TROPIC01 witness, and authenticated counter evidence all bind the same fused
-// root advance — never on RP2350 statements or a host-supplied counter.
+// Authority model: Software Authority, Hardware Identity (§2). Transfer uniqueness is
+// a software property of the DSM device SMT (one parent root R_i → one accepted
+// successor per receiver). The release binds one root-advance message M_{i+1} under
+// three independent signatures — σ^DSM (seed, on the DSM transition), σ^chip (resident
+// non-exportable Ed25519 in TROPIC01), σ^host (RP2350 partition). No hardware counter
+// read is on the acceptance path; the counter is a non-rewind floor carried only as the
+// signed pair (u_i, u_i+1).
 
 syntax = "proto3";
 
 package dsm.anchor;
 
-// The DSM SMT root-advance package Δ (§15). The anchor counter uᵢ and the fused
-// state (B, Aᵢ, J_b) are committed inside prev_root; the only valid successor
-// counter is uᵢ+1.
+// The DSM SMT root-advance package Δ (§10). The anchor counter u_i and the anchor bundle
+// B are committed inside the device SMT root R_i via the anchor-state leaf; the only valid
+// successor counter is u_i+1.
 message TransitionPackage {
   bytes relationship_id       = 1;  // 32
   bytes object_id             = 2;  // 32
   bytes sender_device_id      = 3;  // 32
   bytes recipient_device_id   = 4;  // 32
-  bytes prev_root             = 5;  // 32  hᵢ
-  bytes next_root             = 6;  // 32  hᵢ₊₁
-  uint64 anchor_counter       = 7;  //     uᵢ = H0 − H
-  uint64 next_anchor_counter  = 8;  //     uᵢ+1
+  bytes prev_root             = 5;  // 32  h_i (offline frontier)
+  bytes next_root             = 6;  // 32  h_{i+1}
+  uint64 anchor_counter       = 7;  //     u_i = H0 − H
+  uint64 next_anchor_counter  = 8;  //     u_i+1
   uint32 action_type          = 9;  // 0=Transfer 1=Resync 2=Cancel 3=Rotate
   bytes action_fields         = 10; // canonical action-specific encoding
   bytes payload_hash          = 11; // 32
-  bytes old_leaf_proof        = 12; // DSM SMT proof of the spent leaf at hᵢ
-  bytes new_leaf_proof        = 13; // DSM SMT proof of the produced leaf at hᵢ₊₁
+  bytes old_leaf_proof        = 12; // DSM SMT proof of the spent leaf at R_i
+  bytes new_leaf_proof        = 13; // DSM SMT proof of the produced leaf at R_{i+1}
   bytes authority_policy_hash = 14; // 32
 }
 
-// One boot ticket (§11): a partition-signed boot-head advance J_b → J_{b+1}.
-message BootTicket {
-  bytes anchor_bundle            = 1;  // 32  B
-  bytes anchor_head              = 2;  // 32  Aᵢ
-  bytes prev_boot_head           = 3;  // 32  J_b
-  bytes next_boot_head           = 4;  // 32  J_{b+1}
-  uint64 boot_seq                = 5;
-  bytes firmware_measurement     = 6;  // 32
-  bytes partition_boot_signature = 7;  // σ^P_boot = PartSign(M^P_boot)
-  bytes tropic_boot_input        = 8;  // 32  X^boot
-  bytes tropic_boot_witness      = 9;  // 32  commit(W^boot)
-}
-
-// The fused root advance certificate (§20).
+// The v2 root-advance certificate (§10, Def. 9): three independent signatures over one
+// root-advance message M_{i+1}. The chip/host public keys are NOT carried — they are pinned
+// in the anchor bundle B at enrollment and supplied to the receiver from its pin.
 message RootAdvanceCertificate {
-  bytes anchor_bundle          = 1;  // 32  B
-  bytes prev_anchor_head       = 2;  // 32  Aᵢ
-  bytes next_anchor_head       = 3;  // 32  Aᵢ₊₁
-  bytes prev_boot_head         = 4;  // 32  J_b (committed by prev_root)
-  bytes current_boot_head      = 5;  // 32  J_{b'}
-  bytes prev_root              = 6;  // 32  hᵢ
-  bytes next_root              = 7;  // 32  hᵢ₊₁
-  uint64 anchor_counter        = 8;  //     uᵢ
-  uint64 next_anchor_counter   = 9;  //     uᵢ+1
-  bytes transition_digest      = 10; // 32  D
-  bytes root_advance_message   = 11; // 32  M
-  bytes partition_commitment   = 12; // 32  C^P
-  bytes tropic_transfer_input  = 13; // 32  X^T
-  bytes pk_hash                = 14; // 32  P_hw
-  bytes pk_hw                  = 15; // revealed TROPIC witness public key
-  bytes sigma_tropic           = 16; // σ^T = StepSign(sk_hw, M^T)
-  bytes sigma_partition        = 17; // σ^P = PartSign(M^P)
-  bytes anchor_id              = 18; // 32  enrolled TROPIC01 anchor identity
-  uint32 transfer_slot         = 19; //     q_tx (validated ≤ u16::MAX)
-  bytes receiver_challenge     = 20; // 32  r_R
+  bytes anchor_bundle              = 1;  // 32  B
+  bytes sender_device_root_before  = 2;  // 32  R_i   (commits (B, h_i, u_i))
+  bytes sender_device_root_after   = 3;  // 32  R_{i+1} (commits (B, h_{i+1}, u_i+1))
+  bytes prev_frontier              = 4;  // 32  h_i
+  bytes next_frontier              = 5;  // 32  h_{i+1} = H(tag ‖ h_i ‖ D)
+  uint64 anchor_counter            = 6;  //     u_i
+  uint64 next_anchor_counter       = 7;  //     u_i+1
+  bytes transition_digest          = 8;  // 32  D
+  bytes root_advance_message       = 9;  // 32  M
+  bytes anchor_id                  = 10; // 32  enrolled TROPIC01 anchor identity (stpub)
+  bytes sigma_chip                 = 11; // σ^chip = ChipSign(M) — resident TROPIC01 Ed25519
+  bytes sigma_host                 = 12; // σ^host = HostSign(M) — RP2350 partition
+  bytes receiver_challenge         = 13; // 32  r_R
+  bytes recipient                  = 14; // 32  recipient device id
 }
 
-// One receiver-side authenticated TROPIC01 counter read, pinned to exactly one
-// transition by binding_hash (§13/§32). Used for both the FROM (pre-commit) and TO
-// (post-commit) ends of a single physical advance. The receiver authenticates
-// verifier_transcript; attested_raw_counter is an untrusted transport claim of H (§33).
-// No per-read transition fields are carried: binding_hash must equal the
-// CounterAdvanceBinding the receiver recomputes from the accepted transition, so a stale
-// or foreign read cannot be spliced in.
-message CounterReadEvidence {
-  bytes anchor_id             = 1;  // 32
-  uint64 attested_raw_counter = 2;  //     untrusted transport claim of H for this read
-  bytes verifier_transcript   = 3;  // authenticated L3 read — the trusted value
-  bytes binding_hash          = 4;  // 32  the transition-bound counter-advance binding
-}
-
-// Transition-bound counter-advance evidence (§13/§32). One physical advance
-// witnessed at both ends: pre at the FROM coordinate (H_pre = H0 − uᵢ), post at
-// the TO coordinate (H_post = H0 − (uᵢ+1)); binding_hash ties the movement to one
-// transition. All three binding_hash fields (pre, post, envelope) must equal the
-// receiver-recomputed binding. The old single post-only CounterEvidence is intentionally
-// removed — a post scalar is not sufficient offline-bearer evidence (§4, §33).
-message CounterAdvanceEvidence {
-  CounterReadEvidence pre  = 1;
-  CounterReadEvidence post = 2;
-  // 32  H(anchor_id ‖ r_R ‖ D ‖ M ‖ R_i ‖ R_{i+1} ‖ hᵢ ‖ hᵢ₊₁ ‖ uᵢ ‖ uᵢ+1)
-  bytes binding_hash       = 3;
-}
-
-// The exported release package Pkg = (Δ, BootChain, Cert, counter-advance evidence) (§20).
+// The exported release package Pkg = (Δ, Π_i, Π_{i+1}, Cert, BranchProof) (§10, Def. 9).
+// The SMT inclusion proofs are attached by the SDK (which owns the device tree). branch_proof
+// is an ordered list of prior certificates for forward-only frontier catch-up (Def. 10);
+// empty for a direct-from-frontier release.
 message OfflineRelease {
-  TransitionPackage transition   = 1;
-  repeated BootTicket boot_chain = 2;
-  RootAdvanceCertificate cert    = 3;
-  CounterAdvanceEvidence counter = 4;
+  TransitionPackage transition               = 1;
+  bytes anchor_smt_proof_before              = 2;  // Π_i
+  bytes anchor_smt_proof_after               = 3;  // Π_{i+1}
+  RootAdvanceCertificate cert                = 4;
+  repeated RootAdvanceCertificate branch_proof = 5;
 }
 
-// Appliance operation selector (§21). Boot is a device-internal operation, not a
-// host op: the firmware boot-fences itself with a device-authoritative firmware
-// measurement at startup, so value 1 (the former OP_BOOT) is reserved and any
-// request carrying it is rejected as an unknown op.
+// Appliance operation selector (§12). Boot is a device-internal operation, not a host op:
+// the firmware self-measures at startup as an implementation gate, so value 1 (the former
+// OP_BOOT) is reserved and any request carrying it is rejected as an unknown op.
 enum Op {
   OP_UNSPECIFIED = 0;
   reserved 1;
   reserved "OP_BOOT";
-  OP_PREPARE     = 2;  // one transfer MACANDD witness; form the cross-bound Cert
-  OP_COMMIT      = 3;  // move the counter, erase sk_hw
+  OP_PREPARE     = 2;  // form M_{i+1}; obtain σ^chip + σ^host over it (no counter move)
+  OP_COMMIT      = 3;  // move the counter floor; mark the candidate committed
   OP_EMIT        = 4;  // export the committed release (after counter commit)
-  OP_FINALIZE    = 5;  // advance the active fused state
-  OP_STATUS      = 6;  // read active fused state (no state change)
+  OP_FINALIZE    = 5;  // advance the active frontier
+  OP_STATUS      = 6;  // read active state (no state change)
   OP_CANCEL      = 7;  // discard a prepared (uncommitted) record
   OP_SPI_PASSTHROUGH = 8; // raw-SPI relay bridge: clock spi_payload to TROPIC01, return the MISO
-                          // bytes. NOT an appliance op — the bytes are not interpreted. For the
-                          // DSM Path-B counter read, where a remote receiver runs its own libtropic
-                          // session end-to-end and this device is a transparent SPI bridge.
+                          // bytes. NOT an appliance op — the bytes are not interpreted.
 }
 
-// A request from the (non-secure) host transport into the secure core. There is
-// no host-reachable boot: the device sources its own boot_seq + device-authoritative
-// firmware_measurement, so fields 4/5 are reserved (were the host-supplied copies).
+// A request from the (non-secure) host transport into the secure core. The device roots
+// R_i / R_{i+1} for OP_PREPARE are computed by the DSM layer (which owns the SMT) and passed
+// in; the appliance signs over them.
 message ApplianceRequest {
-  Op op                        = 1;
-  TransitionPackage transition = 2;  // OP_PREPARE
-  bytes receiver_challenge     = 3;  // OP_PREPARE (32, r_R)
-  reserved 4, 5;                     // were boot_seq / firmware_measurement
-  bytes spi_payload            = 6;  // OP_SPI_PASSTHROUGH: raw MOSI bytes to clock to the chip
+  Op op                             = 1;
+  TransitionPackage transition      = 2;  // OP_PREPARE (Δ)
+  bytes receiver_challenge          = 3;  // OP_PREPARE (32, r_R)
+  bytes sender_device_root_before   = 4;  // OP_PREPARE (32, R_i)
+  bytes sender_device_root_after    = 5;  // OP_PREPARE (32, R_{i+1})
+  bytes spi_payload                 = 6;  // OP_SPI_PASSTHROUGH: raw MOSI bytes to clock to the chip
 }
 
 // The secure core's response.
@@ -143,21 +104,16 @@ message ApplianceResponse {
   bool ok                      = 2;
   uint32 error                 = 3;  // ApplianceError/decode error code if !ok
   OfflineRelease release       = 4;  // OP_EMIT
-  bytes active_root            = 5;  // OP_FINALIZE: hᵢ₊₁; OP_STATUS: active root
+  bytes active_root            = 5;  // OP_FINALIZE: h_{i+1}; OP_STATUS: active frontier h_i
   bytes anchor_bundle          = 6;  // OP_STATUS: B
-  bytes active_anchor_head     = 7;  // OP_STATUS: Aᵢ
-  bytes active_boot_head       = 8;  // OP_STATUS: live boot head J_{b'}
-  uint64 active_anchor_counter = 9;  // OP_STATUS: uᵢ
-  uint32 status                = 10; // OP_STATUS: 0=Ready 1=Prepared 2=Committed
-  bool boot_valid              = 11; // OP_STATUS: offline mode enabled this cycle
-  bytes spi_response           = 12; // OP_SPI_PASSTHROUGH: raw MISO bytes read back from the chip
-  bytes active_committed_boot_head = 13; // OP_STATUS: committed boot head J_b (== active_boot_head at
-                                         // rest; the PREV fused-anchor-state leaf commits THIS). The
-                                         // USB appliance client needs it to build the next transition.
-  // OP_STATUS pin material — the chip self-describing the identity a receiver pins. `anchor_bundle`
-  // (field 6) is B; these three complete the AnchorPin so a USB client sources it from one STATUS
-  // round-trip (no host-side enrollment DB) and the sender's disclosure carries the REAL pin.
-  bytes  pin_anchor_id         = 14; // OP_STATUS: 32-byte anchor id
-  uint64 pin_enrolled_counter  = 15; // OP_STATUS: H0 (the live provisioned enrollment counter)
-  bytes  pin_partition_pk      = 16; // OP_STATUS: partition public key
+  uint64 active_anchor_counter = 7;  // OP_STATUS: u_i
+  uint32 status                = 8;  // OP_STATUS: 0=Ready 1=Prepared 2=Committed
+  bytes spi_response           = 9;  // OP_SPI_PASSTHROUGH: raw MISO bytes read back from the chip
+  // OP_STATUS pin material — the chip self-describing the identity a receiver pins. anchor_bundle
+  // (field 6) is B; these complete the AnchorPin so a USB client sources it from one STATUS
+  // round-trip and the sender's disclosure carries the REAL pin.
+  bytes  pin_anchor_id         = 10; // OP_STATUS: 32-byte anchor id (stpub)
+  uint64 pin_enrolled_counter  = 11; // OP_STATUS: H0 (the live provisioned enrollment counter)
+  bytes  pin_partition_pk      = 12; // OP_STATUS: partition public key pk_host
+  bytes  pin_chip_pk           = 13; // OP_STATUS: resident chip public key pk_chip
 }

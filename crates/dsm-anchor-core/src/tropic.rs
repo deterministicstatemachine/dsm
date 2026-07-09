@@ -1,16 +1,16 @@
-//! The TROPIC01 secure-element abstraction the fused witness flow needs, plus the
-//! two pluggable signature schemes the appliance profile fixes (§5):
-//!   - [`WitnessSig`] — the TROPIC01-keyed hardware witness (StepKeyGen / StepSign
-//!     / StepVerify); the profile is WOTS over BLAKE3 (`sig::WotsBlake3`).
-//!   - [`PartitionSig`] — the RP2350 secure-partition signature scheme
-//!     (PartKeyGen / PartSign / PartVerify) under a partition key generated at
-//!     birth and bound into the anchor bundle `B`.
+//! The TROPIC01 secure-element abstraction the v2 witness flow needs, plus the two
+//! pluggable signature schemes the appliance profile fixes:
+//!   - [`ChipSig`] — verification of the resident non-exportable Ed25519 key inside
+//!     TROPIC01 (the `σ^chip` factor). Signing happens on the die via
+//!     [`Tropic::chip_sign`]; the key never leaves the chip. Its at-rest protection is
+//!     the die's physically unclonable function.
+//!   - [`PartitionSig`] — the RP2350 secure-partition signature scheme (the `σ^host`
+//!     factor), under a key generated at birth and sealed to the partition.
 //!
-//! Keeping all three as traits lets the protocol core stay hardware- and
-//! scheme-agnostic and unit-test on the host with deterministic mocks; the
-//! firmware wires the real libtropic `MAC_And_Destroy` / `MCounter` (two slots,
-//! `q_boot` for boot fencing and `q_tx` for transfer witnesses) and the chosen
-//! signature schemes.
+//! Keeping these as traits lets the protocol core stay hardware- and scheme-agnostic and
+//! unit-test on the host with deterministic mocks; the firmware wires the real libtropic
+//! `ECC_Key` / `EdDSA` (chip) and `MCounter` (the counter, now a non-rewind floor), and
+//! the chosen partition signature scheme.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -19,46 +19,44 @@ use alloc::vec::Vec;
 pub enum TropicError {
     /// SPI / L3-session failure, or chip absent.
     Comm,
-    /// The selected MACANDD slot is not in the expected armed state.
-    NotArmed,
     /// `MCounter_Update` on an exhausted counter (`H == 0`) — online only.
     CounterExhausted,
 }
 
-/// TROPIC01 primitives used over an authenticated L3 session, mediated by the
-/// RP2350 secure partition. The non-secure partition/host cannot invoke these.
-/// Two MACANDD slots are used: `q_boot` (boot fence) and `q_tx` (transfer witness).
+/// TROPIC01 primitives used over an authenticated L3 session, mediated by the RP2350
+/// secure partition. The non-secure partition/host cannot invoke these. The counter is a
+/// non-rewind floor + offline exposure cap (not an acceptance authority); `chip_sign` is
+/// the resident-key possession witness `σ^chip`.
 pub trait Tropic {
-    /// `W = MACANDD(q, X)` — one call evolves slot `q`'s state and returns the
-    /// 32-byte witness output (Def. 19/20). A slot must be armed first.
-    fn mac_and_destroy(&mut self, q: u16, x: &[u8; 32]) -> Result<[u8; 32], TropicError>;
-
-    /// Live monotonic down-counter value `H` (§3); `u = H₀ − H`.
+    /// Live monotonic down-counter value `H` (§8); `u = H₀ − H`.
     fn counter_get(&mut self) -> Result<u32, TropicError>;
 
-    /// `MCounter_Update`: `H ← H − 1`. Returns [`TropicError::CounterExhausted`]
-    /// if `H == 0`.
+    /// `MCounter_Update`: `H ← H − 1`. Returns [`TropicError::CounterExhausted`] if `H == 0`.
     fn counter_update(&mut self) -> Result<(), TropicError>;
+
+    /// `σ^chip = ChipSign(M_{i+1})` — the resident non-exportable Ed25519 key inside
+    /// TROPIC01 signs the 32-byte root-advance message. The private half never leaves the die.
+    fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError>;
+
+    /// The resident chip public key `pk_chip`, exported once at birth and bound into the
+    /// anchor bundle `B`. Only the public half is ever exported.
+    fn chip_pubkey(&mut self) -> Result<Vec<u8>, TropicError>;
 }
 
-/// The TROPIC01-keyed hardware-witness signature scheme (deterministic from a
-/// 32-byte seed). `keygen` is StepKeyGen, `sign` is StepSign, `verify` is
-/// StepVerify (§5, §19). `pk`/`sig` are scheme-sized byte strings.
-pub trait WitnessSig {
-    /// Deterministic `(sk, pk)` from a 32-byte seed (the witness key material Kᵀ).
-    fn keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>);
-    /// Deterministic signature over a 32-byte digest under `sk`.
-    fn sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8>;
-    /// Verify a signature over a 32-byte digest under `pk`.
-    fn verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
+/// Host-side verification of the resident TROPIC01 Ed25519 witness (`σ^chip`). The
+/// receiver verifies against `pk_chip` pinned in the anchor bundle `B`; `pk`/`sig` are
+/// scheme-sized byte strings. Signing is on-die only ([`Tropic::chip_sign`]).
+pub trait ChipSig {
+    /// Verify a signature over a 32-byte digest under the resident chip public key.
+    fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool;
 }
 
-/// The RP2350 secure-partition signature scheme (§5). The partition keypair is
-/// generated at appliance birth; `pk` is bound into the anchor bundle `B` and
-/// pinned by the receiver. PartSign signs the boot certificate and the per-transfer
-/// partition final certificate; the receiver verifies with the pinned `pk`.
+/// The RP2350 secure-partition signature scheme (the `σ^host` factor). The partition
+/// keypair is generated at appliance birth under the birth seal; `pk_host` is bound into
+/// the anchor bundle `B` and pinned by the receiver. PartSign signs the per-transfer
+/// root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
 pub trait PartitionSig {
-    /// Deterministic `(sk, pk)` from a 32-byte seed (partition birth entropy).
+    /// Deterministic `(sk, pk)` from a 32-byte seed (partition birth seal).
     fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>);
     /// Signature over a 32-byte digest under the partition secret key.
     fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8>;
