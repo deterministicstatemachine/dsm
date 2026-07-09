@@ -2625,7 +2625,7 @@ impl AppRouter for AppRouterImpl {
         )
     }
 
-    fn build_offline_bearer_release(
+    fn stage_offline_bearer_transition(
         &self,
         relationship_id: [u8; 32],
         recipient_device_id: [u8; 32],
@@ -2635,8 +2635,8 @@ impl AppRouter for AppRouterImpl {
         action_type: u32,
         action_fields: Vec<u8>,
         receiver_challenge: [u8; 32],
-    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
-        self.core_sdk.build_offline_bearer_release(
+    ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError> {
+        self.core_sdk.stage_offline_bearer_transition(
             relationship_id,
             recipient_device_id,
             object_id,
@@ -2648,34 +2648,23 @@ impl AppRouter for AppRouterImpl {
         )
     }
 
-    fn prepare_offline_bearer_release(
+    fn release_offline_bearer(
         &self,
-        relationship_id: [u8; 32],
-        recipient_device_id: [u8; 32],
-        object_id: [u8; 32],
-        payload_hash: [u8; 32],
-        authority_policy_hash: [u8; 32],
-        action_type: u32,
-        action_fields: Vec<u8>,
+        staged: &crate::sdk::core_sdk::StagedBearerTransition,
         receiver_challenge: [u8; 32],
-    ) -> Result<crate::sdk::core_sdk::PreparedOfflineBearer, dsm::types::error::DsmError> {
-        self.core_sdk.prepare_offline_bearer_release(
-            relationship_id,
-            recipient_device_id,
-            object_id,
-            payload_hash,
-            authority_policy_hash,
-            action_type,
-            action_fields,
-            receiver_challenge,
-        )
-    }
-
-    fn commit_offline_bearer_release(
-        &self,
-        prepared: &crate::sdk::core_sdk::PreparedOfflineBearer,
+        sender_device_root_before: [u8; 32],
+        sender_device_root_after: [u8; 32],
+        anchor_smt_proof_before: Vec<u8>,
+        anchor_smt_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
-        self.core_sdk.commit_offline_bearer_release(prepared)
+        self.core_sdk.release_offline_bearer(
+            staged,
+            receiver_challenge,
+            sender_device_root_before,
+            sender_device_root_after,
+            anchor_smt_proof_before,
+            anchor_smt_proof_after,
+        )
     }
 
     fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {

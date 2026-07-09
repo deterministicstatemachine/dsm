@@ -470,7 +470,7 @@ fn validate_conservation(
 /// `child_r_a`. If the CAS fails, another advance landed first and this
 /// outcome is stale; discard and rebuild from the new head.
 /// A fused-anchor-state leaf replacement to apply in the SAME device-SMT batch as a bearer
-/// transfer's relationship-leaf advance (Boot Fenced Fused Anchor §12). `key` is the stable
+/// transfer's relationship-leaf advance (Software-Authority / Hardware-Identity). `key` is the stable
 /// per-device anchor-state leaf key `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`; `new_value` is the
 /// SUCCESSOR commit `H("DSM/fused-anchor-state/v1" ‖ B ‖ A_{i+1} ‖ J_{b'} ‖ uᵢ+1)`. The key is
 /// stable; only the value changes, so the successor root changes because the value changes and a
@@ -481,10 +481,10 @@ pub struct AnchorLeafUpdate {
     pub new_value: [u8; 32],
 }
 
-/// Inclusion proofs for the fused-anchor-state leaf across a bearer advance: `parent` proves the
-/// OLD commit under the pre-advance device root, `child` proves the SUCCESSOR commit under the
-/// post-advance device root (`child_r_a`). Both are `SmtInclusionProof::to_bytes()` and verify via
-/// `verify_anchor_state_commitment`.
+/// Inclusion proofs for the anchor-state leaf across a bearer advance (`Π_i`/`Π_{i+1}`): `parent`
+/// proves the OLD leaf under the pre-advance device root `R_i`, `child` proves the SUCCESSOR leaf
+/// under the post-advance device root `R_{i+1}` (`child_r_a`). Both are
+/// `SmtInclusionProof::to_bytes()` and verify via `verify_anchor_state_leaf`.
 #[derive(Clone, Debug)]
 pub struct AnchorLeafProofs {
     pub parent: Vec<u8>,
@@ -917,7 +917,7 @@ impl DeviceState {
         })
     }
 
-    /// Bootstrap the per-device fused-anchor-state leaf into the device SMT (Boot Fenced Fused
+    /// Bootstrap the per-device anchor-state leaf into the device SMT (Software-Authority /
     /// Anchor §12): insert `key → value` where `key = H("DSM/fused-anchor-state-leaf/v1" ‖ B)` and
     /// `value = commit_0 = H("DSM/fused-anchor-state/v1" ‖ B ‖ A_0 ‖ J_0 ‖ 0)`. Called ONCE when
     /// the device's fused anchor is admitted; the resulting device root becomes the first valid
@@ -1290,16 +1290,15 @@ mod tests {
     #[test]
     fn bearer_advance_commits_fused_anchor_leaf_into_real_device_roots() {
         use crate::core::bilateral_transaction_manager::{
-            anchor_state_commit, anchor_state_leaf_key, compute_smt_key,
-            initial_chain_tip_from_device_ids, verify_anchor_state_commitment,
+            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
+            verify_anchor_state_leaf,
         };
-        // Fused anchor identity + two states (A_i,J_b,u_i) → (A_{i+1},J_{b'},u_i+1).
+        // Fused anchor identity + two opaque v2 anchor-state leaf VALUES (the anchor-core leaf
+        // `anchor_state_leaf(B, h_i, u_i)` — dsm treats them as opaque 32-byte values).
         let b = [0xB1u8; 32];
-        let (a0, j0) = ([0xA0u8; 32], [0x50u8; 32]);
-        let (a1, j1) = ([0xA1u8; 32], [0x51u8; 32]);
         let key = anchor_state_leaf_key(&b);
-        let commit0 = anchor_state_commit(&b, &a0, &j0, 0);
-        let commit1 = anchor_state_commit(&b, &a1, &j1, 1);
+        let commit0 = [0xC0u8; 32];
+        let commit1 = [0xC1u8; 32];
 
         // (bootstrap) The admitted device SMT carries commit_0 at the stable anchor-state key.
         let dev = fresh_device(0xAB);
@@ -1336,57 +1335,41 @@ mod tests {
             .clone()
             .expect("bearer advance emits anchor proofs");
 
-        // prev proof verifies (B,A0,J0,0) ONLY against the prev root; next proof verifies
-        // (B,A1,J1,1) ONLY against the next root.
-        assert!(verify_anchor_state_commitment(
+        // prev proof verifies commit_0 ONLY against the prev root; next proof verifies commit_1
+        // ONLY against the next root — and each rejects the other root/value pairing.
+        assert!(verify_anchor_state_leaf(
             &out.smt_proofs.pre_root,
             &b,
-            &a0,
-            &j0,
-            0,
+            &commit0,
             &ap.parent
         ));
-        assert!(verify_anchor_state_commitment(
+        assert!(verify_anchor_state_leaf(
             &out.child_r_a,
             &b,
-            &a1,
-            &j1,
-            1,
+            &commit1,
             &ap.child
         ));
-        assert!(!verify_anchor_state_commitment(
+        assert!(!verify_anchor_state_leaf(
             &out.child_r_a,
             &b,
-            &a0,
-            &j0,
-            0,
+            &commit0,
             &ap.parent
         ));
-        assert!(!verify_anchor_state_commitment(
+        assert!(!verify_anchor_state_leaf(
             &out.smt_proofs.pre_root,
             &b,
-            &a1,
-            &j1,
-            1,
+            &commit1,
             &ap.child
         ));
-        // off-by-one A / u binding rejects.
-        assert!(!verify_anchor_state_commitment(
+        // a wrong leaf VALUE under the right root rejects (value binding).
+        assert!(!verify_anchor_state_leaf(
             &out.child_r_a,
             &b,
-            &a1,
-            &j1,
-            0,
+            &commit0,
             &ap.child
         ));
-        assert!(!verify_anchor_state_commitment(
-            &out.child_r_a,
-            &b,
-            &a0,
-            &j1,
-            1,
-            &ap.child
-        ));
+        // an empty proof rejects (a release with no attached Π routes online).
+        assert!(!verify_anchor_state_leaf(&out.child_r_a, &b, &commit1, &[]));
 
         // (non-bearer) an ordinary advance (anchor_leaf=None) emits no anchor proofs and does NOT
         // mutate the fused anchor state — a subsequent bearer advance still sees commit_0 as parent.
@@ -1436,7 +1419,7 @@ mod tests {
             .expect("bearer advance after a plain one");
         let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
         assert!(
-            verify_anchor_state_commitment(&out2.smt_proofs.pre_root, &b, &a0, &j0, 0, &ap2.parent),
+            verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &commit0, &ap2.parent),
             "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
         );
     }
@@ -1444,22 +1427,21 @@ mod tests {
     #[test]
     fn two_transfer_adoption_advances_receiver_frontier_and_rejects_replay() {
         use crate::core::bilateral_transaction_manager::{
-            anchor_state_commit, anchor_state_leaf_key, compute_smt_key,
-            initial_chain_tip_from_device_ids, verify_anchor_state_commitment, FusedAnchorFrontier,
+            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
+            verify_anchor_state_leaf,
         };
         let b = [0xB1u8; 32];
         let key = anchor_state_leaf_key(&b);
-        let (a0, j0) = ([0xA0u8; 32], [0x50u8; 32]);
-        let (a1, j1) = ([0xA1u8; 32], [0x51u8; 32]);
-        let (a2, j2) = ([0xA2u8; 32], [0x52u8; 32]);
+        // Opaque v2 anchor-state leaf values for u=0,1,2 (anchor-core computes the real ones).
+        let (leaf0, leaf1, leaf2) = ([0xC0u8; 32], [0xC1u8; 32], [0xC2u8; 32]);
 
-        // Sender device: bootstrap the fused-anchor leaf at commit_0 = (B, A_0, J_0, 0).
+        // Sender device: bootstrap the anchor-state leaf at leaf_0.
         let dev = fresh_device(0xAB)
-            .with_anchor_state_leaf(&key, &anchor_state_commit(&b, &a0, &j0, 0))
+            .with_anchor_state_leaf(&key, &leaf0)
             .expect("bootstrap");
 
-        // One bearer advance to `(a_next, j_next, u)` on relationship `cp_tag`.
-        let bearer = |dev: &DeviceState, cp_tag: u8, a_next: [u8; 32], j_next: [u8; 32], u: u64| {
+        // One bearer advance installing the successor leaf on relationship `cp_tag`.
+        let bearer = |dev: &DeviceState, cp_tag: u8, new_value: [u8; 32], u: u64| {
             let cp = devid(cp_tag);
             let rk = compute_smt_key(&dev.devid, &cp);
             let init = initial_chain_tip_from_device_ids(&dev.devid, &cp);
@@ -1475,77 +1457,50 @@ mod tests {
                     amount: 1,
                 }],
                 Some(init),
-                Some(AnchorLeafUpdate {
-                    key,
-                    new_value: anchor_state_commit(&b, &a_next, &j_next, u),
-                }),
+                Some(AnchorLeafUpdate { key, new_value }),
             )
             .expect("bearer advance")
         };
 
-        // Receiver frontier starts at the admitted genesis fused state.
-        let mut frontier = FusedAnchorFrontier::genesis(a0, j0);
+        // Receiver's accepted leaf frontier starts at the admitted genesis value.
+        let mut accepted = leaf0;
 
-        // ---- Transfer 1: (A_0,J_0,0) -> (A_1,J_1,1) ----
-        let out1 = bearer(&dev, 0xC0, a1, j1, 1);
+        // ---- Transfer 1: leaf_0 -> leaf_1 ----
+        let out1 = bearer(&dev, 0xC0, leaf1, 1);
         let ap1 = out1.anchor_proofs.clone().unwrap();
-        assert!(frontier.matches_prev(&a0, &j0, 0)); // consumes the adopted state
-        assert!(verify_anchor_state_commitment(
-            &out1.smt_proofs.pre_root,
-            &b,
-            &a0,
-            &j0,
-            0,
-            &ap1.parent
-        ));
-        assert!(verify_anchor_state_commitment(
+        assert!(
+            verify_anchor_state_leaf(&out1.smt_proofs.pre_root, &b, &accepted, &ap1.parent),
+            "transfer 1 consumes the accepted leaf frontier"
+        );
+        assert!(verify_anchor_state_leaf(
             &out1.child_r_a,
             &b,
-            &a1,
-            &j1,
-            1,
+            &leaf1,
             &ap1.child
         ));
-        frontier = FusedAnchorFrontier::adopt_successor(a1, j1, 1); // adopt
+        accepted = leaf1; // adopt
 
-        // ---- Replay: presenting Transfer 1 again (prev = A_0) now REJECTS ----
+        // ---- Replay: presenting Transfer 1's parent proof against the ADOPTED frontier rejects ----
         assert!(
-            !frontier.matches_prev(&a0, &j0, 0),
-            "after adoption the receiver must reject a replay of the consumed (A_0,u_0) state"
+            !verify_anchor_state_leaf(&out1.smt_proofs.pre_root, &b, &accepted, &ap1.parent),
+            "after adoption the consumed leaf_0 state no longer matches the accepted frontier"
         );
 
-        // ---- Transfer 2: (A_1,J_1,1) -> (A_2,J_2,2), from the adopted state ----
-        let out2 = bearer(&out1.new_device_state, 0xC1, a2, j2, 2);
+        // ---- Transfer 2: leaf_1 -> leaf_2, from the adopted state ----
+        let out2 = bearer(&out1.new_device_state, 0xC1, leaf2, 2);
         let ap2 = out2.anchor_proofs.clone().unwrap();
         assert!(
-            frontier.matches_prev(&a1, &j1, 1),
+            verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &accepted, &ap2.parent),
             "transfer 2 must consume exactly the successor the receiver adopted"
         );
-        assert!(verify_anchor_state_commitment(
-            &out2.smt_proofs.pre_root,
-            &b,
-            &a1,
-            &j1,
-            1,
-            &ap2.parent
-        ));
-        assert!(verify_anchor_state_commitment(
+        assert!(verify_anchor_state_leaf(
             &out2.child_r_a,
             &b,
-            &a2,
-            &j2,
-            2,
+            &leaf2,
             &ap2.child
         ));
-        frontier = FusedAnchorFrontier::adopt_successor(a2, j2, 2);
-        assert_eq!(
-            frontier,
-            FusedAnchorFrontier {
-                anchor_head: a2,
-                boot_head: j2,
-                counter: 2
-            }
-        );
+        accepted = leaf2;
+        assert_eq!(accepted, leaf2);
     }
 
     #[test]

@@ -130,10 +130,10 @@ pub struct BilateralBleSession {
     /// the same verifiable receipt instead of building a degraded one after the
     /// Per-Device SMT has already been mutated.
     pub stitched_receipt_bytes: Option<Vec<u8>>,
-    /// Offline-bearer receiver challenge r_R (Boot Fenced Fused Anchor §15). RECEIVER: the fresh
-    /// challenge it issued in `BilateralPrepareResponse` (checked vs the release on confirm).
-    /// SENDER: the challenge received from that response, bound into the appliance PREPARE. `None`
-    /// for ordinary transfers.
+    /// Offline-bearer receiver challenge r_R. RECEIVER: the fresh challenge it issued in
+    /// `BilateralPrepareResponse` (checked vs the release on confirm). SENDER: the challenge
+    /// received from that response, bound into the appliance PREPARE. `None` for ordinary
+    /// transfers.
     pub receiver_challenge: Option<[u8; 32]>,
     /// SENDER-only: the fused-anchor-state leaf update the appliance produced for this bearer
     /// transfer, stashed at confirm-build time so `mark_sender_committed_with_post_state_hash`
@@ -146,34 +146,6 @@ pub struct BilateralBleSession {
     /// root, else the sender fails closed to recovery (the receiver verified proofs against this
     /// value). `None` for ordinary transfers and on the receiver side.
     pub anchor_sim_root: Option<[u8; 32]>,
-    /// SENDER-only (receiver-admit fold): the receiver's first-transfer `AnchorEnrollRequest`
-    /// pairing pubkey from the prepare-response (possibly EMPTY when B has no pairing deriver).
-    /// `Some` means B asked to enroll — `send_bilateral_confirm` attaches the anchor disclosure to
-    /// this transfer's confirm. `None` for ordinary transfers / already-pinned counterparties.
-    /// In-memory only: lost on restart, the next bearer transfer simply re-requests (fail-safe).
-    pub pending_enroll_pubkey: Option<Vec<u8>>,
-    /// RECEIVER-only (Counter-Positioned Commit §21.3): the authenticated FROM counter read
-    /// `(anchor_id, H_pre = H0 − uᵢ)` the receiver took over the relay while the sender was still
-    /// uncommitted — captured in `create_prepare_accept_envelope_*` BEFORE the accept-response (which
-    /// is what triggers the sender's commit). Consumed by `handle_confirm_request` as `attested_pre`
-    /// so the predicate enforces the full FROM→TO proof. `None` (fail-closed FROM) for ordinary
-    /// transfers, first transfers with no complete pin yet, or when no relay reader is installed.
-    /// In-memory only: lost on restart, the next bearer transfer simply re-reads (fail-safe).
-    pub attested_pre: Option<([u8; 32], u64)>,
-    /// SENDER-only (§21 first-transfer round-trip): the PREPARED offline-bearer transfer whose
-    /// physical counter has NOT yet moved — held between sending `BilateralBearerPrepared` and
-    /// receiving `BilateralBearerProceed`, at which point the sender commits and builds the confirm
-    /// from it. It must be impossible to confirm a first-transfer bearer without this stored prepared
-    /// release. `None` for non-bearer / subsequent transfers. In-memory only: lost on restart, the
-    /// transfer re-prepares (fail-safe).
-    pub prepared_bearer: Option<crate::sdk::core_sdk::PreparedOfflineBearer>,
-    /// SENDER-only (§21 first-transfer round-trip): the COMMITTED offline-bearer artifacts produced by
-    /// `handle_bearer_proceed` (which moved the counter uᵢ→uᵢ+1 only AFTER the receiver's authenticated
-    /// FROM read) — consumed by `send_bilateral_confirm`, which builds the confirm from these instead of
-    /// re-driving the appliance. It must be impossible to confirm on the first-transfer path without
-    /// this stored committed release. `None` for the ordinary path (where `send_bilateral_confirm`
-    /// drives the appliance itself). In-memory only: lost on restart, the transfer re-runs (fail-safe).
-    pub committed_bearer: Option<crate::sdk::core_sdk::OfflineBearerArtifacts>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -549,10 +521,6 @@ impl SessionStore {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
-            pending_enroll_pubkey: None,
-            attested_pre: None,
-            prepared_bearer: None,
-            committed_bearer: None,
         })
     }
 }
@@ -580,10 +548,6 @@ mod tests {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
-            pending_enroll_pubkey: None,
-            attested_pre: None,
-            prepared_bearer: None,
-            committed_bearer: None,
         }
     }
 

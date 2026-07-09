@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Fused-anchor enrollment persistence (Boot Fenced Fused Anchor receiver-admit).
+//! Fused-anchor enrollment persistence (Software-Authority / Hardware-Identity receiver-admit).
 //!
 //! The RECEIVER's pinned admission of a counterparty's fused anchor, keyed by the counterparty
 //! device id — the SQLite backing for
-//! [`dsm::crypto::anchor_enrollment::AnchorEnrollmentStore`]. Pins are admitted only inside the
-//! offline-bearer bilateral confirm flow (first valid transfer for an already-verified contact),
-//! never implicitly from a release alone. `verifier_slot` / `chip_static_pubkey` stay NULL until
-//! the sender's SE-slot provisioning discloses them; an incomplete pin keeps Path-B counter
-//! verification fail-closed.
+//! [`dsm::crypto::anchor_enrollment::AnchorEnrollmentStore`] (v2 pin shape: `pk_chip` = resident
+//! chip Ed25519 key). Pins are admitted only inside the offline-bearer bilateral confirm flow
+//! (first valid transfer for an already-verified contact), never implicitly from a release alone.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
@@ -31,7 +29,7 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
     let row = conn
         .query_row(
             "SELECT policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
-                    uncompromised, verifier_slot, chip_static_pubkey
+                    pk_chip, uncompromised
              FROM anchor_enrollments WHERE device_id = ?1",
             params![device_id.as_slice()],
             |row| {
@@ -41,26 +39,16 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((policy_hash, bundle, anchor_id, enrolled, partition_pk, uncompromised, slot, stpub)) =
+    let Some((policy_hash, bundle, anchor_id, enrolled, partition_pk, pk_chip, uncompromised)) =
         row
     else {
         return Ok(None);
-    };
-    let verifier_slot = match slot {
-        Some(s) if (0..=255).contains(&s) => Some(s as u8),
-        Some(_) => return Err(anyhow!("anchor_enrollments: verifier_slot out of u8 range")),
-        None => None,
-    };
-    let chip_static_pubkey = match stpub {
-        Some(k) => Some(fixed32(k, "chip_static_pubkey")?),
-        None => None,
     };
     Ok(Some(AnchorEnrollment {
         device_id: *device_id,
@@ -70,9 +58,8 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
             anchor_id: fixed32(anchor_id, "anchor_id")?,
             enrolled_counter: enrolled as u64,
             partition_pk,
+            pk_chip,
             uncompromised: uncompromised != 0,
-            verifier_slot,
-            chip_static_pubkey,
         },
     }))
 }
@@ -142,8 +129,8 @@ pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO anchor_enrollments
             (device_id, policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
-             uncompromised, verifier_slot, chip_static_pubkey)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             pk_chip, uncompromised)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             e.device_id.as_slice(),
             e.policy_hash.as_slice(),
@@ -151,9 +138,8 @@ pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
             e.pin.anchor_id.as_slice(),
             e.pin.enrolled_counter as i64,
             e.pin.partition_pk.as_slice(),
+            e.pin.pk_chip.as_slice(),
             e.pin.uncompromised as i64,
-            e.pin.verifier_slot.map(|s| s as i64),
-            e.pin.chip_static_pubkey.as_ref().map(|k| k.as_slice()),
         ],
     )?;
     Ok(())

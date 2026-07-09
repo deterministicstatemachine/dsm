@@ -42,16 +42,15 @@ use prost::Message;
 const ENVELOPE_VERSION_TAG: u32 = 1;
 const ENVELOPE_HEADERS_TAG: u32 = 2;
 const ENVELOPE_MESSAGE_ID_TAG: u32 = 3;
-const RESERVED_PAYLOAD_TAGS: &[u32] = &[13, 14, 33];
+// 110/111 were the v1 counter-era bearer round-trip payloads (BilateralBearerPrepared/Proceed),
+// removed with the Software-Authority / Hardware-Identity rewrite — a stale peer emitting them is
+// rejected by the canonical validator, never routed.
+const RESERVED_PAYLOAD_TAGS: &[u32] = &[13, 14, 33, 110, 111];
 const ALLOWED_PAYLOAD_TAGS: &[u32] = &[
     10, 11, 12, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 31, 32, 34, 35, 36, 37, 38,
     39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
     63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
     87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-    // Counter-Positioned Commit first-transfer round-trip (§21) envelope payloads:
-    // bilateral_bearer_prepared (110) + bilateral_bearer_proceed (111). Without these the
-    // canonical validator rejects every bearer envelope as an unknown field before routing.
-    110, 111,
 ];
 
 fn parsing_error(message: impl Into<String>) -> DsmError {
@@ -737,11 +736,10 @@ mod tests {
     }
 
     #[test]
-    fn strict_decode_accepts_bearer_round_trip_payloads() {
-        // §21 first-transfer round-trip payloads (bilateral_bearer_prepared = 110,
-        // bilateral_bearer_proceed = 111) must pass the canonical validator, else the
-        // receiver rejects every bearer envelope as an unknown field before it can route.
-        let prepared = Envelope {
+    fn strict_decode_rejects_removed_bearer_round_trip_tags() {
+        // The v1 counter-era bearer round-trip payload tags (110/111) are reserved — a stale
+        // peer emitting them must be rejected by the canonical validator, never routed.
+        let mut env_bytes = to_canonical_bytes(&Envelope {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
@@ -750,49 +748,17 @@ mod tests {
                 seq: 7,
             }),
             message_id: vec![4; 16],
-            payload: Some(
-                crate::types::proto::envelope::Payload::BilateralBearerPrepared(
-                    crate::types::proto::BilateralBearerPrepared {
-                        commitment_hash: Some(crate::types::proto::Hash32 { v: vec![5; 32] }),
-                        anchor_disclosure: Some(crate::types::proto::AnchorDisclosure {
-                            bundle: vec![6; 32],
-                            anchor_id: vec![7; 32],
-                            enrolled_counter: 42,
-                            partition_pk: vec![8; 64],
-                            policy_hash: vec![9; 32],
-                            verifier_slot: 1,
-                            verifier_slot_present: true,
-                            chip_static_pubkey: vec![10; 32],
-                        }),
-                    },
-                ),
-            ),
-        };
-        let decoded = from_canonical_bytes(&to_canonical_bytes(&prepared))
-            .expect("bilateral_bearer_prepared (tag 110) must be accepted");
-        assert_eq!(decoded, prepared);
-
-        let proceed = Envelope {
-            version: 3,
-            headers: Some(crate::types::proto::Headers {
-                device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
-                genesis_hash: vec![3; 32],
-                seq: 8,
-            }),
-            message_id: vec![4; 16],
-            payload: Some(
-                crate::types::proto::envelope::Payload::BilateralBearerProceed(
-                    crate::types::proto::BilateralBearerProceed {
-                        commitment_hash: Some(crate::types::proto::Hash32 { v: vec![5; 32] }),
-                        receiver_signature: vec![11; 64],
-                    },
-                ),
-            ),
-        };
-        let decoded = from_canonical_bytes(&to_canonical_bytes(&proceed))
-            .expect("bilateral_bearer_proceed (tag 111) must be accepted");
-        assert_eq!(decoded, proceed);
+            payload: None,
+        });
+        // Append field 110 (wire type 2, empty message body) — a minimal stale
+        // bilateral_bearer_prepared payload.
+        env_bytes.extend_from_slice(&[0xf2, 0x06, 0x00]);
+        let err =
+            from_canonical_bytes(&env_bytes).expect_err("removed bearer tag 110 must be rejected");
+        assert!(
+            err.to_string().contains("field 110 is reserved"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

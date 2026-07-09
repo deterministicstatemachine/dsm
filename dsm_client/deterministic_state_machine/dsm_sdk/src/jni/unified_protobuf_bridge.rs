@@ -1287,16 +1287,6 @@ fn process_envelope_v3_impl(
                 Some(pb::envelope::Payload::BilateralCommitResponse(_)) => {
                     Some(pb::BleFrameType::BilateralCommitResponse)
                 }
-                // §21 first-transfer round-trip: a complete-envelope (unchunked)
-                // BilateralBearerPrepared / BilateralBearerProceed must route to the
-                // BLE adapter (admit-disclosure+FROM-read / commit) instead of the core
-                // bridge, exactly like the other bilateral frames above.
-                Some(pb::envelope::Payload::BilateralBearerPrepared(_)) => {
-                    Some(pb::BleFrameType::BilateralBearerPrepared)
-                }
-                Some(pb::envelope::Payload::BilateralBearerProceed(_)) => {
-                    Some(pb::BleFrameType::BilateralBearerProceed)
-                }
                 Some(pb::envelope::Payload::UniversalTx(tx)) => {
                     // Detect bilateral.confirm invoke for 3-step protocol
                     tx.ops.first().and_then(|op| {

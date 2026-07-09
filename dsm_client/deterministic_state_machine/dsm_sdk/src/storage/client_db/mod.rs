@@ -742,13 +742,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
             updated_at           INTEGER NOT NULL
         );
 
-        -- Offline-bearer anti-clone (Boot Fenced Fused Anchor): the RECEIVER's pinned admission of
-        -- a counterparty's fused anchor, keyed by the counterparty device id — the persistent
-        -- backing for `dsm::crypto::anchor_enrollment::AnchorEnrollmentStore` (FusedAnchorPin
-        -- shape). Must persist so a restart cannot drop the pinned identity (which would re-open
-        -- the first-transfer TOFU window). verifier_slot / chip_static_pubkey are NULL until the
-        -- sender's SE-slot provisioning discloses them; an incomplete pin keeps Path-B counter
-        -- verification fail-closed (online recovery only).
+        -- Offline-bearer anti-clone (Software-Authority / Hardware-Identity): the RECEIVER's
+        -- pinned admission of a counterparty's fused anchor, keyed by the counterparty device id —
+        -- the persistent backing for `dsm::crypto::anchor_enrollment::AnchorEnrollmentStore`
+        -- (v2 FusedAnchorPin shape, `pk_chip` = resident chip Ed25519 key). Must persist so a
+        -- restart cannot drop the pinned identity (which would re-open the first-transfer TOFU
+        -- window).
         CREATE TABLE IF NOT EXISTS anchor_enrollments(
             device_id          BLOB NOT NULL PRIMARY KEY,
             policy_hash        BLOB NOT NULL,
@@ -756,9 +755,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             anchor_id          BLOB NOT NULL,
             enrolled_counter   INTEGER NOT NULL,
             partition_pk       BLOB NOT NULL,
-            uncompromised      INTEGER NOT NULL,
-            verifier_slot      INTEGER,
-            chip_static_pubkey BLOB
+            pk_chip            BLOB NOT NULL,
+            uncompromised      INTEGER NOT NULL
         );
         "#,
         );
@@ -806,19 +804,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// One-time migration to the fused-anchor pin shape. Pre-existing dev DBs may hold the legacy
-/// Safe-7 placeholder tables (`anchor_frontiers`, and `anchor_enrollments` with the
-/// `id_anchor/commitment_c/...` columns) — proven dead: no production code ever read or wrote
-/// them, so they are empty and safe to drop. The batch's `CREATE TABLE IF NOT EXISTS` cannot fix
-/// an old-shaped table in place; detect the old shape by the missing `bundle` column, drop it,
-/// and recreate the FusedAnchorPin shape. New installs already get the new shape from the batch.
+/// One-time migration to the v2 fused-anchor pin shape. Pre-existing dev DBs may hold either the
+/// legacy Safe-7 placeholder tables (`anchor_frontiers`, `id_anchor/commitment_c/...` columns) or
+/// the v1 counter-era pin shape (`verifier_slot`/`chip_static_pubkey`, no `pk_chip`). Old pins are
+/// NOT carried forward: a v1 pin has no resident-chip key and cannot verify a v2 release, so the
+/// table is dropped and the counterparty re-pins through the normal first-transfer TOFU admission
+/// (no dual old/new fields — an old pin fails clearly by being absent). Detect the v2 shape by the
+/// `pk_chip` column. New installs already get the v2 shape from the batch.
 fn ensure_anchor_enrollments_fused_shape(conn: &Connection) -> Result<()> {
     conn.execute("DROP TABLE IF EXISTS anchor_frontiers;", [])?;
     let mut stmt = conn.prepare("PRAGMA table_info(anchor_enrollments)")?;
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     for col in cols {
-        if col? == "bundle" {
-            return Ok(()); // already the fused shape
+        if col? == "pk_chip" {
+            return Ok(()); // already the v2 shape
         }
     }
     conn.execute("DROP TABLE IF EXISTS anchor_enrollments;", [])?;
@@ -830,9 +829,8 @@ fn ensure_anchor_enrollments_fused_shape(conn: &Connection) -> Result<()> {
             anchor_id          BLOB NOT NULL,
             enrolled_counter   INTEGER NOT NULL,
             partition_pk       BLOB NOT NULL,
-            uncompromised      INTEGER NOT NULL,
-            verifier_slot      INTEGER,
-            chip_static_pubkey BLOB
+            pk_chip            BLOB NOT NULL,
+            uncompromised      INTEGER NOT NULL
         );",
         [],
     )?;
@@ -2456,9 +2454,10 @@ mod tests {
         // Invariant: both columns equal at every step
     }
 
-    /// Receiver-admit fold: a fresh DB gets the FusedAnchorPin-shaped `anchor_enrollments`
-    /// (and no legacy `anchor_frontiers`); a pre-existing DB holding the dead Safe-7 placeholder
-    /// shape is migrated to the fused shape by `ensure_anchor_enrollments_fused_shape`.
+    /// Receiver-admit fold: a fresh DB gets the v2 FusedAnchorPin-shaped `anchor_enrollments`
+    /// (`pk_chip`, no counter-era columns, no legacy `anchor_frontiers`); a pre-existing DB
+    /// holding the v1 counter-era pin shape is dropped + recreated by
+    /// `ensure_anchor_enrollments_fused_shape` (old pins re-admit via first-transfer TOFU).
     #[test]
     #[serial]
     fn anchor_enrollments_schema_is_fused_shape_and_legacy_placeholder_migrates() {
@@ -2481,7 +2480,7 @@ mod tests {
             cols.map(|c| c.expect("col")).collect()
         };
 
-        // Fresh DB: fused shape, no legacy columns, no anchor_frontiers table.
+        // Fresh DB: v2 shape, no v1 counter-era or legacy columns, no anchor_frontiers table.
         let cols = columns(&conn);
         for want in [
             "device_id",
@@ -2490,13 +2489,19 @@ mod tests {
             "anchor_id",
             "enrolled_counter",
             "partition_pk",
+            "pk_chip",
             "uncompromised",
-            "verifier_slot",
-            "chip_static_pubkey",
         ] {
             assert!(cols.iter().any(|c| c == want), "missing column {want}");
         }
-        for gone in ["id_anchor", "commitment_c", "leaf_spki", "frontier_root"] {
+        for gone in [
+            "id_anchor",
+            "commitment_c",
+            "leaf_spki",
+            "frontier_root",
+            "verifier_slot",
+            "chip_static_pubkey",
+        ] {
             assert!(
                 !cols.iter().any(|c| c == gone),
                 "legacy column {gone} present"
@@ -2511,22 +2516,25 @@ mod tests {
             .expect("sqlite_master");
         assert_eq!(frontier_count, 0, "legacy anchor_frontiers table present");
 
-        // Pre-existing dev DB with the dead Safe-7 placeholder shape: migrated in place.
+        // Pre-existing dev DB with the v1 counter-era pin shape (has `bundle` but
+        // `verifier_slot`/`chip_static_pubkey` instead of `pk_chip`): dropped + recreated, and any
+        // v1 pin row is discarded (re-admission is first-transfer TOFU, never a silent carry).
         conn.execute_batch(
             r#"
             DROP TABLE anchor_enrollments;
             CREATE TABLE anchor_enrollments(
                 device_id          BLOB NOT NULL PRIMARY KEY,
-                id_anchor          BLOB NOT NULL,
-                commitment_c       BLOB NOT NULL,
-                leaf_spki          BLOB NOT NULL,
-                firmware_id        BLOB NOT NULL,
-                screen_template_id INTEGER NOT NULL,
-                firmware_hash      BLOB NOT NULL,
                 policy_hash        BLOB NOT NULL,
-                frontier_root      BLOB NOT NULL,
-                frontier_state     INTEGER NOT NULL
+                bundle             BLOB NOT NULL,
+                anchor_id          BLOB NOT NULL,
+                enrolled_counter   INTEGER NOT NULL,
+                partition_pk       BLOB NOT NULL,
+                uncompromised      INTEGER NOT NULL,
+                verifier_slot      INTEGER,
+                chip_static_pubkey BLOB
             );
+            INSERT INTO anchor_enrollments VALUES
+                (x'11', x'22', x'33', x'44', 1000, x'55', 1, 1, x'66');
             CREATE TABLE anchor_frontiers(
                 anchor_id     BLOB NOT NULL PRIMARY KEY,
                 frontier_root BLOB NOT NULL,
@@ -2534,17 +2542,21 @@ mod tests {
             );
             "#,
         )
-        .expect("recreate legacy shape");
+        .expect("recreate v1 counter-era shape");
         ensure_anchor_enrollments_fused_shape(&conn).expect("migrate");
         let cols = columns(&conn);
         assert!(
-            cols.iter().any(|c| c == "bundle"),
-            "migration missed bundle"
+            cols.iter().any(|c| c == "pk_chip"),
+            "migration missed pk_chip"
         );
         assert!(
-            !cols.iter().any(|c| c == "id_anchor"),
-            "migration left the legacy shape"
+            !cols.iter().any(|c| c == "verifier_slot"),
+            "migration left the v1 counter-era shape"
         );
+        let pin_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM anchor_enrollments", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(pin_count, 0, "v1 pin row silently carried into v2");
         let frontier_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='anchor_frontiers'",

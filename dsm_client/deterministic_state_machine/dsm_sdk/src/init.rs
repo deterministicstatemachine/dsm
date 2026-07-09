@@ -79,7 +79,7 @@ fn app_state_u32_bytes(
 /// `genesis_nonce` are NOT required to reproduce `Smaster`.
 ///
 /// `Smaster` roots per-step EK seeds and deterministic ML-KEM coins (authorship). It is NEVER
-/// persisted and re-derives on demand; anti-clone is the Boot Fenced Fused Anchor, not Smaster.
+/// persisted and re-derives on demand; anti-clone is the fused anchor, not Smaster.
 /// Fails closed when the wallet is locked.
 pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
     use dsm::core::identity::genesis_v2::{derive_s0, derive_smaster};
@@ -496,11 +496,8 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         install_sdk_app_router(app_router)
             .map_err(|e| format!("Failed to install app router: {:?}", e))?;
         install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
-        // Receiver-admit fold (Boot Fenced Fused Anchor): persistent pinned-anchor store, so an
-        // admitted counterparty pin survives restarts (a restart must never re-open the
-        // first-transfer TOFU window). This does NOT enable live offline-bearer acceptance: the
-        // counter reader is a separate device-layer install (`install_anchor_counter_reader`,
-        // deliberately absent here) and an incomplete pin fail-closes the Path-B read regardless.
+        // Receiver-admit fold: persistent pinned-anchor store, so an admitted counterparty pin
+        // survives restarts (a restart must never re-open the first-transfer TOFU window).
         crate::bridge::install_anchor_enrollment_store(Arc::new(
             crate::sdk::anchor_enrollment_store::SqliteAnchorEnrollmentStore::new(),
         ));

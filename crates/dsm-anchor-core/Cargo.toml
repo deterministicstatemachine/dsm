@@ -3,7 +3,7 @@ name = "dsm-anchor-core"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Hardware-free core of the DSM Root Advance MACANDD offline-bearer anchor: DSM SMT root-advance construction, MAC-And-Destroy hardware-witness flow, the compact 3-state appliance (prepare/commit/emit/finalize), the receiver acceptance predicate with TROPIC01 counter evidence, power-loss recovery, and the protobuf wire protocol."
+description = "Hardware-free core of the DSM Software-Authority / Hardware-Identity offline anchor: DSM device-SMT root-advance construction, the three-signature release (sigma^DSM seed / sigma^chip resident TROPIC01 Ed25519 / sigma^host RP2350 partition) over one root-advance message, the compact 3-state appliance (prepare/commit/emit/finalize), the software-only receiver acceptance predicate, power-loss recovery, and the protobuf wire protocol."
 
 [lib]
 name = "anchor_core"

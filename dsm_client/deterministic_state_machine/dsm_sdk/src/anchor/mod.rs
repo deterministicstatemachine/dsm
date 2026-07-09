@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Producer-side client for the Boot Fenced Fused Anchor appliance.
+//! Producer-side client for the fused-anchor appliance (Software-Authority / Hardware-Identity).
 //!
 //! The bilateral SENDER drives the appliance (`anchor_core::appliance::Appliance`)
 //! through PREPARE → COMMIT → EMIT to produce the `dsm.anchor.OfflineRelease` it then

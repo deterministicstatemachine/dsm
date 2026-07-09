@@ -48,39 +48,17 @@ pub trait BleTransportDelegate: Send + Sync + 'static {
 
 pub struct BilateralTransportAdapter {
     bilateral_handler: Arc<BilateralBleHandler>,
-    /// Path-B raw-SPI counter relay router (D2): services `TropicSpiRelay` frames on both ends —
-    /// sender A forwards to its local Pico, receiver B resolves its pending round-trips.
-    tropic_relay: Arc<crate::bluetooth::tropic_relay::TropicRelayRouter>,
 }
 
 impl BilateralTransportAdapter {
     #[must_use]
     pub fn new(bilateral_handler: Arc<BilateralBleHandler>) -> Self {
-        Self {
-            bilateral_handler,
-            tropic_relay: Arc::new(crate::bluetooth::tropic_relay::TropicRelayRouter::new()),
-        }
+        Self { bilateral_handler }
     }
 
     #[must_use]
     pub fn bilateral_handler(&self) -> &Arc<BilateralBleHandler> {
         &self.bilateral_handler
-    }
-
-    /// The Path-B counter-relay router. On a sender device, install the local Pico link via
-    /// `router.set_local_pico(...)`. The receiver drives round-trips through it for the counter read:
-    /// the on-device layer wires `router.round_trip(commitment, mosi, |frame| queue_relay_frame(peer,
-    /// frame))` into `dsm_anchor_hw_verifier::read_counter_over_relay` (that reader depends on
-    /// `tropic01` and lives in the excluded hardware crate, so it is not referenced here).
-    #[must_use]
-    pub fn tropic_relay(&self) -> &Arc<crate::bluetooth::tropic_relay::TropicRelayRouter> {
-        &self.tropic_relay
-    }
-
-    /// Send one Path-B relay frame to `peer_address` over BLE (`TropicSpiRelay`). The on-device
-    /// receiver layer uses this as the `send` closure inside `TropicRelayRouter::round_trip`.
-    pub async fn queue_relay_frame(peer_address: &str, frame: &[u8]) -> Result<(), DsmError> {
-        queue_follow_up_chunks(peer_address, BleFrameType::TropicSpiRelay, frame).await
     }
 
     /// Send a secondary-device admission REQUEST envelope to the existing device over BLE
@@ -242,15 +220,12 @@ async fn queue_follow_up_chunks(
     ))
 }
 
-/// Route a `handle_prepare_response` reply to its BLE frame by the returned envelope's payload
-/// (§21 first-transfer split). `handle_prepare_response` returns EITHER the confirm (ordinary +
-/// subsequent bearer) OR a `BilateralBearerPrepared` disclosure (first-transfer bearer, pre-commit).
-/// Exhaustive + hostile by default: only those two are routable; anything else is `None` →
-/// fail-closed at the call site (never a best-effort frame guess).
+/// Route a `handle_prepare_response` reply to its BLE frame by the returned envelope's payload.
+/// The only routable reply is the confirm (a UniversalTx invoking "bilateral.confirm") — anything
+/// else is `None` → fail-closed at the call site (never a best-effort frame guess).
 fn classify_prepare_response_reply(envelope_bytes: &[u8]) -> Option<BleFrameType> {
     let env = crate::envelope::from_canonical_bytes(envelope_bytes).ok()?;
     match env.payload {
-        // The confirm rides a UniversalTx with the "bilateral.confirm" invoke method.
         Some(crate::generated::envelope::Payload::UniversalTx(ref tx)) => tx
             .ops
             .first()
@@ -262,9 +237,6 @@ fn classify_prepare_response_reply(envelope_bytes: &[u8]) -> Option<BleFrameType
                 )
             })
             .then_some(BleFrameType::BilateralConfirm),
-        Some(crate::generated::envelope::Payload::BilateralBearerPrepared(_)) => {
-            Some(BleFrameType::BilateralBearerPrepared)
-        }
         _ => None,
     }
 }
@@ -275,7 +247,6 @@ impl BleTransportDelegate for BilateralTransportAdapter {
         message: TransportInboundMessage,
     ) -> DelegateFuture<Result<Vec<TransportOutbound>, DsmError>> {
         let bilateral_handler = Arc::clone(&self.bilateral_handler);
-        let tropic_relay = Arc::clone(&self.tropic_relay);
         Box::pin(async move {
             match message.frame_type {
                 BleFrameType::BilateralPrepare => {
@@ -337,8 +308,7 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         .handle_prepare_response(&message.payload)
                         .await
                     {
-                        // Payload-type routing (§21 first-transfer split): the reply is EITHER the
-                        // confirm or the BilateralBearerPrepared disclosure. Route by payload,
+                        // Payload-type routing: only the confirm is routable. Route by payload,
                         // exhaustively and fail-closed — never guess the frame.
                         Ok((reply_envelope, _meta)) => {
                             match classify_prepare_response_reply(&reply_envelope) {
@@ -530,64 +500,10 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         }
                     }
                 }
-                BleFrameType::TropicSpiRelay => {
-                    // Path-B raw-SPI counter relay (D2). One relayed SPI transaction: on the sender
-                    // (from_receiver=true) forward to the local Pico and reply; on the receiver
-                    // (from_receiver=false) resolve the pending round-trip. The router decides by the
-                    // packet's direction. Opaque bytes only — no anchor/counter semantics here.
-                    match tropic_relay.handle_inbound(&message.payload).await {
-                        Ok(Some(reply)) => Ok(vec![TransportOutbound::new(
-                            BleFrameType::TropicSpiRelay,
-                            reply,
-                        )]),
-                        Ok(None) => Ok(Vec::new()),
-                        Err(e) => {
-                            warn!("TROPIC_SPI_RELAY handling failed (fail-closed): {e}");
-                            Ok(Vec::new())
-                        }
-                    }
-                }
                 BleFrameType::Unspecified => Ok(vec![TransportOutbound::new(
                     BleFrameType::Unspecified,
                     message.payload,
                 )]),
-                // §21 first-transfer round-trip. The RECEIVER handles BilateralBearerPrepared (admit
-                // pin + FROM read) and replies BilateralBearerProceed; the SENDER handles the proceed
-                // (commit the prepared release) and replies BilateralConfirm. The handlers validate the
-                // payload type and fail closed — an unexpected payload, a missing FROM read, or a
-                // missing stored prepared bearer yields no reply, so first-transfer stays on the online
-                // fallback. The sender only EMITS BilateralBearerPrepared once activation (stage F) is
-                // wired, so these are unreachable until then.
-                BleFrameType::BilateralBearerPrepared => {
-                    match bilateral_handler
-                        .handle_bearer_prepared(&message.payload)
-                        .await
-                    {
-                        Ok(reply) => Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralBearerProceed,
-                            reply,
-                        )]),
-                        Err(e) => {
-                            warn!("[BILATERAL] handle_bearer_prepared failed (fail-closed, recover online): {e}");
-                            Ok(Vec::new())
-                        }
-                    }
-                }
-                BleFrameType::BilateralBearerProceed => {
-                    match bilateral_handler
-                        .handle_bearer_proceed(&message.payload)
-                        .await
-                    {
-                        Ok((confirm_envelope, _meta)) => Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralConfirm,
-                            confirm_envelope,
-                        )]),
-                        Err(e) => {
-                            warn!("[BILATERAL] handle_bearer_proceed failed (fail-closed, recover online): {e}");
-                            Ok(Vec::new())
-                        }
-                    }
-                }
                 _ => {
                     debug!("Ignoring unknown BLE frame type: {:?}", message.frame_type);
                     Ok(Vec::new())

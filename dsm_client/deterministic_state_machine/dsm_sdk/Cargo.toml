@@ -108,6 +108,9 @@ toml = "1.1.2"
 bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 # Cryptography
 blake3 = "1.5.0"
+# Ed25519 — ONLY for the in-process anchor appliance mock's resident-chip key (σ^chip); the real
+# chip signs on-die. The receiver verifies σ^chip via dsm::crypto::classical_verify::verify_ed25519.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 # AEAD
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 hmac = "0.13.0"
