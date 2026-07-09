@@ -13,6 +13,14 @@ name = "dsm-anchor-pico"
 test = false
 bench = false
 
+# Diagnostic (not the serving firmware): proves the three Stage-7 ECC-key silicon gates on a
+# fresh TROPIC01. ECC-only; never touches the monotonic counter.
+[[bin]]
+name = "ecc-gate-probe"
+path = "src/bin/ecc_gate_probe.rs"
+test = false
+bench = false
+
 [dependencies]
 # Software-Authority / Hardware-Identity protocol core (Tropic/ChipSig/PartitionSig traits,
 # enrollment/appliance/accept, the wire protocol). Workspace sibling.
@@ -30,6 +38,9 @@ x25519-dalek = { version = "2", default-features = false, features = [
     "static_secrets",
     "zeroize",
 ] }
+# no_std Ed25519 verify for the ECC-gate probe's OFF-CHIP σ^chip check (curve25519-dalek 4.x
+# is already in the tree via x25519-dalek). Only the ecc-gate-probe `commit` build pulls it in.
+ed25519-dalek = { version = "2.2.0", default-features = false, optional = true }
 
 # --- RP2350 / Pico 2 W ---
 rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
@@ -50,3 +61,8 @@ riscv-rt = "0.12"
 [target.'cfg(target_arch = "arm")'.dependencies]
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
+
+[features]
+# ecc-gate-probe: default build is a READ-ONLY pre-flight (UAP + virgin slot read, nothing
+# written). `commit` enables the destructive generate/sign/verify/persistence phase.
+commit = ["dep:ed25519-dalek"]
