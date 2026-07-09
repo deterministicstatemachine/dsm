@@ -281,6 +281,47 @@ pub fn verify_anchor_state_commitment(
         && SparseMerkleTree::verify_proof_against_root(&proof, device_root)
 }
 
+/// Receiver-side (v2 Software-Authority): verify that `device_root` (`R_i`/`R_{i+1}`) commits the
+/// given anchor-state leaf VALUE `leaf` — the anchor-core v2 leaf `anchor_state_leaf(B, h_i, u_i)`
+/// the acceptance predicate already computed — at the stable per-device key `anchor_state_leaf_key(B)`,
+/// via the release's carried SMT inclusion `proof`. Value-agnostic (dsm never recomputes the v2 leaf,
+/// so it needs no anchor-core dep). Fail-closed on any mismatch (wrong key/value/root) or an empty
+/// proof — so a release with no attached `Π` routes to online recovery.
+pub fn verify_anchor_state_leaf(
+    device_root: &[u8; 32],
+    bundle: &[u8; 32],
+    leaf: &[u8; 32],
+    proof_bytes: &[u8],
+) -> bool {
+    use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
+    let key = anchor_state_leaf_key(bundle);
+    let Some(proof) = SmtInclusionProof::from_bytes(proof_bytes) else {
+        return false;
+    };
+    proof.key == key
+        && proof.value == Some(*leaf)
+        && SparseMerkleTree::verify_proof_against_root(&proof, device_root)
+}
+
+/// Producer-side (v2): set the per-device anchor-state leaf to the given VALUE `leaf` (the anchor-core
+/// v2 leaf `anchor_state_leaf(B, h_i, u_i)`, computed by the caller — the SDK has anchor-core) at the
+/// stable per-device key, and return its inclusion proof against the resulting device root. So the
+/// returned proof binds the same root the transfer commits; the receiver checks it with
+/// [`verify_anchor_state_leaf`].
+pub fn set_anchor_state_leaf_value(
+    smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+    bundle: &[u8; 32],
+    leaf: &[u8; 32],
+) -> Result<Vec<u8>, DsmError> {
+    let key = anchor_state_leaf_key(bundle);
+    smt.update_leaf(&key, leaf)
+        .map_err(|e| DsmError::invalid_operation(format!("anchor-state leaf update: {e}")))?;
+    let proof = smt
+        .get_inclusion_proof(&key, 256)
+        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
+    Ok(proof.to_bytes())
+}
+
 /// The receiver's pinned CURRENT fused anchor state `(Aᵢ, J_b, uᵢ)` for a counterparty — the state
 /// the NEXT offline-bearer transfer from that counterparty must consume. Advanced to the successor
 /// on each accepted transfer, so it is the anti-replay frontier: a release whose previous fused
