@@ -5,11 +5,12 @@
 //!
 //! Software Authority, Hardware Identity (v2): the appliance is NOT the transfer authority; it
 //! contributes exactly two identity witnesses over the DSM root-advance message `M`:
-//!   - `σ^chip` — a resident Ed25519 key. On real hardware the TROPIC01 signs on-die; the
-//!     in-process mock here holds an `ed25519-dalek` key so the crypto is REAL and the receiver's
-//!     `ChipSig` (`dsm::crypto::classical_verify::verify_ed25519`) verifies it.
-//!   - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 partition (`dsm::crypto::sphincs`, the same
-//!     scheme + variant `bluetooth::anchor_accept` verifies with).
+//! - `σ^chip` — a resident Ed25519 key. On real hardware the TROPIC01 signs on-die; the
+//!   in-process mock here holds an `ed25519-dalek` key so the crypto is REAL and the receiver's
+//!   `ChipSig` (`dsm::crypto::classical_verify::verify_ed25519`) verifies it.
+//! - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 partition (`dsm::crypto::sphincs`, the same
+//!   scheme + variant `bluetooth::anchor_accept` verifies with).
+//!
 //! Only the TROPIC01 silicon (the resident key + the down-counter floor) is mocked in process.
 
 use prost::Message;

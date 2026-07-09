@@ -2719,7 +2719,7 @@ impl BilateralBleHandler {
             m.local_signing_public_key()
         };
 
-        // Receiver challenge r_R (Boot Fenced Fused Anchor §15): the receiver-generated freshness
+        // Receiver challenge r_R: the receiver-generated freshness
         // nonce the sender MUST bind into the offline release, so a replayed or pre-computed release
         // for a different receiver session is rejected. Fresh CSPRNG per prepare-response
         // (deterministic under a seeded test RNG). Stashed against this commitment so the confirm's

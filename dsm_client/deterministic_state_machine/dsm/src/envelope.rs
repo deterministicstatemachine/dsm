@@ -42,16 +42,15 @@ use prost::Message;
 const ENVELOPE_VERSION_TAG: u32 = 1;
 const ENVELOPE_HEADERS_TAG: u32 = 2;
 const ENVELOPE_MESSAGE_ID_TAG: u32 = 3;
-const RESERVED_PAYLOAD_TAGS: &[u32] = &[13, 14, 33];
+// 110/111 were the v1 counter-era bearer round-trip payloads (BilateralBearerPrepared/Proceed),
+// removed with the Software-Authority / Hardware-Identity rewrite — a stale peer emitting them is
+// rejected by the canonical validator, never routed.
+const RESERVED_PAYLOAD_TAGS: &[u32] = &[13, 14, 33, 110, 111];
 const ALLOWED_PAYLOAD_TAGS: &[u32] = &[
     10, 11, 12, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 31, 32, 34, 35, 36, 37, 38,
     39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
     63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
     87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-    // Counter-Positioned Commit first-transfer round-trip (§21) envelope payloads:
-    // bilateral_bearer_prepared (110) + bilateral_bearer_proceed (111). Without these the
-    // canonical validator rejects every bearer envelope as an unknown field before routing.
-    110, 111,
 ];
 
 fn parsing_error(message: impl Into<String>) -> DsmError {
@@ -757,7 +756,7 @@ mod tests {
         let err = from_canonical_bytes(&env_bytes)
             .expect_err("removed bearer tag 110 must be rejected");
         assert!(
-            err.to_string().contains("unknown Envelope field 110"),
+            err.to_string().contains("field 110 is reserved"),
             "unexpected error: {err}"
         );
     }

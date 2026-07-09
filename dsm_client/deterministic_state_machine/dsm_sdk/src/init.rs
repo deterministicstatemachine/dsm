@@ -79,7 +79,7 @@ fn app_state_u32_bytes(
 /// `genesis_nonce` are NOT required to reproduce `Smaster`.
 ///
 /// `Smaster` roots per-step EK seeds and deterministic ML-KEM coins (authorship). It is NEVER
-/// persisted and re-derives on demand; anti-clone is the Boot Fenced Fused Anchor, not Smaster.
+/// persisted and re-derives on demand; anti-clone is the fused anchor, not Smaster.
 /// Fails closed when the wallet is locked.
 pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
     use dsm::core::identity::genesis_v2::{derive_s0, derive_smaster};

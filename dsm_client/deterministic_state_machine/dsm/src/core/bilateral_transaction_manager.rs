@@ -27,7 +27,7 @@ use crate::types::operations::Operation;
 use crate::types::state_types::{PreCommitment, State};
 use crate::core::utility::labeling;
 use crate::common::domain_tags::{
-    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY,
+    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY,
     TAG_TIP,
 };
 
@@ -181,104 +181,18 @@ pub fn compute_successor_tip(
     bytes32(h.finalize().as_bytes())
 }
 
-/// Boot Fenced Fused Anchor offline-bearer **state commitment** `(B, Aᵢ, J_b, uᵢ)`
-/// (`H("DSM/fused-anchor-state/v1" ‖ B ‖ Aᵢ ‖ J_b ‖ uᵢ_le)`).
-///
-/// This is the value the DSM root must commit so the receiver predicate
-/// (`anchor_core::accept::accept_offline`, clauses 3 & 21) can prove that `prev_root`
-/// commits `(B, Aᵢ, J_b, uᵢ)` and `next_root` commits the successor
-/// `(B, A_{i+1}, J_{b'}, uᵢ+1)`. The producer inserts this commit as a dedicated SMT
-/// leaf and carries an inclusion proof; the receiver recomputes it from the cert's fused
-/// fields and checks inclusion. It binds the fused anchor **head** `Aᵢ` — never the root —
-/// so the commitment is not circular.
-pub fn anchor_state_commit(
-    bundle: &[u8; 32],
-    anchor_head: &[u8; 32],
-    boot_head: &[u8; 32],
-    anchor_counter: u64,
-) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(TAG_FUSED_ANCHOR_STATE);
-    h.update(bundle);
-    h.update(anchor_head);
-    h.update(boot_head);
-    h.update(&anchor_counter.to_le_bytes());
-    bytes32(h.finalize().as_bytes())
-}
-
-/// SMT key of the single per-device fused-anchor-state leaf: `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`.
+/// SMT key of the single per-device anchor-state leaf: `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`.
 ///
 /// One stable key per device (the fused anchor is device-level — one appliance, one counter),
-/// bound to the immutable anchor bundle `B`. Its VALUE is the current [`anchor_state_commit`],
-/// bootstrapped to `commit_0` when the fused anchor is admitted and replaced old→successor on
-/// every bearer transfer's device-SMT advance. So `prev_root` proves `key → commit(B,Aᵢ,J_b,uᵢ)`
-/// and `next_root` proves the same `key → commit(B,A_{i+1},J_{b'},uᵢ+1)`. Never keyed by
-/// relationship id, root, `Aᵢ`, `J_b`, or `uᵢ`.
+/// bound to the immutable anchor bundle `B`. Its VALUE is the current v2 anchor-state leaf
+/// `anchor_state_leaf(B, h_i, u_i)` (computed by the anchor-core-holding caller), bootstrapped
+/// when the anchor is attached and replaced old→successor on every bearer transfer's device-SMT
+/// advance. So `R_i` proves `key → L_i` and `R_{i+1}` proves the same `key → L_{i+1}`. Never
+/// keyed by relationship id, root, frontier, or counter.
 pub fn anchor_state_leaf_key(bundle: &[u8; 32]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_FUSED_ANCHOR_STATE_LEAF);
     h.update(bundle);
     bytes32(h.finalize().as_bytes())
-}
-
-/// Set the per-device fused-anchor-state leaf to the commit for `(B, A, J, u)` in `smt` and return
-/// its inclusion proof (bytes) against the resulting device-SMT root. Producer-side: called inside
-/// the device-SMT advance so the returned proof binds the same root the transfer commits.
-///
-/// The device root then commits the fused anchor state (spec Def 1/§12): a receiver recomputes the
-/// leaf key+value from the release cert's fused fields and verifies the proof with
-/// [`verify_anchor_state_commitment`]. `prev_root` proves `(B, Aᵢ, J_b, uᵢ)`; `next_root` (post the
-/// old→successor replace, in the same advance) proves `(B, A_{i+1}, J_{b'}, uᵢ+1)`.
-pub fn set_anchor_state_leaf(
-    smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-    bundle: &[u8; 32],
-    anchor_head: &[u8; 32],
-    boot_head: &[u8; 32],
-    anchor_counter: u64,
-) -> Result<Vec<u8>, DsmError> {
-    let key = anchor_state_leaf_key(bundle);
-    let value = anchor_state_commit(bundle, anchor_head, boot_head, anchor_counter);
-    smt.update_leaf(&key, &value)
-        .map_err(|e| DsmError::invalid_operation(format!("anchor-state leaf update: {e}")))?;
-    let proof = smt
-        .get_inclusion_proof(&key, 256)
-        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
-    Ok(proof.to_bytes())
-}
-
-/// Inclusion proof (bytes) of the CURRENT per-device fused-anchor-state leaf against `smt`'s root
-/// (no mutation). Producer-side: the "parent" proof that `prev_root` still commits `(B, Aᵢ, J_b, uᵢ)`
-/// before the advance replaces it with the successor commit.
-pub fn anchor_state_leaf_proof(
-    smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-    bundle: &[u8; 32],
-) -> Result<Vec<u8>, DsmError> {
-    let key = anchor_state_leaf_key(bundle);
-    let proof = smt
-        .get_inclusion_proof(&key, 256)
-        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
-    Ok(proof.to_bytes())
-}
-
-/// Receiver-side: verify that `device_root` (a per-device SMT root the receiver already receives +
-/// verifies) commits the fused anchor state `(B, A, J, u)` via the per-device anchor-state leaf.
-/// Recomputes the leaf key + value and checks the carried inclusion proof binds exactly that
-/// key/value under `device_root`. Fail-closed on any mismatch (wrong key, value, or root).
-pub fn verify_anchor_state_commitment(
-    device_root: &[u8; 32],
-    bundle: &[u8; 32],
-    anchor_head: &[u8; 32],
-    boot_head: &[u8; 32],
-    anchor_counter: u64,
-    proof_bytes: &[u8],
-) -> bool {
-    use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
-    let key = anchor_state_leaf_key(bundle);
-    let value = anchor_state_commit(bundle, anchor_head, boot_head, anchor_counter);
-    let Some(proof) = SmtInclusionProof::from_bytes(proof_bytes) else {
-        return false;
-    };
-    proof.key == key
-        && proof.value == Some(value)
-        && SparseMerkleTree::verify_proof_against_root(&proof, device_root)
 }
 
 /// Receiver-side (v2 Software-Authority): verify that `device_root` (`R_i`/`R_{i+1}`) commits the
@@ -320,56 +234,6 @@ pub fn set_anchor_state_leaf_value(
         .get_inclusion_proof(&key, 256)
         .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
     Ok(proof.to_bytes())
-}
-
-/// The receiver's pinned CURRENT fused anchor state `(Aᵢ, J_b, uᵢ)` for a counterparty — the state
-/// the NEXT offline-bearer transfer from that counterparty must consume. Advanced to the successor
-/// on each accepted transfer, so it is the anti-replay frontier: a release whose previous fused
-/// state does not equal this is rejected (verify-only is not activation; verify + ADOPT is).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FusedAnchorFrontier {
-    pub anchor_head: [u8; 32],
-    pub boot_head: [u8; 32],
-    pub counter: u64,
-}
-
-impl FusedAnchorFrontier {
-    /// `commit_0` frontier for a freshly admitted fused anchor: `(A₀, J₀, 0)`.
-    pub fn genesis(anchor_head: [u8; 32], boot_head: [u8; 32]) -> Self {
-        Self {
-            anchor_head,
-            boot_head,
-            counter: 0,
-        }
-    }
-
-    /// True iff this frontier equals the release's PREVIOUS fused state `(prev_anchor_head,
-    /// prev_boot_head, prev_counter)` — i.e. the transfer consumes the state the receiver adopted.
-    /// A mismatch is a replay / stale / forked release and must be rejected.
-    pub fn matches_prev(
-        &self,
-        prev_anchor_head: &[u8; 32],
-        prev_boot_head: &[u8; 32],
-        prev_counter: u64,
-    ) -> bool {
-        &self.anchor_head == prev_anchor_head
-            && &self.boot_head == prev_boot_head
-            && self.counter == prev_counter
-    }
-
-    /// The successor frontier to ADOPT after an accepted transfer: the release's next fused state
-    /// `(next_anchor_head, current_boot_head, next_counter)`.
-    pub fn adopt_successor(
-        next_anchor_head: [u8; 32],
-        current_boot_head: [u8; 32],
-        next_counter: u64,
-    ) -> Self {
-        Self {
-            anchor_head: next_anchor_head,
-            boot_head: current_boot_head,
-            counter: next_counter,
-        }
-    }
 }
 
 /// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
@@ -536,7 +400,7 @@ pub struct PreparedBilateralAdvance {
     /// [`BilateralTransactionManager::consume_pre_commitment`].
     pub pre_commitment_hash: [u8; 32],
     /// Offline-bearer fused-anchor-state leaf update to commit atomically with the relationship
-    /// leaf (Boot Fenced Fused Anchor). `Some` iff this is a bearer transfer whose sender drove the
+    /// leaf (Software-Authority / Hardware-Identity). `Some` iff this is a bearer transfer whose sender drove the
     /// appliance; the SAME value the sender's `simulate_advance_for_confirm` used to build the wire
     /// proofs, so the canonical committed root matches (both-or-neither). `None` for ordinary transfers.
     pub anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
@@ -1430,7 +1294,7 @@ impl BilateralTransactionManager {
         let receipt_sigma = compute_precommit(&current_tip, &op_bytes, &entropy);
 
         // Successor relationship tip: the symmetric §16.6 tip both parties recompute from the
-        // shared inputs. The Boot Fenced Fused Anchor state is NOT folded here (the tip is
+        // shared inputs. The fused-anchor state is NOT folded here (the tip is
         // symmetric and cannot carry one party's device-private fused state); it is committed
         // by a dedicated per-device fused-anchor SMT leaf (`anchor_state_leaf_key`).
         let new_tip = compute_successor_tip(&current_tip, &op_bytes, &entropy, &receipt_sigma);
@@ -1660,113 +1524,45 @@ mod tests {
     }
 
     #[test]
-    fn anchor_state_commit_is_deterministic_and_field_sensitive() {
-        let b = [1u8; 32];
-        let a = [2u8; 32];
-        let j = [3u8; 32];
-        let u = 7u64;
-        let c = anchor_state_commit(&b, &a, &j, u);
-        // Deterministic.
-        assert_eq!(c, anchor_state_commit(&b, &a, &j, u));
-        // Every field is bound: flipping any input changes the commit.
-        assert_ne!(c, anchor_state_commit(&[9u8; 32], &a, &j, u));
-        assert_ne!(c, anchor_state_commit(&b, &[9u8; 32], &j, u));
-        assert_ne!(c, anchor_state_commit(&b, &a, &[9u8; 32], u));
-        assert_ne!(c, anchor_state_commit(&b, &a, &j, u + 1));
-        // Binds the fused anchor HEAD, not the root: a head/boot-head swap is a distinct commit
-        // (so the commitment cannot be circular with the root that carries it).
-        assert_ne!(c, anchor_state_commit(&b, &j, &a, u));
-        // Domain-separated: not a bare BLAKE3 over the concatenation.
-        let mut raw = blake3::Hasher::new();
-        raw.update(&b);
-        raw.update(&a);
-        raw.update(&j);
-        raw.update(&u.to_le_bytes());
-        assert_ne!(c, *raw.finalize().as_bytes());
-    }
-
-    #[test]
     fn anchor_state_leaf_inclusion_round_trips_and_rejects_tamper() {
         use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
         let b = [0xB1u8; 32];
-        let (a0, j0) = ([0xA0u8; 32], [0x50u8; 32]);
-        let (a1, j1) = ([0xA1u8; 32], [0x51u8; 32]);
+        // Opaque v2 anchor-state leaf VALUES (anchor-core computes the real ones).
+        let leaf0 = [0xC0u8; 32];
+        let leaf1 = [0xC1u8; 32];
 
         let mut smt = SparseMerkleTree::new(256);
-        // Bootstrap commit_0 = (B, A_0, J_0, u=0), then the "parent" proof against prev_root.
-        let parent_proof = set_anchor_state_leaf(&mut smt, &b, &a0, &j0, 0).expect("set0");
+        // Bootstrap leaf_0, then the "parent" proof against prev_root.
+        let parent_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf0).expect("set0");
         let prev_root = *smt.root();
-        // The parent proof must verify the OLD fused state under prev_root.
-        assert!(verify_anchor_state_commitment(
-            &prev_root,
-            &b,
-            &a0,
-            &j0,
-            0,
-            &parent_proof
-        ));
+        assert!(verify_anchor_state_leaf(&prev_root, &b, &leaf0, &parent_proof));
 
-        // Advance the leaf to the successor commit_1 = (B, A_1, J_1, u=1); "child" proof vs next_root.
-        let child_proof = set_anchor_state_leaf(&mut smt, &b, &a1, &j1, 1).expect("set1");
+        // Advance the leaf to the successor leaf_1; "child" proof vs next_root.
+        let child_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf1).expect("set1");
         let next_root = *smt.root();
-        assert!(verify_anchor_state_commitment(
-            &next_root,
-            &b,
-            &a1,
-            &j1,
-            1,
-            &child_proof
-        ));
+        assert!(verify_anchor_state_leaf(&next_root, &b, &leaf1, &child_proof));
 
         // Fail-closed rejections:
-        // wrong counter (off-by-one) under next_root.
-        assert!(!verify_anchor_state_commitment(
-            &next_root,
-            &b,
-            &a1,
-            &j1,
-            0,
-            &child_proof
-        ));
-        // wrong fused head.
-        assert!(!verify_anchor_state_commitment(
-            &next_root,
-            &b,
-            &a0,
-            &j1,
-            1,
-            &child_proof
-        ));
-        // right state but wrong root (child proof does not verify under prev_root).
-        assert!(!verify_anchor_state_commitment(
-            &prev_root,
-            &b,
-            &a1,
-            &j1,
-            1,
-            &child_proof
-        ));
+        // wrong leaf value under next_root.
+        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf0, &child_proof));
+        // right value but wrong root (child proof does not verify under prev_root).
+        assert!(!verify_anchor_state_leaf(&prev_root, &b, &leaf1, &child_proof));
         // parent (old) state is NOT committed by next_root.
-        assert!(!verify_anchor_state_commitment(
-            &next_root,
-            &b,
-            &a0,
-            &j0,
-            0,
-            &parent_proof
-        ));
+        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf0, &parent_proof));
+        // wrong bundle (wrong leaf KEY) rejects even with the right value + root.
+        assert!(!verify_anchor_state_leaf(&next_root, &[9u8; 32], &leaf1, &child_proof));
+        // an empty proof rejects (a release with no attached proof routes online).
+        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf1, &[]));
     }
 
     #[test]
-    fn anchor_state_leaf_key_is_stable_per_bundle_and_distinct_from_commit() {
+    fn anchor_state_leaf_key_is_stable_per_bundle() {
         let b = [1u8; 32];
         let k = anchor_state_leaf_key(&b);
         // One stable key per device bundle (value changes, key does not).
         assert_eq!(k, anchor_state_leaf_key(&b));
-        // Different bundle → different key.
+        // Different bundle -> different key.
         assert_ne!(k, anchor_state_leaf_key(&[2u8; 32]));
-        // The KEY (over B only) is not the VALUE commit (over B‖A‖J‖u) — distinct domains.
-        assert_ne!(k, anchor_state_commit(&b, &b, &b, 0));
     }
 
     fn make_manager_ids() -> ([u8; 32], [u8; 32]) {

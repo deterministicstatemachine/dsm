@@ -25,7 +25,7 @@
 //! folds `AK_pk`, which would otherwise be circular. `Smaster` roots authorship + recovery
 //! continuity ONLY (per-step EK, deterministic ML-KEM coins, b0x salts); it is NEVER
 //! persisted and re-derived from the wallet seed on demand. `Smaster` does NOT establish
-//! anti-cloning — a seed copy holds it and can sign; anti-clone is the Boot Fenced Fused
+//! anti-cloning — a seed copy holds it and can sign; anti-clone is the fused
 //! Anchor alone.
 
 use zeroize::Zeroize;
@@ -164,7 +164,7 @@ pub fn derive_devid(ak_pk: &[u8], atta: &[u8; 32]) -> [u8; 32] {
 ///
 /// `AttA` folds into `DevID`. Deriving it from the wallet seed makes `DevID` reproducible from the
 /// mnemonic alone (recovery), with no silicon fingerprint and no random root. It is a NON-load-bearing
-/// lineage tag; anti-clone is the Boot Fenced Fused Anchor alone (a seed copy reproduces it, which is
+/// lineage tag; anti-clone is the fused anchor alone (a seed copy reproduces it, which is
 /// acceptable). Public — may be stored in the GenesisRecord.
 pub fn derive_atta(wallet_seed: &[u8], g: &[u8; 32], device_slot: u32) -> [u8; 32] {
     kdf32(

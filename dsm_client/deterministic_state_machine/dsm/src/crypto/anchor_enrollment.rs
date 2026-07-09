@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use crate::types::error::DsmError;
 
-/// The Boot Fenced Fused Anchor pin for one counterparty: the values the receiver must hold to
+/// The fused-anchor pin for one counterparty: the values the receiver must hold to
 /// recognize and verify a `dsm.anchor.OfflineRelease` (the anchor-core `VerifierContext` inputs).
 /// Pinned at admission from the anchor appliance's enrollment. The `dsm_sdk` side adapts this into
 /// `anchor_core::accept::PinnedAnchor` (the SDK owns that type; core does not depend on it).

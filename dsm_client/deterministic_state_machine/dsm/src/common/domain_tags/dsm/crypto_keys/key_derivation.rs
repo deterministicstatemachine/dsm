@@ -29,7 +29,7 @@ pub const TAG_DSM_STEP_SALT: &str = "DSM/step-salt";
 // The canonical deterministic key tree. `s0`/`Smaster` are NEVER persisted; they are
 // re-derived from the BIP39 wallet seed via the recovery path. Authorship + recovery
 // continuity only — NOT anti-clone (a seed copy holds Smaster and can sign; anti-clone
-// is the Boot Fenced Fused Anchor).
+// is the fused anchor).
 /// `s0 = keyed-BLAKE3(wallet_seed, "DSM/s0/v2" || G || device_slot_id || authority_policy_hash)`.
 pub const TAG_DSM_S0_V2: &str = "DSM/s0/v2";
 /// `Smaster = keyed-BLAKE3(s0, "DSM/Smaster/v2" || G || DevID || authority_policy_hash)`.

@@ -217,6 +217,7 @@ pub struct AdoptedAnchorState {
 /// relationship genesis (nothing adopted yet) — the release's own `prev_root` is adopted TOFU; its
 /// authenticity rests on the anchor-state inclusion proofs + the three signatures, the same trust
 /// root as the first-transfer pin admit.
+#[allow(clippy::too_many_arguments)]
 pub fn accept_offline_release(
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,

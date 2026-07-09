@@ -65,7 +65,7 @@ pub struct CoreSDK {
     device_info: DeviceInfo,
     policy_system: TokenPolicySystem,
     audit_ctr: AtomicU64, // monotonic counter, not a clock
-    /// Device-level Boot Fenced Fused Anchor appliance (in-process; real WOTS+SPHINCS+, mock
+    /// Device-level fused-anchor appliance (Software-Authority / Hardware-Identity; the
     /// silicon). Lazily birthed on the first offline-bearer transfer; persists across transfers so
     /// its down-counter + fused-anchor lineage advance. Its `commit_0` is bootstrapped into the
     /// DeviceState anchor-state leaf on birth; each bearer transfer drives PREPARE→COMMIT→EMIT→

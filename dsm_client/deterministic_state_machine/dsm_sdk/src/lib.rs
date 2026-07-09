@@ -100,7 +100,7 @@
 #![allow(clippy::type_complexity)] // Complex JNI/trait object signatures
 #![allow(clippy::macro_use_imports)] // Workaround for nightly clippy ICE on prost-generated repr attrs
 
-// Producer-side Boot Fenced Fused Anchor appliance client (offline-bearer release builder).
+// Producer-side fused-anchor appliance client (offline-bearer release builder).
 pub mod anchor;
 
 // Expose policy module and enforce builtin integrity at library load.
