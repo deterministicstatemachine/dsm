@@ -3,40 +3,36 @@
 //! [`InProcessAnchorAppliance`], the activation implementation backed by a real
 //! `anchor_core::appliance::Appliance` driven over an in-process secure-element mock.
 //!
-//! The crypto is REAL (the receiver must accept it): WOTS-over-BLAKE3 witness signatures
-//! (`anchor_core::sig::WotsBlake3`) and BLAKE3-SPHINCS+ SPX128f partition certificates
-//! (`dsm::crypto::sphincs`, the same scheme + variant `bluetooth::anchor_accept` verifies
-//! with). Only the TROPIC01 silicon (MAC-and-destroy + the down-counter) is mocked in
-//! process, since the SDK has no physical-chip transport yet.
+//! Software Authority, Hardware Identity (v2): the appliance is NOT the transfer authority; it
+//! contributes exactly two identity witnesses over the DSM root-advance message `M`:
+//!   - `σ^chip` — a resident Ed25519 key. On real hardware the TROPIC01 signs on-die; the
+//!     in-process mock here holds an `ed25519-dalek` key so the crypto is REAL and the receiver's
+//!     `ChipSig` (`dsm::crypto::classical_verify::verify_ed25519`) verifies it.
+//!   - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 partition (`dsm::crypto::sphincs`, the same
+//!     scheme + variant `bluetooth::anchor_accept` verifies with).
+//! Only the TROPIC01 silicon (the resident key + the down-counter floor) is mocked in process.
 
 use prost::Message;
+
+use ed25519_dalek::{Signer, SigningKey};
 
 use anchor_core::appliance::{Appliance, ApplianceError, RecoverOutcome};
 use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::root_advance::Transition;
-use anchor_core::sig::WotsBlake3;
 use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
 
 use dsm::crypto::sphincs::SphincsVariant;
 use dsm::types::error::DsmError;
 
-/// The RP2350 partition certificate scheme (boot cert + per-transfer final cert).
-/// Byte-compatible with the receiver's verifier in `bluetooth::anchor_accept`.
+/// The RP2350 partition (`σ^host`) scheme. Byte-compatible with the receiver's verifier.
 const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
 
-/// Active fused state read from the appliance (`OP_STATUS`), the inputs the producer needs
-/// to build the next transition package `Δ`.
+/// Active state read from the appliance (`OP_STATUS`) — the inputs the producer needs to build
+/// the next transition `Δ`. v2: the forward-only offline frontier `h_i` + the counter floor `u_i`.
 #[derive(Clone, Debug)]
 pub struct ApplianceStatus {
+    /// The current offline frontier `h_i` (the transition's `prev_root`).
     pub root: [u8; 32],
-    pub anchor_head: [u8; 32],
-    /// The LIVE boot head `J_{b'}` (advanced by boot events; what the next transfer's cert reports
-    /// as `current_boot_head` and what the successor fused state commits).
-    pub boot_head: [u8; 32],
-    /// The COMMITTED boot head `J_b` — the boot head the current active fused state commits to (what
-    /// the next transfer's cert reports as `prev_boot_head`). Equals `boot_head` at rest, but diverges
-    /// after a boot advance until the next finalize; the fused-anchor-state PREV leaf must commit THIS.
-    pub committed_boot_head: [u8; 32],
     pub anchor_counter: u64,
 }
 
@@ -47,75 +43,69 @@ pub struct AnchorPin {
     pub bundle: [u8; 32],
     pub anchor_id: [u8; 32],
     pub enrolled_counter: u64,
+    /// Partition public key `pk_host` (`σ^host`).
     pub partition_pk: Vec<u8>,
+    /// Resident chip public key `pk_chip` (`σ^chip`, Ed25519) — pinned in `B`, verifies `σ^chip`.
+    pub pk_chip: Vec<u8>,
 }
 
-/// Transport-agnostic producer interface to the fused-anchor appliance. The activation
-/// build uses [`InProcessAnchorAppliance`]; a real RP2350 USB-CDC/BLE client implementing
-/// this trait is hardware follow-on. All ops fail-closed into [`DsmError`].
+/// Transport-agnostic producer interface to the anchor appliance. The activation build uses
+/// [`InProcessAnchorAppliance`]; a real RP2350 USB-CDC/BLE client implementing this trait is
+/// hardware follow-on. All ops fail-closed into [`DsmError`].
 pub trait AnchorAppliance {
-    /// `OP_STATUS`: the active fused state (no mutation).
+    /// `OP_STATUS`: the active state (no mutation).
     fn status(&mut self) -> Result<ApplianceStatus, DsmError>;
-    /// `OP_PREPARE`: one transfer-slot MAC-and-destroy witness + the full cross-bound cert.
-    fn prepare(&mut self, t: &Transition, receiver_challenge: &[u8; 32]) -> Result<(), DsmError>;
-    /// `OP_COMMIT`: move the counter, erase the witness key. Point of no return.
+    /// `OP_PREPARE`: form `M` over the DSM-supplied device roots `R_i`/`R_{i+1}` and produce
+    /// `σ^chip` (on-die) + `σ^host`. The DSM layer computes the device SMT roots and passes them in.
+    fn prepare(
+        &mut self,
+        t: &Transition,
+        receiver_challenge: &[u8; 32],
+        sender_device_root_before: &[u8; 32],
+        sender_device_root_after: &[u8; 32],
+    ) -> Result<(), DsmError>;
+    /// `OP_COMMIT`: move the counter floor. Point of no return.
     fn commit(&mut self) -> Result<(), DsmError>;
-    /// `OP_EMIT`: the committed release, prost-encoded as `dsm.anchor.OfflineRelease` bytes
-    /// (ready to drop into `BilateralConfirmRequest.offline_release`).
+    /// `OP_EMIT`: the committed release, prost-encoded as `dsm.anchor.OfflineRelease` bytes (with
+    /// EMPTY SMT proofs — the SDK attaches `Π_i`/`Π_{i+1}` before it rides the confirm).
     fn emit(&mut self) -> Result<Vec<u8>, DsmError>;
-    /// `OP_FINALIZE`: advance the active fused state; returns the new active root.
+    /// `OP_FINALIZE`: advance the active frontier; returns the new frontier.
     fn finalize(&mut self) -> Result<[u8; 32], DsmError>;
     /// `OP_CANCEL`: discard a prepared (uncommitted) record.
     fn cancel(&mut self) -> Result<(), DsmError>;
     /// The receiver pin material for this anchor (pinned at admission).
     fn pin(&self) -> AnchorPin;
 
-    /// `OP_RECOVER` (§27) — OBSERVATION ONLY. Report the appliance's recovery state after a power
-    /// loss / host re-attach. This NEVER cancels, commits, moves the counter, or erases a release:
-    /// the host decides what to do from the returned [`RecoverOutcome`] (see [`recovery_action`]).
-    /// The default is the fail-safe `DowngradeOnline` for appliances that have not yet implemented
-    /// on-device recovery — never auto-cancel an appliance whose true state is unknown.
+    /// `OP_RECOVER` (§26) — OBSERVATION ONLY. Report the appliance's recovery state after a power
+    /// loss / host re-attach. This NEVER cancels, commits, moves the counter, or erases a release;
+    /// the host decides from the returned [`RecoverOutcome`] (see [`recovery_action`]). The default
+    /// is the fail-safe `DowngradeOnline`.
     fn recover(&mut self) -> Result<RecoverOutcome, DsmError> {
         Ok(RecoverOutcome::DowngradeOnline)
     }
 }
 
 /// The host's policy decision after OBSERVING a [`RecoverOutcome`]. `recover()` observes; this
-/// decides; the caller executes. The only state that is auto-cancelled is an orphaned uncommitted
+/// decides; the caller executes. The only state auto-cancelled is an orphaned uncommitted
 /// `Prepared` (no owning session, counter not moved). A committed release is re-emitted, never
-/// erased (§28); anything ambiguous downgrades online.
+/// erased (§26); anything ambiguous downgrades online.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecoveryAction {
-    /// Appliance is `Ready` at its active root — nothing to do.
     Ready,
-    /// Orphaned uncommitted `Prepared` with no owning session — cancel it back to `Ready`. The
-    /// counter has not moved, so nothing is lost.
     CancelOrphanedPrepared,
-    /// A `Prepared` record an in-flight/durable session still owns — leave it for that owner to
-    /// complete or cancel; do NOT touch it.
     LeavePreparedForOwner,
-    /// A committed successor is pending — re-emit + finalize the SAME release; never cancel/erase.
     ReemitCommitted,
-    /// Ambiguous, mismatched, exhausted, or an appliance without on-device recovery — resolve via
-    /// online reconciliation. Never guess.
     DowngradeOnline,
 }
 
-/// Host recovery policy (§27/§28): a PURE decision from an observed [`RecoverOutcome`] plus whether
-/// an in-flight/durable session still owns the prepared bearer.
-///
-/// Guardrails (owner-mandated): auto-cancel happens ONLY for an orphaned uncommitted `Prepared`;
-/// `Committed`/`ReemitCommitted` is NEVER cancelled or erased (it is re-emitted or resolved online);
-/// a possibly-counter-moved or mismatched state downgrades online rather than guessing.
+/// Host recovery policy (§26): a PURE decision from an observed [`RecoverOutcome`] plus whether an
+/// in-flight/durable session still owns the prepared record. Auto-cancel happens ONLY for an
+/// orphaned uncommitted `Prepared`; `Committed`/`ReemitCommitted` is NEVER cancelled or erased.
 #[must_use]
 pub fn recovery_action(outcome: RecoverOutcome, prepared_owned_by_session: bool) -> RecoveryAction {
     match outcome {
         RecoverOutcome::Accept(_) => RecoveryAction::Ready,
-        // A committed successor carrying hᵢ₊₁: re-emit + finalize the SAME release. NEVER cancel or
-        // erase — the counter may have moved.
         RecoverOutcome::ReemitCommitted(_) => RecoveryAction::ReemitCommitted,
-        // `Prepared`, uncommitted, counter NOT moved (recover only returns these two for a prepared
-        // record whose counter still sits at uᵢ). Cancel ONLY when no session owns it.
         RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
             if prepared_owned_by_session {
                 RecoveryAction::LeavePreparedForOwner
@@ -123,7 +113,6 @@ pub fn recovery_action(outcome: RecoverOutcome, prepared_owned_by_session: bool)
                 RecoveryAction::CancelOrphanedPrepared
             }
         }
-        // Counter mismatch, exhausted, or any ambiguity: online reconciliation, never a guess.
         RecoverOutcome::DowngradeOnline
         | RecoverOutcome::FailClosed
         | RecoverOutcome::ExhaustedOnlineOnly => RecoveryAction::DowngradeOnline,
@@ -132,21 +121,14 @@ pub fn recovery_action(outcome: RecoverOutcome, prepared_owned_by_session: bool)
 
 // --- in-process secure-element mock (silicon only; crypto is real) ---
 
-/// In-process TROPIC01 mock: MAC-and-destroy is a keyed BLAKE3 over `(slot ‖ input)` and the
-/// counter is an in-memory down-counter. Mirrors the `anchor_core` integration-test mock; the
-/// real chip replaces only this, never the witness/partition crypto.
+/// In-process TROPIC01 mock: the resident chip key is a real `ed25519-dalek` `SigningKey`
+/// (`chip_sign` = a real Ed25519 signature the receiver verifies) and the counter is an in-memory
+/// down-counter floor. The real chip replaces only this, never the σ^chip/σ^host crypto.
 struct InProcTropic {
     h: u32,
-    secret: [u8; 32],
+    chip: SigningKey,
 }
 impl Tropic for InProcTropic {
-    fn mac_and_destroy(&mut self, q: u16, x: &[u8; 32]) -> Result<[u8; 32], TropicError> {
-        Ok(anchor_core::hash::kdf(
-            &self.secret,
-            "DSM/anchor/inproc-macandd/v1",
-            &[&q.to_le_bytes(), x],
-        ))
-    }
     fn counter_get(&mut self) -> Result<u32, TropicError> {
         Ok(self.h)
     }
@@ -157,11 +139,13 @@ impl Tropic for InProcTropic {
         self.h -= 1;
         Ok(())
     }
+    fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
+        Ok(self.chip.sign(&message[..]).to_bytes().to_vec())
+    }
 }
 
-/// BLAKE3-SPHINCS+ SPX128f partition signature scheme (`PartitionSig`). Same scheme + variant
-/// the receiver verifies with (`bluetooth::anchor_accept`), so a real partition cert this
-/// appliance produces verifies receiver-side.
+/// BLAKE3-SPHINCS+ SPX128f partition signature scheme (`PartitionSig` = `σ^host`). Same scheme +
+/// variant the receiver verifies with (`bluetooth::anchor_accept`).
 struct SphincsPart;
 impl PartitionSig for SphincsPart {
     fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
@@ -178,8 +162,8 @@ impl PartitionSig for SphincsPart {
     }
 }
 
-/// Enrollment inputs for a fresh in-process appliance (the one-way birth fuse ceremony §7–§9).
-/// The SDK supplies these from the device/transfer context; for tests they are deterministic.
+/// Enrollment inputs for a fresh in-process appliance (the one-way birth fuse ceremony §7). The
+/// SDK supplies these from the device/transfer context; for tests they are deterministic.
 pub struct BirthConfig {
     pub partition_trng: [u8; 32],
     pub host_nonce: [u8; 32],
@@ -189,21 +173,21 @@ pub struct BirthConfig {
     pub anchor_id: [u8; 32],
     pub partition_key_seed: [u8; 32],
     pub enrolled_counter: u32,
-    pub q_boot: u16,
-    pub q_tx: u16,
     pub genesis_root: [u8; 32],
-    /// Device-authoritative firmware measurement folded into the boot fence.
-    pub firmware_measurement: [u8; 32],
-    /// In-process secure-element arming seed (stands in for the chip's MAC-and-destroy state).
-    pub se_secret: [u8; 32],
+    /// Chip birth-witness entropy folded into the birth fuse.
+    pub chip_birth_witness: [u8; 32],
+    /// Seed for the resident Ed25519 chip key (`σ^chip`) — the in-process stand-in for the die key.
+    pub chip_seed: [u8; 32],
+    /// Online identity public key `pk_on` bound into `B` as `H(pk_on)` (placeholder in Stage 3; the
+    /// real dual-identity binding + upgrade ceremony land in Stage 5).
+    pub online_id_pk: Vec<u8>,
 }
 
 /// Activation appliance: a real `anchor_core` appliance over the in-process SE mock.
 pub struct InProcessAnchorAppliance {
-    app: Appliance<InProcTropic, WotsBlake3, SphincsPart>,
+    app: Appliance<InProcTropic, SphincsPart>,
     partition_pk: Vec<u8>,
-    boot_seq: u64,
-    firmware_measurement: [u8; 32],
+    pk_chip: Vec<u8>,
 }
 
 fn map_err(e: ApplianceError) -> DsmError {
@@ -211,60 +195,46 @@ fn map_err(e: ApplianceError) -> DsmError {
 }
 
 impl InProcessAnchorAppliance {
-    /// Run the birth ceremony, construct the appliance, and advance the boot fence once so
-    /// offline mode is enabled (the firmware boot-fences itself device-internally).
-    pub fn birth_and_boot(cfg: &BirthConfig) -> Result<Self, DsmError> {
+    /// Run the birth ceremony and construct the appliance. There is no boot fence — offline mode
+    /// is enabled once born.
+    pub fn birth(cfg: &BirthConfig) -> Result<Self, DsmError> {
+        let chip = SigningKey::from_bytes(&cfg.chip_seed);
+        let chip_pk = chip.verifying_key().to_bytes();
         let b = birth::<SphincsPart>(&BirthInputs {
             partition_trng: &cfg.partition_trng,
-            tropic_birth_witness: &cfg.se_secret,
+            chip_birth_witness: &cfg.chip_birth_witness,
             host_nonce: &cfg.host_nonce,
             device_id: &cfg.device_id,
             policy_hash: &cfg.policy_hash,
             partition_device_id: &cfg.partition_device_id,
-            tropic_anchor_id: &cfg.anchor_id,
+            anchor_id: &cfg.anchor_id,
+            chip_pk: &chip_pk,
+            online_id_pk: &cfg.online_id_pk,
             partition_key_seed: &cfg.partition_key_seed,
             enrolled_counter: cfg.enrolled_counter,
-            q_boot: cfg.q_boot,
-            q_tx: cfg.q_tx,
             genesis_root: &cfg.genesis_root,
         });
         let partition_pk = b.partition_pk.clone();
-        let tropic = InProcTropic {
-            h: cfg.enrolled_counter,
-            secret: cfg.se_secret,
-        };
-        let mut app = Appliance::<_, WotsBlake3, SphincsPart>::new(
+        let pk_chip = b.chip_pk.clone();
+        let tropic = InProcTropic { h: cfg.enrolled_counter, chip };
+        let app = Appliance::<_, SphincsPart>::new(
             tropic,
             cfg.enrolled_counter,
             cfg.anchor_id,
-            cfg.q_boot,
-            cfg.q_tx,
             cfg.partition_device_id,
-            cfg.genesis_root,
             b,
         );
-        // Boot fence: enable offline mode for this power cycle.
-        app.boot(1, &cfg.firmware_measurement).map_err(map_err)?;
-        Ok(Self {
-            app,
-            partition_pk,
-            boot_seq: 1,
-            firmware_measurement: cfg.firmware_measurement,
-        })
+        Ok(Self { app, partition_pk, pk_chip })
     }
 
-    /// The pinned partition public key (the receiver verifies boot + final certs with it).
+    /// The pinned partition public key `pk_host`.
     pub fn partition_pk(&self) -> &[u8] {
         &self.partition_pk
     }
 
-    /// Advance the boot fence again (used after a finalize resets the boot chain).
-    pub fn reboot(&mut self) -> Result<(), DsmError> {
-        self.boot_seq += 1;
-        self.app
-            .boot(self.boot_seq, &self.firmware_measurement)
-            .map(|_| ())
-            .map_err(map_err)
+    /// The pinned resident chip public key `pk_chip` (Ed25519).
+    pub fn pk_chip(&self) -> &[u8] {
+        &self.pk_chip
     }
 }
 
@@ -272,15 +242,20 @@ impl AnchorAppliance for InProcessAnchorAppliance {
     fn status(&mut self) -> Result<ApplianceStatus, DsmError> {
         Ok(ApplianceStatus {
             root: self.app.active.root,
-            anchor_head: self.app.active.anchor_head,
-            boot_head: self.app.active.boot_head,
-            committed_boot_head: self.app.active.committed_boot_head,
             anchor_counter: self.app.active.anchor_counter,
         })
     }
 
-    fn prepare(&mut self, t: &Transition, receiver_challenge: &[u8; 32]) -> Result<(), DsmError> {
-        self.app.prepare(t, receiver_challenge).map_err(map_err)
+    fn prepare(
+        &mut self,
+        t: &Transition,
+        receiver_challenge: &[u8; 32],
+        sender_device_root_before: &[u8; 32],
+        sender_device_root_after: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        self.app
+            .prepare(t, receiver_challenge, sender_device_root_before, sender_device_root_after)
+            .map_err(map_err)
     }
 
     fn commit(&mut self) -> Result<(), DsmError> {
@@ -301,8 +276,6 @@ impl AnchorAppliance for InProcessAnchorAppliance {
     }
 
     fn recover(&mut self) -> Result<RecoverOutcome, DsmError> {
-        // Pure observation — delegates to the anchor-core §27 recovery classifier, which never
-        // cancels or signs a new release. The host applies `recovery_action` to decide.
         Ok(self.app.recover())
     }
 
@@ -312,6 +285,7 @@ impl AnchorAppliance for InProcessAnchorAppliance {
             anchor_id: self.app.anchor_id,
             enrolled_counter: self.app.h0 as u64,
             partition_pk: self.partition_pk.clone(),
+            pk_chip: self.pk_chip.clone(),
         }
     }
 }
@@ -319,86 +293,52 @@ impl AnchorAppliance for InProcessAnchorAppliance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anchor_core::accept::{accept_offline, CounterVerifier, DsmVerifier, VerifierContext};
-    use anchor_core::boot::BootTicket;
+    use anchor_core::accept::{accept_offline, DsmVerifier, VerifierContext};
     use anchor_core::proto::pb;
-    use anchor_core::root_advance::{
-        CounterAdvanceBinding, CounterAdvanceEvidence, CounterAdvanceReads, CounterEvidenceError,
-    };
-
-    /// The appliance stamps zero sender device roots (it cannot know them); this test
-    /// pins the same zeros so an honest release binds without an SDK re-stamp.
-    const ZERO_DEVROOT: [u8; 32] = [0u8; 32];
+    use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
+    use anchor_core::tropic::ChipSig;
 
     const H0: u32 = 100;
     const GENESIS: [u8; 32] = [0x11; 32];
-    const NEXT_ROOT: [u8; 32] = [0x22; 32];
-
-    /// The host recovery policy (§27/§28): `recover()` OBSERVES, `recovery_action` DECIDES. Auto-cancel
-    /// is reserved for an orphaned uncommitted `Prepared`; `Committed` is never cancelled/erased;
-    /// anything ambiguous downgrades online. Ownership only matters for the `Prepared` states.
-    #[test]
-    fn recovery_action_cancels_only_orphaned_uncommitted_prepared() {
-        let root = [7u8; 32];
-
-        // Ready — nothing to do, regardless of ownership.
-        assert_eq!(
-            recovery_action(RecoverOutcome::Accept(root), false),
-            RecoveryAction::Ready
-        );
-        assert_eq!(
-            recovery_action(RecoverOutcome::Accept(root), true),
-            RecoveryAction::Ready
-        );
-
-        // Committed — re-emit, NEVER cancel/erase, regardless of ownership (§28).
-        assert_eq!(
-            recovery_action(RecoverOutcome::ReemitCommitted(root), false),
-            RecoveryAction::ReemitCommitted
-        );
-        assert_eq!(
-            recovery_action(RecoverOutcome::ReemitCommitted(root), true),
-            RecoveryAction::ReemitCommitted
-        );
-
-        // Prepared (uncommitted, counter not moved) with NO owning session — cancel to Ready.
-        assert_eq!(
-            recovery_action(RecoverOutcome::AcceptPreparedCanComplete, false),
-            RecoveryAction::CancelOrphanedPrepared
-        );
-        assert_eq!(
-            recovery_action(RecoverOutcome::OnlineCancelOrResolve, false),
-            RecoveryAction::CancelOrphanedPrepared
-        );
-
-        // Prepared with an OWNING in-flight/durable session — leave it, do NOT cancel.
-        assert_eq!(
-            recovery_action(RecoverOutcome::AcceptPreparedCanComplete, true),
-            RecoveryAction::LeavePreparedForOwner
-        );
-        assert_eq!(
-            recovery_action(RecoverOutcome::OnlineCancelOrResolve, true),
-            RecoveryAction::LeavePreparedForOwner
-        );
-
-        // Counter mismatch / exhausted / ambiguous — online reconciliation, never a guess.
-        assert_eq!(
-            recovery_action(RecoverOutcome::DowngradeOnline, false),
-            RecoveryAction::DowngradeOnline
-        );
-        assert_eq!(
-            recovery_action(RecoverOutcome::FailClosed, false),
-            RecoveryAction::DowngradeOnline
-        );
-        assert_eq!(
-            recovery_action(RecoverOutcome::ExhaustedOnlineOnly, false),
-            RecoveryAction::DowngradeOnline
-        );
-    }
     const POLICY: [u8; 32] = [0x33; 32];
     const RECIP: [u8; 32] = [0x44; 32];
     const RCHAL: [u8; 32] = [0x55; 32];
     const ANCHOR: [u8; 32] = [0xAA; 32];
+    // Mock DSM device SMT roots the DSM layer would compute (checked by verify_smt_leaf, mocked true).
+    const R_I: [u8; 32] = [0x51; 32];
+    const R_NEXT: [u8; 32] = [0x52; 32];
+
+    /// Receiver-side Ed25519 verification of `σ^chip` (the real receiver adapter, built in Slice 2).
+    struct Ed25519ChipSig;
+    impl ChipSig for Ed25519ChipSig {
+        fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
+            let (Ok(pk), Ok(sig)) = (
+                <[u8; 32]>::try_from(pk_chip),
+                <[u8; 64]>::try_from(sig),
+            ) else {
+                return false;
+            };
+            dsm::crypto::classical_verify::verify_ed25519(&pk, message, &sig).is_ok()
+        }
+    }
+
+    /// Receiver DSM verifier: `σ^DSM` (verify_transition) + delivery are asserted; SMT inclusion is
+    /// mocked true here (the real device-SMT proofs are produced/checked in Slice 5).
+    struct TestDsm;
+    impl DsmVerifier for TestDsm {
+        fn verify_smt_leaf(&self, _root: &[u8; 32], _proof: &[u8], _leaf: &[u8; 32]) -> bool {
+            true
+        }
+        fn verify_transition(&self, _d: &[u8; 32], _prev: &[u8; 32], _next: &[u8; 32]) -> bool {
+            true
+        }
+        fn delivers_to_receiver(&self, _d: &[u8; 32], recipient: &[u8; 32]) -> bool {
+            recipient == &RECIP
+        }
+        fn verify_upgrade_cert(&self, _bundle: &[u8; 32]) -> bool {
+            true
+        }
+    }
 
     fn cfg() -> BirthConfig {
         BirthConfig {
@@ -410,195 +350,142 @@ mod tests {
             anchor_id: ANCHOR,
             partition_key_seed: [0x4E; 32],
             enrolled_counter: H0,
-            q_boot: 1,
-            q_tx: 2,
             genesis_root: GENESIS,
-            firmware_measurement: [0xF0; 32],
-            se_secret: [0xC0; 32],
+            chip_birth_witness: [0xC0; 32],
+            chip_seed: [0xE2; 32],
+            online_id_pk: Vec::new(), // placeholder; real pk_on binding is Stage 5
         }
     }
 
-    fn transition() -> anchor_core::root_advance::OwnedTransition {
-        anchor_core::root_advance::OwnedTransition {
+    /// A transition advancing from `prev_frontier` at counter `u`; `next_root` is the derived
+    /// frontier `H(h_i ‖ D)` (Δ° excludes it, so D is computable first).
+    fn transition(prev_frontier: [u8; 32], u: u64) -> OwnedTransition {
+        let mut t = OwnedTransition {
             relationship_id: [1u8; 32],
             object_id: [2u8; 32],
             sender_device_id: [3u8; 32],
             recipient_device_id: RECIP,
-            prev_root: GENESIS,
-            next_root: NEXT_ROOT,
-            anchor_counter: 0,
-            next_anchor_counter: 1,
+            prev_root: prev_frontier,
+            next_root: [0u8; 32],
+            anchor_counter: u,
+            next_anchor_counter: u + 1,
             action_type: 0,
             action_fields: vec![0xAB, 0xCD],
             payload_hash: [9u8; 32],
             old_leaf_proof: vec![0xAA; 40],
             new_leaf_proof: vec![0xCC; 40],
             authority_policy_hash: POLICY,
-        }
-    }
-
-    /// Receiver DSM verifier: real boot-chain + partition-cert checks under the pinned key;
-    /// the SMT-state checks return true (those become real inclusion checks in D3/D4).
-    struct TestDsm {
-        part_pk: Vec<u8>,
-    }
-    impl TestDsm {
-        fn pv(&self, m: &[u8; 32], sig: &[u8]) -> bool {
-            dsm::crypto::sphincs::verify(PART_VARIANT, &self.part_pk, m, sig).unwrap_or(false)
-        }
-    }
-    impl DsmVerifier for TestDsm {
-        fn sender_device_root_before_commits_anchor_state(
-            &self,
-            _: &[u8; 32],
-            _: &[u8; 32],
-            _: &[u8; 32],
-            _: &[u8; 32],
-            _: u64,
-        ) -> bool {
-            true
-        }
-        fn verify_boot_chain(
-            &self,
-            bundle: &[u8; 32],
-            anchor_head: &[u8; 32],
-            committed_boot_head: &[u8; 32],
-            current_boot_head: &[u8; 32],
-            boot_chain: &[BootTicket],
-        ) -> bool {
-            let mut prev = *committed_boot_head;
-            for tk in boot_chain {
-                if &tk.anchor_bundle != bundle
-                    || &tk.anchor_head != anchor_head
-                    || tk.prev_boot_head != prev
-                    || !self.pv(&tk.cert_message(), &tk.partition_boot_signature)
-                {
-                    return false;
-                }
-                prev = tk.next_boot_head;
-            }
-            &prev == current_boot_head
-        }
-        fn verify_partition_certificate(&self, m_p: &[u8; 32], sig: &[u8]) -> bool {
-            self.pv(m_p, sig)
-        }
-        fn verify_transition(&self, _: &Transition) -> bool {
-            true
-        }
-        fn delivers_to_receiver(&self, t: &Transition) -> bool {
-            t.recipient_device_id == &RECIP
-        }
-        fn sender_device_root_after_commits_anchor_state(
-            &self,
-            _: &[u8; 32],
-            _: &[u8; 32],
-            _: &[u8; 32],
-            _: &[u8; 32],
-            _: u64,
-        ) -> bool {
-            true
-        }
-    }
-
-    /// Stand-in for the Path-B L3 reads: verifies the transition binding, then returns the
-    /// FROM read `H_pre = H0 - u_i` (pre-commit) and the TO read `H_post = H0 - (u_i+1)`
-    /// (post-commit).
-    struct TestCounter {
-        pre: u64,
-        post: u64,
-    }
-    impl CounterVerifier for TestCounter {
-        fn verify_counter_advance(
-            &self,
-            pinned: &[u8; 32],
-            ev: &CounterAdvanceEvidence,
-            binding: &CounterAdvanceBinding,
-        ) -> Result<CounterAdvanceReads, CounterEvidenceError> {
-            ev.check_binding(pinned, binding)?;
-            Ok(CounterAdvanceReads {
-                pre_raw_counter: self.pre,
-                post_raw_counter: self.post,
-            })
-        }
+        };
+        let d = transition_digest(&t.as_transition(), &RCHAL);
+        t.next_root = anchor_root_advance(&prev_frontier, &d);
+        t
     }
 
     #[test]
-    fn inprocess_release_passes_predicate_crypto() {
-        let mut app = InProcessAnchorAppliance::birth_and_boot(&cfg()).expect("birth");
-        let pin = app.pin();
-        let part_pk = app.partition_pk().to_vec();
+    fn recovery_action_cancels_only_orphaned_uncommitted_prepared() {
+        let root = [7u8; 32];
+        assert_eq!(recovery_action(RecoverOutcome::Accept(root), false), RecoveryAction::Ready);
+        assert_eq!(recovery_action(RecoverOutcome::Accept(root), true), RecoveryAction::Ready);
+        assert_eq!(
+            recovery_action(RecoverOutcome::ReemitCommitted(root), false),
+            RecoveryAction::ReemitCommitted
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::ReemitCommitted(root), true),
+            RecoveryAction::ReemitCommitted
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::AcceptPreparedCanComplete, false),
+            RecoveryAction::CancelOrphanedPrepared
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::OnlineCancelOrResolve, false),
+            RecoveryAction::CancelOrphanedPrepared
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::AcceptPreparedCanComplete, true),
+            RecoveryAction::LeavePreparedForOwner
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::DowngradeOnline, false),
+            RecoveryAction::DowngradeOnline
+        );
+        assert_eq!(
+            recovery_action(RecoverOutcome::ExhaustedOnlineOnly, false),
+            RecoveryAction::DowngradeOnline
+        );
+    }
 
-        // Drive the producer flow: STATUS → PREPARE → COMMIT → EMIT → FINALIZE.
+    #[test]
+    fn inprocess_release_passes_v2_predicate_with_real_ed25519() {
+        let mut app = InProcessAnchorAppliance::birth(&cfg()).expect("birth");
+        let pin = app.pin();
+        let part_pk = pin.partition_pk.clone();
+        let pk_chip = pin.pk_chip.clone();
+
+        // The appliance starts at the genesis frontier h_0 (NOT the DSM genesis root).
         let st = app.status().expect("status");
-        assert_eq!(st.root, GENESIS);
+        let h0_frontier = st.root;
         assert_eq!(st.anchor_counter, 0);
 
-        let txn = transition();
-        app.prepare(&txn.as_transition(), &RCHAL).expect("prepare");
+        // STATUS → PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE.
+        let txn = transition(h0_frontier, 0);
+        let next_frontier = txn.next_root;
+        app.prepare(&txn.as_transition(), &RCHAL, &R_I, &R_NEXT).expect("prepare");
         app.commit().expect("commit");
         let release_bytes = app.emit().expect("emit");
-        let next_root = app.finalize().expect("finalize");
-        assert_eq!(next_root, NEXT_ROOT);
+        assert_eq!(app.finalize().expect("finalize"), next_frontier);
 
-        // Decode the wire release the receiver would see and run the predicate.
+        // Decode the wire release the receiver would see and run the v2 predicate.
         let rel = pb::OfflineRelease::decode(&release_bytes[..])
             .expect("decode")
             .to_release()
             .expect("to_release");
+        assert_eq!(rel.cert.sender_device_root_before, R_I);
+        assert_eq!(rel.cert.sender_device_root_after, R_NEXT);
 
         let ctx = VerifierContext {
-            accepted_prev_root: &GENESIS,
             pinned_bundle: &pin.bundle,
             pinned_anchor_id: &pin.anchor_id,
+            pinned_pk_chip: &pk_chip,
+            pinned_pk_host: &part_pk,
+            accepted_frontier: &h0_frontier,
             expected_receiver_challenge: &RCHAL,
+            expected_recipient: &RECIP,
             expected_policy_hash: &POLICY,
-            enrolled_counter: pin.enrolled_counter,
-            sender_device_root_before: &ZERO_DEVROOT,
-            sender_device_root_after: &ZERO_DEVROOT,
             anchor_uncompromised: true,
+            is_genesis: false,
         };
-        let dsm = TestDsm { part_pk };
-        // FROM read H0 - u_i = 100 - 0 = 100; TO read H0 - (u_i+1) = 100 - 1 = 99.
-        let counter = TestCounter {
-            pre: H0 as u64,
-            post: H0 as u64 - 1,
-        };
-
-        accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, &counter)
-            .expect("emitted release must pass the receiver predicate");
+        accept_offline::<_, Ed25519ChipSig, SphincsPart>(&rel, &ctx, &TestDsm)
+            .expect("emitted release must pass the v2 receiver predicate with real Ed25519 σ^chip");
     }
 
     #[test]
-    fn wrong_counter_value_is_rejected() {
-        let mut app = InProcessAnchorAppliance::birth_and_boot(&cfg()).expect("birth");
+    fn wrong_pinned_chip_key_is_rejected() {
+        let mut app = InProcessAnchorAppliance::birth(&cfg()).expect("birth");
         let pin = app.pin();
-        let part_pk = app.partition_pk().to_vec();
-        let txn = transition();
-        app.prepare(&txn.as_transition(), &RCHAL).expect("prepare");
-        app.commit().expect("commit");
-        let release_bytes = app.emit().expect("emit");
-        let rel = pb::OfflineRelease::decode(&release_bytes[..])
+        let part_pk = pin.partition_pk.clone();
+        let h0_frontier = app.status().unwrap().root;
+        let txn = transition(h0_frontier, 0);
+        app.prepare(&txn.as_transition(), &RCHAL, &R_I, &R_NEXT).unwrap();
+        app.commit().unwrap();
+        let rel = pb::OfflineRelease::decode(&app.emit().unwrap()[..])
             .unwrap()
             .to_release()
             .unwrap();
+        let wrong_pk_chip = [0xEE; 32];
         let ctx = VerifierContext {
-            accepted_prev_root: &GENESIS,
             pinned_bundle: &pin.bundle,
             pinned_anchor_id: &pin.anchor_id,
+            pinned_pk_chip: &wrong_pk_chip,
+            pinned_pk_host: &part_pk,
+            accepted_frontier: &h0_frontier,
             expected_receiver_challenge: &RCHAL,
+            expected_recipient: &RECIP,
             expected_policy_hash: &POLICY,
-            enrolled_counter: pin.enrolled_counter,
-            sender_device_root_before: &ZERO_DEVROOT,
-            sender_device_root_after: &ZERO_DEVROOT,
             anchor_uncompromised: true,
+            is_genesis: false,
         };
-        let dsm = TestDsm { part_pk };
-        // A TO read off by one (not the exact post-commit H0-(u_i+1)) must be rejected. The FROM read
-        // is correct, so the failure is the TO-coordinate check.
-        let counter = TestCounter {
-            pre: H0 as u64,
-            post: H0 as u64,
-        };
-        assert!(accept_offline::<WotsBlake3, _, _>(&rel, &ctx, &dsm, &counter).is_err());
+        assert!(accept_offline::<_, Ed25519ChipSig, SphincsPart>(&rel, &ctx, &TestDsm).is_err());
     }
 }
