@@ -160,8 +160,8 @@ pub fn dispatch<T: Tropic, P: PartitionSig>(
             Ok(()) => ok(op),
             Err(e) => fail(op, appliance_code(e)),
         },
-        // OP_SPI_PASSTHROUGH is not an appliance op — the firmware host services it directly
-        // against the chip backend before this generic dispatch. Reaching here = misrouted frame.
+        // OP_SPI_PASSTHROUGH is not an appliance op; the software-authority firmware offers no
+        // raw-SPI relay, so it is rejected as an unknown op.
         Ok(pb::Op::SpiPassthrough) => fail(op, err::BAD_OP),
         Ok(pb::Op::Unspecified) | Err(_) => fail(op, err::BAD_OP),
     }

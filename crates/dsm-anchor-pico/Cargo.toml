@@ -3,7 +3,7 @@ name = "dsm-anchor-pico"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "RP2350 (Pico 2 W) DSM Boot Fenced Fused Anchor firmware: TROPIC01 via the official libtropic-rs driver (two MACANDD slots), WOTS-over-BLAKE3 witness + no_std BLAKE3-SPHINCS+ partition signatures, boot fence, and the fused offline-bearer appliance over USB-CDC."
+description = "RP2350 (Pico 2 W) DSM Software-Authority / Hardware-Identity anchor firmware: TROPIC01 via the official libtropic-rs driver, providing the resident non-exportable Ed25519 chip signature (sigma^chip) + no_std BLAKE3-SPHINCS+ partition signature (sigma^host) over the DSM root-advance message, and the offline appliance over USB-CDC."
 
 # Not a host workspace member — thumbv8m-only binary (excluded in the root manifest).
 # Build from inside this dir so .cargo/config.toml (target + linker) applies.
@@ -14,8 +14,8 @@ test = false
 bench = false
 
 [dependencies]
-# Boot Fenced Fused Anchor protocol core (Tropic/WitnessSig/PartitionSig traits,
-# enrollment/boot/appliance/accept, the wire protocol). Workspace sibling.
+# Software-Authority / Hardware-Identity protocol core (Tropic/ChipSig/PartitionSig traits,
+# enrollment/appliance/accept, the wire protocol). Workspace sibling.
 dsm-anchor-core = { path = "../dsm-anchor-core" }
 # no_std BLAKE3-SPHINCS+ — the concrete PartitionSig (partition certificates).
 dsm-sphincs = { path = "../dsm-sphincs" }

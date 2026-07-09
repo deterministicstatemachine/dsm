@@ -53,8 +53,10 @@ pub enum ApplianceError {
     Tropic(TropicError),
 }
 
-/// Prepared record (§12.2): the fully formed three-signature certificate + the transition
-/// it signs, retained until commit moves the counter.
+/// Prepared record (§12.2): the certificate carrying the appliance's two on-device identity
+/// witnesses (`σ^chip` + `σ^host`) over `M`, plus the transition it signs, retained until
+/// commit moves the counter. The third release signature `σ^DSM` rides on the transition, not
+/// this certificate.
 pub struct PreparedRecord {
     pub txn: OwnedTransition,
     pub cert: Certificate,
@@ -149,12 +151,6 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             tropic,
             _p: PhantomData,
         }
-    }
-
-    /// Mutable access to the underlying `Tropic` backend (raw-SPI relay use only; not used
-    /// by the appliance's own operations).
-    pub fn tropic_mut(&mut self) -> &mut T {
-        &mut self.tropic
     }
 
     /// Live anchor counter `u = H₀ − H` from the chip. The counter only counts down, so
@@ -408,9 +404,9 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 if self.active.anchor_counter != live_u {
                     return RecoverOutcome::DowngradeOnline;
                 }
-                // The three-signature cert is formed atomically in prepare and no counter has
-                // moved, so a Prepared record is always safe to complete when its frontier +
-                // signatures are intact.
+                // Both on-device witnesses (σ^chip, σ^host) are formed atomically in prepare and
+                // no counter has moved, so a Prepared record is always safe to complete when its
+                // frontier + signatures are intact.
                 let (root_ok, sigs_present) = match &self.active.record {
                     Record::Prepared(p) => (
                         ct_eq_32(&p.cert.prev_frontier, &self.active.root),
@@ -454,8 +450,9 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 }
 
 /// Wipe the partition signing key on teardown (its disclosure forges `σ^host`). The
-/// per-transfer material is public (the three signatures are exported); the resident chip key
-/// never leaves the die, so the only long-lived local secret is `partition_sk`.
+/// per-transfer signatures are public (`σ^chip` + `σ^host` are exported in the certificate);
+/// the resident chip key never leaves the die, so the only long-lived local secret is
+/// `partition_sk`.
 impl<T: Tropic, P: PartitionSig> Drop for Appliance<T, P> {
     fn drop(&mut self) {
         zeroize_vec(&mut self.partition_sk);

@@ -63,9 +63,6 @@ impl Tropic for MockTropic {
         let pk = self.pk();
         Ok(hash("mock/chip-sig", &[&pk, message]).to_vec())
     }
-    fn chip_pubkey(&mut self) -> Result<Vec<u8>, TropicError> {
-        Ok(self.pk())
-    }
 }
 
 /// Receiver-side verification of the resident chip signature (`σ^chip`).

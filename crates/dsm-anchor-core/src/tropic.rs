@@ -36,11 +36,10 @@ pub trait Tropic {
 
     /// `σ^chip = ChipSign(M_{i+1})` — the resident non-exportable Ed25519 key inside
     /// TROPIC01 signs the 32-byte root-advance message. The private half never leaves the die.
+    ///
+    /// The public half `pk_chip` is read once at enrollment (bound into the anchor bundle `B`)
+    /// via the chip's own key-read primitive, not through this trait.
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError>;
-
-    /// The resident chip public key `pk_chip`, exported once at birth and bound into the
-    /// anchor bundle `B`. Only the public half is ever exported.
-    fn chip_pubkey(&mut self) -> Result<Vec<u8>, TropicError>;
 }
 
 /// Host-side verification of the resident TROPIC01 Ed25519 witness (`σ^chip`). The

@@ -208,9 +208,13 @@ impl OwnedTransition {
     }
 }
 
-/// The v2 release certificate `Cert` (§10, Def. 9). Three independent signatures over one
-/// `M_{i+1}`. The chip/host public keys are NOT carried here — they are pinned in the anchor
-/// bundle `B` at enrollment and supplied to the acceptance predicate from the receiver's pin.
+/// The v2 release certificate `Cert` (§10, Def. 9). Carries the two on-device identity-witness
+/// signatures — `sigma_chip` and `sigma_host` — over the one root-advance message `M_{i+1}`.
+/// The third release signature `σ^DSM` is the seed-derived DSM transition signature over the
+/// core `Δ°`; it rides on the transition package, NOT this certificate (so together the release
+/// binds three independent signatures, two of them here). The chip/host public keys are NOT
+/// carried here — they are pinned in the anchor bundle `B` at enrollment and supplied to the
+/// acceptance predicate from the receiver's pin.
 #[derive(Clone)]
 pub struct Certificate {
     pub anchor_bundle: [u8; 32],
