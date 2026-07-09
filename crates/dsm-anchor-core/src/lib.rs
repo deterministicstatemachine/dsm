@@ -17,8 +17,9 @@
 //!
 //! The TROPIC01 monotonic counter is demoted to a **non-rewind floor + offline exposure
 //! cap**; it appears in acceptance only as the signed pair `(uᵢ, uᵢ+1)` and is **never read
-//! by the receiver** (Corollary 1: delete every hardware component and the acceptance
-//! predicate is unchanged, because the chip/host signatures verify against public keys).
+//! by the receiver**: the verifier has no live-hardware dependency — it verifies signed
+//! identity evidence against the enrolled public keys. Removing the live hardware checks does
+//! not remove the chip and host witness requirements (§ Corollary 1).
 //!
 //! This crate is `no_std` (+`alloc`) so the protocol math unit-tests on the host
 //! (`cargo test -p dsm-anchor-core`) and builds for the RP2350 secure partition. The

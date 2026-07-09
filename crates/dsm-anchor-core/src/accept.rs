@@ -5,9 +5,10 @@
 //! inclusion proofs `Π_i`/`Π_{i+1}`, the forward-only frontier (directly or via a
 //! `BranchProof`), the challenge, the recipient, the checked counter increment, and — at
 //! genesis — the upgrade certificate. **No step reads hardware.** There is no verify-live
-//! and no optional audit path (Corollary 1: delete every hardware component and this
-//! predicate is unchanged, because `σ^chip`/`σ^host` are verified against public keys
-//! pinned in `B`, not against a live chip).
+//! and no optional audit path: the verifier has no live-hardware dependency — it verifies
+//! signed identity evidence (`σ^chip`/`σ^host`) against the public keys enrolled in `B`.
+//! Removing the live hardware checks does not remove the chip and host witness requirements
+//! (§ Corollary 1).
 //!
 //! Uniqueness is a software property of the DSM device SMT: one parent root `R_i` admits
 //! at most one accepted successor per receiver (the adopted frontier is forward-only, so a
