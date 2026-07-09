@@ -820,15 +820,7 @@ impl BleFrameCoordinator {
         // Transport-level dedup: if the same frame_commitment was already
         // dispatched (e.g. peer retransmitted the entire chunk set), drop it
         // before it reaches the bilateral handler.
-        //
-        // EXCEPTION — TropicSpiRelay: these are live request/reply round-trips of the Path-B
-        // counter read over a lossy BLE link. A repeated relay request is a legitimate RETRY
-        // (the reader re-runs the idempotent counter read on a fresh Noise session after a
-        // dropped reply), and consecutive requests can be byte-identical -> the same
-        // content-addressed frame_commitment. Content dedup would silently swallow every retry
-        // and wedge the counter read (observed: attempts 2-4 dropped as "duplicate", chip never
-        // sees them). Relay frames must NEVER be deduped.
-        if frame_type != BleFrameType::TropicSpiRelay {
+        {
             let mut dedup = self.dedup_table.lock().await;
             if dedup.is_duplicate(&frame_commitment) {
                 warn!(

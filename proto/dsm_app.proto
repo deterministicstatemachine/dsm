@@ -1742,52 +1742,19 @@ message BilateralPrepareRequest {
   // §11.1 per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
   bytes  sender_kyber_public_key = 16 [(dsm_max_len)=1184];
 }
-// B -> A, rides BilateralPrepareResponse (Boot Fenced Fused Anchor, receiver-admit fold).
-// On the FIRST offline-bearer transfer with an already-verified contact, the value receiver B
-// asks to become a read-only Path-B verifier on the sender A's TROPIC01: it offers its X25519
-// verifier pairing public key for A to enroll into a read-only slot. Empty until the device layer
-// installs a pairing deriver (no HW) -> A cannot provision a slot -> Path-B stays fail-closed.
-message AnchorEnrollRequest {
-  bytes verifier_pairing_pubkey = 1 [(dsm_fixed_len)=32];
-}
-
-// A -> B, rides BilateralConfirmRequest (Boot Fenced Fused Anchor, receiver-admit fold).
+// A -> B, rides BilateralConfirmRequest (Software-Authority / Hardware-Identity receiver-admit).
 // A discloses its fused-anchor pin material so B can PIN it under the ALREADY-verified contact,
-// bound to THIS transfer's state transition (never a standalone/implicit pin). bundle/anchor_id/
-// enrolled_counter/partition_pk come from A's appliance today; verifier_slot + chip_static_pubkey
-// ride EMPTY until A's SE-slot-write firmware op lands. Empty slot/stpub => Path-B fail-closed.
+// bound to THIS transfer's state transition (never a standalone/implicit pin). pk_chip is the
+// resident TROPIC01 ECC public key that verifies the release's σ^chip; a disclosure without it is
+// rejected (no partial v2 pin).
 message AnchorDisclosure {
   bytes  bundle                = 1 [(dsm_fixed_len)=32];
   bytes  anchor_id             = 2 [(dsm_fixed_len)=32];
   uint64 enrolled_counter      = 3;                        // H0
   bytes  partition_pk          = 4 [(dsm_max_len)=4096];
   bytes  policy_hash           = 5 [(dsm_fixed_len)=32];   // policy the anchor is admitted under
-  uint32 verifier_slot         = 6;                        // read-only pairing slot on A's chip
-  bool   verifier_slot_present = 7;                        // proto3 cannot distinguish slot 0 from unset
-  bytes  chip_static_pubkey    = 8 [(dsm_max_len)=32];     // A's chip Noise stpub; empty => none
-}
-
-// Counter-Positioned Commit first-transfer round-trip (§21). On a FIRST offline-bearer transfer the
-// receiver holds no pinned anchor until the sender discloses it, so the sender must expose a PREPARED
-// (uncommitted, counter still at u_i) state and disclose the pin BEFORE committing — otherwise the
-// receiver cannot take the authenticated FROM read (H0 - u_i) and offline acceptance fails closed.
-// Sender -> Receiver, after the accept (which carried the enroll pairing pubkey): the sender has
-// PREPARED the transfer (no counter move) and provisioned the verifier slot; the disclosure lets the
-// receiver admit the pin and read the FROM coordinate live before the sender commits.
-message BilateralBearerPrepared {
-  Hash32 commitment_hash        = 1;
-  AnchorDisclosure anchor_disclosure = 2;   // bundle/anchor_id/H0/partition_pk + provisioned slot + stpub
-}
-
-// Receiver -> Sender: the receiver has admitted the disclosed pin and captured the authenticated FROM
-// read against the still-Prepared sender. Only on receiving this does the sender COMMIT (move the
-// counter u_i -> u_i+1) and send the confirm. Serializes the commit behind the receiver's FROM read.
-// receiver_signature authenticates the proceed: the receiver signs "DSM/bilateral-bearer-proceed\0" ||
-// commitment_hash with its bilateral signing key, so ONLY the authenticated receiver can drive the
-// sender's counter move (a spoofed/observed-commitment proceed cannot burn a counter step).
-message BilateralBearerProceed {
-  Hash32 commitment_hash        = 1;
-  bytes  receiver_signature     = 2;
+  reserved 6, 7, 8; // removed v1 counter-era fields: verifier_slot(+present), chip_static_pubkey
+  bytes  pk_chip               = 9 [(dsm_fixed_len)=32];   // resident chip Ed25519 key (σ^chip)
 }
 
 message BilateralPrepareResponse {
@@ -1800,14 +1767,12 @@ message BilateralPrepareResponse {
   // CRITICAL: This allows the sender to update their contact's signing key
   // when receiving the accept response, enabling session registration for future transfers.
   bytes  responder_signing_public_key = 6 [(dsm_fixed_len)=64];
-  // Fresh receiver challenge r_R (Boot Fenced Fused Anchor §15). The receiver
+  // Fresh receiver challenge r_R (fused-anchor release binding). The receiver
   // generates this per offline-bearer transfer; it rides the prepare response
   // (which precedes the sender's confirm) so the sender can bind it into the
   // anchor appliance PREPARE. Empty for ordinary (non-bearer) transfers.
   bytes  receiver_challenge = 7 [(dsm_fixed_len)=32];
-  // Receiver-admit fold: present iff this is an offline-bearer transfer with an already-verified
-  // contact for which B holds no pin yet (first-transfer enrollment request). See AnchorEnrollRequest.
-  AnchorEnrollRequest anchor_enroll_request = 8;
+  reserved 8; // removed v1 counter-era AnchorEnrollRequest (verifier-slot pairing)
   // Responder's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
   // Mirrors responder_signing_public_key: the sender persists it on the contact record so the
   // §11.1 per-step EK receipt built in the immediately following confirm can encapsulate to it.
@@ -2428,24 +2393,7 @@ enum BleFrameType {
   BLE_FRAME_TYPE_BILATERAL_CONFIRM         = 12; // Step 3: Sender confirms (BilateralConfirmRequest)
   BLE_FRAME_TYPE_DEVICE_ADMISSION_REQUEST  = 13; // Envelope w/ AddDeviceAdmissionRequestV1 (new→existing)
   BLE_FRAME_TYPE_DEVICE_ADMISSION_RESPONSE = 14; // Envelope w/ AddDeviceAdmissionV1 (existing→new, gate-signed)
-  BLE_FRAME_TYPE_TROPIC_SPI_RELAY          = 15; // TropicSpiRelayPacket: opaque raw-SPI transaction relay (Path B counter read, L1 raw-SPI tunnel)
-  BLE_FRAME_TYPE_BILATERAL_BEARER_PREPARED = 16; // Envelope w/ BilateralBearerPrepared (§21 first-transfer: sender prepared + disclosure, pre-commit)
-  BLE_FRAME_TYPE_BILATERAL_BEARER_PROCEED  = 17; // Envelope w/ BilateralBearerProceed (§21 first-transfer: receiver did FROM read, sender may commit)
-}
-
-// Opaque TROPIC01 raw-SPI relay packet (Boot Fenced Fused Anchor §13, Path B counter
-// evidence). The relay cuts at L1/SPI, NOT at a separable L3 packet: the receiver runs
-// the FULL libtropic-rs stack over a RemoteSpiDevice and the sender's phone + Pico A only
-// forward raw SPI transaction bytes to TROPIC01 A (Pico A never decrypts, parses, or
-// interprets the counter). This frame carries ONE SPI transaction (request or response)
-// and is correlated to the in-flight transfer by commitment_hash. It has NO DSM/anchor
-// semantics — no decoded counter, no signature; the encrypted libtropic session (its
-// AES-256-GCM L3) that protects the counter read lives end-to-end at the receiver and
-// chip, tunnelled inside these opaque SPI bytes, never in this frame.
-message TropicSpiRelayPacket {
-  bytes  spi_payload     = 1 [(dsm_max_len)=4160]; // opaque raw SPI transaction bytes (one transaction; sized for a full L2 frame)
-  bool   from_receiver   = 2;                       // true: receiver→chip request; false: chip→receiver response
-  bytes  commitment_hash = 3 [(dsm_fixed_len)=32];  // correlates to the in-flight bilateral transfer
+  reserved 15, 16, 17; // removed v1 counter-era frames: TROPIC_SPI_RELAY, BILATERAL_BEARER_PREPARED/PROCEED
 }
 
 message BleFrameHeader {
@@ -2713,11 +2661,8 @@ message Envelope {
     AddDeviceAdmissionRequestV1       device_admission_request         = 108;
     AddDeviceAdmissionV1              device_admission                 = 109;
 
-    // Counter-Positioned Commit first-transfer round-trip (§21): sender exposes a PREPARED state +
-    // pin disclosure before committing; receiver acknowledges after its FROM read. See the message defs.
-    BilateralBearerPrepared           bilateral_bearer_prepared        = 110;
-    BilateralBearerProceed            bilateral_bearer_proceed         = 111;
   }
+  reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
 }
 
 // ===================== SDK INIT / STATUS =====================

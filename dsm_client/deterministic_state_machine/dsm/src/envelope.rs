@@ -737,11 +737,10 @@ mod tests {
     }
 
     #[test]
-    fn strict_decode_accepts_bearer_round_trip_payloads() {
-        // §21 first-transfer round-trip payloads (bilateral_bearer_prepared = 110,
-        // bilateral_bearer_proceed = 111) must pass the canonical validator, else the
-        // receiver rejects every bearer envelope as an unknown field before it can route.
-        let prepared = Envelope {
+    fn strict_decode_rejects_removed_bearer_round_trip_tags() {
+        // The v1 counter-era bearer round-trip payload tags (110/111) are reserved — a stale
+        // peer emitting them must be rejected by the canonical validator, never routed.
+        let mut env_bytes = to_canonical_bytes(&Envelope {
             version: 3,
             headers: Some(crate::types::proto::Headers {
                 device_id: vec![1; 32],
@@ -750,49 +749,17 @@ mod tests {
                 seq: 7,
             }),
             message_id: vec![4; 16],
-            payload: Some(
-                crate::types::proto::envelope::Payload::BilateralBearerPrepared(
-                    crate::types::proto::BilateralBearerPrepared {
-                        commitment_hash: Some(crate::types::proto::Hash32 { v: vec![5; 32] }),
-                        anchor_disclosure: Some(crate::types::proto::AnchorDisclosure {
-                            bundle: vec![6; 32],
-                            anchor_id: vec![7; 32],
-                            enrolled_counter: 42,
-                            partition_pk: vec![8; 64],
-                            policy_hash: vec![9; 32],
-                            verifier_slot: 1,
-                            verifier_slot_present: true,
-                            chip_static_pubkey: vec![10; 32],
-                        }),
-                    },
-                ),
-            ),
-        };
-        let decoded = from_canonical_bytes(&to_canonical_bytes(&prepared))
-            .expect("bilateral_bearer_prepared (tag 110) must be accepted");
-        assert_eq!(decoded, prepared);
-
-        let proceed = Envelope {
-            version: 3,
-            headers: Some(crate::types::proto::Headers {
-                device_id: vec![1; 32],
-                chain_tip: vec![2; 32],
-                genesis_hash: vec![3; 32],
-                seq: 8,
-            }),
-            message_id: vec![4; 16],
-            payload: Some(
-                crate::types::proto::envelope::Payload::BilateralBearerProceed(
-                    crate::types::proto::BilateralBearerProceed {
-                        commitment_hash: Some(crate::types::proto::Hash32 { v: vec![5; 32] }),
-                        receiver_signature: vec![11; 64],
-                    },
-                ),
-            ),
-        };
-        let decoded = from_canonical_bytes(&to_canonical_bytes(&proceed))
-            .expect("bilateral_bearer_proceed (tag 111) must be accepted");
-        assert_eq!(decoded, proceed);
+            payload: None,
+        });
+        // Append field 110 (wire type 2, empty message body) — a minimal stale
+        // bilateral_bearer_prepared payload.
+        env_bytes.extend_from_slice(&[0xf2, 0x06, 0x00]);
+        let err = from_canonical_bytes(&env_bytes)
+            .expect_err("removed bearer tag 110 must be rejected");
+        assert!(
+            err.to_string().contains("unknown Envelope field 110"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

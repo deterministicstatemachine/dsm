@@ -1100,11 +1100,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::ContactQrResponse(_)
             | gp::envelope::Payload::StorageStatusResponse(_)
             | gp::envelope::Payload::TokenCreateRequest(_)
-            | gp::envelope::Payload::TokenCreateResponse(_)
-            // Offline-bearer first-transfer round-trip (§21): BLE-transport messages handled by the
-            // SDK bilateral transport adapter, never the core bridge — reject here fail-closed.
-            | gp::envelope::Payload::BilateralBearerPrepared(_)
-            | gp::envelope::Payload::BilateralBearerProceed(_),
+            | gp::envelope::Payload::TokenCreateResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),

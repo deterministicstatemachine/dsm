@@ -8,9 +8,8 @@
 //! [`SqliteChainTipStore`](crate::sdk::chain_tip_store::SqliteChainTipStore): a stateless wrapper
 //! delegating to `client_db` helpers.
 //!
-//! Installing this store does NOT enable live offline-bearer acceptance — the counter reader is a
-//! separate device-layer install, and an incomplete pin (no verifier slot / chip static key)
-//! fail-closes the Path-B read regardless.
+//! Installing this store does NOT by itself admit anyone — pins are admitted only through the
+//! offline-bearer bilateral confirm flow (first-transfer TOFU / same-anchor upgrade).
 
 use dsm::crypto::anchor_enrollment::{AnchorEnrollment, AnchorEnrollmentStore};
 use dsm::types::error::DsmError;
@@ -54,7 +53,7 @@ mod tests {
     use dsm::crypto::anchor_enrollment::FusedAnchorPin;
     use serial_test::serial;
 
-    fn enrollment(dev: [u8; 32], slot: Option<u8>, stpub: Option<[u8; 32]>) -> AnchorEnrollment {
+    fn enrollment(dev: [u8; 32], pk_chip: Vec<u8>) -> AnchorEnrollment {
         AnchorEnrollment {
             device_id: dev,
             policy_hash: [0x9A; 32],
@@ -63,16 +62,15 @@ mod tests {
                 anchor_id: [0xA1; 32],
                 enrolled_counter: 1_000_000,
                 partition_pk: vec![0x07; 64],
+                pk_chip,
                 uncompromised: true,
-                verifier_slot: slot,
-                chip_static_pubkey: stpub,
             },
         }
     }
 
     #[test]
     #[serial]
-    fn admit_then_get_round_trips_through_sqlite_including_null_slot_and_stpub() {
+    fn admit_then_get_round_trips_through_sqlite() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -84,32 +82,22 @@ mod tests {
         // Not admitted -> None.
         assert!(store.get(&[0x11; 32]).is_none());
 
-        // Incomplete pre-HW pin: NULL slot + NULL stpub round-trip to None (fail-closed shape).
         let dev_a = [0x11; 32];
-        store.admit(enrollment(dev_a, None, None)).expect("admit");
+        store
+            .admit(enrollment(dev_a, vec![0xCC; 32]))
+            .expect("admit");
         let got = store.get(&dev_a).expect("admitted");
         assert_eq!(got.pin.bundle, [0xB1; 32]);
         assert_eq!(got.pin.anchor_id, [0xA1; 32]);
         assert_eq!(got.pin.enrolled_counter, 1_000_000);
         assert!(got.pin.uncompromised);
-        assert_eq!(got.pin.verifier_slot, None);
-        assert_eq!(got.pin.chip_static_pubkey, None);
-
-        // Complete pin: Some slot + Some stpub survive.
-        let dev_b = [0x22; 32];
-        store
-            .admit(enrollment(dev_b, Some(2), Some([0xCC; 32])))
-            .expect("admit");
-        let got = store.get(&dev_b).expect("admitted");
-        assert_eq!(got.pin.verifier_slot, Some(2));
-        assert_eq!(got.pin.chip_static_pubkey, Some([0xCC; 32]));
+        assert_eq!(got.pin.pk_chip, vec![0xCC; 32]);
 
         // Overwrite semantics (the CALLER owns the authority rules): re-admit upgrades in place.
         store
-            .admit(enrollment(dev_a, Some(1), Some([0xDD; 32])))
+            .admit(enrollment(dev_a, vec![0xDD; 32]))
             .expect("re-admit");
         let got = store.get(&dev_a).expect("admitted");
-        assert_eq!(got.pin.verifier_slot, Some(1));
-        assert_eq!(got.pin.chip_static_pubkey, Some([0xDD; 32]));
+        assert_eq!(got.pin.pk_chip, vec![0xDD; 32]);
     }
 }

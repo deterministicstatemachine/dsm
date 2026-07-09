@@ -43,12 +43,6 @@ pub(crate) fn detect_ble_frame_type_from_bytes(bytes: &[u8]) -> i32 {
             Some(pb::envelope::Payload::BilateralCommitResponse(_)) => {
                 pb::BleFrameType::BilateralCommitResponse as i32
             }
-            Some(pb::envelope::Payload::BilateralBearerPrepared(_)) => {
-                pb::BleFrameType::BilateralBearerPrepared as i32
-            }
-            Some(pb::envelope::Payload::BilateralBearerProceed(_)) => {
-                pb::BleFrameType::BilateralBearerProceed as i32
-            }
             Some(pb::envelope::Payload::UniversalTx(tx)) => {
                 if let Some(op) = tx.ops.first() {
                     if let Some(pb::universal_op::Kind::Invoke(inv)) = op.kind.as_ref() {
@@ -96,24 +90,13 @@ pub(crate) fn detect_ble_frame_type_from_bytes(bytes: &[u8]) -> i32 {
 ///
 /// A frame needs chunking when its payload can exceed a single BLE notification, or
 /// when the peer recovers the frame type from the `BleChunk` header (so a raw frame
-/// would be misdecoded). `BilateralBearerPrepared` carries the full `AnchorDisclosure`
-/// (anchor bundle, partition pubkey up to 4 KiB, verifier slot + chip static pubkey)
-/// and readily exceeds the unframed budget — sent raw it truncates and the first-transfer
-/// round-trip fails before the protocol runs. `BilateralBearerProceed` is small but is
-/// chunk-framed for symmetry so the sender recovers its frame type from the header.
+/// would be misdecoded).
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn ble_frame_needs_chunking(frame_type: i32) -> bool {
     frame_type == pb::BleFrameType::BilateralPrepareReject as i32
         || frame_type == pb::BleFrameType::BilateralCommit as i32
         || frame_type == pb::BleFrameType::BilateralCommitResponse as i32
         || frame_type == pb::BleFrameType::BilateralConfirm as i32
-        || frame_type == pb::BleFrameType::BilateralBearerPrepared as i32
-        || frame_type == pb::BleFrameType::BilateralBearerProceed as i32
-        // Path-B relay reply (chip->receiver counter read): the REQUEST is chunked via
-        // `queue_follow_up_chunks`, so the REPLY must be BleChunk-framed too — otherwise
-        // the receiver decodes the raw `TropicSpiRelayPacket` as a `BleChunk` and fails
-        // (`invalid tag value: 0`), dropping the reply and timing out the counter read.
-        || frame_type == pb::BleFrameType::TropicSpiRelay as i32
 }
 
 #[cfg(test)]
@@ -161,37 +144,6 @@ mod tests {
         encode(env)
     }
 
-    fn build_bilateral_bearer_prepared_envelope(partition_pk_len: usize) -> Vec<u8> {
-        let mut env = base_envelope();
-        env.payload = Some(pb::envelope::Payload::BilateralBearerPrepared(
-            pb::BilateralBearerPrepared {
-                commitment_hash: Some(pb::Hash32 { v: vec![5; 32] }),
-                anchor_disclosure: Some(pb::AnchorDisclosure {
-                    bundle: vec![6; 32],
-                    anchor_id: vec![7; 32],
-                    enrolled_counter: 42,
-                    partition_pk: vec![8; partition_pk_len],
-                    policy_hash: vec![9; 32],
-                    verifier_slot: 1,
-                    verifier_slot_present: true,
-                    chip_static_pubkey: vec![10; 32],
-                }),
-            },
-        ));
-        encode(env)
-    }
-
-    fn build_bilateral_bearer_proceed_envelope() -> Vec<u8> {
-        let mut env = base_envelope();
-        env.payload = Some(pb::envelope::Payload::BilateralBearerProceed(
-            pb::BilateralBearerProceed {
-                commitment_hash: Some(pb::Hash32 { v: vec![5; 32] }),
-                receiver_signature: vec![11; 64],
-            },
-        ));
-        encode(env)
-    }
-
     #[test]
     fn strips_envelope_v3_framing_only_when_present() {
         let raw = build_bilateral_confirm_envelope();
@@ -217,47 +169,12 @@ mod tests {
     }
 
     #[test]
-    fn detects_bilateral_bearer_frames_for_raw_and_framed_envelopes() {
-        let prepared = build_bilateral_bearer_prepared_envelope(64);
-        let mut prepared_framed = vec![0x03];
-        prepared_framed.extend_from_slice(&prepared);
-        assert_eq!(
-            detect_ble_frame_type_from_bytes(&prepared),
-            pb::BleFrameType::BilateralBearerPrepared as i32
-        );
-        assert_eq!(
-            detect_ble_frame_type_from_bytes(&prepared_framed),
-            pb::BleFrameType::BilateralBearerPrepared as i32
-        );
-
-        let proceed = build_bilateral_bearer_proceed_envelope();
-        let mut proceed_framed = vec![0x03];
-        proceed_framed.extend_from_slice(&proceed);
-        assert_eq!(
-            detect_ble_frame_type_from_bytes(&proceed),
-            pb::BleFrameType::BilateralBearerProceed as i32
-        );
-        assert_eq!(
-            detect_ble_frame_type_from_bytes(&proceed_framed),
-            pb::BleFrameType::BilateralBearerProceed as i32
-        );
-    }
-
-    #[test]
-    fn bearer_frames_are_chunking_eligible() {
-        // Both bearer frames must be BleChunk-framed on the outbound reply path.
-        assert!(ble_frame_needs_chunking(
-            pb::BleFrameType::BilateralBearerPrepared as i32
-        ));
-        assert!(ble_frame_needs_chunking(
-            pb::BleFrameType::BilateralBearerProceed as i32
-        ));
-        // Pre-existing large frames stay eligible; a small unframed frame stays ineligible.
+    fn chunking_eligibility_matches_frame_budget() {
         assert!(ble_frame_needs_chunking(
             pb::BleFrameType::BilateralConfirm as i32
         ));
         assert!(ble_frame_needs_chunking(
-            pb::BleFrameType::TropicSpiRelay as i32
+            pb::BleFrameType::BilateralCommitResponse as i32
         ));
         assert!(!ble_frame_needs_chunking(
             pb::BleFrameType::BilateralPrepareResponse as i32
@@ -265,40 +182,5 @@ mod tests {
         assert!(!ble_frame_needs_chunking(
             pb::BleFrameType::Unspecified as i32
         ));
-    }
-
-    #[test]
-    fn large_bearer_prepared_disclosure_is_chunked_not_truncated() {
-        // A realistic first-transfer disclosure (partition_pk up to 4 KiB) exceeds a single
-        // BLE notification. Prove it is (a) chunk-eligible and (b) actually split by the frame
-        // coordinator into >1 chunk, each stamped with the bearer frame type — so the receiver
-        // reassembles the full disclosure instead of a truncated one.
-        let prepared = build_bilateral_bearer_prepared_envelope(1024);
-        assert!(
-            prepared.len() > 512,
-            "test disclosure should exceed one notification, got {}",
-            prepared.len()
-        );
-        assert!(ble_frame_needs_chunking(
-            pb::BleFrameType::BilateralBearerPrepared as i32
-        ));
-
-        let coord = crate::bluetooth::BleFrameCoordinator::new([7u8; 32]);
-        let chunks = coord
-            .encode_message(pb::BleFrameType::BilateralBearerPrepared, &prepared)
-            .expect("encode_message chunks bearer-prepared");
-        assert!(
-            chunks.len() > 1,
-            "large disclosure must span multiple chunks, got {}",
-            chunks.len()
-        );
-        for chunk_bytes in &chunks {
-            let chunk = pb::BleChunk::decode(chunk_bytes.as_slice()).expect("decode BleChunk");
-            let header = chunk.header.expect("chunk header present");
-            assert_eq!(
-                header.frame_type,
-                pb::BleFrameType::BilateralBearerPrepared as i32
-            );
-        }
     }
 }

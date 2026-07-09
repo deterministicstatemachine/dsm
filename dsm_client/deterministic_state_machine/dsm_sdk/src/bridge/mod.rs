@@ -319,39 +319,6 @@ pub fn local_kyber_pubkey() -> Option<Vec<u8>> {
     LOCAL_KYBER_PUBKEY.read().ok()?.clone()
 }
 
-/// Receiver-side Path-B counter reader (D2 activation). Installed by the device layer with an
-/// implementation backed by the BLE relay + the excluded hardware verifier crate. `None` until
-/// installed, which keeps offline-bearer acceptance fail-closed (online recovery).
-static ANCHOR_COUNTER_READER: Lazy<
-    RwLock<Option<Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>>>,
-> = Lazy::new(|| RwLock::new(None));
-
-/// Install (or replace) the receiver-side counter reader used to authenticate the sender's TROPIC01
-/// counter over the relay.
-pub fn install_anchor_counter_reader(
-    reader: Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>,
-) {
-    if let Ok(mut g) = ANCHOR_COUNTER_READER.write() {
-        *g = Some(reader);
-        log::info!("[SDK] AnchorCounterReader installed (Path-B counter activation)");
-    }
-}
-
-#[must_use]
-pub fn anchor_counter_reader(
-) -> Option<Arc<dyn crate::bluetooth::tropic_relay::AnchorCounterReader>> {
-    ANCHOR_COUNTER_READER.read().ok()?.clone()
-}
-
-/// Test-only: clear the installed counter reader so a `#[serial]` test leaves the global bridge as
-/// it found it (other tests assert the fail-closed `None` path).
-#[cfg(test)]
-pub(crate) fn uninstall_anchor_counter_reader() {
-    if let Ok(mut g) = ANCHOR_COUNTER_READER.write() {
-        *g = None;
-    }
-}
-
 /// Receiver-side pinned fused-anchor enrollment store. Installed by the device layer; supplies the
 /// `FusedAnchorPin` the receiver admitted for a counterparty. `None` until installed -> no pin ->
 /// offline-bearer acceptance fail-closed.
@@ -369,7 +336,8 @@ pub fn install_anchor_enrollment_store(
     }
 }
 
-/// Test-only: clear the installed enrollment store (see [`uninstall_anchor_counter_reader`]).
+/// Test-only: clear the installed enrollment store so a `#[serial]` test leaves the global bridge
+/// as it found it (other tests assert the fail-closed `None` path).
 #[cfg(test)]
 pub(crate) fn uninstall_anchor_enrollment_store() {
     if let Ok(mut g) = ANCHOR_ENROLLMENT_STORE.write() {
@@ -413,73 +381,6 @@ pub fn install_anchor_appliance_factory(factory: AnchorApplianceFactory) {
 #[must_use]
 pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
     ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
-}
-
-/// RECEIVER-side X25519 verifier pairing key deriver (Boot Fenced Fused Anchor receiver-admit).
-/// Produces the pairing PUBLIC key B offers in the first-transfer `AnchorEnrollRequest`, derived
-/// per-counterparty from B's identity seed (the private half is re-derived at read time by the
-/// hardware verifier — nothing is persisted). X25519 lives in the device/hardware layer, so this
-/// is an injected seam: `None` (CI / no HW) -> the enroll request rides an EMPTY pubkey -> the
-/// sender cannot provision a verifier slot -> Path-B stays fail-closed.
-pub trait VerifierPairingDeriver: Send + Sync {
-    fn verifier_pairing_pubkey(&self, peer_device_id: [u8; 32]) -> Option<[u8; 32]>;
-}
-
-static VERIFIER_PAIRING_DERIVER: Lazy<RwLock<Option<Arc<dyn VerifierPairingDeriver>>>> =
-    Lazy::new(|| RwLock::new(None));
-
-/// Install (or replace) the receiver-side verifier pairing key deriver.
-pub fn install_verifier_pairing_deriver(deriver: Arc<dyn VerifierPairingDeriver>) {
-    if let Ok(mut g) = VERIFIER_PAIRING_DERIVER.write() {
-        *g = Some(deriver);
-        log::info!("[SDK] VerifierPairingDeriver installed");
-    }
-}
-
-#[must_use]
-pub fn verifier_pairing_deriver() -> Option<Arc<dyn VerifierPairingDeriver>> {
-    VERIFIER_PAIRING_DERIVER.read().ok()?.clone()
-}
-
-/// SENDER-side SE verifier-slot provisioner (Boot Fenced Fused Anchor receiver-admit). Writes the
-/// requester's pairing public key into a READ-ONLY verifier pairing slot on the sender's TROPIC01
-/// (via the Pico firmware) and returns `(slot_index, chip_static_pubkey)` for the disclosure.
-/// `None` (CI / firmware op unbuilt) -> the disclosure rides with slot/stpub EMPTY -> the admitted
-/// pin is incomplete -> Path-B counter verification stays fail-closed.
-pub trait SeSlotWriter: Send + Sync {
-    fn provision_verifier_slot(
-        &self,
-        requester_device_id: [u8; 32],
-        pairing_pubkey: [u8; 32],
-    ) -> Option<(u8, [u8; 32])>;
-}
-
-static SE_SLOT_WRITER: Lazy<RwLock<Option<Arc<dyn SeSlotWriter>>>> =
-    Lazy::new(|| RwLock::new(None));
-
-/// Install (or replace) the sender-side SE verifier-slot provisioner.
-pub fn install_se_slot_writer(writer: Arc<dyn SeSlotWriter>) {
-    if let Ok(mut g) = SE_SLOT_WRITER.write() {
-        *g = Some(writer);
-        log::info!("[SDK] SeSlotWriter installed");
-    }
-}
-
-#[must_use]
-pub fn se_slot_writer() -> Option<Arc<dyn SeSlotWriter>> {
-    SE_SLOT_WRITER.read().ok()?.clone()
-}
-
-/// Test-only: clear the installed SE slot-writer so a `#[serial]` test leaves the global bridge as
-/// it found it. The first-transfer bearer activation gate is exactly `se_slot_writer().is_some()`
-/// (with an enroll request + a bearer op), so the inertness tests toggle this seam to prove the
-/// round-trip stays off without a writer and arms only with one. Mirrors
-/// [`uninstall_anchor_counter_reader`].
-#[cfg(test)]
-pub(crate) fn uninstall_se_slot_writer() {
-    if let Ok(mut g) = SE_SLOT_WRITER.write() {
-        *g = None;
-    }
 }
 
 #[cfg(test)]
