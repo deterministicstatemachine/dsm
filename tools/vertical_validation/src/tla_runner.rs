@@ -397,6 +397,29 @@ impl TlaRunner {
                 linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
                 supports_trace_replay: true,
             },
+            // --- Offline Anchor Single Appliance (Software Authority, Hardware
+            // Identity: appliance-producer form of Theorem 1). One correct
+            // enrolled offline-bearer appliance cannot originate two valid
+            // releases from a single SMT anchor origin (R_i, h_i, u_i) — proved
+            // directly inside the appliance state machine, not "collides later".
+            // The offline-anchor special case of the guarded kernel; universal
+            // proof in lean4/DSMOfflineAnchorOrigin.lean.
+            TlaSpec {
+                label: "OfflineAnchorSingleAppliance".into(),
+                spec_file: "DSM_OfflineAnchorSingleAppliance.tla".into(),
+                config_file: "DSM_OfflineAnchorSingleAppliance.cfg".into(),
+                invariants: vec![
+                    "NoTwoEmittedSameOrigin".into(),
+                    "NoTwoCommittedSameOrigin".into(),
+                    "CounterSync".into(),
+                    "CommitAdvancesOrigin".into(),
+                    "SecondSameOriginFails".into(),
+                    "RecoveryIdempotence".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+            },
         ]
     }
 

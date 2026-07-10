@@ -29,9 +29,14 @@ The guarded kernel (paper Appendix A/B) is machine checked as:
   `hardened_single_consumption`, `no_resource_local_cycle`, and companions).
   The uniqueness/tripwire core depends on NO axioms; only the paper's labeled
   cryptographic Assumptions appear as axioms, and only where the paper uses them.
-- `lean4/DSMGuardedOffline.lean`: offline bearer double-spend exclusion and
-  clone exclusion, with the unforgeability assumption used only where the
-  paper's Theorem 13 uses it.
+- `lean4/DSMOfflineAnchorOrigin.lean`: the offline-anchor special case of the
+  kernel (v2 "Software Authority, Hardware Identity"). One correct enrolled
+  appliance emits at most one committed package per SMT anchor origin
+  `(R_i, h_i, u_i)`; `keyOf_inj` embeds the origin into the general resource key,
+  so `offline_anchor_origin_unique` specializes `realized_unique_at_key`. The
+  whole module depends on NO axioms (uniqueness is a software property; no
+  hardware term appears). Model-checked by
+  `tla/DSM_OfflineAnchorSingleAppliance.tla`.
 - `tla/DSM_Guarded.tla` + instances: TLC model checks of concrete guard
   families, including deliberate falsification. The static Theorem 2/4 form
   (`Safety`) holds for a well-formed family and is violated by a key-split
