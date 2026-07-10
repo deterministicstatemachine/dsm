@@ -28,7 +28,10 @@ const T_REL: [u8; 32] = [1; 32];
 const T_OBJ: [u8; 32] = [2; 32];
 const T_SND: [u8; 32] = [3; 32];
 const T_RCV: [u8; 32] = [4; 32];
-const NEXT_ROOT: [u8; 32] = [0x11; 32];
+// v2 bench device roots R_i/R_{i+1} the appliance signs over (DSM-layer inputs; Phase 2 cancels
+// before any accept, so no receiver ever verifies them).
+const BENCH_R_I: [u8; 32] = [0x51; 32];
+const BENCH_R_NEXT: [u8; 32] = [0x52; 32];
 const T_PAY: [u8; 32] = [9; 32];
 const T_AF: [u8; 2] = [0xAA, 0xBB];
 const LEAF_OLD: [u8; 40] = [0xAB; 40];
@@ -174,29 +177,59 @@ fn status(port: &mut dyn serialport::SerialPort) -> Result<(u64, u64, Vec<u8>), 
 }
 
 fn prepare(port: &mut dyn serialport::SerialPort, prev_root: &[u8]) -> Result<(), String> {
+    // v2: the successor frontier is DERIVED, never invented — the appliance enforces
+    // `next_root == anchor_root_advance(prev_root, D)` where `D = transition_digest(Δ°, r_R)`
+    // (Δ° excludes next_root, so D is computable first). Compute it host-side from the same
+    // anchor-core the firmware links, exactly like the SDK producer does.
+    let prev: [u8; 32] = prev_root
+        .try_into()
+        .map_err(|_| format!("prev_root is {} bytes (want 32)", prev_root.len()))?;
+    let mut owned = anchor_core::root_advance::OwnedTransition {
+        relationship_id: T_REL,
+        object_id: T_OBJ,
+        sender_device_id: T_SND,
+        recipient_device_id: T_RCV,
+        prev_root: prev,
+        next_root: [0u8; 32],
+        anchor_counter: 0,
+        next_anchor_counter: 1,
+        action_type: 0,
+        action_fields: T_AF.to_vec(),
+        payload_hash: T_PAY,
+        old_leaf_proof: LEAF_OLD.to_vec(),
+        new_leaf_proof: LEAF_NEW.to_vec(),
+        // On-chip PREPARE is policy-agnostic; the receiver enforces the canonical policy. Phase
+        // 2 cancels before any accept, so this value is never checked.
+        authority_policy_hash: [0u8; 32],
+    };
+    let d = anchor_core::root_advance::transition_digest(&owned.as_transition(), &RCHAL);
+    owned.next_root = anchor_core::root_advance::anchor_root_advance(&prev, &d);
     roundtrip(
         port,
         &pb::ApplianceRequest {
             op: pb::Op::Prepare as i32,
             transition: Some(pb::TransitionPackage {
-                relationship_id: T_REL.to_vec(),
-                object_id: T_OBJ.to_vec(),
-                sender_device_id: T_SND.to_vec(),
-                recipient_device_id: T_RCV.to_vec(),
-                prev_root: prev_root.to_vec(),
-                next_root: NEXT_ROOT.to_vec(),
-                anchor_counter: 0,
-                next_anchor_counter: 1,
-                action_type: 0,
-                action_fields: T_AF.to_vec(),
-                payload_hash: T_PAY.to_vec(),
-                old_leaf_proof: LEAF_OLD.to_vec(),
-                new_leaf_proof: LEAF_NEW.to_vec(),
-                // On-chip PREPARE is policy-agnostic; the receiver enforces the canonical policy. Phase
-                // 2 cancels before any accept, so this value is never checked.
-                authority_policy_hash: [0u8; 32].to_vec(),
+                relationship_id: owned.relationship_id.to_vec(),
+                object_id: owned.object_id.to_vec(),
+                sender_device_id: owned.sender_device_id.to_vec(),
+                recipient_device_id: owned.recipient_device_id.to_vec(),
+                prev_root: owned.prev_root.to_vec(),
+                next_root: owned.next_root.to_vec(),
+                anchor_counter: owned.anchor_counter,
+                next_anchor_counter: owned.next_anchor_counter,
+                action_type: owned.action_type,
+                action_fields: owned.action_fields.clone(),
+                payload_hash: owned.payload_hash.to_vec(),
+                old_leaf_proof: owned.old_leaf_proof.clone(),
+                new_leaf_proof: owned.new_leaf_proof.clone(),
+                authority_policy_hash: owned.authority_policy_hash.to_vec(),
             }),
             receiver_challenge: RCHAL.to_vec(),
+            // v2: the DSM layer owns the device SMT and supplies R_i/R_{i+1}; the appliance signs
+            // over them. Bench constants — Phase 2 CANCELS before anything could be accepted, so
+            // these are never verified by any receiver.
+            sender_device_root_before: BENCH_R_I.to_vec(),
+            sender_device_root_after: BENCH_R_NEXT.to_vec(),
             ..Default::default()
         },
     )

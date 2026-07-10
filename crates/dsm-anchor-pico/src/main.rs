@@ -92,6 +92,8 @@ const CHIP_KEY_SLOT: u16 = 0;
 // deterministic across reboots (stable bundle/identity); the LIVE counter (`mcounter_get`) gives the
 // current H and the appliance derives u = H0 − H. The firmware ADOPTS the provisioned counter — it
 // must NOT re-init it (that would reset the counter and defeat the anti-double-spend floor).
+// Unused in a bench-adopt build (H0 = the live counter there); never removed from production.
+#[cfg(not(feature = "bench-adopt-existing-chip"))]
 const ENROLL_H0: u32 = 0xFFFF_FFFE; // tropic01 MCOUNTER_VALUE_MAX (4_294_967_294)
 
 /// The partition (`σ^host`) scheme: BLAKE3-SPHINCS+ SPX128f (fast sign, 17,088 B signature,
