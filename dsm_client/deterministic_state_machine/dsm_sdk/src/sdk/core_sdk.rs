@@ -1863,14 +1863,19 @@ fn hardware_appliance_or_fail(
     })?))
 }
 
+/// User-facing error when an offline-bearer send finds no anchor appliance connected. It rides the
+/// `DsmError` up through the confirm-build failure into the `BilateralEventFailed` event's message,
+/// where the frontend maps it to a "connect your anchor device" toast (Stage 4 Slice 3 signal a).
+/// A const so the not(test) producer and the wording test share one source of truth.
+pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
+    "offline-bearer requires the anchor appliance; connect the anchor device (Pico) and retry (fail closed)";
+
 #[cfg(not(test))]
 fn hardware_appliance_or_fail(
     _seed: &impl Fn(&str) -> [u8; 32],
     _dev: [u8; 32],
 ) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
-    Err(DsmError::invalid_operation(
-        "offline-bearer requires the hardware anchor; connect the Pico and install Path-B (fail closed)",
-    ))
+    Err(DsmError::invalid_operation(OFFLINE_BEARER_NO_APPLIANCE_MSG))
 }
 
 impl CoreSDK {
@@ -2847,6 +2852,21 @@ mod tests {
             Ok(sdk) => sdk,
             Err(e) => panic!("Failed to init SDK: {:?}", e),
         }
+    }
+
+    /// Stage 4 Slice 3 (signal a): the offline-bearer "no appliance" error must speak v2 — name the
+    /// anchor device the user connects — and never the deleted v1 "Path-B" concept. This message
+    /// rides into the failed-transfer event the frontend friendly-maps.
+    #[test]
+    fn offline_bearer_no_appliance_message_is_v2_worded() {
+        assert!(
+            OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("anchor device"),
+            "the send-failure message must tell the user to connect the anchor device"
+        );
+        assert!(
+            !OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("Path-B"),
+            "the message must not reference the deleted v1 Path-B concept"
+        );
     }
 
     /// v2 producer phases: STAGE determines the transition + successor leaf with NO appliance
