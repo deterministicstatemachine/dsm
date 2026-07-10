@@ -1,57 +1,31 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! H3 sender-side SE seam: disclose the DSM SMT-root verifier slot on A's OWN TROPIC01.
+//! Device SETUP + read-only diagnostics for the holder's OWN TROPIC01, driven over the phone's USB
+//! link (`OP_SPI_PASSTHROUGH`) — v2 Software-Authority / Hardware-Identity.
 //!
-//! [`SeVerifierSlotWriter`] fills `dsm_sdk`'s `SeSlotWriter` seam and is **strictly read-only**: on a
-//! first-transfer enroll it SCANS the candidate pairing-key indices to LOCATE the one already holding
-//! the fixed DSM verifier key + correct cage, and discloses `(that index, stpub)`. It NEVER writes —
-//! a transfer or app boot can never touch hardware state. Empty / occupied / wrong-key / any error
-//! -> `None` -> disclosure empty -> receiver pin incomplete -> fail-closed.
+//! v2 has NO verifier slot and NO receiver-side hardware. What remains here:
+//!   - read-only diagnostics (always shipped in the default .so; can never write hardware):
+//!     `anchorChipStatus` logs the live counter vs the intended budget; `anchorCounterSelfTest`
+//!     returns ONE authenticated counter read (the H2/H3 bench self-test, now over the local link).
+//!   - gated device-setup WRITES (feature `on_device_installs`, absent from the default .so, run
+//!     deliberately by the operator over ADB — never from app boot or a transfer):
+//!     `counterInitMax` (counter birth: mcounter[0] := MCOUNTER_MAX, spec impl-req #5) and
+//!     `birthCageSlot0` (the IRREVERSIBLE slot-0 birth cage: revokes counter-reset/re-key/un-cage).
 //!
-//! The IRREVERSIBLE provisioning burn is NOT an on-device operation: it is done deliberately at the
-//! bench via the `usb_verifier_slot` CLI (see BENCH_BURN_RUNBOOK.md), against a chosen slot index.
-//! There is intentionally no on-device burn entry point.
-//!
-//! The read drives A's local Pico over the same opaque JNI USB up-call the relay uses, wrapped as a
-//! sync `SpiRelayChannel` so the proven `provisioner` read runs unchanged on-device.
+//! The sync [`SpiRelayChannel`] drives the SAME opaque JNI USB up-call the appliance transport
+//! uses, so the proven bench provisioning ops run unchanged on-device.
 
-// Host-testable decision types (hw-verifier is a normal dep, so these resolve on host too).
-use dsm_anchor_hw_verifier::{dsm_verifier_pairing_pubkey, ProvisionError};
-// The read-only transport + status probes are NOT accept-enabling, so they live under plain
-// `target_os = "android"` (shipped in the default .so). Only the accept-enabling `SeSlotWriter` is
-// behind the `on_device_installs` feature.
+// Read-only transport + probes are NOT accept-enabling → plain `target_os = "android"` (default
+// .so). The setup WRITES are gated `on_device_installs`.
 #[cfg(target_os = "android")]
-use dsm_anchor_hw_verifier::{
-    find_provisioned_slot, preflight_verifier_slot, read_counter, read_verifier_slot,
-    VerifierSlotState, MCOUNTER_MAX, VERIFIER_SLOT_CANDIDATES,
-};
+use dsm_anchor_hw_verifier::{read_counter, MCOUNTER_MAX};
 #[cfg(target_os = "android")]
 use dsm_anchor_verifier::{RelayError, SpiRelayChannel};
-// The counter-init + verifier-slot WRITES are gated setup ops — feature-gated, absent from default .so.
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use dsm_anchor_hw_verifier::{commit_verifier_slot, init_counter_max};
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use dsm_sdk::bridge::SeSlotWriter;
+use dsm_anchor_hw_verifier::{birth_cage_slot0, init_counter_max};
 
-/// The fail-closed disclosure decision, pulled out of the on-device path so it is host-testable: the
-/// receiver's offered key must be the fixed DSM verifier key, and the scan must have LOCATED the role
-/// at some candidate index. Anything else -> `None` (disclosure empty -> receiver pin incomplete).
-/// The located index (1..=3) is downcast to the wire `u8`.
-fn map_disclosure(
-    offered_pubkey: [u8; 32],
-    found: Result<Option<(u16, [u8; 32])>, ProvisionError>,
-) -> Option<(u8, [u8; 32])> {
-    if offered_pubkey != dsm_verifier_pairing_pubkey() {
-        return None;
-    }
-    match found {
-        Ok(Some((slot, stpub))) => u8::try_from(slot).ok().map(|s| (s, stpub)),
-        _ => None,
-    }
-}
-
-/// A sync `SpiRelayChannel` to A's LOCAL Pico over the JNI USB up-call: each `transceive` frames one
-/// raw SPI transaction as `OP_SPI_PASSTHROUGH` (in Rust) and returns the MISO. Zero-size — a fresh
-/// one is minted per probed slot (the scanner's factory).
+/// A sync `SpiRelayChannel` to the phone's LOCAL Pico over the JNI USB up-call: each `transceive`
+/// frames one raw SPI transaction as `OP_SPI_PASSTHROUGH` (in Rust) and returns the MISO.
+/// Zero-size — mint a fresh one per operation.
 #[cfg(target_os = "android")]
 pub struct JniLocalSpiChannel;
 
@@ -66,73 +40,55 @@ impl SpiRelayChannel for JniLocalSpiChannel {
     }
 }
 
-/// READ-ONLY diagnostic (no writes, no burn): scan every candidate index + run the slot-2 preflight
-/// on A's local chip, logging chip identity + per-slot state so an operator (via `adb logcat`) can
-/// confirm which chip this is and whether it is safe to burn — through the phone, without moving the
-/// chip to a bench. Returns 0 always; results are in logcat under "se-slot". Present in the default
-/// .so (read-only); it can never write hardware.
+/// READ-ONLY diagnostic (no writes): read the local chip's mcounter[0] and log it against the
+/// intended device budget. Returns 0 always; results are in logcat under "se-slot". Present in the
+/// default .so; it can never write hardware.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_verifierSlotStatus(
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_anchorChipStatus(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
 ) -> jni::sys::jint {
-    log::info!("[se-slot] === verifier-slot STATUS (read-only) ===");
-    for &slot in VERIFIER_SLOT_CANDIDATES {
-        match read_verifier_slot(slot, JniLocalSpiChannel) {
-            Ok(VerifierSlotState::Provisioned { stpub }) => {
-                log::info!(
-                    "[se-slot] slot {slot}: PROVISIONED (fixed DSM key, caged); stpub={stpub:02x?}"
-                )
-            }
-            Ok(VerifierSlotState::Empty { stpub }) => {
-                log::info!("[se-slot] slot {slot}: EMPTY; stpub={stpub:02x?}")
-            }
-            Ok(VerifierSlotState::Occupied) => {
-                log::info!("[se-slot] slot {slot}: OCCUPIED (non-fixed key or not caged)")
-            }
-            Err(e) => log::warn!("[se-slot] slot {slot}: read error {e:?}"),
-        }
-    }
-    match find_provisioned_slot(|| JniLocalSpiChannel) {
-        Ok(Some((slot, stpub))) => {
-            log::info!(
-                "[se-slot] provisioned verifier role located at slot {slot}; stpub={stpub:02x?}"
-            )
-        }
-        Ok(None) => log::info!("[se-slot] no verifier role provisioned on any candidate index"),
-        Err(e) => log::warn!("[se-slot] scan error {e:?}"),
-    }
-    // Read-only counter status: current mcounter[0] vs the intended device budget (max).
+    log::info!("[se-slot] === anchor chip STATUS (read-only) ===");
     match read_counter(JniLocalSpiChannel) {
         Ok(v) => {
             let note = if v == MCOUNTER_MAX {
-                "at max"
+                "at max (full budget)"
             } else {
-                "NOT at max (placeholder/partial)"
+                "below max (steps consumed, or partial provisioning)"
             };
-            log::info!(
-                "[se-slot] mcounter[0] current={v} intended-max(H0)={MCOUNTER_MAX} -> {note}"
-            )
+            log::info!("[se-slot] mcounter[0] current={v} budget-max(H0)={MCOUNTER_MAX} -> {note}");
         }
         Err(e) => log::warn!("[se-slot] counter read error {e:?}"),
     }
-    // Read-only preflight of the intended dev-chip slot (2). Writes nothing.
-    match preflight_verifier_slot(2, JniLocalSpiChannel) {
-        Ok(r) => log::info!(
-            "[se-slot] preflight slot 2: WOULD PROCEED; stpub={:02x?} mcounter[0]={}",
-            r.stpub,
-            r.mcounter
-        ),
-        Err(e) => log::warn!("[se-slot] preflight slot 2: NOT eligible: {e:?}"),
-    }
-    log::info!("[se-slot] === verifier-slot STATUS done ===");
+    log::info!("[se-slot] === anchor chip STATUS done ===");
     0
 }
 
+/// READ-ONLY self-test: ONE authenticated counter read over the local USB link. Returns the live
+/// counter `H` (>= 0) or -1 on any failure — the bench proof that the phone can reach a real
+/// TROPIC01 through its own Pico. Never writes.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_anchorCounterSelfTest(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) -> jni::sys::jlong {
+    match read_counter(JniLocalSpiChannel) {
+        Ok(v) => {
+            log::info!("[se-slot] counter self-test OK: H={v}");
+            i64::from(v)
+        }
+        Err(e) => {
+            log::error!("[se-slot] counter self-test FAILED: {e:?}");
+            -1
+        }
+    }
+}
+
 /// GATED device-setup WRITE (absent from the default .so): initialize mcounter[0] to the max device
-/// budget (`MCOUNTER_MAX`) on A's local chip, via slot 0, and confirm the read-back. SEPARATE from the
-/// verifier-slot burn and run BEFORE it. Returns the read-back counter on success, or -1 fail. Invoked
+/// budget (`MCOUNTER_MAX`) on the local chip — counter birth. Returns the read-back counter on
+/// success, or -1 fail. Run BEFORE the birth cage (which revokes `mcounter_init` forever). Invoked
 /// deliberately by the operator over ADB; never from app boot or a transfer.
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 #[no_mangle]
@@ -153,90 +109,27 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_counterInitMax(
     }
 }
 
-/// GATED verifier-slot BURN (absent from the default .so): irreversibly provision the fixed DSM
-/// verifier key into `slot` on A's local chip + cage it read-only (the reviewed `commit_verifier_slot`
-/// over the phone USB relay). SEPARATE from counter-init; run AFTER it. Returns the provisioned slot
-/// index (>= 0) on success, or -1 on failure. Invoked deliberately by the operator over ADB with an
-/// explicit slot + confirm; never from app boot or a transfer.
+/// GATED IRREVERSIBLE birth burn (absent from the default .so): permanently revoke slot-0's
+/// counter-reset + re-key + un-cage authority (`SLOT0_BIRTH_DENY`), making the down-counter's
+/// one-way monotonicity a hardware birth invariant. Run LAST in device setup, AFTER
+/// `counterInitMax`. Returns the now-immutable H0 (>= 0) or -1 on failure (nothing partial is
+/// trusted). Invoked deliberately by the operator over ADB with explicit confirmation; never from
+/// app boot or a transfer.
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 #[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_provisionVerifierSlot(
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_birthCageSlot0(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
-    slot: jni::sys::jint,
-) -> jni::sys::jint {
-    let slot = slot as u16;
-    log::info!("[se-slot] BURN: provisioning verifier slot {slot} (irreversible) ...");
-    match commit_verifier_slot(slot, || JniLocalSpiChannel) {
-        Ok((s, stpub)) => {
-            log::info!("[se-slot] BURN OK: slot {s} caged; stpub={stpub:02x?}");
-            i32::from(s as u8)
+) -> jni::sys::jlong {
+    log::info!("[se-slot] BIRTH CAGE: permanently sealing slot-0 (irreversible) ...");
+    match birth_cage_slot0(JniLocalSpiChannel) {
+        Ok(h0) => {
+            log::info!("[se-slot] BIRTH CAGE OK: sealed; immutable H0={h0}");
+            i64::from(h0)
         }
         Err(e) => {
-            log::error!("[se-slot] BURN FAILED (nothing partial trusted): {e:?}");
+            log::error!("[se-slot] BIRTH CAGE FAILED (nothing partial trusted): {e:?}");
             -1
         }
-    }
-}
-
-/// Read-only `SeSlotWriter`: discloses the verifier slot iff it is already provisioned + caged
-/// (located by scanning). Never writes.
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-pub struct SeVerifierSlotWriter;
-
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-impl SeSlotWriter for SeVerifierSlotWriter {
-    fn provision_verifier_slot(
-        &self,
-        _requester_device_id: [u8; 32],
-        pairing_pubkey: [u8; 32],
-    ) -> Option<(u8, [u8; 32])> {
-        let found = find_provisioned_slot(|| JniLocalSpiChannel);
-        if let Err(ref e) = found {
-            log::warn!("[se-slot] verifier-slot scan failed (fail-closed): {e:?}");
-        }
-        let disclosure = map_disclosure(pairing_pubkey, found);
-        if disclosure.is_none() {
-            log::warn!(
-                "[se-slot] no disclosure (unprovisioned / not caged / wrong key); fail-closed"
-            );
-        }
-        disclosure
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const STPUB: [u8; 32] = [0xAB; 32];
-
-    #[test]
-    fn located_fixed_key_slot_discloses_that_index_and_stpub() {
-        // The scan located the role at index 2 (this dev chip): disclose (2, stpub).
-        let ok = map_disclosure(dsm_verifier_pairing_pubkey(), Ok(Some((2u16, STPUB))));
-        assert_eq!(ok, Some((2u8, STPUB)));
-    }
-
-    #[test]
-    fn wrong_offered_key_never_discloses_even_when_located() {
-        let mut wrong = dsm_verifier_pairing_pubkey();
-        wrong[0] ^= 0xFF;
-        assert_eq!(map_disclosure(wrong, Ok(Some((2u16, STPUB)))), None);
-    }
-
-    #[test]
-    fn not_found_and_errors_all_fail_closed() {
-        let fixed = dsm_verifier_pairing_pubkey();
-        assert_eq!(
-            map_disclosure(fixed, Ok(None)),
-            None,
-            "no provisioned slot -> no disclosure",
-        );
-        assert_eq!(
-            map_disclosure(fixed, Err(ProvisionError::Chip("boom".into()))),
-            None,
-            "a scan error must fail closed",
-        );
     }
 }

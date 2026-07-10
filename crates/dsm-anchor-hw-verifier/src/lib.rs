@@ -1,36 +1,27 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The DSM Boot Fenced Fused Anchor Path-B HARDWARE verifier — the only crate that depends on
-//! `tropic01` (the sibling libtropic-rs checkout). It is EXCLUDED from the workspace so CI builds
-//! green without the sibling; build/test it directly on a machine that has the sibling checkout:
+//! DSM local-chip hardware provisioning (Software-Authority / Hardware-Identity) — the only crate
+//! that depends on `tropic01` (the sibling libtropic-rs checkout). It is EXCLUDED from the
+//! workspace so CI builds green without the sibling; build/test it directly on a machine that has
+//! the sibling checkout:
 //!
 //! ```text
 //! cargo build -p dsm-anchor-hw-verifier
 //! cargo run   -p dsm-anchor-hw-verifier --example usb_counter_read   # real board attached
 //! ```
 //!
-//! It runs the receiver's full libtropic session — `Tropic01::new(RemoteSpiDevice)` → `session_start`
-//! → `mcounter_get` — over the `tropic01`-free relay spine from `dsm-anchor-verifier`, and joins it
-//! to a caller-supplied async transport round-trip ([`read_counter_over_relay`]). The DSM SDK stays
-//! free of `tropic01`; the on-device layer wires its BLE round-trip into this reader.
+//! v2 removed every receiver-side hardware path (no relay, no peer counter read, no verifier
+//! slot). What remains is device SETUP for the holder's OWN chip, over any
+//! `dsm_anchor_verifier::SpiRelayChannel` (bench serial, or the phone's own USB
+//! `OP_SPI_PASSTHROUGH` link): counter birth ([`init_counter_max`]), the irreversible slot-0
+//! birth cage ([`birth_cage_slot0`]), and the non-destructive [`read_counter`] diagnostic.
 
 // Tests use `.expect()`/`.unwrap()` freely (the workspace `.clippy.toml` disallows them in
 // production; production code in this crate does not use them).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod provisioner;
-mod reader;
-mod relay_driver;
-mod session;
 
 pub use provisioner::{
-    birth_cage_slot0, commit_verifier_slot, find_provisioned_slot, init_counter_max,
-    preflight_verifier_slot, read_counter, read_verifier_slot, PreflightReport, ProvisionError,
-    VerifierSlotState, ALLOW_FACTORY_OPEN, DENY, MCOUNTER_MAX, SLOT0_BIRTH_DENY, VERIFIER_SLOT,
-    VERIFIER_SLOT_CANDIDATES,
+    birth_cage_slot0, init_counter_max, read_counter, ProvisionError, MCOUNTER_MAX,
+    SLOT0_BIRTH_DENY,
 };
-pub use reader::{
-    dsm_verifier_pairing_pubkey, dsm_verifier_pairing_secret_bytes, DsmVerifierPairingDeriver,
-    RelayCounterReader, RelayRoundTrip,
-};
-pub use relay_driver::read_counter_over_relay;
-pub use session::{read_live_counter, VerifierError, VerifierSessionCredential};

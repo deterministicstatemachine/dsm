@@ -93,20 +93,20 @@ class PicoSelfTestActivity : Activity() {
                     Long.MIN_VALUE
                 }
                 when {
-                    h >= 0 -> Log.i(TAG, "*** H3 PASS: attested counter read H=$h through the phone ***")
+                    h >= 0 -> Log.i(TAG, "*** H3 PASS: authenticated counter read H=$h through the phone ***")
                     h == Long.MIN_VALUE -> Log.i(TAG, "H3 self-test skipped (symbol absent)")
-                    else -> Log.e(TAG, "*** H3 FAIL: attested counter read failed (code $h) ***")
+                    else -> Log.e(TAG, "*** H3 FAIL: authenticated counter read failed (code $h) ***")
                 }
-                // READ-ONLY verifier-slot status/preflight (no writes) — logs under "se-slot".
+                // READ-ONLY chip status (no writes) — logs under "se-slot".
                 try {
-                    com.dsm.wallet.bridge.Unified.verifierSlotStatus()
+                    com.dsm.wallet.bridge.Unified.anchorChipStatus()
                 } catch (e: UnsatisfiedLinkError) {
-                    Log.w(TAG, "verifierSlotStatus not in this .so: ${e.message}")
+                    Log.w(TAG, "anchorChipStatus not in this .so: ${e.message}")
                 }
-                // GATED device-setup WRITE — counter-init to max. Runs ONLY when explicitly launched
-                // with `--ez run_counter_init true --es confirm yes-init-counter-max` (a normal
-                // USB-attach launch has neither, so it stays read-only). The counterInitMax symbol is
-                // present only in on_device_installs-feature .so builds.
+                // GATED device-setup WRITE — counter birth (mcounter[0] := max). Runs ONLY when
+                // explicitly launched with `--ez run_counter_init true --es confirm
+                // yes-init-counter-max` (a normal USB-attach launch has neither, so it stays
+                // read-only). Present only in on_device_installs-feature .so builds.
                 val doCounterInit = intent?.getBooleanExtra("run_counter_init", false) == true
                 val confirm = intent?.getStringExtra("confirm")
                 if (doCounterInit) {
@@ -122,36 +122,34 @@ class PicoSelfTestActivity : Activity() {
                         Log.e(TAG, "counter-init REFUSED: confirm must be 'yes-init-counter-max' (got '$confirm')")
                     }
                 }
-                // GATED accept-enabling Path-B install (for the 2-phone test). Runs ONLY when launched
-                // with `--ez install_path_b true`. Requires the app's BLE bilateral stack (BT manager)
-                // to be up; logs the result. Absent from the default .so.
-                if (intent?.getBooleanExtra("install_path_b", false) == true) {
+                // GATED sender-transport install (for the 2-phone test): the USB anchor appliance
+                // factory — the ONLY v2 device install (the receiver needs no hardware). Runs ONLY
+                // when launched with `--ez install_anchor_transport true`. Absent from the default .so.
+                if (intent?.getBooleanExtra("install_anchor_transport", false) == true) {
                     val ok = try {
-                        com.dsm.wallet.bridge.Unified.installPathBTransports()
+                        com.dsm.wallet.bridge.Unified.installAnchorTransport()
                     } catch (e: UnsatisfiedLinkError) {
-                        Log.e(TAG, "installPathBTransports not in this .so (needs on_device_installs): ${e.message}")
+                        Log.e(TAG, "installAnchorTransport not in this .so (needs on_device_installs): ${e.message}")
                         false
                     }
-                    Log.i(TAG, "*** installPathBTransports = $ok (false = BT manager not up yet) ***")
+                    Log.i(TAG, "*** installAnchorTransport = $ok ***")
                 }
-                // GATED verifier-slot BURN (irreversible). Runs ONLY when launched with
-                // `--ez run_slot_commit true --ei slot N --es confirm yes-burn-slot-N`. The confirm
-                // MUST name the same slot (mismatch refused). A normal launch never reaches this.
-                val doSlotCommit = intent?.getBooleanExtra("run_slot_commit", false) == true
-                if (doSlotCommit) {
-                    val slot = intent?.getIntExtra("slot", -1) ?: -1
-                    if (slot in 1..3 && confirm == "yes-burn-slot-$slot") {
-                        Log.i(TAG, "*** slot-$slot BURN starting (irreversible) ***")
+                // GATED IRREVERSIBLE slot-0 birth burn. Runs ONLY when launched with
+                // `--ez run_birth_cage true --es confirm yes-birth-cage-slot0`. Run LAST in device
+                // setup, AFTER counter-init. A normal launch never reaches this.
+                if (intent?.getBooleanExtra("run_birth_cage", false) == true) {
+                    if (confirm == "yes-birth-cage-slot0") {
+                        Log.i(TAG, "*** slot-0 BIRTH CAGE starting (irreversible) ***")
                         val r = try {
-                            com.dsm.wallet.bridge.Unified.provisionVerifierSlot(slot)
+                            com.dsm.wallet.bridge.Unified.birthCageSlot0()
                         } catch (e: UnsatisfiedLinkError) {
-                            Log.e(TAG, "provisionVerifierSlot not in this .so (needs on_device_installs): ${e.message}")
-                            -2
+                            Log.e(TAG, "birthCageSlot0 not in this .so (needs on_device_installs): ${e.message}")
+                            -2L
                         }
-                        if (r >= 0) Log.i(TAG, "*** slot-$slot BURN OK: verifier slot $r caged ***")
-                        else Log.e(TAG, "*** slot-$slot BURN FAILED (code $r) ***")
+                        if (r >= 0) Log.i(TAG, "*** BIRTH CAGE OK: slot-0 sealed; immutable H0=$r ***")
+                        else Log.e(TAG, "*** BIRTH CAGE FAILED (code $r) ***")
                     } else {
-                        Log.e(TAG, "slot-commit REFUSED: need --ei slot N (1..3) + --es confirm yes-burn-slot-N (got slot=$slot confirm='$confirm')")
+                        Log.e(TAG, "birth-cage REFUSED: confirm must be 'yes-birth-cage-slot0' (got '$confirm')")
                     }
                 }
             } else {
