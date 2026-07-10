@@ -24,6 +24,8 @@ exclude = [
     "crates/dsm-anchor-pico",
     "crates/dsm-anchor-hw-verifier",
     "crates/dsm-android-anchor",
+    # Host used-chip bench harness (native serialport dep); built directly, not in CI.
+    "crates/dsm-anchor-bench",
 ]
 
 [workspace.package]

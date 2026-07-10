@@ -73,6 +73,15 @@ pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
+// Release-only. A debug firmware pins the CPU on SPHINCS+ (the self-test alone can wedge USB enumeration)
+// and invalidates BLE / FROM->TO counter-order timing — it must not exist. Building without --release
+// turns `debug_assertions` on and fails the build here, before any chip is touched.
+#[cfg(debug_assertions)]
+compile_error!(
+    "dsm-anchor-pico must be built with --release: debug SPHINCS+ is too slow (pins the CPU) and \
+     invalidates BLE / FROM->TO timing. Build with `cargo build --release`."
+);
+
 const XTAL_HZ: u32 = 12_000_000;
 const COUNTER: MCounterIndex = MCounterIndex::Index0;
 /// ECC key slot holding the resident non-exportable Ed25519 identity key (`σ^chip`). Generated
@@ -83,6 +92,8 @@ const CHIP_KEY_SLOT: u16 = 0;
 // deterministic across reboots (stable bundle/identity); the LIVE counter (`mcounter_get`) gives the
 // current H and the appliance derives u = H0 − H. The firmware ADOPTS the provisioned counter — it
 // must NOT re-init it (that would reset the counter and defeat the anti-double-spend floor).
+// Unused in a bench-adopt build (H0 = the live counter there); never removed from production.
+#[cfg(not(feature = "bench-adopt-existing-chip"))]
 const ENROLL_H0: u32 = 0xFFFF_FFFE; // tropic01 MCOUNTER_VALUE_MAX (4_294_967_294)
 
 /// The partition (`σ^host`) scheme: BLAKE3-SPHINCS+ SPX128f (fast sign, 17,088 B signature,
@@ -248,18 +259,45 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     ident: &ChipIdentity,
     policy_hash: &[u8; 32],
 ) -> Result<(u32, Birth), &'static str> {
-    // ADOPT the provisioned counter — do NOT `mcounter_init` (re-init resets the physical counter
-    // and would let a rebooted device re-spend already-consumed steps). `H0` is the fixed
-    // provisioning constant `ENROLL_H0`; the live read is only a sanity floor (a healthy chip reads
-    // at or below H0). Birth is deterministic over `ENROLL_H0`, so identity is stable.
+    // ADOPT the counter — do NOT `mcounter_init` (re-init resets the physical counter and would
+    // let a rebooted device re-spend already-consumed steps). The live read is always the real
+    // chip's authenticated MCOUNTER value: never host-supplied, never faked, never software.
     let live = sess.mcounter_get(COUNTER).map_err(|_| "mcounter_get")?;
-    if live > ENROLL_H0 {
-        return Err("counter above enrollment H0 (unprovisioned/mis-provisioned chip)");
-    }
+
+    // H0 selection.
+    //   * Production (default): `H0` is the FIXED provisioning constant `ENROLL_H0` and the live read
+    //     is only a sanity floor (a healthy provisioned virgin chip reads at or below H0). Birth is
+    //     deterministic over `ENROLL_H0`, so identity is stable across reboots.
+    //   * `bench-adopt-existing-chip`: `H0` is the CURRENT live counter, so an ALREADY-USED chip
+    //     becomes a fresh bench anchor at u = H0 − live = 0 without pretending to be virgin. The
+    //     bundle is domain-separated so a bench profile can NEVER collide with a production anchor
+    //     (even if a fresh chip, live == ENROLL_H0, were mistakenly run in this mode). This proves
+    //     transport/read-order/commit/cancel — NOT fresh birth or clone exclusion (module header).
+    #[cfg(not(feature = "bench-adopt-existing-chip"))]
+    let (enroll_h0, partition_trng): (u32, [u8; 32]) = {
+        if live > ENROLL_H0 {
+            return Err("counter above enrollment H0 (unprovisioned/mis-provisioned chip)");
+        }
+        (ENROLL_H0, ident.birth_entropy)
+    };
+    #[cfg(feature = "bench-adopt-existing-chip")]
+    let (enroll_h0, partition_trng): (u32, [u8; 32]) = {
+        if live == 0 {
+            return Err("bench-adopt: chip counter exhausted (no step left to transfer)");
+        }
+        (
+            live,
+            anchor_core::hash::h(
+                "DSM/anchor/bench-adopted-existing-chip/v1",
+                &[&ident.birth_entropy],
+            ),
+        )
+    };
+
     // The resident non-exportable Ed25519 chip key (σ^chip): pk_chip is pinned into B.
     let chip_pk = ensure_chip_key(sess)?;
     let b = birth::<SphincsPart>(&BirthInputs {
-        partition_trng: &ident.birth_entropy,
+        partition_trng: &partition_trng,
         chip_birth_witness: &ident.birth_witness,
         host_nonce: &ident.birth_host_nonce,
         device_id: &ident.device_id,
@@ -269,11 +307,12 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
         chip_pk: &chip_pk,
         online_id_pk: &ident.online_id_label,
         partition_key_seed: &ident.partition_key_seed,
-        enrolled_counter: ENROLL_H0,
+        enrolled_counter: enroll_h0,
         genesis_root: &GENESIS,
     });
-    // Return the FIXED enrollment H0 (not the live read): the appliance derives u = H0 − live.
-    Ok((ENROLL_H0, b))
+    // The appliance derives u = H0 − live. Production: H0 = ENROLL_H0 (virgin chip → u = 0).
+    // bench-adopt: H0 = live (used chip → u = 0). Real FROM/TO reads apply from here.
+    Ok((enroll_h0, b))
 }
 
 /// Serve the appliance over USB-CDC forever: read LE32-length-prefixed protobuf request frames,
@@ -418,7 +457,10 @@ fn main() -> ! {
     let chip_id_hash = match tropic.get_info_chip_id() {
         Ok(id) => anchor_core::hash::h("DSM/anchor/chip-id/v1", &[id]),
         Err(_) => {
-            put(&mut serial, b"[T1] chip id: FAIL (no real identity; halting)\r\n");
+            put(
+                &mut serial,
+                b"[T1] chip id: FAIL (no real identity; halting)\r\n",
+            );
             let _ = serial.flush();
             loop {
                 usb_dev.poll(&mut [&mut serial]);
@@ -429,7 +471,10 @@ fn main() -> ! {
         Ok(cs) => match cs.public_key() {
             Ok(k) => *k,
             Err(_) => {
-                put(&mut serial, b"[T1] cert stpub: FAIL (no real identity; halting)\r\n");
+                put(
+                    &mut serial,
+                    b"[T1] cert stpub: FAIL (no real identity; halting)\r\n",
+                );
                 let _ = serial.flush();
                 loop {
                     usb_dev.poll(&mut [&mut serial]);
@@ -437,7 +482,10 @@ fn main() -> ! {
             }
         },
         Err(_) => {
-            put(&mut serial, b"[T1] cert store: FAIL (no real identity; halting)\r\n");
+            put(
+                &mut serial,
+                b"[T1] cert store: FAIL (no real identity; halting)\r\n",
+            );
             let _ = serial.flush();
             loop {
                 usb_dev.poll(&mut [&mut serial]);
@@ -508,6 +556,38 @@ fn main() -> ! {
         b"[T6] serving software-authority appliance over USB-CDC (LE32-len-prefixed protobuf)\r\n",
     );
     let _ = serial.flush();
+    // Build-mode banner. A debug build fails to compile (module-level `compile_error!`), so if this
+    // line runs the firmware is a release build. Confirms the exact profile before any chip work.
+    // Enrollment above is FAIL-CLOSED for ALL profiles: any enroll failure (including a failed live
+    // authenticated counter read in bench-adopt) halts — never a fallback identity, never ENROLL_H0
+    // adopted by a bench build.
+    put(
+        &mut serial,
+        b"[BUILD] mode=release debug_assertions=false sphincs+=on hw=production\r\n",
+    );
+    #[cfg(feature = "bench-adopt-existing-chip")]
+    put(
+        &mut serial,
+        b"[BUILD] bench-adopt-existing-chip=ENABLED (used-chip adopt: H0=live, u=0)\r\n",
+    );
+    #[cfg(not(feature = "bench-adopt-existing-chip"))]
+    put(
+        &mut serial,
+        b"[BUILD] bench-adopt-existing-chip=disabled (production fresh-birth)\r\n",
+    );
+    let _ = serial.flush();
+    #[cfg(feature = "bench-adopt-existing-chip")]
+    {
+        // Profile marker: this build ADOPTED the chip's live authenticated counter as H0 (u=0). The
+        // anchor is a fresh, domain-separated BENCH anchor on an already-used chip — it proves real
+        // transport / read-order / commit-decrement / cancel-recover, NOT fresh birth or clone
+        // exclusion. Read the adopted H0 back over STATUS.
+        put(
+            &mut serial,
+            b"[T6][BENCH] existing-chip / bench-adopted: H0 = live MCOUNTER (u=0), domain-separated bundle. NOT a fresh-birth proof.\r\n",
+        );
+        let _ = serial.flush();
+    }
     let mut core = SecureCore {
         app: Appliance::<_, SphincsPart>::new(
             ChipTropic { sess: &mut sess },
