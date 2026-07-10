@@ -88,44 +88,45 @@ object Unified {
         UnifiedNativeApi.initDsmSdk(configPath)
     }
 
-    // H2 — Phone->Pico USB-OTG bridge. Rust's `UsbPicoTransport` up-calls this with an OPAQUE,
-    // already-framed OP_SPI_PASSTHROUGH request; this just moves the bytes over USB to the Pico and
-    // returns the response body (Rust decodes it). We understand NOTHING about the payload — no
-    // TROPIC frames, no key material. Empty return on any failure -> Rust fails closed to online
-    // recovery. `LocalPicoUsb.init(context)` must have been called at startup.
+    // Phone->Pico USB-OTG bridge. Rust up-calls this with an OPAQUE, already-framed request
+    // (LE32 length ++ protobuf); this just moves the bytes over USB to the Pico and returns the
+    // response body (Rust decodes it). We understand NOTHING about the payload — no TROPIC frames,
+    // no key material. Empty return on any failure -> Rust fails closed to online recovery.
+    // `LocalPicoUsb.init(context)` must have been called at startup.
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)
 
-    // H3 bench self-test — implemented in the anchor glue (`dsm-android-anchor`, packaged into the
-    // same .so): ONE attested TROPIC01 counter read through the full production reader stack
-    // (libtropic session over the relay router over the H2 USB transport). Returns the live counter
-    // H (>= 0) or a negative fail-closed code. Only present in glue-packaged builds — callers must
-    // catch UnsatisfiedLinkError.
+    // READ-ONLY self-test (default .so; never writes): ONE authenticated TROPIC01 counter read
+    // over the phone's own USB link to its own Pico. Returns the live counter H (>= 0) or -1.
+    // Callers must catch UnsatisfiedLinkError (absent in non-glue builds).
     @Keep @JvmStatic external fun anchorCounterSelfTest(): Long
 
-    // READ-ONLY verifier-slot diagnostic (no writes / no burn): scans candidate slots + runs the
-    // slot-2 preflight on A's local chip, logging results to logcat under "se-slot". Lets an operator
-    // inspect the chip THROUGH the phone (via adb) without moving it to a bench.
-    @Keep @JvmStatic external fun verifierSlotStatus(): Int
+    // READ-ONLY chip diagnostic (default .so; never writes): logs the local chip's mcounter[0]
+    // vs the intended device budget to logcat under "se-slot", so an operator can inspect the chip
+    // THROUGH the phone (via adb) without moving it to a bench.
+    @Keep @JvmStatic external fun anchorChipStatus(): Int
 
     // GATED device-setup WRITE (only in on_device_installs-feature .so builds; absent otherwise):
-    // initialize mcounter[0] to the max device budget on A's local chip, via slot 0. Returns the
-    // read-back counter (>= 0) or -1. Invoked deliberately by the operator over ADB (see
-    // DsmSetupOpReceiver); never from app boot or a transfer. Callers must catch UnsatisfiedLinkError.
+    // counter birth — initialize mcounter[0] to the max device budget on the local chip, via slot
+    // 0. Returns the read-back counter (>= 0) or -1. Run BEFORE birthCageSlot0. Invoked
+    // deliberately by the operator over ADB; never from app boot or a transfer. Callers must catch
+    // UnsatisfiedLinkError.
     @Keep @JvmStatic external fun counterInitMax(): Long
 
-    // GATED verifier-slot BURN (only in on_device_installs-feature .so; absent otherwise): irreversibly
-    // provision + cage the fixed DSM verifier key into `slot` on A's local chip. Returns the slot index
-    // (>= 0) or -1. Invoked deliberately by the operator over ADB (DsmSetupOp path); never from boot or
-    // a transfer. Callers must catch UnsatisfiedLinkError.
-    @Keep @JvmStatic external fun provisionVerifierSlot(slot: Int): Int
+    // GATED IRREVERSIBLE birth burn (only in on_device_installs-feature .so; absent otherwise):
+    // permanently seal slot-0 (revoke counter-reset / re-key / un-cage) so the down-counter's
+    // one-way monotonicity is a hardware birth invariant. Run LAST in device setup, AFTER
+    // counterInitMax. Returns the now-immutable H0 (>= 0) or -1. Invoked deliberately by the
+    // operator over ADB with explicit confirmation; never from boot or a transfer. Callers must
+    // catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun birthCageSlot0(): Long
 
-    // GATED ACCEPT-ENABLING install (only in on_device_installs-feature .so; absent otherwise):
-    // installs the Path-B receiver reader + sender local-Pico + read-only SeSlotWriter into the global
-    // bilateral stack, wiring the counter read over the live BLE relay. Requires the BluetoothManager
-    // to be registered first (returns false otherwise). This is the accept-enabling step for the
-    // 2-phone test; still fail-closed until a complete pin + matching counter. Catch UnsatisfiedLinkError.
-    @Keep @JvmStatic external fun installPathBTransports(): Boolean
+    // GATED sender-transport install (only in on_device_installs-feature .so; absent otherwise):
+    // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
+    // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device
+    // install story). Fail-closed: without it every offline-bearer send errors ("offline = chips").
+    // Catch UnsatisfiedLinkError.
+    @Keep @JvmStatic external fun installAnchorTransport(): Boolean
     @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
         UnifiedNativeApi.dispatchStartup(requestBytes)
     @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =
