@@ -1601,7 +1601,93 @@ pub struct StagedBearerTransition {
     pub pin: crate::anchor::AnchorPin,
 }
 
+/// Read-only snapshot of the sender's anchor appliance for the `anchor.status` diagnostics route
+/// (signal (c)). Purely observational: NO staging, NO counter move, NO device-state mutation.
+/// A disconnected snapshot (no appliance attachable) reports `connected = false` with zeroed
+/// identity — a diagnostics read must never fail the route.
+#[derive(Clone, Debug, Default)]
+pub struct AnchorStatusSnapshot {
+    pub connected: bool,
+    pub anchor_id: [u8; 32],
+    pub pk_chip: Vec<u8>,
+    pub partition_pk: Vec<u8>,
+    pub anchor_counter: u64,
+    pub frontier_root: [u8; 32],
+    pub enrolled_counter: u64,
+    pub bundle: [u8; 32],
+    pub status: String,
+}
+
 impl CoreSDK {
+    /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
+    /// Attaches (and caches) the appliance via the installed factory if not already attached, then
+    /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
+    /// this performs NO anchor-state leaf reconciliation and NO mutation. When no appliance can
+    /// attach (no device / fail-closed) it returns a disconnected snapshot rather than an error, so
+    /// the diagnostics panel can render "no anchor connected" instead of failing.
+    #[must_use]
+    pub fn anchor_appliance_status(&self) -> AnchorStatusSnapshot {
+        let dev = self.device_info.device_id;
+        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
+
+        let mut guard = self.anchor_appliance.lock();
+        if guard.is_none() {
+            let attached: Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> =
+                match crate::bridge::anchor_appliance_factory() {
+                    Some(factory) => factory(),
+                    None => hardware_appliance_or_fail(&seed, dev),
+                };
+            match attached {
+                Ok(a) => *guard = Some(a),
+                Err(e) => {
+                    log::info!("[anchor.status] no anchor appliance attached: {e}");
+                    return AnchorStatusSnapshot {
+                        status: "no anchor appliance connected".into(),
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+
+        let app = match guard.as_mut() {
+            Some(a) => a,
+            None => {
+                return AnchorStatusSnapshot {
+                    status: "no anchor appliance connected".into(),
+                    ..Default::default()
+                }
+            }
+        };
+
+        let pin = app.pin();
+        match app.status() {
+            Ok(s) => AnchorStatusSnapshot {
+                connected: true,
+                anchor_id: pin.anchor_id,
+                pk_chip: pin.pk_chip,
+                partition_pk: pin.partition_pk,
+                anchor_counter: s.anchor_counter,
+                frontier_root: s.root,
+                enrolled_counter: pin.enrolled_counter,
+                bundle: pin.bundle,
+                status: format!("anchor connected (counter u={})", s.anchor_counter),
+            },
+            Err(e) => {
+                log::warn!("[anchor.status] appliance attached but OP_STATUS failed: {e}");
+                AnchorStatusSnapshot {
+                    connected: false,
+                    anchor_id: pin.anchor_id,
+                    pk_chip: pin.pk_chip,
+                    partition_pk: pin.partition_pk,
+                    enrolled_counter: pin.enrolled_counter,
+                    bundle: pin.bundle,
+                    status: "anchor present but status read failed".into(),
+                    ..Default::default()
+                }
+            }
+        }
+    }
+
     /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance
     /// (reconciling the DeviceState anchor-state leaf to the chip's CURRENT active state), then
     /// deterministically stage the next transition — compute `D`, the successor frontier
@@ -2866,6 +2952,45 @@ mod tests {
         assert!(
             !OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("Path-B"),
             "the message must not reference the deleted v1 Path-B concept"
+        );
+    }
+
+    /// Stage 4 Slice 3 (signal c): the read-only `anchor.status` accessor attaches the appliance
+    /// and reports a connected snapshot (identity + counters) WITHOUT mutating the device head —
+    /// the data source behind the diagnostics panel. Contrast `stage_offline_bearer_transition`,
+    /// which reconciles the anchor-state leaf.
+    #[test]
+    #[serial]
+    fn anchor_status_reports_connected_snapshot_without_mutation() {
+        let sdk = test_sdk();
+        let had_head_before = sdk.state_machine.lock().device_head().is_some();
+
+        let snap = sdk.anchor_appliance_status();
+        assert!(
+            snap.connected,
+            "the in-process mock appliance must report connected"
+        );
+        assert_eq!(
+            snap.enrolled_counter, 1_000_000,
+            "enrolled counter comes from the appliance pin"
+        );
+        assert_ne!(
+            snap.anchor_id, [0u8; 32],
+            "a connected anchor exposes a non-zero identity"
+        );
+        assert!(
+            !snap.pk_chip.is_empty(),
+            "a connected anchor exposes the resident chip pubkey"
+        );
+        assert!(
+            snap.status.contains("connected"),
+            "the human-readable status names the connected state"
+        );
+
+        let had_head_after = sdk.state_machine.lock().device_head().is_some();
+        assert_eq!(
+            had_head_before, had_head_after,
+            "anchor.status is read-only and must not create or mutate the device head"
         );
     }
 

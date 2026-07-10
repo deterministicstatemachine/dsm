@@ -13766,6 +13766,114 @@ export class BilateralEventNotification extends Message<BilateralEventNotificati
 }
 
 /**
+ * Read-only offline-bearer anchor status (signal (c)): the `anchor.status` query response.
+ * A pure diagnostics snapshot of the sender's anchor appliance (RP2350/TROPIC01) — never
+ * mutates the appliance or the device state. `anchor_connected=false` means no appliance could
+ * attach (no device / fail-closed); the identity/counter fields are then zero.
+ *
+ * @generated from message dsm.AnchorStatusResponse
+ */
+export class AnchorStatusResponse extends Message<AnchorStatusResponse> {
+  /**
+   * appliance attached and OP_STATUS read OK
+   *
+   * @generated from field: bool anchor_connected = 1;
+   */
+  anchorConnected = false;
+
+  /**
+   * enrolled anchor identity (AnchorPin.anchor_id)
+   *
+   * @generated from field: bytes anchor_id = 2;
+   */
+  anchorId = new Uint8Array(0);
+
+  /**
+   * resident Ed25519 pubkey (σ^chip)
+   *
+   * @generated from field: bytes pk_chip = 3;
+   */
+  pkChip = new Uint8Array(0);
+
+  /**
+   * RP2350 partition pubkey pk_host (σ^host)
+   *
+   * @generated from field: bytes partition_pk = 4;
+   */
+  partitionPk = new Uint8Array(0);
+
+  /**
+   * live counter floor u_i (OP_STATUS)
+   *
+   * @generated from field: uint64 anchor_counter = 5;
+   */
+  anchorCounter = protoInt64.zero;
+
+  /**
+   * current offline frontier h_i (OP_STATUS)
+   *
+   * @generated from field: bytes frontier_root = 6;
+   */
+  frontierRoot = new Uint8Array(0);
+
+  /**
+   * counter floor at enrollment (AnchorPin)
+   *
+   * @generated from field: uint64 enrolled_counter = 7;
+   */
+  enrolledCounter = protoInt64.zero;
+
+  /**
+   * anchor bundle B (AnchorPin.bundle)
+   *
+   * @generated from field: bytes bundle = 8;
+   */
+  bundle = new Uint8Array(0);
+
+  /**
+   * human-readable status line
+   *
+   * @generated from field: string status = 9;
+   */
+  status = "";
+
+  constructor(data?: PartialMessage<AnchorStatusResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorStatusResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "anchor_connected", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "anchor_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "pk_chip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "partition_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "anchor_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "frontier_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "enrolled_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "bundle", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorStatusResponse {
+    return new AnchorStatusResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorStatusResponse {
+    return new AnchorStatusResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorStatusResponse {
+    return new AnchorStatusResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorStatusResponse | PlainMessage<AnchorStatusResponse> | undefined, b: AnchorStatusResponse | PlainMessage<AnchorStatusResponse> | undefined): boolean {
+    return proto3.util.equals(AnchorStatusResponse, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.DsmBtMessage
  */
 export class DsmBtMessage extends Message<DsmBtMessage> {
@@ -18371,6 +18479,14 @@ export class Envelope extends Message<Envelope> {
      */
     value: AddDeviceAdmissionV1;
     case: "deviceAdmission";
+  } | {
+    /**
+     * Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
+     *
+     * @generated from field: dsm.AnchorStatusResponse anchor_status_response = 112;
+     */
+    value: AnchorStatusResponse;
+    case: "anchorStatusResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18474,6 +18590,7 @@ export class Envelope extends Message<Envelope> {
     { no: 107, name: "device_tree_snapshot_response", kind: "message", T: DeviceTreeSnapshotResponse, oneof: "payload" },
     { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
+    { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
