@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! H2 — the Phone->Pico USB-OTG bridge. `UsbPicoTransport` implements the SDK's
-//! [`LocalPicoTransport`](dsm_sdk::bluetooth::tropic_relay::LocalPicoTransport): the sender phone A
-//! forwards a relayed raw-SPI MOSI to its own Pico over USB and returns the MISO, using the SAME
-//! `OP_SPI_PASSTHROUGH` framing the bench tools proved.
-//!
-//! The framing/protocol lives entirely in Rust: this wraps the MOSI in an `ApplianceRequest`,
-//! length-prefixes it, hands the OPAQUE bytes to an injected USB round-trip (on Android: a JNI
-//! up-call to Kotlin, which only moves bytes; in tests: a mock), then decodes the `ApplianceResponse`
-//! and returns `spi_response`. Kotlin never decodes a TROPIC frame; no key material crosses the
+//! The Phone->Pico USB-OTG byte bridge. The framing/protocol lives entirely in Rust: callers frame
+//! an `ApplianceRequest` (LE32 length ++ prost), hand the OPAQUE bytes to an injected USB
+//! round-trip (on Android: a JNI up-call to Kotlin, which only moves bytes; in tests: a mock), and
+//! decode the `ApplianceResponse`. Kotlin never decodes a TROPIC frame; no key material crosses the
 //! boundary. Every failure (USB down, timeout, `ok=false`, malformed response) is fail-closed to a
-//! `DsmError` — the relay read then yields no counter and the transfer recovers online.
+//! `DsmError`.
+//!
+//! Consumers: [`crate::usb_appliance::UsbAnchorAppliance`] (the sender's release producer) and
+//! [`crate::se_slot`]'s sync SPI channel (`OP_SPI_PASSTHROUGH` for device setup/diagnostics).
 
 use std::sync::Arc;
 
 use anchor_core::proto::{decode_response, encode_request, pb};
-use dsm_sdk::bluetooth::tropic_relay::{LocalPicoTransport, PicoFuture};
 use dsm_sdk::types::error::DsmError;
 
 /// The opaque USB round-trip Kotlin performs: write the length-prefixed request frame to the Pico's
@@ -23,13 +20,10 @@ use dsm_sdk::types::error::DsmError;
 /// relay task, not the BLE/GATT thread.
 pub type UsbTransceive = Arc<dyn Fn(Vec<u8>) -> Result<Vec<u8>, DsmError> + Send + Sync>;
 
-/// Frames `OP_SPI_PASSTHROUGH` in Rust and delegates the raw byte round-trip to `usb`.
-pub struct UsbPicoTransport {
-    usb: UsbTransceive,
-}
-
 /// Build the length-prefixed `OP_SPI_PASSTHROUGH` request frame for a raw SPI MOSI (LE32 body len ++
-/// `ApplianceRequest`). Shared by the async relay transport and the sync SE-provisioning channel.
+/// `ApplianceRequest`). Consumed by the sync device-setup SPI channel in [`crate::se_slot`]
+/// (Android-only), so host lib builds see it as dead code.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn frame_passthrough(mosi: Vec<u8>) -> Vec<u8> {
     let req = pb::ApplianceRequest {
         op: pb::Op::SpiPassthrough as i32,
@@ -44,6 +38,7 @@ pub(crate) fn frame_passthrough(mosi: Vec<u8>) -> Vec<u8> {
 
 /// Decode an `ApplianceResponse` body (already length-stripped by Kotlin) and return `spi_response`,
 /// or a fail-closed `DsmError` on a malformed frame / `ok=false`.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn decode_passthrough(resp_body: &[u8]) -> Result<Vec<u8>, DsmError> {
     let resp = decode_response(resp_body).map_err(|e| {
         DsmError::invalid_operation(format!("usb-pico: decode ApplianceResponse: {e:?}"))
@@ -57,39 +52,11 @@ pub(crate) fn decode_passthrough(resp_body: &[u8]) -> Result<Vec<u8>, DsmError> 
     Ok(resp.spi_response)
 }
 
-impl UsbPicoTransport {
-    /// `usb` performs one opaque USB round-trip (request frame bytes -> response body bytes).
-    pub fn new(usb: UsbTransceive) -> Self {
-        Self { usb }
-    }
-}
-
-impl LocalPicoTransport for UsbPicoTransport {
-    fn spi_passthrough(&self, mosi: Vec<u8>) -> PicoFuture<Result<Vec<u8>, DsmError>> {
-        let usb = self.usb.clone();
-        Box::pin(async move {
-            let frame = frame_passthrough(mosi);
-            log::debug!("[usb-pico] passthrough req len={}", frame.len());
-            let resp_body = match usb(frame) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!("[usb-pico] USB round-trip failed (recover online): {e}");
-                    return Err(e);
-                }
-            };
-            log::debug!("[usb-pico] passthrough resp len={}", resp_body.len());
-            decode_passthrough(&resp_body).inspect_err(|e| {
-                log::warn!("[usb-pico] passthrough response rejected (recover online): {e}");
-            })
-        })
-    }
-}
-
 /// The raw opaque USB round-trip: up-call Kotlin's `Unified.picoUsbTransceive([B)[B`, which does the
 /// actual USB-OTG round-trip to A's own Pico. Mirrors `queue_follow_up_chunks`' `with_env` +
 /// re-derive-mutable-JNIEnv pattern. Any JNI/USB failure -> `Err` (fail-closed); a null return from
-/// Kotlin (no device / permission / timeout) is a USB failure. Shared by the async
-/// [`UsbPicoTransport`] (relay reads) and the sync SE-provisioning SPI channel.
+/// Kotlin (no device / permission / timeout) is a USB failure. Shared by the
+/// [`crate::usb_appliance::UsbAnchorAppliance`] transport and the sync setup SPI channel.
 #[cfg(target_os = "android")]
 pub(crate) fn jni_usb_transceive(frame: Vec<u8>) -> Result<Vec<u8>, DsmError> {
     use jni::objects::{JByteArray, JObject, JValue};
@@ -123,72 +90,43 @@ pub(crate) fn jni_usb_transceive(frame: Vec<u8>) -> Result<Vec<u8>, DsmError> {
     .map_err(|e| DsmError::invalid_operation(format!("usb-pico JNI up-call: {e}")))
 }
 
-/// The on-device async transport for the relay reads: frames `OP_SPI_PASSTHROUGH` in Rust and hands
-/// the opaque bytes to [`jni_usb_transceive`]. Host builds/tests use `UsbPicoTransport::new` with a
-/// mock.
-#[cfg(target_os = "android")]
-pub fn android_usb_pico_transport() -> UsbPicoTransport {
-    UsbPicoTransport::new(Arc::new(jni_usb_transceive))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
 
     fn appliance_ok_response(spi_response: Vec<u8>) -> Vec<u8> {
-        let resp = pb::ApplianceResponse {
+        anchor_core::proto::encode_response(&pb::ApplianceResponse {
             op: pb::Op::SpiPassthrough as i32,
             ok: true,
             spi_response,
             ..Default::default()
-        };
-        // Response body is the encoded ApplianceResponse (Kotlin already stripped the length prefix).
-        anchor_core::proto::encode_response(&resp)
+        })
     }
 
     #[test]
-    fn happy_path_frames_request_and_returns_decoded_miso() {
-        // Echo-Pico: decode the request frame, return an ok response carrying the MOSI as MISO.
-        let usb: UsbTransceive = Arc::new(|frame: Vec<u8>| {
-            // Strip the LE32 length prefix and decode the request the way the real Pico would.
-            let len = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
-            let req = anchor_core::proto::decode_request(&frame[4..4 + len]).unwrap();
-            assert_eq!(req.op, pb::Op::SpiPassthrough as i32);
-            Ok(appliance_ok_response(req.spi_payload)) // MISO = MOSI (echo)
-        });
-        let t = UsbPicoTransport::new(usb);
-        let miso = block_on(t.spi_passthrough(vec![1, 2, 3, 4])).expect("passthrough ok");
+    fn passthrough_frame_round_trips_through_an_echo_pico() {
+        // Echo-Pico: decode the request frame the way the real firmware would, echo MOSI as MISO.
+        let frame = frame_passthrough(vec![1, 2, 3, 4]);
+        let len = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
+        let req = anchor_core::proto::decode_request(&frame[4..4 + len]).unwrap();
+        assert_eq!(req.op, pb::Op::SpiPassthrough as i32);
+        let miso = decode_passthrough(&appliance_ok_response(req.spi_payload)).expect("decode ok");
         assert_eq!(miso, vec![1, 2, 3, 4]);
     }
 
     #[test]
-    fn usb_error_fails_closed() {
-        let usb: UsbTransceive =
-            Arc::new(|_frame| Err(DsmError::invalid_operation("cable disconnected")));
-        let t = UsbPicoTransport::new(usb);
-        assert!(block_on(t.spi_passthrough(vec![9])).is_err());
-    }
-
-    #[test]
     fn pico_error_status_fails_closed() {
-        let usb: UsbTransceive = Arc::new(|_frame| {
-            let resp = pb::ApplianceResponse {
-                op: pb::Op::SpiPassthrough as i32,
-                ok: false,
-                error: 7,
-                ..Default::default()
-            };
-            Ok(anchor_core::proto::encode_response(&resp))
+        let body = anchor_core::proto::encode_response(&pb::ApplianceResponse {
+            op: pb::Op::SpiPassthrough as i32,
+            ok: false,
+            error: 7,
+            ..Default::default()
         });
-        let t = UsbPicoTransport::new(usb);
-        assert!(block_on(t.spi_passthrough(vec![9])).is_err());
+        assert!(decode_passthrough(&body).is_err());
     }
 
     #[test]
     fn malformed_response_fails_closed() {
-        let usb: UsbTransceive = Arc::new(|_frame| Ok(vec![0xFF, 0xFF, 0xFF]));
-        let t = UsbPicoTransport::new(usb);
-        assert!(block_on(t.spi_passthrough(vec![9])).is_err());
+        assert!(decode_passthrough(&[0xFF, 0xFF, 0xFF]).is_err());
     }
 }

@@ -1,118 +1,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! H3 device-flow installs: wire the on-device Path-B transport into the running SDK so an
-//! offline-bearer RECEIVER can read the sender's TROPIC01 counter over the live BLE relay, and a
-//! SENDER can service that read from its own Pico.
+//! The ONE v2 device-flow install: the SENDER's anchor appliance factory. Wires
+//! [`crate::usb_appliance::UsbAnchorAppliance`] (the phone's USB link to its own RP2350/TROPIC01)
+//! into `dsm_sdk::bridge::install_anchor_appliance_factory`, so
+//! `CoreSDK::stage_offline_bearer_transition` / `release_offline_bearer` drive REAL silicon:
+//! `σ^chip` from the resident non-exportable Ed25519 key, `σ^host` from the RP2350 partition, and
+//! a real monotonic-counter step at COMMIT.
 //!
-//! Two installs, both onto the process-global bilateral stack:
-//!   1. SENDER side — `set_local_pico(android_usb_pico_transport())` on the bilateral adapter's
-//!      `TropicRelayRouter`, so an inbound `from_receiver` relay frame is forwarded to A's Pico and
-//!      the MISO replied. (Being READABLE is not acceptance.)
-//!   2. RECEIVER side — `install_receiver_anchor(round_trip)`: the reader + verifier-pairing deriver
-//!      (fixed DSM verifier key — no seed). The `round_trip` closure resolves the peer's BLE address,
-//!      then drives ONE relay round-trip through the adapter's router (`round_trip` registers the
-//!      pending reply + sends via `queue_relay_frame`). This is the ACCEPT-ENABLING install: with the
-//!      reader present AND a COMPLETE pin (verifier slot + pinned stpub, from the sender's
-//!      SeSlotWriter disclosure) AND a matching counter, the canonical predicate accepts. It stays
-//!      fail-closed while any is absent — in particular the SeSlotWriter is a separate install, so no
-//!      pin completes yet.
+//! v2 needs NOTHING receiver-side (no relay, no counter reader, no verifier slot) — the receiver
+//! accepts from the release alone. So this is the ENTIRE device-layer install story.
 //!
-//! NOT auto-called from `initDsmSdk`: the reader install is gated behind an explicit device-layer
-//! trigger (bench for the 2-phone test; the production flip is the owner's call).
-
-// The entire module body is Android + accept-enabling-opt-in only; on the host cfg it compiles to
-// nothing, so gate the imports the same way to avoid unused-import warnings.
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use std::sync::Arc;
+//! NOT auto-called from `initDsmSdk`: the install is gated behind an explicit device-layer trigger
+//! (feature `on_device_installs`, bench builds; the production flip is the owner's call). The
+//! factory is called once per send-session and fails CLOSED if the Pico/chip is absent — an
+//! uninstalled factory or an unreachable chip means every offline-bearer send errors
+//! ("offline = chips"); nothing falls back to a mock.
 
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use dsm_anchor_hw_verifier::RelayRoundTrip;
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-use dsm_anchor_verifier::RelayError;
-
-/// Build the receiver `round_trip`: for each raw-SPI transaction, resolve the sender's BLE address
-/// and drive it through the global bilateral adapter's `TropicRelayRouter` over `queue_relay_frame`.
-/// Any missing piece (no manager, unknown address, send/timeout) is a fail-closed `RelayError`.
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-fn adapter_round_trip() -> RelayRoundTrip {
-    use dsm_sdk::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter;
-    use dsm_sdk::bluetooth::get_global_bluetooth_manager;
-
-    Arc::new(move |peer_device_id, commitment, mosi| {
-        Box::pin(async move {
-            let address =
-                dsm_sdk::jni::state::resolve_ble_address(&peer_device_id).ok_or_else(|| {
-                    RelayError::Transport("no BLE address for relay peer (fail-closed)".into())
-                })?;
-            let manager = get_global_bluetooth_manager().ok_or_else(|| {
-                RelayError::Transport("BluetoothManager not registered (fail-closed)".into())
-            })?;
-            let router = Arc::clone(manager.transport_adapter().tropic_relay());
-            router
-                .round_trip(commitment, mosi, move |frame: Vec<u8>| async move {
-                    BilateralTransportAdapter::queue_relay_frame(&address, &frame).await
-                })
-                .await
-        })
-    })
-}
-
-/// Install BOTH Path-B transports onto the global bilateral stack (see module docs). Idempotent-ish:
-/// installing again just replaces the seams. Returns `false` fail-closed if the BluetoothManager is
-/// not yet registered — nothing is installed in that case.
-///
-/// Android + explicit `on_device_installs` opt-in only. The reader is accept-enabling, so it never
-/// compiles into a default build; the device layer (bench / the owner's flip) enables the feature
-/// and calls this.
-#[cfg(all(target_os = "android", feature = "on_device_installs"))]
-pub fn install_path_b_transports() -> bool {
-    use dsm_sdk::bluetooth::get_global_bluetooth_manager;
-
-    // Sender side: service relay reads from A's local Pico.
-    let Some(manager) = get_global_bluetooth_manager() else {
-        log::warn!("[anchor-install] no BluetoothManager — Path-B not installed");
-        return false;
-    };
-    manager
-        .transport_adapter()
-        .tropic_relay()
-        .set_local_pico(Arc::new(crate::usb_pico::android_usb_pico_transport()));
-    log::info!("[anchor-install] local Pico transport set on the bilateral relay router");
-
-    // Receiver side: the ACCEPT-ENABLING reader + verifier-pairing deriver (fixed key, no seed).
-    crate::install_receiver_anchor(adapter_round_trip());
-    log::info!("[anchor-install] RelayCounterReader + verifier deriver installed (Path-B active)");
-
-    // Sender side: the READ-ONLY SE slot writer — discloses (slot, stpub) iff the verifier slot is
-    // already provisioned + caged. It NEVER burns; the burn is the separate explicit setup trigger
-    // (`provisionVerifierSlotCommit`). Until the slot is provisioned, the disclosure stays empty and
-    // the receiver's pin is incomplete -> fail-closed.
-    crate::install_sender_slot_writer(std::sync::Arc::new(crate::se_slot::SeVerifierSlotWriter));
-    log::info!(
-        "[anchor-install] read-only SeSlotWriter installed (disclosure fail-closed until setup)"
-    );
-
-    // Sender side: the ACCEPT-PRODUCING appliance factory. Each offline-bearer release is built by a
-    // fresh `UsbAnchorAppliance` that drives A's own physical RP2350/TROPIC01 over the same opaque USB
-    // up-call, self-sourcing its pin from a STATUS round-trip. Installing this replaces the in-process
-    // mock so a real send consumes a real counter step. Absent -> offline-bearer fails closed in the
-    // SDK ("offline = chips").
-    dsm_sdk::bridge::install_anchor_appliance_factory(std::sync::Arc::new(|| {
-        let usb: crate::usb_pico::UsbTransceive =
-            std::sync::Arc::new(crate::usb_pico::jni_usb_transceive);
-        crate::usb_appliance::UsbAnchorAppliance::connect(usb)
-            .map(|a| Box::new(a) as Box<dyn dsm_sdk::anchor::AnchorAppliance + Send>)
+pub fn install_anchor_transport() {
+    use std::sync::Arc;
+    dsm_sdk::bridge::install_anchor_appliance_factory(Arc::new(|| {
+        let app = crate::usb_appliance::UsbAnchorAppliance::connect(Arc::new(
+            crate::usb_pico::jni_usb_transceive,
+        ))?;
+        Ok(Box::new(app) as Box<dyn dsm_sdk::anchor::AnchorAppliance + Send>)
     }));
-    log::info!("[anchor-install] UsbAnchorAppliance factory installed (offline-bearer = physical chip)");
-    true
+    log::info!("[anchor-install] USB anchor appliance factory installed (sender release = physical chip)");
 }
 
-/// JNI trigger for the receiver-side + sender-side Path-B install. Returns JNI_TRUE iff both
-/// transports were installed. Present only in `on_device_installs` builds (accept-enabling).
+/// JNI trigger: install the sender anchor transport. Returns `true` on success. Absent from the
+/// default .so (gated `on_device_installs`); Kotlin catches `UnsatisfiedLinkError` and treats the
+/// capability as unavailable (fail-closed).
 #[cfg(all(target_os = "android", feature = "on_device_installs"))]
 #[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_installPathBTransports(
+pub extern "system" fn Java_com_dsm_wallet_bridge_Unified_installAnchorTransport(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
 ) -> jni::sys::jboolean {
-    u8::from(install_path_b_transports())
+    install_anchor_transport();
+    jni::sys::JNI_TRUE
 }
