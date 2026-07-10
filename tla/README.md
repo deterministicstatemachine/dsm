@@ -82,6 +82,40 @@ prevent fork acceptance even in the presence of an active adversary attempting
 replay/fork strategies. This is the bilateral-tip SPECIAL CASE of the general
 guarded kernel below: its uniqueness key is the concrete pair `(rel, oldTip)`.
 
+### DSM_OfflineAnchorSingleAppliance.tla
+The **offline-anchor SPECIAL CASE** of the same guarded kernel, exactly parallel
+to `DSM_Tripwire.tla`'s bilateral case. It models ONE correct enrolled
+offline-bearer appliance (v2 "Software Authority, Hardware Identity", July 2026)
+through its full `Prepare → Commit → Emit → Finalize` cycle plus `Recover` and
+`PowerLoss`, and proves DIRECTLY that a single appliance cannot originate two
+valid releases from one SMT anchor origin `(R_i, h_i, u_i)`. Not "they collide
+later", not "detected on reconciliation" — the second release cannot be
+constructed inside the appliance state machine. The kernel's abstract resource
+key is instantiated by the anchor origin: parent `R_i` (device SMT root),
+descriptor `(h_i, u_i)` (offline frontier + committed SMT anchor counter).
+Uniqueness is a SOFTWARE property of the SMT counter leaf and the
+single-prepared-record / atomic-counter-advance discipline; the physical
+TROPIC01 counter `H` is a non-rewind floor synchronized one-to-one to `u`
+(`u = H0 - H`), never an acceptance authority. No fused anchor head, no boot
+ticket, no receiver-witnessed counter read (all removed by the correction).
+
+The two adversary actions `AttemptSecondPrepareSameOrigin` and
+`AttemptSecondCommitSameOrigin` are deliberately included and TLC proves them
+never enabled: the re-pin `o.u = H0 - physH` and the linearity guard
+`RecOrigin ∉ consumedOrigins` are load-bearing (removing either falsifies
+`NoTwoCommittedSameOrigin`). Six invariants hold — `NoTwoEmittedSameOrigin`,
+`NoTwoCommittedSameOrigin`, `CounterSync`, `CommitAdvancesOrigin`,
+`SecondSameOriginFails`, `RecoveryIdempotence` — over 123 distinct states.
+The universal counterpart is `lean4/DSMOfflineAnchorOrigin.lean`
+(`offline_anchor_origin_unique`, axiom-free), which ties the anchor origin to
+the general theorem via `keyOf_inj`. This is the v2 replacement for the
+boot-fenced offline model.
+
+```zsh
+cd tla
+java -cp tla2tools.jar tlc2.TLC -config DSM_OfflineAnchorSingleAppliance.cfg DSM_OfflineAnchorSingleAppliance.tla
+```
+
 ### Guarded kernel: DSM_Guarded.tla and companions
 Machine-checkable realization of the guarded linear constraint system paper
 (Appendix B), with the general key-scoped statement over an abstract resource
