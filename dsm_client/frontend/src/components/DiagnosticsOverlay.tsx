@@ -5,6 +5,7 @@ import React from 'react';
 import { useDiagnostics } from '../hooks/useDiagnostics';
 import { useUX } from '../contexts/UXContext';
 import { decodeBase32Crockford } from '../utils/textId';
+import AnchorStatusPanel from './AnchorStatusPanel';
 
 const overlayBackdropStyle: React.CSSProperties = {
   position: 'absolute',
@@ -188,6 +189,9 @@ export default function DiagnosticsOverlay() {
                 <button data-testid="open-feedback" onClick={() => openGitHubFeedback()} style={actionButtonStyle}>Send feedback</button>
               </div>
             </div>
+
+            {/* Offline-bearer anchor status (Stage 4 Slice 3, signal c) — read-only diagnostics */}
+            <AnchorStatusPanel />
 
             <pre style={{ fontSize: '10px', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'rgba(var(--bg-rgb),0.78)', padding: '10px', borderRadius: 8, border: '1px solid var(--border)', color: 'var(--text-dark)', margin: 0 }}>{diagnostics ?? 'No diagnostics collected yet.'}</pre>
 

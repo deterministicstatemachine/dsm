@@ -1311,6 +1311,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         Some(gp::envelope::Payload::StorageNodeStatsResponse(_))
         | Some(gp::envelope::Payload::StorageNodeManageResponse(_))
         | Some(gp::envelope::Payload::SessionStateResponse(_))
+        // Offline-bearer anchor status (signal (c)) — SDK-owned `anchor.status` query response.
+        | Some(gp::envelope::Payload::AnchorStatusResponse(_))
         | Some(gp::envelope::Payload::TokenPolicyListResponse(_))
         // Outbound-only push envelopes — never arrive as inbound requests
         | Some(gp::envelope::Payload::NfcRecoveryCapsule(_))

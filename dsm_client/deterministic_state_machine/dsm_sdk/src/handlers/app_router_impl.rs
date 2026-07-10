@@ -2721,6 +2721,8 @@ impl AppRouter for AppRouterImpl {
             "debug.dump_state" | "debug.trigger_genesis" => self.handle_debug_query(q).await,
             // Session routes
             "session.status" => self.handle_session_query(q).await,
+            // Offline-bearer anchor status (signal (c)) — read-only diagnostics
+            "anchor.status" => self.handle_anchor_query(q).await,
             // Recovery routes
             p if p.starts_with("recovery.") => self.handle_recovery_query(q).await,
             // Bitcoin query routes

@@ -2047,6 +2047,22 @@ message BilateralEventNotification {
   optional BilateralFailureReason failure_reason = 10;
 }
 
+// Read-only offline-bearer anchor status (signal (c)): the `anchor.status` query response.
+// A pure diagnostics snapshot of the sender's anchor appliance (RP2350/TROPIC01) — never
+// mutates the appliance or the device state. `anchor_connected=false` means no appliance could
+// attach (no device / fail-closed); the identity/counter fields are then zero.
+message AnchorStatusResponse {
+  bool   anchor_connected = 1;                      // appliance attached and OP_STATUS read OK
+  bytes  anchor_id        = 2 [(dsm_fixed_len)=32]; // enrolled anchor identity (AnchorPin.anchor_id)
+  bytes  pk_chip          = 3 [(dsm_max_len)=64];   // resident Ed25519 pubkey (σ^chip)
+  bytes  partition_pk     = 4 [(dsm_max_len)=128];  // RP2350 partition pubkey pk_host (σ^host)
+  uint64 anchor_counter   = 5;                      // live counter floor u_i (OP_STATUS)
+  bytes  frontier_root    = 6 [(dsm_fixed_len)=32]; // current offline frontier h_i (OP_STATUS)
+  uint64 enrolled_counter = 7;                      // counter floor at enrollment (AnchorPin)
+  bytes  bundle           = 8 [(dsm_fixed_len)=32]; // anchor bundle B (AnchorPin.bundle)
+  string status           = 9;                      // human-readable status line
+}
+
 // =========================== Bluetooth Transport ====================
 enum BtMessageType {
   BTMSG_TYPE_UNSPECIFIED = 0;
@@ -2654,6 +2670,9 @@ message Envelope {
     // admission). New device → existing device, then existing → new device.
     AddDeviceAdmissionRequestV1       device_admission_request         = 108;
     AddDeviceAdmissionV1              device_admission                 = 109;
+
+    // Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
+    AnchorStatusResponse              anchor_status_response           = 112;
 
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
