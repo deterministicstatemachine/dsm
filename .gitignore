@@ -262,3 +262,8 @@ rules/caveman-*.md
 skills/
 desktop-extensions/
 WEBSITE_ROADMAP.md
+
+# Firmware build outputs (flash artifacts) — never committed; curated bench evidence lives in
+# docs/bench-proofs/ only when explicitly added (owner rule 2026-07-09).
+crates/dsm-anchor-pico/*.uf2
+crates/dsm-anchor-pico/*.elf
