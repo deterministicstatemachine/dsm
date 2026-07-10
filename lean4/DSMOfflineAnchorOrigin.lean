@@ -15,9 +15,10 @@
     origin. Not "two collide later", not "detected on reconciliation" — the
     second one cannot be constructed inside the appliance discipline.
 
-  This is the v2 REPLACEMENT for the boot-fenced lean4/DSMGuardedOffline.lean.
-  It uses NO fused anchor head, NO boot head, and NO boot ticket (all removed by
-  the correction). Uniqueness is a software property of the SMT counter leaf and
+  This REPLACES the removed boot-fenced offline model (the old v1 DSMGuardedOffline,
+  deleted with this artifact). It uses NO fused anchor head, NO boot head, and NO
+  boot ticket (all removed by the correction). Uniqueness is a software property
+  of the SMT counter leaf and
   the single-prepared-record / atomic-counter-advance discipline; no hardware
   term appears in any proof (Corollary 1 / Hardware Independence).
 

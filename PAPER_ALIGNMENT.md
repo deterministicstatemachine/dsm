@@ -92,8 +92,8 @@ structure makes the per-step reading explicit already.
 ## 4. Appendix A (Lean skeleton): replace with the artifact
 
 Replace the skeleton with a pointer to `lean4/DSMGuardedTripwire.lean` and
-`lean4/DSMGuardedOffline.lean`. Two defects of the printed skeleton, both fixed
-in the artifact:
+`lean4/DSMOfflineAnchorOrigin.lean` (the offline-anchor instantiation). Two
+defects of the printed skeleton, both fixed in the artifact:
 
 - `deriving DecidableEq` on a structure with function-typed fields
   (`relHead : String -> Nat`, `consumed : String -> Bool`) does not elaborate.
