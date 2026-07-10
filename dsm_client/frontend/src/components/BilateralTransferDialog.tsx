@@ -5,7 +5,7 @@ import { on as eventBridgeOn } from '../dsm/EventBridge';
 import { acceptIncomingTransfer, BilateralEventType, BilateralTransferEvent, decodeBilateralEvent, rejectIncomingTransfer } from '../services/bilateral/bilateralEventService';
 import { useWallet } from '../contexts/WalletContext';
 import { useUX } from '../contexts/UXContext';
-import { useContacts } from '../contexts/ContactsContext';
+import { contactsStore } from '../stores/contactsStore';
 import '../styles/BilateralTransfer.css';
 import { emitWalletRefresh } from '../dsm/events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
@@ -22,19 +22,16 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
   const [processing, setProcessing] = useState(false);
   const { refreshAll } = useWallet();
   const { hideComplexity, notifyToast } = useUX();
-  const { contacts } = useContacts();
   const [inboxOpen, setInboxOpen] = useState(false);
 
   // Resolve a friendly name for a counterparty device id (base32) from the contacts store,
-  // falling back to a short id prefix. Rendering-only.
-  const aliasFor = useCallback(
-    (deviceIdB32: string): string => {
-      const c = contacts.find((c) => c.deviceId === deviceIdB32);
-      if (c?.alias) return c.alias;
-      return deviceIdB32 ? `${deviceIdB32.slice(0, 8)}…` : 'a contact';
-    },
-    [contacts]
-  );
+  // falling back to a short id prefix. Read imperatively at event time (a one-shot toast needs no
+  // reactive subscription), so this component takes no new context dependency. Rendering-only.
+  const aliasFor = useCallback((deviceIdB32: string): string => {
+    const c = contactsStore.getSnapshot().contacts.find((c) => c.deviceId === deviceIdB32);
+    if (c?.alias) return c.alias;
+    return deviceIdB32 ? `${deviceIdB32.slice(0, 8)}…` : 'a contact';
+  }, []);
 
   // Hide bilateral overlay when inbox is open
   useEffect(() => {

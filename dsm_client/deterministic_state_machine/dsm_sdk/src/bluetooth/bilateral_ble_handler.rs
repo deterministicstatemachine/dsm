@@ -7249,7 +7249,11 @@ mod tests {
         handler
             .admit_anchor_disclosure(sender, [0x02; 32], &disclosure(0xA1))
             .await;
-        assert_eq!(events.lock().expect("evs").len(), 1, "NoChange must be silent");
+        assert_eq!(
+            events.lock().expect("evs").len(),
+            1,
+            "NoChange must be silent"
+        );
 
         // 3) Differing anchor -> ANCHOR_CHANGED + ORIGINAL pin retained (never overwritten).
         handler
