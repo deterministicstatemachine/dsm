@@ -2020,6 +2020,8 @@ enum BilateralEventType {
   BILATERAL_EVENT_TRANSFER_COMPLETE= 4; // Both: transaction finalized
   BILATERAL_EVENT_REJECTED         = 5; // Receiver: rejected transfer
   BILATERAL_EVENT_FAILED           = 6; // Either: transaction failed
+  BILATERAL_EVENT_ANCHOR_PINNED    = 7; // Receiver: first-transfer TOFU anchor pin admitted (trust established)
+  BILATERAL_EVENT_ANCHOR_CHANGED   = 8; // Receiver: a pinned anchor's identity changed on a later transfer (SECURITY warning; transfer refused, pinned anchor kept)
 }
 
 enum BilateralFailureReason {

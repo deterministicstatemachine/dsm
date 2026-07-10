@@ -14,6 +14,9 @@ export const BilateralEventType = {
   TRANSFER_COMPLETE: pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE,
   REJECTED: pb.BilateralEventType.BILATERAL_EVENT_REJECTED,
   FAILED: pb.BilateralEventType.BILATERAL_EVENT_FAILED,
+  // Stage 4 Slice 3: receiver-side anchor trust signals.
+  ANCHOR_PINNED: pb.BilateralEventType.BILATERAL_EVENT_ANCHOR_PINNED,
+  ANCHOR_CHANGED: pb.BilateralEventType.BILATERAL_EVENT_ANCHOR_CHANGED,
 } as const;
 
 export type BilateralEventTypeValue = typeof BilateralEventType[keyof typeof BilateralEventType];

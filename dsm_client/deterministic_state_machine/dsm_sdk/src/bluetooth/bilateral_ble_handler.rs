@@ -3833,6 +3833,7 @@ impl BilateralBleHandler {
     async fn admit_anchor_disclosure(
         &self,
         sender_device_id: [u8; 32],
+        commitment_hash: [u8; 32],
         d: &generated::AnchorDisclosure,
     ) {
         let contact_verified = {
@@ -3872,20 +3873,62 @@ impl BilateralBleHandler {
                     &disclosed,
                     existing.as_ref(),
                 ) {
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::Admit(e) => match store.admit(e) {
-                        Ok(()) => info!(
-                            "[BILATERAL] fused anchor PINNED for {} (first-transfer TOFU admit)",
-                            bytes_to_base32(&sender_device_id[..8])
-                        ),
-                        Err(err) => warn!(
-                            "[BILATERAL] fused anchor admit failed (continuing fail-closed): {err}"
-                        ),
-                    },
+                    crate::bluetooth::anchor_accept::PinAdmitDecision::Admit(e) => {
+                        let anchor_id = e.pin.anchor_id;
+                        match store.admit(e) {
+                            Ok(()) => {
+                                info!(
+                                    "[BILATERAL] fused anchor PINNED for {} (first-transfer TOFU admit)",
+                                    bytes_to_base32(&sender_device_id[..8])
+                                );
+                                // Stage 4 Slice 3 (signal b): surface the first-transfer trust so the
+                                // receiver UI can say "trusted anchor for <contact>". The message
+                                // carries the Base32 anchor id.
+                                self.emit_event(&generated::BilateralEventNotification {
+                                    event_type:
+                                        generated::BilateralEventType::BilateralEventAnchorPinned
+                                            .into(),
+                                    counterparty_device_id: sender_device_id.to_vec(),
+                                    commitment_hash: commitment_hash.to_vec(),
+                                    transaction_hash: None,
+                                    amount: None,
+                                    token_id: None,
+                                    status: "anchor_pinned_first_transfer".to_string(),
+                                    message: bytes_to_base32(&anchor_id),
+                                    sender_ble_address: None,
+                                    failure_reason: None,
+                                });
+                            }
+                            Err(err) => warn!(
+                                "[BILATERAL] fused anchor admit failed (continuing fail-closed): {err}"
+                            ),
+                        }
+                    }
                     crate::bluetooth::anchor_accept::PinAdmitDecision::NoChange => {}
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::Reject(reason) => warn!(
-                        "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason}); keeping the pinned anchor",
-                        bytes_to_base32(&sender_device_id[..8])
-                    ),
+                    crate::bluetooth::anchor_accept::PinAdmitDecision::Reject(reason) => {
+                        // A pinned anchor's identity changed on a later transfer — a security event,
+                        // not a routine failure. The transfer is ALREADY rejected fail-closed by the
+                        // acceptance predicate (it verifies against the PINNED anchor) and the pinned
+                        // anchor is kept; here we only SURFACE it (owner directive). The log line is
+                        // the audit record; the event drives a prominent security warning in the UI.
+                        warn!(
+                            "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason}); keeping the pinned anchor",
+                            bytes_to_base32(&sender_device_id[..8])
+                        );
+                        self.emit_event(&generated::BilateralEventNotification {
+                            event_type: generated::BilateralEventType::BilateralEventAnchorChanged
+                                .into(),
+                            counterparty_device_id: sender_device_id.to_vec(),
+                            commitment_hash: commitment_hash.to_vec(),
+                            transaction_hash: None,
+                            amount: None,
+                            token_id: None,
+                            status: "anchor_identity_changed".to_string(),
+                            message: reason.to_string(),
+                            sender_ble_address: None,
+                            failure_reason: None,
+                        });
+                    }
                 }
             }
             (false, _, _) => warn!(
@@ -4579,7 +4622,8 @@ impl BilateralBleHandler {
             // Admission is a memory of what to verify — acceptance is the predicate below.
             let sender_device_id = session.counterparty_device_id;
             if let Some(d) = confirm_request.anchor_disclosure.as_ref() {
-                self.admit_anchor_disclosure(sender_device_id, d).await;
+                self.admit_anchor_disclosure(sender_device_id, commitment_hash, d)
+                    .await;
             }
             let pin = crate::bridge::anchor_enrollment_store()
                 .and_then(|s| s.get(&sender_device_id))
@@ -7118,4 +7162,109 @@ mod tests {
     }
 
     // Removed background maintenance test (interval-based) to comply with deterministic, clockless spec.
+
+    /// Stage 4 Slice 3 (signal b): the receiver-admit path emits the right UX events.
+    /// First disclosure from a verified contact -> ANCHOR_PINNED + pin stored; an identical repeat
+    /// -> NO event (NoChange); a DIFFERING anchor -> ANCHOR_CHANGED + the ORIGINAL pin retained
+    /// (never overwritten). Uses a stub event callback + a fresh in-memory enrollment store.
+    #[tokio::test]
+    #[serial]
+    async fn admit_anchor_disclosure_emits_pin_and_change_events() {
+        use dsm::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore;
+        use std::sync::Mutex as StdMutex;
+
+        init_test_db();
+        let device_id = [0x51u8; 32]; // receiver
+        let genesis_hash = [0x52u8; 32];
+        let sender = [0x53u8; 32];
+        let sender_genesis = [0x54u8; 32];
+
+        let (bilateral_manager, mut handler) =
+            make_test_handler(device_id, genesis_hash, b"anchor-events");
+
+        // Verified contact for the sender (admit requires it).
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "sender".to_string(),
+            device_id: sender,
+            genesis_hash: sender_genesis,
+            public_key: vec![7u8; 32],
+            genesis_material: vec![5u8; 32],
+            chain_tip: Some([6u8; 32]),
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1000,
+            added_at_commit_height: 1000,
+            last_updated_commit_height: 1000,
+            verifying_storage_nodes: vec![],
+            ble_address: Some(String::new()),
+        };
+        {
+            let mut m = bilateral_manager.write().await;
+            m.add_verified_contact(contact).expect("contact");
+        }
+
+        // Fresh receiver-side enrollment store (the admit target).
+        crate::bridge::install_anchor_enrollment_store(Arc::new(
+            InMemoryAnchorEnrollmentStore::new(),
+        ));
+
+        // Capture emitted events by decoding them off the callback.
+        let events: Arc<StdMutex<Vec<generated::BilateralEventNotification>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        {
+            let sink = events.clone();
+            handler.set_event_callback(Arc::new(move |bytes: &[u8]| {
+                if let Ok(ev) = generated::BilateralEventNotification::decode(bytes) {
+                    sink.lock().expect("sink").push(ev);
+                }
+            }));
+        }
+
+        let disclosure = |anchor_tag: u8| generated::AnchorDisclosure {
+            bundle: vec![0xB1; 32],
+            anchor_id: vec![anchor_tag; 32],
+            enrolled_counter: 1_000,
+            partition_pk: vec![0x07; 64],
+            policy_hash: vec![0x9A; 32],
+            pk_chip: vec![0x0C; 32],
+        };
+        let last_type = |events: &Arc<StdMutex<Vec<generated::BilateralEventNotification>>>| {
+            events.lock().expect("evs").last().map(|e| e.event_type)
+        };
+        let anchor_pinned = generated::BilateralEventType::BilateralEventAnchorPinned as i32;
+        let anchor_changed = generated::BilateralEventType::BilateralEventAnchorChanged as i32;
+
+        // 1) First disclosure -> ANCHOR_PINNED + pin stored.
+        handler
+            .admit_anchor_disclosure(sender, [0x01; 32], &disclosure(0xA1))
+            .await;
+        assert_eq!(events.lock().expect("evs").len(), 1);
+        assert_eq!(last_type(&events), Some(anchor_pinned));
+        let pinned = crate::bridge::anchor_enrollment_store()
+            .and_then(|s| s.get(&sender))
+            .expect("pin stored");
+        assert_eq!(pinned.pin.anchor_id, [0xA1; 32]);
+
+        // 2) Identical repeat -> NoChange -> NO new event.
+        handler
+            .admit_anchor_disclosure(sender, [0x02; 32], &disclosure(0xA1))
+            .await;
+        assert_eq!(events.lock().expect("evs").len(), 1, "NoChange must be silent");
+
+        // 3) Differing anchor -> ANCHOR_CHANGED + ORIGINAL pin retained (never overwritten).
+        handler
+            .admit_anchor_disclosure(sender, [0x03; 32], &disclosure(0xEE))
+            .await;
+        assert_eq!(events.lock().expect("evs").len(), 2);
+        assert_eq!(last_type(&events), Some(anchor_changed));
+        let still = crate::bridge::anchor_enrollment_store()
+            .and_then(|s| s.get(&sender))
+            .expect("pin still present");
+        assert_eq!(
+            still.pin.anchor_id, [0xA1; 32],
+            "a differing disclosure must never overwrite the pinned anchor"
+        );
+
+        crate::bridge::uninstall_anchor_enrollment_store();
+    }
 }
