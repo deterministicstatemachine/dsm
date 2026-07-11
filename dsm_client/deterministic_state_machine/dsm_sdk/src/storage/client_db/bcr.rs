@@ -65,10 +65,13 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
 
 const REL_CHAIN_STATE_VERSION: u8 = 0x02;
 // v0x02 (spec §0.5 gap 13): adds the canonical per-tip `value_capability` byte. This is a
-// BREAKING bump with NO back-compat reader by design (no-legacy directive) — a v0x01 blob
+// BREAKING bump with NO back-compat reader by design (no-legacy directive) — an older blob
 // is rejected by `decode_device_state`; the device head is re-derived from the authoritative
 // BCR chain-state archive / re-initialized. There is no default-false and no silent fallback.
-const DEVICE_STATE_VERSION: u8 = 0x02;
+// v0x03 adds the non-tip `extra_leaves` section (offline-bearer anchor-state + SoFi vault-state
+// leaves) so a state with any such leaf round-trips: without it, restore replayed only tips and
+// recomputed a mismatched root, bricking the wallet after one offline-bearer transfer.
+const DEVICE_STATE_VERSION: u8 = 0x03;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -269,6 +272,16 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         }
     }
 
+    // v0x03: non-tip SMT leaves (offline-bearer anchor-state + SoFi vault-state), sorted by key
+    // (BTreeMap iteration is already sorted). These commit into `root()` and MUST be persisted so
+    // `restore` replays them; otherwise the recomputed root diverges from the stored one.
+    let extra = head.extra_leaves_snapshot();
+    put_len_u32(&mut out, extra.len());
+    for (key, value) in extra {
+        out.extend_from_slice(key);
+        out.extend_from_slice(value);
+    }
+
     out
 }
 
@@ -347,7 +360,17 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         ));
     }
 
-    // Replay tips into the SMT to rebuild the canonical root.
+    // v0x03: non-tip SMT leaves (offline-bearer anchor-state + SoFi vault-state).
+    let extra_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("extra_leaf count: {e}"))?;
+    let mut extra_leaves: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+    for _ in 0..extra_count {
+        let key: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("extra_leaf key: {e}"))?;
+        let value: [u8; 32] =
+            take::<32>(&mut cursor).map_err(|e| anyhow!("extra_leaf value: {e}"))?;
+        extra_leaves.insert(key, value);
+    }
+
+    // Replay tips + non-tip leaves into the SMT to rebuild the canonical root.
     let head = DeviceState::restore(
         genesis,
         devid,
@@ -355,6 +378,7 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         legacy_anchor,
         balances,
         tips_in_order,
+        extra_leaves,
         1024,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
@@ -672,6 +696,7 @@ mod tests {
                     value_capability: ValueCapability::Unknown,
                 },
             )],
+            outcome.new_device_state.extra_leaves_snapshot().clone(),
             1024,
         )
         .expect("restore head with signed rel state");
@@ -699,6 +724,7 @@ mod tests {
                     value_capability: ValueCapability::Unknown,
                 },
             )],
+            BTreeMap::new(),
             1024,
         )
         .expect("restore head with state-less tip");
@@ -767,6 +793,39 @@ mod tests {
         );
     }
 
+    /// Regression for the reload-brick bug: an offline-bearer transfer adds a non-tip anchor-state
+    /// leaf to the device SMT. Before v0x03, that leaf committed into the STORED root but was never
+    /// persisted/replayed, so decode recomputed a different root → `root mismatch` → the wallet
+    /// failed to load after one such transfer. Assert the leaf now round-trips and the root matches.
+    #[test]
+    fn device_head_codec_roundtrip_preserves_anchor_state_leaf() {
+        let (_, _, _, _, head0) = sample_device_and_rel();
+        let key = [0x11u8; 32];
+        let value = [0x22u8; 32];
+        let head = head0
+            .with_anchor_state_leaf(&key, &value)
+            .expect("add anchor-state leaf");
+        assert_ne!(
+            head.root(),
+            head0.root(),
+            "the anchor-state leaf must change the device root"
+        );
+
+        let bytes = encode_device_state(&head);
+        let (decoded, stored_root) =
+            decode_device_state(&bytes).expect("decode device head with anchor-state leaf");
+
+        // The load-time sanity check (encoded root == recomputed root) is exactly what bricked
+        // before the fix; it must now pass.
+        assert_eq!(stored_root, head.root());
+        assert_eq!(
+            decoded.root(),
+            head.root(),
+            "reloaded root must equal the stored root (the reload-brick regression)"
+        );
+        assert_eq!(decoded.extra_leaves_snapshot().get(&key), Some(&value));
+    }
+
     #[test]
     fn device_head_codec_preserves_state_less_tip_counterparty() {
         let (_, rel_key, head) = head_with_state_less_tip();
@@ -786,24 +845,28 @@ mod tests {
 
     #[test]
     fn device_head_codec_rejects_invalid_value_capability_byte() {
-        // A state-less tip serializes ending with [value_capability, state_flag].
+        // A state-less tip serializes as [..value_capability, state_flag], then the v0x03
+        // extra_leaves section: a u32 count (4 bytes, = 0 here since there are no anchor/vault
+        // leaves). So the value_capability byte sits at n-6 and the state_flag at n-5.
         let (_, _rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
         let n = bytes.len();
-        // Sanity: trailing bytes are value_capability=Unknown(3) then state_flag=0.
-        assert_eq!(bytes[n - 1], 0, "state_flag should be 0 (state-less tip)");
-        assert_eq!(bytes[n - 2], 3, "value_capability should be Unknown(3)");
+        let vc = n - 6; // value_capability
+        let sf = n - 5; // state_flag
+        assert_eq!(&bytes[n - 4..], &[0, 0, 0, 0], "trailing extra_leaves count should be 0");
+        assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
+        assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
 
         // Corrupt to UNSPECIFIED(0): decode MUST reject — never silently read as `No`.
         let mut zeroed = bytes.clone();
-        zeroed[n - 2] = 0;
+        zeroed[vc] = 0;
         assert!(
             decode_device_state(&zeroed).is_err(),
             "UNSPECIFIED value_capability must be rejected, never read as No"
         );
         // Out-of-range value is also rejected.
         let mut oob = bytes;
-        oob[n - 2] = 9;
+        oob[vc] = 9;
         assert!(decode_device_state(&oob).is_err());
     }
 

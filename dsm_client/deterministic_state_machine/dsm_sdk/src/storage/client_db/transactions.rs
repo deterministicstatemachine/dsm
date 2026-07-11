@@ -733,6 +733,7 @@ mod tests {
                     value_capability: dsm::types::device_state::ValueCapability::Unknown,
                 },
             )],
+            BTreeMap::new(),
             64,
         )
         .expect("restore failed head");

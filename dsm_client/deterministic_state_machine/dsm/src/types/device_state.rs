@@ -81,6 +81,17 @@ pub struct DeviceState {
     /// Fresh genesis is `NotAttested`; an admitted island sets `Attested`; a
     /// re-root after recovery resets to `NotAttested`. See [`crate::attestation`].
     offline_bearer_attestation: OfflineBearerAttestation,
+
+    /// Non-relationship SMT leaves that also commit into the device root `r_A`:
+    /// offline-bearer anchor-state leaves ([`Self::with_anchor_state_leaf`], and the
+    /// `anchor_leaf` replaced inside [`Self::advance`]) and SoFi vault-state leaves
+    /// ([`Self::with_vault_state_leaf`]). The [`SparseMerkleTree`] is the canonical source
+    /// of truth for their VALUE, but — exactly like [`Self::tips`] — this map is the
+    /// enumerable record needed to REPLAY them in [`Self::restore`]. Without it a state that
+    /// has any such leaf recomputes a different root on reload (the leaf is in the stored root
+    /// but absent from the replayed one), bricking the wallet. `BTreeMap` for deterministic
+    /// iteration during persistence.
+    extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
 }
 
 impl fmt::Debug for DeviceState {
@@ -540,6 +551,7 @@ impl DeviceState {
             tips: BTreeMap::new(),
             legacy_anchor: None,
             offline_bearer_attestation: OfflineBearerAttestation::NotAttested,
+            extra_leaves: BTreeMap::new(),
         }
     }
 
@@ -561,6 +573,7 @@ impl DeviceState {
     /// # Errors
     ///
     /// Returns `Err` on any SMT replace failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn restore(
         genesis: [u8; 32],
         devid: [u8; 32],
@@ -568,6 +581,7 @@ impl DeviceState {
         legacy_anchor: Option<[u8; 32]>,
         balances: BTreeMap<[u8; 32], u64>,
         tips_in_order: Vec<([u8; 32], RelChainTip)>,
+        extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
         max_relationships: usize,
     ) -> Result<Self, DsmError> {
         let mut state = Self::new(genesis, devid, public_key, max_relationships);
@@ -584,6 +598,18 @@ impl DeviceState {
                     ))
                 })?;
             state.tips.insert(rel_key, tip);
+        }
+
+        // Replay non-tip leaves (offline-bearer anchor-state, SoFi vault-state) so the recomputed
+        // root matches the stored one. Omitting these was the reload-brick bug: a state with any
+        // such leaf recomputed a different root after a restart.
+        for (key, value) in extra_leaves.into_iter() {
+            state.smt.update_leaf(&key, &value).map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "DeviceState::restore: extra-leaf update failed: {e}"
+                ))
+            })?;
+            state.extra_leaves.insert(key, value);
         }
 
         Ok(state)
@@ -658,6 +684,13 @@ impl DeviceState {
     /// Snapshot of all device-level balances (read-only view).
     pub fn balances_snapshot(&self) -> &BTreeMap<[u8; 32], u64> {
         &self.balances
+    }
+
+    /// Snapshot of the non-tip SMT leaves (offline-bearer anchor-state + SoFi vault-state) that
+    /// also commit into the device root. The persistence layer enumerates these to replay them in
+    /// [`Self::restore`]; without persisting them a reload recomputes a mismatched root.
+    pub fn extra_leaves_snapshot(&self) -> &BTreeMap<[u8; 32], [u8; 32]> {
+        &self.extra_leaves
     }
 
     /// Current chain tip for a relationship, if one exists. Returns
@@ -896,6 +929,12 @@ impl DeviceState {
             },
         );
 
+        // A bearer transition replaces the per-device anchor-state leaf as part of the SAME atomic
+        // root update; record its new value so `restore` replays it (else reload root-mismatches).
+        let mut new_extra_leaves = self.extra_leaves.clone();
+        if let Some(al) = &anchor_leaf {
+            new_extra_leaves.insert(al.key, al.new_value);
+        }
         let new_device_state = Self {
             genesis: self.genesis,
             devid: self.devid,
@@ -905,6 +944,7 @@ impl DeviceState {
             tips: new_tips,
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
+            extra_leaves: new_extra_leaves,
         };
 
         Ok(AdvanceOutcome {
@@ -931,6 +971,8 @@ impl DeviceState {
         new_smt.update_leaf(key, value).map_err(|e| {
             DsmError::invalid_operation(format!("anchor-state leaf bootstrap: {e}"))
         })?;
+        let mut new_extra_leaves = self.extra_leaves.clone();
+        new_extra_leaves.insert(*key, *value);
         Ok(Self {
             genesis: self.genesis,
             devid: self.devid,
@@ -940,6 +982,7 @@ impl DeviceState {
             tips: self.tips.clone(),
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
+            extra_leaves: new_extra_leaves,
         })
     }
 
@@ -988,6 +1031,8 @@ impl DeviceState {
             ))
         })?;
 
+        let mut new_extra_leaves = self.extra_leaves.clone();
+        new_extra_leaves.insert(leaf_key, leaf_value);
         let new_device_state = Self {
             genesis: self.genesis,
             devid: self.devid,
@@ -997,6 +1042,7 @@ impl DeviceState {
             tips: self.tips.clone(),
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
+            extra_leaves: new_extra_leaves,
         };
 
         Ok(VaultLeafOutcome {
