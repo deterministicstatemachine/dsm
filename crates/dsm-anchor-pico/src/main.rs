@@ -262,7 +262,25 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     // ADOPT the counter — do NOT `mcounter_init` (re-init resets the physical counter and would
     // let a rebooted device re-spend already-consumed steps). The live read is always the real
     // chip's authenticated MCOUNTER value: never host-supplied, never faked, never software.
+    // Production: hard-require a readable counter (a provisioned chip must have an initialized
+    // counter; never init here — re-init resets the anti-double-spend floor). bench-adopt: if the
+    // used chip's counter is unreadable (cleared / re-provisioned by earlier bench work), INITIALIZE
+    // it to MCOUNTER_VALUE_MAX so the bench anchor starts fresh at u = H0 - live = 0. This is the
+    // bench profile's whole purpose (domain-separated bundle, proves transport/read-order/commit —
+    // NOT fresh birth or clone exclusion). If init ALSO fails, the counter slot's UAP denies this
+    // session and needs re-provisioning (distinct error surfaced).
+    #[cfg(not(feature = "bench-adopt-existing-chip"))]
     let live = sess.mcounter_get(COUNTER).map_err(|_| "mcounter_get")?;
+    #[cfg(feature = "bench-adopt-existing-chip")]
+    let live = match sess.mcounter_get(COUNTER) {
+        Ok(v) => v,
+        Err(_) => {
+            sess.mcounter_init(COUNTER, 0xFFFF_FFFE)
+                .map_err(|_| "mcounter_init (counter unreadable; UAP lock?)")?;
+            sess.mcounter_get(COUNTER)
+                .map_err(|_| "mcounter_get after init")?
+        }
+    };
 
     // H0 selection.
     //   * Production (default): `H0` is the FIXED provisioning constant `ENROLL_H0` and the live read

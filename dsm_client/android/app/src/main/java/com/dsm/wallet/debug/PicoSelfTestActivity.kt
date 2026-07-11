@@ -25,31 +25,24 @@ class PicoSelfTestActivity : Activity() {
         private const val TAG = "PicoSelfTest"
 
         /**
-         * Captured request frame (266 B): LE32 len(262) ++ ApplianceRequest{op=SpiPassthrough,
-         * spi_payload = L1 GET_RESPONSE MOSI [0xAA, 0x80, 0x00*255]}. Head is the only non-zero
-         * region; the 255 trailing payload bytes are zero (ByteArray default). Opaque to Kotlin.
+         * v2 reach-the-chip probe: LE32 len(2) ++ AnchorRequest{op=STATUS(6)} (field 1, varint).
+         * The Software-Authority rewrite removed the old OP_SPI_PASSTHROUGH relay (op 8), so the v2
+         * proof that the phone reached the serving appliance on real silicon is a real STATUS op — a
+         * serving appliance replies with ok=true (field 2). Opaque, minimal frame.
          */
-        private val REQ_FRAME: ByteArray = ByteArray(266).also {
-            byteArrayOf(
-                0x06, 0x01, 0x00, 0x00, // LE32 body length = 262
-                0x08, 0x08,             // op = 8 (SpiPassthrough)
-                0x32, 0x81.toByte(), 0x02, // spi_payload: field 6, len 257
-                0xAA.toByte(), 0x80.toByte(), // GET_RESPONSE opcode + L2_CMD_REQ_LEN(128)
-            ).copyInto(it)
-        }
+        private val REQ_FRAME: ByteArray = byteArrayOf(
+            0x02, 0x00, 0x00, 0x00, // LE32 body length = 2
+            0x08, 0x06,             // op = 6 (STATUS)
+        )
 
-        /**
-         * Expected response body (264 B): ApplianceResponse{ok=true, spi_response = [0x01, 0xFF*256]}.
-         * spi_response[0] = 0x01 is the real chip STATUS byte (ready). Captured from the bench chip.
-         */
-        private val EXPECTED: ByteArray = ByteArray(264).also {
-            byteArrayOf(
-                0x08, 0x08,             // op = 8
-                0x10, 0x01,             // ok = true
-                0x62, 0x81.toByte(), 0x02, // spi_response: field 12, len 257
-                0x01,                   // spi_response[0] = chip STATUS (ready)
-            ).copyInto(it)
-            for (i in 8 until it.size) it[i] = 0xFF.toByte() // spi_response[1..256] = 0xFF (NO_RESP)
+        /** True if `hay` contains the byte subsequence `needle`. */
+        private fun containsSeq(hay: ByteArray, needle: ByteArray): Boolean {
+            if (needle.isEmpty() || hay.size < needle.size) return false
+            outer@ for (i in 0..hay.size - needle.size) {
+                for (j in needle.indices) if (hay[i + j] != needle[j]) continue@outer
+                return true
+            }
+            return false
         }
 
         private fun hex(b: ByteArray, max: Int = 40): String {
@@ -73,16 +66,12 @@ class PicoSelfTestActivity : Activity() {
                 Log.e(TAG, "transceive threw (fail-closed): ${e.message}", e)
                 ByteArray(0)
             }
-            val full = resp.contentEquals(EXPECTED)
-            // Discriminating prefix: ...62 81 02 01 ff ff — the chip STATUS 0x01 right after the length.
-            val prefixOk = resp.size >= 9 &&
-                resp[6] == 0x62.toByte() && resp[7] == 0x81.toByte() && resp[8] == 0x02.toByte() &&
-                resp.size >= 10 && resp[9] == 0x01.toByte()
+            // v2 STATUS success = the response carries ok=true (field 2, tag 0x10, value 1).
+            val okTrue = containsSeq(resp, byteArrayOf(0x10, 0x01))
             Log.i(TAG, "resp len=${resp.size} hex=${hex(resp)}")
-            Log.i(TAG, "full match (byte-identical to bench capture): $full")
-            Log.i(TAG, "chip-status prefix present (reached real TROPIC01): $prefixOk")
-            if (full || prefixOk) {
-                Log.i(TAG, "*** H2 PASS: phone reached the real chip over USB-OTG ***")
+            Log.i(TAG, "v2 STATUS ok=true present (reached serving appliance): $okTrue")
+            if (okTrue) {
+                Log.i(TAG, "*** H2 PASS (v2 STATUS): phone reached the serving appliance over USB-OTG ***")
                 // H3: one attested counter read through the FULL production reader stack
                 // (libtropic session -> relay router -> USB transport). Bench chip expects H=1000.
                 // Only present in glue-packaged builds; absent symbol = old .so, skip gracefully.
