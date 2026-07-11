@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+// DSM DeviceAnchor — USB (codec_v1) host transport message contract.
+//
+// Mirrors the forked Safe 7 firmware's `common/protob/messages-dsm.proto`
+// (field numbers + types identical) so the host `UsbAnchorTransport` can encode
+// DsmAnchorSign / decode DsmAnchorSignature byte-compatibly. This is a SEPARATE
+// schema from the canonical `dsm_app.proto` (it is not part of the DSM wire
+// Envelope; it is the device-link contract), compiled only under the
+// `usb-anchor` feature.
+//
+// proto3 with `optional` on every field: prost emits each present field on the
+// wire even when its value is the scalar default, so the firmware's proto2
+// `required` decode never sees a missing field.
+syntax = "proto3";
+package dsm.anchor.usb;
+
+// Request: read the anchor's self-provisioned identity (generates the key in the
+// secure element on first use). MessageType 2300.
+message DsmAnchorGetIdentity {}
+
+// Response: the raw Ed25519 anchor public key + the ECC slot. MessageType 2301.
+message DsmAnchorIdentity {
+  optional bytes  anchor_pubkey = 1;  // 32-byte self-provisioned Ed25519 public key
+  optional uint32 slot          = 2;  // ECC slot the anchor signs with
+}
+
+// Request: display the offline-bearer intent and, on hold-to-confirm, sign it.
+// The device recomputes ui_transcript + island challenge on-chip from these
+// fields. MessageType 2302.
+message DsmAnchorSign {
+  optional uint64 amount              = 1;
+  optional bytes  asset               = 2;
+  optional bytes  counterparty_id     = 3;
+  optional bytes  policy_id           = 4;
+  optional bytes  firmware_id         = 5;
+  optional uint32 screen_template_id  = 6;
+  optional bytes  h_n                 = 7;
+  optional bytes  payload_hash        = 8;
+  optional bytes  relationship_id     = 9;
+  optional bytes  device_id           = 10;
+  optional uint32 value_capability    = 11;
+  optional uint32 offline_bearer_mode = 12;
+  optional bytes  nonce               = 13;
+  optional uint64 expiry_tick         = 14;
+  optional bytes  genesis_hash        = 15;
+  optional bytes  policy_hash         = 16;
+  optional bytes  successor_root      = 17;
+  optional uint64 state_number        = 18;
+  optional bytes  parent_root         = 19;
+}
+
+// Response: the island signature over the framed device-computed challenge, plus
+// the device-measured firmware hash the secmon gate enforced and the advanced
+// monotonic state number. MessageType 2303.
+message DsmAnchorSignature {
+  optional bytes  signature     = 1;  // 64-byte Ed25519 signature
+  optional bytes  firmware_hash = 2;  // 32-byte gate-enforced measured firmware hash
+  optional uint64 state_number  = 3;  // monotonic counter the device advanced to
+}

@@ -267,3 +267,4 @@ WEBSITE_ROADMAP.md
 # docs/bench-proofs/ only when explicitly added (owner rule 2026-07-09).
 crates/dsm-anchor-pico/*.uf2
 crates/dsm-anchor-pico/*.elf
+/.github/instructions
