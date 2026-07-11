@@ -2593,6 +2593,7 @@ impl AppRouter for AppRouterImpl {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk
             .execute_on_relationship_with_anchor_leaf(
@@ -2602,6 +2603,7 @@ impl AppRouter for AppRouterImpl {
                 deltas,
                 initial_chain_tip,
                 anchor_leaf,
+                offline_spend,
             )
             .map(|(_state, outcome)| outcome)
     }
@@ -2614,6 +2616,7 @@ impl AppRouter for AppRouterImpl {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk.simulate_advance_for_confirm(
             rel_key,
@@ -2622,6 +2625,7 @@ impl AppRouter for AppRouterImpl {
             deltas,
             initial_chain_tip,
             anchor_leaf,
+            offline_spend,
         )
     }
 

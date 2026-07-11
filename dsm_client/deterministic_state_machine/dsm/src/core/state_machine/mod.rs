@@ -160,6 +160,7 @@ impl StateMachine {
     /// write) BEFORE installing it, enabling true fail-closed atomicity:
     /// if persistence fails, the in-memory head stays on the prior state
     /// and the failure is surfaced to the caller.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_advance_relationship(
         &self,
         rel_key: [u8; 32],
@@ -168,6 +169,7 @@ impl StateMachine {
         deltas: &[crate::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<crate::types::device_state::OfflineSpend>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
             DsmError::state_machine(
@@ -207,6 +209,7 @@ impl StateMachine {
             deltas,
             initial_chain_tip,
             anchor_leaf,
+            offline_spend,
         )
     }
 
@@ -291,6 +294,7 @@ impl StateMachine {
             deltas,
             initial_chain_tip,
             None, // anchor_leaf — this convenience path is for ordinary transitions
+            None, // offline_spend — ordinary (online) transition, no pool draw
         )?;
         self.commit_advance(&outcome);
         Ok(outcome)

@@ -701,6 +701,7 @@ mod tests {
                 }],
                 Some([0x55; 32]),
                 None,
+                        None,
             )
             .expect("advance relationship");
 
@@ -962,6 +963,7 @@ mod tests {
                 }],
                 None,
                 None,
+                        None,
             )
             .expect("second advance");
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
@@ -1008,6 +1010,7 @@ mod tests {
                 }],
                 None,
                 None,
+                        None,
             )
             .expect("third advance");
         update_bcr_device_head(&outcome1.new_device_state).expect("upsert head1");

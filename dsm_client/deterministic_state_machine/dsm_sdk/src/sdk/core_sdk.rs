@@ -869,7 +869,8 @@ impl CoreSDK {
             operation,
             deltas,
             initial_chain_tip,
-            None,
+            None, // anchor_leaf — ordinary online transition
+            None, // offline_spend — ordinary online transition, no pool draw
         )
     }
 
@@ -877,6 +878,7 @@ impl CoreSDK {
     /// (`anchor_leaf`) ATOMICALLY with the relationship leaf. The bilateral confirm path passes the
     /// same `anchor_leaf` its `simulate_advance_for_confirm` used, so the committed device root
     /// matches the on-wire proofs (both-or-neither); ordinary advances pass `None`.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_on_relationship_with_anchor_leaf(
         &self,
         rel_key: [u8; 32],
@@ -885,6 +887,7 @@ impl CoreSDK {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
@@ -950,6 +953,7 @@ impl CoreSDK {
             deltas,
             initial_chain_tip,
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
+            offline_spend, // Some(..) draws the value from the offline-cash pool instead of online balance
         )?;
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
@@ -1015,6 +1019,7 @@ impl CoreSDK {
     /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
     /// then commits. Identical inputs → identical outcome, so the simulated
     /// receipt is byte-exact with the eventual canonical advance.
+    #[allow(clippy::too_many_arguments)]
     pub fn simulate_advance_for_confirm(
         &self,
         rel_key: [u8; 32],
@@ -1023,6 +1028,7 @@ impl CoreSDK {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
         let sm = self.state_machine.lock();
         sm.prepare_advance_relationship(
@@ -1032,6 +1038,7 @@ impl CoreSDK {
             deltas,
             initial_chain_tip,
             anchor_leaf,
+            offline_spend,
         )
     }
 
@@ -1313,8 +1320,15 @@ impl CoreSDK {
         // Same fail-closed prepare → write → commit pattern as
         // `execute_on_relationship`. The dev-seed mint participates in BCR
         // archival so reader paths see the seeded balance.
-        let outcome =
-            sm.prepare_advance_relationship(rel_key, dev_id, mint, &deltas, Some(init_tip), None)?;
+        let outcome = sm.prepare_advance_relationship(
+            rel_key,
+            dev_id,
+            mint,
+            &deltas,
+            Some(init_tip),
+            None, // anchor_leaf — dev-seed mint is an ordinary ingress transition
+            None, // offline_spend — online mint, no pool draw
+        )?;
         // Dev-seed Mint is ingress (no capsule bump needed): bump_capsule = false.
         Self::dual_write_advance_outcome(&outcome, false)?;
         sm.commit_advance(&outcome);
@@ -3338,7 +3352,8 @@ mod tests {
                         key: staged.anchor_leaf.key,
                         new_value: staged.anchor_leaf.new_value,
                     }),
-                )
+                            None,
+            )
                 .expect("bearer advance");
             let proofs = out
                 .anchor_proofs
@@ -3504,11 +3519,12 @@ mod tests {
                 deltas,
                 Some(init),
                 Some(leaf.clone()),
+                None,
             )
             .expect("sim with anchor_leaf")
             .child_r_a;
         let sim_without = sdk
-            .simulate_advance_for_confirm(rel_key, cp, op.clone(), deltas, Some(init), None)
+            .simulate_advance_for_confirm(rel_key, cp, op.clone(), deltas, Some(init), None, None)
             .expect("sim without anchor_leaf")
             .child_r_a;
 
@@ -3530,6 +3546,7 @@ mod tests {
                     deltas,
                     Some(init),
                     Some(leaf.clone()),
+                    None,
                 )
                 .expect("canonical prepare with anchor_leaf");
             sm.commit_advance(&outcome);

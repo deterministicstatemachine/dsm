@@ -406,6 +406,23 @@ pub enum BalanceDirection {
     Debit,
 }
 
+/// The value source for an [`DeviceState::advance`] that spends from the device-bound
+/// offline-cash pool instead of the online balance (an offline-bearer transfer).
+///
+/// When present, the transfer's value is conserved by debiting the pool by `amount` — the
+/// online balance is NOT touched (it was already debited when the cash was loaded) and
+/// `deltas` MUST be empty. The pool debit and the relationship + anchor-state advance land in
+/// ONE atomic device-root replacement, so the value move and the transition are inseparable.
+#[derive(Clone, Copy, Debug)]
+pub struct OfflineSpend {
+    /// Chip-rooted anchor bundle `B` binding the pool to this device's offline-bearer island.
+    pub anchor_bundle_b: [u8; 32],
+    /// Asset (CPTA `policy_commit`) whose pool is being spent.
+    pub asset: [u8; 32],
+    /// Amount drawn from the pool — must equal the transfer operation's amount.
+    pub amount: u64,
+}
+
 /// By-construction balance-conservation guard for [`DeviceState::advance`].
 ///
 /// Validates that `deltas` exactly realize `operation` for the device identified
@@ -415,17 +432,32 @@ pub enum BalanceDirection {
 /// operate on `&[BalanceDelta]` (code correspondence: lean4
 /// `DSMOfflineFinality.lean` `commitTransfer` / `commit_conservation`).
 ///
-/// - `Transfer`: exactly one delta, `amount == op.amount`, direction is `Credit`
+/// - `Transfer` (online): exactly one delta, `amount == op.amount`, direction is `Credit`
 ///   iff this device is the recipient (`op.to_device_id == local_devid`) else
 ///   `Debit`, and `policy_commit == op.policy_commit` (§9.5 token binding).
+/// - `Transfer` (offline-bearer, `offline_spend = Some(amount)`): value comes from the
+///   device-bound offline-cash pool, so `deltas` MUST be empty (the online balance is not
+///   touched) and the pool debit must equal `op.amount`. The operation must be a bearer
+///   transfer (`OfflineBearerRequired`). This keeps ONE conservation chokepoint across both
+///   value regimes — the pool debit is the conserved source, exactly as an online `Debit` is.
 /// - `Mint`: exactly one `Credit` delta of `amount`.
 /// - `Burn`: exactly one `Debit` delta of `amount`.
-/// - Every other operation: no balance deltas.
+/// - Every other operation: no balance deltas, and no `offline_spend`.
 fn validate_conservation(
     local_devid: &[u8; 32],
     operation: &Operation,
     deltas: &[BalanceDelta],
+    offline_spend: Option<u64>,
 ) -> Result<(), DsmError> {
+    // A pool-backed spend is only ever valid for an offline-bearer transfer. Reject it on any
+    // other operation before the per-op match, so no non-transfer path can source from the pool.
+    if offline_spend.is_some()
+        && !crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(operation)
+    {
+        return Err(DsmError::invalid_operation(
+            "conservation: offline-cash pool spend is only valid for an offline-bearer transfer",
+        ));
+    }
     match operation {
         Operation::Transfer {
             to_device_id,
@@ -433,6 +465,20 @@ fn validate_conservation(
             policy_commit,
             ..
         } => {
+            // Offline-bearer transfer: pool-backed, no online balance movement.
+            if let Some(pool_amount) = offline_spend {
+                if !deltas.is_empty() {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: offline-bearer transfer must not apply an online balance delta",
+                    ));
+                }
+                if pool_amount != amount.value() {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: offline-cash pool debit != transfer amount",
+                    ));
+                }
+                return Ok(());
+            }
             if deltas.len() != 1 {
                 return Err(DsmError::invalid_operation(
                     "conservation: transfer must apply exactly one balance delta",
@@ -793,6 +839,7 @@ impl DeviceState {
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<AnchorLeafUpdate>,
+        offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -818,12 +865,47 @@ impl DeviceState {
         // correspondence: lean4 DSMOfflineFinality.lean commit_conservation /
         // commitTransfer): the supplied deltas MUST exactly realize the signed
         // operation — one delta of op.amount, role-correct direction, bound to the
-        // op's policy_commit. This is the by-construction guard at the sole
-        // balance-mutation chokepoint; it rejects value creation/substitution
-        // regardless of caller.
-        validate_conservation(&self.devid, &operation, deltas)?;
+        // op's policy_commit — OR, for an offline-bearer transfer, `offline_spend` sources the
+        // value from the device-bound pool and `deltas` is empty. This is the by-construction
+        // guard at the sole balance-mutation chokepoint (online balance AND offline pool); it
+        // rejects value creation/substitution regardless of caller.
+        validate_conservation(&self.devid, &operation, deltas, offline_spend.map(|o| o.amount))?;
 
-        // Apply deltas to a working copy. Failures leave self untouched.
+        // Offline-bearer spend: draw the value from the device-bound offline-cash pool instead of
+        // the online balance. Requires the anchor-state advance (a bearer transfer always advances
+        // the anchor leaf), so the pool debit and the transition land in ONE atomic device root.
+        let pool_update = match offline_spend {
+            None => None,
+            Some(os) => {
+                if anchor_leaf.is_none() {
+                    return Err(DsmError::invalid_operation(
+                        "advance: offline-bearer spend requires an anchor-state leaf advance",
+                    ));
+                }
+                let key = crate::types::offline_allocation_leaf::offline_allocation_key(
+                    &self.genesis,
+                    &self.devid,
+                    &os.anchor_bundle_b,
+                    &os.asset,
+                );
+                let cur = self.offline_allocations.get(&key).copied().unwrap_or_default();
+                let new_amount = cur.amount.checked_sub(os.amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: offline-cash pool underflow (insufficient offline cash)",
+                    )
+                })?;
+                let new_sequence = cur.sequence + 1;
+                let value = crate::types::offline_allocation_leaf::offline_allocation_value(
+                    new_amount,
+                    new_sequence,
+                );
+                Some((key, value, new_amount, new_sequence))
+            }
+        };
+
+        // Apply deltas to a working copy. Failures leave self untouched. (For an offline-bearer
+        // spend, `deltas` is empty — conservation enforced above — so the online balance is
+        // untouched here; the value moved via the pool debit instead.)
         let mut new_balances = self.balances.clone();
         for d in deltas {
             let cur = new_balances.get(&d.policy_commit).copied().unwrap_or(0);
@@ -906,6 +988,16 @@ impl DeviceState {
                 new_smt.update_leaf(&al.key, &al.new_value).map_err(|e| {
                     DsmError::invalid_operation(format!("anchor leaf replace: {e}"))
                 })?;
+                // Offline-bearer spend: the pool debit's allocation leaf rides the SAME atomic
+                // batch, so the pool draw-down and the transition share one device root. Updated
+                // before `post_root`/child proofs so the rel + anchor child proofs bind the final
+                // root (the receiver verifies rel + anchor against it; the pool leaf need not be
+                // proven to the receiver — it is the sender's own accounting).
+                if let Some((k, v, _, _)) = &pool_update {
+                    new_smt.update_leaf(k, v).map_err(|e| {
+                        DsmError::invalid_operation(format!("offline-allocation leaf replace: {e}"))
+                    })?;
+                }
                 let post_root = *new_smt.root();
                 let rel_child = new_smt
                     .get_inclusion_proof(&rel_key, 256)
@@ -953,11 +1045,17 @@ impl DeviceState {
             },
         );
 
-        // A bearer transition replaces the per-device anchor-state leaf as part of the SAME atomic
-        // root update; record its new value so `restore` replays it (else reload root-mismatches).
+        // A bearer transition replaces the per-device anchor-state leaf (and, for an offline-bearer
+        // spend, the allocation leaf) as part of the SAME atomic root update; record their new
+        // values so `restore` replays them (else reload root-mismatches).
         let mut new_extra_leaves = self.extra_leaves.clone();
         if let Some(al) = &anchor_leaf {
             new_extra_leaves.insert(al.key, al.new_value);
+        }
+        let mut new_offline_allocations = self.offline_allocations.clone();
+        if let Some((k, v, amount, sequence)) = pool_update {
+            new_extra_leaves.insert(k, v);
+            new_offline_allocations.insert(k, OfflineAllocation { amount, sequence });
         }
         let new_device_state = Self {
             genesis: self.genesis,
@@ -969,7 +1067,7 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
-            offline_allocations: self.offline_allocations.clone(),
+            offline_allocations: new_offline_allocations,
         };
 
         Ok(AdvanceOutcome {
@@ -1346,6 +1444,7 @@ mod tests {
                 &[],
                 Some(init_tip),
                 None,
+                        None,
             )
             .expect("advance");
         assert_eq!(
@@ -1430,28 +1529,37 @@ mod tests {
             amount: amt,
         };
 
-        // Transfer: recipient credits, sender debits — accepted.
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx)]).is_ok());
-        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[debit(5, pcx)]).is_ok());
+        // Transfer: recipient credits, sender debits — accepted. (offline_spend None = online.)
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[debit(5, pcx)], None).is_ok());
         // Wrong amount / direction / token / count — rejected.
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(6, pcx)]).is_err());
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[debit(5, pcx)]).is_err());
-        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)]).is_err());
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))]).is_err());
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(6, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[debit(5, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))], None).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[], None).is_err());
         assert!(
-            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx), credit(5, pcx)])
+            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx), credit(5, pcx)], None)
                 .is_err()
         );
         // Mint: one credit==amount; Burn: one debit==amount.
-        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)]).is_ok());
-        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)]).is_err());
-        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)]).is_err());
-        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)]).is_ok());
-        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)]).is_err());
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)], None).is_err());
         // Non-balance op must carry no deltas.
-        assert!(validate_conservation(&me, &op(), &[]).is_ok());
-        assert!(validate_conservation(&me, &op(), &[credit(1, pcx)]).is_err());
+        assert!(validate_conservation(&me, &op(), &[], None).is_ok());
+        assert!(validate_conservation(&me, &op(), &[credit(1, pcx)], None).is_err());
+        // offline_spend is only valid on a bearer transfer, and forbids online deltas.
+        assert!(
+            validate_conservation(&me, &mint_op(9), &[], Some(9)).is_err(),
+            "pool spend on a non-bearer op must be rejected"
+        );
+        assert!(
+            validate_conservation(&me, &op(), &[], Some(1)).is_err(),
+            "pool spend on a non-transfer op must be rejected"
+        );
     }
 
     fn entropy(seed: u8) -> Vec<u8> {
@@ -1502,6 +1610,7 @@ mod tests {
                 }],
                 Some(init_tip),
                 None,
+                        None,
             )
             .expect("credit advance succeeds");
 
@@ -1549,6 +1658,7 @@ mod tests {
                 }],
                 Some(init_tip),
                 None,
+                        None,
             )
             .expect("mint 100")
             .new_device_state;
@@ -1671,6 +1781,7 @@ mod tests {
                     key,
                     new_value: commit1,
                 }),
+                        None,
             )
             .expect("bearer advance");
         let ap = out
@@ -1733,6 +1844,7 @@ mod tests {
                 }],
                 Some(init2),
                 None,
+                        None,
             )
             .expect("plain advance");
         assert!(plain.anchor_proofs.is_none());
@@ -1758,12 +1870,169 @@ mod tests {
                     key,
                     new_value: commit1,
                 }),
+                        None,
             )
             .expect("bearer advance after a plain one");
         let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
         assert!(
             verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &commit0, &ap2.parent),
             "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
+        );
+    }
+
+    #[test]
+    fn bearer_advance_draws_from_pool_not_online_balance() {
+        use crate::core::bilateral_transaction_manager::{
+            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        use crate::types::offline_allocation_leaf::offline_allocation_key;
+        use crate::types::operations::{
+            AuthorityMode, AuthorityPolicy, Operation, TransactionMode, VerificationType,
+        };
+
+        let b = [0xB2u8; 32];
+        let key = anchor_state_leaf_key(&b);
+        let token = pc(0xA1);
+
+        // Bootstrap the anchor, mint 100 online, then load 40 into the offline pool.
+        let dev = fresh_device(0xD5)
+            .with_anchor_state_leaf(&key, &[0xC0u8; 32])
+            .expect("bootstrap");
+        let rk_self = compute_smt_key(&dev.devid, &dev.devid);
+        let init_self = initial_chain_tip_from_device_ids(&dev.devid, &dev.devid);
+        let funded = dev
+            .advance(
+                rk_self,
+                dev.devid,
+                mint_op(100),
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Credit,
+                    amount: 100,
+                }],
+                Some(init_self),
+                None,
+                None,
+            )
+            .expect("mint 100")
+            .new_device_state;
+        let loaded = funded
+            .load_offline_cash(&b, &token, 40)
+            .expect("load 40")
+            .new_device_state;
+        let alloc_key = offline_allocation_key(&loaded.genesis, &loaded.devid, &b, &token);
+        assert_eq!(loaded.balances.get(&token).copied().unwrap_or(0), 60);
+        assert_eq!(loaded.offline_allocation(&alloc_key), 40);
+
+        // Build an offline-bearer transfer of `amt` to a counterparty.
+        let cp = devid(0xC5);
+        let rk = compute_smt_key(&loaded.devid, &cp);
+        let init = initial_chain_tip_from_device_ids(&loaded.devid, &cp);
+        let anchor_leaf = AnchorLeafUpdate {
+            key,
+            new_value: [0xC1u8; 32],
+        };
+        let bearer_op = |amt: u64| Operation::Transfer {
+            to_device_id: cp.to_vec(),
+            amount: bal(amt),
+            token_id: b"ERA".to_vec(),
+            policy_commit: token,
+            mode: TransactionMode::Bilateral,
+            nonce: vec![],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![],
+            to: vec![],
+            message: String::new(),
+            signature: vec![],
+            authority_policy: Some(AuthorityPolicy {
+                mode: AuthorityMode::OfflineBearerRequired,
+                policy_id: [0u8; 32],
+                anchor_set_id: [0u8; 32],
+            }),
+        };
+        let spend = |amt: u64| {
+            Some(OfflineSpend {
+                anchor_bundle_b: b,
+                asset: token,
+                amount: amt,
+            })
+        };
+
+        // Bearer spend of 25: pool 40 -> 15, online balance UNTOUCHED (60), anchor leaf advanced.
+        let spent = loaded
+            .advance(
+                rk,
+                cp,
+                bearer_op(25),
+                entropy(2),
+                None,
+                &[], // no online delta — value comes from the pool
+                Some(init),
+                Some(anchor_leaf.clone()),
+                spend(25),
+            )
+            .expect("bearer advance from pool")
+            .new_device_state;
+        assert_eq!(
+            spent.balances.get(&token).copied().unwrap_or(0),
+            60,
+            "online balance must be untouched by a bearer spend"
+        );
+        assert_eq!(
+            spent.offline_allocation(&alloc_key),
+            15,
+            "pool debited by the bearer amount"
+        );
+
+        // Fail-closed: an online delta alongside a pool spend is a double-source → rejected.
+        assert!(
+            loaded
+                .advance(
+                    rk,
+                    cp,
+                    bearer_op(25),
+                    entropy(3),
+                    None,
+                    &[BalanceDelta {
+                        policy_commit: token,
+                        direction: BalanceDirection::Debit,
+                        amount: 25,
+                    }],
+                    Some(init),
+                    Some(anchor_leaf.clone()),
+                    spend(25),
+                )
+                .is_err(),
+            "bearer advance must reject an online delta alongside a pool spend"
+        );
+
+        // Fail-closed: pool underflow (spend 100 from a 40 pool).
+        assert!(
+            loaded
+                .advance(
+                    rk,
+                    cp,
+                    bearer_op(100),
+                    entropy(4),
+                    None,
+                    &[],
+                    Some(init),
+                    Some(anchor_leaf.clone()),
+                    spend(100),
+                )
+                .is_err(),
+            "bearer advance must reject a pool underflow"
+        );
+
+        // Fail-closed: a pool spend without the anchor-state advance (anchor_leaf None) is rejected.
+        assert!(
+            loaded
+                .advance(rk, cp, bearer_op(10), entropy(5), None, &[], Some(init), None, spend(10))
+                .is_err(),
+            "offline-bearer spend requires the anchor-state advance"
         );
     }
 
@@ -1801,6 +2070,7 @@ mod tests {
                 }],
                 Some(init),
                 Some(AnchorLeafUpdate { key, new_value }),
+                        None,
             )
             .expect("bearer advance")
         };
@@ -1871,6 +2141,7 @@ mod tests {
                 }],
                 Some(init),
                 None,
+                        None,
             )
             .expect("value advance");
         assert_eq!(
@@ -1885,7 +2156,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None, None)
+            .advance(rk, cp, op(), entropy(2), None, &[], None, None, None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -1900,7 +2171,7 @@ mod tests {
         let rk2 = compute_smt_key(&dev.devid, &cp2);
         let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
         let o3 = dev
-            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
+            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None, None)
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -1951,6 +2222,7 @@ mod tests {
                 }],
                 Some(init_bob),
                 None,
+                        None,
             )
             .expect("advance Bob");
         assert_eq!(
@@ -1975,6 +2247,7 @@ mod tests {
                 }],
                 Some(init_chrl),
                 None,
+                        None,
             )
             .expect("advance Charlie");
         assert_eq!(
@@ -2033,6 +2306,7 @@ mod tests {
                 }],
                 Some(init_bob),
                 None,
+                        None,
             )
             .expect("advance A");
         let b = dev
@@ -2049,6 +2323,7 @@ mod tests {
                 }],
                 Some(init_chrl),
                 None,
+                        None,
             )
             .expect("advance B");
 
@@ -2100,6 +2375,7 @@ mod tests {
                 }],
                 Some(init),
                 None,
+                        None,
             )
             .expect("advance A");
         let b = dev
@@ -2116,6 +2392,7 @@ mod tests {
                 }],
                 Some(init),
                 None,
+                        None,
             )
             .expect("advance B");
 
@@ -2161,7 +2438,8 @@ mod tests {
             }],
             Some(init),
             None,
-        );
+                    None,
+            );
         assert!(
             r.is_err(),
             "debit > balance must fail with insufficient funds"
@@ -2194,7 +2472,8 @@ mod tests {
             }],
             Some(init),
             None,
-        );
+                    None,
+            );
         assert!(r.is_err(), "u64::MAX + 1 must overflow");
     }
 
@@ -2243,7 +2522,8 @@ mod tests {
                     }],
                     Some(init),
                     None,
-                )
+                            None,
+            )
                 .expect("advance");
             dev = out.new_device_state;
         }
@@ -2332,6 +2612,7 @@ mod tests {
                 &[],
                 Some(init_tip),
                 None,
+                        None,
             )
             .expect("bilateral advance succeeds")
             .new_device_state;

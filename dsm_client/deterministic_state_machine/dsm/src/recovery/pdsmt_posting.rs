@@ -817,6 +817,7 @@ mod tests {
                 }],
                 Some(initial_chain_tip_from_device_ids(&owner, &c_yes)),
                 None,
+                        None,
             )
             .expect("value advance")
             .new_device_state;
@@ -839,6 +840,7 @@ mod tests {
                 &[],
                 Some(initial_chain_tip_from_device_ids(&owner, &c_no)),
                 None,
+                        None,
             )
             .expect("non-value advance")
             .new_device_state;

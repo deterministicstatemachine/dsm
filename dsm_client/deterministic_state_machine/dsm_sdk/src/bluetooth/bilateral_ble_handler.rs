@@ -3499,6 +3499,9 @@ impl BilateralBleHandler {
             &sender_deltas,
             Some(h_n),
             staged_bearer.as_ref().map(|(s, _)| s.anchor_leaf.clone()),
+            // offline_spend: bearer→pool activation lands with the load path (Phase 1 wiring);
+            // until then bearer transfers debit the online balance via `sender_deltas` as before.
+            None,
         )?;
         // `parent_r_a` is the CAS-layer device head (pre-seed root). The
         // Merkle `parent_proof` is built against the post-seed tree, so the
@@ -4709,6 +4712,7 @@ impl BilateralBleHandler {
                 &receiver_deltas,
                 Some(h_n),
                 None, // receiver credits ordinary; the fused-anchor leaf is a sender-side concern
+                None, // offline_spend: never — the receiver credits online value, it does not spend a pool
             )
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
@@ -5383,6 +5387,10 @@ impl BilateralBleHandler {
                 &prepared.deltas,
                 Some(prepared.parent_tip),
                 prepared.anchor_leaf.clone(),
+                // Must match the commit at execute_on_relationship_for_bilateral below EXACTLY
+                // (same inputs → same root). Both None until bearer→pool activation threads the
+                // same offline_spend from `prepared` through here and the commit together.
+                None,
             ) {
                 Ok(o) => o.child_r_a,
                 Err(e) => {
@@ -5427,6 +5435,10 @@ impl BilateralBleHandler {
             &prepared.deltas,
             Some(prepared.parent_tip),
             prepared.anchor_leaf.clone(), // bearer: commit the same fused-anchor leaf as the sim proofs
+            // offline_spend: the sender's bearer→pool debit. None until activation (must equal the
+            // determinism-guard sim above). Then: for a bearer transfer, Some(OfflineSpend{bundle,
+            // asset, amount}) with `prepared.deltas` empty — value drawn from the pool, not online.
+            None,
         ) {
             Ok(o) => o,
             Err(advance_err) => {
