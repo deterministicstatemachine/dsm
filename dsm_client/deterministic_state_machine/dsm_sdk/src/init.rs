@@ -646,7 +646,16 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // Genesis v2: the device signing keypair is the AK keypair derived deterministically
         // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
         // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
-        // unlocked-session secret; it must be cached (RecoverySDK::derive_and_cache_key) first.
+        // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
+        // and sealed at rest, so on a cold start we first try the hardware seed vault before
+        // demanding the mnemonic again. A missing/auth-gated bundle fails closed → locked UI.
+        if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
+            match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
+                Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),
+                Ok(false) => log::info!("[SDK Init] No sealed wallet seed — mnemonic unlock required"),
+                Err(e) => log::warn!("[SDK Init] Seed vault unlock failed ({e}) — mnemonic required"),
+            }
+        }
         let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
             .ok_or_else(|| {
                 "wallet seed not unlocked: cache the mnemonic (RecoverySDK::derive_and_cache_key) \

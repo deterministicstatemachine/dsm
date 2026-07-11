@@ -349,16 +349,26 @@ impl RecoverySDK {
         }
 
         // Cache the BIP39 wallet seed — the canonical Genesis v2 root-secret input
-        // (mnemonic -> wallet_seed -> s0 -> Smaster). NEVER persisted; lives only for the
-        // unlocked session so device-key + per-step EK/ML-KEM derivations can re-derive it.
+        // (mnemonic -> wallet_seed -> s0 -> Smaster). Lives for the unlocked session so
+        // device-key + per-step EK/ML-KEM derivations can re-derive it, and is ALSO sealed
+        // at rest (hardware Keystore on Android) so the signer rebuilds on cold start
+        // without the mnemonic. The seed is a one-way BIP39 derivation — NOT the mnemonic,
+        // never reversible to it; the mnemonic itself is never persisted.
         {
             let seed = bip39::Mnemonic::parse(mnemonic)
                 .map_err(|e| DsmError::InvalidState(format!("invalid mnemonic: {e}")))?
                 .to_seed("");
-            let mut guard = WALLET_SEED_CACHE
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
-            *guard = Some(seed.to_vec());
+            {
+                let mut guard = WALLET_SEED_CACHE
+                    .lock()
+                    .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
+                *guard = Some(seed.to_vec());
+            }
+            // Seal the seed at rest (non-fatal: the session is already usable; failure only
+            // means the next cold start will require the mnemonic again).
+            if let Err(e) = Self::persist_wallet_seed(&seed) {
+                log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
+            }
         }
 
         // Persist the key encrypted by a device-bound wrapping key so it
@@ -401,6 +411,10 @@ impl RecoverySDK {
         }
         // Also wipe the persisted encrypted blob.
         let _ = crate::storage::client_db::recovery::delete_encrypted_recovery_key();
+        // Full wipe (logout / mnemonic change): drop the in-memory seed and the sealed
+        // bundle. (Temporary lock uses `clear_wallet_seed_cache`, which keeps the blob.)
+        Self::clear_wallet_seed_cache();
+        let _ = crate::storage::client_db::recovery::delete_encrypted_wallet_seed();
     }
 
     /// Check if a recovery key is currently cached in memory.
@@ -1099,6 +1113,61 @@ impl RecoverySDK {
         hasher.update(&device_id);
         hasher.update(&genesis_hash);
         Ok(*hasher.finalize().as_bytes())
+    }
+
+    /// Seal the BIP39 wallet seed at rest via the hardware-backed seed vault so the
+    /// signer can be rebuilt on cold start without the mnemonic. The seed is a one-way
+    /// derivation from the paper mnemonic (never the mnemonic, never reversible to it).
+    pub fn persist_wallet_seed(seed: &[u8]) -> Result<(), DsmError> {
+        let blob = crate::sdk::seed_vault::seal(seed)?;
+        crate::storage::client_db::recovery::store_encrypted_wallet_seed(&blob)
+            .map_err(|e| DsmError::InvalidState(format!("persist sealed wallet seed: {e}")))?;
+        log::info!(
+            "[RECOVERY_SDK] Wallet seed sealed at rest ({} bytes)",
+            blob.len()
+        );
+        Ok(())
+    }
+
+    /// Cold-start unlock: if the wallet seed is not cached in memory, load the sealed
+    /// bundle and re-cache it (rebuilding the signer without the mnemonic). Returns
+    /// `Ok(true)` if the seed is now cached, `Ok(false)` if no sealed bundle exists.
+    /// On a biometric/PIN-gated Keystore key, `seed_vault::open` triggers the platform
+    /// auth prompt; a denied/absent auth surfaces as `Err` (fail closed → locked UI).
+    pub fn load_and_cache_wallet_seed() -> Result<bool, DsmError> {
+        if Self::get_cached_wallet_seed().is_some() {
+            return Ok(true);
+        }
+        let blob = match crate::storage::client_db::recovery::load_encrypted_wallet_seed() {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                return Err(DsmError::InvalidState(format!(
+                    "load sealed wallet seed: {e}"
+                )))
+            }
+        };
+        let seed = crate::sdk::seed_vault::open(&blob)?;
+        {
+            let mut guard = WALLET_SEED_CACHE
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
+            *guard = Some(seed);
+        }
+        log::info!("[RECOVERY_SDK] Wallet seed unsealed and cached from cold start");
+        Ok(true)
+    }
+
+    /// Clear the in-memory wallet-seed cache WITHOUT deleting the sealed bundle at rest
+    /// (wallet lock: the seed leaves RAM but the Keystore-sealed blob remains for the
+    /// next auth-gated unlock).
+    pub fn clear_wallet_seed_cache() {
+        if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
+            if let Some(ref mut s) = *guard {
+                s.iter_mut().for_each(|b| *b = 0);
+            }
+            *guard = None;
+        }
     }
 
     /// Encrypt the recovery key with a device-bound wrapping key and store in SQLite.

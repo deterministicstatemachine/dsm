@@ -108,6 +108,9 @@ pub mod vault_state_composition;
 // Recovery system SDK
 pub mod recovery_sdk;
 
+// Hardware-sealed wallet-seed vault (cold-start signer unlock without the mnemonic)
+pub mod seed_vault;
+
 // Transport and communication modules
 pub mod bluetooth_transport;
 pub mod secure_ble_transport;
