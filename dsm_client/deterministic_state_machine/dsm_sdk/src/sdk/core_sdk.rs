@@ -1004,6 +1004,81 @@ impl CoreSDK {
         Ok((compat_state, outcome))
     }
 
+    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash pool,
+    /// bound to the enrolled anchor bundle `B`. An online, conserved regime shift: online
+    /// `available` drops and the device-bound pool rises by the same amount (device root advances).
+    /// Fail-closed persistence: the new device head is durably written BEFORE it is installed, so a
+    /// persist failure leaves the in-memory head on the prior state (the load is never-happened).
+    pub fn load_offline_cash(
+        &self,
+        anchor_bundle_b: [u8; 32],
+        asset: [u8; 32],
+        amount: u64,
+    ) -> Result<dsm::types::device_state::OfflineAllocationOutcome, DsmError> {
+        let mut sm = self.state_machine.lock();
+        let outcome = {
+            let ds = sm.device_head().ok_or_else(|| {
+                DsmError::state_machine("load_offline_cash: DeviceState not initialized (genesis first)")
+            })?;
+            ds.load_offline_cash(&anchor_bundle_b, &asset, amount)?
+        };
+        crate::storage::client_db::update_bcr_device_head(&outcome.new_device_state).map_err(
+            |e| {
+                DsmError::storage(
+                    format!("load_offline_cash: persist device head failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            },
+        )?;
+        sm.set_device_head(outcome.new_device_state.clone());
+        Ok(outcome)
+    }
+
+    /// **Unload** `amount` from this device's offline-cash pool back to the online balance
+    /// (reconcile): the pool drops and online `available` rises by the same amount. Same
+    /// fail-closed persist-before-install discipline as [`Self::load_offline_cash`].
+    pub fn unload_offline_cash(
+        &self,
+        anchor_bundle_b: [u8; 32],
+        asset: [u8; 32],
+        amount: u64,
+    ) -> Result<dsm::types::device_state::OfflineAllocationOutcome, DsmError> {
+        let mut sm = self.state_machine.lock();
+        let outcome = {
+            let ds = sm.device_head().ok_or_else(|| {
+                DsmError::state_machine("unload_offline_cash: DeviceState not initialized (genesis first)")
+            })?;
+            ds.unload_offline_cash(&anchor_bundle_b, &asset, amount)?
+        };
+        crate::storage::client_db::update_bcr_device_head(&outcome.new_device_state).map_err(
+            |e| {
+                DsmError::storage(
+                    format!("unload_offline_cash: persist device head failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            },
+        )?;
+        sm.set_device_head(outcome.new_device_state.clone());
+        Ok(outcome)
+    }
+
+    /// Current offline-cash pool balance for `asset` under the enrolled anchor bundle `B`.
+    pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> u64 {
+        let sm = self.state_machine.lock();
+        match sm.device_head() {
+            Some(ds) => {
+                let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
+                    &ds.genesis_digest(),
+                    &ds.devid(),
+                    &anchor_bundle_b,
+                    &asset,
+                );
+                ds.offline_allocation(&key)
+            }
+            None => 0,
+        }
+    }
+
     /// Get the canonical DeviceState head (§2.2 SMT root).
     pub fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         self.state_machine.lock().device_head().cloned()
