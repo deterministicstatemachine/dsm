@@ -139,24 +139,23 @@ controller is Secure-only), which closes the NS→DMA→Secure-SRAM exfil path a
 app with proper fault vectors would trap the bus error rather than hang. Recovering the board needs a
 physical BOOTSEL.
 
-**Config lock — RESOLVED (2026-07-12): the RP2350 bootrom already locks it; a Secure re-write is
-redundant and bus-faults.** Root-caused end to end on silicon:
-- The ACCESSCTRL `LOCK` write raises a PRECISE BusFault at `0x40060000` — plain store AND atomic-SET
-  alias — even writing 0. (Two earlier readings — a locked-build "DENIED at 13 s" and "atomic alias
-  works at 41 s" — were MISREADS: the diagnostic handler's ~45 s bucket blurred with the ~42 s SG
-  path under a `>30 s = success` classifier. Re-derived with a clean 12 s-vs-42 s binary + a control.)
-- NOT privilege: a `CONTROL.nPRIV` probe (12 s-vs-42 s) confirmed the monitor is Secure **and
-  Privileged**; a plain write to a DIFFERENT ACCESSCTRL register (GPIO_NSMASK0 `0x4006000c`) SUCCEEDS
-  (42 s) — so it is LOCK-register-specific, not a systemic access problem.
-- Cause: reading `LOCK` in-monitor shows it is **NON-ZERO at boot** — `0b0100`, i.e. the **bootrom
-  sets `LOCK.dma`**. The DMA master is already frozen out of ACCESSCTRL by the immutable bootrom;
-  re-writing an already-locked ACCESSCTRL bus-faults.
+**Config lock — WORKS (2026-07-12): the monitor locks core1 + debug with the `0xACCE` write password;
+the bootrom already locks dma.** The earlier "a Secure LOCK write is redundant and bus-faults" account
+was WRONG on the *why*, corrected here:
+- ACCESSCTRL register writes require the write password **`0xACCE` in bits [31:16]** (e.g. CFGRESET is
+  `0xACCE0001`). My earlier LOCK writes were **keyless**, so they were rejected with a bus fault — that
+  was the missing password, NOT that LOCK is unwritable. (The keyless-write-vs-privilege investigation
+  was a detour; the real cause is the password.)
+- With the password, `write(0x40060000, 0xACCE_0000 | LOCK.core1 | LOCK.debug)` **succeeds and the bits
+  read back set** (silicon-verified). `boundary::lock_accessctrl` does this at boot.
+- The bootrom already sets `LOCK.dma` at boot (LOCK reads `0b0100`), so the DMA master is covered.
+  core 0 (the TCB) is left unlocked so the monitor keeps control.
 
-Net: the boundary cannot be re-opened by either real threat — NS can't reach the ACCESSCTRL space
-(SAU), and the DMA master can't reconfigure it (bootrom `LOCK.dma`; NS also can't drive a DMA). So the
-config lock is in place, applied by the bootrom (stronger than a Secure-code lock). The monitor does
-NOT write `LOCK` (redundant + faults). No `LOCK_BOUNDARY` toggle; the committed default is the proven
-boundary (SAU denials + NS launch + live SG, SG-path 42 s).
+**Lock and rerun (silicon):** with the lock applied, the image launches + completes the SG round trip
+(SG-path 43 s), AND a Secure-SRAM denial probe still returns BLOCKED (~12 s) — the lock does not break
+the boundary, and denial holds with it on. Net: the config is frozen against every non-TCB master —
+DMA + core1 (locked) and Non-secure (SAU-blocked from the ACCESSCTRL space) — via a WORKING Secure lock
+plus the bootrom's dma lock. Reset-clearable (power cycle), NOT OTP.
 
 ## Host-automatable now (no board)
 

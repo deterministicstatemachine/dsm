@@ -370,12 +370,10 @@ fn main() -> ! {
         cortex_m::asm::dsb();
     }
 
-    // The ACCESSCTRL config lock is already applied by the immutable RP2350 bootrom, which sets
-    // LOCK.dma at boot (verified on silicon 2026-07-12: LOCK reads 0b0100). The DMA master therefore
-    // cannot reconfigure ACCESSCTRL, and the SAU already blocks Non-secure code from the ACCESSCTRL
-    // register space — so the security boundary cannot be re-opened by either threat. A Secure re-write
-    // of LOCK bus-faults (ACCESSCTRL is already locked) and is redundant, so the monitor does not
-    // attempt it. See boundary.rs.
+    // Freeze the ACCESSCTRL config so the Secure resource attribution cannot be re-opened. The bootrom
+    // already locks the DMA master out (LOCK.dma, silicon 2026-07-12); this adds core1 + the debugger.
+    // Reset-clearable (power cycle), NOT OTP.
+    boundary::lock_accessctrl();
 
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
     // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and

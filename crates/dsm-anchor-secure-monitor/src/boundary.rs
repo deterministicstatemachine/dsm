@@ -54,22 +54,25 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
     Ok(())
 }
 
-// ACCESSCTRL config lock — done by the bootrom, not by the monitor.
-//
-// The Secure resource attribution must not be re-openable. That holds without the monitor writing
-// ACCESSCTRL.LOCK:
-//   - Non-secure code cannot reach the ACCESSCTRL register space: the SAU marks the whole non-NS-SRAM
-//     space Secure, so an NS access traps (proven: NS reads of Secure SRAM / OTP / SPI0 all fault).
-//   - The DMA master cannot reconfigure ACCESSCTRL: the immutable RP2350 bootrom sets LOCK.dma at
-//     boot (SILICON 2026-07-12, chip 0x430ed6d919933c8e: LOCK reads 0b0100), and ACCESSCTRL silently
-//     ignores writes from a locked-out master. NS also cannot DRIVE a DMA (the DMA controller is
-//     Secure-only), so there is no NS->DMA path in the first place.
-//
-// A Secure re-write of LOCK is therefore redundant AND bus-faults on silicon (ACCESSCTRL is already
-// in a locked state; a plain store and the atomic-SET alias both raise a precise BusFault at
-// 0x40060000, while other ACCESSCTRL registers e.g. GPIO_NSMASK0 accept Secure-Privileged writes).
-// So the monitor does not write LOCK; the bootrom's LOCK.dma is the freeze, immutable and stronger
-// than a Secure-code lock.
+/// Freeze the ACCESSCTRL configuration so the Secure resource attribution cannot be re-opened.
+///
+/// ACCESSCTRL register writes require the write password `0xACCE` in the top 16 bits; a keyless write
+/// is rejected with a bus fault (this is what my earlier keyless attempts hit — NOT that LOCK is
+/// unwritable). With the password the monitor sets LOCK.core1 + LOCK.debug, so neither core 1 nor the
+/// debugger can modify ACCESSCTRL. The bootrom already sets LOCK.dma at boot (silicon 2026-07-12: LOCK
+/// reads 0b0100), so the DMA master is covered too; core 0 (the Secure monitor / TCB) is intentionally
+/// left unlocked so it retains control. LOCK bits clear ONLY on a full ACCESSCTRL reset (power cycle) —
+/// reset-clearable, NOT an OTP burn. Verified on silicon: the password write sets the bits (read back).
+pub fn lock_accessctrl() {
+    const ACCESSCTRL_WRITE_PASSWORD: u32 = 0xACCE_0000;
+    const LOCK: *mut u32 = 0x4006_0000 as *mut u32;
+    const LOCK_CORE1: u32 = 1 << 1;
+    const LOCK_DEBUG: u32 = 1 << 3;
+    unsafe {
+        core::ptr::write_volatile(LOCK, ACCESSCTRL_WRITE_PASSWORD | LOCK_CORE1 | LOCK_DEBUG);
+        cortex_m::asm::dsb();
+    }
+}
 /// Core-1 containment. RP2350 core 1 does not execute until core 0 launches it via the SIO FIFO
 /// vector handshake; the monitor never performs that handshake, so core 1 stays powered-down with
 /// no bus master activity. v1 is deliberately single-core (no reviewed Secure multicore design), so
