@@ -39,17 +39,29 @@ working boundary (SAU enabled, NS launched), reconfirmed 2026-07-12 on chip `0x4
 Independent of — and NOT to be conflated with — the ACCESSCTRL lock-write fault (a separate open item
 below). Reproduce with `DENIAL_TARGET` in `veneer/dsm_ns_stub.S`.
 
-| Non-secure attempts to read | Denied? | How it manifests |
+**Our model — outcome vs mechanism.** Every Non-secure attempt to reach a Secure resource resolves to
+one system-level outcome, **`BLOCKED`**: the access returns no data and does not proceed. `BLOCKED` is
+the portable term the DSM model reasons in. *How* the chip enforces it is a per-hardware mechanism note
+underneath, one of:
+- **`trap`** — the access raises a precise fault taken to the Secure handler (clean, observable).
+- **`stall`** — the access halts with no bus response and never completes (also denied, no data; just
+  not a clean fault). On RP2350 this is the enforced behavior for a Non-secure access to a secure AHB
+  peripheral (ACCESSCTRL/IDAU), and is not a leak or bypass.
+
+| Non-secure attempts to read | Outcome | Mechanism on RP2350 |
 |---|---|---|
-| Secure SRAM `0x20000000` | **YES** | clean Secure fault → ~12 s reboot (control, probe off: SG-path 42–43 s) |
-| OTP `0x40130000` | **YES** | clean Secure fault → ~12 s reboot |
-| SPI0 / TROPIC01 `0x40080000` | **YES** | clean Secure fault → ~12 s reboot |
-| DMA controller `0x50000000` | **YES** | bus STALL — no data, board hangs (no fault fires at all) |
+| Secure SRAM `0x20000000` | **BLOCKED** | `trap` — precise SecureFault → Secure handler (~12 s; control probe-off: SG-path 42–43 s) |
+| OTP `0x40130000` | **BLOCKED** | `trap` — precise SecureFault (~13 s) |
+| SPI0 / TROPIC01 `0x40080000` | **BLOCKED** | `trap` — precise SecureFault (~12 s) |
+| DMA controller `0x50000000` | **BLOCKED** | `stall` — secure-AHB access halts, no bus response (denied, no data) |
 
-So: NS-core reads of Secure SRAM, OTP, and the TROPIC SPI all trap cleanly to Secure rather than
-returning data; NS cannot drive the DMA (so no NS→DMA→Secure-SRAM path).
+So: every probed Secure resource is `BLOCKED` from Non-secure — the APB peripherals via a clean `trap`,
+the AHB/DMA controller via a `stall`. NS gets no data anywhere, and cannot drive the DMA (so no
+NS→DMA→Secure-SRAM path). The `trap`/`stall` split is a hardware-mechanism detail beneath the uniform
+`BLOCKED` outcome; a `stall` is only weaker in *observability* (a hang vs a logged fault), never in
+enforcement.
 
-**DMA denial is a bus STALL, RIGOROUSLY established (2026-07-12).** An NS read of the DMA/AHB address
+**DMA = `BLOCKED` (mechanism `stall`), RIGOROUSLY established (2026-07-12).** An NS read of the DMA/AHB address
 `0x50000000` is denied but manifests as a bus stall (the AHB transaction gets no response, the core
 hangs) — NOT the clean SecureFault the `0x20/0x40` APB addresses raise. This was nailed down
 methodically after an earlier UN-rigorous "untrappable stall" claim was rightly rejected:
