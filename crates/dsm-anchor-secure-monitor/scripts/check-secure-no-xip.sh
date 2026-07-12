@@ -9,8 +9,9 @@
 # STATUS: PASSES. The custom SRAM-resident linker (dsm-secure-sram.x) places the whole Secure TCB
 # at an SRAM VMA (flash LMA), so no security-critical Secure symbol resolves into XIP. This gate is
 # the executable form of that policy — a regression that returns any TCB symbol to flash re-FAILs.
-# (Boot-time copy of the flash image into SRAM is the bootrom LOAD_MAP's job; that block item and
-# its on-silicon copy are the remaining step — the ELF symbol residency this checks is independent.)
+# (The boot-block LOAD_MAP that drives the bootrom flash->SRAM copy is now linker-emitted and
+# picotool-decoded; its on-silicon copy is validated by an unlocked-board boot test. The ELF symbol
+# residency this gate checks is independent of that copy.)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ELF="${1:-$HERE/../target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor}"

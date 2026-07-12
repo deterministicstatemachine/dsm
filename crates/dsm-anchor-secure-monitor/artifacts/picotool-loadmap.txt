@@ -1,0 +1,10 @@
+Metadata Block 1
+ address:             0x10000000
+ next block address:  0x10000000
+ block type:          image def
+ target chip:         RP2350
+ image type:          ARM Secure
+ load map entry 0:    Copy 0x10000064->0x100032d8 to 0x20000000->0x20003274
+ load map entry 1:    Copy 0x100032e0->0x10003360 to 0x20040000->0x20040080
+ load map entry 2:    Clear 0x20003274->0x20003278
+ vector table:        0x20000000

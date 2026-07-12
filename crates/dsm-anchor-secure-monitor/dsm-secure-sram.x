@@ -61,13 +61,54 @@ SECTIONS
   /* Secure stack lives at the top of the Secure SRAM region (just below the NSC region). */
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
 
-  /* ## Boot block in FLASH — the bootrom scans the first flash bytes for this signed block. It is
-   * the ONLY thing that legitimately resides at the flash runtime address; the payload it points at
-   * (below) is copied to SRAM. */
+  /* ## Boot block in FLASH — the bootrom scans the first flash bytes for this block. It is the ONLY
+   * thing that legitimately runs from the flash address; the payload it maps (below) is copied to
+   * SRAM. The whole PICOBIN block is emitted here by the linker (LMA/VMA/size are link-time values).
+   *
+   * PICOBIN item encodings (rp235x-hal block.rs):
+   *   1BS item word = (value<<16)|(size_words<<8)|type ;  2BS item word = (value<<24)|(size_words<<8)|type
+   * Relative LOAD_MAP entry (Raspberry Pi picobin) = 3 words:
+   *   (source_LMA - address_of_LOAD_MAP_item) , runtime_VMA , byte_size
+   *   A zero source means "clear the runtime region" (BSS/scratch zero-fill).
+   * LOAD_MAP header = (n_entries<<24) | ((1 + 3*n_entries)<<8) | 0x06. */
   .start_block ORIGIN(FLASH) : ALIGN(4)
   {
     __start_block_addr = .;
-    KEEP(*(.start_block));
+    LONG(0xffffded3);                                  /* BLOCK_MARKER_START */
+
+    /* IMAGE_TYPE (1BS 0x42): EXE(0x0001)|RP2350(0x1000)|ARM(0x0000)|SECURITY_S(0x0020)=0x1021 */
+    LONG((0x1021 << 16) | (1 << 8) | 0x42);
+
+    /* LOAD_MAP (2BS 0x06): 3 entries, size = 1 + 3*3 = 10 words. */
+    __dsm_load_map = .;
+    LONG((3 << 24) | (10 << 8) | 0x06);
+    /* entry 1 — contiguous low Secure image (vectors+.text+.rodata+.data) FLASH -> SRAM 0x20000000 */
+    LONG(LOADADDR(.vector_table) - __dsm_load_map);
+    LONG(ADDR(.vector_table));
+    LONG((LOADADDR(.data) + SIZEOF(.data)) - LOADADDR(.vector_table));
+    /* entry 2 — NSC SG veneer FLASH -> SRAM 0x20040000 */
+    LONG(LOADADDR(.gnu.sgstubs) - __dsm_load_map);
+    LONG(ADDR(.gnu.sgstubs));
+    LONG(SIZEOF(.gnu.sgstubs));
+    /* entry 3 — zero-fill Secure .bss (source 0 = clear); immutable bootrom clears it, not crt0 */
+    LONG(0);
+    LONG(__sbss);
+    LONG(__ebss - __sbss);
+
+    /* VECTOR_TABLE (1BS 0x03, 2 words): runtime VTOR = SRAM vector table. */
+    LONG((0 << 16) | (2 << 8) | 0x03);
+    LONG(ADDR(.vector_table));
+
+    /* ENTRY_POINT (1BS 0x44, 3 words): PC (Reset, thumb bit) + initial SP. */
+    LONG((0 << 16) | (3 << 8) | 0x44);
+    LONG(Reset | 1);
+    LONG(_stack_start);
+
+    /* LAST item (2BS 0xff): size field = total item words above = 1+10+2+3 = 16. */
+    LONG((16 << 8) | 0xff);
+    LONG(0);                                           /* block-loop offset: 0 = single-block self-loop */
+    LONG(0xab123579);                                  /* BLOCK_MARKER_END */
+
     KEEP(*(.boot_info));
   } > FLASH
 

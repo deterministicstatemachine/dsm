@@ -31,14 +31,12 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
-/// RP2350 boot block. `ImageDef::secure_exe()` marks the image type Secure ONLY — it emits NO
-/// `LOAD_MAP` item, so the bootrom does NOT copy this image into SRAM; it runs in place from XIP
-/// flash. Executing the Secure TCB from SRAM requires a custom boot block carrying a `LOAD_MAP`
-/// (flash LMA → SRAM VMA, size) so the bootrom verifies the signed flash image and copies the TCB
-/// to RAM before entry. That linker step is pending; until it lands this is an XIP image.
-#[link_section = ".start_block"]
-#[used]
-pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
+// RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
+// `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
+// LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
+// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20040000, zero-fill
+// Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom copies the
+// verified flash image into SRAM and enters there.
 
 // ── Secure Gateway ABI (mirror of veneer/dsm_sg_abi.h) ────────────────────────────────────────
 const SG_SLOT_INDEX: u32 = 0;
