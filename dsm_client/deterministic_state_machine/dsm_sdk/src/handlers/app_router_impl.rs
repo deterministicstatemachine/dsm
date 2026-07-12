@@ -2753,6 +2753,10 @@ impl AppRouter for AppRouterImpl {
             "wallet.send" | "wallet.sendSmart" | "wallet.sendOffline" => {
                 self.handle_wallet_invoke(i).await
             }
+            // Offline-cash load/unload (two-regime money model)
+            "wallet.loadOffline" | "wallet.unloadOffline" => {
+                self.handle_offline_cash_invoke(i).await
+            }
             // Contacts invoke routes
             "contacts.addManual" => self.handle_contacts_invoke(i).await,
             // Message
