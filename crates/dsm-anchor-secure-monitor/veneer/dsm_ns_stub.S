@@ -25,6 +25,12 @@
     .equ OP_STATUS,     1
     .equ MB_REQUEST_READY, 1
 
+/* Denial test (step 5 boundary): the Non-secure stub first attempts a read the boundary must forbid.
+ * If the boundary denies it, the access faults and traps to the Secure fault handler (DENIED, ~11 s
+ * reboot). If it wrongly succeeds, control falls through to the SG path (ALLOWED, ~50 s reboot). Set
+ * DENIAL_TARGET per resource under test; 0 disables the probe (plain round-trip). */
+    .equ DENIAL_TARGET, 0x0   /* Secure SRAM base (SAU-Secure) — NS read must fault */
+
     .section .ns_app, "ax", %progbits
     .align 3
     .global __ns_app_vector_table
@@ -34,6 +40,12 @@ __ns_app_vector_table:
 
     .thumb_func
 ns_reset:
+    /* DENIAL PROBE: attempt the forbidden access first. A denied access faults here and traps to the
+     * Secure fault handler (DENIED). Only an ALLOWED (boundary-broken) access falls through. */
+.if DENIAL_TARGET
+    ldr  r3, =DENIAL_TARGET
+    ldr  r0, [r3]                    /* NS read of a Secure resource — must fault if denial works */
+.endif
     /* Publish a STATUS request into the fixed mailbox (data plane behind the SG). */
     ldr  r3, =MAILBOX
     movs r0, #OP_STATUS

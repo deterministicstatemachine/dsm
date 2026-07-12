@@ -45,30 +45,32 @@ picotool uf2 convert "$ELF" -t elf "$OUT/loadmap-test.uf2"
 picotool info -a "$OUT/loadmap-test.uf2" | grep -E "load map|vector table|entry point" | head -5
 picotool load -v -x "$OUT/loadmap-test.uf2"
 
-echo "== timing the self-reboot (the Secure handler delays ~13 s before rebooting) =="
-# Outcome map for the NS-launch build:
-#   in BOOTSEL at 6 s        -> TOO FAST: ROM rejected the block or an early fault (FAIL)
-#   BOOTSEL appears ~8..60 s -> PASS: the Secure handler ran (NS launched + crossed the SG)
-#   never                    -> TIMEOUT: NS launch / SG failed, handler never reached (FAIL)
+echo "== timing the self-reboot to classify the boundary outcome =="
+# The monitor encodes the outcome in the reboot delay (SRAM readback is dead on BOOTSEL entry):
+#   < 4 s  ......... TOO FAST : ROM rejected the block / faulted before anything ran
+#   ~11 s (4..30) .. DENIED   : an NS access trapped to the Secure fault handler
+#   ~50 s (30..90) . SG-PATH  : NS reached the Secure Gateway with no fault (access ALLOWED)
+#   never .......... TIMEOUT  : NS launch / SG did not complete
+# The caller decides PASS/FAIL: a denial-probe build wants DENIED; a plain round-trip wants SG-PATH.
 START=$(date +%s)
-sleep 6
+sleep 4
 if picotool info -d >/dev/null 2>&1; then
-    echo "FAIL (too fast, $(( $(date +%s) - START )) s): in BOOTSEL before the ~13 s handler delay —"
-    echo "     the ROM rejected the block or the monitor faulted before the NS launch. Check"
-    echo "     'picotool info -a' block decode and the linker map."
-    exit 1
+    echo "RESULT: TOO-FAST ($(( $(date +%s) - START )) s) — ROM rejected the block or an early fault."
+    exit 2
 fi
-for _ in $(seq 1 30); do
+for _ in $(seq 1 45); do
     if picotool info -d >/dev/null 2>&1; then
-        NOW=$(date +%s)
-        echo "PASS: self-reboot at $((NOW - START)) s (matches the ~13 s handler delay) —"
-        echo "      the Non-secure app launched, crossed the NSC sg veneer into Secure, and the"
-        echo "      Secure handler read the NS mailbox (state/seq/opcode) and rebooted."
-        picotool info -d 2>&1 | grep -E "chipid|secure boot|debug"
+        T=$(( $(date +%s) - START ))
+        if [ "$T" -lt 30 ]; then
+            echo "RESULT: DENIED (self-reboot at ${T} s ~ the Secure-fault delay) — the Non-secure"
+            echo "        access faulted into the Secure fault handler. Boundary blocked it."
+        else
+            echo "RESULT: SG-PATH (self-reboot at ${T} s ~ the Secure-Gateway delay) — NS reached the"
+            echo "        gateway with no fault (a denial probe reaching here means ACCESS ALLOWED)."
+        fi
         exit 0
     fi
     sleep 2
 done
-echo "FAIL (timeout): no reboot within ~66 s. NS launch or the SG transition did not complete"
-echo "     (bad BXNS / SAU attribution / veneer), so the handler was never reached."
+echo "RESULT: TIMEOUT (no reboot within ~94 s) — NS launch or the SG transition did not complete."
 exit 1

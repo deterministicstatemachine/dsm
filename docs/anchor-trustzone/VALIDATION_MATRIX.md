@@ -66,6 +66,16 @@ slot/state/seq, reads `opcode` from the NS mailbox, and (bring-up flag) reboots 
 veneer, and Secure reading the NS data plane, all on silicon. Does NOT prove the handler's authority
 logic (it reboots before it), the response path back to NS, or NS/DMA *denial* of Secure resources.
 
+**Row 0c (NS code → Secure SRAM DENIED) — 2026-07-12, same chip.** Denial-observability channel:
+the monitor's Secure fault handler reboots after a ~11 s delay, distinct from the ~50 s SG-success
+delay, so reboot time classifies the outcome. The NS bring-up stub attempts `ldr` of Secure SRAM
+`0x20000000` (SAU-Secure) before the SG path. Result: DENIED, self-reboot at 12 s (the fault path).
+Control (same build, probe off): SG-PATH, self-reboot at 42 s — proving the two paths are cleanly
+separated and 12 s is unambiguously the trap. So an NS access to Secure SRAM faults to Secure rather
+than returning data — the SAU boundary *blocks*, not just transitions. Reproduce: set `DENIAL_TARGET`
+in `veneer/dsm_ns_stub.S`. Still reversible (no lock, no OTP). OTP/TROPIC (ACCESSCTRL) + DMA-MPU
+denial and the post-lock rerun are the remaining rows.
+
 ## Host-automatable now (no board)
 
 These become unit/integration tests in the monitor crate as the split lands:

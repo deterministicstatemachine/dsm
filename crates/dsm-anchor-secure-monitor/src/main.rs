@@ -178,14 +178,8 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
         // fault) never reboots at all (timeout). A reboot at ~13 s therefore isolates "the handler
         // ran" = NS launched + crossed the SG + Secure read the NS mailbox. (~7M cycles/s on the
         // post-ROM clock.)
-        cortex_m::asm::delay(90_000_000);
-        hal::reboot::reboot(
-            hal::reboot::RebootKind::BootSel {
-                picoboot_disabled: false,
-                msd_disabled: false,
-            },
-            hal::reboot::RebootArch::Normal,
-        );
+        cortex_m::asm::delay(SG_REBOOT_DELAY_CYCLES);
+        reboot_bootsel();
     }
     if req_len > SG_SLOT_MAX_LEN {
         return finish(mb, seq, SG_ERR_SIZE);
@@ -376,6 +370,35 @@ fn main() -> ! {
 /// Bring-up proof flag (step 5b/6): when set, the Secure handler self-reboots into BOOTSEL on a
 /// STATUS call so the NS→S round trip is observable on silicon. Cleared with the real response path.
 const BRINGUP_NS_LAUNCH_PROOF: bool = true;
+
+/// Distinctive reboot timings that make silicon outcomes readable by wall-clock alone, since
+/// post-boot SRAM readback is cleared on BOOTSEL entry. The two delays are far apart so re-enumeration
+/// jitter + 2 s poll granularity cannot confuse them (empirically ~90M cycles ≈ 14 s):
+///   ROM rejects the block ......... < 4 s   (nothing of ours ran)
+///   DENIED (Secure fault fired) ... ~11 s   (a boundary violation trapped to Secure)
+///   ALLOWED (NS reached the SG) ... ~50 s   (no fault; NS crossed the gateway)
+///   lockup / no path .............. timeout
+const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
+const SG_REBOOT_DELAY_CYCLES: u32 = 320_000_000; // ~50 s
+
+fn reboot_bootsel() -> ! {
+    hal::reboot::reboot(
+        hal::reboot::RebootKind::BootSel {
+            picoboot_disabled: false,
+            msd_disabled: false,
+        },
+        hal::reboot::RebootArch::Normal,
+    )
+}
+
+/// Secure fault handler = the denial-test observable. An NS access the boundary forbids (SAU-Secure
+/// SRAM, or an ACCESSCTRL-Secure peripheral that escalates here) traps to Secure; this reboots after
+/// the DENIED delay. Reaching it proves the access faulted rather than returning secret data.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
+    cortex_m::asm::delay(FAULT_REBOOT_DELAY_CYCLES);
+    reboot_bootsel()
+}
 
 extern "C" {
     /// The Non-secure app's 2-word vector table (`[initial NS MSP, NS reset]`), at the NS SRAM base
