@@ -73,8 +73,15 @@ delay, so reboot time classifies the outcome. The NS bring-up stub attempts `ldr
 Control (same build, probe off): SG-PATH, self-reboot at 42 s — proving the two paths are cleanly
 separated and 12 s is unambiguously the trap. So an NS access to Secure SRAM faults to Secure rather
 than returning data — the SAU boundary *blocks*, not just transitions. Reproduce: set `DENIAL_TARGET`
-in `veneer/dsm_ns_stub.S`. Still reversible (no lock, no OTP). OTP/TROPIC (ACCESSCTRL) + DMA-MPU
-denial and the post-lock rerun are the remaining rows.
+in `veneer/dsm_ns_stub.S`. Still reversible (no lock, no OTP).
+
+**NS-code peripheral denials (rows 4/5 CPU side) — 2026-07-12, same chip.** Same probe, retargeted:
+- NS read of OTP_DATA `0x40130000`: DENIED, self-reboot at 13 s.
+- NS read of SPI0 (TROPIC01 transport) `0x40080000`: DENIED, self-reboot at 12 s.
+Both fault to Secure: the SAU marks everything outside the two NS-SRAM/NSC regions Secure, so NS-core
+reads of OTP and the TROPIC SPI trap rather than returning data. (This is the CPU side; the DMA-master
+side of rows 4/5/6 is separate — ACCESSCTRL SRAM0–9 default to fully-open, so a DMA could reach Secure
+SRAM until ACCESSCTRL locks it. That + the config lock are the remaining rows.)
 
 ## Host-automatable now (no board)
 

@@ -29,7 +29,7 @@
  * If the boundary denies it, the access faults and traps to the Secure fault handler (DENIED, ~11 s
  * reboot). If it wrongly succeeds, control falls through to the SG path (ALLOWED, ~50 s reboot). Set
  * DENIAL_TARGET per resource under test; 0 disables the probe (plain round-trip). */
-    .equ DENIAL_TARGET, 0x0   /* Secure SRAM base (SAU-Secure) — NS read must fault */
+    .equ DENIAL_TARGET, 0x0   /* target under test; 0 = probe off (plain round-trip) */
 
     .section .ns_app, "ax", %progbits
     .align 3
