@@ -32,6 +32,24 @@ provisioned RP2350 board.
 | 19 | bench build | cannot create a production-compatible enrollment bundle | host (domain-tag separation) | pending |
 | 20 | any fallback exposing HostSign when measurement fails | none exists | host (code audit) + silicon | pending |
 
+## Denial results — definitive (working state, `LOCK_BOUNDARY` off; clean yes/no)
+
+A clean yes/no on "can Non-secure reach a Secure resource", run one probe at a time in the proven
+working boundary (SAU enabled, NS launched), reconfirmed 2026-07-12 on chip `0x430ed6d919933c8e`.
+Independent of — and NOT to be conflated with — the ACCESSCTRL lock-write fault (a separate open item
+below). Reproduce with `DENIAL_TARGET` in `veneer/dsm_ns_stub.S`.
+
+| Non-secure attempts to read | Denied? | How it manifests |
+|---|---|---|
+| Secure SRAM `0x20000000` | **YES** | clean Secure fault → ~12 s reboot (control, probe off: SG-path 42–43 s) |
+| OTP `0x40130000` | **YES** | clean Secure fault → ~12 s reboot |
+| SPI0 / TROPIC01 `0x40080000` | **YES** | clean Secure fault → ~12 s reboot |
+| DMA controller `0x50000000` | **YES** | lockup (no data; unhandled Non-secure bus error — the bare stub has no fault vectors and the AHB/DMA address is attributed differently than the SAU-Secure APB range, so it does NOT raise the clean SecureFault the others do) |
+
+So: NS-core reads of Secure SRAM, OTP, and the TROPIC SPI all trap to Secure rather than returning
+data; NS cannot drive the DMA (so no NS→DMA→Secure-SRAM path). The DMA case is denied but its fault is
+messy on the bare bring-up stub — the real NS app (proper fault vectors) will trap it cleanly.
+
 ## Silicon results so far
 
 **Row 0 — 2026-07-12, chip `0x430ed6d919933c8e` (unlocked: secure boot 0, debug 1), unsigned image.**
