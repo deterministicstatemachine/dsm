@@ -44,11 +44,22 @@ below). Reproduce with `DENIAL_TARGET` in `veneer/dsm_ns_stub.S`.
 | Secure SRAM `0x20000000` | **YES** | clean Secure fault → ~12 s reboot (control, probe off: SG-path 42–43 s) |
 | OTP `0x40130000` | **YES** | clean Secure fault → ~12 s reboot |
 | SPI0 / TROPIC01 `0x40080000` | **YES** | clean Secure fault → ~12 s reboot |
-| DMA controller `0x50000000` | **YES** | lockup (no data; unhandled Non-secure bus error — the bare stub has no fault vectors and the AHB/DMA address is attributed differently than the SAU-Secure APB range, so it does NOT raise the clean SecureFault the others do) |
+| DMA controller `0x50000000` | **YES** | bus STALL — no data, board hangs (no fault fires at all) |
 
-So: NS-core reads of Secure SRAM, OTP, and the TROPIC SPI all trap to Secure rather than returning
-data; NS cannot drive the DMA (so no NS→DMA→Secure-SRAM path). The DMA case is denied but its fault is
-messy on the bare bring-up stub — the real NS app (proper fault vectors) will trap it cleanly.
+So: NS-core reads of Secure SRAM, OTP, and the TROPIC SPI all trap cleanly to Secure rather than
+returning data; NS cannot drive the DMA (so no NS→DMA→Secure-SRAM path).
+
+**DMA is a bus stall, NOT a trappable fault (investigated 2026-07-12).** An NS read of the DMA/AHB
+address `0x50000000` neither returns data nor raises a fault the core can vector — the AHB transaction
+stalls with no response and the core hangs. Confirmed by adding a FULL Non-secure vector table
+(fault entries → an `ns_fault` trap that signals Secure): the board still hung — neither the Secure
+fault handler (~12 s) nor the NS `ns_fault` handler (~30 s) fired. So it differs fundamentally from
+the `0x20/0x40` APB addresses, which the core SAU-checks into a clean precise SecureFault before the
+bus. This is a hardware behavior of the AHB/DMA peripheral to a wrong-security access, not a
+missing-fault-vector bug — fault vectors cannot trap a stall. The security property is unaffected
+(NS gets no data), and NS cannot program a DMA anyway (the controller is Secure-only). Cleaner
+DMA-denial *observability* (vs a hang) is deferred; it needs a different mechanism (e.g. a Secure-side
+watchdog, or an RP2350 IDAU/SAU attribution study) and is NOT a security gap.
 
 ## Silicon results so far
 
