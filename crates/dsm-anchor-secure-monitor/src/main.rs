@@ -1,17 +1,26 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! DSM anchor RP2350 **Secure monitor** (TrustZone-M Secure world).
 //!
-//! Runs entirely from boot-ROM-verified SRAM (see `MEMORY_MAP.md`). Owns OTP, the host key,
-//! `HostSign`, TROPIC01, the physical counter, durable prepare/commit/recovery state, the exact
-//! measurement seal, and the ONLY Secure Gateway (the `-mcmse` NSC veneer → this handler).
+//! Owns OTP, the host key, `HostSign`, TROPIC01, the physical counter, durable prepare/commit/
+//! recovery state, the exact measurement seal, and the ONLY Secure Gateway (the NSC veneer → this
+//! handler).
 //!
-//! This increment lands the **Secure Gateway dispatch path**: the veneer entry
-//! `dsm_secure_dispatch(slot, seq)` calls [`dsm_secure_handler`], which runs the mailbox state
-//! machine (§4), performs a **fresh** BLAKE3 measurement of the Non-secure RX image before any
-//! authority-bearing op (§2), and dispatches the narrow state machine (§5). The leaf crypto
-//! (`σ^chip` via TROPIC01, `σ^host` via BLAKE3-SPHINCS+) and the real durable store are behind the
-//! `SecureOps` seam, fail-closed until the `real-crypto` wiring increment. `main` (reset) is a
-//! placeholder until the SAU/ACCESSCTRL init (step 5) and the measured NS loader (step 7) land.
+//! STATUS (this increment): STRUCTURAL split + SG ABI only. Both images link and the SG dispatch
+//! path resolves, but the monitor + veneer are still linked as an **XIP-flash** image — there is NO
+//! boot-block `LOAD_MAP` yet, so the Secure TCB does NOT run from boot-ROM-verified SRAM. The
+//! target invariant (whole Secure TCB executes from SRAM, because external flash is mutable after
+//! boot-time verification) is NOT physically true until the SRAM `LOAD_MAP` linker step lands;
+//! `scripts/check-secure-no-xip.sh` correctly FAILS until then. The runtime security boundary
+//! (SAU/MPU/ACCESSCTRL) is not configured and the Non-secure image is not launched.
+//!
+//! What IS wired: the veneer entry `dsm_secure_dispatch(slot, seq)` calls [`dsm_secure_handler`],
+//! which runs the mailbox state machine (§4), performs a **fresh** BLAKE3 measurement of the
+//! Non-secure RX image before any authority-bearing op (§2), and dispatches the narrow state
+//! machine (§5). The leaf crypto (`σ^chip` via TROPIC01, `σ^host` via BLAKE3-SPHINCS+), the durable
+//! store, and every authority op (`prepare`/`commit`/`emit`/`finalize`/`recover`) are behind the
+//! `SecureOps` seam and return fail-closed internal errors until the `real-crypto` increment.
+//! `main` (reset) is a placeholder wfi loop until the SAU/ACCESSCTRL init (step 5) and the measured
+//! NS loader (step 7) land.
 
 #![no_std]
 #![no_main]
@@ -22,7 +31,11 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
-/// RP2350 SRAM image marker (bootrom copies+verifies the whole signed image into SRAM).
+/// RP2350 boot block. `ImageDef::secure_exe()` marks the image type Secure ONLY — it emits NO
+/// `LOAD_MAP` item, so the bootrom does NOT copy this image into SRAM; it runs in place from XIP
+/// flash. Executing the Secure TCB from SRAM requires a custom boot block carrying a `LOAD_MAP`
+/// (flash LMA → SRAM VMA, size) so the bootrom verifies the signed flash image and copies the TCB
+/// to RAM before entry. That linker step is pending; until it lands this is an XIP image.
 #[link_section = ".start_block"]
 #[used]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();

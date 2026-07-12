@@ -9,11 +9,16 @@ MEMORY {
  * §3/§5 TrustZone domain layout — fixed addresses shared by the monitor + app linker scripts and the
  * signed manifest. These are the SAU region boundaries the monitor programs at init (step 5).
  * Secure occupies the low SRAM; the NSC veneer region and the Non-secure image occupy the high SRAM.
- * (The FLASH region above still stores the signed image; making the Secure .text VMA SRAM-resident —
- * so check-secure-no-xip.sh passes — is the next linker step. This layout defines the boundaries.)
+ *
+ * IMPORTANT — this is the TARGET layout, NOT the current image. cortex-m-rt's link.x forces .text
+ * into FLASH (it ASSERTs _stext is inside the FLASH region), so the monitor currently links + runs
+ * as an XIP-flash image and check-secure-no-xip.sh FAILS. Making the TCB actually SRAM-resident
+ * requires replacing cortex-m-rt's linker with a custom Secure script (SRAM VMA / flash LMA) plus a
+ * bootrom LOAD_MAP so the immutable bootrom verifies the signed flash image and copies it to SRAM
+ * before entry. Until that lands, treat these boundaries as the intended map, not live residency.
  */
 __secure_sram_start = 0x20000000;
-__secure_sram_end   = 0x20040000;   /* 256 KiB Secure (monitor code+data+heap+stack, SRAM-resident) */
+__secure_sram_end   = 0x20040000;   /* 256 KiB Secure (monitor code+data+heap+stack) — TARGET VMA */
 __nsc_start         = 0x20040000;
 __nsc_end           = 0x20041000;   /* 4 KiB Non-Secure-Callable (SG veneers / .gnu.sgstubs) */
 __ns_sram_start     = 0x20041000;

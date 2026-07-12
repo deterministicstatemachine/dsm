@@ -3,7 +3,7 @@ name = "dsm-anchor-secure-monitor"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "DSM anchor RP2350 Secure monitor (TrustZone-M Secure world): OTP-sealed host key, HostSign, TROPIC01, physical counter, durable prepare/commit/recovery state, exact-measurement seal, and the ONLY Secure Gateway (NSC veneer + fixed-slot dispatcher). Runs entirely from boot-ROM-verified SRAM. Not a workspace member — thumbv8m-only, excluded in the root manifest."
+description = "DSM anchor RP2350 Secure monitor (TrustZone-M Secure world): OTP-sealed host key, HostSign, TROPIC01, physical counter, durable prepare/commit/recovery state, exact-measurement seal, and the ONLY Secure Gateway (NSC veneer + fixed-slot dispatcher). Structural split + SG ABI linked; the SRAM LOAD_MAP, runtime security boundary (SAU/MPU/ACCESSCTRL), and authority state machine are not yet integrated — currently an XIP-flash image. Not a workspace member — thumbv8m-only, excluded in the root manifest."
 
 # Two-image TrustZone build; link the monitor FIRST to produce the CMSE import library the
 # Non-secure app links against. Build from inside this dir so .cargo/config.toml applies.
