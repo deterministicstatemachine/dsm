@@ -13,6 +13,53 @@
 
 use cortex_m::peripheral::sau::{SauError, SauRegion, SauRegionAttribute};
 use cortex_m::peripheral::SAU;
+use rp235x_hal as hal;
+
+// ── Watchdog: recover from a Non-secure-induced hang (e.g. the NS->DMA bus stall) ─────────────
+//
+// A Non-secure access to a secure AHB peripheral (DMA) is BLOCKED via a bus STALL — the core hangs
+// with no fault to trap. A stall is not a leak, but a permanent hang is a DoS. The watchdog turns it
+// into a recovered reset: armed before the NS launch, FED by the Secure fault/gateway paths while
+// they run (so normal operation never trips it), it fires only when NO code is running for the
+// period — exactly the stall — resetting the chip. The next boot detects the recovery via SCRATCH0.
+const WD_CTRL: *mut u32 = 0x400d_8000 as *mut u32;
+const WD_LOAD: *mut u32 = 0x400d_8004 as *mut u32;
+const WD_SCRATCH0: *mut u32 = 0x400d_800c as *mut u32;
+const WD_PERIOD_US: u32 = 2_000_000; // ~2 s (nominal; scales with clk_ref)
+const WD_ARMED: u32 = 0x5744_4147; // "WDAG": set while armed, cleared on a deliberate reboot / power-on
+
+/// True iff the previous boot armed the watchdog and never disarmed it — i.e. a watchdog reset fired
+/// (recovery from a Non-secure hang). SCRATCH0 survives a soft/watchdog reset; `disarm_watchdog`
+/// clears it on every deliberate reboot; a power-on clears it.
+pub fn watchdog_recovery_pending() -> bool {
+    unsafe { core::ptr::read_volatile(WD_SCRATCH0 as *const u32) == WD_ARMED }
+}
+
+/// Arm the watchdog immediately before launching Non-secure.
+pub fn arm_watchdog() {
+    let pac = unsafe { hal::pac::Peripherals::steal() };
+    let mut wd = hal::watchdog::Watchdog::new(pac.WATCHDOG);
+    wd.enable_tick_generation(12); // ~1 us tick assuming ~12 MHz clk_ref
+    wd.start(hal::fugit::MicrosDurationU32::from_ticks(WD_PERIOD_US));
+    unsafe { core::ptr::write_volatile(WD_SCRATCH0, WD_ARMED) };
+}
+
+/// Reload the watchdog. Called by the Secure paths while they spin so a LIVE monitor is not reset;
+/// a hung core (the stall) cannot call this, so the watchdog fires.
+#[inline(always)]
+pub fn feed_watchdog() {
+    unsafe { core::ptr::write_volatile(WD_LOAD, WD_PERIOD_US) };
+}
+
+/// Disarm on any deliberate reboot (so it cannot fire once the chip is in BOOTSEL) and clear the
+/// recovery marker.
+pub fn disarm_watchdog() {
+    unsafe {
+        let ctrl = core::ptr::read_volatile(WD_CTRL as *const u32);
+        core::ptr::write_volatile(WD_CTRL, ctrl & !(1 << 30)); // clear CTRL.ENABLE (bit 30)
+        core::ptr::write_volatile(WD_SCRATCH0, 0);
+    }
+}
 
 /// TrustZone domain map (must match dsm-secure-sram.x / memory.x). SAU limit addresses are the
 /// INCLUSIVE last byte (low 5 bits = 1), per the cortex-m SAU API.

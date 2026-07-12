@@ -178,8 +178,7 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
         // fault) never reboots at all (timeout). A reboot at ~13 s therefore isolates "the handler
         // ran" = NS launched + crossed the SG + Secure read the NS mailbox. (~7M cycles/s on the
         // post-ROM clock.)
-        cortex_m::asm::delay(SG_REBOOT_DELAY_CYCLES);
-        reboot_bootsel();
+        delayed_reboot(SG_REBOOT_DELAY_CYCLES);
     }
     if req_len > SG_SLOT_MAX_LEN {
         return finish(mb, seq, SG_ERR_SIZE);
@@ -329,6 +328,16 @@ const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
 // ── Reset entry (placeholder until step 5 SAU init + step 7 measured loader) ──────────────────
 #[hal::entry]
 fn main() -> ! {
+    // If the previous boot armed the watchdog and never disarmed it, a watchdog reset fired — i.e.
+    // we are recovering from a Non-secure-induced hang (the NS->DMA bus stall). Recover cleanly to
+    // BOOTSEL instead of re-launching NS into the same stall. reboot_bootsel disarms + clears it.
+    if boundary::watchdog_recovery_pending() {
+        // Recover to a safe state (BOOTSEL) instead of re-launching NS into the same hang. Proven on
+        // silicon 2026-07-12: with a distinctive ~20 s recovery marker the NS->DMA stall self-rebooted
+        // at 22 s (vs a permanent TIMEOUT without the watchdog); here the recovery is immediate.
+        reboot_bootsel();
+    }
+
     // Arm the Secure stack guard FIRST (belt-and-suspenders with the ENTRY_POINT sp_limit word):
     // set MSPLIM to the reserved stack floor before any deep call can overflow it.
     unsafe {
@@ -375,6 +384,11 @@ fn main() -> ! {
     // Reset-clearable (power cycle), NOT OTP.
     boundary::lock_accessctrl();
 
+    // Arm the watchdog just before handing control to Non-secure: if NS hangs the core (the DMA-stall
+    // BLOCKED case), no Secure path feeds the watchdog and it resets the chip -> recovered on reboot
+    // (vs a permanent hang / DoS). The Secure fault + gateway paths feed it via `delayed_reboot`.
+    boundary::arm_watchdog();
+
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
     // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and
     // BXNS into the NS reset vector. Control leaves Secure and only re-enters through the `sg`
@@ -400,6 +414,8 @@ const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
 const SG_REBOOT_DELAY_CYCLES: u32 = 320_000_000; // ~50 s
 
 fn reboot_bootsel() -> ! {
+    // Disarm the watchdog on any deliberate reboot so it cannot fire while the chip is in BOOTSEL.
+    boundary::disarm_watchdog();
     hal::reboot::reboot(
         hal::reboot::RebootKind::BootSel {
             picoboot_disabled: false,
@@ -409,16 +425,28 @@ fn reboot_bootsel() -> ! {
     )
 }
 
+/// Spin for `cycles` while FEEDING the watchdog (so a live Secure path is never reset), then reboot.
+/// Used by the bring-up timed reboots; a hung core cannot reach this, so the watchdog fires instead.
+fn delayed_reboot(cycles: u32) -> ! {
+    let mut remaining = cycles;
+    while remaining > 0 {
+        boundary::feed_watchdog();
+        let d = remaining.min(1_000_000);
+        cortex_m::asm::delay(d);
+        remaining -= d;
+    }
+    reboot_bootsel()
+}
+
 /// Secure fault handler = the denial-test observable. An NS access the boundary forbids (SAU-Secure
 /// SRAM, or an ACCESSCTRL-Secure peripheral that escalates here) traps to Secure; this reboots after
 /// the DENIED delay. Reaching it proves the access faulted rather than returning secret data.
 ///
 #[cortex_m_rt::exception]
 unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    // Proven-simple handler (rebooted reliably on the SRAM SecureFault at ~12 s). ANY fault reaching
-    // Secure -> ~12 s reboot. With BFHFNMINS=0, an NS->DMA BusFault should now land here.
-    cortex_m::asm::delay(FAULT_REBOOT_DELAY_CYCLES);
-    reboot_bootsel()
+    // ANY fault reaching Secure -> ~12 s reboot (feeding the watchdog so a trapped fault, unlike a
+    // hang, is not treated as a stall).
+    delayed_reboot(FAULT_REBOOT_DELAY_CYCLES)
 }
 
 extern "C" {

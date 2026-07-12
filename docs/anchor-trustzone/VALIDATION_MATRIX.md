@@ -53,7 +53,7 @@ underneath, one of:
 | Secure SRAM `0x20000000` | **BLOCKED** | `trap` — precise SecureFault → Secure handler (~12 s; control probe-off: SG-path 42–43 s) |
 | OTP `0x40130000` | **BLOCKED** | `trap` — precise SecureFault (~13 s) |
 | SPI0 / TROPIC01 `0x40080000` | **BLOCKED** | `trap` — precise SecureFault (~12 s) |
-| DMA controller `0x50000000` | **BLOCKED** | `stall` — secure-AHB access halts, no bus response (denied, no data) |
+| DMA controller `0x50000000` | **BLOCKED** | `stall` — secure-AHB access halts, no bus response (denied, no data); a Secure watchdog RECOVERS the hang (no permanent DoS) |
 
 So: every probed Secure resource is `BLOCKED` from Non-secure — the APB peripherals via a clean `trap`,
 the AHB/DMA controller via a `stall`. NS gets no data anywhere, and cannot drive the DMA (so no
@@ -74,9 +74,17 @@ Mechanism: the APB peripherals (SPI0/OTP) are core-SAU-checked into a precise Se
 AHB/DMA address is not core-security-checked (IDAU delegates it to ACCESSCTRL), so the NS access
 reaches the bus and the secure-AHB denial stalls rather than bus-errors — a documented RP2350
 behavior for NS access to a secure AHB peripheral. The security property is UNCHANGED: NS gets no
-data, and NS cannot program a DMA (Secure-only + bootrom LOCK.dma). Cleaner *observability* (a fault
-instead of a hang) is a robustness item (e.g. a Secure watchdog), NOT a security gap. `BFHFNMINS=0`
-is kept because it correctly routes NS bus errors that DO fault to the Secure handler.
+data, and NS cannot program a DMA (Secure-only + bootrom LOCK.dma). `BFHFNMINS=0` is kept because it
+correctly routes NS bus errors that DO fault to the Secure handler.
+
+**Watchdog recovery (DONE on silicon).** A stall is not a leak, but a permanent hang is a DoS. The
+monitor arms the RP2350 watchdog (`boundary::arm_watchdog`, ~2 s) before the NS launch; the Secure
+fault + gateway paths FEED it while they run (`delayed_reboot`), so normal operation never trips it
+(control: probe-off still reaches SG-path 43 s). A genuine hang — no code running, i.e. the DMA stall
+— stops feeding, so the watchdog resets the chip; the next boot detects it (`watchdog_recovery_pending`,
+via a WATCHDOG SCRATCH marker that survives the reset) and recovers to BOOTSEL instead of re-launching
+NS into the same stall. Proven: with a distinctive ~20 s recovery marker the DMA probe self-rebooted
+at 22 s (vs a permanent TIMEOUT without the watchdog). So `BLOCKED(stall)` is now also RECOVERABLE.
 
 ## Silicon results so far
 
