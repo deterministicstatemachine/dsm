@@ -24,6 +24,9 @@
     .equ MB_SEQUENCE,   0x0c         /* Mailbox.sequence offset */
     .equ OP_STATUS,     1
     .equ MB_REQUEST_READY, 1
+    /* Opcode the stub sends across the SG. 1=STATUS (round-trip proof); 2=PREPARE exercises the §2
+     * measurement gate (fail-closed on a blank-OTP board). */
+    .equ OP_TO_CALL,    1
 
 /* Denial test (step 5 boundary): the Non-secure stub first attempts a read the boundary must forbid.
  * If the boundary denies it, the access faults and traps to the Secure fault handler (DENIED, ~11 s
@@ -48,7 +51,7 @@ ns_reset:
 .endif
     /* Publish a STATUS request into the fixed mailbox (data plane behind the SG). */
     ldr  r3, =MAILBOX
-    movs r0, #OP_STATUS
+    movs r0, #OP_TO_CALL
     str  r0, [r3, #MB_OPCODE]
     movs r0, #1
     str  r0, [r3, #MB_SEQUENCE]

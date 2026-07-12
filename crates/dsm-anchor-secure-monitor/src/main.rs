@@ -192,6 +192,12 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
 
     // §2 FRESH measurement before any authority-bearing op.
     if op_requires_measurement(opcode) && !measurement_ok() {
+        // BRING-UP: prove the §2 measurement gate FAIL-CLOSES on silicon — an authority op (PREPARE)
+        // is refused because OTP `mu_enrolled` is blank on this unprovisioned board (mu_enrolled=None).
+        // Distinctive ~25 s reboot, separate from fault ~12 s / SG ~42 s. (Removed with real crypto.)
+        if BRINGUP_NS_LAUNCH_PROOF {
+            delayed_reboot(180_000_000);
+        }
         // §7.12 measurement failure => no counter movement, no TROPIC/host signature.
         let s = finish(mb, seq, SG_ERR_MEASUREMENT);
         zeroize(&mut sreq);
