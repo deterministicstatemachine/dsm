@@ -1560,6 +1560,64 @@ mod tests {
             validate_conservation(&me, &op(), &[], Some(1)).is_err(),
             "pool spend on a non-transfer op must be rejected"
         );
+        // A bearer transfer sourced from the pool: empty deltas + Some(offline_spend) is accepted;
+        // but empty deltas WITHOUT offline_spend is rejected before commit (the fail-closed case the
+        // activation seam must never produce — empty deltas and Some(offline_spend) are one choice).
+        let bearer_xfer = |amt: u64| {
+            use crate::types::operations::{AuthorityMode, AuthorityPolicy};
+            match xfer(other, amt, pcx) {
+                Operation::Transfer {
+                    to_device_id,
+                    amount,
+                    token_id,
+                    policy_commit,
+                    mode,
+                    nonce,
+                    verification,
+                    pre_commit,
+                    recipient,
+                    to,
+                    message,
+                    signature,
+                    ..
+                } => Operation::Transfer {
+                    to_device_id,
+                    amount,
+                    token_id,
+                    policy_commit,
+                    mode,
+                    nonce,
+                    verification,
+                    pre_commit,
+                    recipient,
+                    to,
+                    message,
+                    signature,
+                    authority_policy: Some(AuthorityPolicy {
+                        mode: AuthorityMode::OfflineBearerRequired,
+                        policy_id: [0u8; 32],
+                        anchor_set_id: [0u8; 32],
+                    }),
+                },
+                other => other,
+            }
+        };
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[], Some(5)).is_ok(),
+            "bearer transfer with empty deltas + matching pool debit must be accepted"
+        );
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[], None).is_err(),
+            "bearer transfer with empty deltas and NO offline_spend must be rejected before commit"
+        );
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[debit(5, pcx)], Some(5)).is_err(),
+            "bearer transfer must not carry an online delta alongside a pool spend"
+        );
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[], Some(6)).is_err(),
+            "bearer pool debit must equal the transfer amount"
+        );
     }
 
     fn entropy(seed: u8) -> Vec<u8> {
@@ -1985,6 +2043,31 @@ mod tests {
             spent.offline_allocation(&alloc_key),
             15,
             "pool debited by the bearer amount"
+        );
+
+        // Determinism (the sim==guard==commit invariant): re-running the SAME bearer advance
+        // (identical op, empty deltas, anchor_leaf, and offline_spend) against the same head yields
+        // a byte-identical device root. This is why threading the SAME `prepared.offline_spend` into
+        // the confirm-build sim, the determinism-guard sim, and the canonical commit keeps all three
+        // sender roots equal.
+        let spent_again = loaded
+            .advance(
+                rk,
+                cp,
+                bearer_op(25),
+                entropy(2),
+                None,
+                &[],
+                Some(init),
+                Some(anchor_leaf.clone()),
+                spend(25),
+            )
+            .expect("re-run bearer advance from pool")
+            .new_device_state;
+        assert_eq!(
+            spent.root(),
+            spent_again.root(),
+            "identical bearer advance inputs must produce a byte-identical device root"
         );
 
         // Fail-closed: an online delta alongside a pool spend is a double-source → rejected.
