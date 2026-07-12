@@ -356,6 +356,12 @@ fn main() -> ! {
             }
         }
     }
+    // Freeze the access-control config (reset-clearable, NOT OTP) once the boundary is proven. The
+    // denial tests run first with this off (reversible), then on (locked), and must deny in both.
+    if LOCK_BOUNDARY {
+        let pac = unsafe { hal::pac::Peripherals::steal() };
+        boundary::lock_accessctrl(&pac.ACCESSCTRL);
+    }
 
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
     // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and
@@ -380,6 +386,10 @@ const BRINGUP_NS_LAUNCH_PROOF: bool = true;
 ///   lockup / no path .............. timeout
 const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
 const SG_REBOOT_DELAY_CYCLES: u32 = 320_000_000; // ~50 s
+
+/// Step-5 config lock: freeze ACCESSCTRL against DMA/core1/debug (reset-clearable, NOT OTP). Run the
+/// denial tests with this OFF (reversible) then ON (locked) — both must deny.
+const LOCK_BOUNDARY: bool = false;
 
 fn reboot_bootsel() -> ! {
     hal::reboot::reboot(

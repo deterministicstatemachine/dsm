@@ -83,6 +83,22 @@ reads of OTP and the TROPIC SPI trap rather than returning data. (This is the CP
 side of rows 4/5/6 is separate — ACCESSCTRL SRAM0–9 default to fully-open, so a DMA could reach Secure
 SRAM until ACCESSCTRL locks it. That + the config lock are the remaining rows.)
 
+**NS → DMA controller (row 6 source path) — 2026-07-12, same chip.** NS read of the DMA controller
+`0x50000000`: BLOCKED, but manifests as a lockup (TIMEOUT — no reboot, board stuck out of BOOTSEL)
+rather than the clean ~12 s Secure-fault the `0x20/0x40` addresses produced. The access returns no
+data and never reaches the SG path, so it is denied; the lockup is because the bare NS stub has no
+fault vector table, so a Non-secure bus error (the DMA/AHB response, distinct from the SAU's clean
+SecureFault) has nowhere to go. Security reading: **Non-secure code cannot drive the DMA** (the DMA
+controller is Secure-only), which closes the NS→DMA→Secure-SRAM exfil path at its source — a real NS
+app with proper fault vectors would trap the bus error rather than hang. Recovering the board needs a
+physical BOOTSEL.
+
+**Config lock (reversible→locked, rerun) — staged, code ready (`LOCK_BOUNDARY`), pending a board.**
+`boundary::lock_accessctrl` sets ACCESSCTRL LOCK.{core1,debug} (reset-clearable, NOT OTP; core 0/TCB
+keeps control; the DMA LOCK bit isn't host-writable in this PAC). The denial tests above ran while
+reversible; the rerun-after-lock (confirming they still deny and the boundary isn't broken by the
+lock) is the remaining silicon step.
+
 ## Host-automatable now (no board)
 
 These become unit/integration tests in the monitor crate as the split lands:

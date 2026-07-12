@@ -13,6 +13,7 @@
 
 use cortex_m::peripheral::sau::{SauError, SauRegion, SauRegionAttribute};
 use cortex_m::peripheral::SAU;
+use rp235x_hal as hal;
 
 /// TrustZone domain map (must match dsm-secure-sram.x / memory.x). SAU limit addresses are the
 /// INCLUSIVE last byte (low 5 bits = 1), per the cortex-m SAU API.
@@ -52,6 +53,25 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
     // ALLNS stays 0: unmatched addresses (Secure monitor, flash, OTP, peripherals) are Secure.
     sau.enable();
     Ok(())
+}
+
+/// Lock the ACCESSCTRL configuration so the Secure resource attribution cannot be re-opened.
+///
+/// The peripherals that must never be Non-secure-reachable (OTP, SPI0/TROPIC, the DMA controller)
+/// default to "Secure access from any master", and the SAU already faults every Non-secure-core
+/// access to the whole non-NS-SRAM space (proven: NS reads of Secure SRAM / OTP / SPI0 all trap).
+/// The one path the SAU does NOT cover is a Non-secure-driven DMA — but that is closed at the
+/// source, because the DMA controller is itself Secure-only, so Non-secure code cannot program a
+/// DMA at all.
+///
+/// This freezes that state: LOCK bits make ACCESSCTRL silently ignore writes from core 1 and the
+/// debugger, so neither can re-open a Secure resource. A LOCK bit clears ONLY on a full ACCESSCTRL
+/// reset (power cycle) — reset-clearable, NOT an OTP burn. Core 0 (the Secure monitor, the TCB)
+/// intentionally keeps control so it can still manage the boundary as later increments assign the
+/// Non-secure app its own peripherals (config-then-lock). (The DMA LOCK bit is not host-writable in
+/// this PAC; the DMA-master path stays closed by the DMA controller being Secure-only.)
+pub fn lock_accessctrl(ac: &hal::pac::ACCESSCTRL) {
+    ac.lock().write(|w| w.core1().set_bit().debug().set_bit());
 }
 
 /// Core-1 containment. RP2350 core 1 does not execute until core 0 launches it via the SIO FIFO
