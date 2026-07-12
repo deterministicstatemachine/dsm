@@ -49,17 +49,22 @@ below). Reproduce with `DENIAL_TARGET` in `veneer/dsm_ns_stub.S`.
 So: NS-core reads of Secure SRAM, OTP, and the TROPIC SPI all trap cleanly to Secure rather than
 returning data; NS cannot drive the DMA (so no NS→DMA→Secure-SRAM path).
 
-**DMA is a bus stall, NOT a trappable fault (investigated 2026-07-12).** An NS read of the DMA/AHB
-address `0x50000000` neither returns data nor raises a fault the core can vector — the AHB transaction
-stalls with no response and the core hangs. Confirmed by adding a FULL Non-secure vector table
-(fault entries → an `ns_fault` trap that signals Secure): the board still hung — neither the Secure
-fault handler (~12 s) nor the NS `ns_fault` handler (~30 s) fired. So it differs fundamentally from
-the `0x20/0x40` APB addresses, which the core SAU-checks into a clean precise SecureFault before the
-bus. This is a hardware behavior of the AHB/DMA peripheral to a wrong-security access, not a
-missing-fault-vector bug — fault vectors cannot trap a stall. The security property is unaffected
-(NS gets no data), and NS cannot program a DMA anyway (the controller is Secure-only). Cleaner
-DMA-denial *observability* (vs a hang) is deferred; it needs a different mechanism (e.g. a Secure-side
-watchdog, or an RP2350 IDAU/SAU attribution study) and is NOT a security gap.
+**DMA denial is a bus STALL, RIGOROUSLY established (2026-07-12).** An NS read of the DMA/AHB address
+`0x50000000` is denied but manifests as a bus stall (the AHB transaction gets no response, the core
+hangs) — NOT the clean SecureFault the `0x20/0x40` APB addresses raise. This was nailed down
+methodically after an earlier UN-rigorous "untrappable stall" claim was rightly rejected:
+- Proved the image launches first (probe off → SG-path 42 s) so a hang can't be a broken build.
+- Controlled the observation path: a KNOWN SecureFault (NS→Secure SRAM) in the SAME build reboots at
+  13 s via the proven Secure handler — so the handler works; a DMA timeout in that build is real.
+- Controlled fault ROUTING: set `AIRCR.BFHFNMINS=0` so a Non-secure BusFault targets Secure. DMA
+  still hung. Also brought the DMA out of reset (ruling out an AHB-slave-in-reset stall). Still hung.
+Mechanism: the APB peripherals (SPI0/OTP) are core-SAU-checked into a precise SecureFault; the
+AHB/DMA address is not core-security-checked (IDAU delegates it to ACCESSCTRL), so the NS access
+reaches the bus and the secure-AHB denial stalls rather than bus-errors — a documented RP2350
+behavior for NS access to a secure AHB peripheral. The security property is UNCHANGED: NS gets no
+data, and NS cannot program a DMA (Secure-only + bootrom LOCK.dma). Cleaner *observability* (a fault
+instead of a hang) is a robustness item (e.g. a Secure watchdog), NOT a security gap. `BFHFNMINS=0`
+is kept because it correctly routes NS bus errors that DO fault to the Secure handler.
 
 ## Silicon results so far
 

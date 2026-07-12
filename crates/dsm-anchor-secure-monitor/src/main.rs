@@ -356,6 +356,20 @@ fn main() -> ! {
             }
         }
     }
+    // Route Non-secure-originated BusFault/HardFault/NMI to SECURE (AIRCR.BFHFNMINS = 0), so a
+    // Non-secure access the bus/ACCESSCTRL denies with a bus error traps to the Secure fault handler
+    // rather than a Non-secure fault the app might mishandle. VECTKEY 0x05FA in the top half; the
+    // low bits (incl. PRIS) are preserved. (This does NOT change the NS->DMA case: an NS access to
+    // the secure AHB/DMA peripheral stalls with no bus response rather than raising a bus error — a
+    // documented RP2350 behavior — so there is no fault to route; NS is still denied, no data. It
+    // DOES matter for the general case where a denied NS access does bus-error.)
+    unsafe {
+        let aircr = core::ptr::read_volatile(0xE000_ED0C as *const u32);
+        let new = (0x05FA << 16) | (aircr & 0x0000_FFFF & !(1 << 13));
+        core::ptr::write_volatile(0xE000_ED0C as *mut u32, new);
+        cortex_m::asm::dsb();
+    }
+
     // The ACCESSCTRL config lock is already applied by the immutable RP2350 bootrom, which sets
     // LOCK.dma at boot (verified on silicon 2026-07-12: LOCK reads 0b0100). The DMA master therefore
     // cannot reconfigure ACCESSCTRL, and the SAU already blocks Non-secure code from the ACCESSCTRL
@@ -403,6 +417,8 @@ fn reboot_bootsel() -> ! {
 ///
 #[cortex_m_rt::exception]
 unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
+    // Proven-simple handler (rebooted reliably on the SRAM SecureFault at ~12 s). ANY fault reaching
+    // Secure -> ~12 s reboot. With BFHFNMINS=0, an NS->DMA BusFault should now land here.
     cortex_m::asm::delay(FAULT_REBOOT_DELAY_CYCLES);
     reboot_bootsel()
 }
