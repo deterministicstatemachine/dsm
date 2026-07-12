@@ -6,9 +6,11 @@
 # execute from boot-ROM-verified SRAM (0x20000000..0x20081fff) — external flash is mutable after
 # boot-time verification. This runs on the linked monitor ELF.
 #
-# STATUS for the current increment: the monitor links as a FLASH image (the SRAM-image linker that
-# relocates the TCB VMA into SRAM is the next linker step), so this gate is EXPECTED to report the
-# XIP residency until that lands. It is the executable policy that will pass only when compliant.
+# STATUS: PASSES. The custom SRAM-resident linker (dsm-secure-sram.x) places the whole Secure TCB
+# at an SRAM VMA (flash LMA), so no security-critical Secure symbol resolves into XIP. This gate is
+# the executable form of that policy — a regression that returns any TCB symbol to flash re-FAILs.
+# (Boot-time copy of the flash image into SRAM is the bootrom LOAD_MAP's job; that block item and
+# its on-silicon copy are the remaining step — the ELF symbol residency this checks is independent.)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ELF="${1:-$HERE/../target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor}"

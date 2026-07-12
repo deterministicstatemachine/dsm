@@ -10,7 +10,10 @@ target = "thumbv8m.main-none-eabihf"
 [target.thumbv8m.main-none-eabihf]
 rustflags = [
   "-C", "link-arg=--nmagic",
-  "-C", "link-arg=-Tlink.x",
+  # Custom SRAM-resident Secure linker (replaces cortex-m-rt's link.x, which forces .text into
+  # FLASH). Places the whole Secure TCB at an SRAM VMA with a FLASH LMA so the bootrom copies the
+  # verified image into SRAM before entry — flash is mutable after boot-time verification.
+  "-C", "link-arg=-Tdsm-secure-sram.x",
   "-C", "target-cpu=cortex-m33",
 ]
 
