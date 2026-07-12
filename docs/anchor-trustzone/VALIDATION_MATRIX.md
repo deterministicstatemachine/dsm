@@ -111,16 +111,24 @@ controller is Secure-only), which closes the NS→DMA→Secure-SRAM exfil path a
 app with proper fault vectors would trap the bus error rather than hang. Recovering the board needs a
 physical BOOTSEL.
 
-**Config lock — BLOCKED on silicon (2026-07-12): the ACCESSCTRL LOCK write faults.** `boundary::
-lock_accessctrl` writes ACCESSCTRL LOCK.{core1,debug}. On silicon this WRITE faults (bus error →
-Secure fault), isolated cleanly: a read-only version of the same access takes the normal SG-path (no
-fault, 42–43 s), and the write version reboots at the ~11 s fault time. Ruled OUT: privilege — a
-`CONTROL.nPRIV` probe confirmed the SRAM-launched monitor is Secure **and Privileged** (SG-path, 43 s),
-so it is not the datasheet's unprivileged-write bus error. Root cause not yet identified. Consequence:
-the "lock and rerun" is NOT achieved, and an earlier reading of a locked-build "DENIED at 13 s" as a
-persisting Secure-SRAM denial was WRONG — that was the lock write faulting, not the probe. `LOCK_BOUNDARY`
-is OFF by default; the proven, working, reversible boundary (SAU denials + NS launch + live SG round
-trip, SG-path 43 s) is the committed default. Resolving the lock-write fault is an open follow-up.
+**Config lock — RESOLVED (2026-07-12): the RP2350 bootrom already locks it; a Secure re-write is
+redundant and bus-faults.** Root-caused end to end on silicon:
+- The ACCESSCTRL `LOCK` write raises a PRECISE BusFault at `0x40060000` — plain store AND atomic-SET
+  alias — even writing 0. (Two earlier readings — a locked-build "DENIED at 13 s" and "atomic alias
+  works at 41 s" — were MISREADS: the diagnostic handler's ~45 s bucket blurred with the ~42 s SG
+  path under a `>30 s = success` classifier. Re-derived with a clean 12 s-vs-42 s binary + a control.)
+- NOT privilege: a `CONTROL.nPRIV` probe (12 s-vs-42 s) confirmed the monitor is Secure **and
+  Privileged**; a plain write to a DIFFERENT ACCESSCTRL register (GPIO_NSMASK0 `0x4006000c`) SUCCEEDS
+  (42 s) — so it is LOCK-register-specific, not a systemic access problem.
+- Cause: reading `LOCK` in-monitor shows it is **NON-ZERO at boot** — `0b0100`, i.e. the **bootrom
+  sets `LOCK.dma`**. The DMA master is already frozen out of ACCESSCTRL by the immutable bootrom;
+  re-writing an already-locked ACCESSCTRL bus-faults.
+
+Net: the boundary cannot be re-opened by either real threat — NS can't reach the ACCESSCTRL space
+(SAU), and the DMA master can't reconfigure it (bootrom `LOCK.dma`; NS also can't drive a DMA). So the
+config lock is in place, applied by the bootrom (stronger than a Secure-code lock). The monitor does
+NOT write `LOCK` (redundant + faults). No `LOCK_BOUNDARY` toggle; the committed default is the proven
+boundary (SAU denials + NS launch + live SG, SG-path 42 s).
 
 ## Host-automatable now (no board)
 

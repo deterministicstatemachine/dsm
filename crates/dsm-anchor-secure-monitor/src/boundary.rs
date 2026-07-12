@@ -13,7 +13,6 @@
 
 use cortex_m::peripheral::sau::{SauError, SauRegion, SauRegionAttribute};
 use cortex_m::peripheral::SAU;
-use rp235x_hal as hal;
 
 /// TrustZone domain map (must match dsm-secure-sram.x / memory.x). SAU limit addresses are the
 /// INCLUSIVE last byte (low 5 bits = 1), per the cortex-m SAU API.
@@ -55,31 +54,22 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
     Ok(())
 }
 
-/// Lock the ACCESSCTRL configuration so the Secure resource attribution cannot be re-opened.
-///
-/// The peripherals that must never be Non-secure-reachable (OTP, SPI0/TROPIC, the DMA controller)
-/// default to "Secure access from any master", and the SAU already faults every Non-secure-core
-/// access to the whole non-NS-SRAM space (proven: NS reads of Secure SRAM / OTP / SPI0 all trap).
-/// The one path the SAU does NOT cover is a Non-secure-driven DMA — but that is closed at the
-/// source, because the DMA controller is itself Secure-only, so Non-secure code cannot program a
-/// DMA at all.
-///
-/// This freezes that state: LOCK bits make ACCESSCTRL silently ignore writes from core 1 and the
-/// debugger, so neither can re-open a Secure resource. A LOCK bit clears ONLY on a full ACCESSCTRL
-/// reset (power cycle) — reset-clearable, NOT an OTP burn. Core 0 (the Secure monitor, the TCB)
-/// intentionally keeps control so it can still manage the boundary as later increments assign the
-/// Non-secure app its own peripherals (config-then-lock). (The DMA LOCK bit is not host-writable in
-/// this PAC; the DMA-master path stays closed by the DMA controller being Secure-only.)
-///
-/// SILICON FINDING (2026-07-12, chip 0x430ed6d919933c8e): this LOCK **write** FAULTS (bus error ->
-/// Secure fault) even though a read of the same register succeeds, and the monitor is confirmed
-/// Secure + Privileged (so it is NOT the datasheet's unprivileged-write bus error). Root cause not
-/// yet identified. The caller keeps this OFF (`LOCK_BOUNDARY = false`) until it is understood; the
-/// boundary is proven and denies without it (SAU faults every NS access to Secure SRAM/OTP/TROPIC).
-pub fn lock_accessctrl(ac: &hal::pac::ACCESSCTRL) {
-    ac.lock().write(|w| w.core1().set_bit().debug().set_bit());
-}
-
+// ACCESSCTRL config lock — done by the bootrom, not by the monitor.
+//
+// The Secure resource attribution must not be re-openable. That holds without the monitor writing
+// ACCESSCTRL.LOCK:
+//   - Non-secure code cannot reach the ACCESSCTRL register space: the SAU marks the whole non-NS-SRAM
+//     space Secure, so an NS access traps (proven: NS reads of Secure SRAM / OTP / SPI0 all fault).
+//   - The DMA master cannot reconfigure ACCESSCTRL: the immutable RP2350 bootrom sets LOCK.dma at
+//     boot (SILICON 2026-07-12, chip 0x430ed6d919933c8e: LOCK reads 0b0100), and ACCESSCTRL silently
+//     ignores writes from a locked-out master. NS also cannot DRIVE a DMA (the DMA controller is
+//     Secure-only), so there is no NS->DMA path in the first place.
+//
+// A Secure re-write of LOCK is therefore redundant AND bus-faults on silicon (ACCESSCTRL is already
+// in a locked state; a plain store and the atomic-SET alias both raise a precise BusFault at
+// 0x40060000, while other ACCESSCTRL registers e.g. GPIO_NSMASK0 accept Secure-Privileged writes).
+// So the monitor does not write LOCK; the bootrom's LOCK.dma is the freeze, immutable and stronger
+// than a Secure-code lock.
 /// Core-1 containment. RP2350 core 1 does not execute until core 0 launches it via the SIO FIFO
 /// vector handshake; the monitor never performs that handshake, so core 1 stays powered-down with
 /// no bus master activity. v1 is deliberately single-core (no reviewed Secure multicore design), so

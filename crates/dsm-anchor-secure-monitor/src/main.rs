@@ -356,12 +356,12 @@ fn main() -> ! {
             }
         }
     }
-    // Freeze the access-control config (reset-clearable, NOT OTP) once the boundary is proven. The
-    // denial tests run first with this off (reversible), then on (locked), and must deny in both.
-    if LOCK_BOUNDARY {
-        let pac = unsafe { hal::pac::Peripherals::steal() };
-        boundary::lock_accessctrl(&pac.ACCESSCTRL);
-    }
+    // The ACCESSCTRL config lock is already applied by the immutable RP2350 bootrom, which sets
+    // LOCK.dma at boot (verified on silicon 2026-07-12: LOCK reads 0b0100). The DMA master therefore
+    // cannot reconfigure ACCESSCTRL, and the SAU already blocks Non-secure code from the ACCESSCTRL
+    // register space — so the security boundary cannot be re-opened by either threat. A Secure re-write
+    // of LOCK bus-faults (ACCESSCTRL is already locked) and is redundant, so the monitor does not
+    // attempt it. See boundary.rs.
 
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
     // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and
@@ -387,13 +387,6 @@ const BRINGUP_NS_LAUNCH_PROOF: bool = true;
 const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
 const SG_REBOOT_DELAY_CYCLES: u32 = 320_000_000; // ~50 s
 
-/// Step-5 config lock toggle. OFF by default: the ACCESSCTRL LOCK write currently FAULTS on silicon
-/// (2026-07-12; see `boundary::lock_accessctrl` — read succeeds, write faults, monitor confirmed
-/// Secure+Privileged so it is NOT a privilege issue). The working default is therefore the proven
-/// reversible boundary (SAU denials + NS launch + SG round trip). Flip ON only once that fault is
-/// understood and fixed.
-const LOCK_BOUNDARY: bool = false;
-
 fn reboot_bootsel() -> ! {
     hal::reboot::reboot(
         hal::reboot::RebootKind::BootSel {
@@ -407,6 +400,7 @@ fn reboot_bootsel() -> ! {
 /// Secure fault handler = the denial-test observable. An NS access the boundary forbids (SAU-Secure
 /// SRAM, or an ACCESSCTRL-Secure peripheral that escalates here) traps to Secure; this reboots after
 /// the DENIED delay. Reaching it proves the access faulted rather than returning secret data.
+///
 #[cortex_m_rt::exception]
 unsafe fn HardFault(_ef: &cortex_m_rt::ExceptionFrame) -> ! {
     cortex_m::asm::delay(FAULT_REBOOT_DELAY_CYCLES);
