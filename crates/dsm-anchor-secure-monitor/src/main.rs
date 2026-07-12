@@ -329,6 +329,14 @@ fn main() -> ! {
     // init SAU/MPU/DMA-MPU/NVIC-target-state/ACCESSCTRL (step 5); load+measure the NS app into NS
     // SRAM, RX-lock it (step 7); launch it Non-secure. Until then, halt — the monitor never returns
     // to Non-secure without the boundary configured.
+    //
+    // BRINGUP DIAGNOSTIC (remove with the step-5 NS launch): after ~10 beats, self-reboot into
+    // BOOTSEL. The RP2350 bootrom clears main SRAM on BOOTSEL entry (proven by marker test on the
+    // bringup board), so post-hoc SRAM readback is NOT a valid evidence channel. This is: the
+    // monitor's code exists only at its SRAM VMA — if the LOAD_MAP copy had not run, the entry
+    // point is garbage and the chip locks up (the fault handlers are SRAM-resident too, so no
+    // false BOOTSEL). The device re-enumerating in BOOTSEL on its own therefore proves the boot
+    // path executed from Secure SRAM.
     let mut beat: u32 = 0;
     loop {
         beat = beat.wrapping_add(1);
@@ -336,6 +344,16 @@ fn main() -> ! {
             let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
             core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), beat);
         }
-        cortex_m::asm::wfi();
+        // ~0.5-2 s per beat on the post-ROM ROSC clock (clocks deliberately not configured yet).
+        cortex_m::asm::delay(20_000_000);
+        if beat >= 10 {
+            hal::reboot::reboot(
+                hal::reboot::RebootKind::BootSel {
+                    picoboot_disabled: false,
+                    msd_disabled: false,
+                },
+                hal::reboot::RebootArch::Normal,
+            );
+        }
     }
 }

@@ -10,6 +10,7 @@ provisioned RP2350 board.
 
 | # | Test | Expected | Where | Status |
 |---|---|---|---|---|
+| 0 | bootrom executes the boot-block LOAD_MAP (flash→SRAM copy, MSP/MSPLIM, SRAM entry) | monitor runs from Secure SRAM | silicon | **PASS 2026-07-12** (unlocked board, unsigned image) |
 | 1 | Correct monitor + exact app | boot succeeds; committed `HostSign` succeeds | silicon | pending |
 | 2 | One app byte changed | `measurement_ok=false`; `HostSign` unavailable | silicon (host: measure fn) | pending |
 | 3 | Different app signed by the same signing infra | measurement still fails | silicon | pending |
@@ -30,6 +31,23 @@ provisioned RP2350 board.
 | 18 | device with different OTP secret | cannot reproduce the same host key | silicon (host: HKDF determinism) | pending |
 | 19 | bench build | cannot create a production-compatible enrollment bundle | host (domain-tag separation) | pending |
 | 20 | any fallback exposing HostSign when measurement fails | none exists | host (code audit) + silicon | pending |
+
+## Silicon results so far
+
+**Row 0 — 2026-07-12, chip `0x430ed6d919933c8e` (unlocked: secure boot 0, debug 1), unsigned image.**
+Method: the monitor's bringup diagnostic self-reboots into BOOTSEL after ~10 beats; its code exists
+only at the SRAM VMA, so self-entry into BOOTSEL after 28 s (vs <2 s for ROM rejection; lockup for a
+failed copy — the fault handlers are SRAM-resident too) proves the ROM accepted the hand-encoded
+PICOBIN block, performed the LOAD_MAP copy, and entered at the SRAM entry point with a working
+MSPLIM. See `crates/dsm-anchor-secure-monitor/scripts/bringup-loadmap-boot-test.sh`.
+
+Discovered en route (binding for all future rows): **the RP2350 bootrom clears main SRAM on BOOTSEL
+entry** — a marker written in BOOTSEL vanished across a BOOTSEL→BOOTSEL reboot with no app run in
+between. Post-hoc SRAM readback is an invalid evidence channel; use self-reboot, GPIO, or SWD.
+
+Row 0 does NOT yet prove: the VECTOR_TABLE item's VTOR took effect (no exception fired), the NSC
+veneer copy executed correctly (nothing calls it until the step-5 NS launch), the hashed/sealed
+image path, or any secure-boot behavior. Those remain with their own rows.
 
 ## Host-automatable now (no board)
 
