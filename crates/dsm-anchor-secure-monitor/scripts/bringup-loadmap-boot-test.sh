@@ -45,20 +45,30 @@ picotool uf2 convert "$ELF" -t elf "$OUT/loadmap-test.uf2"
 picotool info -a "$OUT/loadmap-test.uf2" | grep -E "load map|vector table|entry point" | head -5
 picotool load -v -x "$OUT/loadmap-test.uf2"
 
-echo "== polling for self-entry into BOOTSEL (pass window 4..180 s) =="
+echo "== timing the self-reboot (the Secure handler delays ~13 s before rebooting) =="
+# Outcome map for the NS-launch build:
+#   in BOOTSEL at 6 s        -> TOO FAST: ROM rejected the block or an early fault (FAIL)
+#   BOOTSEL appears ~8..60 s -> PASS: the Secure handler ran (NS launched + crossed the SG)
+#   never                    -> TIMEOUT: NS launch / SG failed, handler never reached (FAIL)
 START=$(date +%s)
-sleep 4     # exclude the <2 s ROM-rejection window
-for _ in $(seq 1 88); do
+sleep 6
+if picotool info -d >/dev/null 2>&1; then
+    echo "FAIL (too fast, $(( $(date +%s) - START )) s): in BOOTSEL before the ~13 s handler delay —"
+    echo "     the ROM rejected the block or the monitor faulted before the NS launch. Check"
+    echo "     'picotool info -a' block decode and the linker map."
+    exit 1
+fi
+for _ in $(seq 1 30); do
     if picotool info -d >/dev/null 2>&1; then
         NOW=$(date +%s)
-        echo "PASS: device re-entered BOOTSEL BY ITSELF after $((NOW - START)) s —"
-        echo "      the bootrom performed the LOAD_MAP copy and entered the SRAM monitor."
+        echo "PASS: self-reboot at $((NOW - START)) s (matches the ~13 s handler delay) —"
+        echo "      the Non-secure app launched, crossed the NSC sg veneer into Secure, and the"
+        echo "      Secure handler read the NS mailbox (state/seq/opcode) and rebooted."
         picotool info -d 2>&1 | grep -E "chipid|secure boot|debug"
         exit 0
     fi
     sleep 2
 done
-echo "FAIL: no self-reboot within 180 s — the monitor never reached the reboot call."
-echo "      (Chip likely locked up: copy or SRAM entry did not happen. Re-check the block"
-echo "      encoding with 'picotool info -a' and the linker map.)"
+echo "FAIL (timeout): no reboot within ~66 s. NS launch or the SG transition did not complete"
+echo "     (bad BXNS / SAU attribution / veneer), so the handler was never reached."
 exit 1

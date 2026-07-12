@@ -85,9 +85,9 @@ SECTIONS
     /* IMAGE_TYPE (1BS 0x42): EXE(0x0001)|RP2350(0x1000)|ARM(0x0000)|SECURITY_S(0x0020)=0x1021 */
     LONG((0x1021 << 16) | (1 << 8) | 0x42);
 
-    /* LOAD_MAP (2BS 0x06): 3 entries, size = 1 + 3*3 = 10 words. */
+    /* LOAD_MAP (2BS 0x06): 4 entries, size = 1 + 3*4 = 13 words. */
     __dsm_load_map = .;
-    LONG((3 << 24) | (10 << 8) | 0x06);
+    LONG((4 << 24) | (13 << 8) | 0x06);
     /* entry 1 — contiguous low Secure image (vectors+.text+.rodata+.data) FLASH -> SRAM 0x20000000 */
     LONG(LOADADDR(.vector_table) - __dsm_load_map);
     LONG(ADDR(.vector_table));
@@ -96,7 +96,11 @@ SECTIONS
     LONG(LOADADDR(.gnu.sgstubs) - __dsm_load_map);
     LONG(ADDR(.gnu.sgstubs));
     LONG(SIZEOF(.gnu.sgstubs));
-    /* entry 3 — zero-fill Secure .bss (source 0 = clear); immutable bootrom clears it, not crt0 */
+    /* entry 3 — Non-secure app image (bring-up stub) FLASH -> NS SRAM 0x20041000 */
+    LONG(LOADADDR(.ns_app) - __dsm_load_map);
+    LONG(ADDR(.ns_app));
+    LONG(SIZEOF(.ns_app));
+    /* entry 4 — zero-fill Secure .bss (source 0 = clear); immutable bootrom clears it, not crt0 */
     LONG(0);
     LONG(__sbss);
     LONG(__ebss - __sbss);
@@ -112,8 +116,8 @@ SECTIONS
     LONG(_stack_start);
     LONG(__secure_stack_limit);
 
-    /* LAST item (2BS 0xff): size field = total item words above = 1+10+2+4 = 17. */
-    LONG((17 << 8) | 0xff);
+    /* LAST item (2BS 0xff): size field = total item words above = 1+13+2+4 = 20. */
+    LONG((20 << 8) | 0xff);
     LONG(0);                                           /* block-loop offset: 0 = single-block self-loop */
     LONG(0xab123579);                                  /* BLOCK_MARKER_END */
 
@@ -184,6 +188,17 @@ SECTIONS
   } > NSC AT> FLASH
   . = ALIGN(32);
   __veneer_limit = .;
+
+  /* ### .ns_app — the Non-secure bring-up stub, VMA at the NS SRAM base (0x20041000), FLASH LMA.
+   * A LOAD_MAP entry copies it to NS SRAM; the monitor launches it Non-secure after SAU. Replaced
+   * by the real dsm-anchor-nonsecure-app image once cross-crate NS packaging lands. */
+  .ns_app ORIGIN(NS) : ALIGN(8)
+  {
+    __ns_app_start = .;
+    KEEP(*(.ns_app .ns_app.*))
+    . = ALIGN(4);
+    __ns_app_end = .;
+  } > NS AT> FLASH
 
   /* ### .bss */
   .bss (NOLOAD) : ALIGN(4)

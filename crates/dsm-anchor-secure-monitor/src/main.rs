@@ -166,6 +166,27 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
     // §4.3 read the bounded length ONCE; §4.4 copy the COMPLETE request into Secure SRAM.
     let opcode = unsafe { core::ptr::read_volatile(&mb.opcode) };
     let req_len = unsafe { core::ptr::read_volatile(&mb.req_len) } as usize;
+
+    // BRING-UP PROOF (step 5b / step 6, removed with the real NS response path): reaching here means
+    // the Non-secure app launched, published a STATUS request into the NS mailbox, and crossed the
+    // NSC `sg` veneer into this Secure handler — which read the NS data plane (state/seq/opcode). A
+    // self-reboot into BOOTSEL is the observable signal (post-boot SRAM readback is cleared on
+    // BOOTSEL entry on this silicon, so it cannot be the channel).
+    if BRINGUP_NS_LAUNCH_PROOF && opcode == OP_STATUS {
+        // Distinctive ~13 s delay BEFORE the reboot so a pass lands at a time nothing else produces:
+        // ROM rejection of the block re-enters BOOTSEL in <2 s; a failed NS launch / SG (bad BXNS,
+        // fault) never reboots at all (timeout). A reboot at ~13 s therefore isolates "the handler
+        // ran" = NS launched + crossed the SG + Secure read the NS mailbox. (~7M cycles/s on the
+        // post-ROM clock.)
+        cortex_m::asm::delay(90_000_000);
+        hal::reboot::reboot(
+            hal::reboot::RebootKind::BootSel {
+                picoboot_disabled: false,
+                msd_disabled: false,
+            },
+            hal::reboot::RebootArch::Normal,
+        );
+    }
     if req_len > SG_SLOT_MAX_LEN {
         return finish(mb, seq, SG_ERR_SIZE);
     }
@@ -342,35 +363,50 @@ fn main() -> ! {
         }
     }
 
-    // Next increments: init the heap; assert the secure context (secure boot + debug-disable);
-    // init SAU/MPU/DMA-MPU/NVIC-target-state/ACCESSCTRL (step 5); load+measure the NS app into NS
-    // SRAM, RX-lock it (step 7); launch it Non-secure. Until then, halt — the monitor never returns
-    // to Non-secure without the boundary configured.
-    //
-    // BRINGUP DIAGNOSTIC (remove with the step-5 NS launch): after ~10 beats, self-reboot into
-    // BOOTSEL. The RP2350 bootrom clears main SRAM on BOOTSEL entry (proven by marker test on the
-    // bringup board), so post-hoc SRAM readback is NOT a valid evidence channel. This is: the
-    // monitor's code exists only at its SRAM VMA — if the LOAD_MAP copy had not run, the entry
-    // point is garbage and the chip locks up (the fault handlers are SRAM-resident too, so no
-    // false BOOTSEL). The device re-enumerating in BOOTSEL on its own therefore proves the boot
-    // path executed from Secure SRAM.
-    let mut beat: u32 = 0;
+    // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
+    // and SAU marks that region Non-secure; this sets MSP_NS + VTOR_NS from the NS vector table and
+    // BXNS into the NS reset vector. Control leaves Secure and only re-enters through the `sg`
+    // veneer. (Step 7 replaces the bring-up stub with the measured real NS app; step 5 still owes
+    // ACCESSCTRL/DMA/NVIC/lock.) If the launch ever returns, halt fail-closed.
+    unsafe {
+        launch_nonsecure(core::ptr::addr_of!(__ns_app_vector_table) as u32);
+    }
+}
+
+/// Bring-up proof flag (step 5b/6): when set, the Secure handler self-reboots into BOOTSEL on a
+/// STATUS call so the NS→S round trip is observable on silicon. Cleared with the real response path.
+const BRINGUP_NS_LAUNCH_PROOF: bool = true;
+
+extern "C" {
+    /// The Non-secure app's 2-word vector table (`[initial NS MSP, NS reset]`), at the NS SRAM base
+    /// (dsm-secure-sram.x `.ns_app`). Copied there by LOAD_MAP entry 3.
+    static __ns_app_vector_table: u32;
+}
+
+/// Transfer control to Non-secure. Sets the banked NS main stack pointer and NS vector table, then
+/// `BXNS` into the NS reset vector (bit 0 cleared selects the Non-secure state). Never returns:
+/// Secure code runs again only when Non-secure calls the NSC `sg` veneer.
+///
+/// # Safety
+/// `ns_vector_table` must point at a valid, SAU-Non-secure, 2-word NS vector table whose word 0 is a
+/// valid NS stack top and word 1 a valid NS reset vector; SAU must already attribute the NS region.
+unsafe fn launch_nonsecure(ns_vector_table: u32) -> ! {
+    core::arch::asm!(
+        "ldr   {sp}, [{tbl}]",        // NS initial MSP = ns_table[0]
+        "msr   MSP_NS, {sp}",
+        "ldr   {ent}, [{tbl}, #4]",   // NS reset vector = ns_table[1] (thumb, bit0=1)
+        "movw  {vt}, #0xED08",        // SCB_NS->VTOR = 0xE002ED08
+        "movt  {vt}, #0xE002",
+        "str   {tbl}, [{vt}]",        // VTOR_NS = ns_table
+        "bic   {ent}, {ent}, #1",     // clear bit0 so BXNS targets the Non-secure state
+        "bxns  {ent}",
+        tbl = in(reg) ns_vector_table,
+        sp = out(reg) _,
+        ent = out(reg) _,
+        vt = out(reg) _,
+    );
+    // BXNS does not return to Secure except via the `sg` veneer; this is unreachable.
     loop {
-        beat = beat.wrapping_add(1);
-        unsafe {
-            let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
-            core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), beat);
-        }
-        // ~0.5-2 s per beat on the post-ROM ROSC clock (clocks deliberately not configured yet).
-        cortex_m::asm::delay(20_000_000);
-        if beat >= 10 {
-            hal::reboot::reboot(
-                hal::reboot::RebootKind::BootSel {
-                    picoboot_disabled: false,
-                    msd_disabled: false,
-                },
-                hal::reboot::RebootArch::Normal,
-            );
-        }
+        cortex_m::asm::udf();
     }
 }

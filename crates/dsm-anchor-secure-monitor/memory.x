@@ -19,6 +19,7 @@ MEMORY {
     FLASH  : ORIGIN = 0x10000000, LENGTH = 4096K   /* storage / LMA only */
     SECURE : ORIGIN = 0x20000000, LENGTH = 256K    /* Secure TCB runtime VMA */
     NSC    : ORIGIN = 0x20040000, LENGTH = 4K      /* Non-Secure-Callable veneer VMA */
+    NS     : ORIGIN = 0x20041000, LENGTH = 252K    /* Non-secure app runtime VMA */
 }
 
 /* Fixed domain boundaries (shared with the app linker + the signed manifest). */

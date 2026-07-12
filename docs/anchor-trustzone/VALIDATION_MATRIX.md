@@ -56,6 +56,16 @@ proving `sau.enable()` from Secure SRAM does NOT fault the running Secure world 
 mis-marked NS). Does NOT yet prove NS/DMA denial (rows 4/5/6) — that needs the Non-secure launch to
 attempt the accesses. `src/boundary.rs::configure_sau`; core 1 remains unlaunched (contained).
 
+**Row 0b (Non-secure launch + live SG round trip = step 5b + step 6) — 2026-07-12, same chip.**
+After SAU, the monitor sets `MSP_NS` + `VTOR_NS` from the NS vector table and `BXNS` into the NS
+reset vector. A bring-up NS stub (LOAD_MAP entry 3 → NS SRAM 0x20041000) runs Non-secure, publishes
+a STATUS request into the fixed mailbox, and calls the NSC `sg` veneer; the Secure handler validates
+slot/state/seq, reads `opcode` from the NS mailbox, and (bring-up flag) reboots after a distinctive
+~13 s delay. Observed self-reboot at 14 s — a time neither ROM rejection (<2 s) nor an NS/SG failure
+(never reboots) can produce. Proves: NS launch, the NS→S `sg` transition through the single NSC
+veneer, and Secure reading the NS data plane, all on silicon. Does NOT prove the handler's authority
+logic (it reboots before it), the response path back to NS, or NS/DMA *denial* of Secure resources.
+
 ## Host-automatable now (no board)
 
 These become unit/integration tests in the monitor crate as the split lands:
