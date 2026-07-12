@@ -1,0 +1,21 @@
+10002f40 <dsm_secure_dispatch>:
+10002f40:	e97f e97f 	sg
+10002f44:	b510      	push	{r4, lr}
+10002f46:	f7fd fb7d 	bl	10000644 <dsm_secure_handler>
+10002f4a:	e8bd 4010 	ldmia.w	sp!, {r4, lr}
+10002f4e:	2100      	movs	r1, #0
+10002f50:	2200      	movs	r2, #0
+10002f52:	2300      	movs	r3, #0
+10002f54:	f04f 0c00 	mov.w	ip, #0
+10002f58:	ee00 1a10 	vmov	s0, r1
+10002f5c:	ee00 1a90 	vmov	s1, r1
+10002f60:	ee01 1a10 	vmov	s2, r1
+10002f64:	ee01 1a90 	vmov	s3, r1
+10002f68:	ee02 1a10 	vmov	s4, r1
+10002f6c:	ee02 1a90 	vmov	s5, r1
+10002f70:	ee03 1a10 	vmov	s6, r1
+10002f74:	ee03 1a90 	vmov	s7, r1
+10002f78:	ee04 1a10 	vmov	s8, r1
+10002f7c:	ee04 1a90 	vmov	s9, r1
+10002f80:	ee05 1a10 	vmov	s10, r1
+10002f84:	ee05 1a90 	vmov	s11, r1

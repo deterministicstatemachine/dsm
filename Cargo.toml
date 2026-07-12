@@ -26,6 +26,9 @@ exclude = [
     "crates/dsm-android-anchor",
     # Host used-chip bench harness (native serialport dep); built directly, not in CI.
     "crates/dsm-anchor-bench",
+    # RP2350 TrustZone measurement-seal images (thumbv8m-only; two-image build).
+    "crates/dsm-anchor-secure-monitor",
+    "crates/dsm-anchor-nonsecure-app",
 ]
 
 [workspace.package]
