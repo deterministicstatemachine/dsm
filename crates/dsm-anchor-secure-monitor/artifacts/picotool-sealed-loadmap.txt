@@ -1,6 +1,7 @@
+# picotool seal --hash preservation check (load map + entry point survive signing)
 Metadata Block 1
  address:             0x10000000
- next block address:  0x10000000
+ next block address:  0x100033a0
  block type:          image def
  target chip:         RP2350
  image type:          ARM Secure

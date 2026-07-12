@@ -35,8 +35,10 @@ use subtle::ConstantTimeEq;
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
 // LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
 // relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20040000, zero-fill
-// Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom copies the
-// verified flash image into SRAM and enters there.
+// Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom is
+// instructed to copy the flash payload into SRAM and enter there. (Cryptographic verification of
+// that payload happens only once secure boot is enabled + validated; the LOAD_MAP itself just
+// describes the copy.)
 
 // ── Secure Gateway ABI (mirror of veneer/dsm_sg_abi.h) ────────────────────────────────────────
 const SG_SLOT_INDEX: u32 = 0;
@@ -293,14 +295,47 @@ impl SecureOps {
     }
 }
 
+extern "C" {
+    /// Floor of the reserved Secure stack (from dsm-secure-sram.x). MSPLIM is set here so a Secure
+    /// stack overflow FAULTs instead of corrupting the monitor's own code/state below the stack.
+    static __secure_stack_limit: u32;
+}
+
+/// Secure reset heartbeat, at a fixed symbol in Secure SRAM (resolve via `nm`). The unlocked-board
+/// bringup reads it to confirm the Secure reset path executed from SRAM (word 0 == the sentinel and
+/// word 1 incrementing means the bootrom copied the image and entered the SRAM monitor). Not an
+/// authority signal — purely a boot-liveness probe removed once the NS launch (step 5) lands.
+#[no_mangle]
+pub static mut DSM_SECURE_HEARTBEAT: [u32; 2] = [0; 2];
+const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
+
 // ── Reset entry (placeholder until step 5 SAU init + step 7 measured loader) ──────────────────
 #[hal::entry]
 fn main() -> ! {
+    // Arm the Secure stack guard FIRST (belt-and-suspenders with the ENTRY_POINT sp_limit word):
+    // set MSPLIM to the reserved stack floor before any deep call can overflow it.
+    unsafe {
+        let limit = core::ptr::addr_of!(__secure_stack_limit) as u32;
+        cortex_m::register::msplim::write(limit);
+    }
+
+    // Diagnostic heartbeat for the unlocked-board bringup (see DSM_SECURE_HEARTBEAT).
+    unsafe {
+        let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[0]), HEARTBEAT_SENTINEL);
+    }
+
     // Next increments: init the heap; assert the secure context (secure boot + debug-disable);
     // init SAU/MPU/DMA-MPU/NVIC-target-state/ACCESSCTRL (step 5); load+measure the NS app into NS
     // SRAM, RX-lock it (step 7); launch it Non-secure. Until then, halt — the monitor never returns
     // to Non-secure without the boundary configured.
+    let mut beat: u32 = 0;
     loop {
+        beat = beat.wrapping_add(1);
+        unsafe {
+            let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), beat);
+        }
         cortex_m::asm::wfi();
     }
 }

@@ -9,9 +9,11 @@
  *   SECURE  [0x20000000, 0x20040000)  256 KiB  monitor vectors+code+rodata+data+bss+heap+stack
  *   NSC     [0x20040000, 0x20041000)    4 KiB  Non-Secure-Callable (.gnu.sgstubs SG veneer)
  *   NS      [0x20041000, 0x20080000)  ~252 KiB Non-secure app (separate image): RX + RW + mailbox
- * FLASH is storage only: the signed image lives there and the immutable bootrom copies the
- * SRAM-VMA payload into the regions above (per the boot-block LOAD_MAP) before entry, because
- * external flash is mutable after the boot-time signature check.
+ * FLASH is storage only: the image lives there and the boot-block LOAD_MAP instructs the immutable
+ * bootrom to copy the SRAM-VMA payload into the regions above before entry, because external flash
+ * is mutable (a runtime rewrite/glitch must not reach executing Secure code). Cryptographic
+ * verification of that flash image is added when secure boot is enabled + validated — separate from
+ * the copy the LOAD_MAP describes.
  */
 MEMORY {
     FLASH  : ORIGIN = 0x10000000, LENGTH = 4096K   /* storage / LMA only */

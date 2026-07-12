@@ -4,12 +4,13 @@
  *
  * WHY a custom script: cortex-m-rt's link.x hard-ASSERTs that .text lives inside FLASH
  * (`_stext > ORIGIN(FLASH) && _stext < ORIGIN(FLASH)+LENGTH(FLASH)`). The Secure TCB must NOT
- * execute from external XIP flash — flash is mutable after the bootrom's boot-time signature check,
- * so a runtime flash rewrite/glitch could substitute Secure instructions. The whole TCB therefore
- * gets a runtime VMA in SRAM with a storage LMA in flash (`AT> FLASH`). The immutable bootrom
- * verifies the signed flash image and copies it to SRAM (via the boot-block LOAD_MAP that picotool
- * derives from these flash-LMA→SRAM-VMA LOAD segments) before entry. A crt0 self-copy is NOT
- * acceptable here (the copier would itself run from mutable flash) — the copy must be the bootrom's.
+ * execute from external XIP flash — flash is mutable, so a runtime flash rewrite/glitch could
+ * substitute Secure instructions. The whole TCB therefore gets a runtime VMA in SRAM with a storage
+ * LMA in flash (`AT> FLASH`). The boot-block LOAD_MAP instructs the immutable bootrom to copy the
+ * flash payload to SRAM before entry. A crt0 self-copy is NOT acceptable (the copier would itself
+ * run from mutable flash) — the copy must be the bootrom's. Cryptographic verification of the flash
+ * image is a SEPARATE property added when secure boot is enabled + validated; the LOAD_MAP only
+ * describes the copy.
  *
  * This script mirrors cortex-m-rt's link.x.in section-for-section, changing only the placement of
  * the executable/rodata/data/vectors from FLASH to the SECURE SRAM region, dropping the
@@ -58,8 +59,13 @@ SECTIONS
 {
   PROVIDE(_ram_start = ORIGIN(SECURE));
   PROVIDE(_ram_end = ORIGIN(SECURE) + LENGTH(SECURE));
-  /* Secure stack lives at the top of the Secure SRAM region (just below the NSC region). */
+  /* Secure stack lives at the top of the Secure SRAM region (just below the NSC region) and grows
+   * DOWN. __secure_stack_limit is its explicit floor: MSPLIM is set to it (ENTRY_POINT sp_limit
+   * word + belt-and-suspenders write at reset) so a Secure stack overflow FAULTS instead of
+   * silently corrupting the monitor's own code/state/heap below it. */
+  __secure_stack_size = 32K;
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
+  PROVIDE(__secure_stack_limit = ORIGIN(SECURE) + LENGTH(SECURE) - __secure_stack_size);
 
   /* ## Boot block in FLASH — the bootrom scans the first flash bytes for this block. It is the ONLY
    * thing that legitimately runs from the flash address; the payload it maps (below) is copied to
@@ -99,13 +105,15 @@ SECTIONS
     LONG((0 << 16) | (2 << 8) | 0x03);
     LONG(ADDR(.vector_table));
 
-    /* ENTRY_POINT (1BS 0x44, 3 words): PC (Reset, thumb bit) + initial SP. */
-    LONG((0 << 16) | (3 << 8) | 0x44);
+    /* ENTRY_POINT (1BS 0x44, 4 words): PC (Reset, thumb bit) + initial SP + SP limit (MSPLIM). The
+     * optional 4th word makes the bootrom arm the Secure stack guard before entry. */
+    LONG((0 << 16) | (4 << 8) | 0x44);
     LONG(Reset | 1);
     LONG(_stack_start);
+    LONG(__secure_stack_limit);
 
-    /* LAST item (2BS 0xff): size field = total item words above = 1+10+2+3 = 16. */
-    LONG((16 << 8) | 0xff);
+    /* LAST item (2BS 0xff): size field = total item words above = 1+10+2+4 = 17. */
+    LONG((17 << 8) | 0xff);
     LONG(0);                                           /* block-loop offset: 0 = single-block self-loop */
     LONG(0xab123579);                                  /* BLOCK_MARKER_END */
 
@@ -257,6 +265,8 @@ ASSERT(_stext >= ORIGIN(SECURE) && _stext < ORIGIN(SECURE) + LENGTH(SECURE),
 
 /* The measured/runtime image must fit under the NSC region so the stack + Secure data have room. */
 ASSERT(__euninit <= ORIGIN(NSC), "ERROR: Secure runtime image (text+rodata+data+bss+uninit) overruns into the NSC region");
+/* The reserved Secure stack must not overlap bss/uninit/heap below it (MSPLIM guards the other end). */
+ASSERT(__euninit <= __secure_stack_limit, "ERROR: Secure .bss/.uninit/heap collides with the reserved Secure stack region (raise SECURE size or lower __secure_stack_size)");
 ASSERT(__nsc_veneer_end <= ORIGIN(NSC) + LENGTH(NSC), "ERROR: SG veneer overruns the NSC region");
 
 ASSERT(SIZEOF(.got) == 0, "ERROR: .got detected — dynamic relocations are not supported");
