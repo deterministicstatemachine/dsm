@@ -70,6 +70,12 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
 /// intentionally keeps control so it can still manage the boundary as later increments assign the
 /// Non-secure app its own peripherals (config-then-lock). (The DMA LOCK bit is not host-writable in
 /// this PAC; the DMA-master path stays closed by the DMA controller being Secure-only.)
+///
+/// SILICON FINDING (2026-07-12, chip 0x430ed6d919933c8e): this LOCK **write** FAULTS (bus error ->
+/// Secure fault) even though a read of the same register succeeds, and the monitor is confirmed
+/// Secure + Privileged (so it is NOT the datasheet's unprivileged-write bus error). Root cause not
+/// yet identified. The caller keeps this OFF (`LOCK_BOUNDARY = false`) until it is understood; the
+/// boundary is proven and denies without it (SAU faults every NS access to Secure SRAM/OTP/TROPIC).
 pub fn lock_accessctrl(ac: &hal::pac::ACCESSCTRL) {
     ac.lock().write(|w| w.core1().set_bit().debug().set_bit());
 }

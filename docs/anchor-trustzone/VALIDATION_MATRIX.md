@@ -93,11 +93,16 @@ controller is Secure-only), which closes the NS→DMA→Secure-SRAM exfil path a
 app with proper fault vectors would trap the bus error rather than hang. Recovering the board needs a
 physical BOOTSEL.
 
-**Config lock (reversible→locked, rerun) — staged, code ready (`LOCK_BOUNDARY`), pending a board.**
-`boundary::lock_accessctrl` sets ACCESSCTRL LOCK.{core1,debug} (reset-clearable, NOT OTP; core 0/TCB
-keeps control; the DMA LOCK bit isn't host-writable in this PAC). The denial tests above ran while
-reversible; the rerun-after-lock (confirming they still deny and the boundary isn't broken by the
-lock) is the remaining silicon step.
+**Config lock — BLOCKED on silicon (2026-07-12): the ACCESSCTRL LOCK write faults.** `boundary::
+lock_accessctrl` writes ACCESSCTRL LOCK.{core1,debug}. On silicon this WRITE faults (bus error →
+Secure fault), isolated cleanly: a read-only version of the same access takes the normal SG-path (no
+fault, 42–43 s), and the write version reboots at the ~11 s fault time. Ruled OUT: privilege — a
+`CONTROL.nPRIV` probe confirmed the SRAM-launched monitor is Secure **and Privileged** (SG-path, 43 s),
+so it is not the datasheet's unprivileged-write bus error. Root cause not yet identified. Consequence:
+the "lock and rerun" is NOT achieved, and an earlier reading of a locked-build "DENIED at 13 s" as a
+persisting Secure-SRAM denial was WRONG — that was the lock write faulting, not the probe. `LOCK_BOUNDARY`
+is OFF by default; the proven, working, reversible boundary (SAU denials + NS launch + live SG round
+trip, SG-path 43 s) is the committed default. Resolving the lock-write fault is an open follow-up.
 
 ## Host-automatable now (no board)
 

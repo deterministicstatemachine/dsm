@@ -387,8 +387,11 @@ const BRINGUP_NS_LAUNCH_PROOF: bool = true;
 const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
 const SG_REBOOT_DELAY_CYCLES: u32 = 320_000_000; // ~50 s
 
-/// Step-5 config lock: freeze ACCESSCTRL against DMA/core1/debug (reset-clearable, NOT OTP). Run the
-/// denial tests with this OFF (reversible) then ON (locked) — both must deny.
+/// Step-5 config lock toggle. OFF by default: the ACCESSCTRL LOCK write currently FAULTS on silicon
+/// (2026-07-12; see `boundary::lock_accessctrl` — read succeeds, write faults, monitor confirmed
+/// Secure+Privileged so it is NOT a privilege issue). The working default is therefore the proven
+/// reversible boundary (SAU denials + NS launch + SG round trip). Flip ON only once that fault is
+/// understood and fixed.
 const LOCK_BOUNDARY: bool = false;
 
 fn reboot_bootsel() -> ! {
