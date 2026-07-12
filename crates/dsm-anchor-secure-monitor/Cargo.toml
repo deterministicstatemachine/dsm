@@ -28,6 +28,11 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 # Heap for the Secure working set (SPHINCS+ signing / release staging) — SEPARATE from the NS heap.
 embedded-alloc = "0.6"
+# σ^chip: TROPIC01 resident Ed25519 signing over the DSM root-advance message (Secure-only SPI0).
+tropic01 = { path = "../../../../libtropic-rs/tropic01" }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+embedded-hal = "1.0"
+embedded-hal-bus = "0.3"
 
 [build-dependencies]
 # Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.

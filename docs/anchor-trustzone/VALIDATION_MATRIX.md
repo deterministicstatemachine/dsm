@@ -12,6 +12,7 @@ provisioned RP2350 board.
 |---|---|---|---|---|
 | 0 | bootrom executes the boot-block LOAD_MAP (flash→SRAM copy, MSP/MSPLIM, SRAM entry) | monitor runs from Secure SRAM | silicon | **PASS 2026-07-12** (unlocked board, unsigned image) |
 | 1 | Correct monitor + exact app | boot succeeds; committed `HostSign` succeeds | silicon | pending |
+| 1a | σ^chip from the Secure monitor | TROPIC01 resident Ed25519 sig produced over SPI0 (Secure-only) | silicon | **PASS 2026-07-12** (monitor self-test: chip alive → PROD0 session → 64-byte σ^chip, reboot 28 s = code 0x1F, reproduced) |
 | 2 | One app byte changed | `measurement_ok=false`; `HostSign` unavailable | silicon (host: measure fn) | pending |
 | 2a | authority op on an UNPROVISIONED board (blank OTP `mu_enrolled`) | refused fail-closed (no signature / counter move) | silicon | **PASS 2026-07-12** (NS PREPARE → §2 gate refused, distinct 24 s vs 42 s STATUS) |
 | 3 | Different app signed by the same signing infra | measurement still fails | silicon | pending |

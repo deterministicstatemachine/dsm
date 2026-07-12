@@ -32,6 +32,12 @@ use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
 mod boundary;
+mod tropic;
+
+/// Bring-up: run the σ^chip TROPIC01 self-test from Secure instead of launching NS. Signals the
+/// result by reboot timing (clock is 150 MHz after `init_clocks_and_plls`, so delays are calibrated
+/// for that): ~26 s = chip+session+σ^chip signed; ~16 s = chip+session; ~8 s = chip only; ~4 s = no chip.
+const SIGMA_CHIP_SELFTEST: bool = false;
 
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
@@ -349,6 +355,21 @@ fn main() -> ! {
     unsafe {
         let limit = core::ptr::addr_of!(__secure_stack_limit) as u32;
         cortex_m::register::msplim::write(limit);
+    }
+
+    // σ^chip bring-up: drive the TROPIC01 from Secure and signal the result by reboot timing.
+    if SIGMA_CHIP_SELFTEST {
+        let r = tropic::sigma_chip_selftest();
+        let d: u32 = match r {
+            0x1F => 3_900_000_000, // σ^chip signed          (~26 s @150 MHz)
+            0x0F => 3_000_000_000, // session ok, sign failed (~20 s)
+            0x07 => 2_400_000_000, // chip alive, no session  (~16 s)
+            0x03 => 1_800_000_000, // SPI up, chip id failed  (~12 s)
+            0x01 => 1_200_000_000, // clocks ok, SPI failed   (~8 s)
+            _ => 600_000_000,      // clock init failed       (~4 s)
+        };
+        cortex_m::asm::delay(d);
+        reboot_bootsel();
     }
 
     // Diagnostic heartbeat for the unlocked-board bringup (see DSM_SECURE_HEARTBEAT).
