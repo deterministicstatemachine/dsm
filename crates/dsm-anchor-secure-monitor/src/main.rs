@@ -31,6 +31,8 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
+mod boundary;
+
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
 // LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
@@ -323,6 +325,21 @@ fn main() -> ! {
     unsafe {
         let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[0]), HEARTBEAT_SENTINEL);
+    }
+
+    // Step 5: configure the Secure/Non-secure boundary BEFORE any Non-secure launch. This runs from
+    // Secure SRAM; if the attribution were wrong (e.g. Secure code marked NS) the Secure world would
+    // fault here and never reach the self-reboot below — so a self-reboot proves SAU enable is safe.
+    boundary::assert_core1_contained();
+    {
+        // Single-threaded reset context; core peripherals are borrowed only here.
+        let mut cp = unsafe { cortex_m::Peripherals::steal() };
+        // A failed SAU program is fail-closed: halt rather than launch anything with a bad boundary.
+        if boundary::configure_sau(&mut cp.SAU).is_err() {
+            loop {
+                cortex_m::asm::wfi();
+            }
+        }
     }
 
     // Next increments: init the heap; assert the secure context (secure boot + debug-disable);

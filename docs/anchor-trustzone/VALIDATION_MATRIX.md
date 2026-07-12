@@ -49,6 +49,13 @@ Row 0 does NOT yet prove: the VECTOR_TABLE item's VTOR took effect (no exception
 veneer copy executed correctly (nothing calls it until the step-5 NS launch), the hashed/sealed
 image path, or any secure-boot behavior. Those remain with their own rows.
 
+**Row 0a (SAU enable) — 2026-07-12, same chip.** The monitor programs SAU (region 0 = NSC veneer
+[0x20040000,0x20041000); region 1 = NS SRAM [0x20041000,0x20080000); ALLNS=0 so the Secure monitor,
+flash, OTP, peripherals stay Secure) and enables it, then continues. Self-reboot still fired at 29 s,
+proving `sau.enable()` from Secure SRAM does NOT fault the running Secure world (no Secure region
+mis-marked NS). Does NOT yet prove NS/DMA denial (rows 4/5/6) — that needs the Non-secure launch to
+attempt the accesses. `src/boundary.rs::configure_sau`; core 1 remains unlaunched (contained).
+
 ## Host-automatable now (no board)
 
 These become unit/integration tests in the monitor crate as the split lands:
