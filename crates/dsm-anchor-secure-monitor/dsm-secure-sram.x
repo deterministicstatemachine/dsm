@@ -62,8 +62,12 @@ SECTIONS
   /* Secure stack lives at the top of the Secure SRAM region (just below the NSC region) and grows
    * DOWN. __secure_stack_limit is its explicit floor: MSPLIM is set to it (ENTRY_POINT sp_limit
    * word + belt-and-suspenders write at reset) so a Secure stack overflow FAULTS instead of
-   * silently corrupting the monitor's own code/state/heap below it. */
-  __secure_stack_size = 32K;
+   * silently corrupting the monitor's own code/state/heap below it.
+   * Sized to fit the SRAM-resident TCB: SECURE (256K) = ~137K code+rodata + ~96K working heap
+   * (SPHINCS+ σ^host sign + ~2× release staging in `emit`) + this stack. 20K is the largest stack
+   * that leaves the 96K heap intact; the MSPLIM floor sits above `.bss`, so an overflow faults
+   * (caught by the Secure fault handler) rather than corrupting the monitor. */
+  __secure_stack_size = 20K;
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
   PROVIDE(__secure_stack_limit = ORIGIN(SECURE) + LENGTH(SECURE) - __secure_stack_size);
 

@@ -42,6 +42,23 @@ pub trait Tropic {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError>;
 }
 
+/// Forward `Tropic` through a `Box`, so a firmware holding the appliance in a `'static` slot can
+/// erase the (unnameable) concrete chip-session type behind `Box<dyn Tropic>` and still satisfy
+/// `Appliance<T: Tropic, P>`. The RP2350 secure monitor needs this: its SG handler is reached by a
+/// hardware `bxns` (not a call it can pass state into), so the appliance must live in a static of a
+/// nameable type. Signing/counter behavior is unchanged — the box is a pointer indirection only.
+impl<T: Tropic + ?Sized> Tropic for alloc::boxed::Box<T> {
+    fn counter_get(&mut self) -> Result<u32, TropicError> {
+        (**self).counter_get()
+    }
+    fn counter_update(&mut self) -> Result<(), TropicError> {
+        (**self).counter_update()
+    }
+    fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
+        (**self).chip_sign(message)
+    }
+}
+
 /// Host-side verification of the resident TROPIC01 Ed25519 witness (`σ^chip`). The
 /// receiver verifies against `pk_chip` pinned in the anchor bundle `B`; `pk`/`sig` are
 /// scheme-sized byte strings. Signing is on-die only ([`Tropic::chip_sign`]).

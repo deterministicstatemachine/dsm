@@ -8,12 +8,15 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use hal::fugit::RateExtU32;
 use hal::Clock;
 use rp235x_hal as hal;
+use dsm_sphincs::SphincsVariant;
 use tropic01::keys::{SH0PRIV_PROD0, SH0PUB_PROD0};
 use tropic01::{Tropic01, X25519Dalek};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const XTAL_HZ: u32 = 12_000_000;
 const CHIP_KEY_SLOT: u16 = 0;
+/// σ^host scheme — MUST match the pico anchor + the receiver (byte-compatible SPX128f).
+const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
 
 /// Bring up SPI0 + the TROPIC01 PROD0 session and produce σ^chip over a fixed message with the
 /// resident Ed25519 key (slot 0). Returns a bitmask of the stages that succeeded. The signature is
@@ -102,7 +105,32 @@ pub fn sigma_chip_selftest() -> u32 {
     if let Ok(sig) = sess.eddsa_sign(CHIP_KEY_SLOT.into(), &msg[..]) {
         if sig.len() == 64 {
             result = 0x1F; // σ^chip signed
+        } else {
+            return result;
         }
+    } else {
+        return result;
+    }
+
+    // σ^host: BLAKE3-SPHINCS+ (SPX128f) — the SAME dsm-sphincs scheme + PartitionSig contract as the
+    // pico anchor (dev seed here; the OTP-sealed host key is the deferred provisioning step). Proves
+    // both crypto factors fit + run in the SRAM Secure monitor.
+    let seed = [0x11u8; 32];
+    match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, &seed) {
+        Ok(kp) => {
+            result = 0x3F; // keygen OK
+            match dsm_sphincs::sign(PART_VARIANT, &kp.secret_key, &msg) {
+                Ok(sig) => {
+                    result = 0x7F; // sign OK
+                    if dsm_sphincs::verify(PART_VARIANT, &kp.public_key, &msg, &sig).unwrap_or(false)
+                    {
+                        result = 0xFF; // σ^host verify OK — full σ^chip + σ^host
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        Err(_) => {}
     }
     result
 }

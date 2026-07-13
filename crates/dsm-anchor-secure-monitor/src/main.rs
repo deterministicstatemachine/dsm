@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! DSM anchor RP2350 **Secure monitor** (TrustZone-M Secure world).
 //!
-//! Owns OTP, the host key, `HostSign`, TROPIC01, the physical counter, durable prepare/commit/
-//! recovery state, the exact measurement seal, and the ONLY Secure Gateway (the NSC veneer → this
-//! handler).
+//! Owns the TROPIC01 (`σ^chip`), the BLAKE3-SPHINCS+ partition key (`σ^host`), the physical counter,
+//! prepare/commit/recovery state, the exact measurement seal, and the ONLY Secure Gateway (the NSC
+//! veneer → this handler).
 //!
-//! STATUS (this increment): STRUCTURAL split + SG ABI only. Both images link and the SG dispatch
-//! path resolves, but the monitor + veneer are still linked as an **XIP-flash** image — there is NO
-//! boot-block `LOAD_MAP` yet, so the Secure TCB does NOT run from boot-ROM-verified SRAM. The
-//! target invariant (whole Secure TCB executes from SRAM, because external flash is mutable after
-//! boot-time verification) is NOT physically true until the SRAM `LOAD_MAP` linker step lands;
-//! `scripts/check-secure-no-xip.sh` correctly FAILS until then. The runtime security boundary
-//! (SAU/MPU/ACCESSCTRL) is not configured and the Non-secure image is not launched.
-//!
-//! What IS wired: the veneer entry `dsm_secure_dispatch(slot, seq)` calls [`dsm_secure_handler`],
-//! which runs the mailbox state machine (§4), performs a **fresh** BLAKE3 measurement of the
-//! Non-secure RX image before any authority-bearing op (§2), and dispatches the narrow state
-//! machine (§5). The leaf crypto (`σ^chip` via TROPIC01, `σ^host` via BLAKE3-SPHINCS+), the durable
-//! store, and every authority op (`prepare`/`commit`/`emit`/`finalize`/`recover`) are behind the
-//! `SecureOps` seam and return fail-closed internal errors until the `real-crypto` increment.
-//! `main` (reset) is a placeholder wfi loop until the SAU/ACCESSCTRL init (step 5) and the measured
-//! NS loader (step 7) land.
+//! STATUS (this increment): SRAM-resident TCB + runtime boundary + REAL appliance, wired; silicon
+//! validation of the full crypto round trip is pending (needs a clean TROPIC power cycle).
+//!  * The whole Secure TCB runs from SRAM: the boot-block `LOAD_MAP` (linker-emitted) instructs the
+//!    bootrom to copy the SRAM-VMA payload out of mutable external flash before entry;
+//!    `scripts/check-secure-no-xip.sh` PASSES. (Cryptographic verification of that flash image is a
+//!    separate secure-boot step.)
+//!  * `main` (reset) programs MSPLIM, builds the real appliance ([`anchor_glue::init`]), then
+//!    configures the Secure/Non-secure boundary — SAU regions, `AIRCR.BFHFNMINS = 0`, the ACCESSCTRL
+//!    lock, the recovery watchdog — and BXNS-launches the Non-secure image (§5, silicon 2026-07-12).
+//!  * The veneer entry `dsm_secure_dispatch(slot, seq)` calls [`dsm_secure_handler`], which runs the
+//!    mailbox state machine (§4), performs a **fresh** BLAKE3 measurement of the Non-secure RX image
+//!    before any authority op (§2), and dispatches through the REAL `anchor_core` appliance
+//!    ([`anchor_glue::service_request`] → `anchor_core::service::dispatch`) — `σ^chip` on the
+//!    TROPIC01 die, `σ^host` via `dsm-sphincs`. The protocol state machine is NOT reimplemented here;
+//!    it is `anchor_core`, the same crate the `dsm-anchor-pico` binary drives.
+//!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, the appliance stays
+//!    uninitialized and every authority op is refused (`SG_ERR_INTERNAL`).
+//!  * Standalone crypto self-test + NS-launch/measurement bring-up proofs are retained behind the
+//!    (default-OFF) `SIGMA_CHIP_SELFTEST` / `BRINGUP_NS_LAUNCH_PROOF` flags for silicon triage.
 
 #![no_std]
 #![no_main]
@@ -31,12 +34,24 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
+extern crate alloc;
+
+mod anchor_glue;
 mod boundary;
 mod tropic;
 
-/// Bring-up: run the σ^chip TROPIC01 self-test from Secure instead of launching NS. Signals the
-/// result by reboot timing (clock is 150 MHz after `init_clocks_and_plls`, so delays are calibrated
-/// for that): ~26 s = chip+session+σ^chip signed; ~16 s = chip+session; ~8 s = chip only; ~4 s = no chip.
+// Secure working-set heap (SPHINCS+ σ^host signing + release/proto Vec staging). Lives in Secure
+// .bss; the Non-secure app has its own separate heap. Initialized once at reset before any alloc.
+#[global_allocator]
+static HEAP: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
+const SECURE_HEAP_SIZE: usize = 96 * 1024;
+static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
+    [core::mem::MaybeUninit::uninit(); SECURE_HEAP_SIZE];
+
+/// Bring-up DIAGNOSTIC (default OFF): run the standalone σ^chip/σ^host self-test from Secure and
+/// signal the result by reboot timing, INSTEAD of the real appliance path. Retained behind this
+/// flag so a future bench session can re-probe the crypto after a clean TROPIC power cycle; the
+/// default path builds the real appliance (`anchor_glue::init`) and launches Non-secure.
 const SIGMA_CHIP_SELFTEST: bool = false;
 
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
@@ -61,6 +76,10 @@ const SG_OK: u32 = 0;
 const SG_ERR_SLOT: u32 = 1;
 const SG_ERR_SEQ: u32 = 2;
 const SG_ERR_SIZE: u32 = 3;
+/// Reserved transport ABI code. Unknown ops are now decoded and rejected as `BAD_PROTO` inside
+/// anchor-core's dispatch (a response frame, transport status SG_OK), so the monitor no longer emits
+/// this — kept for ABI stability with the Non-secure transport + spec.
+#[allow(dead_code)]
 const SG_ERR_OPCODE: u32 = 4;
 const SG_ERR_ENCODING: u32 = 5;
 const SG_ERR_STATE: u32 = 6;
@@ -68,6 +87,10 @@ const SG_ERR_MEASUREMENT: u32 = 7;
 const SG_ERR_INTERNAL: u32 = 8;
 
 // ── Mailbox (§4): ONE fixed slot in Non-secure SRAM. Data plane only. ─────────────────────────
+/// Idle mailbox state. Published by the Non-secure side (which owns the slot between round trips);
+/// the monitor only ever transitions REQUEST_READY → SECURE_PROCESSING → RESPONSE_READY, so it does
+/// not name this — kept for ABI parity with the NS transport's state enum.
+#[allow(dead_code)]
 const MB_EMPTY: u32 = 0;
 const MB_REQUEST_READY: u32 = 1;
 const MB_SECURE_PROCESSING: u32 = 2;
@@ -142,8 +165,10 @@ fn measurement_ok() -> bool {
     measured.as_bytes().ct_eq(&enrolled).into()
 }
 
-/// Which ops mint signatures / move the counter and therefore REQUIRE a fresh measurement (§2).
-fn op_requires_measurement(op: u32) -> bool {
+/// UNTRUSTED mailbox-opcode hint (monitor `OP_*` scheme) — used ONLY by the bring-up triage path to
+/// decide whether to fire the measurement fail-close reboot. The AUTHORITATIVE measurement gate runs
+/// on the DECODED protobuf op inside `anchor_glue::service_request`, never on this hint.
+fn op_requires_measurement_hint(op: u32) -> bool {
     matches!(op, OP_PREPARE | OP_COMMIT | OP_EMIT | OP_FINALIZE | OP_RECOVER)
 }
 
@@ -196,39 +221,34 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
     // §4.5 from here we interpret ONLY the Secure copy `sreq[..req_len]` — never the mailbox.
     let request = &sreq[..req_len];
 
-    // §2 FRESH measurement before any authority-bearing op.
-    if op_requires_measurement(opcode) && !measurement_ok() {
-        // BRING-UP: prove the §2 measurement gate FAIL-CLOSES on silicon — an authority op (PREPARE)
-        // is refused because OTP `mu_enrolled` is blank on this unprovisioned board (mu_enrolled=None).
-        // Distinctive ~25 s reboot, separate from fault ~12 s / SG ~42 s. (Removed with real crypto.)
-        if BRINGUP_NS_LAUNCH_PROOF {
-            delayed_reboot(180_000_000);
+    // BRING-UP measurement fail-close proof (retained behind the flag for silicon triage): an
+    // authority op is refused because OTP `mu_enrolled` is blank on an unprovisioned board.
+    // Distinctive ~25 s reboot. The real gate below applies to the DECODED op, not this hint.
+    if BRINGUP_NS_LAUNCH_PROOF && op_requires_measurement_hint(opcode) && !measurement_ok() {
+        delayed_reboot(180_000_000);
+    }
+
+    // §5 dispatch through the REAL appliance (dsm-anchor-core `dispatch`), NOT a reimplemented state
+    // machine. `service_request` decodes the protobuf `ApplianceRequest`, applies the §2 measurement
+    // seal to the DECODED op, and drives `Appliance::{prepare,commit,emit,finalize,status,cancel}`.
+    // The returned frame is the encoded `ApplianceResponse`; the transport status is SG_OK unless
+    // the frame could not even be produced (decode / measurement / uninitialized-appliance failure).
+    let status = match unsafe { anchor_glue::service_request(request, measurement_ok()) } {
+        Ok(resp) => {
+            // §4.7 copy the bounded response back to the NS slot.
+            let resp_cap = unsafe { core::ptr::read_volatile(&mb.resp_cap) } as usize;
+            let n = resp.len().min(resp_cap).min(SG_SLOT_MAX_LEN);
+            for (i, byte) in resp.iter().enumerate().take(n) {
+                unsafe { core::ptr::write_volatile(&mut mb.body[i], *byte) };
+            }
+            unsafe { core::ptr::write_volatile(&mut mb.resp_len, n as u32) };
+            SG_OK
         }
-        // §7.12 measurement failure => no counter movement, no TROPIC/host signature.
-        let s = finish(mb, seq, SG_ERR_MEASUREMENT);
-        zeroize(&mut sreq);
-        return s;
-    }
-
-    // §5 narrow dispatch — there is NO generic sign / chip_sign / counter / OTP / memory op.
-    let mut ops = SecureOps::new();
-    let (status, resp) = match opcode {
-        OP_STATUS => ops.status(request),
-        OP_PREPARE => ops.prepare(request),
-        OP_COMMIT => ops.commit(request),
-        OP_EMIT => ops.emit(request),
-        OP_FINALIZE => ops.finalize(request),
-        OP_RECOVER => ops.recover(request),
-        _ => (SG_ERR_OPCODE, Response::empty()),
+        Err(err_status) => {
+            unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
+            err_status
+        }
     };
-
-    // §4.7 copy the bounded response back to the NS slot.
-    let resp_cap = unsafe { core::ptr::read_volatile(&mb.resp_cap) } as usize;
-    let n = resp.len.min(resp_cap).min(SG_SLOT_MAX_LEN);
-    for i in 0..n {
-        unsafe { core::ptr::write_volatile(&mut mb.body[i], resp.bytes[i]) };
-    }
-    unsafe { core::ptr::write_volatile(&mut mb.resp_len, n as u32) };
 
     // §4.9 zeroize the Secure request copy + sensitive temporaries.
     zeroize(&mut sreq);
@@ -253,76 +273,6 @@ fn zeroize(buf: &mut [u8]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// Bounded Secure→NS response.
-struct Response {
-    bytes: [u8; SG_SLOT_MAX_LEN],
-    len: usize,
-}
-impl Response {
-    fn empty() -> Self {
-        Response {
-            bytes: [0u8; SG_SLOT_MAX_LEN],
-            len: 0,
-        }
-    }
-}
-
-// ── The narrow appliance state machine (§5/§6). Leaf crypto behind this seam. ─────────────────
-//
-// This increment implements the STATE MACHINE + validation; the TROPIC01 σ^chip, BLAKE3-SPHINCS+
-// σ^host, physical counter, and durable store are fail-closed stubs until the `real-crypto`
-// increment. No path here exposes a raw signer, an arbitrary counter decrement, or memory access.
-struct SecureOps {
-    _priv: (),
-}
-impl SecureOps {
-    fn new() -> Self {
-        SecureOps { _priv: () }
-    }
-
-    /// Read-only appliance status: measurement_ok, state, u_i, H0. No signature, no counter move.
-    fn status(&mut self, _req: &[u8]) -> (u32, Response) {
-        let mut r = Response::empty();
-        r.bytes[0] = measurement_ok() as u8;
-        // state / u_i / H0 filled from the durable record once the store lands.
-        r.len = 1;
-        (SG_OK, r)
-    }
-
-    /// Recompute the canonical DSM root-advance message internally from the request inputs; persist
-    /// ONE prepared record. Mints NO signature; moves NO counter (§6). Fail-closed until wired.
-    fn prepare(&mut self, req: &[u8]) -> (u32, Response) {
-        if req.is_empty() {
-            return (SG_ERR_ENCODING, Response::empty());
-        }
-        // (real-crypto increment) validate parent root/frontier/counter/policy from the Secure copy,
-        // recompute M internally, persist the prepared record. Fail closed until wired.
-        (SG_ERR_INTERNAL, Response::empty())
-    }
-
-    /// Load the prepared record; re-pin `H0 - H == prev_u`; ONE physical counter decrement; sign
-    /// σ^chip + σ^host over the record's message ONLY; refuse a second distinct commit (§6).
-    fn commit(&mut self, _req: &[u8]) -> (u32, Response) {
-        (SG_ERR_INTERNAL, Response::empty())
-    }
-
-    /// Export the committed release bytes from the durable record.
-    fn emit(&mut self, _req: &[u8]) -> (u32, Response) {
-        (SG_ERR_INTERNAL, Response::empty())
-    }
-
-    fn finalize(&mut self, _req: &[u8]) -> (u32, Response) {
-        (SG_ERR_INTERNAL, Response::empty())
-    }
-
-    /// Re-emit the byte-identical committed release, OR complete the one message already fixed in
-    /// the durable record, OR downgrade online. NEVER accept a new recipient/challenge/successor
-    /// root/transition digest for an already-consumed counter step (§6).
-    fn recover(&mut self, _req: &[u8]) -> (u32, Response) {
-        (SG_ERR_INTERNAL, Response::empty())
-    }
-}
-
 extern "C" {
     /// Floor of the reserved Secure stack (from dsm-secure-sram.x). MSPLIM is set here so a Secure
     /// stack overflow FAULTs instead of corrupting the monitor's own code/state below the stack.
@@ -340,6 +290,14 @@ const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
 // ── Reset entry (placeholder until step 5 SAU init + step 7 measured loader) ──────────────────
 #[hal::entry]
 fn main() -> ! {
+    // Initialize the Secure heap once, before any allocation (σ^host / release staging use it).
+    unsafe {
+        HEAP.init(
+            core::ptr::addr_of_mut!(SECURE_HEAP_MEM) as usize,
+            SECURE_HEAP_SIZE,
+        );
+    }
+
     // If the previous boot armed the watchdog and never disarmed it, a watchdog reset fired — i.e.
     // we are recovering from a Non-secure-induced hang (the NS->DMA bus stall). Recover cleanly to
     // BOOTSEL instead of re-launching NS into the same stall. reboot_bootsel disarms + clears it.
@@ -357,18 +315,27 @@ fn main() -> ! {
         cortex_m::register::msplim::write(limit);
     }
 
-    // σ^chip bring-up: drive the TROPIC01 from Secure and signal the result by reboot timing.
+    // σ^chip / σ^host bring-up: drive the crypto from Secure and publish the exact result CODE in
+    // watchdog SCRATCH1 (peripheral RAM survives the ROM BOOTSEL entry that wipes main SRAM), so the
+    // host reads the byte directly with `picotool save` — NO timing inference. A short beat delay is
+    // kept only so the board is quiescent before it drops to BOOTSEL.
     if SIGMA_CHIP_SELFTEST {
         let r = tropic::sigma_chip_selftest();
-        let d: u32 = match r {
-            0x1F => 3_900_000_000, // σ^chip signed          (~26 s @150 MHz)
-            0x0F => 3_000_000_000, // session ok, sign failed (~20 s)
-            0x07 => 2_400_000_000, // chip alive, no session  (~16 s)
-            0x03 => 1_800_000_000, // SPI up, chip id failed  (~12 s)
-            0x01 => 1_200_000_000, // clocks ok, SPI failed   (~8 s)
-            _ => 600_000_000,      // clock init failed       (~4 s)
+        // Timing channel with HUGE monotonic gaps so the variable TROPIC-session time (a few seconds)
+        // can never push one bucket into another. 3-way headline (subdivide later if needed):
+        //   ~57 s .. σ^host FULL (σ^chip + keygen + sign + verify)   r == 0xFF
+        //   ~37 s .. σ^chip OK, σ^host incomplete                    r >= 0x1F
+        //   ~15 s .. σ^chip FAILED (no session / sign)               r <  0x1F
+        let beats: u32 = if r == 0xFF {
+            50
+        } else if r >= 0x1F {
+            30
+        } else {
+            8
         };
-        cortex_m::asm::delay(d);
+        for _ in 0..beats {
+            cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
+        }
         reboot_bootsel();
     }
 
@@ -376,6 +343,17 @@ fn main() -> ! {
     unsafe {
         let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[0]), HEARTBEAT_SENTINEL);
+    }
+
+    // Step 7: build the REAL appliance (TROPIC01 σ^chip + BLAKE3-SPHINCS+ σ^host, resident chip key,
+    // one-way birth fuse) BEFORE the boundary is locked and NS launched, so the Secure-only SPI0/
+    // TROPIC bring-up runs while the monitor still owns everything. Fail-closed: a chip/session/
+    // enroll failure leaves the appliance uninitialized and every authority op refuses (the SG
+    // handler returns SG_ERR_INTERNAL). Record readiness in heartbeat[1] for bring-up triage.
+    let app_ready = unsafe { anchor_glue::init() };
+    unsafe {
+        let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), app_ready as u32);
     }
 
     // Step 5: configure the Secure/Non-secure boundary BEFORE any Non-secure launch. This runs from
@@ -426,9 +404,10 @@ fn main() -> ! {
     }
 }
 
-/// Bring-up proof flag (step 5b/6): when set, the Secure handler self-reboots into BOOTSEL on a
-/// STATUS call so the NS→S round trip is observable on silicon. Cleared with the real response path.
-const BRINGUP_NS_LAUNCH_PROOF: bool = true;
+/// Bring-up proof flag (step 5b/6, default OFF): when set, the Secure handler self-reboots into
+/// BOOTSEL on a STATUS call / measurement fail so the NS→S round trip is observable on silicon.
+/// Retained for triage; the default path runs the real appliance dispatch (`service_request`).
+const BRINGUP_NS_LAUNCH_PROOF: bool = false;
 
 /// Distinctive reboot timings that make silicon outcomes readable by wall-clock alone, since
 /// post-boot SRAM readback is cleared on BOOTSEL entry. The two delays are far apart so re-enumeration
@@ -505,7 +484,5 @@ unsafe fn launch_nonsecure(ns_vector_table: u32) -> ! {
         vt = out(reg) _,
     );
     // BXNS does not return to Secure except via the `sg` veneer; this is unreachable.
-    loop {
-        cortex_m::asm::udf();
-    }
+    cortex_m::asm::udf()
 }

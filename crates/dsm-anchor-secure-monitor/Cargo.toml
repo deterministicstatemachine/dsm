@@ -3,7 +3,7 @@ name = "dsm-anchor-secure-monitor"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "DSM anchor RP2350 Secure monitor (TrustZone-M Secure world): OTP-sealed host key, HostSign, TROPIC01, physical counter, durable prepare/commit/recovery state, exact-measurement seal, and the ONLY Secure Gateway (NSC veneer + fixed-slot dispatcher). Structural split + SG ABI linked; the SRAM LOAD_MAP, runtime security boundary (SAU/MPU/ACCESSCTRL), and authority state machine are not yet integrated — currently an XIP-flash image. Not a workspace member — thumbv8m-only, excluded in the root manifest."
+description = "DSM anchor RP2350 Secure monitor (TrustZone-M Secure world): TROPIC01 (σ^chip), BLAKE3-SPHINCS+ partition key (σ^host), physical counter, prepare/commit/recovery state, exact-measurement seal, and the ONLY Secure Gateway (NSC veneer + fixed-slot dispatcher). SRAM-resident TCB (linker-emitted boot-block LOAD_MAP), runtime boundary (SAU/ACCESSCTRL/BFHFNMINS/watchdog), and the real appliance (anchor_core dispatch — NOT a reimplemented state machine) are wired; full-crypto silicon validation pending a clean TROPIC power cycle. Not a workspace member — thumbv8m-only, excluded in the root manifest."
 
 # Two-image TrustZone build; link the monitor FIRST to produce the CMSE import library the
 # Non-secure app links against. Build from inside this dir so .cargo/config.toml applies.
@@ -33,13 +33,9 @@ tropic01 = { path = "../../../../libtropic-rs/tropic01" }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 embedded-hal = "1.0"
 embedded-hal-bus = "0.3"
+# σ^host: shared no_std BLAKE3-SPHINCS+ (SPX128f) — the SAME crate the pico anchor uses (PartitionSig).
+dsm-sphincs = { path = "../dsm-sphincs" }
 
 [build-dependencies]
 # Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.
 cc = "1"
-
-[features]
-# Wire the real TROPIC01 (σ^chip) + BLAKE3-SPHINCS+ (σ^host) leaf crypto (the next increment). Until
-# then the monitor builds the full dispatch path with fail-closed leaf-crypto stubs so both images
-# link and the Secure Gateway path is exercisable without the chip.
-real-crypto = []
