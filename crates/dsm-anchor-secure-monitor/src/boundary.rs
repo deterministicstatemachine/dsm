@@ -67,6 +67,14 @@ const NSC_BASE: u32 = 0x2004_0000;
 const NSC_LIMIT: u32 = 0x2004_0FFF; // NSC veneer region [0x20040000, 0x20041000)
 const NS_BASE: u32 = 0x2004_1000;
 const NS_LIMIT: u32 = 0x2007_FFFF; // Non-secure SRAM [0x20041000, 0x20080000)
+// Peripheral space made Non-secure-ADDRESSABLE so the NS app can reach the clocks + USB it needs.
+// This is defense-in-depth, NOT a blanket grant: SAU only lifts the address-level Secure attribution;
+// per-peripheral ACCESSCTRL (grant_ns_peripherals) still gates WHICH peripherals NS may touch, and
+// every Secure peripheral (OTP 0x…60a8, SPI0 0x…6090, DMA, …) keeps its reset default NSP=0, so an
+// NS access to it still bus-errors. Covers APB (0x40000000+) and the USB block (0x50100000+); SIO
+// (0xd0000000) is deliberately NOT covered (the NS app uses no GPIO).
+const PERIPH_BASE: u32 = 0x4000_0000;
+const PERIPH_LIMIT: u32 = 0x501F_FFFF;
 
 /// Configure SAU address attribution and enable it.
 ///
@@ -96,9 +104,56 @@ pub fn configure_sau(sau: &mut SAU) -> Result<(), SauError> {
             attribute: SauRegionAttribute::NonSecure,
         },
     )?;
-    // ALLNS stays 0: unmatched addresses (Secure monitor, flash, OTP, peripherals) are Secure.
+    // region 2: peripheral space — NS-addressable so the NS app can drive clocks + USB. ACCESSCTRL
+    // (grant_ns_peripherals) is the fine-grained gate; Secure peripherals keep NSP=0 and stay denied.
+    sau.set_region(
+        2,
+        SauRegion {
+            base_address: PERIPH_BASE,
+            limit_address: PERIPH_LIMIT,
+            attribute: SauRegionAttribute::NonSecure,
+        },
+    )?;
+    // ALLNS stays 0: unmatched addresses (Secure monitor SRAM, flash boot block, SIO) are Secure.
     sau.enable();
     Ok(())
+}
+
+/// Grant Non-secure access, via per-peripheral ACCESSCTRL, to ONLY the peripherals the NS app drives:
+/// the clock tree (CLOCKS/XOSC/PLL_SYS/PLL_USB), RESETS + WATCHDOG (used by the HAL clock init), and
+/// USBCTRL. Every other peripheral — critically OTP and SPI0 (the TROPIC bus) — keeps its reset
+/// default NSP=0 and remains Non-secure-denied at the bus, so the SAU peripheral region does not
+/// expose them. Writes are read-modify-write (preserve the existing Secure/core bits, add NSP+NSU)
+/// and carry the mandatory 0xACCE password in the top 16 bits; a keyless write bus-faults. Must run
+/// BEFORE lock_accessctrl and BEFORE launch_nonsecure.
+///
+/// SECURITY NOTES (to harden after bring-up): granting RESETS lets NS assert resets on Secure
+/// peripherals (availability/glitch vector, not a secret-disclosure one) and granting WATCHDOG lets
+/// NS touch the same watchdog the Secure recovery uses — both are here only because the HAL clock/USB
+/// init needs them; a later increment should pre-init USB Secure-side and drop these two grants.
+pub fn grant_ns_peripherals() {
+    const ACCESSCTRL_BASE: u32 = 0x4006_0000;
+    const PASSWORD: u32 = 0xACCE_0000;
+    const NSP: u32 = 1 << 1;
+    const NSU: u32 = 1 << 0;
+    // ACCESSCTRL per-peripheral register offsets (rp235x-pac SVD): the NS-app working set only.
+    const GRANTS: [u32; 8] = [
+        0x48, // USBCTRL
+        0x64, // RESETS
+        0xc0, // CLOCKS
+        0xc4, // XOSC
+        0xcc, // PLL_SYS
+        0xd0, // PLL_USB
+        0xd4, // TICKS (RP2350 tick generator — clock init starts it; SWD-confirmed BFAR 0x40108004)
+        0xd8, // WATCHDOG
+    ];
+    for off in GRANTS {
+        let reg = (ACCESSCTRL_BASE + off) as *mut u32;
+        unsafe {
+            let cur = core::ptr::read_volatile(reg) & 0xFF;
+            core::ptr::write_volatile(reg, PASSWORD | cur | NSP | NSU);
+        }
+    }
 }
 
 /// Freeze the ACCESSCTRL configuration so the Secure resource attribution cannot be re-opened.

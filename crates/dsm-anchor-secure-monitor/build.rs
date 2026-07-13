@@ -12,17 +12,49 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=veneer/dsm_sg_veneer.S");
-    println!("cargo:rerun-if-changed=veneer/dsm_ns_stub.S");
+    println!("cargo:rerun-if-changed=veneer/dsm_ns_payload.S");
     println!("cargo:rerun-if-changed=veneer/dsm_sg_abi.h");
     println!("cargo:rerun-if-changed=memory.x");
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let lib = out.join("libdsm_sg_veneer.a");
 
-    // Assemble the reviewed asm (NSC veneer + the bring-up NS stub) with clang for ARMv8-M, archive
-    // both into one static lib linked into the monitor.
+    // ── Build the real Non-secure app and objcopy its SRAM image into ns_app.bin (OUT_DIR), which
+    // veneer/dsm_ns_payload.S `.incbin`s into .ns_app. A separate --target-dir avoids workspace lock
+    // contention with this monitor build. This is the cross-crate NS packaging (replaces the stub).
+    let ns_crate = manifest.join("../dsm-anchor-nonsecure-app");
+    println!("cargo:rerun-if-changed={}/src/main.rs", ns_crate.display());
+    println!("cargo:rerun-if-changed={}/dsm-ns-sram.x", ns_crate.display());
+    println!("cargo:rerun-if-changed={}/memory.x", ns_crate.display());
+    let ns_target = out.join("ns-app-target");
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(&cargo)
+        .current_dir(&ns_crate)
+        .args(["build", "--release", "--target-dir"])
+        .arg(&ns_target)
+        // Do not inherit this monitor build's RUSTFLAGS/target; the NS crate's .cargo/config sets its
+        // own (dsm-ns-sram.x). Clear the vars cargo would otherwise propagate.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_TARGET")
+        .status()
+        .expect("build dsm-anchor-nonsecure-app");
+    assert!(status.success(), "Non-secure app build failed");
+    let ns_elf = ns_target.join("thumbv8m.main-none-eabihf/release/dsm-anchor-nonsecure-app");
+    let ns_bin = out.join("ns_app.bin");
+    let status = Command::new("arm-none-eabi-objcopy")
+        .args(["-O", "binary"])
+        .arg(&ns_elf)
+        .arg(&ns_bin)
+        .status()
+        .expect("objcopy the Non-secure app image");
+    assert!(status.success(), "objcopy of the Non-secure app failed");
+
+    // Assemble the reviewed asm (NSC veneer + the NS payload) with clang for ARMv8-M, archive both
+    // into one static lib linked into the monitor. `-I <OUT_DIR>` lets the payload `.incbin ns_app.bin`.
     let mut objs = Vec::new();
-    for src in ["veneer/dsm_sg_veneer.S", "veneer/dsm_ns_stub.S"] {
+    for src in ["veneer/dsm_sg_veneer.S", "veneer/dsm_ns_payload.S"] {
         let obj = out.join(format!("{}.o", src.rsplit('/').next().unwrap()));
         let status = Command::new("clang")
             .args([
@@ -30,10 +62,10 @@ fn main() {
                 "-mcpu=cortex-m33",
                 "-mfloat-abi=hard",
                 "-mfpu=fpv5-sp-d16",
-                "-c",
-                src,
-                "-o",
+                "-I",
             ])
+            .arg(&out)
+            .args(["-c", src, "-o"])
             .arg(&obj)
             .status()
             .unwrap_or_else(|_| panic!("clang assemble {src}"));
