@@ -40,7 +40,7 @@ pub mod identity;
 // number proximity, state-count rate, etc.) no longer map to the canonical
 // model. Security guarantees now come from:
 //   - §6.1 Tripwire: no double-consume of a chain tip
-//   - §12 DBRW anti-cloning: physical single-writer invariant
+//   - §12 anti-cloning: fused hardware anchor (σ^chip + σ^host) + single-writer invariant
 //   - bilateral pair signing on every advance (§11)
 //   - §8 balance-witness equality check inside DeviceState::advance
 pub mod state_machine;

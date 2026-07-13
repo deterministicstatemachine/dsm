@@ -11,7 +11,7 @@ DSM's post-quantum cryptographic stack for contributors and integrators.
 | Hashing            | BLAKE3-256         | All protocol hashing, domain-separated                                                | `crypto/blake3.rs`, `crypto/hash.rs`               |
 | Signatures         | SPHINCS+           | Post-quantum digital signatures (EUF-CMA)                                             | `crypto/sphincs.rs`                                |
 | Key Exchange       | ML-KEM-768 (Kyber) | Post-quantum key encapsulation                                                        | `crypto/kyber.rs`                                  |
-| Anti-Cloning       | DBRW               | Dual-factor: silicon fingerprint + env binding                                        | `crypto/dbrw.rs`                                   |
+| Anti-Cloning       | Fused HW anchor    | TROPIC01 + RP2350 triple signature (σ^DSM+σ^chip+σ^host) over each root advance         | `crates/dsm-anchor-core/src/lib.rs`                |
 | Commitments        | Salted BLAKE3      | Hiding + binding commitments via `BLAKE3("DSM/<purpose>\0" \|\| blinding \|\| value)` | `crypto/blake3.rs` (primitive); per-use call sites |
 | Storage Encryption | ChaCha20-Poly1305  | At-rest encryption                                                                    | —                                                  |
 | Key Derivation     | BLAKE3 keyed       | Domain-separated KDF                                                                  | Per-use domain                                     |
@@ -37,7 +37,7 @@ The null byte (`\0`) terminates the domain tag, preventing prefix collisions.
 | `DSM/bilateral-sign\0` | Bilateral signature message domain separation |
 | `DSM/bilateral\0`      | Bilateral transaction hashing                 |
 | `DSM/token\0`          | Token operation hashing                       |
-| `DSM/cdbrw/bind\0`     | C-DBRW binding key (canonical 4-input)        |
+| `DSM/anchor-root-advance/v2` | Fused-anchor root-advance message binding |
 | `DSM/cpta\0`           | Content-Addressed Token Policy Anchor         |
 | `DSM/dlv-unlock\0`     | DLV vault unlock key derivation               |
 | `DSM/assign\0`         | Storage node assignment                       |
@@ -106,40 +106,45 @@ Device A                          Device B
 
 ---
 
-## DBRW Anti-Cloning
+## Anti-Cloning: the Fused Hardware Anchor
 
-Device-Bound Random Walk (DBRW) prevents state cloning attacks by binding each identity to specific hardware.
+DSM does **not** fingerprint device hardware. Transfer uniqueness is a **software** property of
+the DSM device Sparse Merkle Tree: one parent device root `Rᵢ` admits at most one accepted successor
+per receiver, and the offline frontier `hᵢ → hᵢ₊₁` is forward-only, so a release claiming an
+already-consumed frontier is rejected on sight. (An earlier design bound identity to a device
+"fingerprint" — Device-Bound Random Walk / C-DBRW; that mechanism was **removed**. See the historical
+note in the CHANGELOG.)
 
-### Dual-Factor Binding
+Hardware provides **identity, not authority**. Anti-cloning is enforced by a **fused offline anchor**
+— a TROPIC01 secure element plus the RP2350 secure partition — that binds every forward-only *root
+advance* under three independent signatures over the root-advance message `Mᵢ₊₁`:
 
-1. **Silicon fingerprint** — derived from hardware-specific properties (sensor readings, timing characteristics) that are unique to each physical device
-2. **Environment binding** — derived from the device's runtime environment, preventing state from being valid on a different device even with identical hardware
+1. **`σ^DSM`** — the seed-derived DSM device signature over the transition core `Δ°`.
+2. **`σ^chip`** — a resident, **non-exportable Ed25519 key inside the TROPIC01 die** (its private half
+   never leaves the chip; at-rest protection is the die's PUF), verified against `pk_chip` pinned in
+   the anchor bundle `B`.
+3. **`σ^host`** — the RP2350 secure-partition key, verified against `pk_host` pinned in `B`.
 
-### DBRW Hash
+A clone cannot reproduce `σ^chip` (the key is non-exportable silicon) or `σ^host` (the sealed
+partition), so it cannot advance the root.
 
-```
-K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
-                 || LP(genesis_hash) || LP(device_id)
-                 || LP(silicon_fingerprint) || LP(env_entropy))
-```
+### Counter as a floor, not authority
 
-where `LP(x) = LE32(len(x)) || x` and the root-device invariant binds
-`device_id = genesis_hash`. K_DBRW is derived post-MPC inside the
-genesis session (so `genesis_hash` exists before the binding key is
-needed), and on restore is recomputed deterministically from the four
-already-persisted inputs.
+The TROPIC01 monotonic counter is demoted to a **non-rewind floor + offline exposure cap**. It
+appears in acceptance only as the signed pair `(uᵢ, uᵢ+1)` and is **never read by the receiver** —
+the verifier has no live-hardware dependency; it verifies signed identity evidence against the
+enrolled public keys.
 
-### Health States
+### Enrollment
 
-The DBRW module (`crypto/dbrw_health.rs`) tracks three health states:
+At admission a counterparty's anchor is pinned as a bundle `B = {anchor_id, H₀, pk_host, pk_chip}`,
+and every later root advance is verified against it — **fail-closed**: a counterparty with no pinned
+anchor is refused.
 
-- **Healthy** — fingerprint measurements are within expected variance
-- **Degraded** — some measurements show anomalies (e.g., battery replacement)
-- **MeasurementAnomaly** — significant deviation detected, potential cloning attempt
-
-### Bootstrap Integration
-
-During PBI (Platform Boot Identity) bootstrap, the DBRW hash is computed and bound to the device identity. The SDK stores this in a `PlatformContext` via `OnceLock`, ensuring it's computed exactly once per app lifetime.
+**Source of truth:** `crates/dsm-anchor-core/src/lib.rs` (protocol math), plus
+`crates/dsm-anchor-core/src/{root_advance,accept,appliance}.rs`; client-side enrollment in
+`dsm/src/crypto/anchor_enrollment.rs`; firmware in `crates/dsm-anchor-secure-monitor/` and
+`crates/dsm-anchor-pico/`.
 
 ---
 

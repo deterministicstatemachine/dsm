@@ -50,8 +50,8 @@ What this means structurally:
 What Alice does:
 
 1. Wallet bootstrap derives her SPHINCS+ signing key and Kyber pk from
-   DBRW. No external KYC, no contract approval — the keys are a property
-   of the device.
+   her mnemonic seed (GenesisV2, mnemonic-rooted). No external KYC, no
+   contract approval — the keys are a property of the device.
 2. Opens **AMM VAULT (DEV)** in the wallet. Fills in `token_a`,
    `token_b`, `reserve_a`, `reserve_b`, `fee_bps`, `policy_anchor`.
    Taps **Create AMM vault**. The wallet builds a `DlvSpecV1` with an

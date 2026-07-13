@@ -35,7 +35,7 @@ Comprehensive guide to developing with the Deterministic State Machine protocol.
 15. [Security Model](15-security-model.md) -- Threat model and security guarantees
 16. [Code Generation](16-code-generation.md) -- `dsm-gen` for typed DLV and policy clients
 17. [DSM Primitive](17-dsm-primitive.md) -- Defines the primitive boundary, trust surface, and composition model
-18. [In-App Developer Walkthroughs](18-in-app-developer-walkthroughs.md) -- Hidden dev menu, C-DBRW monitor, DLV tools, token creation, and BLE app flows
+18. [In-App Developer Walkthroughs](18-in-app-developer-walkthroughs.md) -- Hidden dev menu, anchor/chip diagnostics, DLV tools, token creation, and BLE app flows
 
 ### Appendices
 

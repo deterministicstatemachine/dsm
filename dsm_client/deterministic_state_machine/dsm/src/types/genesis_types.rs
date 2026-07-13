@@ -18,12 +18,12 @@
 //!          ∥ ( "DSM/genesis/mpc\0" ∥ H(m_i)  for each contribution, sorted ))
 //! ```
 //!
-//! The public-key bundle and the K_DBRW anti-cloning binding are deliberately
-//! EXCLUDED from `G`: keys and K_DBRW are *derived from* `G`
-//! (`keys ← S_master ← K_DBRW ← G`), so folding them back into the preimage
-//! would be circular. They bind to genesis by derivation, not by inclusion;
-//! anti-cloning is enforced downstream by K_DBRW (a clone derives a different
-//! K_DBRW, hence different keys). Wall-clock and mutable metadata are likewise
+//! The public-key bundle is deliberately EXCLUDED from `G`: keys are *derived
+//! from* `G` (`keys ← S_master ← G`; GenesisV2 is mnemonic-rooted), so folding
+//! them back into the preimage would be circular. They bind to genesis by
+//! derivation, not by inclusion. Anti-cloning is NOT part of `G`: it is enforced
+//! downstream by the fused hardware anchor (σ^chip + σ^host), not by any device
+//! fingerprint (the former K_DBRW binding was removed). Wall-clock and mutable metadata are likewise
 //! excluded, keeping `G` clockless and publicly recomputable from the public
 //! `device_id` plus the revealed contributions. No hex/json/base64/serde here.
 
@@ -94,7 +94,7 @@ pub fn hash_contribution(material: &[u8]) -> Digest32 {
 ///
 /// `G` is acyclic and publicly recomputable: it depends only on `device_id`
 /// and the revealed contributions, never on values derived from `G` (keys,
-/// K_DBRW), which bind to genesis by being derived from it.
+/// keys), which bind to genesis by being derived from it.
 pub fn compute_genesis_hash(device_id: &[u8; 32], contributions: &[MPCContribution]) -> Digest32 {
     let mut h = dsm_domain_hasher("DSM/genesis");
     h.update(device_id);

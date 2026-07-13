@@ -18,7 +18,7 @@ DSM assumes an adversary who can:
 
 ### What the Adversary Cannot Do
 
-- **Clone hardware** — DBRW binds identity to specific silicon
+- **Clone the anchor** — the resident non-exportable TROPIC01 key (`σ^chip`) and the sealed RP2350 partition key (`σ^host`) cannot be copied, so a clone cannot advance the root
 - **Break hash functions** — BLAKE3 provides 128-bit post-quantum security
 - **Forge signatures** — SPHINCS+ is EUF-CMA secure against quantum adversaries
 - **Create valid forks** — Tripwire Fork-Exclusion prevents double successors
@@ -51,40 +51,35 @@ Classical cryptographic algorithms (RSA, ECDSA, Diffie-Hellman) are vulnerable t
 
 ---
 
-## Anti-Cloning (DBRW)
+## Anti-Cloning (Fused Hardware Anchor)
 
-Device-Bound Random Walk prevents an adversary from copying device state to another device and operating two "copies" of the same identity.
+DSM prevents an adversary from copying device state to another device and operating two "copies" of
+the same identity **without fingerprinting hardware**. (An earlier design bound identity to a device
+fingerprint — DBRW / C-DBRW; it was removed.) Two mechanisms replace it:
 
-### Two-Factor Binding
+1. **Software uniqueness (DSM device SMT).** A parent device root `Rᵢ` admits at most one accepted
+   successor per receiver, and the offline frontier `hᵢ → hᵢ₊₁` is forward-only — a release claiming
+   an already-consumed frontier is rejected on sight.
+2. **Fused offline anchor** (TROPIC01 secure element + RP2350 secure partition). Hardware supplies
+   **identity, not authority**: each forward-only root advance binds the message `Mᵢ₊₁` under three
+   signatures — `σ^DSM` (seed-derived device signature over the transition core `Δ°`), `σ^chip`
+   (resident non-exportable Ed25519 key inside the TROPIC01 die, vs `pk_chip`), and `σ^host` (RP2350
+   secure-partition key, vs `pk_host`). Both `pk_chip` and `pk_host` are pinned in the enrolled anchor
+   bundle `B`.
 
-1. **Silicon fingerprint** — hardware-specific measurements unique to each physical device
-2. **Environment binding** — runtime environment properties that change across devices
-
-```
-K_DBRW = BLAKE3("DSM/cdbrw/bind\0"
-                 || LP(genesis_hash) || LP(device_id)
-                 || LP(silicon_fingerprint) || LP(env_entropy))
-```
-
-where `LP(x) = LE32(len(x)) || x`; root-device invariant binds
-`device_id = genesis_hash`. The binding key reflects the device's
-final protocol identity, not just its silicon/environment fingerprints.
-
-### Health Monitoring
-
-The DBRW module continuously monitors binding validity:
-
-| State | Meaning | Action |
-|-------|---------|--------|
-| Healthy | Measurements within expected variance | Normal operation |
-| Degraded | Some anomalies (e.g., battery replacement) | Warning, may require re-binding |
-| MeasurementAnomaly | Significant deviation | Potential cloning detected, operations restricted |
+The TROPIC01 monotonic counter is a **non-rewind floor + offline exposure cap** — signed as the pair
+`(uᵢ, uᵢ+1)` and **never read by the receiver** (no live-hardware dependency on the acceptance path).
 
 ### Attack Resistance
 
-- **State export attack** — extracting and importing device state fails because the DBRW hash won't match on the target device
-- **Emulator attack** — emulators produce different silicon fingerprints than physical devices
-- **Relay attack** — DBRW entropy is collected at bootstrap and bound to the identity; relaying requests doesn't help because the binding is checked at every operation
+- **State export / clone** — a clone cannot produce `σ^chip` (non-exportable silicon key) or `σ^host`
+  (sealed partition), so it cannot advance the root; and the SMT frontier admits only one successor.
+- **Emulator** — no valid `σ^chip`/`σ^host` without the real TROPIC01 + RP2350 partition.
+- **Replay** — a release over an already-consumed frontier is rejected; the counter floor caps offline
+  exposure.
+
+**Source of truth:** `crates/dsm-anchor-core/src/lib.rs`; client enrollment
+`dsm/src/crypto/anchor_enrollment.rs`.
 
 ---
 
@@ -147,7 +142,7 @@ BLE transfers are fully secured without network connectivity:
 1. **Identity verification** — SPHINCS+ signatures verify device identity
 2. **State integrity** — hash chain structure prevents tampering
 3. **Anti-replay** — nonces and sequence counters in every message
-4. **Anti-cloning** — DBRW binding verified locally
+4. **Anti-cloning** — the enrolled anchor's `σ^chip`/`σ^host` are verified against the pinned bundle `B`
 5. **Conservation** — token balance checks run on-device
 
 When connectivity returns, devices sync with storage nodes. Conflicts are impossible due to Tripwire — each device can only produce one valid successor per state.
@@ -159,7 +154,7 @@ When connectivity returns, devices sync with storage nodes. Conflicts are imposs
 ### Key Hierarchy
 
 ```
-DBRW entropy + hardware
+BIP39 mnemonic → seed   (GenesisV2: mnemonic-rooted)
     │
     ▼ BLAKE3 KDF
 Master identity key (SPHINCS+)
@@ -172,7 +167,7 @@ Master identity key (SPHINCS+)
 
 ### Key Lifecycle
 
-- **Generation** — derived from DBRW-bound hardware entropy at genesis
+- **Generation** — derived from the BIP39 mnemonic seed at genesis (GenesisV2, mnemonic-rooted)
 - **Storage** — encrypted at rest with ChaCha20-Poly1305
 - **Rotation** — not currently supported (identity is permanent)
 - **Recovery** — via recovery capsules stored on storage nodes
@@ -256,10 +251,9 @@ This bound applies to single-vault manipulation. It does not address:
 
 ## Known Security Considerations
 
-1. **DBRW thermal feedback** — health states exist but are not yet surfaced to the frontend UI
-2. **DBRW key derivation** — currently duplicated in two files (`pbi.rs` and `crypto_brw.rs`) which is a security risk if they diverge
-3. **UUID v4 in performance monitoring** — uses randomness, which is a determinism violation if it leaks into protocol paths
-4. **Recovery capsule encryption** — relies on storage node availability; if all N replicas are lost, recovery is impossible
+1. **UUID v4 in performance monitoring** — uses randomness, which is a determinism violation if it leaks into protocol paths
+2. **Recovery capsule encryption** — relies on storage node availability; if all N replicas are lost, recovery is impossible
+3. **Custom SPHINCS+** — the in-tree SPHINCS+ is unaudited; see `crypto/sphincs.rs` for the honest status note
 
 ---
 

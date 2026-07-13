@@ -264,14 +264,14 @@ dsm/
 │   └── deterministic_state_machine/
 │       ├── dsm/src/                      — core protocol crate (pure Rust)
 │       │   ├── core/                     — state machine, bilateral
-│       │   ├── crypto/                   — BLAKE3, SPHINCS+, ML-KEM, DBRW
+│       │   ├── crypto/                   — BLAKE3, SPHINCS+, ML-KEM, anchor enrollment
 │       │   ├── vault/                    — DLV, limbo vaults
 │       │   └── cpta/                     — token policy anchors
 │       └── dsm_sdk/src/                  — JNI-exposed SDK crate
 │           ├── jni/                      — JNI dispatch, bootstrap
 │           ├── bluetooth/                — BLE handler, frame coordinator
 │           ├── sdk/                      — bilateral, token, DLV, Bitcoin APIs
-│           └── security/                 — DBRW validation
+│           └── security/                 — anchor / gating validation
 ├── dsm_storage_node/                     — storage node binary (Rust + Axum)
 │   ├── src/
 │   ├── scripts/                          — local multi-node dev management

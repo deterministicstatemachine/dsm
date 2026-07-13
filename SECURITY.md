@@ -56,7 +56,7 @@ release branches; security fixes land on `main` and the next beta tag.
 In-scope for security reports:
 
 - Wallet key handling and signing flows (SPHINCS+ ephemeral keys, cert chain).
-- DBRW / C-DBRW binding, anti-clone gate, attractor commitment derivation.
+- Fused hardware-anchor enrollment (σ^chip / σ^host) + anti-clone gate, attractor commitment derivation.
 - JNI / Android / iOS boundary handling (memory safety, FFI signatures).
 - Protobuf parsing and Envelope v3 transport validation.
 - Bilateral 3-phase commit protocol (Phase 1/2/3 ordering, abort safety).

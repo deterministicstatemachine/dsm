@@ -72,7 +72,7 @@ The core crate contains all protocol logic with zero I/O dependencies:
 | `crypto/blake3.rs`, `crypto/hash.rs` | Domain-separated BLAKE3 hashing                                                                                                                            |
 | `crypto/sphincs.rs`                  | SPHINCS+ post-quantum signatures                                                                                                                           |
 | `crypto/kyber.rs`                    | ML-KEM-768 key encapsulation                                                                                                                               |
-| `crypto/dbrw.rs`                     | DBRW anti-cloning                                                                                                                                          |
+| `crypto/anchor_enrollment.rs`        | Fused hardware-anchor enrollment (anti-cloning); protocol math lives in `crates/dsm-anchor-core`                                                           |
 | `crypto/blake3.rs` (commitments)     | Salted-BLAKE3 commitments via `dsm_domain_hasher`; replaces the removed Pedersen module (Issue #184 F2) — see `vault::limbo_vault::dlv_content_commitment` |
 | `merkle/sparse_merkle_tree.rs`       | Per-device Sparse Merkle Tree                                                                                                                              |
 | `vault/dlv_manager.rs`               | Deterministic Limbo Vault management                                                                                                                       |
@@ -96,7 +96,7 @@ Wraps the core crate with thin ABI shims plus a shared semantic ingress:
 | `jni/mod.rs`                         | JNI module root, `JNI_OnLoad`                           |
 | `jni/unified_protobuf_bridge.rs`     | Android JNI ABI shim                                    |
 | `platform/ios/transport.rs`          | iOS envelope FFI shim                                   |
-| `jni/bootstrap.rs`                   | PBI bootstrap (device_id + genesis_hash + DBRW entropy) |
+| `jni/bootstrap.rs`                   | PBI bootstrap (device_id + genesis_hash; GenesisV2 mnemonic-rooted) |
 | `jni/create_genesis.rs`              | MPC genesis creation                                    |
 | `bluetooth/bilateral_ble_handler.rs` | BLE bilateral session handler                           |
 | `bluetooth/ble_frame_coordinator.rs` | MTU-aware chunking/reassembly                           |
@@ -106,7 +106,7 @@ Wraps the core crate with thin ABI shims plus a shared semantic ingress:
 | `sdk/dlv_sdk.rs`                     | DLV vault operations                                    |
 | `sdk/bitcoin_tap_sdk.rs`             | dBTC Bitcoin bridge                                     |
 | `sdk/storage_node_sdk.rs`            | Storage node HTTP client                                |
-| `security/dbrw_validation.rs`        | DBRW clone detection                                    |
+| `bluetooth/anchor_accept.rs`         | Fused-anchor enrollment acceptance (anti-clone gate)    |
 
 Compiled by `cargo ndk` for three ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`.
 
@@ -235,7 +235,7 @@ INIT → BOOTSTRAPPING → GENESIS_PENDING → READY → [screens]
 Bootstrap flow:
 
 1. `useAppBootstrap.ts` initializes the bridge
-2. SDK checks for existing device identity (DBRW-bound)
+2. SDK checks for existing device identity (anchor-enrolled)
 3. If no identity: `useGenesisFlow.ts` calls MPC genesis endpoint
 4. Genesis response has `0x03` prefix — decoded via `decodeFramedEnvelopeV3()`
 5. SDK_READY flag is set; all operations are now available
@@ -311,7 +311,7 @@ Detailed order-of-operations for key flows across all four layers. All paths are
 | ------------------ | ----------------------------------------------------------------------- |
 | No double-spend    | Tripwire Fork-Exclusion: SPHINCS+ EUF-CMA + BLAKE3 collision resistance |
 | No replay          | Nonces and sequence counters in every message                           |
-| Identity binding   | SPHINCS+ keypair + DBRW anti-cloning (silicon + environment)            |
+| Identity binding   | SPHINCS+ keypair + fused hardware anchor (σ^chip + σ^host over each root advance) |
 | Offline capability | BLE transport requires no network; storage sync is eventual             |
 | Server blindness   | Storage nodes are index-only; never sign, validate, or gate             |
 | Token conservation | `B_{n+1} = B_n + Delta, B >= 0` enforced at every transition            |

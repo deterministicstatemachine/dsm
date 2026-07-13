@@ -165,7 +165,7 @@ The `SDK_READY` atomic flag must be set before any post-bootstrap operations. Ch
 
 1. Was `sdkBootstrap` called? (happens during app init)
 2. Did bootstrap complete successfully? Check logs for errors
-3. Is the device identity valid? (DBRW binding must match)
+3. Is the device identity valid? (anchor enrollment must be present and verify)
 
 ### Storage Nodes
 
@@ -366,7 +366,7 @@ Common causes:
 
 - Missing native lib → rebuild with `make android-libs`
 - JNI method not found → verify symbol count (87+)
-- DBRW initialization failure → clear app data and retry
+- Anchor/identity initialization failure → clear app data and retry
 
 **"run-as: Package is not debuggable"**
 
