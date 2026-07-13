@@ -63,11 +63,13 @@ SECTIONS
    * DOWN. __secure_stack_limit is its explicit floor: MSPLIM is set to it (ENTRY_POINT sp_limit
    * word + belt-and-suspenders write at reset) so a Secure stack overflow FAULTS instead of
    * silently corrupting the monitor's own code/state/heap below it.
-   * Sized to fit the SRAM-resident TCB: SECURE (256K) = ~137K code+rodata + ~96K working heap
-   * (SPHINCS+ σ^host sign + ~2× release staging in `emit`) + this stack. 20K is the largest stack
-   * that leaves the 96K heap intact; the MSPLIM floor sits above `.bss`, so an overflow faults
-   * (caught by the Secure fault handler) rather than corrupting the monitor. */
-  __secure_stack_size = 20K;
+   * Sized to fit the SRAM-resident TCB: SECURE (256K) = ~137K code+rodata + 56K working heap
+   * (SPHINCS+ σ^host) + this 48K stack. SILICON (SWD, 2026-07-13): the appliance bring-up call
+   * chain — TROPIC01 session_start (X25519 DH + AES-GCM + SHA-256) plus the ~4.6K `Tropic01`
+   * (ActiveSession) struct move — overflowed a 20K stack (read CFSR.STKOF over SWD, SP just above
+   * the 20K MSPLIM); 48K clears it (CFSR=0, init runs to completion). The MSPLIM floor sits above
+   * `.bss`, so any future overflow faults (caught by the Secure fault handler), never corrupts. */
+  __secure_stack_size = 48K;
   PROVIDE(_stack_start = ORIGIN(SECURE) + LENGTH(SECURE));
   PROVIDE(__secure_stack_limit = ORIGIN(SECURE) + LENGTH(SECURE) - __secure_stack_size);
 

@@ -44,7 +44,7 @@ mod tropic;
 // .bss; the Non-secure app has its own separate heap. Initialized once at reset before any alloc.
 #[global_allocator]
 static HEAP: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
-const SECURE_HEAP_SIZE: usize = 96 * 1024;
+const SECURE_HEAP_SIZE: usize = 56 * 1024;
 static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
     [core::mem::MaybeUninit::uninit(); SECURE_HEAP_SIZE];
 
