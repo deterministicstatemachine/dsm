@@ -74,14 +74,11 @@ fn keystore_upcall(method: &str, input: &[u8]) -> Result<Vec<u8>, DsmError> {
             &mut env,
             "com/dsm/wallet/security/KeystoreVault",
         )?;
-        let j_in = env.byte_array_from_slice(input).map_err(|e| e.to_string())?;
+        let j_in = env
+            .byte_array_from_slice(input)
+            .map_err(|e| e.to_string())?;
         let ret = env
-            .call_static_method(
-                class,
-                method,
-                "([B)[B",
-                &[JValue::Object(&j_in.into())],
-            )
+            .call_static_method(class, method, "([B)[B", &[JValue::Object(&j_in.into())])
             .map_err(|e| format!("KeystoreVault.{method} upcall failed: {e}"))?;
         let obj = ret.l().map_err(|e| e.to_string())?;
         if obj.is_null() {

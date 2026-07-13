@@ -652,8 +652,12 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
             match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
                 Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),
-                Ok(false) => log::info!("[SDK Init] No sealed wallet seed — mnemonic unlock required"),
-                Err(e) => log::warn!("[SDK Init] Seed vault unlock failed ({e}) — mnemonic required"),
+                Ok(false) => {
+                    log::info!("[SDK Init] No sealed wallet seed — mnemonic unlock required")
+                }
+                Err(e) => {
+                    log::warn!("[SDK Init] Seed vault unlock failed ({e}) — mnemonic required")
+                }
             }
         }
         let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()

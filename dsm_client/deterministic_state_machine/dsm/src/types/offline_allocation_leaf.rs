@@ -140,17 +140,26 @@ mod tests {
         let mut tree = SparseMerkleTree::new(64);
         tree.update_leaf(&key, &value).expect("update_leaf");
         let root = *tree.root();
-        let proof = tree.get_inclusion_proof(&key, 256).expect("proof").to_bytes();
+        let proof = tree
+            .get_inclusion_proof(&key, 256)
+            .expect("proof")
+            .to_bytes();
 
         assert!(verify_offline_allocation_leaf(
             &root, &g, &d, &b, &a, amount, seq, &proof
         ));
         // Wrong amount / sequence / asset must all fail closed.
-        assert!(!verify_offline_allocation_leaf(&root, &g, &d, &b, &a, 31, seq, &proof));
-        assert!(!verify_offline_allocation_leaf(&root, &g, &d, &b, &a, amount, 2, &proof));
+        assert!(!verify_offline_allocation_leaf(
+            &root, &g, &d, &b, &a, 31, seq, &proof
+        ));
+        assert!(!verify_offline_allocation_leaf(
+            &root, &g, &d, &b, &a, amount, 2, &proof
+        ));
         let mut a2 = a;
         a2[0] ^= 0xff;
-        assert!(!verify_offline_allocation_leaf(&root, &g, &d, &b, &a2, amount, seq, &proof));
+        assert!(!verify_offline_allocation_leaf(
+            &root, &g, &d, &b, &a2, amount, seq, &proof
+        ));
         // Tampered root fails.
         let mut bad_root = root;
         bad_root[0] ^= 0xff;
@@ -163,7 +172,14 @@ mod tests {
     fn empty_proof_fails_closed() {
         let (g, d, b, a) = ids();
         assert!(!verify_offline_allocation_leaf(
-            &[0u8; 32], &g, &d, &b, &a, 0, 0, &[]
+            &[0u8; 32],
+            &g,
+            &d,
+            &b,
+            &a,
+            0,
+            0,
+            &[]
         ));
     }
 }

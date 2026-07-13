@@ -24,7 +24,11 @@ impl AppRouterImpl {
     /// Dispatch handler for `wallet.loadOffline` / `wallet.unloadOffline` invoke routes.
     pub(crate) async fn handle_offline_cash_invoke(&self, i: AppInvoke) -> AppResult {
         let is_load = i.method == "wallet.loadOffline";
-        let verb = if is_load { "loadOffline" } else { "unloadOffline" };
+        let verb = if is_load {
+            "loadOffline"
+        } else {
+            "unloadOffline"
+        };
 
         // Decode ArgPack -> OfflineCashRequest.
         let arg_pack = match generated::ArgPack::decode(&*i.args) {
@@ -33,14 +37,21 @@ impl AppRouterImpl {
         };
         let req = match generated::OfflineCashRequest::decode(&*arg_pack.body) {
             Ok(r) => r,
-            Err(e) => return err(format!("wallet.{verb}: decode OfflineCashRequest failed: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "wallet.{verb}: decode OfflineCashRequest failed: {e}"
+                ))
+            }
         };
         if req.amount == 0 {
             return err(format!("wallet.{verb}: amount must be > 0"));
         }
 
         // Resolve the asset's CPTA policy_commit (strict — no silent fallback).
-        let asset = match self.core_sdk.resolve_policy_commit_strict(req.token_id.as_bytes()) {
+        let asset = match self
+            .core_sdk
+            .resolve_policy_commit_strict(req.token_id.as_bytes())
+        {
             Ok(pc) => pc,
             Err(e) => return err(format!("wallet.{verb}: policy_commit resolve failed: {e}")),
         };

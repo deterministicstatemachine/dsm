@@ -3508,7 +3508,8 @@ impl BilateralBleHandler {
                     dsm::types::operations::Operation::Transfer {
                         amount, token_id, ..
                     },
-                ) => match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
+                ) => match crate::bridge::app_router()
+                    .map(|r| r.resolve_policy_commit_strict(token_id))
                 {
                     Some(Ok(asset)) => Some(dsm::types::device_state::OfflineSpend {
                         anchor_bundle_b: staged.pin.bundle,

@@ -2824,7 +2824,7 @@ mod tests {
                 &[],
                 Some(initial_tip),
                 None,
-                        None,
+                None,
             )
             .expect("first-ever advance should succeed");
 

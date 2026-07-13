@@ -1018,7 +1018,9 @@ impl CoreSDK {
         let mut sm = self.state_machine.lock();
         let outcome = {
             let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine("load_offline_cash: DeviceState not initialized (genesis first)")
+                DsmError::state_machine(
+                    "load_offline_cash: DeviceState not initialized (genesis first)",
+                )
             })?;
             ds.load_offline_cash(&anchor_bundle_b, &asset, amount)?
         };
@@ -1046,7 +1048,9 @@ impl CoreSDK {
         let mut sm = self.state_machine.lock();
         let outcome = {
             let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine("unload_offline_cash: DeviceState not initialized (genesis first)")
+                DsmError::state_machine(
+                    "unload_offline_cash: DeviceState not initialized (genesis first)",
+                )
             })?;
             ds.unload_offline_cash(&anchor_bundle_b, &asset, amount)?
         };
@@ -3427,8 +3431,8 @@ mod tests {
                         key: staged.anchor_leaf.key,
                         new_value: staged.anchor_leaf.new_value,
                     }),
-                            None,
-            )
+                    None,
+                )
                 .expect("bearer advance");
             let proofs = out
                 .anchor_proofs

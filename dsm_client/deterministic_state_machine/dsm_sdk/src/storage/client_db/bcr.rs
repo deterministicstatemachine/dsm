@@ -388,8 +388,10 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
     let mut offline_allocations: BTreeMap<[u8; 32], OfflineAllocation> = BTreeMap::new();
     for _ in 0..pool_count {
         let key: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("pool key: {e}"))?;
-        let amount_bytes: [u8; 8] = take::<8>(&mut cursor).map_err(|e| anyhow!("pool amount: {e}"))?;
-        let seq_bytes: [u8; 8] = take::<8>(&mut cursor).map_err(|e| anyhow!("pool sequence: {e}"))?;
+        let amount_bytes: [u8; 8] =
+            take::<8>(&mut cursor).map_err(|e| anyhow!("pool amount: {e}"))?;
+        let seq_bytes: [u8; 8] =
+            take::<8>(&mut cursor).map_err(|e| anyhow!("pool sequence: {e}"))?;
         offline_allocations.insert(
             key,
             OfflineAllocation {
@@ -701,7 +703,7 @@ mod tests {
                 }],
                 Some([0x55; 32]),
                 None,
-                        None,
+                None,
             )
             .expect("advance relationship");
 
@@ -728,7 +730,10 @@ mod tests {
                 },
             )],
             outcome.new_device_state.extra_leaves_snapshot().clone(),
-            outcome.new_device_state.offline_allocations_snapshot().clone(),
+            outcome
+                .new_device_state
+                .offline_allocations_snapshot()
+                .clone(),
             1024,
         )
         .expect("restore head with signed rel state");
@@ -870,7 +875,11 @@ mod tests {
             .load_offline_cash(&bundle, &token, 3)
             .expect("load 3 offline")
             .new_device_state;
-        assert_ne!(head.root(), head0.root(), "load must advance the device root");
+        assert_ne!(
+            head.root(),
+            head0.root(),
+            "load must advance the device root"
+        );
 
         let bytes = encode_device_state(&head);
         let (decoded, stored_root) =
@@ -924,7 +933,11 @@ mod tests {
         let n = bytes.len();
         let vc = n - 10; // value_capability
         let sf = n - 9; // state_flag
-        assert_eq!(&bytes[n - 8..], &[0, 0, 0, 0, 0, 0, 0, 0], "trailing extra_leaves + pools counts should be 0");
+        assert_eq!(
+            &bytes[n - 8..],
+            &[0, 0, 0, 0, 0, 0, 0, 0],
+            "trailing extra_leaves + pools counts should be 0"
+        );
         assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
         assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
 
@@ -963,7 +976,7 @@ mod tests {
                 }],
                 None,
                 None,
-                        None,
+                None,
             )
             .expect("second advance");
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
@@ -1010,7 +1023,7 @@ mod tests {
                 }],
                 None,
                 None,
-                        None,
+                None,
             )
             .expect("third advance");
         update_bcr_device_head(&outcome1.new_device_state).expect("upsert head1");
