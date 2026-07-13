@@ -1771,6 +1771,23 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         val bilateralInitialized = com.dsm.native.DsmNative.initializeBilateralSdk()
                         if (bilateralInitialized) {
                             Log.i(tag, "initDsmAndSignalReady: Bilateral SDK initialized successfully")
+                            // Install the USB anchor-appliance factory so an offline-bearer SEND drives
+                            // the physical RP2350/TROPIC01 anchor over USB-OTG (σ^chip/σ^host/counter
+                            // from real silicon). This is the ONE v2 device install (the receiver needs
+                            // no hardware). Present only in an on_device_installs .so — the default .so
+                            // lacks the symbol, so this no-ops (UnsatisfiedLinkError) and offline-bearer
+                            // sends fail closed. The installed factory itself fails closed per send if
+                            // the chip is absent, so installing here (once) is safe regardless of USB state.
+                            val anchorInstalled = try {
+                                Unified.installAnchorTransport()
+                            } catch (e: UnsatisfiedLinkError) {
+                                Log.i(tag, "installAnchorTransport absent (default .so, not on_device_installs) — offline-bearer send fails closed")
+                                false
+                            } catch (t: Throwable) {
+                                Log.e(tag, "installAnchorTransport error", t)
+                                false
+                            }
+                            Log.i(tag, "initDsmAndSignalReady: USB anchor transport installed = $anchorInstalled")
                         } else {
                             Log.w(tag, "initDsmAndSignalReady: Bilateral SDK initialization returned false")
                         }
