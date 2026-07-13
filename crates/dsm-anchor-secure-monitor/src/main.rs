@@ -125,9 +125,13 @@ static mut LAST_SEQ: u32 = 0;
 
 // ── §2 exact measurement (fresh, before authority) ────────────────────────────────────────────
 
-/// The enrolled application digest `mu_enrolled` (OTP-sealed, secure-read; see `otp-plan.json`).
-/// Fail-closed: a permission-denied / blank read yields `None` and every authority op is refused.
-fn mu_enrolled() -> Option<[u8; 32]> {
+// `bench_self_enroll` is a BENCH-ONLY escape hatch and must never ship in production.
+#[cfg(all(feature = "bench_self_enroll", feature = "production"))]
+compile_error!("`bench_self_enroll` must NOT be enabled in a production build (feature `production`)");
+
+/// The OTP-sealed enrolled digest (secure-read; see `otp-plan.json`). `None` = permission-denied or
+/// blank OTP.
+fn otp_mu_enrolled() -> Option<[u8; 32]> {
     // 16 ECC rows @ page 46 (row_base 2944) — MUST match otp-plan.json + provisioning.
     const MU_ROW: usize = 46 * hal::otp::NUM_ROWS_PER_PAGE;
     let mut out = [0u8; 32];
@@ -142,6 +146,63 @@ fn mu_enrolled() -> Option<[u8; 32]> {
         Some(out)
     } else {
         None
+    }
+}
+
+/// BENCH self-enrollment: the digest of the NS image measured at THIS boot (set once by
+/// `bench_self_enroll_at_boot`). Only compiled under the bench feature. A distinctive SWD-readable
+/// marker (`BENCH_ENROLLED_MARKER`) is set alongside so an operator can tell the device is
+/// bench-enrolled, not OTP-sealed.
+#[cfg(feature = "bench_self_enroll")]
+static mut BENCH_MU: Option<[u8; 32]> = None;
+/// Obvious bench-mode status bit (SWD-readable): 0 = not bench-enrolled; 0xBE0C_0FED = bench-enrolled
+/// this boot from the measured NS image (NO OTP seal).
+#[cfg(feature = "bench_self_enroll")]
+#[no_mangle]
+pub static mut BENCH_ENROLLED_MARKER: u32 = 0;
+
+/// Measure the NS RX image once at boot and stash it as the bench enrolled digest — BUT refuse
+/// (leave `BENCH_MU = None`) if OTP is already sealed, so a real seal is never shadowed by bench
+/// mode. Called from `main` before the boundary/NS launch. Does NOT weaken `measurement_ok`: the
+/// per-op fresh measure + compare still runs; this only supplies the enrolled value when OTP is blank.
+#[cfg(feature = "bench_self_enroll")]
+unsafe fn bench_self_enroll_at_boot() {
+    if otp_mu_enrolled().is_some() {
+        // Both OTP and bench configured — refuse. Authority ops fail closed (BENCH_MU stays None).
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(BENCH_ENROLLED_MARKER), 0xDEAD_C0DE);
+        return;
+    }
+    let start = core::ptr::addr_of!(__ns_rx_start) as usize;
+    let end = core::ptr::addr_of!(__ns_rx_end) as usize;
+    if end <= start {
+        return;
+    }
+    let bytes = core::slice::from_raw_parts(start as *const u8, end - start);
+    let digest = *blake3::hash(bytes).as_bytes();
+    core::ptr::write_volatile(core::ptr::addr_of_mut!(BENCH_MU), Some(digest));
+    // Self-verify that the §2 gate now PASSES the same way an authority op will: a fresh measure +
+    // constant-time compare against the just-enrolled digest. 0xBE0C_0FED only if measurement_ok()
+    // actually returns true (0xBE0C_0BAD would flag a self-enroll that somehow does not satisfy §2).
+    let marker = if measurement_ok() { 0xBE0C_0FED } else { 0xBE0C_0BAD };
+    core::ptr::write_volatile(core::ptr::addr_of_mut!(BENCH_ENROLLED_MARKER), marker);
+}
+
+/// The enrolled application digest `mu_enrolled`. Production: OTP-sealed. Bench (`bench_self_enroll`,
+/// non-production): the NS image measured at boot, ONLY when OTP is blank (refuses if OTP is sealed).
+/// Fail-closed: `None` refuses every authority op.
+fn mu_enrolled() -> Option<[u8; 32]> {
+    #[cfg(feature = "bench_self_enroll")]
+    {
+        // If OTP is sealed we must not shadow it — refuse (fail-closed) so a bench build can never
+        // silently override a real seal. Otherwise use the boot-measured bench digest.
+        if otp_mu_enrolled().is_some() {
+            return None;
+        }
+        return unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BENCH_MU)) };
+    }
+    #[cfg(not(feature = "bench_self_enroll"))]
+    {
+        otp_mu_enrolled()
     }
 }
 
@@ -358,6 +419,14 @@ fn main() -> ! {
     unsafe {
         let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), app_ready as u32);
+    }
+
+    // BENCH ONLY (feature `bench_self_enroll`, never production): enroll the measurement digest from
+    // the NS image measured at THIS boot, so authority ops pass the §2 gate on an unsealed board
+    // WITHOUT burning OTP. Refuses if OTP is already sealed. Runs before the NS launch / any SG op.
+    #[cfg(feature = "bench_self_enroll")]
+    unsafe {
+        bench_self_enroll_at_boot();
     }
 
     // Step 5: configure the Secure/Non-secure boundary BEFORE any Non-secure launch. This runs from

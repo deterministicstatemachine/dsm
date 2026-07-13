@@ -39,3 +39,15 @@ dsm-sphincs = { path = "../dsm-sphincs" }
 [build-dependencies]
 # Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.
 cc = "1"
+
+[features]
+# Production profile marker. A production build sets this; it FORBIDS `bench_self_enroll` (a build
+# that enables both fails to compile — see the compile_error in main.rs).
+production = []
+# BENCH-ONLY measurement enrollment (never production). Sources `mu_enrolled` from the NS image
+# measured at THIS boot instead of OTP, so authority ops work on an unsealed board WITHOUT burning
+# OTP. It does NOT weaken `measurement_ok`: the full fresh measure + constant-time compare runs on
+# every authority op — only the enrolled digest's SOURCE changes, and only when OTP is blank. If OTP
+# IS sealed, bench mode refuses (fail-closed) so a real seal is never overridden. Mutually exclusive
+# with `production`.
+bench_self_enroll = []
