@@ -604,6 +604,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            offline_spend: None,
         })
     }
 
@@ -1636,6 +1637,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            offline_spend: None,
         };
 
         {
@@ -2592,6 +2594,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            offline_spend: None,
         };
 
         {
@@ -3492,6 +3495,39 @@ impl BilateralBleHandler {
             } else {
                 None
             };
+        // Offline-bearer transfer: draw value from the device-bound offline-cash pool, not the online
+        // balance. Build the pool-spend descriptor ONCE here — it carries the anchor bundle B from the
+        // staged appliance, which is NOT recoverable from anchor_leaf's H(B) key, so it is stashed on
+        // the session (below) and threaded identically into the canonical commit. Empty deltas and
+        // Some(offline_spend) are ONE atomic decision (empty deltas without offline_spend is rejected
+        // by the conservation guard — the fail-closed case).
+        let offline_spend: Option<dsm::types::device_state::OfflineSpend> =
+            match (staged_bearer.as_ref(), &session.operation) {
+                (
+                    Some((staged, _)),
+                    dsm::types::operations::Operation::Transfer {
+                        amount, token_id, ..
+                    },
+                ) => match crate::bridge::app_router()
+                    .map(|r| r.resolve_policy_commit_strict(token_id))
+                {
+                    Some(Ok(asset)) => Some(dsm::types::device_state::OfflineSpend {
+                        anchor_bundle_b: staged.pin.bundle,
+                        asset,
+                        amount: amount.value(),
+                    }),
+                    // policy_commit unresolved: leave None so the online deltas stand (or, if they too
+                    // were empty on unresolved, the guard rejects) — never empty deltas without a spend.
+                    _ => None,
+                },
+                _ => None,
+            };
+        // Pool-backed: the value moved via the pool debit, so the online deltas MUST be empty.
+        let sender_deltas = if offline_spend.is_some() {
+            Vec::new()
+        } else {
+            sender_deltas
+        };
         let sim_outcome = router.simulate_advance_for_confirm(
             rel_key,
             session.counterparty_device_id,
@@ -3499,6 +3535,9 @@ impl BilateralBleHandler {
             &sender_deltas,
             Some(h_n),
             staged_bearer.as_ref().map(|(s, _)| s.anchor_leaf.clone()),
+            // Bearer→pool: draw the value from the offline-cash pool instead of the online balance.
+            // The same descriptor is stashed on the session and used at the canonical commit.
+            offline_spend,
         )?;
         // `parent_r_a` is the CAS-layer device head (pre-seed root). The
         // Merkle `parent_proof` is built against the post-seed tree, so the
@@ -3562,6 +3601,9 @@ impl BilateralBleHandler {
                 if let Some(art) = bearer_artifacts.as_ref() {
                     s.anchor_leaf = Some(art.anchor_leaf.clone());
                     s.anchor_sim_root = Some(sender_smt_root);
+                    // Carry the pool-spend descriptor forward (Copy) so the canonical commit debits
+                    // the SAME pool the sim did — the bundle B is not recoverable from anchor_leaf.
+                    s.offline_spend = offline_spend;
                 }
             }
         }
@@ -4709,6 +4751,7 @@ impl BilateralBleHandler {
                 &receiver_deltas,
                 Some(h_n),
                 None, // receiver credits ordinary; the fused-anchor leaf is a sender-side concern
+                None, // offline_spend: never — the receiver credits online value, it does not spend a pool
             )
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
@@ -5224,6 +5267,7 @@ impl BilateralBleHandler {
             cached_receipt,
             session_anchor_leaf,
             session_anchor_sim_root,
+            session_offline_spend,
         ) = {
             let sessions = self.sessions.sessions.lock().await;
             let sess = match sessions.get(commitment_hash) {
@@ -5250,6 +5294,7 @@ impl BilateralBleHandler {
                 sess.stitched_receipt_bytes.clone(),
                 sess.anchor_leaf.clone(),
                 sess.anchor_sim_root,
+                sess.offline_spend,
             )
         };
 
@@ -5309,6 +5354,15 @@ impl BilateralBleHandler {
                     }
                     _ => Vec::new(),
                 };
+            // Bearer→pool: if the confirm-build stashed a pool-spend descriptor, the value is drawn
+            // from the offline-cash pool, so the online deltas MUST be empty — the SAME decision the
+            // confirm-build sim made, so the committed root matches the sent sim root. Empty deltas
+            // and Some(offline_spend) are one atomic choice (never split).
+            let sender_deltas = if session_offline_spend.is_some() {
+                Vec::new()
+            } else {
+                sender_deltas
+            };
 
             match manager
                 .prepare_bilateral_advance(
@@ -5318,6 +5372,7 @@ impl BilateralBleHandler {
                     pre_entropy,
                     sender_deltas,
                     session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
+                    session_offline_spend, // bearer→pool: the SAME pool debit the confirm-build sim used
                 )
                 .await
             {
@@ -5383,6 +5438,10 @@ impl BilateralBleHandler {
                 &prepared.deltas,
                 Some(prepared.parent_tip),
                 prepared.anchor_leaf.clone(),
+                // Must match the commit at execute_on_relationship_for_bilateral below EXACTLY
+                // (same inputs → same root): the SAME pool debit `prepared` carries. `OfflineSpend`
+                // is Copy, so this and the commit read the identical value.
+                prepared.offline_spend,
             ) {
                 Ok(o) => o.child_r_a,
                 Err(e) => {
@@ -5427,6 +5486,11 @@ impl BilateralBleHandler {
             &prepared.deltas,
             Some(prepared.parent_tip),
             prepared.anchor_leaf.clone(), // bearer: commit the same fused-anchor leaf as the sim proofs
+            // Bearer→pool: the SAME pool debit the confirm-build sim and the determinism-guard sim
+            // used (`prepared.offline_spend`, Copy) — `prepared.deltas` is empty for a bearer transfer,
+            // so the value is drawn from the offline-cash pool, not the online balance, and the
+            // committed sender root byte-matches the sent sim root.
+            prepared.offline_spend,
         ) {
             Ok(o) => o,
             Err(advance_err) => {
@@ -6144,6 +6208,7 @@ impl BilateralBleHandler {
             receiver_challenge: None,
             anchor_leaf: None,
             anchor_sim_root: None,
+            offline_spend: None,
         };
 
         // Insert into active sessions
@@ -6485,6 +6550,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                offline_spend: None,
             })
             .await;
 
@@ -6589,6 +6655,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                offline_spend: None,
             })
             .await;
 
@@ -6658,6 +6725,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                offline_spend: None,
             })
             .await;
         handler
@@ -6679,6 +6747,7 @@ mod tests {
                 receiver_challenge: None,
                 anchor_leaf: None,
                 anchor_sim_root: None,
+                offline_spend: None,
             })
             .await;
 

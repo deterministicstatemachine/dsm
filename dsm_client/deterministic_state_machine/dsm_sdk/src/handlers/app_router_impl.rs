@@ -2593,6 +2593,7 @@ impl AppRouter for AppRouterImpl {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk
             .execute_on_relationship_with_anchor_leaf(
@@ -2602,6 +2603,7 @@ impl AppRouter for AppRouterImpl {
                 deltas,
                 initial_chain_tip,
                 anchor_leaf,
+                offline_spend,
             )
             .map(|(_state, outcome)| outcome)
     }
@@ -2614,6 +2616,7 @@ impl AppRouter for AppRouterImpl {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk.simulate_advance_for_confirm(
             rel_key,
@@ -2622,6 +2625,7 @@ impl AppRouter for AppRouterImpl {
             deltas,
             initial_chain_tip,
             anchor_leaf,
+            offline_spend,
         )
     }
 
@@ -2748,6 +2752,10 @@ impl AppRouter for AppRouterImpl {
             // Wallet invoke routes
             "wallet.send" | "wallet.sendSmart" | "wallet.sendOffline" => {
                 self.handle_wallet_invoke(i).await
+            }
+            // Offline-cash load/unload (two-regime money model)
+            "wallet.loadOffline" | "wallet.unloadOffline" => {
+                self.handle_offline_cash_invoke(i).await
             }
             // Contacts invoke routes
             "contacts.addManual" => self.handle_contacts_invoke(i).await,

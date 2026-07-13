@@ -1,0 +1,24 @@
+[package]
+name = "dsm-anchor-nonsecure-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "DSM anchor RP2350 Non-secure application (TrustZone-M Non-secure world): USB-CDC + protobuf + host transport + candidate transition/SMT-proof construction. Calls the Secure monitor ONLY through the single NSC Secure Gateway entry dsm_secure_dispatch(slot, seq); a fixed Non-secure SRAM mailbox slot carries bulk request/response bytes. Has NO access to OTP, the host key, TROPIC01, the counter, or Secure state. Not a workspace member — thumbv8m-only."
+
+[[bin]]
+name = "dsm-anchor-nonsecure-app"
+test = false
+bench = false
+
+[dependencies]
+# The app builds candidate transitions + SMT inclusion proofs (BLAKE3 only — NO SPHINCS+, NO
+# libtropic; those are Secure-only).
+blake3 = { version = "1", default-features = false }
+rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
+panic-halt = "1.0"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+embedded-alloc = "0.6"
+# USB-CDC host transport (the Non-secure data path).
+usb-device = "0.3"
+usbd-serial = "0.2"

@@ -118,6 +118,7 @@ pub trait AppRouter: Send + Sync {
     /// happens later inside `execute_on_relationship_for_bilateral`).
     /// Returns identical outcome for identical inputs, so the simulated
     /// receipt is byte-exact with the eventual real advance.
+    #[allow(clippy::too_many_arguments)]
     fn simulate_advance_for_confirm(
         &self,
         _rel_key: [u8; 32],
@@ -126,6 +127,7 @@ pub trait AppRouter: Send + Sync {
         _deltas: &[dsm::types::device_state::BalanceDelta],
         _initial_chain_tip: Option<[u8; 32]>,
         _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
             "simulate_advance_for_confirm not implemented on this router",
@@ -195,6 +197,7 @@ pub trait AppRouter: Send + Sync {
     /// Returns `Err` if the router is not yet attached to an identity, or if
     /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8
     /// balance binding).
+    #[allow(clippy::too_many_arguments)]
     fn execute_on_relationship_for_bilateral(
         &self,
         _rel_key: [u8; 32],
@@ -203,6 +206,7 @@ pub trait AppRouter: Send + Sync {
         _deltas: &[dsm::types::device_state::BalanceDelta],
         _initial_chain_tip: Option<[u8; 32]>,
         _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
             "execute_on_relationship_for_bilateral not implemented on this router",

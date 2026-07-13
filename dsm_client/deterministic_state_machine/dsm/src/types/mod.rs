@@ -30,6 +30,7 @@ pub mod general;
 pub mod genesis_types;
 pub mod identifiers; // New type-safe identifiers
 pub mod identity;
+pub mod offline_allocation_leaf; // offline-cash device-bound allocation leaf (load/unload)
 pub mod operations;
 pub mod policy_types;
 pub mod proto; // generated OUT_DIR include (dsm.rs)

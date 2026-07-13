@@ -1,0 +1,41 @@
+[package]
+name = "dsm-anchor-secure-monitor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "DSM anchor RP2350 Secure monitor (TrustZone-M Secure world): TROPIC01 (σ^chip), BLAKE3-SPHINCS+ partition key (σ^host), physical counter, prepare/commit/recovery state, exact-measurement seal, and the ONLY Secure Gateway (NSC veneer + fixed-slot dispatcher). SRAM-resident TCB (linker-emitted boot-block LOAD_MAP), runtime boundary (SAU/ACCESSCTRL/BFHFNMINS/watchdog), and the real appliance (anchor_core dispatch — NOT a reimplemented state machine) are wired; full-crypto silicon validation pending a clean TROPIC power cycle. Not a workspace member — thumbv8m-only, excluded in the root manifest."
+
+# Two-image TrustZone build; link the monitor FIRST to produce the CMSE import library the
+# Non-secure app links against. Build from inside this dir so .cargo/config.toml applies.
+[[bin]]
+name = "dsm-anchor-secure-monitor"
+test = false
+bench = false
+
+[dependencies]
+# Software-Authority / Hardware-Identity protocol core (root-advance message recomputation, the
+# appliance state machine, the Tropic/PartitionSig traits the monitor implements for σ^chip/σ^host).
+dsm-anchor-core = { path = "../dsm-anchor-core" }
+# Exact-measurement seal: BLAKE3 over the canonical Non-secure RX image (no_std).
+blake3 = { version = "1", default-features = false }
+# Constant-time comparison for the measurement equality check.
+subtle = { version = "2", default-features = false }
+# RP2350 HAL — SAU/ACCESSCTRL, OTP reads (rom_data/otp), SRAM-image boot.
+rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
+# Secure fault/panic handler (halts; never returns to Non-secure).
+panic-halt = "1.0"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+# Heap for the Secure working set (SPHINCS+ signing / release staging) — SEPARATE from the NS heap.
+embedded-alloc = "0.6"
+# σ^chip: TROPIC01 resident Ed25519 signing over the DSM root-advance message (Secure-only SPI0).
+tropic01 = { path = "../../../../libtropic-rs/tropic01" }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+embedded-hal = "1.0"
+embedded-hal-bus = "0.3"
+# σ^host: shared no_std BLAKE3-SPHINCS+ (SPX128f) — the SAME crate the pico anchor uses (PartitionSig).
+dsm-sphincs = { path = "../dsm-sphincs" }
+
+[build-dependencies]
+# Compiles the -mcmse NSC veneer and links --cmse-implib to emit the Secure Gateway import library.
+cc = "1"

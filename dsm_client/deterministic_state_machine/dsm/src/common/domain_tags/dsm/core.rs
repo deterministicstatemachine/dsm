@@ -21,6 +21,15 @@ pub const TAG_STATE_HASH: &str = "DSM/state-hash";
 /// anchor-core v2 leaf `anchor_state_leaf(B, h_i, u_i)`, replaced old→successor on every
 /// bearer transfer's device-SMT advance. Never keyed by relationship/root/frontier/counter.
 pub const TAG_FUSED_ANCHOR_STATE_LEAF: &str = "DSM/fused-anchor-state-leaf/v1";
+/// SMT key of the per-(device, asset) offline-cash allocation leaf:
+/// `H(tag ‖ genesis_id ‖ device_id ‖ anchor_bundle_B ‖ asset_id)`. Accounts for value
+/// deliberately loaded from the online balance into this device's offline-bearer pool
+/// (device-bound single-device cash). Distinct from the anchor-state leaf, which proves
+/// offline position/counter; this leaf accounts for the loaded VALUE.
+pub const TAG_OFFLINE_ALLOCATION_LEAF: &str = "DSM/offline-allocation/v1";
+/// Value of the offline-cash allocation leaf: `H(tag ‖ amount_be ‖ sequence_be)`. The
+/// sequence advances on every load/unload/spend so a repeated amount still changes the leaf.
+pub const TAG_OFFLINE_ALLOCATION_STATE: &str = "DSM/offline-allocation-state/v1";
 pub const TAG_COMMITMENT: &str = "DSM/commitment";
 pub const TAG_COMMITMENT_OPEN: &str = "DSM/commitment-open";
 pub const TAG_COMMITMENT_FIELDS: &str = "DSM/commitment-fields";
@@ -51,6 +60,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_TIP,
     TAG_STATE_HASH,
     TAG_FUSED_ANCHOR_STATE_LEAF,
+    TAG_OFFLINE_ALLOCATION_LEAF,
+    TAG_OFFLINE_ALLOCATION_STATE,
     TAG_COMMITMENT,
     TAG_COMMITMENT_OPEN,
     TAG_COMMITMENT_FIELDS,

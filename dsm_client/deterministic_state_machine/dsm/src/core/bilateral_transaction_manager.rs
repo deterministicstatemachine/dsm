@@ -403,6 +403,12 @@ pub struct PreparedBilateralAdvance {
     /// appliance; the SAME value the sender's `simulate_advance_for_confirm` used to build the wire
     /// proofs, so the canonical committed root matches (both-or-neither). `None` for ordinary transfers.
     pub anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
+    /// Offline-cash pool debit for an offline-bearer transfer: the value is drawn from the
+    /// device-bound pool instead of the online balance, so `deltas` is empty and this is `Some`.
+    /// Carried forward from the confirm-build seam (stashed on the session) — NEVER reconstructed
+    /// from `anchor_leaf`, whose key is `H(B)` and cannot recover the bundle. Threaded identically
+    /// into the determinism-guard sim and the canonical commit so all three sender roots byte-match.
+    pub offline_spend: Option<crate::types::device_state::OfflineSpend>,
 }
 
 #[derive(Debug)]
@@ -1329,6 +1335,7 @@ impl BilateralTransactionManager {
     ///
     /// No SMT mutation. No anchor mutation. No `pending_commitments` removal
     /// — caller calls [`Self::consume_pre_commitment`] after advance commit.
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare_bilateral_advance(
         &mut self,
         remote_device_id: &[u8; 32],
@@ -1337,6 +1344,7 @@ impl BilateralTransactionManager {
         pre_generated_entropy: Option<[u8; 32]>,
         sender_deltas: Vec<BalanceDelta>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<crate::types::device_state::OfflineSpend>,
     ) -> Result<PreparedBilateralAdvance, DsmError> {
         info!("prepare_bilateral_advance: tripwire + entropy (no SMT/anchor mutation)");
 
@@ -1447,6 +1455,7 @@ impl BilateralTransactionManager {
             entropy,
             pre_commitment_hash: *pre_commitment_hash,
             anchor_leaf,
+            offline_spend,
         })
     }
 

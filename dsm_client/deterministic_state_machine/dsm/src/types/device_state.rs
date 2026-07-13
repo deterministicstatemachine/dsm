@@ -92,6 +92,27 @@ pub struct DeviceState {
     /// but absent from the replayed one), bricking the wallet. `BTreeMap` for deterministic
     /// iteration during persistence.
     extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
+
+    /// Offline-cash pools: value deliberately loaded from the online balance into this
+    /// device's device-bound offline-bearer regime ("cash in hand"). Keyed by
+    /// `offline_allocation_key(genesis, devid, anchor_bundle_B, asset)`; the value is the
+    /// extractable `(amount, sequence)` behind the committed allocation leaf (whose hash lives
+    /// in [`Self::extra_leaves`]). The leaf hash is not reversible to the amount, so this map is
+    /// the enumerable, persisted record of the pool balance — mutated only by the
+    /// load/unload/spend chokepoints, never by the online per-token spend path. `BTreeMap` for
+    /// deterministic iteration during persistence.
+    offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
+}
+
+/// Extractable state of one offline-cash pool (see [`DeviceState::offline_allocations`]).
+/// The committed allocation leaf value is `offline_allocation_value(amount, sequence)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OfflineAllocation {
+    /// Current pool balance in the asset's base units.
+    pub amount: u64,
+    /// Monotone per-pool transition counter; advances on every load/unload/spend so a
+    /// repeated `amount` still produces a distinct committed leaf value (no replay).
+    pub sequence: u64,
 }
 
 impl fmt::Debug for DeviceState {
@@ -385,6 +406,23 @@ pub enum BalanceDirection {
     Debit,
 }
 
+/// The value source for an [`DeviceState::advance`] that spends from the device-bound
+/// offline-cash pool instead of the online balance (an offline-bearer transfer).
+///
+/// When present, the transfer's value is conserved by debiting the pool by `amount` — the
+/// online balance is NOT touched (it was already debited when the cash was loaded) and
+/// `deltas` MUST be empty. The pool debit and the relationship + anchor-state advance land in
+/// ONE atomic device-root replacement, so the value move and the transition are inseparable.
+#[derive(Clone, Copy, Debug)]
+pub struct OfflineSpend {
+    /// Chip-rooted anchor bundle `B` binding the pool to this device's offline-bearer island.
+    pub anchor_bundle_b: [u8; 32],
+    /// Asset (CPTA `policy_commit`) whose pool is being spent.
+    pub asset: [u8; 32],
+    /// Amount drawn from the pool — must equal the transfer operation's amount.
+    pub amount: u64,
+}
+
 /// By-construction balance-conservation guard for [`DeviceState::advance`].
 ///
 /// Validates that `deltas` exactly realize `operation` for the device identified
@@ -394,17 +432,32 @@ pub enum BalanceDirection {
 /// operate on `&[BalanceDelta]` (code correspondence: lean4
 /// `DSMOfflineFinality.lean` `commitTransfer` / `commit_conservation`).
 ///
-/// - `Transfer`: exactly one delta, `amount == op.amount`, direction is `Credit`
+/// - `Transfer` (online): exactly one delta, `amount == op.amount`, direction is `Credit`
 ///   iff this device is the recipient (`op.to_device_id == local_devid`) else
 ///   `Debit`, and `policy_commit == op.policy_commit` (§9.5 token binding).
+/// - `Transfer` (offline-bearer, `offline_spend = Some(amount)`): value comes from the
+///   device-bound offline-cash pool, so `deltas` MUST be empty (the online balance is not
+///   touched) and the pool debit must equal `op.amount`. The operation must be a bearer
+///   transfer (`OfflineBearerRequired`). This keeps ONE conservation chokepoint across both
+///   value regimes — the pool debit is the conserved source, exactly as an online `Debit` is.
 /// - `Mint`: exactly one `Credit` delta of `amount`.
 /// - `Burn`: exactly one `Debit` delta of `amount`.
-/// - Every other operation: no balance deltas.
+/// - Every other operation: no balance deltas, and no `offline_spend`.
 fn validate_conservation(
     local_devid: &[u8; 32],
     operation: &Operation,
     deltas: &[BalanceDelta],
+    offline_spend: Option<u64>,
 ) -> Result<(), DsmError> {
+    // A pool-backed spend is only ever valid for an offline-bearer transfer. Reject it on any
+    // other operation before the per-op match, so no non-transfer path can source from the pool.
+    if offline_spend.is_some()
+        && !crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(operation)
+    {
+        return Err(DsmError::invalid_operation(
+            "conservation: offline-cash pool spend is only valid for an offline-bearer transfer",
+        ));
+    }
     match operation {
         Operation::Transfer {
             to_device_id,
@@ -412,6 +465,20 @@ fn validate_conservation(
             policy_commit,
             ..
         } => {
+            // Offline-bearer transfer: pool-backed, no online balance movement.
+            if let Some(pool_amount) = offline_spend {
+                if !deltas.is_empty() {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: offline-bearer transfer must not apply an online balance delta",
+                    ));
+                }
+                if pool_amount != amount.value() {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: offline-cash pool debit != transfer amount",
+                    ));
+                }
+                return Ok(());
+            }
             if deltas.len() != 1 {
                 return Err(DsmError::invalid_operation(
                     "conservation: transfer must apply exactly one balance delta",
@@ -552,6 +619,7 @@ impl DeviceState {
             legacy_anchor: None,
             offline_bearer_attestation: OfflineBearerAttestation::NotAttested,
             extra_leaves: BTreeMap::new(),
+            offline_allocations: BTreeMap::new(),
         }
     }
 
@@ -582,11 +650,13 @@ impl DeviceState {
         balances: BTreeMap<[u8; 32], u64>,
         tips_in_order: Vec<([u8; 32], RelChainTip)>,
         extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
+        offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
         max_relationships: usize,
     ) -> Result<Self, DsmError> {
         let mut state = Self::new(genesis, devid, public_key, max_relationships);
         state.legacy_anchor = legacy_anchor;
         state.balances = balances;
+        state.offline_allocations = offline_allocations;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
             state
@@ -769,6 +839,7 @@ impl DeviceState {
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<AnchorLeafUpdate>,
+        offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -794,12 +865,56 @@ impl DeviceState {
         // correspondence: lean4 DSMOfflineFinality.lean commit_conservation /
         // commitTransfer): the supplied deltas MUST exactly realize the signed
         // operation — one delta of op.amount, role-correct direction, bound to the
-        // op's policy_commit. This is the by-construction guard at the sole
-        // balance-mutation chokepoint; it rejects value creation/substitution
-        // regardless of caller.
-        validate_conservation(&self.devid, &operation, deltas)?;
+        // op's policy_commit — OR, for an offline-bearer transfer, `offline_spend` sources the
+        // value from the device-bound pool and `deltas` is empty. This is the by-construction
+        // guard at the sole balance-mutation chokepoint (online balance AND offline pool); it
+        // rejects value creation/substitution regardless of caller.
+        validate_conservation(
+            &self.devid,
+            &operation,
+            deltas,
+            offline_spend.map(|o| o.amount),
+        )?;
 
-        // Apply deltas to a working copy. Failures leave self untouched.
+        // Offline-bearer spend: draw the value from the device-bound offline-cash pool instead of
+        // the online balance. Requires the anchor-state advance (a bearer transfer always advances
+        // the anchor leaf), so the pool debit and the transition land in ONE atomic device root.
+        let pool_update = match offline_spend {
+            None => None,
+            Some(os) => {
+                if anchor_leaf.is_none() {
+                    return Err(DsmError::invalid_operation(
+                        "advance: offline-bearer spend requires an anchor-state leaf advance",
+                    ));
+                }
+                let key = crate::types::offline_allocation_leaf::offline_allocation_key(
+                    &self.genesis,
+                    &self.devid,
+                    &os.anchor_bundle_b,
+                    &os.asset,
+                );
+                let cur = self
+                    .offline_allocations
+                    .get(&key)
+                    .copied()
+                    .unwrap_or_default();
+                let new_amount = cur.amount.checked_sub(os.amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: offline-cash pool underflow (insufficient offline cash)",
+                    )
+                })?;
+                let new_sequence = cur.sequence + 1;
+                let value = crate::types::offline_allocation_leaf::offline_allocation_value(
+                    new_amount,
+                    new_sequence,
+                );
+                Some((key, value, new_amount, new_sequence))
+            }
+        };
+
+        // Apply deltas to a working copy. Failures leave self untouched. (For an offline-bearer
+        // spend, `deltas` is empty — conservation enforced above — so the online balance is
+        // untouched here; the value moved via the pool debit instead.)
         let mut new_balances = self.balances.clone();
         for d in deltas {
             let cur = new_balances.get(&d.policy_commit).copied().unwrap_or(0);
@@ -882,6 +997,16 @@ impl DeviceState {
                 new_smt.update_leaf(&al.key, &al.new_value).map_err(|e| {
                     DsmError::invalid_operation(format!("anchor leaf replace: {e}"))
                 })?;
+                // Offline-bearer spend: the pool debit's allocation leaf rides the SAME atomic
+                // batch, so the pool draw-down and the transition share one device root. Updated
+                // before `post_root`/child proofs so the rel + anchor child proofs bind the final
+                // root (the receiver verifies rel + anchor against it; the pool leaf need not be
+                // proven to the receiver — it is the sender's own accounting).
+                if let Some((k, v, _, _)) = &pool_update {
+                    new_smt.update_leaf(k, v).map_err(|e| {
+                        DsmError::invalid_operation(format!("offline-allocation leaf replace: {e}"))
+                    })?;
+                }
                 let post_root = *new_smt.root();
                 let rel_child = new_smt
                     .get_inclusion_proof(&rel_key, 256)
@@ -929,11 +1054,17 @@ impl DeviceState {
             },
         );
 
-        // A bearer transition replaces the per-device anchor-state leaf as part of the SAME atomic
-        // root update; record its new value so `restore` replays it (else reload root-mismatches).
+        // A bearer transition replaces the per-device anchor-state leaf (and, for an offline-bearer
+        // spend, the allocation leaf) as part of the SAME atomic root update; record their new
+        // values so `restore` replays them (else reload root-mismatches).
         let mut new_extra_leaves = self.extra_leaves.clone();
         if let Some(al) = &anchor_leaf {
             new_extra_leaves.insert(al.key, al.new_value);
+        }
+        let mut new_offline_allocations = self.offline_allocations.clone();
+        if let Some((k, v, amount, sequence)) = pool_update {
+            new_extra_leaves.insert(k, v);
+            new_offline_allocations.insert(k, OfflineAllocation { amount, sequence });
         }
         let new_device_state = Self {
             genesis: self.genesis,
@@ -945,6 +1076,7 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
+            offline_allocations: new_offline_allocations,
         };
 
         Ok(AdvanceOutcome {
@@ -983,6 +1115,7 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
+            offline_allocations: self.offline_allocations.clone(),
         })
     }
 
@@ -1043,6 +1176,7 @@ impl DeviceState {
             legacy_anchor: self.legacy_anchor,
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
+            offline_allocations: self.offline_allocations.clone(),
         };
 
         Ok(VaultLeafOutcome {
@@ -1051,6 +1185,213 @@ impl DeviceState {
             siblings: proof.siblings,
         })
     }
+
+    // ---------------------------------------------------------------------
+    // Offline-cash pool transitions (device-bound "cash in hand").
+    //
+    // Each is a real device-SMT state change: it rewrites the allocation leaf
+    // (advancing the device root) and, for load/unload, moves online balance.
+    // These are balance-mutation chokepoints alongside `advance`: conservation is
+    // by construction — the online debit/credit and the pool credit/debit are
+    // computed together from the same `amount`, so value is moved, never created
+    // or destroyed. `advance` remains the sole chokepoint for relationship transfers.
+    // ---------------------------------------------------------------------
+
+    /// Current offline-cash pool balance for the allocation `key`, or 0 if none.
+    pub fn offline_allocation(&self, key: &[u8; 32]) -> u64 {
+        self.offline_allocations
+            .get(key)
+            .map(|a| a.amount)
+            .unwrap_or(0)
+    }
+
+    /// Enumerable snapshot of every offline-cash pool, for persistence.
+    pub fn offline_allocations_snapshot(&self) -> &BTreeMap<[u8; 32], OfflineAllocation> {
+        &self.offline_allocations
+    }
+
+    /// Rewrite the allocation leaf for `key` to `(new_amount, new_sequence)` and return the
+    /// new device state + inclusion proof. Internal helper for the load/unload/spend
+    /// chokepoints; `new_balances` is the already-computed online balance map.
+    fn set_offline_allocation(
+        &self,
+        key: [u8; 32],
+        new_balances: BTreeMap<[u8; 32], u64>,
+        new_amount: u64,
+        new_sequence: u64,
+    ) -> Result<OfflineAllocationOutcome, DsmError> {
+        let leaf_value = crate::types::offline_allocation_leaf::offline_allocation_value(
+            new_amount,
+            new_sequence,
+        );
+        let mut new_smt = self.smt.clone();
+        new_smt.update_leaf(&key, &leaf_value).map_err(|e| {
+            DsmError::invalid_operation(format!("offline-allocation leaf update: {e}"))
+        })?;
+        let new_root = *new_smt.root();
+        let proof = new_smt
+            .get_inclusion_proof(&key, 256)
+            .map_err(|e| DsmError::merkle(format!("offline-allocation proof: {e}")))?;
+
+        let mut new_extra_leaves = self.extra_leaves.clone();
+        new_extra_leaves.insert(key, leaf_value);
+        // Keep the entry even at amount 0 so `sequence` stays monotone (never replay a leaf value).
+        let mut new_offline_allocations = self.offline_allocations.clone();
+        new_offline_allocations.insert(
+            key,
+            OfflineAllocation {
+                amount: new_amount,
+                sequence: new_sequence,
+            },
+        );
+
+        let new_device_state = Self {
+            genesis: self.genesis,
+            devid: self.devid,
+            public_key: self.public_key.clone(),
+            smt: new_smt,
+            balances: new_balances,
+            tips: self.tips.clone(),
+            legacy_anchor: self.legacy_anchor,
+            offline_bearer_attestation: self.offline_bearer_attestation,
+            extra_leaves: new_extra_leaves,
+            offline_allocations: new_offline_allocations,
+        };
+        Ok(OfflineAllocationOutcome {
+            new_device_state,
+            new_root,
+            proof: proof.to_bytes(),
+            amount: new_amount,
+            sequence: new_sequence,
+        })
+    }
+
+    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash pool
+    /// (`anchor_bundle_b` binds the pool to this device's offline-bearer island). Debits online
+    /// `available` and credits the pool by the same amount — conserved. Fails closed on
+    /// insufficient online balance.
+    pub fn load_offline_cash(
+        &self,
+        anchor_bundle_b: &[u8; 32],
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<OfflineAllocationOutcome, DsmError> {
+        if amount == 0 {
+            return Err(DsmError::invalid_operation(
+                "load_offline_cash: amount must be > 0",
+            ));
+        }
+        let key = crate::types::offline_allocation_leaf::offline_allocation_key(
+            &self.genesis,
+            &self.devid,
+            anchor_bundle_b,
+            asset,
+        );
+        let cur_bal = self.balances.get(asset).copied().unwrap_or(0);
+        let new_bal = cur_bal.checked_sub(amount).ok_or_else(|| {
+            DsmError::invalid_operation("load_offline_cash: insufficient online balance")
+        })?;
+        let mut new_balances = self.balances.clone();
+        if new_bal == 0 {
+            new_balances.remove(asset);
+        } else {
+            new_balances.insert(*asset, new_bal);
+        }
+        let cur = self
+            .offline_allocations
+            .get(&key)
+            .copied()
+            .unwrap_or_default();
+        let new_amount = cur.amount.checked_add(amount).ok_or_else(|| {
+            DsmError::invalid_operation("load_offline_cash: pool balance overflow")
+        })?;
+        self.set_offline_allocation(key, new_balances, new_amount, cur.sequence + 1)
+    }
+
+    /// **Unload** `amount` from the offline-cash pool back to the online balance (reconcile).
+    /// Credits online `available` and debits the pool — conserved. Fails closed if the pool
+    /// holds less than `amount`.
+    pub fn unload_offline_cash(
+        &self,
+        anchor_bundle_b: &[u8; 32],
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<OfflineAllocationOutcome, DsmError> {
+        if amount == 0 {
+            return Err(DsmError::invalid_operation(
+                "unload_offline_cash: amount must be > 0",
+            ));
+        }
+        let key = crate::types::offline_allocation_leaf::offline_allocation_key(
+            &self.genesis,
+            &self.devid,
+            anchor_bundle_b,
+            asset,
+        );
+        let cur = self
+            .offline_allocations
+            .get(&key)
+            .copied()
+            .unwrap_or_default();
+        let new_amount = cur.amount.checked_sub(amount).ok_or_else(|| {
+            DsmError::invalid_operation("unload_offline_cash: insufficient offline-cash pool")
+        })?;
+        let cur_bal = self.balances.get(asset).copied().unwrap_or(0);
+        let new_bal = cur_bal.checked_add(amount).ok_or_else(|| {
+            DsmError::invalid_operation("unload_offline_cash: online balance overflow")
+        })?;
+        let mut new_balances = self.balances.clone();
+        new_balances.insert(*asset, new_bal);
+        self.set_offline_allocation(key, new_balances, new_amount, cur.sequence + 1)
+    }
+
+    /// **Spend** `amount` from the offline-cash pool for an offline-bearer transfer. Draws the
+    /// pool down; the online balance is NOT touched (the value goes to the receiver via the
+    /// bearer release, off the online books). Fails closed if the pool holds less than `amount`.
+    pub fn spend_offline_cash(
+        &self,
+        anchor_bundle_b: &[u8; 32],
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<OfflineAllocationOutcome, DsmError> {
+        if amount == 0 {
+            return Err(DsmError::invalid_operation(
+                "spend_offline_cash: amount must be > 0",
+            ));
+        }
+        let key = crate::types::offline_allocation_leaf::offline_allocation_key(
+            &self.genesis,
+            &self.devid,
+            anchor_bundle_b,
+            asset,
+        );
+        let cur = self
+            .offline_allocations
+            .get(&key)
+            .copied()
+            .unwrap_or_default();
+        let new_amount = cur.amount.checked_sub(amount).ok_or_else(|| {
+            DsmError::invalid_operation("spend_offline_cash: insufficient offline-cash pool")
+        })?;
+        self.set_offline_allocation(key, self.balances.clone(), new_amount, cur.sequence + 1)
+    }
+}
+
+/// Outcome of an offline-cash pool transition ([`DeviceState::load_offline_cash`] /
+/// [`DeviceState::unload_offline_cash`] / [`DeviceState::spend_offline_cash`]). The caller
+/// CAS-installs `new_device_state` as the device head once persistence succeeds.
+#[derive(Debug, Clone)]
+pub struct OfflineAllocationOutcome {
+    /// New device state (post-transition). Install as the head.
+    pub new_device_state: DeviceState,
+    /// Post-transition device SMT root.
+    pub new_root: [u8; 32],
+    /// Inclusion proof (`SmtInclusionProof::to_bytes()`) of the allocation leaf under `new_root`.
+    pub proof: Vec<u8>,
+    /// New pool balance.
+    pub amount: u64,
+    /// New pool transition sequence.
+    pub sequence: u64,
 }
 
 /// Outcome of [`DeviceState::with_vault_state_leaf`].  Caller installs
@@ -1131,6 +1472,7 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
+                None,
                 None,
             )
             .expect("advance");
@@ -1216,28 +1558,100 @@ mod tests {
             amount: amt,
         };
 
-        // Transfer: recipient credits, sender debits — accepted.
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx)]).is_ok());
-        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[debit(5, pcx)]).is_ok());
+        // Transfer: recipient credits, sender debits — accepted. (offline_spend None = online.)
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[debit(5, pcx)], None).is_ok());
         // Wrong amount / direction / token / count — rejected.
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(6, pcx)]).is_err());
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[debit(5, pcx)]).is_err());
-        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)]).is_err());
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))]).is_err());
-        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[]).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[credit(6, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[debit(5, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &xfer(other, 5, pcx), &[credit(5, pcx)], None).is_err());
         assert!(
-            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pcx), credit(5, pcx)])
-                .is_err()
+            validate_conservation(&me, &xfer(me, 5, pcx), &[credit(5, pc(0xEE))], None).is_err()
         );
+        assert!(validate_conservation(&me, &xfer(me, 5, pcx), &[], None).is_err());
+        assert!(validate_conservation(
+            &me,
+            &xfer(me, 5, pcx),
+            &[credit(5, pcx), credit(5, pcx)],
+            None
+        )
+        .is_err());
         // Mint: one credit==amount; Burn: one debit==amount.
-        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)]).is_ok());
-        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)]).is_err());
-        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)]).is_err());
-        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)]).is_ok());
-        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)]).is_err());
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)], None).is_err());
         // Non-balance op must carry no deltas.
-        assert!(validate_conservation(&me, &op(), &[]).is_ok());
-        assert!(validate_conservation(&me, &op(), &[credit(1, pcx)]).is_err());
+        assert!(validate_conservation(&me, &op(), &[], None).is_ok());
+        assert!(validate_conservation(&me, &op(), &[credit(1, pcx)], None).is_err());
+        // offline_spend is only valid on a bearer transfer, and forbids online deltas.
+        assert!(
+            validate_conservation(&me, &mint_op(9), &[], Some(9)).is_err(),
+            "pool spend on a non-bearer op must be rejected"
+        );
+        assert!(
+            validate_conservation(&me, &op(), &[], Some(1)).is_err(),
+            "pool spend on a non-transfer op must be rejected"
+        );
+        // A bearer transfer sourced from the pool: empty deltas + Some(offline_spend) is accepted;
+        // but empty deltas WITHOUT offline_spend is rejected before commit (the fail-closed case the
+        // activation seam must never produce — empty deltas and Some(offline_spend) are one choice).
+        let bearer_xfer = |amt: u64| {
+            use crate::types::operations::{AuthorityMode, AuthorityPolicy};
+            match xfer(other, amt, pcx) {
+                Operation::Transfer {
+                    to_device_id,
+                    amount,
+                    token_id,
+                    policy_commit,
+                    mode,
+                    nonce,
+                    verification,
+                    pre_commit,
+                    recipient,
+                    to,
+                    message,
+                    signature,
+                    ..
+                } => Operation::Transfer {
+                    to_device_id,
+                    amount,
+                    token_id,
+                    policy_commit,
+                    mode,
+                    nonce,
+                    verification,
+                    pre_commit,
+                    recipient,
+                    to,
+                    message,
+                    signature,
+                    authority_policy: Some(AuthorityPolicy {
+                        mode: AuthorityMode::OfflineBearerRequired,
+                        policy_id: [0u8; 32],
+                        anchor_set_id: [0u8; 32],
+                    }),
+                },
+                other => other,
+            }
+        };
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[], Some(5)).is_ok(),
+            "bearer transfer with empty deltas + matching pool debit must be accepted"
+        );
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[], None).is_err(),
+            "bearer transfer with empty deltas and NO offline_spend must be rejected before commit"
+        );
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[debit(5, pcx)], Some(5)).is_err(),
+            "bearer transfer must not carry an online delta alongside a pool spend"
+        );
+        assert!(
+            validate_conservation(&me, &bearer_xfer(5), &[], Some(6)).is_err(),
+            "bearer pool debit must equal the transfer amount"
+        );
     }
 
     fn entropy(seed: u8) -> Vec<u8> {
@@ -1288,6 +1702,7 @@ mod tests {
                 }],
                 Some(init_tip),
                 None,
+                None,
             )
             .expect("credit advance succeeds");
 
@@ -1304,6 +1719,117 @@ mod tests {
         assert!(
             !bob.balances.contains_key(&custom_token),
             "advance must not mutate &self"
+        );
+    }
+
+    #[test]
+    fn offline_cash_load_spend_unload_conserves_and_advances_root() {
+        use crate::types::offline_allocation_leaf::offline_allocation_key;
+        let dev = fresh_device(0xC1);
+        let token = pc(0xA1);
+        let bundle = [0x7B; 32];
+
+        // Seed 100 of the token via a self-mint advance.
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &dev.devid, &dev.devid,
+            );
+        let funded = dev
+            .advance(
+                rk_self,
+                dev.devid,
+                mint_op(100),
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Credit,
+                    amount: 100,
+                }],
+                Some(init_tip),
+                None,
+                None,
+            )
+            .expect("mint 100")
+            .new_device_state;
+
+        let key = offline_allocation_key(&funded.genesis, &funded.devid, &bundle, &token);
+        let online = |s: &DeviceState| s.balances.get(&token).copied().unwrap_or(0);
+        assert_eq!(online(&funded), 100);
+        assert_eq!(funded.offline_allocation(&key), 0);
+
+        // Load 30: online 70, pool 30 — conserved — and the device root advances (real state change).
+        let loaded = funded
+            .load_offline_cash(&bundle, &token, 30)
+            .expect("load 30")
+            .new_device_state;
+        assert_eq!(online(&loaded), 70);
+        assert_eq!(loaded.offline_allocation(&key), 30);
+        assert_eq!(
+            online(&loaded) + loaded.offline_allocation(&key),
+            100,
+            "load conserves"
+        );
+        assert_ne!(
+            loaded.root(),
+            funded.root(),
+            "load must advance the device root"
+        );
+
+        // Spend 10 offline: pool 20, online unchanged (value leaves via the bearer release).
+        let spent = loaded
+            .spend_offline_cash(&bundle, &token, 10)
+            .expect("spend 10")
+            .new_device_state;
+        assert_eq!(spent.offline_allocation(&key), 20);
+        assert_eq!(online(&spent), 70);
+        assert_ne!(
+            spent.root(),
+            loaded.root(),
+            "spend must advance the device root"
+        );
+
+        // Unload 5: pool 15, online 75 — conserved back.
+        let unloaded = spent
+            .unload_offline_cash(&bundle, &token, 5)
+            .expect("unload 5")
+            .new_device_state;
+        assert_eq!(unloaded.offline_allocation(&key), 15);
+        assert_eq!(online(&unloaded), 75);
+
+        // Fail-closed guards.
+        assert!(
+            unloaded.load_offline_cash(&bundle, &token, 76).is_err(),
+            "load > online balance"
+        );
+        assert!(
+            unloaded.spend_offline_cash(&bundle, &token, 16).is_err(),
+            "spend > pool"
+        );
+        assert!(
+            unloaded.unload_offline_cash(&bundle, &token, 16).is_err(),
+            "unload > pool"
+        );
+        assert!(
+            unloaded.load_offline_cash(&bundle, &token, 0).is_err(),
+            "zero amount rejected"
+        );
+    }
+
+    #[test]
+    fn offline_cash_pool_is_disjoint_from_online_token_balance() {
+        // The pool leaf key never collides with the token's policy_commit balance key: an online
+        // per-token spend reads `balances[token]`, which the pool never occupies.
+        use crate::types::offline_allocation_leaf::offline_allocation_key;
+        let dev = fresh_device(0xC2);
+        let token = pc(0xA2);
+        let bundle = [0x7C; 32];
+        let key = offline_allocation_key(&dev.genesis, &dev.devid, &bundle, &token);
+        assert_ne!(
+            key, token,
+            "allocation key must not equal the token policy_commit"
         );
     }
 
@@ -1374,6 +1900,7 @@ mod tests {
                     key,
                     new_value: commit1,
                 }),
+                None,
             )
             .expect("bearer advance");
         let ap = out
@@ -1436,6 +1963,7 @@ mod tests {
                 }],
                 Some(init2),
                 None,
+                None,
             )
             .expect("plain advance");
         assert!(plain.anchor_proofs.is_none());
@@ -1461,12 +1989,204 @@ mod tests {
                     key,
                     new_value: commit1,
                 }),
+                None,
             )
             .expect("bearer advance after a plain one");
         let ap2 = out2.anchor_proofs.clone().expect("anchor proofs");
         assert!(
             verify_anchor_state_leaf(&out2.smt_proofs.pre_root, &b, &commit0, &ap2.parent),
             "a non-bearer transition must not mutate the fused anchor state (commit_0 survives)"
+        );
+    }
+
+    #[test]
+    fn bearer_advance_draws_from_pool_not_online_balance() {
+        use crate::core::bilateral_transaction_manager::{
+            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        use crate::types::offline_allocation_leaf::offline_allocation_key;
+        use crate::types::operations::{
+            AuthorityMode, AuthorityPolicy, Operation, TransactionMode, VerificationType,
+        };
+
+        let b = [0xB2u8; 32];
+        let key = anchor_state_leaf_key(&b);
+        let token = pc(0xA1);
+
+        // Bootstrap the anchor, mint 100 online, then load 40 into the offline pool.
+        let dev = fresh_device(0xD5)
+            .with_anchor_state_leaf(&key, &[0xC0u8; 32])
+            .expect("bootstrap");
+        let rk_self = compute_smt_key(&dev.devid, &dev.devid);
+        let init_self = initial_chain_tip_from_device_ids(&dev.devid, &dev.devid);
+        let funded = dev
+            .advance(
+                rk_self,
+                dev.devid,
+                mint_op(100),
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Credit,
+                    amount: 100,
+                }],
+                Some(init_self),
+                None,
+                None,
+            )
+            .expect("mint 100")
+            .new_device_state;
+        let loaded = funded
+            .load_offline_cash(&b, &token, 40)
+            .expect("load 40")
+            .new_device_state;
+        let alloc_key = offline_allocation_key(&loaded.genesis, &loaded.devid, &b, &token);
+        assert_eq!(loaded.balances.get(&token).copied().unwrap_or(0), 60);
+        assert_eq!(loaded.offline_allocation(&alloc_key), 40);
+
+        // Build an offline-bearer transfer of `amt` to a counterparty.
+        let cp = devid(0xC5);
+        let rk = compute_smt_key(&loaded.devid, &cp);
+        let init = initial_chain_tip_from_device_ids(&loaded.devid, &cp);
+        let anchor_leaf = AnchorLeafUpdate {
+            key,
+            new_value: [0xC1u8; 32],
+        };
+        let bearer_op = |amt: u64| Operation::Transfer {
+            to_device_id: cp.to_vec(),
+            amount: bal(amt),
+            token_id: b"ERA".to_vec(),
+            policy_commit: token,
+            mode: TransactionMode::Bilateral,
+            nonce: vec![],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![],
+            to: vec![],
+            message: String::new(),
+            signature: vec![],
+            authority_policy: Some(AuthorityPolicy {
+                mode: AuthorityMode::OfflineBearerRequired,
+                policy_id: [0u8; 32],
+                anchor_set_id: [0u8; 32],
+            }),
+        };
+        let spend = |amt: u64| {
+            Some(OfflineSpend {
+                anchor_bundle_b: b,
+                asset: token,
+                amount: amt,
+            })
+        };
+
+        // Bearer spend of 25: pool 40 -> 15, online balance UNTOUCHED (60), anchor leaf advanced.
+        let spent = loaded
+            .advance(
+                rk,
+                cp,
+                bearer_op(25),
+                entropy(2),
+                None,
+                &[], // no online delta — value comes from the pool
+                Some(init),
+                Some(anchor_leaf.clone()),
+                spend(25),
+            )
+            .expect("bearer advance from pool")
+            .new_device_state;
+        assert_eq!(
+            spent.balances.get(&token).copied().unwrap_or(0),
+            60,
+            "online balance must be untouched by a bearer spend"
+        );
+        assert_eq!(
+            spent.offline_allocation(&alloc_key),
+            15,
+            "pool debited by the bearer amount"
+        );
+
+        // Determinism (the sim==guard==commit invariant): re-running the SAME bearer advance
+        // (identical op, empty deltas, anchor_leaf, and offline_spend) against the same head yields
+        // a byte-identical device root. This is why threading the SAME `prepared.offline_spend` into
+        // the confirm-build sim, the determinism-guard sim, and the canonical commit keeps all three
+        // sender roots equal.
+        let spent_again = loaded
+            .advance(
+                rk,
+                cp,
+                bearer_op(25),
+                entropy(2),
+                None,
+                &[],
+                Some(init),
+                Some(anchor_leaf.clone()),
+                spend(25),
+            )
+            .expect("re-run bearer advance from pool")
+            .new_device_state;
+        assert_eq!(
+            spent.root(),
+            spent_again.root(),
+            "identical bearer advance inputs must produce a byte-identical device root"
+        );
+
+        // Fail-closed: an online delta alongside a pool spend is a double-source → rejected.
+        assert!(
+            loaded
+                .advance(
+                    rk,
+                    cp,
+                    bearer_op(25),
+                    entropy(3),
+                    None,
+                    &[BalanceDelta {
+                        policy_commit: token,
+                        direction: BalanceDirection::Debit,
+                        amount: 25,
+                    }],
+                    Some(init),
+                    Some(anchor_leaf.clone()),
+                    spend(25),
+                )
+                .is_err(),
+            "bearer advance must reject an online delta alongside a pool spend"
+        );
+
+        // Fail-closed: pool underflow (spend 100 from a 40 pool).
+        assert!(
+            loaded
+                .advance(
+                    rk,
+                    cp,
+                    bearer_op(100),
+                    entropy(4),
+                    None,
+                    &[],
+                    Some(init),
+                    Some(anchor_leaf.clone()),
+                    spend(100),
+                )
+                .is_err(),
+            "bearer advance must reject a pool underflow"
+        );
+
+        // Fail-closed: a pool spend without the anchor-state advance (anchor_leaf None) is rejected.
+        assert!(
+            loaded
+                .advance(
+                    rk,
+                    cp,
+                    bearer_op(10),
+                    entropy(5),
+                    None,
+                    &[],
+                    Some(init),
+                    None,
+                    spend(10)
+                )
+                .is_err(),
+            "offline-bearer spend requires the anchor-state advance"
         );
     }
 
@@ -1504,6 +2224,7 @@ mod tests {
                 }],
                 Some(init),
                 Some(AnchorLeafUpdate { key, new_value }),
+                None,
             )
             .expect("bearer advance")
         };
@@ -1574,6 +2295,7 @@ mod tests {
                 }],
                 Some(init),
                 None,
+                None,
             )
             .expect("value advance");
         assert_eq!(
@@ -1588,7 +2310,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None, None)
+            .advance(rk, cp, op(), entropy(2), None, &[], None, None, None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -1603,7 +2325,17 @@ mod tests {
         let rk2 = compute_smt_key(&dev.devid, &cp2);
         let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
         let o3 = dev
-            .advance(rk2, cp2, op(), entropy(3), None, &[], Some(init2), None)
+            .advance(
+                rk2,
+                cp2,
+                op(),
+                entropy(3),
+                None,
+                &[],
+                Some(init2),
+                None,
+                None,
+            )
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -1654,6 +2386,7 @@ mod tests {
                 }],
                 Some(init_bob),
                 None,
+                None,
             )
             .expect("advance Bob");
         assert_eq!(
@@ -1677,6 +2410,7 @@ mod tests {
                     amount: 50,
                 }],
                 Some(init_chrl),
+                None,
                 None,
             )
             .expect("advance Charlie");
@@ -1736,6 +2470,7 @@ mod tests {
                 }],
                 Some(init_bob),
                 None,
+                None,
             )
             .expect("advance A");
         let b = dev
@@ -1751,6 +2486,7 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init_chrl),
+                None,
                 None,
             )
             .expect("advance B");
@@ -1803,6 +2539,7 @@ mod tests {
                 }],
                 Some(init),
                 None,
+                None,
             )
             .expect("advance A");
         let b = dev
@@ -1818,6 +2555,7 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init),
+                None,
                 None,
             )
             .expect("advance B");
@@ -1864,6 +2602,7 @@ mod tests {
             }],
             Some(init),
             None,
+            None,
         );
         assert!(
             r.is_err(),
@@ -1896,6 +2635,7 @@ mod tests {
                 amount: 1,
             }],
             Some(init),
+            None,
             None,
         );
         assert!(r.is_err(), "u64::MAX + 1 must overflow");
@@ -1945,6 +2685,7 @@ mod tests {
                         amount: amt,
                     }],
                     Some(init),
+                    None,
                     None,
                 )
                 .expect("advance");
@@ -2034,6 +2775,7 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
+                None,
                 None,
             )
             .expect("bilateral advance succeeds")

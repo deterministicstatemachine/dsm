@@ -1,0 +1,30 @@
+20040000 <dsm_secure_dispatch>:
+20040000:	e97f e97f 	sg
+20040004:	b510      	push	{r4, lr}
+20040006:	f7c0 fb09 	bl	2000061c <dsm_secure_handler>
+2004000a:	e8bd 4010 	ldmia.w	sp!, {r4, lr}
+2004000e:	2100      	movs	r1, #0
+20040010:	2200      	movs	r2, #0
+20040012:	2300      	movs	r3, #0
+20040014:	f04f 0c00 	mov.w	ip, #0
+20040018:	ee00 1a10 	vmov	s0, r1
+2004001c:	ee00 1a90 	vmov	s1, r1
+20040020:	ee01 1a10 	vmov	s2, r1
+20040024:	ee01 1a90 	vmov	s3, r1
+20040028:	ee02 1a10 	vmov	s4, r1
+2004002c:	ee02 1a90 	vmov	s5, r1
+20040030:	ee03 1a10 	vmov	s6, r1
+20040034:	ee03 1a90 	vmov	s7, r1
+20040038:	ee04 1a10 	vmov	s8, r1
+2004003c:	ee04 1a90 	vmov	s9, r1
+20040040:	ee05 1a10 	vmov	s10, r1
+20040044:	ee05 1a90 	vmov	s11, r1
+20040048:	ee06 1a10 	vmov	s12, r1
+2004004c:	ee06 1a90 	vmov	s13, r1
+20040050:	ee07 1a10 	vmov	s14, r1
+20040054:	ee07 1a90 	vmov	s15, r1
+20040058:	eee1 1a10 	vmsr	fpscr, r1
+2004005c:	f381 8c00 	msr	CPSR_fs, r1
+20040060:	4774      	bxns	lr
+20040062:	d4d4      	bmi.n	2004000e <dsm_secure_dispatch+0xe>
+20040064:	d4d4      	bmi.n	20040010 <dsm_secure_dispatch+0x10>

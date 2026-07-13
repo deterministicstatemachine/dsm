@@ -1,12 +1,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Hardware-sealed wallet-seed vault.
+//! Phone-local (online-domain) hardware-sealed seed vault.
 //!
-//! Persists the Genesis v2 wallet seed at rest so the device signer can be rebuilt
-//! on a cold start **without re-entering the mnemonic**. The stored material is the
-//! BIP39 wallet seed (`mnemonic.to_seed("")`) — a one-way derivation from the paper
-//! mnemonic that is NOT the mnemonic and cannot be reversed back to it. The paper
-//! mnemonic stays off-device (disaster recovery only); the usable key material lives
-//! here, sealed.
+//! Persists the Genesis v2 wallet seed at rest so the **online** device signer can be
+//! rebuilt on a cold start **without re-entering the mnemonic**. The stored material is
+//! the BIP39 wallet seed (`mnemonic.to_seed("")`) — a one-way derivation from the paper
+//! mnemonic that is NOT the mnemonic and cannot be reversed back to it. The paper mnemonic
+//! stays off-device (disaster recovery only); the usable key material lives here, sealed.
+//!
+//! ## Domain scope (owner directive 2026-07-11)
+//!
+//! This vault is the **online-domain** vault, sealed by **phone** hardware (Android
+//! Keystore) — NOT the RP2350/TROPIC appliance. Online DSM must work on a phone + seed
+//! alone; gating online onboarding on the appliance is forbidden. The **offline** bearer
+//! domain is appliance-gated *by construction*: an offline release additionally needs
+//! `σ^chip` (TROPIC resident key) and `σ^host` (RP2350 partition key) — hardware keys that
+//! are never seed-derived and never stored on the phone (spec §6.4, §11). So a phone-only
+//! compromise yields online takeover, offline stays safe, regardless of what this vault holds.
+//!
+//! Reserved seam: a distinct offline seed-factor
+//! (`k_offline_seed_factor = HKDF(seed, "DSM/identity/offline-seed-factor/v1")`) belongs in a
+//! SEPARATE **appliance-gated** vault, built with the offline-cash phase — it must NOT be
+//! added to this phone Keystore vault. Fully replacing the raw seed here with an online-only
+//! `k_online = HKDF(seed, "DSM/identity/online/v1")` (spec §6.1) so this vault cannot derive
+//! the offline factor is a deliberate genesis-derivation re-root (device identity changes),
+//! tracked separately; it is not required for offline gating, which the hardware factors enforce.
 //!
 //! Sealing key:
 //! - **Android** (`target_os = "android"`): an `AndroidKeyStore` AES/GCM key held by
@@ -57,14 +74,11 @@ fn keystore_upcall(method: &str, input: &[u8]) -> Result<Vec<u8>, DsmError> {
             &mut env,
             "com/dsm/wallet/security/KeystoreVault",
         )?;
-        let j_in = env.byte_array_from_slice(input).map_err(|e| e.to_string())?;
+        let j_in = env
+            .byte_array_from_slice(input)
+            .map_err(|e| e.to_string())?;
         let ret = env
-            .call_static_method(
-                class,
-                method,
-                "([B)[B",
-                &[JValue::Object(&j_in.into())],
-            )
+            .call_static_method(class, method, "([B)[B", &[JValue::Object(&j_in.into())])
             .map_err(|e| format!("KeystoreVault.{method} upcall failed: {e}"))?;
         let obj = ret.l().map_err(|e| e.to_string())?;
         if obj.is_null() {

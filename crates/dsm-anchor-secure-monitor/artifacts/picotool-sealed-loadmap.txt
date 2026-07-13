@@ -1,0 +1,12 @@
+# picotool seal --hash preservation check (load map + entry point survive signing)
+Metadata Block 1
+ address:             0x10000000
+ next block address:  0x100033a0
+ block type:          image def
+ target chip:         RP2350
+ image type:          ARM Secure
+ load map entry 0:    Copy 0x10000068->0x10003308 to 0x20000000->0x200032a0
+ load map entry 1:    Copy 0x10003320->0x100033a0 to 0x20040000->0x20040080
+ load map entry 2:    Clear 0x200032a0->0x200032ac
+ vector table:        0x20000000
+ entry point:         EP 0x200000f9, SP 0x20040000, SPLIM 0x20038000

@@ -1,0 +1,8 @@
+# Never commit signing keys, the sealed host secret, signed images, or OTP dumps.
+bootkey.pem
+bootkey-otp.json
+host-secret.json
+perms.json
+signed.elf
+otp-before.json
+otp-*.json

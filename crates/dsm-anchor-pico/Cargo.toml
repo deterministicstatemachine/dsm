@@ -75,3 +75,10 @@ commit = ["dep:ed25519-dalek"]
 # job. OFF by default (production = fresh birth over the fixed provisioned H0). No mock, no bypass,
 # no host-supplied counter, no software counter.
 bench-adopt-existing-chip = []
+# Production secure-boot profile. Requires RP2350 secure boot + debug-disable latched in OTP (the
+# firmware halts otherwise) and derives σ^host from an OTP-sealed secret (secure-read page) instead
+# of the public "honest label". Realizes the paper's measurement-gated host signer: rogue firmware
+# is unsigned (bootrom refuses it) and cannot read the OTP secret. The one-way OTP provisioning is
+# performed on the board by scripts/anchor-secure-boot/. OFF by default (bench/dev builds run the
+# honest-label profile, which is not anti-clone).
+secure-boot = []

@@ -734,6 +734,7 @@ mod tests {
                 },
             )],
             BTreeMap::new(),
+            BTreeMap::new(),
             64,
         )
         .expect("restore failed head");

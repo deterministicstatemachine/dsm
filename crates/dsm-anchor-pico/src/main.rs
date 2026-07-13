@@ -66,6 +66,10 @@ use usb_device::prelude::*;
 use usb_device::UsbError;
 use usbd_serial::SerialPort;
 
+/// Production secure-boot enforcement + OTP-sealed host-key material (feature = `secure-boot`).
+#[cfg(feature = "secure-boot")]
+mod secure_boot;
+
 #[link_section = ".start_block"]
 #[used]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
@@ -136,16 +140,31 @@ struct ChipIdentity {
     online_id_label: [u8; 32],
 }
 impl ChipIdentity {
-    /// Derive from the chip's fused `stpub` (device-cert public key) and a 32-byte digest of `chip_id`.
-    fn derive(stpub: &[u8; 32], chip_id_hash: &[u8; 32]) -> Self {
+    /// Derive from the chip's fused `stpub` (device-cert public key) and a 32-byte digest of
+    /// `chip_id`. `host_secret` is the OTP-sealed σ^host birth secret in the production `secure-boot`
+    /// profile (chip-bound, NOT reproducible by rogue firmware); `None` is the bench profile whose
+    /// σ^host birth material is the public "honest label" (deterministic + chip-unique, NOT a silicon
+    /// secret). The two use disjoint domain tags, so a bench bundle can never collide with a
+    /// production bundle even on the same chip.
+    fn derive(stpub: &[u8; 32], chip_id_hash: &[u8; 32], host_secret: Option<&[u8; 32]>) -> Self {
         use anchor_core::hash::h;
         let root = h("DSM/anchor/chip-root/v1", &[stpub, chip_id_hash]);
+        let (partition_key_seed, birth_entropy) = match host_secret {
+            Some(secret) => (
+                h("DSM/anchor/partition-seed-sealed/v1", &[secret, &root]),
+                h("DSM/anchor/birth-entropy-sealed/v1", &[secret, &root]),
+            ),
+            None => (
+                h("DSM/anchor/partition-seed-label/v1", &[&root]),
+                h("DSM/anchor/birth-entropy/v1", &[&root]),
+            ),
+        };
         Self {
             anchor_id: h("DSM/anchor/anchor-id/v1", &[&root]),
             device_id: h("DSM/anchor/device-id/v1", &[&root]),
             partition_device_id: h("DSM/anchor/partition-device-id/v1", &[&root]),
-            partition_key_seed: h("DSM/anchor/partition-seed-label/v1", &[&root]),
-            birth_entropy: h("DSM/anchor/birth-entropy/v1", &[&root]),
+            partition_key_seed,
+            birth_entropy,
             birth_host_nonce: h("DSM/anchor/birth-host-nonce/v1", &[&root]),
             birth_witness: h("DSM/anchor/birth-witness/v1", &[&root]),
             online_id_label: h("DSM/anchor/online-id-label/v1", &[&root]),
@@ -510,8 +529,39 @@ fn main() -> ! {
             }
         }
     };
+    // Production secure-boot profile: refuse to run unless secure boot + debug-disable are actually
+    // latched in OTP (the measurement gate — the bootrom verified this exact signed image), and
+    // derive σ^host from the OTP-sealed secret (chip-bound, unreadable by rogue firmware). Any doubt
+    // halts. The bench profile derives σ^host from the public honest label (NOT anti-clone).
+    #[cfg(feature = "secure-boot")]
+    let host_secret: [u8; 32] = {
+        if let Err(e) = secure_boot::assert_secure_context() {
+            put(&mut serial, b"[SEC] secure context FAIL (halting): ");
+            put(&mut serial, e.as_bytes());
+            put(&mut serial, b"\r\n");
+            let _ = serial.flush();
+            loop {
+                usb_dev.poll(&mut [&mut serial]);
+            }
+        }
+        match secure_boot::read_sealed_host_secret() {
+            Ok(s) => s,
+            Err(e) => {
+                put(&mut serial, b"[SEC] sealed host secret FAIL (halting): ");
+                put(&mut serial, e.as_bytes());
+                put(&mut serial, b"\r\n");
+                let _ = serial.flush();
+                loop {
+                    usb_dev.poll(&mut [&mut serial]);
+                }
+            }
+        }
+    };
     // Deterministic, chip-rooted identity + the well-known canonical policy id.
-    let ident = ChipIdentity::derive(&stpub, &chip_id_hash);
+    #[cfg(feature = "secure-boot")]
+    let ident = ChipIdentity::derive(&stpub, &chip_id_hash, Some(&host_secret));
+    #[cfg(not(feature = "secure-boot"))]
+    let ident = ChipIdentity::derive(&stpub, &chip_id_hash, None);
     let policy_hash = anchor_core::hash::h(POLICY_ID_DOMAIN, &[&[0u8][..]]);
     put(
         &mut serial,

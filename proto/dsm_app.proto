@@ -2063,6 +2063,23 @@ message AnchorStatusResponse {
   string status           = 9;                      // human-readable status line
 }
 
+// ── Offline-cash (two-regime money model) ──────────────────────────────────
+// Deliberately load online balance into a device-bound offline-bearer pool
+// ("cash in hand"), spend it offline, reconcile it back. Request bodies ride
+// inside ArgPack.body for wallet.loadOffline / wallet.unloadOffline.
+message OfflineCashRequest {
+  string token_id = 1;   // asset to move between regimes (resolved to a CPTA policy_commit)
+  uint64 amount   = 2;   // base units to load (online -> pool) or unload (pool -> online)
+}
+
+message OfflineCashResponse {
+  bool   success        = 1;
+  uint64 online_balance = 2;                       // online available AFTER the move
+  uint64 pool_balance   = 3;                       // device-bound offline pool AFTER the move
+  bytes  device_root    = 4 [(dsm_fixed_len)=32];  // new device SMT root r_A
+  string message        = 5;
+}
+
 // =========================== Bluetooth Transport ====================
 enum BtMessageType {
   BTMSG_TYPE_UNSPECIFIED = 0;
@@ -2673,6 +2690,9 @@ message Envelope {
 
     // Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
     AnchorStatusResponse              anchor_status_response           = 112;
+
+    // Offline-cash load/unload (two-regime money model): device-bound pool balance.
+    OfflineCashResponse               offline_cash_response            = 113;
 
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)

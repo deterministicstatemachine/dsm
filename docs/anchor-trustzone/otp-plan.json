@@ -1,0 +1,52 @@
+{
+  "_comment": "DSM anchor RP2350 OTP layout plan (spec §3). This is a DOCUMENTED PLAN, not a ready-to-burn file. The 'row_base' values are page-relative (page * 64) and MUST be confirmed free against 'picotool otp list' on the target silicon and against RP2350 datasheet §13 before any burn. secure-monitor and nonsecure-app source MUST reference these same constants. All numeric burns are one-time; a wrong value bricks the board.",
+  "hardware": "RP2350 (Pico 2 W)",
+  "rows_per_page": 64,
+  "fields": {
+    "mu_enrolled": {
+      "purpose": "32-byte BLAKE3 digest of the canonical Non-secure app image (the exact [load_addr, load_addr+len) byte range the monitor measures).",
+      "page": 46,
+      "row_base": 2944,
+      "rows": 16,
+      "encoding": "16 ECC rows, little-endian 16-bit halfwords of the 32-byte digest",
+      "permissions": "secure-read only; non-secure read denied; debug/DMA denied",
+      "written_by": "provisioning (from nonsecure-app.mu)"
+    },
+    "k_host_root": {
+      "purpose": ">=32 bytes CSPRNG entropy; the ROOT of the host signing key. NEVER derived from stpub, chip_id, public enrollment data, firmware bytes, or any reproducible label. k_host = HKDF(k_host_root, 'DSM/host-sign/v1' || device_identity || policy_id), derived only inside the monitor, kept only in Secure SRAM, zeroized after use.",
+      "page": 48,
+      "row_base": 3072,
+      "rows": 16,
+      "encoding": "16 ECC rows, little-endian 16-bit halfwords of 32 random bytes",
+      "permissions": "secure-read only; non-secure read denied; debug/DMA denied",
+      "written_by": "provisioning (CSPRNG on the provisioning host; guard the file like a key)"
+    },
+    "policy_version": {
+      "purpose": "policy id + monotonic firmware/policy version metadata (rollback prevention anchor for a FUTURE update protocol; v1 has no update path).",
+      "page": 47,
+      "row_base": 3008,
+      "rows": 4,
+      "permissions": "secure-read only",
+      "written_by": "provisioning"
+    },
+    "monitor_config_digest": {
+      "purpose": "optional BLAKE3 digest of the monitor configuration (SAU/ACCESSCTRL plan + OTP layout) for cross-checking; optional in v1.",
+      "page": 47,
+      "row_base": 3040,
+      "rows": 16,
+      "permissions": "secure-read only",
+      "written_by": "provisioning (optional)"
+    },
+    "boot_key_fingerprint": {
+      "purpose": "secp256k1 public-key fingerprint of the DEDICATED MONITOR signing key (RP2350 secure boot). Produced by 'picotool seal --sign secure-monitor.elf ... monitor-otp.json'. Only the finalized monitor is signed by this key; ordinary app updates NEVER use it. Unused boot-key slots are disabled.",
+      "slot": "boot-key slot 0 (confirm against 'picotool otp list')",
+      "written_by": "picotool otp load monitor-otp.json"
+    },
+    "crit_lockdown": {
+      "purpose": "SECURE_BOOT_ENABLE + DEBUG_DISABLE (+ secure-debug-disable) + disable unused boot paths. HAL reads CRIT bit0=secure_boot_enabled, bit2=debug_disabled. DO LAST.",
+      "selector": "CRIT register rows — read exact selectors from RP2350 datasheet §13; provisioning refuses to guess them.",
+      "written_by": "manual 'picotool otp set <CRIT selector> <value>' from the reviewed plan"
+    }
+  },
+  "permissions_note": "The 'secure-read only' pages (mu_enrolled, k_host_root, policy_version, monitor_config_digest) are locked via 'picotool otp permissions otp-permissions.json'. Build otp-permissions.json from the RP2350 datasheet §13 permission schema; do not guess the permission bits."
+}
