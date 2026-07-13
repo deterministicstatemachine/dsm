@@ -128,6 +128,18 @@ SECTIONS
     LONG(0xab123579);                                  /* BLOCK_MARKER_END */
 
     KEEP(*(.boot_info));
+
+    /* Pad the boot block so the following .vector_table LMA is 32-byte aligned. entry-1 of the
+     * LOAD_MAP is ONE linear flash->SRAM copy of [.vector_table|.text|.rodata|.data], so each
+     * section's LMA offset must equal its VMA offset or the copy misplaces it. The .vector_table
+     * VMA base is ORIGIN(SECURE) (0x2000_0000, 32-aligned); if its LMA base is only 4-aligned, an
+     * over-aligned downstream section (e.g. 8-aligned .rodata) gets DIFFERENT padding in flash vs
+     * SRAM, shifting .rodata/.data by the alignment gap. On silicon (2026-07-13) a 4-byte skew put
+     * curve25519's A24 constant one word off, so X25519 read 0 for 121666 and every TROPIC Noise
+     * handshake failed — with byte-identical ladder code to the working pico. Forcing the LMA base
+     * to 32-align makes the LMA->VMA delta a multiple of every section alignment (<=32), so LMA and
+     * VMA padding are identical and the linear copy is exact. */
+    . = ALIGN(32);
   } > FLASH
 
   /* ## Runtime image in SRAM (VMA), stored in FLASH (LMA). */
@@ -291,6 +303,17 @@ ASSERT(__euninit <= __secure_stack_limit, "ERROR: Secure .bss/.uninit/heap colli
 ASSERT(__nsc_veneer_end <= ORIGIN(NSC) + LENGTH(NSC), "ERROR: SG veneer overruns the NSC region");
 
 ASSERT(SIZEOF(.got) == 0, "ERROR: .got detected — dynamic relocations are not supported");
+
+/* LOAD_MAP entry-1 copies [.vector_table|.text|.rodata|.data] as ONE linear flash->SRAM block, so
+ * every section's LMA offset MUST equal its VMA offset — otherwise the bootrom places .rodata/.data
+ * at the wrong SRAM address and the SRAM-resident code reads shifted constants (silicon 2026-07-13:
+ * a 4-byte .rodata skew broke curve25519/X25519). These ASSERTs fail the link if any skew returns. */
+ASSERT(LOADADDR(.vector_table) % 32 == 0,
+  "BUG: .vector_table LMA base is not 32-aligned — pad .start_block so LMA/VMA alignment padding matches");
+ASSERT(LOADADDR(.rodata) - LOADADDR(.vector_table) == ADDR(.rodata) - ADDR(.vector_table),
+  "BUG: .rodata LMA/VMA skew — the single linear LOAD_MAP copy would misplace .rodata in SRAM");
+ASSERT(LOADADDR(.data) - LOADADDR(.vector_table) == ADDR(.data) - ADDR(.vector_table),
+  "BUG: .data LMA/VMA skew — the single linear LOAD_MAP copy would misplace .data in SRAM");
 
 /* §6 Secure code+rodata size ceiling (SRAM-resident budget from MEMORY_MAP.md). */
 ASSERT((__etext - _stext) <= 224K, "Secure monitor code+rodata exceeds the 224 KiB budget (MEMORY_MAP.md)");

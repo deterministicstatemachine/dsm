@@ -145,15 +145,31 @@ fn ensure_chip_key<SPI: SpiDevice, CS: OutputPin>(
     Ok(res.pub_key().to_vec())
 }
 
-/// Enroll: ADOPT the live counter (never `mcounter_init` — re-init would reset the anti-double-spend
-/// floor), ensure the resident chip key, run the one-way birth fuse to the bundle `B` + genesis
-/// frontier `h_0`. Bench/fresh-birth profile: `H0 = ENROLL_H0`, `u = H0 − live`.
+/// Enroll: read (and, on a VIRGIN chip only, initialize) the live counter, ensure the resident chip
+/// key, run the one-way birth fuse to the bundle `B` + genesis frontier `h_0`. Fresh-birth profile:
+/// `H0 = ENROLL_H0`, `u = H0 − live`.
+///
+/// Counter handling — get, and ONLY on the specific `CounterInvalid` status (0x14 = never
+/// initialized; SWD-confirmed on the fresh chip) `mcounter_init(Index0, ENROLL_H0)` then re-get. The
+/// init is gated STRICTLY on `CounterInvalid`: a generic L3 failure, timeout, SPI/GPIO bus error, or
+/// `Unauthorized` must NEVER trigger init — re-initializing a live counter would reset the
+/// anti-double-spend floor. `ENROLL_H0 = MCOUNTER_VALUE_MAX (0xFFFF_FFFE)`, so a virgin chip is born
+/// at `u = 0` and identity is deterministic over `H0`.
 fn enroll<SPI: SpiDevice, CS: OutputPin>(
     sess: &mut Tropic01<SPI, CS, ActiveSession>,
     ident: &ChipIdentity,
     policy_hash: &[u8; 32],
 ) -> Result<(u32, Birth), ()> {
-    let live = sess.mcounter_get(COUNTER).map_err(|_| ())?;
+    let live = match sess.mcounter_get(COUNTER) {
+        Ok(v) => v,
+        // Virgin chip: Index0 was never initialized. Initialize ONCE to MCOUNTER_VALUE_MAX, then
+        // re-read the authenticated live value. Gated strictly on CounterInvalid (see fn doc).
+        Err(tropic01::Error::CounterInvalid) => {
+            sess.mcounter_init(COUNTER, ENROLL_H0).map_err(|_| ())?;
+            sess.mcounter_get(COUNTER).map_err(|_| ())?
+        }
+        Err(_) => return Err(()),
+    };
     if live > ENROLL_H0 {
         return Err(()); // counter above enrollment H0 (unprovisioned/mis-provisioned chip)
     }
@@ -224,10 +240,19 @@ pub unsafe fn init() -> bool {
         1_000_000u32.Hz(),
         embedded_hal::spi::MODE_0,
     );
-    let spi_dev = match ExclusiveDevice::new(spi_bus, cs, timer) {
+    let mut spi_dev = match ExclusiveDevice::new(spi_bus, cs, timer) {
         Ok(d) => d,
         Err(_) => return false,
     };
+
+    // Cold-start SPI warm-up (mirrors the pico anchor's Phase 1): clock the TROPIC01 with a few real
+    // transactions so it is ready for the first L2 read after a cold power-up.
+    use embedded_hal::spi::SpiDevice as _;
+    for _ in 0..3 {
+        let mut rx = [0u8; 4];
+        let _ = spi_dev.transfer(&mut rx, &[0xAAu8, 0, 0, 0]);
+        cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
+    }
 
     // Phase 2: read the REAL chip identity (chip_id + device-cert stpub) BEFORE session_start
     // consumes the NoSession handle. Fail closed if the chip will not disclose a real identity.
@@ -243,6 +268,9 @@ pub unsafe fn init() -> bool {
         },
         Err(_) => return false,
     };
+    // Space the cert-store read from session_start's own internal cert read — the TROPIC needs a gap
+    // between back-to-back L2 reads (the pico gets this implicitly from USB polling).
+    cortex_m::asm::delay(15_000_000); // ~100 ms @150 MHz
     let ident = ChipIdentity::derive(&stpub, &chip_id_hash);
 
     // Phase 3: authenticated L3 session (PROD0 SH0 keys).
