@@ -14,7 +14,9 @@ bench = false
 # The app builds candidate transitions + SMT inclusion proofs (BLAKE3 only — NO SPHINCS+, NO
 # libtropic; those are Secure-only).
 blake3 = { version = "1", default-features = false }
-rp235x-hal = { version = "0.3", features = ["binary-info", "critical-section-impl", "rt"] }
+# No `binary-info`: this app is embedded in the monitor image (not flashed standalone), so it needs
+# no PICOBIN metadata / .bi_entries — the monitor carries the boot block + binary info.
+rp235x-hal = { version = "0.3", features = ["critical-section-impl", "rt"] }
 panic-halt = "1.0"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"

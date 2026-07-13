@@ -177,6 +177,10 @@ fn op_requires_measurement_hint(op: u32) -> bool {
 /// Called by the `-mcmse` veneer's single NSC entry `dsm_secure_dispatch`. Secure-only.
 #[no_mangle]
 pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u32 {
+    // A crossing means the Non-secure app is alive and looping (a hung NS cannot reach the `sg`), so
+    // feed the watchdog. Combined with the NS serve loop's periodic keepalive crossing, this keeps a
+    // healthy idle anchor alive while a genuinely hung NS still trips the ~2 s watchdog reset.
+    boundary::feed_watchdog();
     // §4.1 validate slot + state.
     if slot_index != SG_SLOT_INDEX {
         return SG_ERR_SLOT;
@@ -370,6 +374,10 @@ fn main() -> ! {
             }
         }
     }
+    // Grant Non-secure access, via per-peripheral ACCESSCTRL, to ONLY the clocks + USB the NS app
+    // drives (OTP, SPI0/TROPIC, DMA stay NSP=0 = denied). Before lock_accessctrl + the NS launch.
+    boundary::grant_ns_peripherals();
+
     // Route Non-secure-originated BusFault/HardFault/NMI to SECURE (AIRCR.BFHFNMINS = 0), so a
     // Non-secure access the bus/ACCESSCTRL denies with a bus error traps to the Secure fault handler
     // rather than a Non-secure fault the app might mishandle. VECTKEY 0x05FA in the top half; the
@@ -389,9 +397,12 @@ fn main() -> ! {
     // Reset-clearable (power cycle), NOT OTP.
     boundary::lock_accessctrl();
 
-    // Arm the watchdog just before handing control to Non-secure: if NS hangs the core (the DMA-stall
-    // BLOCKED case), no Secure path feeds the watchdog and it resets the chip -> recovered on reboot
-    // (vs a permanent hang / DoS). The Secure fault + gateway paths feed it via `delayed_reboot`.
+    // Arm the watchdog just before handing control to Non-secure: a hung NS (the DMA-stall BLOCKED
+    // case, or an NS crash) stops crossing the SG, so nothing feeds the watchdog and it resets the
+    // chip -> recovered on reboot (vs a permanent hang / DoS). A HEALTHY serving NS keeps it fed: the
+    // Secure Gateway handler feeds on every crossing, and the NS serve loop sends a periodic keepalive
+    // crossing when idle (so idle-but-alive != hung). The Secure fault path also feeds via
+    // `delayed_reboot`.
     boundary::arm_watchdog();
 
     // Step 5b: launch the Non-secure app. The bootrom copied its image to NS SRAM (LOAD_MAP entry 3)
