@@ -8,7 +8,7 @@
 
 Every bilateral receipt now carries:
 - `ek_pk_a` (proto field 16): the per-step ephemeral SPHINCS+ public key
-  derived from `(h_n, C_pre, k_step, K_DBRW)`, used to verify `sig_a`.
+  derived from `(h_n, C_pre, k_step, chain-head-at-rest key)`, used to verify `sig_a`.
 - `ek_cert_a` (proto field 14): the cert chaining `EK_pk_{n+1}` back to
   the device's attested AK_pk via prior chain heads.
 - `sig_a` is signed by `EK_sk_{n+1}` (NOT the wallet's long-term identity
@@ -57,12 +57,14 @@ passed `pk_a` for legacy receipts that pre-date this work.
 
 4. **Initialize cert chain for every existing relationship**:
    ```rust
+   // Seed-derived chain-head at-rest wrap key (replaces the old K_DBRW arg).
+   let chain_head_wrap_key = current_chain_head_at_rest_key()?;
    for relationship in client_db::contacts::list_all() {
        let rel_key = compute_smt_key(&local_devid, &relationship.devid);
        let (ak_pk, ak_sk) = wallet.ak_keypair_for_cert_chain()?;
        let counterparty_ak_pk = relationship.public_key;
        client_db::cert_chain::init_local_cert_chain_head_with_sk(
-           &rel_key, &ak_pk, &ak_sk, &k_dbrw,
+           &rel_key, &ak_pk, &ak_sk, &chain_head_wrap_key,
        )?;
        client_db::cert_chain::init_cert_chain_head(
            &rel_key, CertChainSide::Counterparty, &counterparty_ak_pk,
@@ -122,11 +124,11 @@ keypair generation (signing/verification each ~1ms).
 
 ## Operational gotchas
 
-- **`K_DBRW` regeneration** — encrypted SK material is bound to the
-  device's DBRW state. If the device's hardware/environment changes
-  (rare but possible during firmware update or hardware swap), encrypted
-  SKs become unrecoverable. Recovery flow: tombstone+succession to
-  re-anchor at a new AK; chain heads re-initialize at step 0.
+- **Chain-head at-rest key** — encrypted per-step SK material is wrapped
+  by the chain-head-at-rest key, which is derived from the wallet mnemonic
+  seed (`TAG_DSM_CHAIN_HEAD_AT_REST_V2`), NOT device hardware. A firmware
+  update or hardware swap therefore does not lose it — it re-derives from
+  the seed. (The former K_DBRW device-binding was removed.)
 - **Cold-start verification after recovery** — the recovery capsule v5
   (commit `f5ce701`) carries `cert_chain_heads` + `last_certs` so a
   resumed device has its chain heads available immediately without

@@ -59,7 +59,6 @@ pub mod anchor_enrollment;
 pub mod blake3;
 pub mod canonical_lp;
 pub mod classical_verify;
-pub mod device_anchor;
 pub mod ephemeral_key;
 pub mod hash;
 pub mod hkdf;

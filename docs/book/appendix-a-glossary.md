@@ -14,7 +14,8 @@ Terminology reference for the DSM protocol.
 | **ByteCommit** | A state commitment anchored on storage nodes for persistence and replication. |
 | **CPTA** | Content-Addressed Token Policy Anchor. Binds token policies to their canonical content hash: `BLAKE3("DSM/cpta\0" \|\| canonical_bytes)`. |
 | **dBTC** | Deterministic Bitcoin. A 1:1 Bitcoin-backed token inside DSM. Bridge uses HTLCs on Bitcoin and DLVs on DSM. |
-| **DBRW** | Device-Bound Random Walk. Anti-cloning mechanism using dual-factor binding: silicon fingerprint + environment entropy. |
+| **Anchor (fused hardware anchor)** | The anti-cloning mechanism: a TROPIC01 secure element + RP2350 secure partition binding each root advance under a triple signature (σ^DSM + σ^chip + σ^host). Hardware supplies identity, not authority. |
+| **DBRW** | *(removed)* Device-Bound Random Walk — an earlier fingerprint-based anti-cloning design (silicon + environment). Superseded by the fused hardware anchor; retained here only because older docs may reference the term. |
 | **SoFi** | Decentralized Token Finance. DSM's framework for programmable token operations including DLVs, smart commitments, and atomic swaps. |
 | **Device Tree** | Hierarchical structure aggregating per-device Sparse Merkle Trees into a global tree for cross-device verification. |
 | **DJTE** | Deterministic Join-Triggered Emissions. Token emission model where new tokens are minted deterministically when new participants join. |
@@ -32,7 +33,7 @@ Terminology reference for the DSM protocol.
 | **MessagePort** | WebView API for binary communication between JavaScript and Kotlin. Carries `[8-byte msgId][protobuf bytes]`. |
 | **ML-KEM-768** | Module-Lattice Key Encapsulation Mechanism (formerly Kyber). Post-quantum key exchange used for BLE sessions and TLS. |
 | **MPC** | Multi-Party Computation. Used for genesis creation — the MPC service contributes entropy that no single party controls. |
-| **PBI** | Platform Boot Identity. The bootstrap process that establishes device identity from DBRW entropy, device ID, and genesis hash. |
+| **PBI** | Platform Boot Identity. The bootstrap process that establishes device identity from the mnemonic seed, device ID, and genesis hash (GenesisV2, mnemonic-rooted). |
 | **Salted-BLAKE3 Commitment** | Hiding + binding cryptographic commitment of the form `BLAKE3-256("DSM/<purpose>\0" \|\| blinding \|\| value)` where `blinding` is 32 bytes of CSPRNG output used once per commit. Replaces the previously-used (and misnamed) "Quantum-Resistant Pedersen" commitments — see Issue #184 Finding #2. Used for DLV vault content commitments via `vault::limbo_vault::dlv_content_commitment`. |
 | **PRLSM** | Partitioned Replicated Lightweight State Machine. DSM's approach to statelessness across the network. |
 | **Signet** | Bitcoin's shared test network. Public test coins, public blocks, and realistic confirmation flow without using mainnet funds. |

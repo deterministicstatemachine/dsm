@@ -22,7 +22,7 @@ The `dsm` core crate is pure Rust with no network calls, no OS time, no UI, and 
 
 ### Post-quantum from day one
 
-The cryptographic stack uses BLAKE3 for domain-separated hashing, SPHINCS+ for post-quantum digital signatures (EUF-CMA), ML-KEM-768 (Kyber) for key encapsulation, and DBRW for hardware-bound anti-cloning. No classical-only primitives are used in protocol-critical paths.
+The cryptographic stack uses BLAKE3 for domain-separated hashing, SPHINCS+ for post-quantum digital signatures (EUF-CMA), and ML-KEM-768 (Kyber) for key encapsulation. Anti-cloning is enforced by a fused hardware anchor (see below), not by primitives in this table. No classical-only primitives are used in protocol-critical paths.
 
 ### Binary-first
 
@@ -46,9 +46,9 @@ All wire messages are wrapped in Envelope v3 containers with a `0x03` framing by
 
 Storage nodes are "dumb" HTTP persistence servers. They hold encrypted state blobs and provide index/lookup services but never interpret protocol semantics. Replica placement uses deterministic keyed Fisher-Yates shuffle — no leader election or consensus protocol is needed.
 
-### DBRW Anti-Cloning
+### Anti-Cloning: the Fused Hardware Anchor
 
-Device-Bound Random Walk (DBRW) binds each identity to specific hardware using a dual-factor approach: silicon fingerprint + environment binding. This prevents state cloning attacks where an adversary copies device state to a second device.
+DSM does not fingerprint hardware. Transfer uniqueness is a software property of the device SMT (one accepted successor per parent root, forward-only frontier), and a **fused hardware anchor** (TROPIC01 secure element + RP2350 secure partition) binds every root advance under a triple signature `σ^DSM + σ^chip + σ^host`. Hardware supplies **identity, not authority**; the monotonic counter is a non-rewind floor the receiver never reads. A clone cannot reproduce the resident non-exportable chip key or the sealed partition key, so it cannot advance the root.
 
 ### Deterministic Limbo Vaults (DLV)
 

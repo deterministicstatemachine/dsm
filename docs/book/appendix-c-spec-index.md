@@ -94,12 +94,13 @@ Every feature maps to an authoritative spec and code modules across all layers.
 - **Source:** `docs/book/06-cryptographic-architecture.md`
 - **Core:** `crypto/kyber.rs`
 
-### DBRW Anti-Cloning
+### Anti-Cloning: Fused Hardware Anchor
 
-- **Source:** `docs/book/15-security-model.md`, `docs/book/18-in-app-developer-walkthroughs.md`
-- **Core:** `crypto/dbrw.rs`, `crypto/dbrw_health.rs`, `pbi.rs`
-- **SDK:** `security/dbrw_validation.rs`, `jni/dbrw.rs`, `jni/bootstrap.rs`
-- **Android:** `AntiCloneGate.kt`, `SiliconFingerprint.kt`
+- **Source:** `docs/book/06-cryptographic-architecture.md`, `docs/book/15-security-model.md`
+- **Protocol math:** `crates/dsm-anchor-core/src/{lib,root_advance,accept,appliance,enrollment}.rs`
+- **Client:** `crypto/anchor_enrollment.rs`, `bluetooth/anchor_accept.rs`, `sdk/anchor_enrollment_store.rs`
+- **Firmware:** `crates/dsm-anchor-secure-monitor/`, `crates/dsm-anchor-pico/`, `crates/dsm-android-anchor/`
+- **Note:** the earlier DBRW / C-DBRW fingerprinting mechanism was removed (see CHANGELOG).
 
 ### DJTE Emissions
 
@@ -175,7 +176,7 @@ Each layer has its own CLAUDE.md with layer-specific conventions:
 | Layer    | File                                               | Scope                                             |
 | -------- | -------------------------------------------------- | ------------------------------------------------- |
 | Rust     | `dsm_client/deterministic_state_machine/CLAUDE.md` | Core logic, SDK, JNI, BLE, crypto                 |
-| Android  | `dsm_client/android/CLAUDE.md`                     | Kotlin, JNI, BLE actor, DBRW gate, WebView bridge |
+| Android  | `dsm_client/android/CLAUDE.md`                     | Kotlin, JNI, BLE actor, anchor gate, WebView bridge |
 | Frontend | `dsm_client/frontend/CLAUDE.md`                    | React UI, bridge protocol, contexts, services     |
 
 For cross-layer changes, consult all relevant CLAUDE.md files.

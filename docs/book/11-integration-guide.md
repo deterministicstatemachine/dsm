@@ -95,7 +95,7 @@ object NativeApi {
 
 ### Bootstrap Sequence
 
-1. Call `sdkBootstrap` with device config (DBRW entropy, storage node URLs)
+1. Call `sdkBootstrap` with device config (mnemonic-rooted identity, storage node URLs)
 2. Wait for `SDK_READY` (poll via `sdkReady()`)
 3. If no identity exists, call `createGenesis` to initialize via MPC
 4. All other methods are now available
@@ -105,7 +105,7 @@ object NativeApi {
 - All data exchange is protobuf-encoded bytes — no JSON
 - The `0x03` framing byte appears on genesis responses — strip it before parsing
 - BLE operations require Android Bluetooth permissions and the `BleCoordinator` actor
-- DBRW anti-cloning binds the identity to the specific device hardware
+- Anti-cloning is enforced by the fused hardware anchor (σ^chip + σ^host over each root advance), not a hardware fingerprint
 
 ---
 

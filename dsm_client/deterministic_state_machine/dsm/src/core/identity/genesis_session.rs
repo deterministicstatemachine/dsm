@@ -199,7 +199,7 @@ impl GenesisSession {
         Ok(())
     }
 
-    /// Set device + MPC entropies (bytes-only). DBRW binding is set separately.
+    /// Set device + MPC entropies (bytes-only).
     pub fn set_entropies(
         &mut self,
         device_entropy: [u8; 32],
@@ -319,16 +319,17 @@ impl GenesisSession {
     ///
     /// Contributions are `[device_id ∥ device_entropy, b_1, …, b_n]`, sorted by
     /// contribution hash so transport-time order cannot change `G`.  The
-    /// public-key bundle and `K_DBRW` are NOT folded in: they bind to genesis
-    /// by being *derived from* `G` (`keys ← S_master ← K_DBRW ← G`); folding
-    /// them back would be circular.  Silicon binding happens one layer down at
-    /// master-seed derivation (whitepaper §11.1 eq.13), not at the genesis hash.
+    /// public-key bundle is NOT folded in: keys bind to genesis by being
+    /// *derived from* `G` (`keys ← S_master ← G`; GenesisV2 is mnemonic-rooted);
+    /// folding them back would be circular.  Anti-cloning is the fused hardware
+    /// anchor, applied downstream — not at the genesis hash (the former
+    /// K_DBRW/silicon binding was removed).
     pub fn compute_genesis_id(&mut self) {
         self.genesis_id = compute_genesis_hash(&self.device_id, &self.canonical_contributions());
     }
 
-    /// Validate full session.  Requires DBRW binding (K_DBRW) to be set
-    /// per whitepaper §11.1 eq.13 prerequisite for master-seed derivation.
+    /// Validate full session: requires the storage-node quorum, device + MPC
+    /// entropies, commitments, `genesis_id`, and `s0` to be set.
     pub fn validate_session(&self) -> Result<(), DsmError> {
         if self.storage_nodes.len() < 3 {
             return Err(DsmError::invalid_operation("MPC requires ≥3 storage nodes"));

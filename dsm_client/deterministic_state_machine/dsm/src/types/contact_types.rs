@@ -29,7 +29,7 @@ pub struct ChainTipSmtProof {
 pub struct DsmVerifiedContact {
     /// User-friendly alias
     pub alias: String,
-    /// Device ID derived from genesis/DBRW (immutable)
+    /// Device ID derived from genesis (immutable)
     pub device_id: [u8; 32],
     /// Genesis hash from decentralized storage (immutable)
     pub genesis_hash: [u8; 32],
