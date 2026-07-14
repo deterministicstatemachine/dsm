@@ -1675,7 +1675,7 @@ that binds DevIDs to a single genesis, and a Per-Device SMT that indexes relatio
 domains and their linear straight hash chains. Ordering is enforced solely by hash adjacency.
 Receipts carry inclusion proofs and post-quantum signatures; ephemeral SPHINCS+ keys are
 chained to the parent and keyed by Smaster. Online delivery is deterministic
-via b0x[...] spool keys; offline is bilateral live-sign. The result is robust, scalable, and
+via b0x[...] sallocation keys; offline is bilateral live-sign. The result is robust, scalable, and
 suitable for large-scale deployment.
 DSM: Deterministic State Machines 43
 terminology (source of truth)

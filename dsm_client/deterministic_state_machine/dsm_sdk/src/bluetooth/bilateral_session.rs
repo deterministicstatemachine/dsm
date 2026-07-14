@@ -146,11 +146,11 @@ pub struct BilateralBleSession {
     /// root, else the sender fails closed to recovery (the receiver verified proofs against this
     /// value). `None` for ordinary transfers and on the receiver side.
     pub anchor_sim_root: Option<[u8; 32]>,
-    /// SENDER-only: the offline-cash pool debit for a bearer transfer, created ONCE at confirm-build
-    /// and stashed here so the canonical commit draws value from the pool identically to the sim.
+    /// SENDER-only: the offline-cash allocation debit for a bearer transfer, created ONCE at confirm-build
+    /// and stashed here so the canonical commit draws value from the allocation identically to the sim.
     /// It carries the anchor bundle `B` — which is NOT recoverable from `anchor_leaf` (whose key is
     /// `H(B)`), so it must live as session state, never be reconstructed at commit. `Some` iff this
-    /// bearer transfer is pool-backed; `None` for ordinary transfers and on the receiver side.
+    /// bearer transfer is allocation-backed; `None` for ordinary transfers and on the receiver side.
     pub offline_spend: Option<dsm::types::device_state::OfflineSpend>,
 }
 

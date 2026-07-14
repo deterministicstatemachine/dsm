@@ -1215,7 +1215,7 @@ message VaultStateInclusionProofV1 {
 // Token-pair canonicalisation: `token_a` and `token_b` are the
 // LEXICOGRAPHICALLY LOWER and HIGHER token-id bytes respectively.
 // Reserves are reported in the matching order (reserve_a is the
-// pool of token_a).  This collapses the "A→B" and "B→A" entries
+// reserve of token_a).  This collapses the "A→B" and "B→A" entries
 // for a single vault into one canonical advertisement; the router
 // flips reserve roles based on the requested trade direction.
 message RoutingVaultAdvertisementV1 {
@@ -1223,8 +1223,8 @@ message RoutingVaultAdvertisementV1 {
   bytes  vault_id                = 2 [(dsm_fixed_len)=32];
   bytes  token_a                 = 3 [(dsm_max_len)=64];   // lexicographically lower
   bytes  token_b                 = 4 [(dsm_max_len)=64];   // lexicographically higher
-  bytes  reserve_a_u128          = 5 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_a
-  bytes  reserve_b_u128          = 6 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_b
+  bytes  reserve_a_u128          = 5 [(dsm_fixed_len)=16]; // big-endian u128, token_a reserve
+  bytes  reserve_b_u128          = 6 [(dsm_fixed_len)=16]; // big-endian u128, token_b reserve
   // Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
   // the routing graph weights deterministic and clockless.
   uint32 fee_bps                 = 7;
@@ -2064,18 +2064,18 @@ message AnchorStatusResponse {
 }
 
 // ── Offline-cash (two-regime money model) ──────────────────────────────────
-// Deliberately load online balance into a device-bound offline-bearer pool
+// Deliberately load online balance into a device-bound offline-bearer allocation
 // ("cash in hand"), spend it offline, reconcile it back. Request bodies ride
 // inside ArgPack.body for wallet.loadOffline / wallet.unloadOffline.
 message OfflineCashRequest {
   string token_id = 1;   // asset to move between regimes (resolved to a CPTA policy_commit)
-  uint64 amount   = 2;   // base units to load (online -> pool) or unload (pool -> online)
+  uint64 amount   = 2;   // base units to load (online -> allocation) or unload (allocation -> online)
 }
 
 message OfflineCashResponse {
   bool   success        = 1;
   uint64 online_balance = 2;                       // online available AFTER the move
-  uint64 pool_balance   = 3;                       // device-bound offline pool AFTER the move
+  uint64 allocation_balance   = 3;                       // device-bound offline allocation AFTER the move
   bytes  device_root    = 4 [(dsm_fixed_len)=32];  // new device SMT root r_A
   string message        = 5;
 }
@@ -2691,7 +2691,7 @@ message Envelope {
     // Offline-bearer anchor status (signal (c)) — read-only `anchor.status` diagnostics.
     AnchorStatusResponse              anchor_status_response           = 112;
 
-    // Offline-cash load/unload (two-regime money model): device-bound pool balance.
+    // Offline-cash load/unload (two-regime money model): device-bound allocation balance.
     OfflineCashResponse               offline_cash_response            = 113;
 
   }

@@ -294,7 +294,7 @@ impl StateMachine {
             deltas,
             initial_chain_tip,
             None, // anchor_leaf — this convenience path is for ordinary transitions
-            None, // offline_spend — ordinary (online) transition, no pool draw
+            None, // offline_spend — ordinary (online) transition, no allocation draw
         )?;
         self.commit_advance(&outcome);
         Ok(outcome)

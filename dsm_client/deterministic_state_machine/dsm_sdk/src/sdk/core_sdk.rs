@@ -870,7 +870,7 @@ impl CoreSDK {
             deltas,
             initial_chain_tip,
             None, // anchor_leaf — ordinary online transition
-            None, // offline_spend — ordinary online transition, no pool draw
+            None, // offline_spend — ordinary online transition, no allocation draw
         )
     }
 
@@ -953,7 +953,7 @@ impl CoreSDK {
             deltas,
             initial_chain_tip,
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
-            offline_spend, // Some(..) draws the value from the offline-cash pool instead of online balance
+            offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
         )?;
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
@@ -1004,9 +1004,9 @@ impl CoreSDK {
         Ok((compat_state, outcome))
     }
 
-    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash pool,
+    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation,
     /// bound to the enrolled anchor bundle `B`. An online, conserved regime shift: online
-    /// `available` drops and the device-bound pool rises by the same amount (device root advances).
+    /// `available` drops and the device-bound allocation rises by the same amount (device root advances).
     /// Fail-closed persistence: the new device head is durably written BEFORE it is installed, so a
     /// persist failure leaves the in-memory head on the prior state (the load is never-happened).
     pub fn load_offline_cash(
@@ -1036,8 +1036,8 @@ impl CoreSDK {
         Ok(outcome)
     }
 
-    /// **Unload** `amount` from this device's offline-cash pool back to the online balance
-    /// (reconcile): the pool drops and online `available` rises by the same amount. Same
+    /// **Unload** `amount` from this device's offline-cash allocation back to the online balance
+    /// (reconcile): the allocation drops and online `available` rises by the same amount. Same
     /// fail-closed persist-before-install discipline as [`Self::load_offline_cash`].
     pub fn unload_offline_cash(
         &self,
@@ -1066,7 +1066,7 @@ impl CoreSDK {
         Ok(outcome)
     }
 
-    /// Current offline-cash pool balance for `asset` under the enrolled anchor bundle `B`.
+    /// Current offline-cash allocation balance for `asset` under the enrolled anchor bundle `B`.
     pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> u64 {
         let sm = self.state_machine.lock();
         match sm.device_head() {
@@ -1406,7 +1406,7 @@ impl CoreSDK {
             &deltas,
             Some(init_tip),
             None, // anchor_leaf — dev-seed mint is an ordinary ingress transition
-            None, // offline_spend — online mint, no pool draw
+            None, // offline_spend — online mint, no allocation draw
         )?;
         // Dev-seed Mint is ingress (no capsule bump needed): bump_capsule = false.
         Self::dual_write_advance_outcome(&outcome, false)?;

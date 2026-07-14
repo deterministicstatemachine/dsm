@@ -193,7 +193,7 @@ pub(crate) async fn publish_terminal_state(
 /// verbatim — the swap moves reserves, not vault identity.
 ///
 /// Reserves are accepted in CANONICAL pair order: `new_reserve_a` is
-/// the new pool of `token_a` (lex-lower), `new_reserve_b` is the pool
+/// the new reserve of `token_a` (lex-lower), `new_reserve_b` is the reserve
 /// of `token_b`.  The caller (chunk #7 unlock handler) is responsible
 /// for mapping its hop-direction `(reserve_in, reserve_out)` back to
 /// canonical order before calling.

@@ -3495,8 +3495,8 @@ impl BilateralBleHandler {
             } else {
                 None
             };
-        // Offline-bearer transfer: draw value from the device-bound offline-cash pool, not the online
-        // balance. Build the pool-spend descriptor ONCE here — it carries the anchor bundle B from the
+        // Offline-bearer transfer: draw value from the device-bound offline-cash allocation, not the online
+        // balance. Build the allocation-spend descriptor ONCE here — it carries the anchor bundle B from the
         // staged appliance, which is NOT recoverable from anchor_leaf's H(B) key, so it is stashed on
         // the session (below) and threaded identically into the canonical commit. Empty deltas and
         // Some(offline_spend) are ONE atomic decision (empty deltas without offline_spend is rejected
@@ -3522,7 +3522,7 @@ impl BilateralBleHandler {
                 },
                 _ => None,
             };
-        // Pool-backed: the value moved via the pool debit, so the online deltas MUST be empty.
+        // Allocation-backed: the value moved via the allocation debit, so the online deltas MUST be empty.
         let sender_deltas = if offline_spend.is_some() {
             Vec::new()
         } else {
@@ -3535,7 +3535,7 @@ impl BilateralBleHandler {
             &sender_deltas,
             Some(h_n),
             staged_bearer.as_ref().map(|(s, _)| s.anchor_leaf.clone()),
-            // Bearer→pool: draw the value from the offline-cash pool instead of the online balance.
+            // Bearer→allocation: draw the value from the offline-cash allocation instead of the online balance.
             // The same descriptor is stashed on the session and used at the canonical commit.
             offline_spend,
         )?;
@@ -3601,8 +3601,8 @@ impl BilateralBleHandler {
                 if let Some(art) = bearer_artifacts.as_ref() {
                     s.anchor_leaf = Some(art.anchor_leaf.clone());
                     s.anchor_sim_root = Some(sender_smt_root);
-                    // Carry the pool-spend descriptor forward (Copy) so the canonical commit debits
-                    // the SAME pool the sim did — the bundle B is not recoverable from anchor_leaf.
+                    // Carry the allocation-spend descriptor forward (Copy) so the canonical commit debits
+                    // the SAME allocation the sim did — the bundle B is not recoverable from anchor_leaf.
                     s.offline_spend = offline_spend;
                 }
             }
@@ -4751,7 +4751,7 @@ impl BilateralBleHandler {
                 &receiver_deltas,
                 Some(h_n),
                 None, // receiver credits ordinary; the fused-anchor leaf is a sender-side concern
-                None, // offline_spend: never — the receiver credits online value, it does not spend a pool
+                None, // offline_spend: never — the receiver credits online value, it does not spend a allocation
             )
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
@@ -5354,8 +5354,8 @@ impl BilateralBleHandler {
                     }
                     _ => Vec::new(),
                 };
-            // Bearer→pool: if the confirm-build stashed a pool-spend descriptor, the value is drawn
-            // from the offline-cash pool, so the online deltas MUST be empty — the SAME decision the
+            // Bearer→allocation: if the confirm-build stashed a allocation-spend descriptor, the value is drawn
+            // from the offline-cash allocation, so the online deltas MUST be empty — the SAME decision the
             // confirm-build sim made, so the committed root matches the sent sim root. Empty deltas
             // and Some(offline_spend) are one atomic choice (never split).
             let sender_deltas = if session_offline_spend.is_some() {
@@ -5372,7 +5372,7 @@ impl BilateralBleHandler {
                     pre_entropy,
                     sender_deltas,
                     session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
-                    session_offline_spend, // bearer→pool: the SAME pool debit the confirm-build sim used
+                    session_offline_spend, // bearer→allocation: the SAME allocation debit the confirm-build sim used
                 )
                 .await
             {
@@ -5439,7 +5439,7 @@ impl BilateralBleHandler {
                 Some(prepared.parent_tip),
                 prepared.anchor_leaf.clone(),
                 // Must match the commit at execute_on_relationship_for_bilateral below EXACTLY
-                // (same inputs → same root): the SAME pool debit `prepared` carries. `OfflineSpend`
+                // (same inputs → same root): the SAME allocation debit `prepared` carries. `OfflineSpend`
                 // is Copy, so this and the commit read the identical value.
                 prepared.offline_spend,
             ) {
@@ -5486,9 +5486,9 @@ impl BilateralBleHandler {
             &prepared.deltas,
             Some(prepared.parent_tip),
             prepared.anchor_leaf.clone(), // bearer: commit the same fused-anchor leaf as the sim proofs
-            // Bearer→pool: the SAME pool debit the confirm-build sim and the determinism-guard sim
+            // Bearer→allocation: the SAME allocation debit the confirm-build sim and the determinism-guard sim
             // used (`prepared.offline_spend`, Copy) — `prepared.deltas` is empty for a bearer transfer,
-            // so the value is drawn from the offline-cash pool, not the online balance, and the
+            // so the value is drawn from the offline-cash allocation, not the online balance, and the
             // committed sender root byte-matches the sent sim root.
             prepared.offline_spend,
         ) {

@@ -103,8 +103,8 @@ pub enum FulfillmentMechanism {
     /// reserves will fail the verifier's re-simulation check.
     ///
     /// `token_a` / `token_b` MUST be canonicalised in lex order;
-    /// `reserve_a` describes the `token_a` pool, `reserve_b` the
-    /// `token_b` pool.  `fee_bps` is in basis points (30 = 0.30 %).
+    /// `reserve_a` describes the `token_a` reserve, `reserve_b` the
+    /// `token_b` reserve.  `fee_bps` is in basis points (30 = 0.30 %).
     AmmConstantProduct {
         /// Lex-lower token id.
         token_a: Vec<u8>,
