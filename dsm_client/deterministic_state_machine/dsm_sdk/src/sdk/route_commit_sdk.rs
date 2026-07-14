@@ -696,7 +696,7 @@ pub(crate) enum AmmVerifyError {
     /// `simulated > reserve_out` — impossible by the formula but
     /// surfaced anyway as a defensive check.
     SimulatedExceedsReserveOut,
-    /// `reserve_in + input_amount` overflowed u128.  Pool is too
+    /// `reserve_in + input_amount` overflowed u128.  Reserve is too
     /// large for the swap; should never happen under realistic
     /// reserves but the pure code fails closed rather than wrapping.
     ReserveInOverflow,
@@ -791,7 +791,7 @@ pub(crate) fn verify_amm_swap_against_reserves(
     }
 
     // Standard Uniswap V2 invariant: the FULL input_amount enters the
-    // reserve; the fee accrues to the pool as LP yield (already baked
+    // reserve; the fee accrues to the vault as LP yield (already baked
     // into the lower output the simulator produced).
     let new_reserve_in = reserve_in
         .checked_add(input_amount)
@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn amm_verify_reserve_in_overflow_protection() {
-        // A pool with reserves at u128::MAX would overflow on input.
+        // A vault with reserves at u128::MAX would overflow on input.
         let (a, b) = token_a_pair();
         let vault = amm_vault(u128::MAX, 1_000, 30);
         let simulated =

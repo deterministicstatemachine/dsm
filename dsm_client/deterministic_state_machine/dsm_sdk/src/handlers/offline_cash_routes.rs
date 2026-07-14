@@ -3,12 +3,12 @@
 //!
 //! Invoke routes:
 //! - `wallet.loadOffline`  → move `amount` of an asset from the online balance into this device's
-//!   device-bound offline-bearer pool ("cash in hand"). A conserved regime shift: online
-//!   `available` drops, the pool rises, the device root advances + persists.
-//! - `wallet.unloadOffline` → reconcile: move `amount` from the pool back to online `available`.
+//!   device-bound offline-bearer allocation ("cash in hand"). A conserved regime shift: online
+//!   `available` drops, the allocation rises, the device root advances + persists.
+//! - `wallet.unloadOffline` → reconcile: move `amount` from the allocation back to online `available`.
 //!
-//! The pool is keyed by the device's enrolled anchor bundle `B`, so managing it requires the
-//! anchor device to be present (its `B` identifies which pool to touch). The online balance debit
+//! The allocation is keyed by the device's enrolled anchor bundle `B`, so managing it requires the
+//! anchor device to be present (its `B` identifies which allocation to touch). The online balance debit
 //! itself is the network witness that those units left online-spendable liquidity.
 
 use prost::Message;
@@ -56,7 +56,7 @@ impl AppRouterImpl {
             Err(e) => return err(format!("wallet.{verb}: policy_commit resolve failed: {e}")),
         };
 
-        // The pool is bound to the enrolled anchor bundle B — resolve it from the connected anchor
+        // The allocation is bound to the enrolled anchor bundle B — resolve it from the connected anchor
         // device. Offline cash is the appliance-gated regime, so managing it needs the anchor present.
         let snap = self.core_sdk.anchor_appliance_status();
         if !snap.connected {
@@ -81,10 +81,10 @@ impl AppRouterImpl {
         let resp = generated::OfflineCashResponse {
             success: true,
             online_balance,
-            pool_balance: outcome.amount,
+            allocation_balance: outcome.amount,
             device_root: outcome.new_root.to_vec(),
             message: format!(
-                "{} {} of {} — offline pool now {}, online {}",
+                "{} {} of {} — offline allocation now {}, online {}",
                 if is_load { "loaded" } else { "unloaded" },
                 req.amount,
                 req.token_id,

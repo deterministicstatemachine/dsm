@@ -246,8 +246,8 @@ class SoFiTradeRealHwTest {
 
         // Canonical pair: tokenA = DEMO_BBB (lex-lower), tokenB = ERA.
         // Trader spends ERA (tokenB) in, gets DEMO_BBB (tokenA) out.
-        // So reserveB INCREASES (trader put ERA into the pool) and
-        // reserveA DECREASES (pool paid out DEMO_BBB).
+        // So reserveB INCREASES (trader put ERA into the reserve) and
+        // reserveA DECREASES (reserve paid out DEMO_BBB).
         val raAfter = u128beToLong(updated.reserveAU128.toByteArray())
         val rbAfter = u128beToLong(updated.reserveBU128.toByteArray())
         assertTrue(

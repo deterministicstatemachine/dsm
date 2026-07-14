@@ -8517,7 +8517,7 @@ export class VaultStateInclusionProofV1 extends Message<VaultStateInclusionProof
  * Token-pair canonicalisation: `token_a` and `token_b` are the
  * LEXICOGRAPHICALLY LOWER and HIGHER token-id bytes respectively.
  * Reserves are reported in the matching order (reserve_a is the
- * pool of token_a).  This collapses the "A→B" and "B→A" entries
+ * reserve of token_a).  This collapses the "A→B" and "B→A" entries
  * for a single vault into one canonical advertisement; the router
  * flips reserve roles based on the requested trade direction.
  *
@@ -8549,14 +8549,14 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
   tokenB = new Uint8Array(0);
 
   /**
-   * big-endian u128, pool of token_a
+   * big-endian u128, token_a reserve
    *
    * @generated from field: bytes reserve_a_u128 = 5;
    */
   reserveAU128 = new Uint8Array(0);
 
   /**
-   * big-endian u128, pool of token_b
+   * big-endian u128, token_b reserve
    *
    * @generated from field: bytes reserve_b_u128 = 6;
    */
@@ -13874,6 +13874,125 @@ export class AnchorStatusResponse extends Message<AnchorStatusResponse> {
 }
 
 /**
+ * ── Offline-cash (two-regime money model) ──────────────────────────────────
+ * Deliberately load online balance into a device-bound offline-bearer allocation
+ * ("cash in hand"), spend it offline, reconcile it back. Request bodies ride
+ * inside ArgPack.body for wallet.loadOffline / wallet.unloadOffline.
+ *
+ * @generated from message dsm.OfflineCashRequest
+ */
+export class OfflineCashRequest extends Message<OfflineCashRequest> {
+  /**
+   * asset to move between regimes (resolved to a CPTA policy_commit)
+   *
+   * @generated from field: string token_id = 1;
+   */
+  tokenId = "";
+
+  /**
+   * base units to load (online -> allocation) or unload (allocation -> online)
+   *
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<OfflineCashRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineCashRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineCashRequest {
+    return new OfflineCashRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineCashRequest {
+    return new OfflineCashRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineCashRequest {
+    return new OfflineCashRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineCashRequest | PlainMessage<OfflineCashRequest> | undefined, b: OfflineCashRequest | PlainMessage<OfflineCashRequest> | undefined): boolean {
+    return proto3.util.equals(OfflineCashRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.OfflineCashResponse
+ */
+export class OfflineCashResponse extends Message<OfflineCashResponse> {
+  /**
+   * @generated from field: bool success = 1;
+   */
+  success = false;
+
+  /**
+   * online available AFTER the move
+   *
+   * @generated from field: uint64 online_balance = 2;
+   */
+  onlineBalance = protoInt64.zero;
+
+  /**
+   * device-bound offline allocation AFTER the move
+   *
+   * @generated from field: uint64 allocation_balance = 3;
+   */
+  allocationBalance = protoInt64.zero;
+
+  /**
+   * new device SMT root r_A
+   *
+   * @generated from field: bytes device_root = 4;
+   */
+  deviceRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: string message = 5;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<OfflineCashResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineCashResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "online_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "allocation_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "device_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineCashResponse {
+    return new OfflineCashResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineCashResponse {
+    return new OfflineCashResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineCashResponse {
+    return new OfflineCashResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineCashResponse | PlainMessage<OfflineCashResponse> | undefined, b: OfflineCashResponse | PlainMessage<OfflineCashResponse> | undefined): boolean {
+    return proto3.util.equals(OfflineCashResponse, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.DsmBtMessage
  */
 export class DsmBtMessage extends Message<DsmBtMessage> {
@@ -18487,6 +18606,14 @@ export class Envelope extends Message<Envelope> {
      */
     value: AnchorStatusResponse;
     case: "anchorStatusResponse";
+  } | {
+    /**
+     * Offline-cash load/unload (two-regime money model): device-bound allocation balance.
+     *
+     * @generated from field: dsm.OfflineCashResponse offline_cash_response = 113;
+     */
+    value: OfflineCashResponse;
+    case: "offlineCashResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18591,6 +18718,7 @@ export class Envelope extends Message<Envelope> {
     { no: 108, name: "device_admission_request", kind: "message", T: AddDeviceAdmissionRequestV1, oneof: "payload" },
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
     { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
+    { no: 113, name: "offline_cash_response", kind: "message", T: OfflineCashResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {

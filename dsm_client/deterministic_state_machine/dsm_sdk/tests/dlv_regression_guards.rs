@@ -828,9 +828,9 @@ fn amm_re_simulation_uses_path_search_simulator() {
 
 /// Chunk #7 invariant — the post-trade reserve update MUST use the
 /// FULL `input_amount` (Uniswap V2 invariant: fee accrues to the
-/// pool as LP yield).  A regression that subtracted the fee from
+/// vault as LP yield).  A regression that subtracted the fee from
 /// the input before adding to the reserve would leak fees out of
-/// the pool, breaking the constant-product invariant the simulator
+/// the vault, breaking the constant-product invariant the simulator
 /// relies on.
 #[test]
 fn amm_reserve_update_uses_full_input_amount() {
@@ -838,7 +838,7 @@ fn amm_reserve_update_uses_full_input_amount() {
     assert!(
         src.contains("reserve_in\n        .checked_add(input_amount)"),
         "regression: AMM post-trade reserve update no longer uses the full \
-         input_amount — fees would leak out of the pool"
+         input_amount — fees would leak out of the vault"
     );
 }
 

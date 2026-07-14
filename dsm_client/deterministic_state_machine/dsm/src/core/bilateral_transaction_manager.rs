@@ -403,8 +403,8 @@ pub struct PreparedBilateralAdvance {
     /// appliance; the SAME value the sender's `simulate_advance_for_confirm` used to build the wire
     /// proofs, so the canonical committed root matches (both-or-neither). `None` for ordinary transfers.
     pub anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
-    /// Offline-cash pool debit for an offline-bearer transfer: the value is drawn from the
-    /// device-bound pool instead of the online balance, so `deltas` is empty and this is `Some`.
+    /// Offline-cash allocation debit for an offline-bearer transfer: the value is drawn from the
+    /// device-bound allocation instead of the online balance, so `deltas` is empty and this is `Some`.
     /// Carried forward from the confirm-build seam (stashed on the session) — NEVER reconstructed
     /// from `anchor_leaf`, whose key is `H(B)` and cannot recover the bundle. Threaded identically
     /// into the determinism-guard sim and the canonical commit so all three sender roots byte-match.

@@ -284,12 +284,12 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(value);
     }
 
-    // v0x04: offline-cash pools — the extractable (amount, sequence) behind each allocation leaf.
+    // v0x04: offline-cash allocations — the extractable (amount, sequence) behind each allocation leaf.
     // The leaf HASH is already in `extra_leaves` (commits into the root); this section carries the
     // amounts, which are not recoverable from the hash. BTreeMap iteration is sorted.
-    let pools = head.offline_allocations_snapshot();
-    put_len_u32(&mut out, pools.len());
-    for (key, alloc) in pools {
+    let allocations = head.offline_allocations_snapshot();
+    put_len_u32(&mut out, allocations.len());
+    for (key, alloc) in allocations {
         out.extend_from_slice(key);
         out.extend_from_slice(&alloc.amount.to_le_bytes());
         out.extend_from_slice(&alloc.sequence.to_le_bytes());
@@ -383,15 +383,16 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         extra_leaves.insert(key, value);
     }
 
-    // v0x04: offline-cash pools — extractable (amount, sequence) behind each allocation leaf.
-    let pool_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("pool count: {e}"))?;
+    // v0x04: offline-cash allocations — extractable (amount, sequence) behind each allocation leaf.
+    let allocation_count =
+        read_len_u32(&mut cursor).map_err(|e| anyhow!("allocation count: {e}"))?;
     let mut offline_allocations: BTreeMap<[u8; 32], OfflineAllocation> = BTreeMap::new();
-    for _ in 0..pool_count {
-        let key: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("pool key: {e}"))?;
+    for _ in 0..allocation_count {
+        let key: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("allocation key: {e}"))?;
         let amount_bytes: [u8; 8] =
-            take::<8>(&mut cursor).map_err(|e| anyhow!("pool amount: {e}"))?;
+            take::<8>(&mut cursor).map_err(|e| anyhow!("allocation amount: {e}"))?;
         let seq_bytes: [u8; 8] =
-            take::<8>(&mut cursor).map_err(|e| anyhow!("pool sequence: {e}"))?;
+            take::<8>(&mut cursor).map_err(|e| anyhow!("allocation sequence: {e}"))?;
         offline_allocations.insert(
             key,
             OfflineAllocation {
@@ -864,10 +865,10 @@ mod tests {
         assert_eq!(decoded.extra_leaves_snapshot().get(&key), Some(&value));
     }
 
-    /// The offline-cash pool amount is not recoverable from the leaf hash, so v0x04 persists it
-    /// separately. Assert a loaded pool survives an encode/decode and the root still matches.
+    /// The offline-cash allocation amount is not recoverable from the leaf hash, so v0x04 persists it
+    /// separately. Assert a loaded allocation survives an encode/decode and the root still matches.
     #[test]
-    fn device_head_codec_roundtrip_preserves_offline_cash_pool() {
+    fn device_head_codec_roundtrip_preserves_offline_allocation() {
         let (_, _, _, _, head0) = sample_device_and_rel();
         let token = [0xD4u8; 32]; // funded with 7 by sample_device_and_rel
         let bundle = [0x7Bu8; 32];
@@ -883,12 +884,12 @@ mod tests {
 
         let bytes = encode_device_state(&head);
         let (decoded, stored_root) =
-            decode_device_state(&bytes).expect("decode device head with offline pool");
+            decode_device_state(&bytes).expect("decode device head with offline allocation");
         assert_eq!(stored_root, head.root());
         assert_eq!(
             decoded.root(),
             head.root(),
-            "reloaded root must equal the stored root (pool leaf replayed)"
+            "reloaded root must equal the stored root (allocation leaf replayed)"
         );
 
         let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
@@ -900,7 +901,7 @@ mod tests {
         assert_eq!(
             decoded.offline_allocation(&key),
             3,
-            "pool amount must survive reload"
+            "allocation amount must survive reload"
         );
         // And the online balance was debited by the load (7 -> 4).
         assert_eq!(decoded.balances_snapshot().get(&token), Some(&4));
@@ -926,7 +927,7 @@ mod tests {
     #[test]
     fn device_head_codec_rejects_invalid_value_capability_byte() {
         // A state-less tip serializes as [..value_capability, state_flag], then two trailing
-        // u32 counts: the v0x03 extra_leaves count and the v0x04 offline-pools count (both = 0
+        // u32 counts: the v0x03 extra_leaves count and the v0x04 offline-allocations count (both = 0
         // here, 8 bytes total). So value_capability sits at n-10 and state_flag at n-9.
         let (_, _rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
@@ -936,7 +937,7 @@ mod tests {
         assert_eq!(
             &bytes[n - 8..],
             &[0, 0, 0, 0, 0, 0, 0, 0],
-            "trailing extra_leaves + pools counts should be 0"
+            "trailing extra_leaves + allocations counts should be 0"
         );
         assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
         assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");

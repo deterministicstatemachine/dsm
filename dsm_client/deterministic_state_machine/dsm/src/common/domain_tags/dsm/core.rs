@@ -23,7 +23,7 @@ pub const TAG_STATE_HASH: &str = "DSM/state-hash";
 pub const TAG_FUSED_ANCHOR_STATE_LEAF: &str = "DSM/fused-anchor-state-leaf/v1";
 /// SMT key of the per-(device, asset) offline-cash allocation leaf:
 /// `H(tag ‖ genesis_id ‖ device_id ‖ anchor_bundle_B ‖ asset_id)`. Accounts for value
-/// deliberately loaded from the online balance into this device's offline-bearer pool
+/// deliberately loaded from the online balance into this device's offline-bearer allocation
 /// (device-bound single-device cash). Distinct from the anchor-state leaf, which proves
 /// offline position/counter; this leaf accounts for the loaded VALUE.
 pub const TAG_OFFLINE_ALLOCATION_LEAF: &str = "DSM/offline-allocation/v1";

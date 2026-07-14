@@ -3,9 +3,9 @@
 //! Offline-cash allocation SMT leaf primitive.
 //!
 //! DSM's two-regime money model: the same Genesis balance is *online* (cross-device,
-//! network-synced) but can be deliberately **loaded** into a *device-bound offline pool*
+//! network-synced) but can be deliberately **loaded** into a *device-bound offline allocation*
 //! ("cash in hand") while online, spent offline via the bearer path, and reconciled back.
-//! This module is the pure-crypto layer for the pool's accounting leaf.
+//! This module is the pure-crypto layer for the allocation's accounting leaf.
 //!
 //! The offline allocation is committed as a per-`(device, asset)` leaf in the device SMT,
 //! in a namespace disjoint from relationship-tip leaves (`DSM/smt-key`), the anchor-state

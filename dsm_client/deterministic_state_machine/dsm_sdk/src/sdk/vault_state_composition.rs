@@ -434,7 +434,7 @@ pub(crate) async fn compose_vault_state(
         }
         // Apply the swap to the cursor.  Saturating-sub on the output
         // side defends against malformed RCs that claim more than the
-        // pool can pay; the re-sim above should already exclude these,
+        // allocation can pay; the re-sim above should already exclude these,
         // but defense-in-depth is cheap.
         let (new_a, new_b) = if input_is_a {
             (
