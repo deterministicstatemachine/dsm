@@ -58,6 +58,7 @@ pub mod inbox_poller;
 pub mod policy_cache;
 #[cfg(test)]
 mod qr; // QR code creation and parsing for contacts - enabled for tests only
+pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
 pub mod session_manager; // Native-first session state projection
 pub mod signing_authority;
 pub mod tls_transport_sdk;
