@@ -588,6 +588,8 @@ mod tests {
             &genesis_hash,
             &pubkey_vec,
             &token_hash_vec,
+            &vec![0u8; 1184],
+            &vec![0u8; 64],
         )
         .await
         .ok()?;
@@ -814,6 +816,8 @@ mod tests {
             &receiver_genesis_hash,
             &receiver_pubkey,
             &token_hash,
+            &vec![0u8; 1184],
+            &vec![0u8; 64],
         )
         .await
         .unwrap_or_else(|e| panic!("insert receiver device failed: {e}"));

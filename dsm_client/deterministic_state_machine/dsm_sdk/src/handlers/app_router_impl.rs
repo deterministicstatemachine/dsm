@@ -91,6 +91,13 @@ pub(crate) struct QuorumDeviceIdentity {
     pub(crate) device_id: [u8; 32],
     pub(crate) genesis_hash: [u8; 32],
     pub(crate) public_key: Vec<u8>,
+    /// Recipient ML-KEM-768 public key (online per-step-EK encapsulation target),
+    /// registry-carried and MANDATORY. Included in the `Eq` quorum so a node that
+    /// serves a divergent Kyber key (equivocation) breaks agreement.
+    pub(crate) kyber_public_key: Vec<u8>,
+    /// SPHINCS+ (device AK) signature binding `kyber_public_key` to the device
+    /// identity; verified at contact-add against the QR-carried AK.
+    pub(crate) kyber_binding_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -319,10 +326,18 @@ impl AppRouterImpl {
         mut contact_record: crate::storage::client_db::ContactRecord,
         authoritative: &QuorumDeviceIdentity,
     ) -> Result<crate::storage::client_db::ContactRecord, String> {
+        // The AK established in-person via the QR (the contact's signing key) is
+        // what verifies the recipient's registry-carried ML-KEM identity binding.
+        // Capture it before any repair overwrites `public_key`.
+        let contact_ak = contact_record.public_key.clone();
+
         let public_key_matches = authoritative.public_key.is_empty()
             || contact_record.public_key == authoritative.public_key;
+        let kyber_matches = !authoritative.kyber_public_key.is_empty()
+            && contact_record.kyber_public_key == authoritative.kyber_public_key;
         if contact_record.genesis_hash.as_slice() == authoritative.genesis_hash.as_slice()
             && public_key_matches
+            && kyber_matches
         {
             return Ok(contact_record);
         }
@@ -342,6 +357,30 @@ impl AppRouterImpl {
         if !authoritative.public_key.is_empty() {
             contact_record.public_key = authoritative.public_key.clone();
         }
+
+        // MANDATORY recipient ML-KEM identity binding (DSM beta, no legacy path):
+        // the quorum-agreed Kyber key must be bound to (device_id, genesis) under
+        // the QR-established AK before we persist it to the contact. Fail-closed on
+        // missing or unbound (substituted/equivocating) material — an online
+        // per-step-EK send has no legacy fallback.
+        if authoritative.kyber_public_key.is_empty() {
+            return Err("recipient identity quorum returned no Kyber public key".to_string());
+        }
+        let recipient_device_id: [u8; 32] = contact_record
+            .device_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| "contact device_id is not 32 bytes".to_string())?;
+        crate::sdk::kyber_identity::verify_kyber_identity_binding(
+            &recipient_device_id,
+            &authoritative.genesis_hash,
+            &authoritative.kyber_public_key,
+            &authoritative.kyber_binding_sig,
+            &contact_ak,
+        )
+        .map_err(|e| format!("recipient Kyber identity binding invalid: {e}"))?;
+        contact_record.kyber_public_key = authoritative.kyber_public_key.clone();
+
         contact_record.verified = true;
         contact_record.needs_online_reconcile = false;
 
@@ -2448,9 +2487,18 @@ pub(crate) fn collect_rotated_inbox_addresses(
 fn select_quorum_device_identity(
     candidates: impl IntoIterator<Item = QuorumDeviceIdentity>,
 ) -> Option<QuorumDeviceIdentity> {
-    let mut counts: HashMap<([u8; 32], Vec<u8>), (usize, QuorumDeviceIdentity)> = HashMap::new();
+    // Quorum agreement must cover the FULL identity, including the mandatory
+    // Kyber material — otherwise a node could equivocate on the ML-KEM key while
+    // still counting toward quorum on the other fields.
+    let mut counts: HashMap<([u8; 32], Vec<u8>, Vec<u8>, Vec<u8>), (usize, QuorumDeviceIdentity)> =
+        HashMap::new();
     for candidate in candidates {
-        let key = (candidate.genesis_hash, candidate.public_key.clone());
+        let key = (
+            candidate.genesis_hash,
+            candidate.public_key.clone(),
+            candidate.kyber_public_key.clone(),
+            candidate.kyber_binding_sig.clone(),
+        );
         let entry = counts.entry(key).or_insert((0, candidate.clone()));
         entry.0 += 1;
         if entry.0 >= 3 {
@@ -2509,10 +2557,30 @@ pub(crate) async fn fetch_quorum_device_identity(
                     ));
                     continue;
                 }
+                // Kyber material is MANDATORY (DSM beta, no legacy path). A record
+                // without a well-formed ML-KEM-768 key + binding is invalid; the
+                // cryptographic binding is verified at contact-add against the AK.
+                if decoded.kyber_public_key.len() != 1184 {
+                    last_error = Some(format!(
+                        "device identity from {} had invalid kyber_public_key length {}",
+                        endpoint,
+                        decoded.kyber_public_key.len()
+                    ));
+                    continue;
+                }
+                if decoded.kyber_binding_sig.is_empty() {
+                    last_error = Some(format!(
+                        "device identity from {} had empty kyber_binding_sig",
+                        endpoint
+                    ));
+                    continue;
+                }
                 candidates.push(QuorumDeviceIdentity {
                     device_id,
                     genesis_hash,
                     public_key: decoded.pubkey,
+                    kyber_public_key: decoded.kyber_public_key,
+                    kyber_binding_sig: decoded.kyber_binding_sig,
                 });
             }
             Ok(resp)
@@ -3439,11 +3507,15 @@ mod tests {
             device_id,
             genesis_hash: [0x22u8; 32],
             public_key: vec![0x33u8; 64],
+            kyber_public_key: vec![0x66u8; 1184],
+            kyber_binding_sig: vec![0x77u8; 64],
         };
         let bad = QuorumDeviceIdentity {
             device_id,
             genesis_hash: [0x44u8; 32],
             public_key: vec![0x55u8; 64],
+            kyber_public_key: vec![0x66u8; 1184],
+            kyber_binding_sig: vec![0x77u8; 64],
         };
 
         let selected =
@@ -3461,20 +3533,46 @@ mod tests {
                 device_id,
                 genesis_hash: [0x22u8; 32],
                 public_key: vec![0x33u8; 64],
+                kyber_public_key: vec![0x66u8; 1184],
+                kyber_binding_sig: vec![0x77u8; 64],
             },
             QuorumDeviceIdentity {
                 device_id,
                 genesis_hash: [0x44u8; 32],
                 public_key: vec![0x55u8; 64],
+                kyber_public_key: vec![0x66u8; 1184],
+                kyber_binding_sig: vec![0x77u8; 64],
             },
             QuorumDeviceIdentity {
                 device_id,
                 genesis_hash: [0x22u8; 32],
                 public_key: vec![0x33u8; 64],
+                kyber_public_key: vec![0x66u8; 1184],
+                kyber_binding_sig: vec![0x77u8; 64],
             },
         ]);
 
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn select_quorum_device_identity_rejects_kyber_equivocation() {
+        // Same device_id + genesis + pubkey across all three nodes, but each
+        // serves a DIFFERENT ML-KEM key (registry equivocation). No quorum can
+        // form because the Kyber material is part of the identity's equality.
+        let device_id = [0x11u8; 32];
+        let node = |kpk: u8| QuorumDeviceIdentity {
+            device_id,
+            genesis_hash: [0x22u8; 32],
+            public_key: vec![0x33u8; 64],
+            kyber_public_key: vec![kpk; 1184],
+            kyber_binding_sig: vec![0x77u8; 64],
+        };
+        let selected = select_quorum_device_identity(vec![node(0xA1), node(0xB2), node(0xC3)]);
+        assert!(
+            selected.is_none(),
+            "kyber equivocation across nodes must prevent quorum agreement"
+        );
     }
 
     #[test]

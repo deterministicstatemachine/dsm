@@ -202,6 +202,8 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     genesis_hash     BLOB NOT NULL,
                     pubkey           BLOB NOT NULL,
                     token_hash       BLOB NOT NULL,
+                    kyber_public_key  BLOB NOT NULL,
+                    kyber_binding_sig BLOB NOT NULL,
                     revoked          INTEGER NOT NULL DEFAULT 0,
                     paidk_satisfied  INTEGER NOT NULL DEFAULT 0
                 );
@@ -1358,36 +1360,54 @@ pub async fn get_dlv_slot_capacity(pool: &DBPool, dlv_id: &[u8]) -> Result<Optio
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn register_device(
     pool: &DBPool,
     device_id: &str,
     genesis_hash: &[u8],
     pubkey: &[u8],
     token_hash: &[u8],
+    kyber_public_key: &[u8],
+    kyber_binding_sig: &[u8],
 ) -> Result<u64> {
     let device_id = device_id.to_string();
     let genesis_hash = genesis_hash.to_vec();
     let pubkey = pubkey.to_vec();
     let token_hash = token_hash.to_vec();
+    let kyber_public_key = kyber_public_key.to_vec();
+    let kyber_binding_sig = kyber_binding_sig.to_vec();
     with_conn(pool, move |conn| {
         let rows = conn.execute(
-            "INSERT OR IGNORE INTO devices (device_id, genesis_hash, pubkey, token_hash, revoked)
-             VALUES (?1, ?2, ?3, ?4, 0)",
-            params![device_id, genesis_hash, pubkey, token_hash],
+            "INSERT OR IGNORE INTO devices
+                (device_id, genesis_hash, pubkey, token_hash, kyber_public_key, kyber_binding_sig, revoked)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            params![
+                device_id,
+                genesis_hash,
+                pubkey,
+                token_hash,
+                kyber_public_key,
+                kyber_binding_sig
+            ],
         )?;
         Ok(rows as u64)
     })
     .await
 }
 
-pub async fn get_device(pool: &DBPool, device_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+/// Get a device's identity: (genesis_hash, pubkey, kyber_public_key, kyber_binding_sig).
+pub async fn get_device(
+    pool: &DBPool,
+    device_id: &str,
+) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>> {
     let device_id = device_id.to_string();
     with_conn(pool, move |conn| {
-        let result: Option<(Vec<u8>, Vec<u8>)> = conn
+        let result: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = conn
             .query_row(
-                "SELECT genesis_hash, pubkey FROM devices WHERE device_id = ?1",
+                "SELECT genesis_hash, pubkey, kyber_public_key, kyber_binding_sig
+                 FROM devices WHERE device_id = ?1",
                 params![device_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
         Ok(result)

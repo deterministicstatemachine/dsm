@@ -61,6 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_id: device_id_raw.to_vec(),
         pubkey: pubkey_raw.to_vec(),
         genesis_hash: genesis_raw.to_vec(),
+        kyber_public_key: vec![0u8; 1184],
+        kyber_binding_sig: vec![0u8; 64],
     };
     let reg_body = reg_req.encode_to_vec();
     let reg_url = format!("{}/api/v2/device/register", endpoint);
