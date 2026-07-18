@@ -294,7 +294,7 @@ async fn retrieve_b0x_batch(
     // Log full device_id to help correlate retrieves with stored recipients
     log::info!(
         "📬 retrieve_b0x_batch: incoming GET /api/v2/b0x/retrieve (device={}, lookup_key={})",
-        &device_id,
+        device_id,
         &lookup_key[..16.min(lookup_key.len())]
     );
     let include_acked = headers
@@ -311,7 +311,7 @@ async fn retrieve_b0x_batch(
     if rows.is_empty() {
         log::info!(
             "📭 retrieve_from_b0x_v2: inbox empty for device {}",
-            &device_id
+            device_id
         );
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
@@ -332,7 +332,7 @@ async fn retrieve_b0x_batch(
     log::info!(
         "📬 retrieve_from_b0x_v2: returning {} envelopes for device {}",
         batch.envelopes.len(),
-        &device_id
+        device_id
     );
 
     let mut headers = axum::http::HeaderMap::new();
@@ -376,7 +376,7 @@ async fn retrieve_b0x_batch_from_seq(
     log::info!(
         "📬 retrieve_b0x_batch_from_seq: incoming GET /api/v2/b0x/retrieve/{} (device={}, lookup_key={})",
         from_seq,
-        &device_id,
+        device_id,
         &lookup_key[..16.min(lookup_key.len())]
     );
 
@@ -390,7 +390,7 @@ async fn retrieve_b0x_batch_from_seq(
         log::info!(
             "📭 retrieve_b0x_batch_from_seq: no envelopes >= seq {} for device {}",
             from_seq,
-            &device_id
+            device_id
         );
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
@@ -424,7 +424,7 @@ async fn retrieve_b0x_batch_from_seq(
         from_seq,
         next_seq - 1,
         batch.next_seq,
-        &device_id
+        device_id
     );
 
     let mut headers = axum::http::HeaderMap::new();
