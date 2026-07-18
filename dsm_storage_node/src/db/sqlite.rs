@@ -1395,14 +1395,18 @@ pub async fn register_device(
     .await
 }
 
+/// A device's registered identity row:
+/// `(genesis_hash, pubkey, kyber_public_key, kyber_binding_sig)`.
+pub type DeviceIdentityRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Get a device's identity: (genesis_hash, pubkey, kyber_public_key, kyber_binding_sig).
 pub async fn get_device(
     pool: &DBPool,
     device_id: &str,
-) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+) -> Result<Option<DeviceIdentityRow>> {
     let device_id = device_id.to_string();
     with_conn(pool, move |conn| {
-        let result: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = conn
+        let result: Option<DeviceIdentityRow> = conn
             .query_row(
                 "SELECT genesis_hash, pubkey, kyber_public_key, kyber_binding_sig
                  FROM devices WHERE device_id = ?1",

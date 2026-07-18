@@ -33,7 +33,7 @@ impl fmt::Debug for KeyPair {
         f.debug_struct("KeyPair")
             .field(
                 "public_key",
-                &format!("{:?}...", &self.public_key.get(0..4).unwrap_or(&[])),
+                &format!("{:?}...", self.public_key.get(0..4).unwrap_or(&[])),
             )
             .field("private_key", &"[REDACTED]")
             .finish()

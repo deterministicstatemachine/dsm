@@ -245,7 +245,7 @@ pub(crate) async fn compose_vault_state(
                 Err(e) => {
                     log::debug!(
                         "[compose_vault_state] skipping {}: fetch failed: {e}",
-                        &item.key,
+                        item.key,
                     );
                     continue;
                 }
@@ -255,7 +255,7 @@ pub(crate) async fn compose_vault_state(
                 Err(e) => {
                     log::debug!(
                         "[compose_vault_state] skipping {}: decode failed: {e}",
-                        &item.key,
+                        item.key,
                     );
                     continue;
                 }

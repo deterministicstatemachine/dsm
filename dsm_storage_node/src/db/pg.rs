@@ -1452,11 +1452,15 @@ pub async fn register_device(
     Ok(rows)
 }
 
+/// A device's registered identity row:
+/// `(genesis_hash, pubkey, kyber_public_key, kyber_binding_sig)`.
+pub type DeviceIdentityRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Get a device's identity: (genesis_hash, pubkey, kyber_public_key, kyber_binding_sig).
 pub async fn get_device(
     pool: &Pool,
     device_id: &str,
-) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+) -> Result<Option<DeviceIdentityRow>> {
     let client = pool.get().await?;
     let stmt = client
         .prepare_cached(

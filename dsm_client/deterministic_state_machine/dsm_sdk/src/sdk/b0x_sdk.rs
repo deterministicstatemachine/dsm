@@ -2084,7 +2084,7 @@ impl B0xSDK {
                     continue;
                 }
             };
-            let url = format!("{}/api/v2/b0x/retrieve", &epc);
+            let url = format!("{}/api/v2/b0x/retrieve", epc);
             // NOTE: Do not log the full Authorization header (it contains a bearer-like token).
             let did = self.device_id.trim();
             info!(
@@ -2385,7 +2385,7 @@ impl B0xSDK {
                     continue;
                 }
             };
-            let url = format!("{}/api/v2/b0x/ack", &epc);
+            let url = format!("{}/api/v2/b0x/ack", epc);
 
             let mut req = self
                 .http_client

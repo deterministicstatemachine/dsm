@@ -404,7 +404,6 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
         // Bilateral / paired operations carry both proof and signature.
         Operation::Transfer {
             signature,
-            recipient: _,
             ..
         } => {
             // Transfer's get_proof_of_authorization returns the signature

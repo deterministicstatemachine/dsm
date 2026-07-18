@@ -2185,17 +2185,14 @@ impl Ops for Operation {
             Operation::Generic { .. } => Ok(true),
             Operation::Transfer {
                 amount,
-                token_id: _,
                 ..
             } => Ok(amount.value() > 0),
             Operation::Mint {
                 amount,
-                token_id: _,
                 ..
             } => Ok(amount.value() > 0),
             Operation::Burn {
                 amount,
-                token_id: _,
                 ..
             } => Ok(amount.value() > 0),
             Operation::LockToken { .. } => Ok(true),
@@ -2251,17 +2248,14 @@ impl TokenOps for Operation {
         match self {
             Operation::Transfer {
                 amount,
-                token_id: _,
                 ..
             } => amount.value() > 0,
             Operation::Mint {
                 amount,
-                token_id: _,
                 ..
             } => amount.value() > 0,
             Operation::Burn {
                 amount,
-                token_id: _,
                 ..
             } => amount.value() > 0,
             Operation::Lock { amount, .. } => amount.value() > 0,

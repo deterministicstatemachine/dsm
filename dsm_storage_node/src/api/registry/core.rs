@@ -118,7 +118,7 @@ pub async fn publish_evidence(
 
     log::info!(
         "registry.publish: storing evidence at addr={} kind_code={} size={}",
-        &addr,
+        addr,
         kind_code,
         body.len()
     );
@@ -139,7 +139,7 @@ pub async fn publish_evidence(
 
     log::info!(
         "registry.publish: successfully stored evidence at addr={}",
-        &addr
+        addr
     );
 
     let mut out_headers = HeaderMap::new();
@@ -180,7 +180,7 @@ pub async fn get_object_by_addr(
     Extension(_state): Extension<Arc<crate::AppState>>,
     Path(addr): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    log::info!("registry.get: retrieving evidence at addr={}", &addr);
+    log::info!("registry.get: retrieving evidence at addr={}", addr);
 
     let bytes_opt = crate::db::get_registry_object_by_addr(&_state.db_pool, &addr)
         .await
@@ -190,13 +190,13 @@ pub async fn get_object_by_addr(
         })?;
 
     let Some(bytes) = bytes_opt else {
-        log::warn!("registry.get: no evidence found at addr={}", &addr);
+        log::warn!("registry.get: no evidence found at addr={}", addr);
         return Err(StatusCode::NOT_FOUND);
     };
 
     log::info!(
         "registry.get: found evidence at addr={} size={}",
-        &addr,
+        addr,
         bytes.len()
     );
 

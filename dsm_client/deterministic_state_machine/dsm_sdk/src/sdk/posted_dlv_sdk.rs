@@ -199,7 +199,7 @@ pub(crate) async fn load_all_advertisements_for_recipient(
                 Err(e) => {
                     log::warn!(
                         "[posted_dlv.list] skipping {}: fetch failed: {e}",
-                        &item.key
+                        item.key
                     );
                     continue;
                 }
@@ -210,7 +210,7 @@ pub(crate) async fn load_all_advertisements_for_recipient(
                     Err(e) => {
                         log::warn!(
                             "[posted_dlv.list] skipping {}: decode failed: {e}",
-                            &item.key
+                            item.key
                         );
                         continue;
                     }

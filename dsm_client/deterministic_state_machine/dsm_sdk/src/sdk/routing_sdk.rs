@@ -267,7 +267,7 @@ pub(crate) async fn load_all_advertisements_for_pair(
             let payload = match BitcoinTapSdk::storage_get_bytes(&item.key).await {
                 Ok(b) => b,
                 Err(e) => {
-                    log::warn!("[routing.list] skipping {}: fetch failed: {e}", &item.key);
+                    log::warn!("[routing.list] skipping {}: fetch failed: {e}", item.key);
                     continue;
                 }
             };
@@ -275,7 +275,7 @@ pub(crate) async fn load_all_advertisements_for_pair(
                 match generated::RoutingVaultAdvertisementV1::decode(payload.as_slice()) {
                     Ok(a) => a,
                     Err(e) => {
-                        log::warn!("[routing.list] skipping {}: decode failed: {e}", &item.key);
+                        log::warn!("[routing.list] skipping {}: decode failed: {e}", item.key);
                         continue;
                     }
                 };
