@@ -437,6 +437,27 @@ pub fn rollback_failed_online_send_atomic(
 /// In production each device has its own DB, but single-process integration
 /// tests share one SQLite instance, so the receiver's completed transaction row
 /// must not suppress the sender's settlement bundle.
+/// True if a transaction row for this `tx_id` already exists — i.e. we already
+/// applied and recorded this exact transfer. Used to recognize a stale-route
+/// re-delivery of an already-accepted transition so it can be re-ACKed (releasing
+/// the sender's pending online gate) instead of silently skipped and stranded.
+pub fn transaction_exists(tx_id: &str) -> bool {
+    let binding = match get_connection() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    conn.query_row(
+        "SELECT 1 FROM transactions WHERE tx_id = ?1 LIMIT 1",
+        params![tx_id],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
 pub fn is_sender_settlement_completed(tx_id: &str, sender_device_id: &str) -> bool {
     let binding = match get_connection() {
         Ok(b) => b,

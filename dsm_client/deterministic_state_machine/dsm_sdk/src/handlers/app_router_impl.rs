@@ -312,6 +312,16 @@ impl AppRouterImpl {
             rollback_errors.push(format!("wallet rollback failed: {e}"));
         }
 
+        // §11.1 lockstep: a terminally-failed online send must leave NO pending
+        // Local cert head behind — the committed head was never advanced (we only
+        // stash at sign time), so dropping the pending stash returns this
+        // relationship to exactly its pre-send cert-chain state.
+        if let Err(e) =
+            crate::storage::client_db::drop_pending_local_heads_for_relationship(rollback.smt_key)
+        {
+            rollback_errors.push(format!("pending cert head drop failed: {e}"));
+        }
+
         crate::security::modal_sync_lock::clear_pending_online(rollback.smt_key).await;
 
         if rollback_errors.is_empty() {
@@ -1273,6 +1283,36 @@ impl AppRouterImpl {
             );
         }
 
+        // Durable pending-gate guard — DELIVERY SAFETY. The modal lock above is
+        // in-memory only: it does not survive a process restart, and it is cleared
+        // once a send's flow completes even while the durable outbox gate remains
+        // unresolved (recipient accepted but its ACK has not yet been confirmed at
+        // quorum). Without this check, a second send passes the modal lock, is
+        // DELIVERED to the recipient's inbox, and only then hits the different-gate
+        // rejection at `record_pending_online_transition` — forcing a rollback of a
+        // transfer the recipient may have already accepted, diverging the two
+        // ledgers. Fail closed BEFORE delivery instead. The gate self-clears once
+        // the recipient's ACK lands (storage.sync §5.4 sweep), so this blocks only
+        // while a prior transfer to this contact is genuinely still pending.
+        match crate::storage::client_db::get_pending_online_outbox(&to_device_id) {
+            Ok(Some(_pending)) => {
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                let _ =
+                    crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
+                return err(
+                    "wallet.send: a prior online transfer to this contact is still pending the recipient's acknowledgement; sync before sending again"
+                        .to_string(),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                return err(format!(
+                    "wallet.send: failed to check pending online gate before send: {e}"
+                ));
+            }
+        }
+
         // Tripwire preflight: the parent tip may be consumed only once.
         match crate::storage::client_db::contact_chain_tip_matches_expected(
             &to_device_id,
@@ -1530,18 +1570,23 @@ impl AppRouterImpl {
                                 receipt.set_kyber_ct_a(out.kyber_ct);
                                 receipt.add_sig_a(out.sig);
 
-                                // Advance chain head so step n+1 will use this
-                                // EK_sk_n. After advance, ek_sk in memory is no
-                                // longer needed.
-                                if let Err(e) =
-                                    crate::sdk::receipts::advance_local_chain_head_after_signing(
-                                        &rel_key,
-                                        &out.ek_pk,
-                                        &out.ek_sk,
-                                        &at_rest_key,
-                                        out.used_root_ak,
-                                    )
-                                {
+                                // §11.1 lockstep: do NOT advance the committed Local
+                                // chain head at sign time. STASH the new EK head as
+                                // pending, keyed by this receipt commitment. It is
+                                // promoted into `cert_chain_heads` only once the
+                                // receiver's acceptance ACK is observed (storage.sync
+                                // sweep), and dropped if the transfer fails. This keeps
+                                // the sender's committed head unchanged for a transfer
+                                // that is never accepted, so a failed/timed-out attempt
+                                // cannot run the chain ahead of the receiver.
+                                if let Err(e) = crate::storage::client_db::stash_pending_local_head(
+                                    &rel_key,
+                                    &commitment,
+                                    &out.ek_pk,
+                                    &out.ek_sk,
+                                    &at_rest_key,
+                                    out.used_root_ak,
+                                ) {
                                     let rollback_error = self
                                         .rollback_failed_online_transfer(&rollback_request)
                                         .await
@@ -1549,7 +1594,7 @@ impl AppRouterImpl {
                                         .map(|rb| format!("; rollback failed: {rb}"))
                                         .unwrap_or_default();
                                     return err(format!(
-                                        "wallet.send: §11.1 chain head advance failed: {e}{rollback_error}"
+                                        "wallet.send: §11.1 pending chain head stash failed: {e}{rollback_error}"
                                     ));
                                 }
 

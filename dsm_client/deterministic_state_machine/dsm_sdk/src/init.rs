@@ -215,7 +215,40 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
     ));
     crate::bridge::mark_full_app_router_installed(device_id);
     log::info!("[SDK] Full AppRouter hot-swapped in (canonical identity ready)");
+    spawn_acceptance_recovery_sweep("warm-swap");
     Ok(true)
+}
+
+/// §16.6 startup acceptance recovery: finish applied-but-incomplete acceptance
+/// journals from the durable `CanonicalApplyRecord` — no redelivery required.
+/// This init path is SYNCHRONOUS (JNI-invoked) and may already be inside an
+/// active Tokio runtime, so NEVER `block_on` here — schedule on the established
+/// runtime (same pattern as `startPairingAll`). The wrap key is derived INSIDE
+/// the spawned task and the sweep skips fail-closed when the wallet is locked
+/// or the DB is not initialized — recovery runs only after the database, wallet
+/// keys, and runtime all exist.
+fn spawn_acceptance_recovery_sweep(origin: &'static str) {
+    crate::runtime::get_runtime().spawn(async move {
+        match current_chain_head_at_rest_key() {
+            Ok(wrap_key) => {
+                if let Err(e) =
+                    crate::handlers::recipient_receipt::recover_incomplete_acceptances(&wrap_key)
+                        .await
+                {
+                    log::warn!(
+                        "[SDK] §16.6 startup acceptance recovery ({origin}) errored (non-fatal): {e}"
+                    );
+                } else {
+                    log::info!("[SDK] §16.6 startup acceptance recovery ({origin}) swept");
+                }
+            }
+            Err(_) => {
+                log::debug!(
+                    "[SDK] §16.6 startup acceptance recovery ({origin}) skipped (wallet locked)"
+                );
+            }
+        }
+    });
 }
 
 /// Core bilateral handler that wraps SDK's async BiImpl
@@ -503,6 +536,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         ));
         crate::bridge::mark_full_app_router_installed(device_id);
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
+        spawn_acceptance_recovery_sweep("cold-boot");
     } else {
         // Install minimal bootstrap router for pre-genesis queries
         use crate::bridge::{AppQuery, AppInvoke, AppResult};

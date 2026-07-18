@@ -32,6 +32,8 @@ pub mod mempool_api;
 pub mod message_routes;
 pub mod misc_routes;
 pub mod offline_cash_routes;
+pub mod online_finalize;
+pub mod recipient_receipt;
 pub mod posted_dlv_routes;
 pub mod prefs_routes;
 pub mod recovery_impl;

@@ -45,6 +45,7 @@ pub use bootstrap::SdkBootstrap;
 
 pub mod anchor_enrollment_store;
 pub mod app_state; // Shared application state management
+pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;
 pub mod chain_tip_store;
 pub mod core_sdk;
