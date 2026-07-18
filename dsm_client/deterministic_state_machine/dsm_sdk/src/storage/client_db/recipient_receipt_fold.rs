@@ -85,7 +85,10 @@ impl std::fmt::Debug for RecipientAcceptanceJournal {
                 "new_local_b_sk_enc",
                 &self.new_local_b_sk_enc.as_ref().map(|_| "<redacted>"),
             )
-            .field("new_counterparty_a_head_len", &self.new_counterparty_a_head.len())
+            .field(
+                "new_counterparty_a_head_len",
+                &self.new_counterparty_a_head.len(),
+            )
             .field("receipt_bytes_len", &self.receipt_bytes.len())
             .field("status", &self.status)
             .finish()
@@ -118,9 +121,7 @@ pub fn acceptance_artifact_hash(exact_full_receipt_bytes: &[u8]) -> [u8; 32] {
 }
 
 #[allow(clippy::type_complexity)]
-fn row_to_journal(
-    row: &rusqlite::Row,
-) -> rusqlite::Result<RecipientAcceptanceJournal> {
+fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJournal> {
     let g = |i: usize| -> rusqlite::Result<Vec<u8>> { row.get::<_, Vec<u8>>(i) };
     let go = |i: usize| -> rusqlite::Result<Option<Vec<u8>>> { row.get::<_, Option<Vec<u8>>>(i) };
     let to32 = |v: Vec<u8>| -> [u8; 32] {
@@ -457,10 +458,7 @@ pub fn promote_prepared_to_applied(
 
 /// Mark a prepared journal Rejected/Aborted — ONLY when the caller has proven the
 /// transition was not applied (explicit `apply_operation` failure). Idempotent.
-pub fn mark_acceptance_rejected(
-    relationship_key: &[u8; 32],
-    parent_tip: &[u8; 32],
-) -> Result<()> {
+pub fn mark_acceptance_rejected(relationship_key: &[u8; 32], parent_tip: &[u8; 32]) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
@@ -583,7 +581,10 @@ pub fn complete_applied_acceptance(
         | CasHeadOutcome::AlreadyAtTarget => {}
         CasHeadOutcome::Conflict { current } => {
             return Ok(AcceptancePhaseOutcome::Conflict {
-                reason: format!("counterparty A head CAS conflict (len={:?})", current.map(|c| c.len())),
+                reason: format!(
+                    "counterparty A head CAS conflict (len={:?})",
+                    current.map(|c| c.len())
+                ),
             });
         }
     }
@@ -622,7 +623,10 @@ pub fn complete_applied_acceptance(
             | CasHeadOutcome::AlreadyAtTarget => {}
             CasHeadOutcome::Conflict { current } => {
                 return Ok(AcceptancePhaseOutcome::Conflict {
-                    reason: format!("local B head CAS conflict (len={:?})", current.map(|c| c.len())),
+                    reason: format!(
+                        "local B head CAS conflict (len={:?})",
+                        current.map(|c| c.len())
+                    ),
                 });
             }
         }
@@ -716,7 +720,15 @@ mod tests {
         let rel = [0x01u8; 32];
         let parent = [0x02u8; 32];
         let child = [0x03u8; 32];
-        let rec = prepared_row(rel, parent, child, [0x04u8; 32], vec![0xBBu8; 40], &[0xCCu8; 64], vec![0xAAu8; 40]);
+        let rec = prepared_row(
+            rel,
+            parent,
+            child,
+            [0x04u8; 32],
+            vec![0xBBu8; 40],
+            &[0xCCu8; 64],
+            vec![0xAAu8; 40],
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
 
         // Not applied: completion refuses, no head advance, no outbox.
@@ -724,7 +736,9 @@ mod tests {
             complete_applied_acceptance(&rec, &WRAP).unwrap(),
             AcceptancePhaseOutcome::NotYetApplied
         );
-        assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap().is_none());
+        assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local)
+            .unwrap()
+            .is_none());
         assert!(!outbound_reply_exists(&[0x04u8; 32]).unwrap());
         // promote is NotYetApplied until the canonical tip reaches child.
         assert_eq!(
@@ -743,25 +757,54 @@ mod tests {
         let commitment = [0x14u8; 32];
         let ek_pk_b = vec![0xB1u8; 40];
         let ek_pk_a = vec![0xA1u8; 40];
-        let rec = prepared_row(rel, parent, child, commitment, ek_pk_b.clone(), &[0xC1u8; 64], ek_pk_a.clone());
+        let rec = prepared_row(
+            rel,
+            parent,
+            child,
+            commitment,
+            ek_pk_b.clone(),
+            &[0xC1u8; 64],
+            ek_pk_a.clone(),
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
 
         // Simulate the transition applied (canonical tip advanced to child).
         set_applied(&rec);
-        assert_eq!(promote_prepared_to_applied(&rel, &parent).unwrap(), PromoteOutcome::Applied);
+        assert_eq!(
+            promote_prepared_to_applied(&rel, &parent).unwrap(),
+            PromoteOutcome::Applied
+        );
 
         // Now completion converges both heads + outbox; idempotent on re-run.
         let out = complete_applied_acceptance(&rec, &WRAP).unwrap();
         assert!(matches!(out, AcceptancePhaseOutcome::Converged { .. }));
-        assert_eq!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(), Some(ek_pk_b.clone()));
-        assert_eq!(load_cert_chain_head_pubkey(&rel, CertChainSide::Counterparty).unwrap(), Some(ek_pk_a));
+        assert_eq!(
+            load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(),
+            Some(ek_pk_b.clone())
+        );
+        assert_eq!(
+            load_cert_chain_head_pubkey(&rel, CertChainSide::Counterparty).unwrap(),
+            Some(ek_pk_a)
+        );
         assert!(outbound_reply_exists(&commitment).unwrap());
-        assert_eq!(get_acceptance_journal(&rel, &parent).unwrap().unwrap().status, STATUS_COMPLETE);
+        assert_eq!(
+            get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .status,
+            STATUS_COMPLETE
+        );
 
         // Re-run (crash-after-Applied recovery): idempotent, single heads.
         let reloaded = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
-        assert!(matches!(complete_applied_acceptance(&reloaded, &WRAP).unwrap(), AcceptancePhaseOutcome::Converged { .. }));
-        assert_eq!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(), Some(ek_pk_b));
+        assert!(matches!(
+            complete_applied_acceptance(&reloaded, &WRAP).unwrap(),
+            AcceptancePhaseOutcome::Converged { .. }
+        ));
+        assert_eq!(
+            load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(),
+            Some(ek_pk_b)
+        );
     }
 
     #[test]
@@ -774,20 +817,40 @@ mod tests {
         let commitment = [0x24u8; 32];
         let ek_pk_b = vec![0xB2u8; 40];
         let ek_pk_a = vec![0xA2u8; 40];
-        let rec = prepared_row(rel, parent, child, commitment, ek_pk_b.clone(), &[0xC2u8; 64], ek_pk_a.clone());
+        let rec = prepared_row(
+            rel,
+            parent,
+            child,
+            commitment,
+            ek_pk_b.clone(),
+            &[0xC2u8; 64],
+            ek_pk_a.clone(),
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
         set_applied(&rec);
         promote_prepared_to_applied(&rel, &parent).unwrap();
 
         // Simulate crash after A head advanced only.
-        super::super::cert_chain::init_cert_chain_head(&rel, CertChainSide::Counterparty, &ek_pk_a).unwrap();
-        assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap().is_none());
+        super::super::cert_chain::init_cert_chain_head(&rel, CertChainSide::Counterparty, &ek_pk_a)
+            .unwrap();
+        assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local)
+            .unwrap()
+            .is_none());
 
         let out = complete_applied_acceptance(&rec, &WRAP).unwrap();
         assert!(matches!(out, AcceptancePhaseOutcome::Converged { .. }));
-        assert_eq!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(), Some(ek_pk_b));
+        assert_eq!(
+            load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(),
+            Some(ek_pk_b)
+        );
         assert!(outbound_reply_exists(&commitment).unwrap());
-        assert_eq!(get_acceptance_journal(&rel, &parent).unwrap().unwrap().status, STATUS_COMPLETE);
+        assert_eq!(
+            get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .status,
+            STATUS_COMPLETE
+        );
     }
 
     #[test]
@@ -797,15 +860,34 @@ mod tests {
         let rel = [0x31u8; 32];
         let parent = [0x32u8; 32];
         let commitment = [0x34u8; 32];
-        let rec = prepared_row(rel, parent, [0x33u8; 32], commitment, vec![0xB3u8; 40], &[0xC3u8; 64], vec![0xA3u8; 40]);
+        let rec = prepared_row(
+            rel,
+            parent,
+            [0x33u8; 32],
+            commitment,
+            vec![0xB3u8; 40],
+            &[0xC3u8; 64],
+            vec![0xA3u8; 40],
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
 
         // apply failed → mark rejected (transition provably not applied).
         mark_acceptance_rejected(&rel, &parent).unwrap();
-        assert_eq!(get_acceptance_journal(&rel, &parent).unwrap().unwrap().status, STATUS_REJECTED);
+        assert_eq!(
+            get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .status,
+            STATUS_REJECTED
+        );
         // Completion refuses a rejected journal; no heads, no outbox.
-        assert_eq!(complete_applied_acceptance(&rec, &WRAP).unwrap(), AcceptancePhaseOutcome::NotYetApplied);
-        assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap().is_none());
+        assert_eq!(
+            complete_applied_acceptance(&rec, &WRAP).unwrap(),
+            AcceptancePhaseOutcome::NotYetApplied
+        );
+        assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local)
+            .unwrap()
+            .is_none());
         assert!(!outbound_reply_exists(&commitment).unwrap());
     }
 
@@ -817,7 +899,15 @@ mod tests {
         let parent = [0x52u8; 32];
         let child = [0x53u8; 32];
         let commitment = [0x54u8; 32];
-        let rec = prepared_row(rel, parent, child, commitment, vec![0xB5u8; 40], &[0xC5u8; 64], vec![0xA5u8; 40]);
+        let rec = prepared_row(
+            rel,
+            parent,
+            child,
+            commitment,
+            vec![0xB5u8; 40],
+            &[0xC5u8; 64],
+            vec![0xA5u8; 40],
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
         // Marker with the SAME child_tip but a DIFFERENT receipt_child_root_a — a distinct
         // transition that reaches the same apparent child state. child_tip does NOT
@@ -841,7 +931,10 @@ mod tests {
         let err = promote_prepared_to_applied(&rel, &parent).unwrap_err();
         assert!(err.to_string().contains("field-for-field"));
         assert_eq!(
-            get_acceptance_journal(&rel, &parent).unwrap().unwrap().status,
+            get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .status,
             STATUS_PREPARED
         );
     }
@@ -854,7 +947,15 @@ mod tests {
         let parent = [0x5Au8; 32];
         let child = [0x5Bu8; 32];
         let commitment = [0x5Cu8; 32];
-        let rec = prepared_row(rel, parent, child, commitment, vec![0xB9u8; 40], &[0xC9u8; 64], vec![0xA9u8; 40]);
+        let rec = prepared_row(
+            rel,
+            parent,
+            child,
+            commitment,
+            vec![0xB9u8; 40],
+            &[0xC9u8; 64],
+            vec![0xA9u8; 40],
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
         // Marker matches ALL semantic fields but carries a DIFFERENT artifact hash
         // (a different signed EK artifact for the same semantic transition) — must
@@ -884,10 +985,21 @@ mod tests {
         init_test_db();
         let rel = [0x55u8; 32];
         let parent = [0x56u8; 32];
-        let rec = prepared_row(rel, parent, [0x57u8; 32], [0x58u8; 32], vec![0xB6u8; 40], &[0xC6u8; 64], vec![0xA6u8; 40]);
+        let rec = prepared_row(
+            rel,
+            parent,
+            [0x57u8; 32],
+            [0x58u8; 32],
+            vec![0xB6u8; 40],
+            &[0xC6u8; 64],
+            vec![0xA6u8; 40],
+        );
         insert_prepared_acceptance_journal(&rec).unwrap();
         // No accepted-transition marker yet → not applied.
-        assert_eq!(promote_prepared_to_applied(&rel, &parent).unwrap(), PromoteOutcome::NotYetApplied);
+        assert_eq!(
+            promote_prepared_to_applied(&rel, &parent).unwrap(),
+            PromoteOutcome::NotYetApplied
+        );
     }
 
     #[test]
@@ -896,9 +1008,25 @@ mod tests {
         init_test_db();
         let rel = [0x41u8; 32];
         let parent = [0x42u8; 32];
-        let rec1 = prepared_row(rel, parent, [0x43u8; 32], [0x44u8; 32], vec![0xB4u8; 40], &[0xC4u8; 64], vec![0xA4u8; 40]);
+        let rec1 = prepared_row(
+            rel,
+            parent,
+            [0x43u8; 32],
+            [0x44u8; 32],
+            vec![0xB4u8; 40],
+            &[0xC4u8; 64],
+            vec![0xA4u8; 40],
+        );
         insert_prepared_acceptance_journal(&rec1).unwrap();
-        let rec2 = prepared_row(rel, parent, [0x99u8; 32], [0x98u8; 32], vec![0xB4u8; 40], &[0xC4u8; 64], vec![0xA4u8; 40]);
+        let rec2 = prepared_row(
+            rel,
+            parent,
+            [0x99u8; 32],
+            [0x98u8; 32],
+            vec![0xB4u8; 40],
+            &[0xC4u8; 64],
+            vec![0xA4u8; 40],
+        );
         let err = insert_prepared_acceptance_journal(&rec2).unwrap_err();
         assert!(err.to_string().contains("DIFFERENT receipt"));
         insert_prepared_acceptance_journal(&rec1).unwrap(); // idempotent identical re-insert

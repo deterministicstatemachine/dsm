@@ -343,7 +343,13 @@ pub fn cas_advance_local_cert_chain_head_with_sk(
                  step_count = step_count + 1,
                  updated_at = ?3
              WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
-            params![new_pubkey, encrypted_sk, now, relationship_key.as_slice(), expected],
+            params![
+                new_pubkey,
+                encrypted_sk,
+                now,
+                relationship_key.as_slice(),
+                expected
+            ],
         )?;
         if updated == 1 {
             let step: i64 = conn

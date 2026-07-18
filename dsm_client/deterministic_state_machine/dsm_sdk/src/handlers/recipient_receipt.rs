@@ -237,11 +237,7 @@ pub fn converge_accepted_locked(
             return Err(anyhow!("journal is rejected — refusing to converge"));
         }
     }
-    match resume_acceptance_phases_locked(
-        journal.relationship_key,
-        journal.parent_tip,
-        wrap_key,
-    )? {
+    match resume_acceptance_phases_locked(journal.relationship_key, journal.parent_tip, wrap_key)? {
         Some(bytes) => Ok(bytes),
         None => Err(anyhow!(
             "completion returned NotYetApplied after promotion — inconsistent acceptance state"
@@ -317,7 +313,9 @@ fn read_persisted_bytes(
     }
     match get_acceptance_journal(relationship_key, parent_tip)? {
         Some(j) => Ok(j.receipt_bytes),
-        None => Err(anyhow!("acceptance receipt bytes not found in storage after fold")),
+        None => Err(anyhow!(
+            "acceptance receipt bytes not found in storage after fold"
+        )),
     }
 }
 
@@ -380,10 +378,14 @@ pub fn generate_b_artifacts_from_inbound(
         || receipt.ek_cert_b.is_empty()
         || receipt.kyber_ct_b.is_empty()
     {
-        return Err(anyhow!("constructed B-side receipt has an empty EK artifact"));
+        return Err(anyhow!(
+            "constructed B-side receipt has an empty EK artifact"
+        ));
     }
     if inbound_receipt.ek_pk_a.is_empty() {
-        return Err(anyhow!("inbound receipt missing ek_pk_a (cannot advance A head)"));
+        return Err(anyhow!(
+            "inbound receipt missing ek_pk_a (cannot advance A head)"
+        ));
     }
     let bytes = receipt
         .to_full_protobuf()
@@ -465,8 +467,9 @@ mod tests {
             receipt_parent_root_a: [0x0Bu8; 32],
             receipt_child_root_a: [0x0Cu8; 32],
             precommit_digest: [0x0Du8; 32],
-            prepared_receipt_artifact_hash:
-                crate::storage::client_db::acceptance_artifact_hash(bytes),
+            prepared_receipt_artifact_hash: crate::storage::client_db::acceptance_artifact_hash(
+                bytes,
+            ),
             expected_local_b_head: None,
             new_local_b_head: vec![0xBBu8; 40],
             new_local_b_sk_enc: encrypt_chain_sk(&[0xCCu8; 64], &WRAP).unwrap(),
@@ -531,7 +534,11 @@ mod tests {
         let rel = [0x51u8; 32];
         let parent = [0x52u8; 32];
         let bytes = prepare_bside_acceptance_receipt_locked(rel, parent, || {
-            Ok(make_artifacts([0x53u8; 32], [0x54u8; 32], b"PREPARED-BYTES"))
+            Ok(make_artifacts(
+                [0x53u8; 32],
+                [0x54u8; 32],
+                b"PREPARED-BYTES",
+            ))
         })
         .unwrap();
         assert_eq!(bytes, b"PREPARED-BYTES");
@@ -539,11 +546,9 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!outbound_reply_exists(&[0x54u8; 32]).unwrap());
-        assert!(
-            resume_acceptance_phases_locked(rel, parent, &WRAP)
-                .unwrap()
-                .is_none()
-        );
+        assert!(resume_acceptance_phases_locked(rel, parent, &WRAP)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -644,7 +649,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(recover_incomplete_acceptances(&WRAP)).unwrap();
         assert_eq!(
-            get_acceptance_journal(&rel, &parent).unwrap().unwrap().status,
+            get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .status,
             STATUS_COMPLETE
         );
         assert!(outbound_reply_exists(&[0x84u8; 32]).unwrap());

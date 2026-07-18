@@ -170,7 +170,10 @@ mod tests {
             &f.binding_sig,
             &f.ak_pk,
         );
-        assert!(res.is_err(), "a substituted Kyber key must fail the binding");
+        assert!(
+            res.is_err(),
+            "a substituted Kyber key must fail the binding"
+        );
     }
 
     #[test]
@@ -183,7 +186,10 @@ mod tests {
             &f.binding_sig,
             &f.ak_pk,
         );
-        assert!(bad_dev.is_err(), "wrong device_id must fail (identity binding)");
+        assert!(
+            bad_dev.is_err(),
+            "wrong device_id must fail (identity binding)"
+        );
         let bad_gen = verify_kyber_identity_binding(
             &f.device_id,
             &[0x99u8; 32],
@@ -191,7 +197,10 @@ mod tests {
             &f.binding_sig,
             &f.ak_pk,
         );
-        assert!(bad_gen.is_err(), "wrong genesis must fail (identity binding)");
+        assert!(
+            bad_gen.is_err(),
+            "wrong genesis must fail (identity binding)"
+        );
     }
 
     #[test]

@@ -459,10 +459,9 @@ impl WalletSDK {
         // wallet seed is not yet cached (pre-genesis wallet shells); the
         // post-genesis router rebuild re-derives deterministically.
         let (kyber_pk, kyber_sk) = match crate::init::current_smaster() {
-            Ok(smaster) => dsm::crypto::kyber::generate_kyber_keypair_from_entropy(
-                &smaster,
-                "DSM/kyber\0",
-            )?,
+            Ok(smaster) => {
+                dsm::crypto::kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?
+            }
             Err(_) => {
                 log::warn!(
                     "[WalletSDK] wallet seed not cached — using EPHEMERAL Kyber keypair \

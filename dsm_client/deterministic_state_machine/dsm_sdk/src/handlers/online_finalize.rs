@@ -126,10 +126,8 @@ pub fn verify_acceptance_receipt(
     // From the SENDER's viewpoint the recipient (B) is the Counterparty. At
     // relationship genesis (no Counterparty head yet) ek_cert_b chains back to
     // the recipient's AK — its legitimate predecessor.
-    let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
-        &receipt.devid_a,
-        &receipt.devid_b,
-    );
+    let rel_key =
+        dsm::verification::smt_replace_witness::compute_smt_key(&receipt.devid_a, &receipt.devid_b);
     let expected_prev_pk_b = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
         .ok()
         .flatten()
@@ -165,7 +163,12 @@ mod tests {
     use super::*;
     use crate::storage::client_db::types::PendingOnlineOutboxRecord;
 
-    fn base_receipt(a: [u8; 32], b: [u8; 32], parent: [u8; 32], child: [u8; 32]) -> StitchedReceiptV2 {
+    fn base_receipt(
+        a: [u8; 32],
+        b: [u8; 32],
+        parent: [u8; 32],
+        child: [u8; 32],
+    ) -> StitchedReceiptV2 {
         StitchedReceiptV2::new(
             [0u8; 32], // genesis
             a,
@@ -195,8 +198,7 @@ mod tests {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt([0x99u8; 32], b, parent, child);
         let g = gate(b, parent, child);
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], None, None).unwrap();
+        let out = verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], None, None).unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 

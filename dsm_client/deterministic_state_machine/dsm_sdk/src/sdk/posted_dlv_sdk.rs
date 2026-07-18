@@ -197,10 +197,7 @@ pub(crate) async fn load_all_advertisements_for_recipient(
             let payload = match BitcoinTapSdk::storage_get_bytes(&item.key).await {
                 Ok(b) => b,
                 Err(e) => {
-                    log::warn!(
-                        "[posted_dlv.list] skipping {}: fetch failed: {e}",
-                        item.key
-                    );
+                    log::warn!("[posted_dlv.list] skipping {}: fetch failed: {e}", item.key);
                     continue;
                 }
             };

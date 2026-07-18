@@ -130,7 +130,9 @@ pub fn insert_canonical_apply_identity_with_conn(
     // Explicit pre-checks (under the same tx snapshot) so an exact duplicate is
     // classified BEFORE the INSERT throws a constraint error.
     if let Some(existing) = load_by_id_locked(conn, &id)? {
-        return Ok(CanonicalApplyInsertOutcome::DuplicateSameOperation(Box::new(existing)));
+        return Ok(CanonicalApplyInsertOutcome::DuplicateSameOperation(
+            Box::new(existing),
+        ));
     }
     let collision: Option<i64> = conn
         .query_row(
@@ -178,7 +180,9 @@ pub fn insert_canonical_apply_identity_with_conn(
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
             match load_by_id_locked(conn, &id)? {
-                Some(existing) => Ok(CanonicalApplyInsertOutcome::DuplicateSameOperation(Box::new(existing))),
+                Some(existing) => Ok(CanonicalApplyInsertOutcome::DuplicateSameOperation(
+                    Box::new(existing),
+                )),
                 None => Ok(CanonicalApplyInsertOutcome::Conflict),
             }
         }
@@ -428,7 +432,10 @@ mod tests {
         assert_eq!(out1, CanonicalApplyInsertOutcome::Inserted);
         // Exact duplicate → loaded original, verified.
         let out2 = with_tx(|c| insert_canonical_apply_identity_with_conn(c, &r)).unwrap();
-        assert_eq!(out2, CanonicalApplyInsertOutcome::DuplicateSameOperation(Box::new(r.clone())));
+        assert_eq!(
+            out2,
+            CanonicalApplyInsertOutcome::DuplicateSameOperation(Box::new(r.clone()))
+        );
         // Reader by (rel, parent) also verifies.
         let loaded = get_canonical_apply_identity(&r.relationship_key, &r.parent_tip)
             .unwrap()
@@ -450,7 +457,8 @@ mod tests {
         // Same (rel, parent), different op/child → Conflict.
         let mut second_child = rec(0x21, 0x22, 0x99);
         second_child.child_tip = [0xDDu8; 32];
-        let out2 = with_tx(|c| insert_canonical_apply_identity_with_conn(c, &second_child)).unwrap();
+        let out2 =
+            with_tx(|c| insert_canonical_apply_identity_with_conn(c, &second_child)).unwrap();
         assert_eq!(out2, CanonicalApplyInsertOutcome::Conflict);
     }
 

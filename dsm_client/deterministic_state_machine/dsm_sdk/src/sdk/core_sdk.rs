@@ -205,7 +205,12 @@ impl CoreSDK {
     fn dual_write_advance_outcome_with_extra(
         outcome: &dsm::types::device_state::AdvanceOutcome,
         bump_capsule: bool,
-        in_tx_extra: Option<&dyn Fn(&rusqlite::Transaction<'_>, &dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
     ) -> Result<(), DsmError> {
         use crate::storage::client_db::{
             get_connection, store_bcr_chain_state_with_conn, update_bcr_device_head_with_conn,
@@ -942,7 +947,12 @@ impl CoreSDK {
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         expected_parent: Option<([u8; 32], [u8; 32])>,
-        in_tx_extra: Option<&dyn Fn(&rusqlite::Transaction<'_>, &dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         self.execute_on_relationship_inner(
             rel_key,
@@ -968,7 +978,12 @@ impl CoreSDK {
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         expected_parent: Option<([u8; 32], [u8; 32])>,
-        in_tx_extra: Option<&dyn Fn(&rusqlite::Transaction<'_>, &dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
@@ -2490,7 +2505,12 @@ impl CoreSDK {
                 to_device_id,
                 token_id,
                 ..
-            } => (nonce.clone(), amount.value(), to_device_id.clone(), token_id.clone()),
+            } => (
+                nonce.clone(),
+                amount.value(),
+                to_device_id.clone(),
+                token_id.clone(),
+            ),
             _ => {
                 return Err(DsmError::invalid_operation(
                     "apply_incoming_transfer_full_state: only Transfer operations are accepted",
@@ -2707,15 +2727,16 @@ impl CoreSDK {
                     amount_val,
                     sender_device_id,
                 );
-                Ok(ApplyOutcome::Applied { record, advance: Box::new(advance) })
+                Ok(ApplyOutcome::Applied {
+                    record,
+                    advance: Box::new(advance),
+                })
             }
             Err(e) => {
                 // Losing racer / stale request classification. The DB is the
                 // authority: re-lookup the exact identity first.
                 match cdb::get_canonical_apply_identity_by_id(&canonical_apply_id) {
-                    Ok(Some(record)) => {
-                        Ok(ApplyOutcome::AlreadyAppliedSameOperation { record })
-                    }
+                    Ok(Some(record)) => Ok(ApplyOutcome::AlreadyAppliedSameOperation { record }),
                     _ => {
                         let msg = e.to_string();
                         if msg.contains("apply parent validation failed")
@@ -2730,7 +2751,6 @@ impl CoreSDK {
             }
         }
     }
-
 }
 
 /* ---------------------------------- Tests ----------------------------------- */
@@ -2825,9 +2845,8 @@ mod tests {
             .expect("record persisted");
         assert_eq!(stored, record);
         // Identity binds the derived child/precommit.
-        let precommit = dsm::core::bilateral_transaction_manager::compute_precommit(
-            &parent, &op_bytes, &nonce,
-        );
+        let precommit =
+            dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
         let child = dsm::core::bilateral_transaction_manager::compute_successor_tip(
             &parent, &op_bytes, &nonce, &precommit,
         );
@@ -2886,7 +2905,10 @@ mod tests {
             )
             .expect("conflict classification");
         assert!(
-            matches!(out, crate::sdk::apply_outcome::ApplyOutcome::Conflict { .. }),
+            matches!(
+                out,
+                crate::sdk::apply_outcome::ApplyOutcome::Conflict { .. }
+            ),
             "different identity on a consumed parent must be Conflict"
         );
         assert_eq!(device_root(&sdk), root_before, "conflict must not mutate");
@@ -2942,14 +2964,23 @@ mod tests {
             .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, b"op-bytes-3", parent)
             .expect("race classification");
         assert!(
-            matches!(out, crate::sdk::apply_outcome::ApplyOutcome::Conflict { .. }),
+            matches!(
+                out,
+                crate::sdk::apply_outcome::ApplyOutcome::Conflict { .. }
+            ),
             "in-tx nonce race must classify as Conflict"
         );
         // ALL-OR-NOTHING: no state advance, no record, no credit.
-        assert_eq!(device_root(&sdk), root_before, "state advance must roll back");
-        assert!(crate::storage::client_db::get_canonical_apply_identity(&rel, &parent)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            device_root(&sdk),
+            root_before,
+            "state advance must roll back"
+        );
+        assert!(
+            crate::storage::client_db::get_canonical_apply_identity(&rel, &parent)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// MANDATORY regression A (crash after apply, before convergence): the
@@ -2968,9 +2999,8 @@ mod tests {
             &local, &sender,
         );
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
-        let precommit = dsm::core::bilateral_transaction_manager::compute_precommit(
-            &parent, &op_bytes, &nonce,
-        );
+        let precommit =
+            dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
         let child = dsm::core::bilateral_transaction_manager::compute_successor_tip(
             &parent, &op_bytes, &nonce, &precommit,
         );
@@ -3010,7 +3040,13 @@ mod tests {
 
         // APPLY commits; then CRASH before convergence (we simply don't converge).
         let out = sdk
-            .apply_incoming_transfer_full_state(op.clone(), &crate::types::identifiers::TransactionId::new("tx-A"), &sender_b32, &op_bytes, parent)
+            .apply_incoming_transfer_full_state(
+                op.clone(),
+                &crate::types::identifiers::TransactionId::new("tx-A"),
+                &sender_b32,
+                &op_bytes,
+                parent,
+            )
             .expect("fresh apply");
         assert!(matches!(
             out,
@@ -3027,10 +3063,18 @@ mod tests {
         .unwrap();
         assert_eq!(again, b"RECEIPT-A");
         let redelivered = sdk
-            .apply_incoming_transfer_full_state(op, &crate::types::identifiers::TransactionId::new("tx-A"), &sender_b32, &op_bytes, parent)
+            .apply_incoming_transfer_full_state(
+                op,
+                &crate::types::identifiers::TransactionId::new("tx-A"),
+                &sender_b32,
+                &op_bytes,
+                parent,
+            )
             .expect("redelivery");
         let record = match redelivered {
-            crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record } => record,
+            crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record } => {
+                record
+            }
             other => panic!("expected AlreadyAppliedSameOperation, got {other:?}"),
         };
 
@@ -3052,11 +3096,17 @@ mod tests {
             crate::handlers::recipient_receipt::converge_accepted_locked(&journal, &record, &wrap)
                 .unwrap();
         assert_eq!(bytes, b"RECEIPT-A");
-        assert_eq!(gen_calls.load(std::sync::atomic::Ordering::SeqCst), 1, "ONE EK derivation total");
+        assert_eq!(
+            gen_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ONE EK derivation total"
+        );
         // Exactly one marker + one outbox entry; journal Complete.
-        assert!(crate::storage::client_db::get_accepted_transition(&rel, &parent)
-            .unwrap()
-            .is_some());
+        assert!(
+            crate::storage::client_db::get_accepted_transition(&rel, &parent)
+                .unwrap()
+                .is_some()
+        );
         assert!(crate::storage::client_db::outbound_reply_exists(&[0x64u8; 32]).unwrap());
         assert_eq!(
             crate::storage::client_db::get_acceptance_journal(&rel, &parent)
@@ -3293,13 +3343,23 @@ mod tests {
         // is left at the u=0 value: exactly the stale condition the bug produced.
         let staged1 = sdk
             .stage_offline_bearer_transition(
-                [1u8; 32], recipient, [2u8; 32], [9u8; 32], [3u8; 32], 0, vec![0xAB], [0x55u8; 32],
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
             )
             .expect("stage 1");
         let bundle = staged1.pin.bundle;
         let key = anchor_state_leaf_key(&bundle);
-        let leaf_u0 =
-            anchor_state_leaf(&bundle, &staged1.appliance_prev_root, staged1.transition.anchor_counter);
+        let leaf_u0 = anchor_state_leaf(
+            &bundle,
+            &staged1.appliance_prev_root,
+            staged1.transition.anchor_counter,
+        );
         {
             let sm = sdk.state_machine.lock();
             let head = sm.device_head().expect("head");
@@ -3310,7 +3370,12 @@ mod tests {
             );
         }
         sdk.release_offline_bearer(
-            &staged1, [0x55u8; 32], [0x51u8; 32], [0x52u8; 32], vec![0xAA; 40], vec![0xCC; 40],
+            &staged1,
+            [0x55u8; 32],
+            [0x51u8; 32],
+            [0x52u8; 32],
+            vec![0xAA; 40],
+            vec![0xCC; 40],
         )
         .expect("release 1 (advances the mock chip)");
 
@@ -3319,7 +3384,14 @@ mod tests {
         // would prove the wrong value.
         let staged2 = sdk
             .stage_offline_bearer_transition(
-                [1u8; 32], recipient, [2u8; 32], [9u8; 32], [3u8; 32], 0, vec![0xCD], [0x66u8; 32],
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xCD],
+                [0x66u8; 32],
             )
             .expect("stage 2");
         assert_eq!(
@@ -3331,7 +3403,10 @@ mod tests {
             &staged2.appliance_prev_root,
             staged2.transition.anchor_counter,
         );
-        assert_ne!(expected, leaf_u0, "the reconciled value actually advanced past the stale u=0 leaf");
+        assert_ne!(
+            expected, leaf_u0,
+            "the reconciled value actually advanced past the stale u=0 leaf"
+        );
         let sm = sdk.state_machine.lock();
         let head = sm.device_head().expect("head");
         assert_eq!(
@@ -3358,14 +3433,24 @@ mod tests {
         let recipient = [4u8; 32];
         let stage = || {
             sdk.stage_offline_bearer_transition(
-                [1u8; 32], recipient, [2u8; 32], [9u8; 32], [3u8; 32], 0, vec![0xAB], [0x55u8; 32],
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
             )
         };
         let s1 = stage().expect("stage 1");
         let root_after_1 = sdk.state_machine.lock().device_head().expect("head").root();
         let s2 = stage().expect("stage 2 (no chip change)");
         let root_after_2 = sdk.state_machine.lock().device_head().expect("head").root();
-        assert_eq!(root_after_1, root_after_2, "an unchanged chip must not drift the device root");
+        assert_eq!(
+            root_after_1, root_after_2,
+            "an unchanged chip must not drift the device root"
+        );
         assert_eq!(s1.appliance_prev_root, s2.appliance_prev_root);
         assert_eq!(s1.anchor_leaf.new_value, s2.anchor_leaf.new_value);
     }

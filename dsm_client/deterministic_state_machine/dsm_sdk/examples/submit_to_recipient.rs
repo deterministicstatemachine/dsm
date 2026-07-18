@@ -126,9 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "✅ Submitted to recipient {} msg_id={}",
         &recipient_b32[..8.min(recipient_b32.len())],
-        &msg_b32
+        msg_b32
     );
-    println!("MSGB32={}", &msg_b32);
+    println!("MSGB32={}", msg_b32);
 
     Ok(())
 }

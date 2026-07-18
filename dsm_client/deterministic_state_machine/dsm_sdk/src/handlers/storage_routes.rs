@@ -113,10 +113,8 @@ fn verify_inbound_receipt_sig_a(
 ) -> Result<(), String> {
     use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 
-    let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
-        &receipt.devid_a,
-        &receipt.devid_b,
-    );
+    let rel_key =
+        dsm::verification::smt_replace_witness::compute_smt_key(&receipt.devid_a, &receipt.devid_b);
     // From the receiver's viewpoint the SENDER (A-side) is the Counterparty.
     // At relationship genesis (no Counterparty head yet) the sender's ek_cert_a
     // chains back to the sender's AK — the legitimate predecessor.
@@ -164,9 +162,7 @@ async fn repair_sender_kyber_from_registry(
     )
     .await?;
     if identity.genesis_hash != contact_genesis {
-        return Err(
-            "registry genesis diverges from the pairing-established genesis".to_string(),
-        );
+        return Err("registry genesis diverges from the pairing-established genesis".to_string());
     }
     crate::sdk::kyber_identity::verify_kyber_identity_binding(
         &sender_device_id,
@@ -939,7 +935,10 @@ impl AppRouterImpl {
                                                     ) {
                                                         log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a invalid: {}", entry.transaction_id, e);
                                                         let mut sg = batch_state.lock().await;
-                                                        sg.errors.push(format!("replay drain sig_a invalid for tx {}", entry.transaction_id));
+                                                        sg.errors.push(format!(
+                                                            "replay drain sig_a invalid for tx {}",
+                                                            entry.transaction_id
+                                                        ));
                                                         continue;
                                                     }
 
@@ -1250,16 +1249,21 @@ impl AppRouterImpl {
                                                 &from_device_id,
                                                 &to_device_id_arr,
                                             );
-                                        let (ak_pk, ak_sk) =
-                                            match self.wallet.ak_keypair_for_cert_chain() {
-                                                Ok(p) => p,
-                                                Err(e) => {
-                                                    log::error!("[storage.sync] §16.6 AK keypair unavailable for tx {}: {} — no ACK", entry.transaction_id, e);
-                                                    let mut sg = batch_state.lock().await;
-                                                    sg.errors.push(format!("AK keypair unavailable for tx {}: {}", entry.transaction_id, e));
-                                                    continue;
-                                                }
-                                            };
+                                        let (ak_pk, ak_sk) = match self
+                                            .wallet
+                                            .ak_keypair_for_cert_chain()
+                                        {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                log::error!("[storage.sync] §16.6 AK keypair unavailable for tx {}: {} — no ACK", entry.transaction_id, e);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!(
+                                                    "AK keypair unavailable for tx {}: {}",
+                                                    entry.transaction_id, e
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                         let sender_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(&from_device_id) {
                                             Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
                                             Ok(Some(c)) => {
@@ -1289,19 +1293,26 @@ impl AppRouterImpl {
                                                 continue;
                                             }
                                         };
-                                        let wrap_key = match crate::init::current_chain_head_at_rest_key() {
-                                            Ok(k) => k,
-                                            Err(e) => {
-                                                log::error!("[storage.sync] §16.6 wrap key unavailable for tx {} (wallet locked?): {} — no ACK", entry.transaction_id, e);
-                                                let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("wrap key unavailable for tx {}: {}", entry.transaction_id, e));
-                                                continue;
-                                            }
-                                        };
+                                        let wrap_key =
+                                            match crate::init::current_chain_head_at_rest_key() {
+                                                Ok(k) => k,
+                                                Err(e) => {
+                                                    log::error!("[storage.sync] §16.6 wrap key unavailable for tx {} (wallet locked?): {} — no ACK", entry.transaction_id, e);
+                                                    let mut sg = batch_state.lock().await;
+                                                    sg.errors.push(format!(
+                                                        "wrap key unavailable for tx {}: {}",
+                                                        entry.transaction_id, e
+                                                    ));
+                                                    continue;
+                                                }
+                                            };
 
                                         // Async relationship exclusion, held across prepare →
                                         // apply → convergence for this entry.
-                                        let rel_lock = crate::handlers::recipient_receipt::relationship_lock(&rel_key);
+                                        let rel_lock =
+                                            crate::handlers::recipient_receipt::relationship_lock(
+                                                &rel_key,
+                                            );
                                         let _rel_guard = rel_lock.lock_owned().await;
 
                                         // PHASE 1 — prepare + persist the exact countersigned
@@ -1329,18 +1340,22 @@ impl AppRouterImpl {
                                         };
 
                                         // ATOMIC FULL-STATE APPLY (lookup-before-execute).
-                                        let apply_outcome = match core_sdk.apply_incoming_transfer_full_state(
-                                            op,
-                                            &tx_id,
-                                            &entry.sender_device_id,
-                                            &op_bytes_for_tip,
-                                            chain_tip_arr,
-                                        ) {
+                                        let apply_outcome = match core_sdk
+                                            .apply_incoming_transfer_full_state(
+                                                op,
+                                                &tx_id,
+                                                &entry.sender_device_id,
+                                                &op_bytes_for_tip,
+                                                chain_tip_arr,
+                                            ) {
                                             Ok(o) => o,
                                             Err(e) => {
                                                 log::warn!("[storage.sync] §16.6 full-state apply errored for tx {}: {} — no ACK", entry.transaction_id, e);
                                                 let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("full-state apply failed for tx {}: {}", entry.transaction_id, e));
+                                                sg.errors.push(format!(
+                                                    "full-state apply failed for tx {}: {}",
+                                                    entry.transaction_id, e
+                                                ));
                                                 continue;
                                             }
                                         };
@@ -1365,16 +1380,25 @@ impl AppRouterImpl {
                                         // durable CanonicalApplyRecord on BOTH fresh and duplicate
                                         // paths. Failure: reconcile-flag + no ACK (recovery sweep
                                         // converges later; the canonical commit is never reversed).
-                                        let journal = match crate::storage::client_db::get_acceptance_journal(&rel_key, &chain_tip_arr) {
-                                            Ok(Some(j)) => j,
-                                            _ => {
-                                                log::error!("[storage.sync] §16.6 prepared journal missing after apply for tx {} — reconcile, no ACK", entry.transaction_id);
-                                                mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
-                                                let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("prepared journal missing for tx {}", entry.transaction_id));
-                                                continue;
-                                            }
-                                        };
+                                        let journal =
+                                            match crate::storage::client_db::get_acceptance_journal(
+                                                &rel_key,
+                                                &chain_tip_arr,
+                                            ) {
+                                                Ok(Some(j)) => j,
+                                                _ => {
+                                                    log::error!("[storage.sync] §16.6 prepared journal missing after apply for tx {} — reconcile, no ACK", entry.transaction_id);
+                                                    mark_contact_needs_online_reconcile_and_refresh(
+                                                        &from_device_id,
+                                                    );
+                                                    let mut sg = batch_state.lock().await;
+                                                    sg.errors.push(format!(
+                                                        "prepared journal missing for tx {}",
+                                                        entry.transaction_id
+                                                    ));
+                                                    continue;
+                                                }
+                                            };
                                         if let Err(e) = crate::handlers::recipient_receipt::converge_accepted_locked(
                                             &journal,
                                             &apply_record,
@@ -1410,7 +1434,10 @@ impl AppRouterImpl {
                                             };
                                             let mut meta = std::collections::HashMap::new();
                                             meta.insert("token_id".to_string(), token_id.clone());
-                                            meta.insert("memo".to_string(), memo.as_bytes().to_vec());
+                                            meta.insert(
+                                                "memo".to_string(),
+                                                memo.as_bytes().to_vec(),
+                                            );
 
                                             let recv_smt_pre = advance_outcome.parent_r_a;
                                             let recv_smt_post = advance_outcome.child_r_a;
@@ -1433,19 +1460,24 @@ impl AppRouterImpl {
                                                     )
                                                 }
                                             };
-                                            if !countersigned.sig_a.is_empty() && !countersigned.sig_b.is_empty() {
-                                                let dual = crate::storage::client_db::StitchedReceipt {
-                                                    tx_hash: receipt_commitment,
-                                                    h_n: chain_tip_arr,
-                                                    h_n1: expected_h_next,
-                                                    device_id_a: from_device_id,
-                                                    device_id_b: to_device_id_arr,
-                                                    sig_a: countersigned.sig_a.clone(),
-                                                    sig_b: countersigned.sig_b.clone(),
-                                                    receipt_commit: entry.receipt_commit.clone(),
-                                                    smt_root_pre: Some(recv_smt_pre),
-                                                    smt_root_post: Some(recv_smt_post),
-                                                };
+                                            if !countersigned.sig_a.is_empty()
+                                                && !countersigned.sig_b.is_empty()
+                                            {
+                                                let dual =
+                                                    crate::storage::client_db::StitchedReceipt {
+                                                        tx_hash: receipt_commitment,
+                                                        h_n: chain_tip_arr,
+                                                        h_n1: expected_h_next,
+                                                        device_id_a: from_device_id,
+                                                        device_id_b: to_device_id_arr,
+                                                        sig_a: countersigned.sig_a.clone(),
+                                                        sig_b: countersigned.sig_b.clone(),
+                                                        receipt_commit: entry
+                                                            .receipt_commit
+                                                            .clone(),
+                                                        smt_root_pre: Some(recv_smt_pre),
+                                                        smt_root_post: Some(recv_smt_post),
+                                                    };
                                                 if let Err(e) =
                                                     crate::storage::client_db::store_stitched_receipt(&dual)
                                                 {
@@ -1474,21 +1506,22 @@ impl AppRouterImpl {
                                                     &entry.receipt_commit,
                                                 );
 
-                                            let rec = crate::storage::client_db::TransactionRecord {
-                                                tx_id: entry.transaction_id.clone(),
-                                                tx_hash,
-                                                from_device: entry.sender_device_id.clone(),
-                                                to_device: to_device_b32,
-                                                amount: amount_val,
-                                                tx_type: "online".to_string(),
-                                                status: "confirmed".to_string(),
-                                                chain_height: entry.seq,
-                                                step_index: entry.seq,
-                                                commitment_hash: None,
-                                                proof_data: history_proof_bytes,
-                                                metadata: meta,
-                                                created_at: 0,
-                                            };
+                                            let rec =
+                                                crate::storage::client_db::TransactionRecord {
+                                                    tx_id: entry.transaction_id.clone(),
+                                                    tx_hash,
+                                                    from_device: entry.sender_device_id.clone(),
+                                                    to_device: to_device_b32,
+                                                    amount: amount_val,
+                                                    tx_type: "online".to_string(),
+                                                    status: "confirmed".to_string(),
+                                                    chain_height: entry.seq,
+                                                    step_index: entry.seq,
+                                                    commitment_hash: None,
+                                                    proof_data: history_proof_bytes,
+                                                    metadata: meta,
+                                                    created_at: 0,
+                                                };
                                             if let Err(e) =
                                                 crate::storage::client_db::store_transaction(&rec)
                                             {
@@ -1740,10 +1773,11 @@ impl AppRouterImpl {
                                         // §11.1 lockstep: tip already at next ⇒ this transfer was
                                         // accepted (in this or a prior cycle) — promote the pending
                                         // Local cert head now (idempotent no-op if already promoted).
-                                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
-                                            &self.device_id_bytes,
-                                            &cp_arr,
-                                        );
+                                        let rel_key =
+                                            dsm::verification::smt_replace_witness::compute_smt_key(
+                                                &self.device_id_bytes,
+                                                &cp_arr,
+                                            );
                                         let _ = crate::storage::client_db::promote_pending_local_head_by_relationship(&rel_key);
                                         continue;
                                     }
