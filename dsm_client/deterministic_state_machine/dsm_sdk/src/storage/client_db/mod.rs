@@ -34,6 +34,7 @@ mod online_outbox;
 mod pending_transactions;
 pub mod recipient_receipt_fold;
 pub mod recovery;
+pub mod sender_proposal;
 mod stitched_receipts;
 mod system_peers;
 mod tokens;
@@ -56,6 +57,7 @@ pub use ble_chunk_buffer::*;
 pub use canonical_apply::*;
 pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
+pub use sender_proposal::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
 pub use export::*;
@@ -136,6 +138,7 @@ pub fn init_database() -> Result<()> {
         ensure_bitcoin_accounts_active_receive_index(&conn)?;
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
+        ensure_acceptance_journal_projection_columns(&conn)?;
         ensure_stitched_receipts_dual_signature_schema(&conn)?;
         ensure_bilateral_sessions_created_at_step(&conn)?;
         ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
@@ -381,6 +384,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             expected_counterparty_a_head BLOB,
             new_counterparty_a_head      BLOB NOT NULL,
             receipt_bytes                BLOB NOT NULL,
+            -- SYMMETRIC-space projection CAS pair captured at PREPARE (empty on
+            -- pre-authority-fix rows; such rows can no longer converge and are
+            -- inert). Authority pair above is ASYMMETRIC (signed receipt).
+            projection_parent_tip        BLOB NOT NULL DEFAULT X'',
+            projection_target_tip        BLOB NOT NULL DEFAULT X'',
             status                       TEXT NOT NULL,
             created_at                   INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, parent_tip)
@@ -446,6 +454,27 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- Durable outbound-reply record: the exact receipt bytes to (re)post to
         -- the sender's reply window, keyed by receipt commitment. Store-before-send;
         -- reposted until GC. Transport wiring is deferred (design step 6).
+        CREATE TABLE IF NOT EXISTS sender_online_proposal(
+            relationship_key       BLOB NOT NULL,
+            canonical_parent       BLOB NOT NULL,   -- ASYM canonical parent (signed receipt space)
+            canonical_child        BLOB NOT NULL,   -- ASYM canonical child
+            projection_parent      BLOB NOT NULL,   -- SYM gate/wire routing space
+            projection_target      BLOB NOT NULL,
+            commitment             BLOB NOT NULL,
+            operation_digest       BLOB NOT NULL,
+            nonce_hash             BLOB NOT NULL,
+            message_id             TEXT,
+            tx_id                  TEXT NOT NULL,
+            counterparty_device_id BLOB NOT NULL,
+            amount                 INTEGER NOT NULL,
+            token_id               TEXT NOT NULL,
+            status                 TEXT NOT NULL,
+            created_at             INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, canonical_parent)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sender_proposal_message
+            ON sender_online_proposal(message_id) WHERE message_id IS NOT NULL;
+
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
             commitment             BLOB PRIMARY KEY,
             relationship_key       BLOB NOT NULL,
@@ -1194,6 +1223,34 @@ fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> 
     if !has_observed_tip_source {
         conn.execute(
             "ALTER TABLE contacts ADD COLUMN observed_remote_tip_source INTEGER",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Authority-sourcing migration: pre-existing acceptance_fold_journal rows
+/// predate the SYMMETRIC projection-CAS columns. Added with empty defaults —
+/// an empty pair means the row was prepared under metadata-derived keying and
+/// can no longer converge (inert; the strict apply refuses its lineage anyway).
+fn ensure_acceptance_journal_projection_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(acceptance_fold_journal)")?;
+    let mut has_projection = false;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == "projection_parent_tip" {
+            has_projection = true;
+            break;
+        }
+    }
+    drop(stmt);
+    if !has_projection {
+        conn.execute(
+            "ALTER TABLE acceptance_fold_journal ADD COLUMN projection_parent_tip BLOB NOT NULL DEFAULT X''",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE acceptance_fold_journal ADD COLUMN projection_target_tip BLOB NOT NULL DEFAULT X''",
             [],
         )?;
     }

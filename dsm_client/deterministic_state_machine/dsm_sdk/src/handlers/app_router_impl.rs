@@ -292,6 +292,17 @@ impl AppRouterImpl {
     ) -> Result<(), String> {
         let mut rollback_errors = Vec::new();
 
+        // §16.6 proposal authority: a rolled-back send terminally marks its
+        // proposal (any non-finalized proposal for this relationship + tx).
+        // Runs first so a partially-failed rollback still leaves the proposal
+        // unusable by the strict finalizer.
+        if let Err(e) = crate::storage::client_db::mark_sender_proposals_rolled_back_for_tx(
+            rollback.smt_key,
+            rollback.tx_id,
+        ) {
+            rollback_errors.push(format!("proposal rollback mark failed: {e}"));
+        }
+
         // Canonical rollback deletes the archived `bcr_chain_states` row +
         // resets `bcr_device_heads` inside `rollback_failed_online_send_atomic`
         // (invoked by `WalletSDK::rollback_failed_online_send`).  No shadow
@@ -1662,6 +1673,83 @@ impl AppRouterImpl {
         };
 
         // =====================================================================
+        // §16.6 CANONICAL SENDER PROPOSAL (proposal authority) — ONE persisted
+        // record written BEFORE any wire work. Its canonical pair comes from
+        // the SIGNED artifact itself; its projection pair is the symmetric
+        // routing lineage snapshotted at preparation. Every downstream
+        // consumer (gate, wire entry, ACK finalization, rollback) reads THIS
+        // record — `contacts.chain_tip` is never reread past this point.
+        // =====================================================================
+        let sender_proposal = {
+            let parsed = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                &receipt_commit_bytes,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|rb| format!("; rollback failed: {rb}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: signed artifact reparse for proposal failed: {e}{rollback_error}"
+                    ));
+                }
+            };
+            let proposal_commitment = match parsed.compute_commitment() {
+                Ok(c) => c,
+                Err(e) => {
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|rb| format!("; rollback failed: {rb}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: proposal commitment failed: {e}{rollback_error}"
+                    ));
+                }
+            };
+            let operation_digest = {
+                let mut h =
+                    dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-op-digest/v1");
+                h.update(&op_bytes);
+                let mut out32 = [0u8; 32];
+                out32.copy_from_slice(&h.finalize().as_bytes()[..32]);
+                out32
+            };
+            crate::storage::client_db::SenderOnlineProposal {
+                relationship_key: smt_key,
+                canonical_parent: parsed.parent_tip,
+                canonical_child: parsed.child_tip,
+                projection_parent: chain_tip_arr,
+                projection_target: new_chain_tip,
+                commitment: proposal_commitment,
+                operation_digest,
+                nonce_hash: crate::storage::codecs::hash_blake3_bytes(&nonce),
+                message_id: None,
+                tx_id: signed_tx.id.to_string(),
+                counterparty_device_id: to_device_id,
+                amount: transfer_req.amount,
+                token_id: token_id.clone(),
+                status: crate::storage::client_db::PROPOSAL_PROPOSED.to_string(),
+                created_at: 0,
+            }
+        };
+        if let Err(e) = crate::storage::client_db::insert_sender_proposal(&sender_proposal) {
+            let rollback_error = self
+                .rollback_failed_online_transfer(&rollback_request)
+                .await
+                .err()
+                .map(|rb| format!("; rollback failed: {rb}"))
+                .unwrap_or_default();
+            return err(format!(
+                "wallet.send: sender proposal persistence failed: {e}{rollback_error}"
+            ));
+        }
+
+        // =====================================================================
         // B0X SUBMISSION (deliver to recipient's inbox)
         // ATOMIC: If b0x fails, rollback the local balance deduction.
         // Use the CANONICAL signature so receiver verification succeeds.
@@ -1699,7 +1787,7 @@ impl AppRouterImpl {
                     .unwrap_or_else(|_| vec![0u8; 32]),
             );
             let sender_chain_tip_b32 =
-                crate::util::text_id::encode_base32_crockford(&chain_tip_arr);
+                crate::util::text_id::encode_base32_crockford(&sender_proposal.projection_parent);
             // Use the signing authority's public key — derived from the same
             // (genesis_hash, device_id, binding_key) triple that produced the
             // secret key used for signing.  This is the ONLY correct source.
@@ -1744,7 +1832,7 @@ impl AppRouterImpl {
 
             // Use relationship-specific h_{n+1} as next_chain_tip (not entity hash).
             // SMT failure is terminal (function returns early), so we always have a valid tip here.
-            let b0x_next_chain_tip = new_chain_tip.to_vec();
+            let b0x_next_chain_tip = sender_proposal.projection_target.to_vec();
 
             // §16.4: Compute the tip-scoped b0x routing address.
             // The address is a single base32(32) digest over domain-separated
@@ -1831,6 +1919,19 @@ impl AppRouterImpl {
                             log::info!("[wallet.send] ✅ Submitted to b0x: {}", msg_id);
                             b0x_succeeded = true;
                             b0x_message_id = Some(msg_id.clone());
+                            // §16.6 proposal authority: bind the wire identity
+                            // to the persisted proposal (exactly once).
+                            if let Err(e) =
+                                crate::storage::client_db::mark_sender_proposal_submitted(
+                                    &sender_proposal.relationship_key,
+                                    &sender_proposal.canonical_parent,
+                                    &msg_id,
+                                )
+                            {
+                                log::error!(
+                                    "[wallet.send] §16.6 proposal message-id bind failed: {e}"
+                                );
+                            }
                             // Wake our own inbox poller so we pick up the recipient's
                             // ACK faster — reduces tip-drift on subsequent sends.
                             crate::sdk::inbox_poller::resume_poller();
@@ -1910,10 +2011,10 @@ impl AppRouterImpl {
             };
             let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&new_chain_tip);
             if let Err(e) = crate::storage::client_db::record_pending_online_transition(
-                &to_device_id,
+                &sender_proposal.counterparty_device_id,
                 msg_id,
-                &chain_tip_arr,
-                &new_chain_tip,
+                &sender_proposal.projection_parent,
+                &sender_proposal.projection_target,
             ) {
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);

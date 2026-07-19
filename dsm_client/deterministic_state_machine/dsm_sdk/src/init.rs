@@ -229,6 +229,22 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
 /// keys, and runtime all exist.
 fn spawn_acceptance_recovery_sweep(origin: &'static str) {
     crate::runtime::get_runtime().spawn(async move {
+        // §16.6 legacy sender-proposal repair (idempotent, unambiguous-only):
+        // pre-proposal gates get their proposal materialized from canonical BCR
+        // evidence so the strict ACK finalizer can release them.
+        if let Some(devid) = crate::sdk::app_state::AppState::get_device_id() {
+            if let Ok(local) = <[u8; 32]>::try_from(devid.as_slice()) {
+                match crate::storage::client_db::repair_legacy_sender_proposals(&local) {
+                    Ok(0) => {}
+                    Ok(n) => log::info!(
+                        "[SDK] §16.6 proposal repair ({origin}): materialized {n} legacy proposal(s)"
+                    ),
+                    Err(e) => log::warn!(
+                        "[SDK] §16.6 proposal repair ({origin}) errored (non-fatal): {e}"
+                    ),
+                }
+            }
+        }
         match current_chain_head_at_rest_key() {
             Ok(wrap_key) => {
                 if let Err(e) =

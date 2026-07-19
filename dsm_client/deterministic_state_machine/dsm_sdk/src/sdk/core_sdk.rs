@@ -1076,6 +1076,19 @@ impl CoreSDK {
                     "apply parent validation failed (fail closed): {reason}"
                 )));
             }
+            // Successor recomputation (§16.6 authority sourcing): the canonical
+            // child computed by THIS device from (consumed parent + signed
+            // operation) must equal the SIGNED child the sender committed to.
+            // Prepare is pure — refusal here has zero side effects.
+            let computed_child = outcome.new_chain_state.compute_chain_tip();
+            if computed_child != request_child_tip {
+                return Err(DsmError::invalid_operation(format!(
+                    "apply child validation failed (fail closed): recomputed canonical successor \
+                     ({}..) != signed child ({}..)",
+                    crate::util::text_id::encode_base32_crockford(&computed_child[..4]),
+                    crate::util::text_id::encode_base32_crockford(&request_child_tip[..4]),
+                )));
+            }
         }
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
@@ -2489,7 +2502,8 @@ impl CoreSDK {
         tx_id: &crate::types::identifiers::TransactionId,
         sender_device_id: &str,
         canonical_operation_bytes: &[u8],
-        parent_tip: [u8; 32],
+        signed_parent_tip: [u8; 32],
+        signed_child_tip: [u8; 32],
     ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
         use crate::sdk::apply_outcome::ApplyOutcome;
         use crate::storage::client_db::{
@@ -2559,16 +2573,18 @@ impl CoreSDK {
         // ---- derive the PRE-EXECUTION request identity (no roots) ----
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+        // AUTHORITY SOURCING: the request pair comes from the SIGNED receipt's
+        // ASYMMETRIC canonical tips — the same formula-space as the DeviceState
+        // embedded relationship lineage this apply advances. The SYMMETRIC
+        // (`compute_successor_tip`) lineage is a projection/routing space and is
+        // NEVER derived or compared here (cross-space comparison was the
+        // AWYPCNK8 false-conflict bug). C_pre is bound to the signed parent.
+        let parent_tip = signed_parent_tip;
+        let child_tip = signed_child_tip;
         let precommit_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
             &parent_tip,
             canonical_operation_bytes,
             &nonce,
-        );
-        let child_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &parent_tip,
-            canonical_operation_bytes,
-            &nonce,
-            &precommit_digest,
         );
         let operation_digest = {
             let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-op-digest/v1");
@@ -2740,6 +2756,7 @@ impl CoreSDK {
                     _ => {
                         let msg = e.to_string();
                         if msg.contains("apply parent validation failed")
+                            || msg.contains("apply child validation failed")
                             || msg.contains("full-state apply race")
                         {
                             Ok(ApplyOutcome::Conflict { reason: msg })
@@ -2750,6 +2767,64 @@ impl CoreSDK {
                 }
             }
         }
+    }
+
+    /// TEST-ONLY honest-sender probe: the canonical (embedded_parent,
+    /// computed_child) THIS device would derive for an incoming transfer —
+    /// pure prepare, no persistence, no head mutation. Fixtures use it to
+    /// present the signed pair an honest sender's canonical advance carries.
+    #[cfg(test)]
+    pub(crate) fn probe_incoming_transfer_canonical_pair(
+        &self,
+        op: &dsm::types::operations::Operation,
+        sender_device_id: &str,
+    ) -> Result<([u8; 32], [u8; 32]), DsmError> {
+        let (amount_val, token_id) = match op {
+            dsm::types::operations::Operation::Transfer {
+                amount, token_id, ..
+            } => (amount.value(), token_id.clone()),
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "probe: only Transfer operations are accepted",
+                ))
+            }
+        };
+        let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
+        let mut local_arr = [0u8; 32];
+        local_arr.copy_from_slice(&local_device_id_bytes);
+        let sender_id_bytes = crate::util::text_id::decode_base32_crockford(sender_device_id)
+            .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
+        let mut sender_arr = [0u8; 32];
+        sender_arr.copy_from_slice(&sender_id_bytes);
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+        let deltas = {
+            let pc = self.resolve_policy_commit_strict(&token_id)?;
+            vec![dsm::types::device_state::BalanceDelta {
+                policy_commit: pc,
+                direction: dsm::types::device_state::BalanceDirection::Credit,
+                amount: amount_val,
+            }]
+        };
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local_arr,
+            &sender_arr,
+        );
+        let sm = self.state_machine.lock();
+        let outcome = sm.prepare_advance_relationship(
+            rel_key,
+            sender_arr,
+            op.clone(),
+            &deltas,
+            Some(init_tip),
+            None,
+            None,
+        )?;
+        Ok((
+            outcome.new_chain_state.embedded_parent,
+            outcome.new_chain_state.compute_chain_tip(),
+        ))
     }
 }
 
@@ -2825,13 +2900,20 @@ mod tests {
         let nonce = vec![0x77u8; 32];
         let op = incoming_transfer_op(&local, 50, nonce.clone());
         let op_bytes = b"canonical-op-bytes-1".to_vec();
-        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &local, &sender,
-        );
+        let (parent, child) = sdk
+            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
+            .expect("canonical probe");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-1");
 
         let out = sdk
-            .apply_incoming_transfer_full_state(op.clone(), &tx_id, &sender_b32, &op_bytes, parent)
+            .apply_incoming_transfer_full_state(
+                op.clone(),
+                &tx_id,
+                &sender_b32,
+                &op_bytes,
+                parent,
+                child,
+            )
             .expect("fresh apply");
         let record = match out {
             crate::sdk::apply_outcome::ApplyOutcome::Applied { record, .. } => record,
@@ -2844,12 +2926,10 @@ mod tests {
             .unwrap()
             .expect("record persisted");
         assert_eq!(stored, record);
-        // Identity binds the derived child/precommit.
+        // Identity binds the SIGNED canonical pair + the precommit over the
+        // signed parent (§16.6 authority sourcing).
         let precommit =
             dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
-        let child = dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &parent, &op_bytes, &nonce, &precommit,
-        );
         assert_eq!(record.parent_tip, parent);
         assert_eq!(record.child_tip, child);
         assert_eq!(record.precommit_digest, precommit);
@@ -2857,7 +2937,7 @@ mod tests {
         // DUPLICATE: exact replay → loaded original record, no re-execution.
         let root_before = device_root(&sdk);
         let dup = sdk
-            .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent)
+            .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent, child)
             .expect("duplicate apply");
         match dup {
             crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record: r2 } => {
@@ -2880,15 +2960,15 @@ mod tests {
     fn full_state_apply_conflict_and_stale_parent_fail_closed() {
         let sdk = full_state_apply_harness();
         let local: [u8; 32] = sdk.device_info.device_id;
-        let (sender, sender_b32) = sender_ids();
+        let (_sender, sender_b32) = sender_ids();
         let nonce = vec![0x88u8; 32];
         let op = incoming_transfer_op(&local, 10, nonce.clone());
         let op_bytes = b"canonical-op-bytes-2".to_vec();
-        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &local, &sender,
-        );
+        let (parent, child) = sdk
+            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
+            .expect("canonical probe");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-2");
-        sdk.apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent)
+        sdk.apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent, child)
             .expect("fresh apply");
 
         // Different op (different canonical bytes ⇒ different identity) reusing
@@ -2902,6 +2982,7 @@ mod tests {
                 &sender_b32,
                 b"different-op-bytes",
                 parent,
+                child,
             )
             .expect("conflict classification");
         assert!(
@@ -2923,6 +3004,7 @@ mod tests {
                 &sender_b32,
                 b"op-bytes-stale",
                 stale_parent,
+                [0x32u8; 32],
             )
             .expect("stale classification");
         match out3 {
@@ -2936,6 +3018,98 @@ mod tests {
         }
         assert_eq!(device_root(&sdk), root_before, "stale must not execute");
         assert!(!crate::storage::client_db::is_nonce_spent(&[0xAAu8; 32]).unwrap());
+    }
+
+    /// AWYPCNK8 REGRESSION (§16.6 authority sourcing): a transfer whose SIGNED
+    /// receipt carries the correct canonical pair must apply cleanly even when
+    /// every symmetric-space value around it (contacts.chain_tip projection,
+    /// wire metadata) is DIVERGENT — the two lineages are parallel formula
+    /// spaces and the apply must consult only the signed pair. This is exactly
+    /// the false-conflict that stranded the live AWYPCNK8 transfer.
+    #[test]
+    #[serial]
+    fn awypcnk8_regression_divergent_projection_never_blocks_signed_receipt() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (sender, sender_b32) = sender_ids();
+        let nonce = vec![0xD1u8; 32];
+        let op = incoming_transfer_op(&local, 15, nonce.clone());
+        let op_bytes = b"awypcnk8-op-bytes".to_vec();
+        // Honest sender: the signed pair is the canonical transition.
+        let (signed_parent, signed_child) = sdk
+            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
+            .expect("canonical probe");
+
+        // The projection space holds a COMPLETELY different lineage (as on the
+        // live rig: 00941A79.. symmetric vs 06F28A35.. canonical).
+        let divergent_projection = [0xABu8; 32];
+        {
+            let binding = crate::storage::client_db::get_connection().unwrap();
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, metadata, added_at, verified, status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter, chain_tip)
+                 VALUES ('awy', ?1, 'awy', X'00', X'00', 0, 1, 'active', 0, 0, 0, ?2)",
+                rusqlite::params![sender.as_slice(), divergent_projection.as_slice()],
+            )
+            .unwrap();
+        }
+
+        let out = sdk
+            .apply_incoming_transfer_full_state(
+                op,
+                &crate::types::identifiers::TransactionId::new("tx-awy"),
+                &sender_b32,
+                &op_bytes,
+                signed_parent,
+                signed_child,
+            )
+            .expect("apply must not consult the projection");
+        assert!(
+            matches!(out, crate::sdk::apply_outcome::ApplyOutcome::Applied { .. }),
+            "a valid signed pair must apply regardless of projection divergence"
+        );
+    }
+
+    /// §16.6 successor recomputation: a signed child that does not equal the
+    /// recipient's own recomputed canonical successor fails CLOSED with no
+    /// side effects (prepare is pure).
+    #[test]
+    #[serial]
+    fn apply_child_validation_fails_closed_on_wrong_signed_child() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (_sender, sender_b32) = sender_ids();
+        let nonce = vec![0xD2u8; 32];
+        let op = incoming_transfer_op(&local, 20, nonce.clone());
+        let (signed_parent, _real_child) = sdk
+            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
+            .expect("canonical probe");
+
+        let root_before = device_root(&sdk);
+        let out = sdk
+            .apply_incoming_transfer_full_state(
+                op,
+                &crate::types::identifiers::TransactionId::new("tx-badchild"),
+                &sender_b32,
+                b"badchild-op-bytes",
+                signed_parent,
+                [0x5Au8; 32], // forged child
+            )
+            .expect("classification, not error");
+        match out {
+            crate::sdk::apply_outcome::ApplyOutcome::Conflict { reason } => {
+                assert!(
+                    reason.contains("child validation"),
+                    "unexpected conflict reason: {reason}"
+                );
+            }
+            other => panic!("expected Conflict for forged child, got {other:?}"),
+        }
+        assert_eq!(device_root(&sdk), root_before, "no mutation on refusal");
+        assert!(
+            !crate::storage::client_db::is_nonce_spent(&nonce).unwrap(),
+            "nonce must remain unspent"
+        );
     }
 
     /// The legacy crash state (nonce spent WITHOUT a canonical apply record —
@@ -2954,14 +3128,21 @@ mod tests {
         crate::storage::client_db::mark_nonce_spent(&nonce, "tx-seeded", &sender, 5).unwrap();
 
         let root_before = device_root(&sdk);
-        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &local, &sender,
-        );
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
         let op = incoming_transfer_op(&local, 25, nonce.clone());
+        let (parent, child) = sdk
+            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
+            .expect("canonical probe");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-3");
         let out = sdk
-            .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, b"op-bytes-3", parent)
+            .apply_incoming_transfer_full_state(
+                op,
+                &tx_id,
+                &sender_b32,
+                b"op-bytes-3",
+                parent,
+                child,
+            )
             .expect("race classification");
         assert!(
             matches!(
@@ -2995,15 +3176,29 @@ mod tests {
         let nonce = vec![0xC7u8; 32];
         let op = incoming_transfer_op(&local, 30, nonce.clone());
         let op_bytes = b"canonical-op-bytes-A".to_vec();
-        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &local, &sender,
+        // SYMMETRIC projection pair (contacts CAS space).
+        let sym_parent =
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &local, &sender,
+            );
+        let sym_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &sym_parent,
+            &op_bytes,
+            &nonce,
         );
+        let sym_target = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+            &sym_parent,
+            &op_bytes,
+            &nonce,
+            &sym_sigma,
+        );
+        // ASYMMETRIC authority pair (what the signed receipt carries).
+        let (parent, child) = sdk
+            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
+            .expect("canonical probe");
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
         let precommit =
             dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
-        let child = dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &parent, &op_bytes, &nonce, &precommit,
-        );
         let wrap = [0x42u8; 32];
 
         // PHASE 1 (prepare BEFORE apply, as the live path does).
@@ -3011,6 +3206,7 @@ mod tests {
         let prepared = crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
             rel,
             parent,
+            (sym_parent, sym_target),
             || {
                 gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(crate::handlers::recipient_receipt::GeneratedBArtifacts {
@@ -3046,6 +3242,7 @@ mod tests {
                 &sender_b32,
                 &op_bytes,
                 parent,
+                child,
             )
             .expect("fresh apply");
         assert!(matches!(
@@ -3058,6 +3255,7 @@ mod tests {
         let again = crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
             rel,
             parent,
+            (sym_parent, sym_target),
             || panic!("second EK derivation is forbidden on redelivery"),
         )
         .unwrap();
@@ -3069,6 +3267,7 @@ mod tests {
                 &sender_b32,
                 &op_bytes,
                 parent,
+                child,
             )
             .expect("redelivery");
         let record = match redelivered {
@@ -3085,7 +3284,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, metadata, added_at, verified, status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter, chain_tip)
                  VALUES ('t', ?1, 't', X'00', X'00', 0, 1, 'active', 0, 0, 0, ?2)",
-                rusqlite::params![sender.as_slice(), parent.as_slice()],
+                rusqlite::params![sender.as_slice(), sym_parent.as_slice()],
             )
             .unwrap();
         }

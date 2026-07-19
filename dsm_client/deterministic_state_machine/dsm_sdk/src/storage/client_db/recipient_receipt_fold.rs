@@ -65,6 +65,15 @@ pub struct RecipientAcceptanceJournal {
     pub new_counterparty_a_head: Vec<u8>,
     /// Exact canonical `StitchedReceiptV2::to_full_protobuf` bytes (with `sig_b`).
     pub receipt_bytes: Vec<u8>,
+    /// SYMMETRIC-space projection pair for the contacts.chain_tip CAS, captured
+    /// at PREPARE time: `projection_parent_tip` = the locally stored symmetric
+    /// tip, `projection_target_tip` = its successor recomputed from the SIGNED
+    /// operation + nonce. The authority pair above (`parent_tip`/`child_tip`)
+    /// lives in the ASYMMETRIC canonical space (the signed receipt's values);
+    /// the two lineages are parallel formula-spaces and must never be compared
+    /// across. Wire routing metadata is NEVER an input here.
+    pub projection_parent_tip: [u8; 32],
+    pub projection_target_tip: [u8; 32],
     pub status: String,
     pub created_at: u64,
 }
@@ -108,7 +117,8 @@ fn arr32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
 const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterparty_device_id, \
      commitment, receipt_parent_root_a, receipt_child_root_a, precommit_digest, artifact_hash, \
      expected_local_b_head, new_local_b_head, new_local_b_sk_enc, \
-     expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, status, created_at";
+     expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, \
+     projection_parent_tip, projection_target_tip, status, created_at";
 
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
@@ -146,8 +156,10 @@ fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJo
         expected_counterparty_a_head: go(12)?,
         new_counterparty_a_head: g(13)?,
         receipt_bytes: g(14)?,
-        status: row.get::<_, String>(15)?,
-        created_at: row.get::<_, i64>(16)? as u64,
+        projection_parent_tip: to32(g(15)?),
+        projection_target_tip: to32(g(16)?),
+        status: row.get::<_, String>(17)?,
+        created_at: row.get::<_, i64>(18)? as u64,
     })
 }
 
@@ -182,7 +194,7 @@ pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> R
     conn.execute(
         &format!(
             "INSERT INTO acceptance_fold_journal ({JOURNAL_COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)"
         ),
         params![
             rec.relationship_key.as_slice(),
@@ -200,6 +212,8 @@ pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> R
             rec.expected_counterparty_a_head.as_deref(),
             rec.new_counterparty_a_head.as_slice(),
             rec.receipt_bytes.as_slice(),
+            rec.projection_parent_tip.as_slice(),
+            rec.projection_target_tip.as_slice(),
             STATUS_PREPARED,
             tick() as i64,
         ],
@@ -673,6 +687,8 @@ mod tests {
         ek_pk_a: Vec<u8>,
     ) -> RecipientAcceptanceJournal {
         RecipientAcceptanceJournal {
+            projection_parent_tip: [0xE1u8; 32],
+            projection_target_tip: [0xE2u8; 32],
             relationship_key: rel,
             parent_tip: parent,
             child_tip: child,
