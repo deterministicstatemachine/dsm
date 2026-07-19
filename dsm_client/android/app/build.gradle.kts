@@ -484,10 +484,14 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // ML Kit Barcode Scanning - production-grade QR decoder (replaces html5-qrcode as primary)
-    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    // 17.3.0+ ships 16 KB-page-aligned native libs (libbarhopper_v3.so); 17.2.0 was 4 KB
+    // aligned and fails the Android 15+ ELF alignment check.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
-    // CameraX for consistent camera handling across device stacks
-    val cameraxVersion = "1.3.1"
+    // CameraX for consistent camera handling across device stacks.
+    // 1.4.x is the first line with 16 KB-aligned native libs
+    // (libimage_processing_util_jni.so); 1.3.1 was 4 KB aligned.
+    val cameraxVersion = "1.4.2"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
