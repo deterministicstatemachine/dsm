@@ -68,7 +68,12 @@ pub fn start_poller() {
             }
 
             let (processed, _pulled) = run_inbox_sync_cycle_counted("poll").await;
-            let pending_gate_active = has_pending_online_catchup();
+            // Settlement-urgent covers BOTH directions: the sender awaiting an
+            // acceptance receipt AND the recipient still holding an undelivered
+            // countersigned reply. Polling the reply side at the idle interval
+            // would leave the sender's gate held for a minute after the money
+            // was already applied.
+            let pending_gate_active = has_pending_settlement_work();
 
             // Enter eager mode when items are processed, so follow-up
             // messages (ACKs, rapid exchanges) are discovered faster.
@@ -111,7 +116,41 @@ fn has_pending_online_catchup() -> bool {
         .unwrap_or(false)
 }
 
-/// Stop the inbox poller. The task will exit on its next iteration.
+/// True while this device owes the network a settlement step that only polling
+/// can complete:
+///   * a SENDER-side pending online gate awaiting the recipient's acceptance
+///     receipt (§16.6 finalize-on-receipt), or
+///   * a RECIPIENT-side countersigned reply that has not yet been delivered
+///     back to the sender (§16.6 reply window).
+///
+/// Money in flight must not depend on the user keeping the app on screen. A
+/// transfer whose settlement stalls because the phone went in a pocket is
+/// indistinguishable, to both parties, from one that failed.
+pub fn has_pending_settlement_work() -> bool {
+    if has_pending_online_catchup() {
+        return true;
+    }
+    crate::storage::client_db::pending_outbound_replies()
+        .map(|r| !r.is_empty())
+        .unwrap_or(false)
+}
+
+/// Lifecycle-driven stop (app backgrounded). REFUSES to stop while settlement
+/// work is outstanding — see [`has_pending_settlement_work`]. Use
+/// [`stop_poller`] for an unconditional shutdown.
+pub fn stop_poller_for_lifecycle() {
+    if has_pending_settlement_work() {
+        log::info!(
+            "[inbox_poller] lifecycle stop DECLINED — settlement work outstanding; \
+             continuing to poll in the background so the transfer can complete"
+        );
+        return;
+    }
+    stop_poller();
+}
+
+/// Stop the inbox poller unconditionally. The task will exit on its next
+/// iteration.
 pub fn stop_poller() {
     POLLER_STOP.store(true, Ordering::SeqCst);
     POLLER_WAKE.notify_one();

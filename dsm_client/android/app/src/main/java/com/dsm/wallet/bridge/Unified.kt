@@ -509,6 +509,14 @@ object Unified {
 
     // Device + envelope inspection helpers
     @Keep @JvmStatic fun getDeviceIdBin(): ByteArray = UnifiedNativeApi.getDeviceIdBin()
+
+    /**
+     * App-backgrounded transition. Rust owns the whole decision (stop the poller or
+     * keep polling because settlement is in flight) and returns ONE directive:
+     * true = keep the foreground service alive. Kotlin relays it, nothing more.
+     */
+    @Keep @JvmStatic fun onAppBackgrounded(): Boolean =
+        try { UnifiedNativeApi.onAppBackgrounded() } catch (_: Throwable) { false }
     @Keep @JvmStatic fun getGenesisHashBin(): ByteArray = UnifiedNativeApi.getGenesisHashBin()
     /**
      * Get the local signing public key (64 bytes for SPHINCS+ SPX256s).

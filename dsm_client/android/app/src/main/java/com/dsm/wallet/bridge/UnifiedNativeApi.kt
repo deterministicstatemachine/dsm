@@ -109,6 +109,12 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun forceBleCoordinatorInit(): Boolean
     @Keep @JvmStatic external fun setManualAcceptEnabled(enabled: Boolean)
     @Keep @JvmStatic external fun getDeviceIdBin(): ByteArray
+
+    /**
+     * App-backgrounded transition. Rust stops the poller (or declines to) and returns
+     * the directive: true = the host MUST keep its foreground service alive.
+     */
+    @Keep @JvmStatic external fun onAppBackgrounded(): Boolean
     @Keep @JvmStatic external fun getGenesisHashBin(): ByteArray
     @Keep @JvmStatic external fun getSigningPublicKeyBin(): ByteArray
     @Keep @JvmStatic external fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray
