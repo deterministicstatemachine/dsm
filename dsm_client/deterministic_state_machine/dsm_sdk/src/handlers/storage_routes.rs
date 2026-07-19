@@ -1138,13 +1138,10 @@ impl AppRouterImpl {
                                             let mut claimed_arr = [0u8; 32];
                                             claimed_arr.copy_from_slice(&claimed_tip);
                                             if claimed_arr != expected_h_next {
-                                                log::error!("[storage.sync] §4.3#6 envelope next_chain_tip != recomputed h_{{n+1}} for tx {} — rejecting without ACK", entry.transaction_id);
-                                                let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!(
-                                                    "§4.3#6 next_chain_tip mismatch for tx {}",
-                                                    entry.transaction_id
-                                                ));
-                                                continue;
+                                                // Routing/diagnostic ONLY (§16.6 authority sourcing):
+                                                // envelope tips are unsigned metadata and must never
+                                                // invalidate an otherwise-valid signed receipt.
+                                                log::warn!("[storage.sync] envelope next_chain_tip diverges from recomputed symmetric h_{{n+1}} for tx {} — diagnostic only, proceeding on the signed receipt", entry.transaction_id);
                                             }
                                         }
 
@@ -1230,6 +1227,55 @@ impl AppRouterImpl {
                                                 continue;
                                             }
                                         }
+
+                                        // ═══════════════════════════════════════════════════════
+                                        // §16.6 AUTHORITY SOURCING: the VERIFIED SIGNED receipt is
+                                        // the sole authority for the canonical transition this
+                                        // entry proposes. Its parent/child are ASYMMETRIC-space
+                                        // canonical tips. `entry.sender_chain_tip` /
+                                        // `entry.next_chain_tip` are unsigned routing metadata —
+                                        // logged on divergence, never validation inputs.
+                                        // ═══════════════════════════════════════════════════════
+                                        let signed_parent: [u8; 32] = receipt.parent_tip;
+                                        let signed_child: [u8; 32] = receipt.child_tip;
+                                        if signed_parent != chain_tip_arr {
+                                            log::warn!(
+                                                "[storage.sync] routing metadata parent ({}..) diverges from SIGNED receipt parent ({}..) for tx {} — proceeding on the signed value",
+                                                crate::util::text_id::encode_base32_crockford(&chain_tip_arr[..4]),
+                                                crate::util::text_id::encode_base32_crockford(&signed_parent[..4]),
+                                                entry.transaction_id
+                                            );
+                                        }
+                                        // C_pre bound to the SIGNED parent + SIGNED operation bytes.
+                                        let signed_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
+                                            &signed_parent,
+                                            &op_bytes_for_tip,
+                                            &nonce,
+                                        );
+                                        // SYMMETRIC projection pair for the contacts CAS, captured
+                                        // BEFORE any mutation from the LOCAL stored symmetric tip
+                                        // (genesis-init when absent) + the signed operation — the
+                                        // wire metadata plays no part.
+                                        let projection_parent: [u8; 32] = match crate::storage::client_db::get_contact_chain_tip_raw(&from_device_id) {
+                                            Some(t) if t != [0u8; 32] => t,
+                                            _ => dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                                &to_device_id_arr,
+                                                &from_device_id,
+                                            ),
+                                        };
+                                        let projection_target: [u8; 32] = {
+                                            let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
+                                                &projection_parent,
+                                                &op_bytes_for_tip,
+                                                &nonce,
+                                            );
+                                            dsm::core::bilateral_transaction_manager::compute_successor_tip(
+                                                &projection_parent,
+                                                &op_bytes_for_tip,
+                                                &nonce,
+                                                &sigma_sym,
+                                            )
+                                        };
 
                                         // ═══════════════════════════════════════════════════════
                                         // §16.6 SINGLE AUTHORITATIVE COUNTERSIGNING PATH (the fold).
@@ -1320,10 +1366,11 @@ impl AppRouterImpl {
                                         // the same stored bytes, never re-signs.
                                         let prepared_bytes = match crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
                                             rel_key,
-                                            chain_tip_arr,
+                                            signed_parent,
+                                            (projection_parent, projection_target),
                                             || crate::handlers::recipient_receipt::generate_b_artifacts_from_inbound(
                                                 &receipt,
-                                                &receipt_sigma,
+                                                &signed_sigma,
                                                 &sender_kyber_pk,
                                                 &ak_pk,
                                                 &ak_sk,
@@ -1346,7 +1393,8 @@ impl AppRouterImpl {
                                                 &tx_id,
                                                 &entry.sender_device_id,
                                                 &op_bytes_for_tip,
-                                                chain_tip_arr,
+                                                signed_parent,
+                                                signed_child,
                                             ) {
                                             Ok(o) => o,
                                             Err(e) => {
@@ -1383,7 +1431,7 @@ impl AppRouterImpl {
                                         let journal =
                                             match crate::storage::client_db::get_acceptance_journal(
                                                 &rel_key,
-                                                &chain_tip_arr,
+                                                &signed_parent,
                                             ) {
                                                 Ok(Some(j)) => j,
                                                 _ => {
@@ -1466,8 +1514,8 @@ impl AppRouterImpl {
                                                 let dual =
                                                     crate::storage::client_db::StitchedReceipt {
                                                         tx_hash: receipt_commitment,
-                                                        h_n: chain_tip_arr,
-                                                        h_n1: expected_h_next,
+                                                        h_n: projection_parent,
+                                                        h_n1: projection_target,
                                                         device_id_a: from_device_id,
                                                         device_id_b: to_device_id_arr,
                                                         sig_a: countersigned.sig_a.clone(),
@@ -1492,8 +1540,8 @@ impl AppRouterImpl {
                                             let rebuilt = build_online_receipt_with_smt(
                                                 &from_device_id,
                                                 &to_device_id_arr,
-                                                chain_tip_arr,
-                                                expected_h_next,
+                                                projection_parent,
+                                                projection_target,
                                                 recv_smt_pre,
                                                 recv_smt_post,
                                                 recv_parent_bytes,
@@ -1790,6 +1838,34 @@ impl AppRouterImpl {
                                                 "[storage.sync] §5.4 sweep: message {} ACKed; finalizing tip atomically",
                                                 pending.message_id,
                                             );
+                                            // §16.6 PROPOSAL AUTHORITY: finalization requires the
+                                            // persisted sender proposal for this wire identity, and
+                                            // the gate must match its projection pair. A gate with
+                                            // no (or divergent) proposal is fail-closed — the legacy
+                                            // repair sweep materializes proposals for pre-proposal
+                                            // gates from canonical BCR evidence.
+                                            let ack_proposal = match crate::storage::client_db::get_sender_proposal_by_message_id(&pending.message_id) {
+                                                Ok(Some(p)) => p,
+                                                Ok(None) => {
+                                                    log::error!("[storage.sync] §5.4 sweep: ACKed message {} has NO sender proposal — fail closed, gate retained (repair sweep should materialize it)", pending.message_id);
+                                                    continue;
+                                                }
+                                                Err(e) => {
+                                                    log::warn!("[storage.sync] §5.4 sweep: proposal lookup failed for {}: {} — gate retained", pending.message_id, e);
+                                                    continue;
+                                                }
+                                            };
+                                            if pending.parent_tip.as_slice()
+                                                != ack_proposal.projection_parent.as_slice()
+                                                || pending.next_tip.as_slice()
+                                                    != ack_proposal.projection_target.as_slice()
+                                            {
+                                                log::error!("[storage.sync] §5.4 sweep: gate for {} diverges from its proposal's projection pair — fail closed, gate retained", pending.message_id);
+                                                mark_contact_needs_online_reconcile_and_refresh(
+                                                    &pending.counterparty_device_id,
+                                                );
+                                                continue;
+                                            }
                                             match (
                                                 pending_next,
                                                 <[u8; 32]>::try_from(pending.parent_tip.as_slice()),
@@ -1818,6 +1894,9 @@ impl AppRouterImpl {
                                                                     &cp_arr,
                                                                 );
                                                                 let _ = crate::storage::client_db::promote_pending_local_head_by_relationship(&rel_key);
+                                                                if let Ok(true) = crate::storage::client_db::mark_sender_proposal_finalized(&pending.message_id) {
+                                                                    log::info!("[storage.sync] §16.6 sender proposal finalized for {}", pending.message_id);
+                                                                }
                                                                 emit_authoritative_wallet_refresh();
                                                             }
                                                             _ => {

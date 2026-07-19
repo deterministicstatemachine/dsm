@@ -79,9 +79,16 @@ pub struct GeneratedBArtifacts {
 /// PHASE 1 (before apply) — SYNC, caller holds the relationship guard.
 /// Generate + self-verify the B receipt once and persist it PREPARED. Re-entry
 /// returns the exact stored bytes and NEVER re-signs. Advances nothing.
+///
+/// `parent_tip` is the SIGNED receipt's ASYMMETRIC canonical parent (the sole
+/// validation authority). `projection_pair` is the SYMMETRIC-space
+/// (parent, target) captured by the caller for the contacts.chain_tip CAS —
+/// derived from the locally stored symmetric tip + the SIGNED operation/nonce,
+/// never from wire routing metadata.
 pub fn prepare_bside_acceptance_receipt_locked<G>(
     relationship_key: [u8; 32],
     parent_tip: [u8; 32],
+    projection_pair: ([u8; 32], [u8; 32]),
     generate: G,
 ) -> Result<Vec<u8>>
 where
@@ -108,6 +115,8 @@ where
         expected_counterparty_a_head: artifacts.expected_counterparty_a_head,
         new_counterparty_a_head: artifacts.new_counterparty_a_head,
         receipt_bytes: artifacts.receipt_bytes.clone(),
+        projection_parent_tip: projection_pair.0,
+        projection_target_tip: projection_pair.1,
         status: STATUS_PREPARED.to_string(),
         created_at: 0,
     };
@@ -207,10 +216,20 @@ pub fn converge_accepted_locked(
         sender_device: record.sender_device,
         recipient_device: record.recipient_device,
     };
+    // The contacts.chain_tip CAS runs in the SYMMETRIC formula-space, using the
+    // pair captured durably at PREPARE. The authority pair (journal.parent_tip /
+    // child_tip) is ASYMMETRIC (signed receipt) — cross-space comparison is the
+    // exact bug class this fold refuses. A pre-authority-fix row (empty
+    // projection pair) can never converge — fail closed for inspection.
+    if journal.projection_parent_tip == [0u8; 32] && journal.projection_target_tip == [0u8; 32] {
+        return Err(anyhow!(
+            "journal predates authority sourcing (no projection pair) — inert, cannot converge"
+        ));
+    }
     let request = TipSyncRequest {
         counterparty_device_id: journal.counterparty_device_id,
-        expected_parent_tip: journal.parent_tip,
-        target_tip: journal.child_tip,
+        expected_parent_tip: journal.projection_parent_tip,
+        target_tip: journal.projection_target_tip,
         observed_gate: None,
         clear_gate_on_success: false,
     };
@@ -533,14 +552,15 @@ mod tests {
         init_test_db();
         let rel = [0x51u8; 32];
         let parent = [0x52u8; 32];
-        let bytes = prepare_bside_acceptance_receipt_locked(rel, parent, || {
-            Ok(make_artifacts(
-                [0x53u8; 32],
-                [0x54u8; 32],
-                b"PREPARED-BYTES",
-            ))
-        })
-        .unwrap();
+        let bytes =
+            prepare_bside_acceptance_receipt_locked(rel, parent, (parent, [0xEEu8; 32]), || {
+                Ok(make_artifacts(
+                    [0x53u8; 32],
+                    [0x54u8; 32],
+                    b"PREPARED-BYTES",
+                ))
+            })
+            .unwrap();
         assert_eq!(bytes, b"PREPARED-BYTES");
         assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local)
             .unwrap()
@@ -559,7 +579,7 @@ mod tests {
         let parent = [0x62u8; 32];
         let child = [0x63u8; 32];
         let calls = AtomicUsize::new(0);
-        let first = prepare_bside_acceptance_receipt_locked(rel, parent, || {
+        let first = prepare_bside_acceptance_receipt_locked(rel, parent, (parent, child), || {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(make_artifacts(child, [0x64u8; 32], b"BYTES-3PHASE"))
         })
@@ -585,10 +605,11 @@ mod tests {
             Some(child)
         );
         // Re-entry to prepare returns identical bytes; generator NOT called again.
-        let again = prepare_bside_acceptance_receipt_locked(rel, parent, || {
-            panic!("must not regenerate");
-        })
-        .unwrap();
+        let again =
+            prepare_bside_acceptance_receipt_locked(rel, parent, (parent, [0xEEu8; 32]), || {
+                panic!("must not regenerate");
+            })
+            .unwrap();
         assert_eq!(first, again);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -600,7 +621,7 @@ mod tests {
         let rel = [0x71u8; 32];
         let parent = [0x72u8; 32];
         let child = [0x73u8; 32];
-        prepare_bside_acceptance_receipt_locked(rel, parent, || {
+        prepare_bside_acceptance_receipt_locked(rel, parent, (parent, child), || {
             Ok(make_artifacts(child, [0x74u8; 32], b"BYTES-MM"))
         })
         .unwrap();
@@ -625,7 +646,7 @@ mod tests {
         let rel = [0x81u8; 32];
         let parent = [0x82u8; 32];
         let child = [0x83u8; 32];
-        prepare_bside_acceptance_receipt_locked(rel, parent, || {
+        prepare_bside_acceptance_receipt_locked(rel, parent, (parent, child), || {
             Ok(make_artifacts(child, [0x84u8; 32], b"BYTES-RECOVER"))
         })
         .unwrap();
@@ -663,7 +684,7 @@ mod tests {
         // And a prepared journal with NO record stays prepared:
         let rel2 = [0x91u8; 32];
         let parent2 = [0x92u8; 32];
-        prepare_bside_acceptance_receipt_locked(rel2, parent2, || {
+        prepare_bside_acceptance_receipt_locked(rel2, parent2, (parent2, [0xEEu8; 32]), || {
             Ok(make_artifacts([0x93u8; 32], [0x94u8; 32], b"BYTES-NOREC"))
         })
         .unwrap();
@@ -692,10 +713,15 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     let lock = relationship_lock(&rel);
                     let _guard = lock.lock_owned().await;
-                    prepare_bside_acceptance_receipt_locked(rel, parent, || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(make_artifacts([0xA3u8; 32], [0xA4u8; 32], b"BYTES-CONC"))
-                    })
+                    prepare_bside_acceptance_receipt_locked(
+                        rel,
+                        parent,
+                        (parent, [0xEEu8; 32]),
+                        || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(make_artifacts([0xA3u8; 32], [0xA4u8; 32], b"BYTES-CONC"))
+                        },
+                    )
                     .unwrap()
                 }));
             }
