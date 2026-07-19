@@ -924,20 +924,27 @@ impl CoreSDK {
             anchor_leaf,
             offline_spend,
             None,
-            None,
         )
     }
 
     /// Guarded relationship advance for the incoming-transfer apply (§16.6):
-    /// `expected_parent = Some((request_parent, request_child))` requires the
-    /// canonical relationship tip consumed by the prepare step to equal the
-    /// request's parent tip (else stale/Conflict — NO execution side effects, the
-    /// prepare is pure and nothing is persisted; a canonical tip already at the
-    /// request's CHILD with no apply record is flagged for reconciliation), and
     /// `in_tx_extra` runs inside the single full-state apply transaction. The
-    /// global `state_machine` lock is held across validation → prepare → durable
-    /// write → in-memory head install (device-root serialization across
-    /// relationships).
+    /// global `state_machine` lock is held across prepare → durable write →
+    /// in-memory head install (device-root serialization across relationships).
+    ///
+    /// This layer performs NO comparison against the sender's signed tips. A
+    /// relationship chain tip is a **per-device (side-specific) lineage value**:
+    /// [`RelationshipChainState::compute_chain_tip`] hashes `counterparty_devid`
+    /// (each side stores the OTHER party), `entropy` (derived from the device's
+    /// own SMT root / own prior tip), and `balance_witness` (the device's own
+    /// `B^T`). Two honest devices therefore NEVER produce equal chain tips for
+    /// the same transfer, and they coincide at `embedded_parent` only on the
+    /// first-ever advance, where both seed from the shared spec-canonical
+    /// `initial_chain_tip`. Constraining this local advance by the sender's
+    /// A-side values is a cross-lineage comparison: it rejects every honest
+    /// transfer (child) and every transfer after the first (parent).
+    /// A-side authority is validated where it belongs — see
+    /// [`Self::apply_incoming_transfer_full_state`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_on_relationship_guarded(
         &self,
@@ -946,7 +953,6 @@ impl CoreSDK {
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
-        expected_parent: Option<([u8; 32], [u8; 32])>,
         in_tx_extra: Option<
             &dyn Fn(
                 &rusqlite::Transaction<'_>,
@@ -962,7 +968,6 @@ impl CoreSDK {
             initial_chain_tip,
             None,
             None,
-            expected_parent,
             in_tx_extra,
         )
     }
@@ -977,7 +982,6 @@ impl CoreSDK {
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
-        expected_parent: Option<([u8; 32], [u8; 32])>,
         in_tx_extra: Option<
             &dyn Fn(
                 &rusqlite::Transaction<'_>,
@@ -1051,45 +1055,12 @@ impl CoreSDK {
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
         )?;
-        // §16.6 canonical-parent validation (incoming-transfer apply): the prepare
-        // step consumed the CANONICAL current relationship tip as `embedded_parent`.
-        // If the request's parent doesn't match, refuse BEFORE any persistence —
-        // prepare is pure, so this path has zero execution side effects. A tip
-        // already at the request's child with NO canonical apply record (the caller
-        // checked before execution) is NOT an idempotent duplicate — it is missing
-        // durability evidence and must go to reconciliation.
-        if let Some((expected_parent_tip, request_child_tip)) = expected_parent {
-            let consumed_parent = outcome.new_chain_state.embedded_parent;
-            if consumed_parent != expected_parent_tip {
-                let reason = if consumed_parent == request_child_tip {
-                    "canonical relationship tip is already at the requested child but no \
-                     canonical apply record exists — inconsistent state, reconciliation required"
-                        .to_string()
-                } else {
-                    format!(
-                        "stale request: canonical relationship tip ({}..) != requested parent ({}..)",
-                        crate::util::text_id::encode_base32_crockford(&consumed_parent[..4]),
-                        crate::util::text_id::encode_base32_crockford(&expected_parent_tip[..4]),
-                    )
-                };
-                return Err(DsmError::invalid_operation(format!(
-                    "apply parent validation failed (fail closed): {reason}"
-                )));
-            }
-            // Successor recomputation (§16.6 authority sourcing): the canonical
-            // child computed by THIS device from (consumed parent + signed
-            // operation) must equal the SIGNED child the sender committed to.
-            // Prepare is pure — refusal here has zero side effects.
-            let computed_child = outcome.new_chain_state.compute_chain_tip();
-            if computed_child != request_child_tip {
-                return Err(DsmError::invalid_operation(format!(
-                    "apply child validation failed (fail closed): recomputed canonical successor \
-                     ({}..) != signed child ({}..)",
-                    crate::util::text_id::encode_base32_crockford(&computed_child[..4]),
-                    crate::util::text_id::encode_base32_crockford(&request_child_tip[..4]),
-                )));
-            }
-        }
+        // The sender's signed A-side pair is deliberately NOT compared against
+        // this device's own lineage here — see the doc comment on
+        // `execute_on_relationship_guarded` for why such a comparison can never
+        // hold between two honest devices. The local advance is authoritative
+        // for the local lineage; A-side authority is enforced upstream in
+        // `apply_incoming_transfer_full_state`.
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
         // the capsule being marked dirty. `in_tx_extra` (nonce consumption +
@@ -2635,6 +2606,36 @@ impl CoreSDK {
             CanonicalApplyLookup::Fresh => {}
         }
 
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local_arr,
+            &sender_arr,
+        );
+        // §16.6 A-side head pin (the space-correct successor check).
+        // The recipient cannot recompute the sender's child — chain tips are
+        // per-device values — but it CAN pin the sender's asymmetric head and
+        // require the signed parent to be exactly it. Before any transition has
+        // been applied the pin is the spec-canonical genesis seed, the single
+        // tip both sides derive identically. A stale, replayed, reordered, or
+        // forked sender lineage fails closed HERE, before execution.
+        let pinned_a_head = cdb::pinned_counterparty_a_head(&rel_key)
+            .map_err(|e| {
+                DsmError::internal(
+                    format!("A-side head pin failed: {e}"),
+                    None::<std::convert::Infallible>,
+                )
+            })?
+            .unwrap_or(init_tip);
+        if parent_tip != pinned_a_head {
+            return Ok(ApplyOutcome::Conflict {
+                reason: format!(
+                    "signed parent ({}..) is not the pinned counterparty A-side head ({}..) — \
+                     stale, replayed, or forked sender lineage",
+                    crate::util::text_id::encode_base32_crockford(&parent_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&pinned_a_head[..4]),
+                ),
+            });
+        }
+
         // ---- fresh: execute under the global lock with the single full-state tx ----
         let deltas = {
             let pc = self.resolve_policy_commit_strict(&token_id)?;
@@ -2644,10 +2645,6 @@ impl CoreSDK {
                 amount: amount_val,
             }]
         };
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &local_arr,
-            &sender_arr,
-        );
         let tx_id_str = String::from_utf8_lossy(tx_id.as_bytes()).into_owned();
         let in_tx_extra = {
             let nonce = nonce.clone();
@@ -2710,7 +2707,6 @@ impl CoreSDK {
             op,
             &deltas,
             Some(init_tip),
-            Some((parent_tip, child_tip)),
             Some(&in_tx_extra),
         );
 
@@ -2773,22 +2769,23 @@ impl CoreSDK {
     /// computed_child) THIS device would derive for an incoming transfer —
     /// pure prepare, no persistence, no head mutation. Fixtures use it to
     /// present the signed pair an honest sender's canonical advance carries.
+    /// §16.6 TEST HELPER — the A-space pair a REMOTE sender would sign.
+    ///
+    /// The recipient's pin is the spec-canonical genesis seed for the first
+    /// transition and the previously applied signed child thereafter. The CHILD
+    /// is deliberately a value this device can never compute: a real sender's
+    /// chain tip hashes ITS own counterparty devid, its own hash-chained
+    /// entropy, and its own balance witness. Deriving the "signed" child from
+    /// the recipient's own `prepare` (as the retired probe did) makes every
+    /// cross-lineage bug invisible — that is exactly how the unsatisfiable
+    /// child-equality check reached production.
     #[cfg(test)]
-    pub(crate) fn probe_incoming_transfer_canonical_pair(
+    pub(crate) fn remote_signed_pair(
         &self,
-        op: &dsm::types::operations::Operation,
         sender_device_id: &str,
+        parent: Option<[u8; 32]>,
+        remote_step: u8,
     ) -> Result<([u8; 32], [u8; 32]), DsmError> {
-        let (amount_val, token_id) = match op {
-            dsm::types::operations::Operation::Transfer {
-                amount, token_id, ..
-            } => (amount.value(), token_id.clone()),
-            _ => {
-                return Err(DsmError::invalid_operation(
-                    "probe: only Transfer operations are accepted",
-                ))
-            }
-        };
         let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
             .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
         let mut local_arr = [0u8; 32];
@@ -2797,34 +2794,19 @@ impl CoreSDK {
             .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
         let mut sender_arr = [0u8; 32];
         sender_arr.copy_from_slice(&sender_id_bytes);
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
-        let deltas = {
-            let pc = self.resolve_policy_commit_strict(&token_id)?;
-            vec![dsm::types::device_state::BalanceDelta {
-                policy_commit: pc,
-                direction: dsm::types::device_state::BalanceDirection::Credit,
-                amount: amount_val,
-            }]
-        };
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &local_arr,
-            &sender_arr,
-        );
-        let sm = self.state_machine.lock();
-        let outcome = sm.prepare_advance_relationship(
-            rel_key,
-            sender_arr,
-            op.clone(),
-            &deltas,
-            Some(init_tip),
-            None,
-            None,
-        )?;
-        Ok((
-            outcome.new_chain_state.embedded_parent,
-            outcome.new_chain_state.compute_chain_tip(),
-        ))
+        let signed_parent = parent.unwrap_or_else(|| {
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &local_arr,
+                &sender_arr,
+            )
+        });
+        // Opaque remote-lineage child; unreachable by any local computation.
+        let mut signed_child = [0u8; 32];
+        signed_child[0] = 0xE0;
+        signed_child[1] = remote_step;
+        signed_child[2..].copy_from_slice(&signed_parent[2..]);
+        signed_child[31] ^= 0x5A;
+        Ok((signed_parent, signed_child))
     }
 }
 
@@ -2901,8 +2883,8 @@ mod tests {
         let op = incoming_transfer_op(&local, 50, nonce.clone());
         let op_bytes = b"canonical-op-bytes-1".to_vec();
         let (parent, child) = sdk
-            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
-            .expect("canonical probe");
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote signed pair");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-1");
 
         let out = sdk
@@ -2965,8 +2947,8 @@ mod tests {
         let op = incoming_transfer_op(&local, 10, nonce.clone());
         let op_bytes = b"canonical-op-bytes-2".to_vec();
         let (parent, child) = sdk
-            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
-            .expect("canonical probe");
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote signed pair");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-2");
         sdk.apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent, child)
             .expect("fresh apply");
@@ -2994,7 +2976,7 @@ mod tests {
         );
         assert_eq!(device_root(&sdk), root_before, "conflict must not mutate");
 
-        // Stale parent: canonical tip has moved past the requested parent.
+        // Stale parent: the pinned A-side head has moved past this parent.
         let stale_parent = [0x31u8; 32];
         let op3 = incoming_transfer_op(&local, 12, vec![0xAAu8; 32]);
         let out3 = sdk
@@ -3010,7 +2992,7 @@ mod tests {
         match out3 {
             crate::sdk::apply_outcome::ApplyOutcome::Conflict { reason } => {
                 assert!(
-                    reason.contains("stale request") || reason.contains("parent validation"),
+                    reason.contains("pinned counterparty A-side head"),
                     "unexpected conflict reason: {reason}"
                 );
             }
@@ -3035,10 +3017,12 @@ mod tests {
         let nonce = vec![0xD1u8; 32];
         let op = incoming_transfer_op(&local, 15, nonce.clone());
         let op_bytes = b"awypcnk8-op-bytes".to_vec();
-        // Honest sender: the signed pair is the canonical transition.
+        // Honest REMOTE sender: parent is the pinned A-side head (genesis seed
+        // on a fresh relationship); the child is the sender's own lineage value,
+        // which this device cannot and must not recompute.
         let (signed_parent, signed_child) = sdk
-            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
-            .expect("canonical probe");
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote signed pair");
 
         // The projection space holds a COMPLETELY different lineage (as on the
         // live rig: 00941A79.. symmetric vs 06F28A35.. canonical).
@@ -3070,45 +3054,115 @@ mod tests {
         );
     }
 
-    /// §16.6 successor recomputation: a signed child that does not equal the
-    /// recipient's own recomputed canonical successor fails CLOSED with no
-    /// side effects (prepare is pure).
+    /// §16.6 A-side head pin: a signed parent that is NOT the pinned
+    /// counterparty head (stale / replayed / forked sender lineage) fails
+    /// CLOSED with no side effects — prepare is pure.
+    ///
+    /// This replaces a retired "recomputed successor == signed child" check.
+    /// That check was unsatisfiable between honest devices: a relationship chain
+    /// tip hashes the holder's own counterparty devid, its own hash-chained
+    /// entropy, and its own balance witness, so the recipient can never
+    /// reproduce the sender's child. The pin enforces the same property —
+    /// only the sender's genuine next transition is accepted — in the one
+    /// formula space both parties can agree on.
     #[test]
     #[serial]
-    fn apply_child_validation_fails_closed_on_wrong_signed_child() {
+    fn apply_fails_closed_when_signed_parent_is_not_the_pinned_a_head() {
         let sdk = full_state_apply_harness();
         let local: [u8; 32] = sdk.device_info.device_id;
         let (_sender, sender_b32) = sender_ids();
         let nonce = vec![0xD2u8; 32];
         let op = incoming_transfer_op(&local, 20, nonce.clone());
-        let (signed_parent, _real_child) = sdk
-            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
-            .expect("canonical probe");
+        let (_pinned, signed_child) = sdk
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote signed pair");
 
         let root_before = device_root(&sdk);
         let out = sdk
             .apply_incoming_transfer_full_state(
                 op,
-                &crate::types::identifiers::TransactionId::new("tx-badchild"),
+                &crate::types::identifiers::TransactionId::new("tx-badparent"),
                 &sender_b32,
-                b"badchild-op-bytes",
-                signed_parent,
-                [0x5Au8; 32], // forged child
+                b"badparent-op-bytes",
+                [0x5Au8; 32], // NOT the pinned A-side head
+                signed_child,
             )
             .expect("classification, not error");
         match out {
             crate::sdk::apply_outcome::ApplyOutcome::Conflict { reason } => {
                 assert!(
-                    reason.contains("child validation"),
+                    reason.contains("pinned counterparty A-side head"),
                     "unexpected conflict reason: {reason}"
                 );
             }
-            other => panic!("expected Conflict for forged child, got {other:?}"),
+            other => panic!("expected Conflict for unpinned parent, got {other:?}"),
         }
         assert_eq!(device_root(&sdk), root_before, "no mutation on refusal");
         assert!(
             !crate::storage::client_db::is_nonce_spent(&nonce).unwrap(),
             "nonce must remain unspent"
+        );
+    }
+
+    /// LIVE REGRESSION (the bug this replaces): the SECOND transfer in a
+    /// relationship must apply.
+    ///
+    /// The retired checks compared the sender's signed tips against the
+    /// recipient's own lineage. Those coincide only at the spec-canonical
+    /// genesis seed, so transfer #1 passed the parent check while every later
+    /// transfer failed "stale request". Here transfer #2 chains onto the signed
+    /// child of transfer #1 — a value drawn from the REMOTE lineage — and must
+    /// be accepted.
+    #[test]
+    #[serial]
+    fn second_transfer_applies_when_signed_parent_continues_the_remote_lineage() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (_sender, sender_b32) = sender_ids();
+
+        let nonce1 = vec![0xE1u8; 32];
+        let op1 = incoming_transfer_op(&local, 11, nonce1.clone());
+        let (parent1, child1) = sdk
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote pair 1");
+        let out1 = sdk
+            .apply_incoming_transfer_full_state(
+                op1,
+                &crate::types::identifiers::TransactionId::new("tx-seq-1"),
+                &sender_b32,
+                b"seq-op-bytes-1",
+                parent1,
+                child1,
+            )
+            .expect("apply 1");
+        assert!(
+            matches!(
+                out1,
+                crate::sdk::apply_outcome::ApplyOutcome::Applied { .. }
+            ),
+            "first transfer must apply, got {out1:?}"
+        );
+
+        // Transfer #2 starts exactly where the sender's signed lineage left off.
+        let nonce2 = vec![0xE2u8; 32];
+        let op2 = incoming_transfer_op(&local, 13, nonce2.clone());
+        let (parent2, child2) = sdk
+            .remote_signed_pair(&sender_b32, Some(child1), 2)
+            .expect("remote pair 2");
+        assert_eq!(parent2, child1, "fixture must chain onto the signed child");
+        let out2 = sdk
+            .apply_incoming_transfer_full_state(
+                op2,
+                &crate::types::identifiers::TransactionId::new("tx-seq-2"),
+                &sender_b32,
+                b"seq-op-bytes-2",
+                parent2,
+                child2,
+            )
+            .expect("apply 2");
+        assert!(
+            matches!(out2, crate::sdk::apply_outcome::ApplyOutcome::Applied { .. }),
+            "SECOND transfer must apply — the retired cross-lineage check broke exactly here; got {out2:?}"
         );
     }
 
@@ -3131,8 +3185,8 @@ mod tests {
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
         let op = incoming_transfer_op(&local, 25, nonce.clone());
         let (parent, child) = sdk
-            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
-            .expect("canonical probe");
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote signed pair");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-3");
         let out = sdk
             .apply_incoming_transfer_full_state(
@@ -3194,8 +3248,8 @@ mod tests {
         );
         // ASYMMETRIC authority pair (what the signed receipt carries).
         let (parent, child) = sdk
-            .probe_incoming_transfer_canonical_pair(&op, &sender_b32)
-            .expect("canonical probe");
+            .remote_signed_pair(&sender_b32, None, 1)
+            .expect("remote signed pair");
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
         let precommit =
             dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
