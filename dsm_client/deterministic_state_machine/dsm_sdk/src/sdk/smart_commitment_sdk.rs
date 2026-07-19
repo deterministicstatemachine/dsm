@@ -406,7 +406,7 @@ impl SmartCommitmentSDK {
             data: op_data,
             message: format!(
                 "Payment commitment from {sender} to {recipient} for {amount} ROOT (id suffix: {})",
-                &short
+                short
             ),
             signature: vec![],
         };

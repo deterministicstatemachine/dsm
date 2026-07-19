@@ -402,11 +402,7 @@ pub fn generate_position_sequence(
 pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmError> {
     match operation {
         // Bilateral / paired operations carry both proof and signature.
-        Operation::Transfer {
-            signature,
-            recipient: _,
-            ..
-        } => {
+        Operation::Transfer { signature, .. } => {
             // Transfer's get_proof_of_authorization returns the signature
             // when it is non-empty, so `signature.is_empty()` is the single
             // gate we need.

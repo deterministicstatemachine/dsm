@@ -78,6 +78,34 @@ pub enum RecordPendingGateOutcome {
 ///
 /// No caller outside this function may write to bilateral tip columns.
 pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyncOutcome> {
+    sync_projection_with_optional_acceptance(request, None)
+}
+
+/// §16.6: synchronize the `contacts.chain_tip` PROJECTION and insert the
+/// immutable `accepted_transition` marker in ONE client-db transaction.
+///
+/// The name is deliberate — this is PROJECTION synchronization, not a second
+/// canonical state transition. The canonical relationship tip already committed
+/// inside the full-state apply transaction; parent/child here come from the
+/// durable `CanonicalApplyRecord`, never derived from the projection. This
+/// function must NOT create BCR state, recompute a successor, touch balances,
+/// or mutate the authenticated `DeviceState`. Semantics:
+///   projection == record.parent → update to record.child → insert/check marker
+///   projection == record.child  → already synchronized  → insert/check marker (idempotent)
+///   projection == third value   → fail closed (no writes) → reconciliation
+/// The marker insert runs in the SAME transaction on both committing cases; an
+/// existing DIFFERENT marker for the consumed parent aborts the whole tx.
+pub fn sync_tip_projection_and_record_acceptance_atomic(
+    request: &TipSyncRequest,
+    marker: &super::recipient_receipt_fold::AcceptedTransition,
+) -> Result<TipSyncOutcome> {
+    sync_projection_with_optional_acceptance(request, Some(marker))
+}
+
+fn sync_projection_with_optional_acceptance(
+    request: &TipSyncRequest,
+    acceptance: Option<&super::recipient_receipt_fold::AcceptedTransition>,
+) -> Result<TipSyncOutcome> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
@@ -85,7 +113,32 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
     });
 
     let tx = conn.transaction()?;
+    let outcome = sync_tip_projections_in_tx(&tx, request, acceptance)?;
+    match outcome {
+        TipSyncOutcome::Advanced { .. }
+        | TipSyncOutcome::RepairedAtTarget { .. }
+        | TipSyncOutcome::AlreadyAtTarget { .. } => {
+            tx.commit()?;
+        }
+        _ => {
+            // Non-committing outcome — nothing may persist (marker included).
+            tx.rollback().ok();
+        }
+    }
+    Ok(outcome)
+}
 
+/// The single transactional impl — ONE copy of the CAS logic; both public APIs
+/// delegate here (no cloned CAS to drift). PROJECTION-ONLY: touches
+/// `contacts.chain_tip` / `local_bilateral_chain_tip` / the pending gate /
+/// the acceptance marker — never BCR state, balances, or `DeviceState`.
+/// Performs NO commit/rollback; the wrapper commits only the committing
+/// outcomes (`Advanced` / `RepairedAtTarget` / `AlreadyAtTarget`).
+fn sync_tip_projections_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    request: &TipSyncRequest,
+    acceptance: Option<&super::recipient_receipt_fold::AcceptedTransition>,
+) -> Result<TipSyncOutcome> {
     // Step 1: Load current bilateral row
     let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source): (
         Vec<u8>,
@@ -180,8 +233,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
                 {
                     true // exact match
                 } else {
-                    // Gate exists but different values — mismatch
-                    tx.rollback().ok();
+                    // Gate exists but different values — mismatch (wrapper rolls back)
                     return Ok(TipSyncOutcome::GateMismatch);
                 }
             }
@@ -216,7 +268,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             }
             let gc = if request.clear_gate_on_success && gate_matched {
                 clear_gate_in_tx(
-                    &tx,
+                    tx,
                     &request.counterparty_device_id,
                     request.observed_gate.as_ref(),
                 )?
@@ -224,7 +276,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
                 false
             };
             clear_observed_remote_tip_in_tx(
-                &tx,
+                tx,
                 &request.counterparty_device_id,
                 clear_observed_tip_on_success,
             )?;
@@ -243,7 +295,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             )?;
             let gc = if request.clear_gate_on_success && gate_matched {
                 clear_gate_in_tx(
-                    &tx,
+                    tx,
                     &request.counterparty_device_id,
                     request.observed_gate.as_ref(),
                 )?
@@ -251,7 +303,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
                 false
             };
             clear_observed_remote_tip_in_tx(
-                &tx,
+                tx,
                 &request.counterparty_device_id,
                 clear_observed_tip_on_success,
             )?;
@@ -275,7 +327,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         )?;
         let gc = if request.clear_gate_on_success && gate_matched {
             clear_gate_in_tx(
-                &tx,
+                tx,
                 &request.counterparty_device_id,
                 request.observed_gate.as_ref(),
             )?
@@ -283,7 +335,7 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             false
         };
         clear_observed_remote_tip_in_tx(
-            &tx,
+            tx,
             &request.counterparty_device_id,
             clear_observed_tip_on_success,
         )?;
@@ -292,15 +344,14 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             gate_cleared: gc,
         }
     } else {
-        // Case C: canonical is somewhere else
-        // Distinguish ParentMismatch from CanonicalMovedToDifferentTip
+        // Case C: canonical is somewhere else — fail closed, no writes
+        // (wrapper rolls back). Distinguish ParentMismatch from
+        // CanonicalMovedToDifferentTip.
         if chain_tip_arr != [0u8; 32] && chain_tip_arr != *parent {
-            tx.rollback().ok();
             return Ok(TipSyncOutcome::CanonicalMovedToDifferentTip {
                 current_tip: chain_tip_arr,
             });
         }
-        tx.rollback().ok();
         return Ok(TipSyncOutcome::ParentMismatch {
             current_tip: chain_tip_arr,
         });
@@ -328,7 +379,15 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         }
     }
 
-    tx.commit()?;
+    // §16.6 acceptance marker: SAME transaction, committing cases only (all
+    // non-committing outcomes returned early above). Idempotent for an
+    // identical existing marker; a DIFFERENT existing marker for this consumed
+    // parent errors — the wrapper then rolls the whole tx back (fail closed,
+    // the projection sync does not persist either).
+    if let Some(marker) = acceptance {
+        super::recipient_receipt_fold::record_accepted_transition_in_tx(tx, marker)?;
+    }
+
     Ok(outcome)
 }
 

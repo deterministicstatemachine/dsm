@@ -192,6 +192,26 @@ impl CoreSDK {
         outcome: &dsm::types::device_state::AdvanceOutcome,
         bump_capsule: bool,
     ) -> Result<(), DsmError> {
+        Self::dual_write_advance_outcome_with_extra(outcome, bump_capsule, None)
+    }
+
+    /// `dual_write_advance_outcome` with an optional caller-supplied closure that
+    /// runs INSIDE the same SQLite transaction, immediately before commit
+    /// (§16.6 full-state consumption: the incoming-transfer apply path injects
+    /// nonce consumption + the canonical apply record here so EVERY durable side
+    /// effect of the apply commits together — all exist, or none do). The
+    /// closure returning `Err` aborts the whole transaction; the in-memory head
+    /// is then never installed and the operation is observable as never-happened.
+    fn dual_write_advance_outcome_with_extra(
+        outcome: &dsm::types::device_state::AdvanceOutcome,
+        bump_capsule: bool,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<(), DsmError> {
         use crate::storage::client_db::{
             get_connection, store_bcr_chain_state_with_conn, update_bcr_device_head_with_conn,
         };
@@ -245,6 +265,12 @@ impl CoreSDK {
                     )
                 },
             )?;
+        }
+        // §16.6: caller-injected full-state-consumption work (nonce consumption +
+        // canonical apply record for the incoming-transfer apply). Same tx — an
+        // Err here rolls back the state persistence too.
+        if let Some(extra) = in_tx_extra {
+            extra(&tx, outcome)?;
         }
         tx.commit().map_err(|e| {
             DsmError::storage(
@@ -889,6 +915,76 @@ impl CoreSDK {
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            anchor_leaf,
+            offline_spend,
+            None,
+            None,
+        )
+    }
+
+    /// Guarded relationship advance for the incoming-transfer apply (§16.6):
+    /// `expected_parent = Some((request_parent, request_child))` requires the
+    /// canonical relationship tip consumed by the prepare step to equal the
+    /// request's parent tip (else stale/Conflict — NO execution side effects, the
+    /// prepare is pure and nothing is persisted; a canonical tip already at the
+    /// request's CHILD with no apply record is flagged for reconciliation), and
+    /// `in_tx_extra` runs inside the single full-state apply transaction. The
+    /// global `state_machine` lock is held across validation → prepare → durable
+    /// write → in-memory head install (device-root serialization across
+    /// relationships).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_guarded(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        expected_parent: Option<([u8; 32], [u8; 32])>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            None,
+            None,
+            expected_parent,
+            in_tx_extra,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_on_relationship_inner(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        expected_parent: Option<([u8; 32], [u8; 32])>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
         // `is_value_egress` is an exhaustive classifier (dsm core), so value
@@ -955,10 +1051,38 @@ impl CoreSDK {
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
         )?;
+        // §16.6 canonical-parent validation (incoming-transfer apply): the prepare
+        // step consumed the CANONICAL current relationship tip as `embedded_parent`.
+        // If the request's parent doesn't match, refuse BEFORE any persistence —
+        // prepare is pure, so this path has zero execution side effects. A tip
+        // already at the request's child with NO canonical apply record (the caller
+        // checked before execution) is NOT an idempotent duplicate — it is missing
+        // durability evidence and must go to reconciliation.
+        if let Some((expected_parent_tip, request_child_tip)) = expected_parent {
+            let consumed_parent = outcome.new_chain_state.embedded_parent;
+            if consumed_parent != expected_parent_tip {
+                let reason = if consumed_parent == request_child_tip {
+                    "canonical relationship tip is already at the requested child but no \
+                     canonical apply record exists — inconsistent state, reconciliation required"
+                        .to_string()
+                } else {
+                    format!(
+                        "stale request: canonical relationship tip ({}..) != requested parent ({}..)",
+                        crate::util::text_id::encode_base32_crockford(&consumed_parent[..4]),
+                        crate::util::text_id::encode_base32_crockford(&expected_parent_tip[..4]),
+                    )
+                };
+                return Err(DsmError::invalid_operation(format!(
+                    "apply parent validation failed (fail closed): {reason}"
+                )));
+            }
+        }
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
-        // the capsule being marked dirty.
-        Self::dual_write_advance_outcome(&outcome, frontier_changed)?;
+        // the capsule being marked dirty. `in_tx_extra` (nonce consumption +
+        // canonical apply record on the incoming-transfer path) runs in the SAME
+        // transaction (§16.6 full-state consumption).
+        Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)?;
         sm.commit_advance(&outcome);
 
         // Build a compatibility State view from the outcome for callers that
@@ -1810,43 +1934,15 @@ impl CoreSDK {
         if guard.is_none() {
             // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
             // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
-            // producer. The factory is called once and cached (stateful appliance).
-            let mut a: Box<dyn crate::anchor::AnchorAppliance + Send> =
+            // producer. The factory is called once and cached (stateful appliance). Construction only —
+            // the anchor-state-leaf reconcile is done PER stage call below (see the comment there), not
+            // once at birth: the chip can advance between attach and a later transfer.
+            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
                 match crate::bridge::anchor_appliance_factory() {
                     Some(factory) => factory()?,
                     None => hardware_appliance_or_fail(&seed, dev)?,
                 };
-            // Reconcile the DeviceState anchor-state leaf to the appliance's CURRENT active state
-            // (v2 leaf: B, frontier h_i, counter floor u_i), sourced from the chip's own
-            // status()/pin(). The CHIP is the source of truth for the counter, so this uses its
-            // live `anchor_counter` (u), NOT a hardcoded 0:
-            //   * fresh provisioned chip -> u == 0, the genesis leaf;
-            //   * process restart with k prior offline-bearer transfers (possibly with ONLINE
-            //     transfers in between — those advance the device SMT but never touch the chip
-            //     counter) -> u == k, so the leaf adopts the true post-k state;
-            //   * device-state/chip divergence -> the hardware wins.
-            // Writing the current active state is idempotent when the leaf already matches.
-            {
-                let s = a.status()?;
-                let pin = a.pin();
-                let value = anchor_state_leaf(&pin.bundle, &s.root, s.anchor_counter);
-                log::info!(
-                    "[offline-bearer] anchor-state leaf reconciled to chip state: u(anchor_counter)={} (online-transfer-safe; chip is source of truth)",
-                    s.anchor_counter
-                );
-                let key = anchor_state_leaf_key(&pin.bundle);
-                {
-                    let mut sm = self.state_machine.lock();
-                    let ds = sm.device_head().ok_or_else(|| {
-                        DsmError::state_machine(
-                            "offline-bearer: DeviceState not initialized (genesis first)",
-                        )
-                    })?;
-                    let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
-                    sm.set_device_head(bootstrapped);
-                }
-                *guard = Some(a);
-            }
+            *guard = Some(a);
         }
 
         let app = guard.as_mut().ok_or_else(|| {
@@ -1854,9 +1950,56 @@ impl CoreSDK {
         })?;
         let pin = app.pin();
 
+        // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
+        // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
+        // online recovery. This does NOT cancel or erase here — an orphaned/committed record is left for
+        // the dedicated `resolve_prepared_on_reattach` seam (a Committed release must be re-emitted,
+        // never erased, §26). Conservative `prepared_owned_by_session = true`: never auto-cancel in stage.
+        let action = crate::anchor::recovery_action(app.recover()?, true);
+        if action != crate::anchor::RecoveryAction::Ready {
+            return Err(DsmError::invalid_operation(format!(
+                "offline-bearer stage: appliance not Ready ({action:?}) — resolve/re-emit via recovery \
+                 before staging a new transfer (fail closed to online)"
+            )));
+        }
+
         // Active state: the frontier this transfer consumes + the current counter floor.
         let before = app.status()?;
         let appliance_prev_root = before.root;
+
+        // PER-CALL reconcile (the fix for receiver `PrevStateUncommitted`): keep the device-head
+        // anchor-state leaf byte-equal to the value the certificate will claim —
+        // `anchor_state_leaf(B, before.root, before.anchor_counter)` at `anchor_state_leaf_key(B)`.
+        // `before` is a LIVE chip status read that drives cert.prev_frontier/anchor_counter, so the
+        // leaf the sim's Π_i proves must be reconciled to the SAME live state. This previously ran only
+        // once at first attach (`if guard.is_none()`), so any chip move afterward that was not mirrored
+        // into a persisted device head — a committed-but-failed attempt (COMMIT burns the counter +
+        // FINALIZE advances the frontier), a reflash-birth, or an online-only advance that rebuilt the
+        // head — left the stored leaf stale, Π_i proved a stale value, and the receiver rejected.
+        // `with_anchor_state_leaf` touches only `anchor_state_leaf_key(B)`; balances / relationship tips
+        // / offline_allocations are untouched (allocation conservation is unaffected).
+        {
+            let value = anchor_state_leaf(&pin.bundle, &before.root, before.anchor_counter);
+            let key = anchor_state_leaf_key(&pin.bundle);
+            let mut sm = self.state_machine.lock();
+            let ds = sm.device_head().ok_or_else(|| {
+                DsmError::state_machine(
+                    "offline-bearer: DeviceState not initialized (genesis first)",
+                )
+            })?;
+            let stored = ds.extra_leaves_snapshot().get(&key).copied();
+            // No-op guard: an idempotent same-value write preserves the SMT root, but the explicit
+            // skip makes the determinism guarantee obvious and avoids a needless head replacement.
+            if stored != Some(value) {
+                log::info!(
+                    "[offline-bearer] anchor-state leaf reconciled to live chip: u(anchor_counter)={} (stored={}, chip is source of truth)",
+                    before.anchor_counter,
+                    stored.map(|v| crate::util::text_id::encode_base32_crockford(&v[..6])).unwrap_or_else(|| "absent".into()),
+                );
+                let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
+                sm.set_device_head(bootstrapped);
+            }
+        }
 
         // Stage Δ°: the digest excludes `next_root`, so D is computable first and the successor
         // frontier is derived, never invented.
@@ -2327,684 +2470,284 @@ impl CoreSDK {
     /// inbox drain in `storage_routes`) can build the stitched ReceiptCommit
     /// (§4.2) directly from `smt_proofs` + `parent_r_a` + `child_r_a` — no
     /// shadow SMT replace needed.
-    pub fn apply_operation_with_replay_protection(
+    /// Apply an INCOMING online transfer with §16.6 full-state consumption.
+    ///
+    /// Lookup-before-execute: the canonical apply record is consulted BEFORE any
+    /// mutable-state inspection or execution — an exact duplicate returns the
+    /// loaded record with NO re-execution and NO re-credit; a different identity
+    /// colliding on (relationship, parent) or the nonce is a `Conflict`. A fresh
+    /// request executes under the global `state_machine` lock (held across
+    /// canonical-parent validation → prepare → single full-state transaction →
+    /// in-memory head install) with ONE atomic SQLite transaction committing the
+    /// DeviceState successor (balances + relationship tip inside it), the BCR
+    /// archive, the device head, the nonce consumption, the recovery index, and
+    /// the `CanonicalApplyRecord` — all exist or none do. Token/UI projections
+    /// stay best-effort post-commit and never invalidate the canonical commit.
+    pub fn apply_incoming_transfer_full_state(
         &self,
         op: dsm::types::operations::Operation,
         tx_id: &crate::types::identifiers::TransactionId,
-        _seq: u64,
         sender_device_id: &str,
-        sender_chain_tip: &str,
-    ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
-        // Fail-closed on obviously malformed inputs.
-        if sender_device_id.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "apply_operation_with_replay_protection: empty sender_device_id",
-            ));
-        }
-        if sender_chain_tip.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "apply_operation_with_replay_protection: empty sender_chain_tip",
-            ));
-        }
-
-        // Execute via relationship-aware path. For incoming transfers (this is a
-        // recipient-side apply), the rel_key is k_{sender↔local_device}.
-        let local_device_id_bytes_pre = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-        let sender_id_bytes_pre =
-            crate::util::text_id::decode_base32_crockford(sender_device_id)
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-
-        let (rel_key, counterparty, deltas) = {
-            let mut local_arr = [0u8; 32];
-            if local_device_id_bytes_pre.len() == 32 {
-                local_arr.copy_from_slice(&local_device_id_bytes_pre);
-            }
-            let mut sender_arr = [0u8; 32];
-            if sender_id_bytes_pre.len() == 32 {
-                sender_arr.copy_from_slice(&sender_id_bytes_pre);
-            }
-            let rk =
-                dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
-            // For incoming transfers, we're the recipient → Credit
-            let d: Vec<dsm::types::device_state::BalanceDelta> = match &op {
-                dsm::types::operations::Operation::Transfer {
-                    token_id, amount, ..
-                } => {
-                    let pc = self.resolve_policy_commit_strict(token_id)?;
-                    vec![dsm::types::device_state::BalanceDelta {
-                        policy_commit: pc,
-                        direction: dsm::types::device_state::BalanceDirection::Credit,
-                        amount: amount.value(),
-                    }]
-                }
-                _ => vec![],
-            };
-            (rk, sender_arr, d)
+        canonical_operation_bytes: &[u8],
+        parent_tip: [u8; 32],
+    ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
+        use crate::sdk::apply_outcome::ApplyOutcome;
+        use crate::storage::client_db::{
+            self as cdb, CanonicalApplyInsertOutcome, CanonicalApplyLookup, CanonicalApplyRecord,
         };
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &{
-                let mut a = [0u8; 32];
-                if local_device_id_bytes_pre.len() == 32 {
-                    a.copy_from_slice(&local_device_id_bytes_pre);
-                }
-                a
-            },
-            &counterparty,
-        );
-        let (new_state, outcome) = self
-            .execute_on_relationship(rel_key, counterparty, op.clone(), &deltas, Some(init_tip))
-            .map_err(|e| {
-                DsmError::invalid_operation(format!(
-                    "apply_operation_with_replay_protection: state machine execution failed: {e}"
-                ))
-            })?;
+        use crate::storage::codecs::hash_blake3_bytes;
 
-        // Then handle database persistence based on operation type
-        match op {
+        // ---- validate the request (fail closed) ----
+        let (nonce, amount_val, to_device_id, token_id) = match &op {
             dsm::types::operations::Operation::Transfer {
                 nonce,
                 amount,
                 to_device_id,
                 token_id,
                 ..
-            } => {
-                if nonce.is_empty() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: empty transfer nonce",
-                    ));
-                }
-                let amount_val = amount.value();
-                if amount_val == 0 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: zero transfer amount",
-                    ));
-                }
-
-                // Ensure the transfer is addressed to us (recipient-only apply).
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-                if to_device_id.as_slice() != local_device_id_bytes.as_slice() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: transfer not addressed to this device",
-                    ));
-                }
-
-                // Decode sender id to raw bytes for AF-2 table.
-                let sender_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_device_id,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-                if sender_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                    ));
-                }
-
-                // Replay check: refuse if nonce already spent.
-                let already_spent = client_db::is_nonce_spent(&nonce).map_err(|e| {
-                    DsmError::internal(
-                        format!("nonce check failed: {e}"),
-                        None::<std::convert::Infallible>,
-                    )
-                })?;
-                if already_spent {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: replay detected (nonce already spent)",
-                    ));
-                }
-
-                // We don't currently have an authoritative local chain tip for the bilateral inbox
-                // path in this function signature. Use the sender-provided chain tip *only* as
-                // input to the deterministic tip derivation in atomic_receive_transfer.
-                let sender_chain_tip_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_chain_tip,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_chain_tip not valid base32"))?;
-                if sender_chain_tip_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_chain_tip must decode to 32 bytes",
-                    ));
-                }
-
-                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
-                let local_b32 =
-                    crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
-                // Resolve policy_commit for hierarchical domain separation in chain tip.
-                let pc = self.resolve_policy_commit_strict(&token_id)?;
-                let tx_id_lossy = String::from_utf8_lossy(tx_id.as_bytes());
-                let _new_tip = client_db::atomic_receive_transfer(
-                    &local_b32,
-                    &nonce,
-                    &tx_id_lossy,
-                    &sender_id_bytes,
-                    amount_val,
-                    &sender_chain_tip_bytes,
-                    &pc,
-                )
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("atomic receive failed: {e}"),
-                        None::<std::convert::Infallible>,
-                    )
-                })?;
-
-                self.sync_token_projection_best_effort(
-                    &local_b32,
-                    &token_id,
-                    &new_state,
-                    "apply_operation",
-                );
-
-                log::info!(
-                    "[apply_operation] ✅ applied transfer tx={} token={} amount={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&token_id),
-                    amount_val,
-                    sender_device_id
-                );
-                Ok(outcome.clone())
+            } => (
+                nonce.clone(),
+                amount.value(),
+                to_device_id.clone(),
+                token_id.clone(),
+            ),
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "apply_incoming_transfer_full_state: only Transfer operations are accepted",
+                ))
             }
-            dsm::types::operations::Operation::Receive {
-                nonce,
-                amount,
-                from_device_id,
-                token_id,
-                ..
-            } => {
-                if nonce.is_empty() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: empty receive nonce",
-                    ));
-                }
-                let amount_val = amount.value();
-                if amount_val == 0 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: zero receive amount",
-                    ));
-                }
+        };
+        if nonce.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: empty transfer nonce",
+            ));
+        }
+        if amount_val == 0 {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: zero transfer amount",
+            ));
+        }
+        if canonical_operation_bytes.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: empty canonical operation bytes",
+            ));
+        }
+        let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
+        if local_device_id_bytes.len() != 32 {
+            return Err(DsmError::state_machine(
+                "local device_id must be 32 bytes (AppState corrupt)",
+            ));
+        }
+        if to_device_id.as_slice() != local_device_id_bytes.as_slice() {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: transfer not addressed to this device",
+            ));
+        }
+        let sender_id_bytes = crate::util::text_id::decode_base32_crockford(sender_device_id)
+            .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
+        if sender_id_bytes.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: sender_device_id must decode to 32 bytes",
+            ));
+        }
+        let mut local_arr = [0u8; 32];
+        local_arr.copy_from_slice(&local_device_id_bytes);
+        let mut sender_arr = [0u8; 32];
+        sender_arr.copy_from_slice(&sender_id_bytes);
 
-                // Ensure the receive is from the expected sender
-                let sender_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_device_id,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-                if sender_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                    ));
-                }
-                let from_device_id_str = String::from_utf8_lossy(&from_device_id);
-                let from_device_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    &from_device_id_str,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("from_device_id not valid base32"))?;
-                if from_device_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: from_device_id must decode to 32 bytes",
-                    ));
-                }
-                if from_device_id_bytes.as_slice() != sender_id_bytes.as_slice() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: receive from_device_id mismatch",
-                    ));
-                }
+        // ---- derive the PRE-EXECUTION request identity (no roots) ----
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+        let precommit_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &parent_tip,
+            canonical_operation_bytes,
+            &nonce,
+        );
+        let child_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+            &parent_tip,
+            canonical_operation_bytes,
+            &nonce,
+            &precommit_digest,
+        );
+        let operation_digest = {
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-op-digest/v1");
+            h.update(canonical_operation_bytes);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&h.finalize().as_bytes()[..32]);
+            out
+        };
+        let nonce_hash = hash_blake3_bytes(&nonce);
+        let canonical_apply_id = cdb::compute_canonical_apply_id(
+            &rel_key,
+            &parent_tip,
+            &child_tip,
+            &precommit_digest,
+            &operation_digest,
+            &sender_arr,
+            &local_arr,
+            &nonce_hash,
+        );
 
-                // Replay check: refuse if nonce already spent.
-                let already_spent = client_db::is_nonce_spent(&nonce).map_err(|e| {
+        // ---- lookup BEFORE inspecting any mutable state or executing ----
+        match cdb::lookup_canonical_apply_status(
+            &canonical_apply_id,
+            &rel_key,
+            &parent_tip,
+            &nonce_hash,
+        )
+        .map_err(|e| {
+            DsmError::internal(
+                format!("canonical apply lookup failed: {e}"),
+                None::<std::convert::Infallible>,
+            )
+        })? {
+            CanonicalApplyLookup::Duplicate(record) => {
+                log::info!(
+                    "[apply_full_state] duplicate of already-applied op (tx={}); returning stored record, no re-execution",
+                    String::from_utf8_lossy(tx_id.as_bytes()),
+                );
+                return Ok(ApplyOutcome::AlreadyAppliedSameOperation { record: *record });
+            }
+            CanonicalApplyLookup::Conflict => {
+                return Ok(ApplyOutcome::Conflict {
+                    reason: "a different operation identity already consumed this (relationship, \
+                             parent) or nonce"
+                        .to_string(),
+                });
+            }
+            CanonicalApplyLookup::Fresh => {}
+        }
+
+        // ---- fresh: execute under the global lock with the single full-state tx ----
+        let deltas = {
+            let pc = self.resolve_policy_commit_strict(&token_id)?;
+            vec![dsm::types::device_state::BalanceDelta {
+                policy_commit: pc,
+                direction: dsm::types::device_state::BalanceDirection::Credit,
+                amount: amount_val,
+            }]
+        };
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local_arr,
+            &sender_arr,
+        );
+        let tx_id_str = String::from_utf8_lossy(tx_id.as_bytes()).into_owned();
+        let in_tx_extra = {
+            let nonce = nonce.clone();
+            let tx_id_str = tx_id_str.clone();
+            move |tx: &rusqlite::Transaction<'_>,
+                  outcome: &dsm::types::device_state::AdvanceOutcome|
+                  -> Result<(), DsmError> {
+                // Nonce consumption INSIDE the full-state transaction.
+                let spent = cdb::is_nonce_spent_with_conn(tx, &nonce).map_err(|e| {
                     DsmError::internal(
-                        format!("nonce check failed: {e}"),
+                        format!("in-tx nonce check failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
                 })?;
-                if already_spent {
+                if spent {
                     return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: replay detected (nonce already spent)",
+                        "full-state apply race: nonce consumed concurrently (fail closed)",
                     ));
                 }
-
-                // Get local device info for balance update
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-
-                let sender_chain_tip_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_chain_tip,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_chain_tip not valid base32"))?;
-                if sender_chain_tip_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_chain_tip must decode to 32 bytes",
-                    ));
-                }
-
-                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
-                let local_b32 =
-                    crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
-                // Resolve policy_commit for hierarchical domain separation in chain tip.
-                let pc = self.resolve_policy_commit_strict(&token_id)?;
-                let tx_id_lossy = String::from_utf8_lossy(tx_id.as_bytes());
-                let _new_tip = client_db::atomic_receive_transfer(
-                    &local_b32,
-                    &nonce,
-                    &tx_id_lossy,
-                    &sender_id_bytes,
-                    amount_val,
-                    &sender_chain_tip_bytes,
-                    &pc,
-                )
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("atomic receive failed: {e}"),
-                        None::<std::convert::Infallible>,
-                    )
-                })?;
-
-                self.sync_token_projection_best_effort(
-                    &local_b32,
-                    &token_id,
-                    &new_state,
-                    "apply_operation",
-                );
-
-                log::info!(
-                    "[apply_operation] ✅ applied receive tx={} token={} amount={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&token_id),
-                    amount_val,
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Create { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied create operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::AddRelationship {
-                from_id: _,
-                to_id,
-                relationship_type,
-                metadata,
-                proof,
-                mode: _,
-                message,
-                ..
-            } => {
-                // Add the sender as a contact if they're adding a relationship with us
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-
-                // Check if this relationship is addressed to us
-                if to_id.as_slice() == local_device_id_bytes.as_slice() {
-                    // Create or update contact record
-                    let sender_id_bytes =
-                        crate::util::text_id::decode_base32_crockford(sender_device_id)
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation("sender_device_id not valid base32")
-                            })?;
-                    if sender_id_bytes.len() != 32 {
-                        return Err(DsmError::invalid_operation(
-                            "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                        ));
-                    }
-
-                    let contact = client_db::ContactRecord {
-                        contact_id: format!("contact_{}", sender_device_id),
-                        device_id: sender_id_bytes.clone(),
-                        alias: String::from_utf8_lossy(relationship_type.as_slice()).into_owned(),
-                        genesis_hash: if metadata.len() >= 32 {
-                            // Genesis hash embedded in first 32 bytes of metadata
-                            metadata[..32].to_vec()
-                        } else {
-                            // Derive deterministic genesis hash from sender device ID
-                            dsm_blake3::domain_hash(
-                                "DSM/genesis-counterparty",
-                                &[b"genesis/", sender_id_bytes.as_slice()].concat(),
-                            )
-                            .as_bytes()
-                            .to_vec()
-                        },
-                        public_key: if proof.len() >= 32 {
-                            // Public key embedded in first 32 bytes of proof
-                            proof[..32].to_vec()
-                        } else {
-                            vec![]
-                        },
-                        current_chain_tip: Some(
-                            crate::util::text_id::decode_base32_crockford(sender_chain_tip)
-                                .ok_or_else(|| {
-                                    DsmError::invalid_operation("sender_chain_tip not valid base32")
-                                })?,
-                        ),
-                        added_at: crate::util::deterministic_time::tick(),
-                        verified: true,
-                        verification_proof: Some(proof.clone()),
-                        metadata: {
-                            let mut meta = std::collections::HashMap::new();
-                            meta.insert("relationship_type".to_string(), relationship_type.clone());
-                            meta.insert("message".to_string(), message.as_bytes().to_vec());
-                            if !metadata.is_empty() {
-                                meta.insert("metadata".to_string(), metadata.clone());
-                            }
-                            meta
-                        },
-                        ble_address: None,
-                        status: "Active".to_string(),
-                        needs_online_reconcile: false,
-                        last_seen_online_counter: crate::util::deterministic_time::tick(),
-                        last_seen_ble_counter: 0,
-                        kyber_public_key: Vec::new(),
-                        previous_chain_tip: None,
-                    };
-
-                    client_db::store_contact(&contact).map_err(|e| {
+                cdb::mark_nonce_spent_with_conn(tx, &nonce, &tx_id_str, &sender_arr, amount_val)
+                    .map_err(|e| {
                         DsmError::internal(
-                            format!("failed to store contact: {e}"),
+                            format!("in-tx nonce consume failed: {e}"),
                             None::<std::convert::Infallible>,
                         )
                     })?;
-
-                    log::info!(
-                        "[apply_operation] ✅ added relationship/contact tx={} type={} from={}",
-                        String::from_utf8_lossy(tx_id.as_bytes()),
-                        String::from_utf8_lossy(relationship_type.as_slice()),
-                        sender_device_id
-                    );
-                } else {
-                    log::info!(
-                        "[apply_operation] ℹ️  relationship not addressed to us tx={} from={}",
-                        String::from_utf8_lossy(tx_id.as_bytes()),
-                        sender_device_id
-                    );
-                }
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::CreateRelationship {
-                counterparty_id,
-                commitment,
-                proof,
-                mode: _,
-                message,
-                ..
-            } => {
-                // Similar to AddRelationship, create a contact record
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-
-                let sender_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_device_id,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-                if sender_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                    ));
-                }
-
-                let contact = client_db::ContactRecord {
-                    contact_id: format!("contact_{}", sender_device_id),
-                    device_id: sender_id_bytes.clone(),
-                    alias: String::from_utf8_lossy(&counterparty_id).into_owned(),
-                    genesis_hash: if commitment.len() >= 32 {
-                        // Genesis hash embedded in first 32 bytes of commitment
-                        commitment[..32].to_vec()
-                    } else {
-                        // Derive deterministic genesis hash from sender device ID
-                        dsm_blake3::domain_hash(
-                            "DSM/genesis-counterparty",
-                            &[b"genesis/", sender_id_bytes.as_slice()].concat(),
-                        )
-                        .as_bytes()
-                        .to_vec()
-                    },
-                    public_key: if proof.len() >= 32 {
-                        // Public key embedded in first 32 bytes of proof
-                        proof[..32].to_vec()
-                    } else {
-                        vec![]
-                    },
-                    current_chain_tip: Some(
-                        crate::util::text_id::decode_base32_crockford(sender_chain_tip)
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation("sender_chain_tip not valid base32")
-                            })?,
-                    ),
-                    added_at: crate::util::deterministic_time::tick(),
-                    verified: true,
-                    verification_proof: Some(proof.clone()),
-                    metadata: {
-                        let mut meta = std::collections::HashMap::new();
-                        meta.insert("counterparty_id".to_string(), counterparty_id.clone());
-                        meta.insert("message".to_string(), message.as_bytes().to_vec());
-                        if !commitment.is_empty() {
-                            meta.insert("commitment".to_string(), commitment.clone());
-                        }
-                        meta
-                    },
-                    ble_address: None,
-                    status: "Active".to_string(),
-                    needs_online_reconcile: false,
-                    last_seen_online_counter: crate::util::deterministic_time::tick(),
-                    last_seen_ble_counter: 0,
-                    kyber_public_key: Vec::new(),
-                    previous_chain_tip: None,
+                // Canonical apply record with the AUTHORITATIVE applied B roots
+                // from the state mutation itself.
+                let record = CanonicalApplyRecord {
+                    relationship_key: rel_key,
+                    parent_tip,
+                    child_tip,
+                    precommit_digest,
+                    operation_digest,
+                    sender_device: sender_arr,
+                    recipient_device: local_arr,
+                    nonce_hash,
+                    applied_parent_root_b: outcome.parent_r_a,
+                    applied_child_root_b: outcome.child_r_a,
                 };
-
-                client_db::store_contact(&contact).map_err(|e| {
+                match cdb::insert_canonical_apply_identity_with_conn(tx, &record).map_err(|e| {
                     DsmError::internal(
-                        format!("failed to store contact: {e}"),
+                        format!("in-tx canonical apply insert failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
-                })?;
+                })? {
+                    CanonicalApplyInsertOutcome::Inserted => Ok(()),
+                    CanonicalApplyInsertOutcome::DuplicateSameOperation(_)
+                    | CanonicalApplyInsertOutcome::Conflict => Err(DsmError::invalid_operation(
+                        "full-state apply race: canonical apply identity inserted concurrently \
+                         (fail closed)",
+                    )),
+                }
+            }
+        };
 
-                log::info!(
-                    "[apply_operation] ✅ created relationship/contact tx={} counterparty={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&counterparty_id),
-                    sender_device_id
+        let exec = self.execute_on_relationship_guarded(
+            rel_key,
+            sender_arr,
+            op,
+            &deltas,
+            Some(init_tip),
+            Some((parent_tip, child_tip)),
+            Some(&in_tx_extra),
+        );
+
+        match exec {
+            Ok((new_state, advance)) => {
+                // Post-commit convergence (best-effort projection; NEVER invalidates
+                // the committed canonical transition).
+                let local_b32 = crate::util::text_id::encode_base32_crockford(&local_arr);
+                self.sync_token_projection_best_effort(
+                    &local_b32,
+                    &token_id,
+                    &new_state,
+                    "apply_full_state",
                 );
-                Ok(outcome.clone())
+                let record = CanonicalApplyRecord {
+                    relationship_key: rel_key,
+                    parent_tip,
+                    child_tip,
+                    precommit_digest,
+                    operation_digest,
+                    sender_device: sender_arr,
+                    recipient_device: local_arr,
+                    nonce_hash,
+                    applied_parent_root_b: advance.parent_r_a,
+                    applied_child_root_b: advance.child_r_a,
+                };
+                log::info!(
+                    "[apply_full_state] ✅ applied transfer tx={} amount={} from={} (single full-state tx)",
+                    tx_id_str,
+                    amount_val,
+                    sender_device_id,
+                );
+                Ok(ApplyOutcome::Applied {
+                    record,
+                    advance: Box::new(advance),
+                })
             }
-            dsm::types::operations::Operation::Generic {
-                operation_type,
-                data: _,
-                message: _,
-                ..
-            } => {
-                // Generic operations are allowed but may not require specific database persistence
-                // The state machine validation already occurred above
-                log::info!(
-                    "[apply_operation] ✅ applied generic operation tx={} type={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&operation_type),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            // For operations that don't require recipient-side database persistence,
-            // we still allow them through since state machine validation passed
-            dsm::types::operations::Operation::Mint { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied mint operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Burn { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied burn operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Lock { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied lock operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Unlock { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied unlock operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::LockToken { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied lock_token operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::UnlockToken { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied unlock_token operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::CreateToken { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied create_token operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Update { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied update operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::RemoveRelationship { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied remove_relationship operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Recovery { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied recovery operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Delete { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied delete operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Link { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied link operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Unlink { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied unlink operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Invalidate { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied invalidate operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Genesis => {
-                log::info!(
-                    "[apply_operation] ✅ applied genesis operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Noop => {
-                log::info!(
-                    "[apply_operation] ✅ applied noop operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvCreate { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_create operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvUnlock { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_unlock operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvClaim { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_claim operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvInvalidate { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_invalidate operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
+            Err(e) => {
+                // Losing racer / stale request classification. The DB is the
+                // authority: re-lookup the exact identity first.
+                match cdb::get_canonical_apply_identity_by_id(&canonical_apply_id) {
+                    Ok(Some(record)) => Ok(ApplyOutcome::AlreadyAppliedSameOperation { record }),
+                    _ => {
+                        let msg = e.to_string();
+                        if msg.contains("apply parent validation failed")
+                            || msg.contains("full-state apply race")
+                        {
+                            Ok(ApplyOutcome::Conflict { reason: msg })
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
             }
         }
     }
@@ -3017,6 +2760,362 @@ mod tests {
     use super::*;
     use dsm::types::operations::Operation as DsmOperation;
     use serial_test::serial;
+
+    /// §16.6 full-state apply regression harness: fresh DB + genesis'd CoreSDK,
+    /// with AppState's device id matching the SDK device (transfers addressed
+    /// to us).
+    fn full_state_apply_harness() -> CoreSDK {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let sdk = test_sdk();
+        sdk.initialize_with_genesis_state().expect("genesis");
+        let devid = sdk.device_info.device_id;
+        crate::sdk::app_state::AppState::set_identity_info(
+            devid.to_vec(),
+            vec![0x02; 32],
+            vec![0x03; 32],
+            vec![0x04; 32],
+        );
+        sdk
+    }
+
+    fn incoming_transfer_op(to: &[u8; 32], amount: u64, nonce: Vec<u8>) -> DsmOperation {
+        DsmOperation::Transfer {
+            policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+            to_device_id: to.to_vec(),
+            amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
+            token_id: b"ERA".to_vec(),
+            mode: dsm::types::operations::TransactionMode::Bilateral,
+            nonce,
+            verification: dsm::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: to.to_vec(),
+            to: b"local".to_vec(),
+            message: "apply-test".to_string(),
+            signature: vec![0; 64],
+            authority_policy: None,
+        }
+    }
+
+    fn sender_ids() -> ([u8; 32], String) {
+        let sender = [0x5Au8; 32];
+        let b32 = crate::util::text_id::encode_base32_crockford(&sender);
+        (sender, b32)
+    }
+
+    fn device_root(sdk: &CoreSDK) -> [u8; 32] {
+        sdk.state_machine
+            .lock()
+            .device_head()
+            .map(|ds| ds.root())
+            .unwrap_or([0u8; 32])
+    }
+
+    /// Fresh apply commits everything in ONE transaction: balance/state advance,
+    /// nonce consumption, and the CanonicalApplyRecord all exist afterwards; a
+    /// duplicate returns the ORIGINAL record with NO re-execution and NO second
+    /// credit (device root unchanged).
+    #[test]
+    #[serial]
+    fn full_state_apply_fresh_then_duplicate_no_reexecution() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (sender, sender_b32) = sender_ids();
+        let nonce = vec![0x77u8; 32];
+        let op = incoming_transfer_op(&local, 50, nonce.clone());
+        let op_bytes = b"canonical-op-bytes-1".to_vec();
+        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local, &sender,
+        );
+        let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-1");
+
+        let out = sdk
+            .apply_incoming_transfer_full_state(op.clone(), &tx_id, &sender_b32, &op_bytes, parent)
+            .expect("fresh apply");
+        let record = match out {
+            crate::sdk::apply_outcome::ApplyOutcome::Applied { record, .. } => record,
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        // Single-tx postconditions: nonce spent + verified record present.
+        assert!(crate::storage::client_db::is_nonce_spent(&nonce).unwrap());
+        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
+        let stored = crate::storage::client_db::get_canonical_apply_identity(&rel, &parent)
+            .unwrap()
+            .expect("record persisted");
+        assert_eq!(stored, record);
+        // Identity binds the derived child/precommit.
+        let precommit =
+            dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
+        let child = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+            &parent, &op_bytes, &nonce, &precommit,
+        );
+        assert_eq!(record.parent_tip, parent);
+        assert_eq!(record.child_tip, child);
+        assert_eq!(record.precommit_digest, precommit);
+
+        // DUPLICATE: exact replay → loaded original record, no re-execution.
+        let root_before = device_root(&sdk);
+        let dup = sdk
+            .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent)
+            .expect("duplicate apply");
+        match dup {
+            crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record: r2 } => {
+                assert_eq!(r2, record, "must return the ORIGINAL persisted record");
+            }
+            other => panic!("expected AlreadyAppliedSameOperation, got {other:?}"),
+        }
+        assert_eq!(
+            device_root(&sdk),
+            root_before,
+            "duplicate must not re-execute (no second credit)"
+        );
+    }
+
+    /// A DIFFERENT operation reusing a spent nonce (or consumed parent) is a
+    /// Conflict with no mutation; and a stale parent (canonical tip != request
+    /// parent) is a Conflict with NO state-machine execution.
+    #[test]
+    #[serial]
+    fn full_state_apply_conflict_and_stale_parent_fail_closed() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (sender, sender_b32) = sender_ids();
+        let nonce = vec![0x88u8; 32];
+        let op = incoming_transfer_op(&local, 10, nonce.clone());
+        let op_bytes = b"canonical-op-bytes-2".to_vec();
+        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local, &sender,
+        );
+        let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-2");
+        sdk.apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent)
+            .expect("fresh apply");
+
+        // Different op (different canonical bytes ⇒ different identity) reusing
+        // the SAME consumed parent → Conflict, nothing mutated.
+        let root_before = device_root(&sdk);
+        let op2 = incoming_transfer_op(&local, 11, vec![0x99u8; 32]);
+        let out = sdk
+            .apply_incoming_transfer_full_state(
+                op2,
+                &tx_id,
+                &sender_b32,
+                b"different-op-bytes",
+                parent,
+            )
+            .expect("conflict classification");
+        assert!(
+            matches!(
+                out,
+                crate::sdk::apply_outcome::ApplyOutcome::Conflict { .. }
+            ),
+            "different identity on a consumed parent must be Conflict"
+        );
+        assert_eq!(device_root(&sdk), root_before, "conflict must not mutate");
+
+        // Stale parent: canonical tip has moved past the requested parent.
+        let stale_parent = [0x31u8; 32];
+        let op3 = incoming_transfer_op(&local, 12, vec![0xAAu8; 32]);
+        let out3 = sdk
+            .apply_incoming_transfer_full_state(
+                op3,
+                &tx_id,
+                &sender_b32,
+                b"op-bytes-stale",
+                stale_parent,
+            )
+            .expect("stale classification");
+        match out3 {
+            crate::sdk::apply_outcome::ApplyOutcome::Conflict { reason } => {
+                assert!(
+                    reason.contains("stale request") || reason.contains("parent validation"),
+                    "unexpected conflict reason: {reason}"
+                );
+            }
+            other => panic!("expected Conflict for stale parent, got {other:?}"),
+        }
+        assert_eq!(device_root(&sdk), root_before, "stale must not execute");
+        assert!(!crate::storage::client_db::is_nonce_spent(&[0xAAu8; 32]).unwrap());
+    }
+
+    /// The legacy crash state (nonce spent WITHOUT a canonical apply record —
+    /// impossible under the new single tx, but seedable) must ROLL BACK the
+    /// whole in-tx apply: no balance credit, no record, device root unchanged.
+    /// This directly proves the all-or-nothing boundary.
+    #[test]
+    #[serial]
+    fn full_state_apply_rolls_back_everything_when_in_tx_step_fails() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (sender, sender_b32) = sender_ids();
+        let nonce = vec![0xB7u8; 32];
+        // Seed ONLY the spent nonce (no canonical record): pre-lookup sees Fresh,
+        // execution proceeds, and the IN-TX nonce check must fail the whole tx.
+        crate::storage::client_db::mark_nonce_spent(&nonce, "tx-seeded", &sender, 5).unwrap();
+
+        let root_before = device_root(&sdk);
+        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local, &sender,
+        );
+        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
+        let op = incoming_transfer_op(&local, 25, nonce.clone());
+        let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-3");
+        let out = sdk
+            .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, b"op-bytes-3", parent)
+            .expect("race classification");
+        assert!(
+            matches!(
+                out,
+                crate::sdk::apply_outcome::ApplyOutcome::Conflict { .. }
+            ),
+            "in-tx nonce race must classify as Conflict"
+        );
+        // ALL-OR-NOTHING: no state advance, no record, no credit.
+        assert_eq!(
+            device_root(&sdk),
+            root_before,
+            "state advance must roll back"
+        );
+        assert!(
+            crate::storage::client_db::get_canonical_apply_identity(&rel, &parent)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// MANDATORY regression A (crash after apply, before convergence): the
+    /// redelivery yields AlreadyAppliedSameOperation with the stored record and
+    /// the fold converges — exactly ONE marker, ONE outbox entry, no second EK.
+    #[test]
+    #[serial]
+    fn crash_after_apply_redelivery_converges_via_stored_record() {
+        let sdk = full_state_apply_harness();
+        let local: [u8; 32] = sdk.device_info.device_id;
+        let (sender, sender_b32) = sender_ids();
+        let nonce = vec![0xC7u8; 32];
+        let op = incoming_transfer_op(&local, 30, nonce.clone());
+        let op_bytes = b"canonical-op-bytes-A".to_vec();
+        let parent = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local, &sender,
+        );
+        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
+        let precommit =
+            dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
+        let child = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+            &parent, &op_bytes, &nonce, &precommit,
+        );
+        let wrap = [0x42u8; 32];
+
+        // PHASE 1 (prepare BEFORE apply, as the live path does).
+        let gen_calls = std::sync::atomic::AtomicUsize::new(0);
+        let prepared = crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
+            rel,
+            parent,
+            || {
+                gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(crate::handlers::recipient_receipt::GeneratedBArtifacts {
+                    receipt_bytes: b"RECEIPT-A".to_vec(),
+                    commitment: [0x64u8; 32],
+                    child_tip: child,
+                    counterparty_device_id: sender,
+                    receipt_parent_root_a: [0x0Bu8; 32],
+                    receipt_child_root_a: [0x0Cu8; 32],
+                    precommit_digest: precommit,
+                    prepared_receipt_artifact_hash:
+                        crate::storage::client_db::acceptance_artifact_hash(b"RECEIPT-A"),
+                    expected_local_b_head: None,
+                    new_local_b_head: vec![0xBBu8; 40],
+                    new_local_b_sk_enc: crate::storage::client_db::cert_chain::encrypt_chain_sk(
+                        &[0xCCu8; 64],
+                        &wrap,
+                    )
+                    .unwrap(),
+                    expected_counterparty_a_head: None,
+                    new_counterparty_a_head: vec![0xAAu8; 40],
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared, b"RECEIPT-A");
+
+        // APPLY commits; then CRASH before convergence (we simply don't converge).
+        let out = sdk
+            .apply_incoming_transfer_full_state(
+                op.clone(),
+                &crate::types::identifiers::TransactionId::new("tx-A"),
+                &sender_b32,
+                &op_bytes,
+                parent,
+            )
+            .expect("fresh apply");
+        assert!(matches!(
+            out,
+            crate::sdk::apply_outcome::ApplyOutcome::Applied { .. }
+        ));
+
+        // REDELIVERY after "restart": prepare returns the SAME bytes without
+        // re-signing; apply returns the stored record; convergence completes.
+        let again = crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
+            rel,
+            parent,
+            || panic!("second EK derivation is forbidden on redelivery"),
+        )
+        .unwrap();
+        assert_eq!(again, b"RECEIPT-A");
+        let redelivered = sdk
+            .apply_incoming_transfer_full_state(
+                op,
+                &crate::types::identifiers::TransactionId::new("tx-A"),
+                &sender_b32,
+                &op_bytes,
+                parent,
+            )
+            .expect("redelivery");
+        let record = match redelivered {
+            crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record } => {
+                record
+            }
+            other => panic!("expected AlreadyAppliedSameOperation, got {other:?}"),
+        };
+
+        // Seed the contact row for the projection sync, then converge.
+        {
+            let binding = crate::storage::client_db::get_connection().unwrap();
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, metadata, added_at, verified, status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter, chain_tip)
+                 VALUES ('t', ?1, 't', X'00', X'00', 0, 1, 'active', 0, 0, 0, ?2)",
+                rusqlite::params![sender.as_slice(), parent.as_slice()],
+            )
+            .unwrap();
+        }
+        let journal = crate::storage::client_db::get_acceptance_journal(&rel, &parent)
+            .unwrap()
+            .unwrap();
+        let bytes =
+            crate::handlers::recipient_receipt::converge_accepted_locked(&journal, &record, &wrap)
+                .unwrap();
+        assert_eq!(bytes, b"RECEIPT-A");
+        assert_eq!(
+            gen_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ONE EK derivation total"
+        );
+        // Exactly one marker + one outbox entry; journal Complete.
+        assert!(
+            crate::storage::client_db::get_accepted_transition(&rel, &parent)
+                .unwrap()
+                .is_some()
+        );
+        assert!(crate::storage::client_db::outbound_reply_exists(&[0x64u8; 32]).unwrap());
+        assert_eq!(
+            crate::storage::client_db::get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::storage::client_db::STATUS_COMPLETE
+        );
+    }
 
     fn rt() -> tokio::runtime::Runtime {
         match tokio::runtime::Runtime::new() {
@@ -3215,6 +3314,145 @@ mod tests {
             .unwrap();
         assert_eq!(rel2.cert.anchor_counter, 1, "counter advanced to u_i=1");
         assert_eq!(rel2.cert.receiver_challenge, r_r_2);
+    }
+
+    /// Regression lock for receiver `PrevStateUncommitted`: the sender's device-head anchor-state leaf
+    /// is reconciled to the LIVE chip on EVERY stage call, not once per appliance attach. When a prior
+    /// transfer advances the chip (counter + frontier) without the successor leaf being committed into
+    /// the device head, the next stage MUST re-reconcile the (now stale) head leaf to the live chip —
+    /// otherwise the confirm-build Π_i proves a stale value while the cert claims the new frontier/
+    /// counter, and the receiver rejects. The decisive assertion is that the stored device-head leaf
+    /// equals EXACTLY the value the certificate claims for this transfer.
+    #[test]
+    #[serial]
+    fn stage_reconciles_device_head_anchor_leaf_to_live_chip_every_call() {
+        use anchor_core::root_advance::anchor_state_leaf;
+        use dsm::core::bilateral_transaction_manager::anchor_state_leaf_key;
+        use dsm::types::device_state::DeviceState;
+
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let recipient = [4u8; 32];
+
+        // Transfer 1: stage (reconciles the head leaf to the live u=0 state) + release (PREPARE→COMMIT→
+        // EMIT→FINALIZE advances the mock chip to u=1 / a new frontier). The unit test does NOT commit
+        // the successor leaf into the device head — the real canonical commit would — so the head leaf
+        // is left at the u=0 value: exactly the stale condition the bug produced.
+        let staged1 = sdk
+            .stage_offline_bearer_transition(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
+            )
+            .expect("stage 1");
+        let bundle = staged1.pin.bundle;
+        let key = anchor_state_leaf_key(&bundle);
+        let leaf_u0 = anchor_state_leaf(
+            &bundle,
+            &staged1.appliance_prev_root,
+            staged1.transition.anchor_counter,
+        );
+        {
+            let sm = sdk.state_machine.lock();
+            let head = sm.device_head().expect("head");
+            assert_eq!(
+                head.extra_leaves_snapshot().get(&key),
+                Some(&leaf_u0),
+                "stage 1 reconciled the head leaf to the live (u=0) chip state",
+            );
+        }
+        sdk.release_offline_bearer(
+            &staged1,
+            [0x55u8; 32],
+            [0x51u8; 32],
+            [0x52u8; 32],
+            vec![0xAA; 40],
+            vec![0xCC; 40],
+        )
+        .expect("release 1 (advances the mock chip)");
+
+        // The head leaf is now STALE (still u=0) relative to the advanced chip (u=1). Stage 2 must
+        // RE-reconcile it to the live chip — WITHOUT the per-call fix this would remain leaf_u0 and Π_i
+        // would prove the wrong value.
+        let staged2 = sdk
+            .stage_offline_bearer_transition(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xCD],
+                [0x66u8; 32],
+            )
+            .expect("stage 2");
+        assert_eq!(
+            staged2.transition.anchor_counter, 1,
+            "the chip advanced to u=1 after transfer 1",
+        );
+        let expected = anchor_state_leaf(
+            &bundle,
+            &staged2.appliance_prev_root,
+            staged2.transition.anchor_counter,
+        );
+        assert_ne!(
+            expected, leaf_u0,
+            "the reconciled value actually advanced past the stale u=0 leaf"
+        );
+        let sm = sdk.state_machine.lock();
+        let head = sm.device_head().expect("head");
+        assert_eq!(
+            head.extra_leaves_snapshot().get(&key),
+            Some(&expected),
+            "stage 2 RE-reconciled the stale head leaf to the live chip (u=1) — the device-head leaf now \
+             equals exactly the value the cert claims, so Π_i verifies on the receiver",
+        );
+    }
+
+    /// Determinism: staging twice with an unchanged live chip leaves the device-head root identical
+    /// (the no-op guard skips a same-value rewrite), so the confirm-build sim and the canonical-commit
+    /// re-sim see byte-identical pre-roots.
+    #[test]
+    #[serial]
+    fn restage_with_unchanged_chip_leaves_device_root_identical() {
+        use dsm::types::device_state::DeviceState;
+
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let recipient = [4u8; 32];
+        let stage = || {
+            sdk.stage_offline_bearer_transition(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                [3u8; 32],
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
+            )
+        };
+        let s1 = stage().expect("stage 1");
+        let root_after_1 = sdk.state_machine.lock().device_head().expect("head").root();
+        let s2 = stage().expect("stage 2 (no chip change)");
+        let root_after_2 = sdk.state_machine.lock().device_head().expect("head").root();
+        assert_eq!(
+            root_after_1, root_after_2,
+            "an unchanged chip must not drift the device root"
+        );
+        assert_eq!(s1.appliance_prev_root, s2.appliance_prev_root);
+        assert_eq!(s1.anchor_leaf.new_value, s2.anchor_leaf.new_value);
     }
 
     /// Exactly-once release: re-releasing the SAME staged transition is rejected (its `prev_root`

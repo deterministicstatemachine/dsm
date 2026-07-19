@@ -3141,11 +3141,19 @@ impl StorageNodeSDK {
             )));
         }
 
+        // Kyber identity binding is MANDATORY (DSM beta, no legacy path): a device
+        // registration MUST carry the device's ML-KEM public key bound to its
+        // identity so online peers can do per-step-EK sends without a prior BLE
+        // exchange. Fail-closed if unavailable (wallet locked / key not installed).
+        let (kyber_public_key, kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
         let req = dsm::types::proto::RegisterDeviceRequest {
             device_id: decoded.clone(),
             pubkey: crate::util::text_id::decode_base32_crockford(pubkey).unwrap_or_default(),
             genesis_hash: crate::util::text_id::decode_base32_crockford(genesis_hash)
                 .unwrap_or_default(),
+            kyber_public_key,
+            kyber_binding_sig,
         };
         let mut body = Vec::with_capacity(req.encoded_len());
         req.encode(&mut body).map_err(|e| {

@@ -1710,6 +1710,14 @@ message RegisterDeviceRequest {
   bytes device_id    = 1 [(dsm_fixed_len)=32];
   bytes pubkey       = 2 [(dsm_fixed_len)=32];
   bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+  // ML-KEM-768 encapsulation public key (the recipient key online per-step-EK
+  // sends encapsulate against). MANDATORY — DSM beta has no legacy path; a
+  // registration/lookup without it is invalid.
+  bytes kyber_public_key  = 4 [(dsm_fixed_len)=1184];
+  // SPHINCS+ (device AK) signature binding kyber_public_key to the device
+  // identity: sign( domain_hash("DSM/kyber-identity-binding\0",
+  //   device_id || genesis_hash || kyber_public_key) ). MANDATORY.
+  bytes kyber_binding_sig = 5 [(dsm_max_len)=51200];
 }
 
 message RegisterDeviceResponse {

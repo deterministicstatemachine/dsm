@@ -2183,21 +2183,9 @@ impl Ops for Operation {
     fn validate(&self) -> Result<bool, DsmError> {
         match self {
             Operation::Generic { .. } => Ok(true),
-            Operation::Transfer {
-                amount,
-                token_id: _,
-                ..
-            } => Ok(amount.value() > 0),
-            Operation::Mint {
-                amount,
-                token_id: _,
-                ..
-            } => Ok(amount.value() > 0),
-            Operation::Burn {
-                amount,
-                token_id: _,
-                ..
-            } => Ok(amount.value() > 0),
+            Operation::Transfer { amount, .. } => Ok(amount.value() > 0),
+            Operation::Mint { amount, .. } => Ok(amount.value() > 0),
+            Operation::Burn { amount, .. } => Ok(amount.value() > 0),
             Operation::LockToken { .. } => Ok(true),
             Operation::UnlockToken { .. } => Ok(true),
             Operation::Lock { .. } => Ok(true),
@@ -2249,21 +2237,9 @@ impl Ops for Operation {
 impl TokenOps for Operation {
     fn is_valid(&self) -> bool {
         match self {
-            Operation::Transfer {
-                amount,
-                token_id: _,
-                ..
-            } => amount.value() > 0,
-            Operation::Mint {
-                amount,
-                token_id: _,
-                ..
-            } => amount.value() > 0,
-            Operation::Burn {
-                amount,
-                token_id: _,
-                ..
-            } => amount.value() > 0,
+            Operation::Transfer { amount, .. } => amount.value() > 0,
+            Operation::Mint { amount, .. } => amount.value() > 0,
+            Operation::Burn { amount, .. } => amount.value() > 0,
             Operation::Lock { amount, .. } => amount.value() > 0,
             Operation::Unlock { amount, .. } => amount.value() > 0,
             _ => false,

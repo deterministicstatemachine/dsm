@@ -91,6 +91,13 @@ pub(crate) struct QuorumDeviceIdentity {
     pub(crate) device_id: [u8; 32],
     pub(crate) genesis_hash: [u8; 32],
     pub(crate) public_key: Vec<u8>,
+    /// Recipient ML-KEM-768 public key (online per-step-EK encapsulation target),
+    /// registry-carried and MANDATORY. Included in the `Eq` quorum so a node that
+    /// serves a divergent Kyber key (equivocation) breaks agreement.
+    pub(crate) kyber_public_key: Vec<u8>,
+    /// SPHINCS+ (device AK) signature binding `kyber_public_key` to the device
+    /// identity; verified at contact-add against the QR-carried AK.
+    pub(crate) kyber_binding_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +312,16 @@ impl AppRouterImpl {
             rollback_errors.push(format!("wallet rollback failed: {e}"));
         }
 
+        // §11.1 lockstep: a terminally-failed online send must leave NO pending
+        // Local cert head behind — the committed head was never advanced (we only
+        // stash at sign time), so dropping the pending stash returns this
+        // relationship to exactly its pre-send cert-chain state.
+        if let Err(e) =
+            crate::storage::client_db::drop_pending_local_heads_for_relationship(rollback.smt_key)
+        {
+            rollback_errors.push(format!("pending cert head drop failed: {e}"));
+        }
+
         crate::security::modal_sync_lock::clear_pending_online(rollback.smt_key).await;
 
         if rollback_errors.is_empty() {
@@ -319,10 +336,18 @@ impl AppRouterImpl {
         mut contact_record: crate::storage::client_db::ContactRecord,
         authoritative: &QuorumDeviceIdentity,
     ) -> Result<crate::storage::client_db::ContactRecord, String> {
+        // The AK established in-person via the QR (the contact's signing key) is
+        // what verifies the recipient's registry-carried ML-KEM identity binding.
+        // Capture it before any repair overwrites `public_key`.
+        let contact_ak = contact_record.public_key.clone();
+
         let public_key_matches = authoritative.public_key.is_empty()
             || contact_record.public_key == authoritative.public_key;
+        let kyber_matches = !authoritative.kyber_public_key.is_empty()
+            && contact_record.kyber_public_key == authoritative.kyber_public_key;
         if contact_record.genesis_hash.as_slice() == authoritative.genesis_hash.as_slice()
             && public_key_matches
+            && kyber_matches
         {
             return Ok(contact_record);
         }
@@ -342,6 +367,30 @@ impl AppRouterImpl {
         if !authoritative.public_key.is_empty() {
             contact_record.public_key = authoritative.public_key.clone();
         }
+
+        // MANDATORY recipient ML-KEM identity binding (DSM beta, no legacy path):
+        // the quorum-agreed Kyber key must be bound to (device_id, genesis) under
+        // the QR-established AK before we persist it to the contact. Fail-closed on
+        // missing or unbound (substituted/equivocating) material — an online
+        // per-step-EK send has no legacy fallback.
+        if authoritative.kyber_public_key.is_empty() {
+            return Err("recipient identity quorum returned no Kyber public key".to_string());
+        }
+        let recipient_device_id: [u8; 32] = contact_record
+            .device_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| "contact device_id is not 32 bytes".to_string())?;
+        crate::sdk::kyber_identity::verify_kyber_identity_binding(
+            &recipient_device_id,
+            &authoritative.genesis_hash,
+            &authoritative.kyber_public_key,
+            &authoritative.kyber_binding_sig,
+            &contact_ak,
+        )
+        .map_err(|e| format!("recipient Kyber identity binding invalid: {e}"))?;
+        contact_record.kyber_public_key = authoritative.kyber_public_key.clone();
+
         contact_record.verified = true;
         contact_record.needs_online_reconcile = false;
 
@@ -1234,6 +1283,36 @@ impl AppRouterImpl {
             );
         }
 
+        // Durable pending-gate guard — DELIVERY SAFETY. The modal lock above is
+        // in-memory only: it does not survive a process restart, and it is cleared
+        // once a send's flow completes even while the durable outbox gate remains
+        // unresolved (recipient accepted but its ACK has not yet been confirmed at
+        // quorum). Without this check, a second send passes the modal lock, is
+        // DELIVERED to the recipient's inbox, and only then hits the different-gate
+        // rejection at `record_pending_online_transition` — forcing a rollback of a
+        // transfer the recipient may have already accepted, diverging the two
+        // ledgers. Fail closed BEFORE delivery instead. The gate self-clears once
+        // the recipient's ACK lands (storage.sync §5.4 sweep), so this blocks only
+        // while a prior transfer to this contact is genuinely still pending.
+        match crate::storage::client_db::get_pending_online_outbox(&to_device_id) {
+            Ok(Some(_pending)) => {
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                let _ =
+                    crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
+                return err(
+                    "wallet.send: a prior online transfer to this contact is still pending the recipient's acknowledgement; sync before sending again"
+                        .to_string(),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                return err(format!(
+                    "wallet.send: failed to check pending online gate before send: {e}"
+                ));
+            }
+        }
+
         // Tripwire preflight: the parent tip may be consumed only once.
         match crate::storage::client_db::contact_chain_tip_matches_expected(
             &to_device_id,
@@ -1491,18 +1570,23 @@ impl AppRouterImpl {
                                 receipt.set_kyber_ct_a(out.kyber_ct);
                                 receipt.add_sig_a(out.sig);
 
-                                // Advance chain head so step n+1 will use this
-                                // EK_sk_n. After advance, ek_sk in memory is no
-                                // longer needed.
-                                if let Err(e) =
-                                    crate::sdk::receipts::advance_local_chain_head_after_signing(
-                                        &rel_key,
-                                        &out.ek_pk,
-                                        &out.ek_sk,
-                                        &at_rest_key,
-                                        out.used_root_ak,
-                                    )
-                                {
+                                // §11.1 lockstep: do NOT advance the committed Local
+                                // chain head at sign time. STASH the new EK head as
+                                // pending, keyed by this receipt commitment. It is
+                                // promoted into `cert_chain_heads` only once the
+                                // receiver's acceptance ACK is observed (storage.sync
+                                // sweep), and dropped if the transfer fails. This keeps
+                                // the sender's committed head unchanged for a transfer
+                                // that is never accepted, so a failed/timed-out attempt
+                                // cannot run the chain ahead of the receiver.
+                                if let Err(e) = crate::storage::client_db::stash_pending_local_head(
+                                    &rel_key,
+                                    &commitment,
+                                    &out.ek_pk,
+                                    &out.ek_sk,
+                                    &at_rest_key,
+                                    out.used_root_ak,
+                                ) {
                                     let rollback_error = self
                                         .rollback_failed_online_transfer(&rollback_request)
                                         .await
@@ -1510,7 +1594,7 @@ impl AppRouterImpl {
                                         .map(|rb| format!("; rollback failed: {rb}"))
                                         .unwrap_or_default();
                                     return err(format!(
-                                        "wallet.send: §11.1 chain head advance failed: {e}{rollback_error}"
+                                        "wallet.send: §11.1 pending chain head stash failed: {e}{rollback_error}"
                                     ));
                                 }
 
@@ -2448,9 +2532,18 @@ pub(crate) fn collect_rotated_inbox_addresses(
 fn select_quorum_device_identity(
     candidates: impl IntoIterator<Item = QuorumDeviceIdentity>,
 ) -> Option<QuorumDeviceIdentity> {
-    let mut counts: HashMap<([u8; 32], Vec<u8>), (usize, QuorumDeviceIdentity)> = HashMap::new();
+    // Quorum agreement must cover the FULL identity, including the mandatory
+    // Kyber material — otherwise a node could equivocate on the ML-KEM key while
+    // still counting toward quorum on the other fields.
+    let mut counts: HashMap<([u8; 32], Vec<u8>, Vec<u8>, Vec<u8>), (usize, QuorumDeviceIdentity)> =
+        HashMap::new();
     for candidate in candidates {
-        let key = (candidate.genesis_hash, candidate.public_key.clone());
+        let key = (
+            candidate.genesis_hash,
+            candidate.public_key.clone(),
+            candidate.kyber_public_key.clone(),
+            candidate.kyber_binding_sig.clone(),
+        );
         let entry = counts.entry(key).or_insert((0, candidate.clone()));
         entry.0 += 1;
         if entry.0 >= 3 {
@@ -2509,10 +2602,30 @@ pub(crate) async fn fetch_quorum_device_identity(
                     ));
                     continue;
                 }
+                // Kyber material is MANDATORY (DSM beta, no legacy path). A record
+                // without a well-formed ML-KEM-768 key + binding is invalid; the
+                // cryptographic binding is verified at contact-add against the AK.
+                if decoded.kyber_public_key.len() != 1184 {
+                    last_error = Some(format!(
+                        "device identity from {} had invalid kyber_public_key length {}",
+                        endpoint,
+                        decoded.kyber_public_key.len()
+                    ));
+                    continue;
+                }
+                if decoded.kyber_binding_sig.is_empty() {
+                    last_error = Some(format!(
+                        "device identity from {} had empty kyber_binding_sig",
+                        endpoint
+                    ));
+                    continue;
+                }
                 candidates.push(QuorumDeviceIdentity {
                     device_id,
                     genesis_hash,
                     public_key: decoded.pubkey,
+                    kyber_public_key: decoded.kyber_public_key,
+                    kyber_binding_sig: decoded.kyber_binding_sig,
                 });
             }
             Ok(resp)
@@ -3439,11 +3552,15 @@ mod tests {
             device_id,
             genesis_hash: [0x22u8; 32],
             public_key: vec![0x33u8; 64],
+            kyber_public_key: vec![0x66u8; 1184],
+            kyber_binding_sig: vec![0x77u8; 64],
         };
         let bad = QuorumDeviceIdentity {
             device_id,
             genesis_hash: [0x44u8; 32],
             public_key: vec![0x55u8; 64],
+            kyber_public_key: vec![0x66u8; 1184],
+            kyber_binding_sig: vec![0x77u8; 64],
         };
 
         let selected =
@@ -3461,20 +3578,46 @@ mod tests {
                 device_id,
                 genesis_hash: [0x22u8; 32],
                 public_key: vec![0x33u8; 64],
+                kyber_public_key: vec![0x66u8; 1184],
+                kyber_binding_sig: vec![0x77u8; 64],
             },
             QuorumDeviceIdentity {
                 device_id,
                 genesis_hash: [0x44u8; 32],
                 public_key: vec![0x55u8; 64],
+                kyber_public_key: vec![0x66u8; 1184],
+                kyber_binding_sig: vec![0x77u8; 64],
             },
             QuorumDeviceIdentity {
                 device_id,
                 genesis_hash: [0x22u8; 32],
                 public_key: vec![0x33u8; 64],
+                kyber_public_key: vec![0x66u8; 1184],
+                kyber_binding_sig: vec![0x77u8; 64],
             },
         ]);
 
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn select_quorum_device_identity_rejects_kyber_equivocation() {
+        // Same device_id + genesis + pubkey across all three nodes, but each
+        // serves a DIFFERENT ML-KEM key (registry equivocation). No quorum can
+        // form because the Kyber material is part of the identity's equality.
+        let device_id = [0x11u8; 32];
+        let node = |kpk: u8| QuorumDeviceIdentity {
+            device_id,
+            genesis_hash: [0x22u8; 32],
+            public_key: vec![0x33u8; 64],
+            kyber_public_key: vec![kpk; 1184],
+            kyber_binding_sig: vec![0x77u8; 64],
+        };
+        let selected = select_quorum_device_identity(vec![node(0xA1), node(0xB2), node(0xC3)]);
+        assert!(
+            selected.is_none(),
+            "kyber equivocation across nodes must prevent quorum agreement"
+        );
     }
 
     #[test]

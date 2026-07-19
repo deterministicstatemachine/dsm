@@ -45,6 +45,7 @@ pub use bootstrap::SdkBootstrap;
 
 pub mod anchor_enrollment_store;
 pub mod app_state; // Shared application state management
+pub mod apply_outcome; // §16.6 tri-state full-state apply outcome
 pub mod b0x_sdk;
 pub mod chain_tip_store;
 pub mod core_sdk;
@@ -55,6 +56,7 @@ pub mod external_commitment_sdk;
 // pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
 pub mod identity_sdk;
 pub mod inbox_poller;
+pub mod kyber_identity; // ML-KEM identity binding for online contact establishment (§11.1)
 pub mod policy_cache;
 #[cfg(test)]
 mod qr; // QR code creation and parsing for contacts - enabled for tests only

@@ -123,7 +123,7 @@ impl StorageSyncSdk {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(CT_PROTO));
         // Auth header per the storage-node auth layer: "DSM <device_id>:<token>"
-        let authz = format!("DSM {}:{}", self.device_id_str, &self.auth_token);
+        let authz = format!("DSM {}:{}", self.device_id_str, self.auth_token);
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&authz).context("auth header")?,
@@ -169,7 +169,7 @@ impl StorageSyncSdk {
     /// domain-separated routing digest.
     pub async fn retrieve_b0x_v2(&self, b0x_id: &str) -> Result<BatchEnvelope> {
         let url = format!("{}/api/v2/b0x/retrieve", self.base_url);
-        let authz = format!("DSM {}:{}", self.device_id_str, &self.auth_token);
+        let authz = format!("DSM {}:{}", self.device_id_str, self.auth_token);
         let mut req = self.http.get(url).header(CONTENT_TYPE, CT_PROTO).header(
             AUTHORIZATION,
             HeaderValue::from_str(&authz).context("auth header")?,
@@ -199,7 +199,7 @@ impl StorageSyncSdk {
             .context("encode BatchEnvelope for ack")?;
 
         let url = format!("{}/api/v2/b0x/ack", self.base_url);
-        let authz = format!("DSM {}:{}", self.device_id_str, &self.auth_token);
+        let authz = format!("DSM {}:{}", self.device_id_str, self.auth_token);
         let mut req = self
             .http
             .post(url)
@@ -234,7 +234,7 @@ impl StorageSyncSdk {
         stake_hash: Option<&str>,
     ) -> Result<()> {
         let url = format!("{}/api/v2/object/put", self.base_url);
-        let authz = format!("DSM {}:{}", self.device_id_str, &self.auth_token);
+        let authz = format!("DSM {}:{}", self.device_id_str, self.auth_token);
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(CT_PROTO));

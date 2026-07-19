@@ -72,6 +72,8 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
             device_id: device_id_bytes.clone(),
             pubkey: pubkey_bytes.clone(),
             genesis_hash: genesis_bytes.clone(),
+            kyber_public_key: vec![0u8; 1184],
+            kyber_binding_sig: vec![0u8; 64],
         };
         let body = req.encode_to_vec();
         let resp = http
@@ -103,6 +105,8 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
                 device_id: device_id_bytes.clone(),
                 pubkey: pubkey_bytes_new,
                 genesis_hash: genesis_bytes.clone(),
+                kyber_public_key: vec![0u8; 1184],
+                kyber_binding_sig: vec![0u8; 64],
             };
             let body2 = req2.encode_to_vec();
             let resp2 = http

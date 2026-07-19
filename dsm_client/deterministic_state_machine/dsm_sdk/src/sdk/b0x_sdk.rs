@@ -907,10 +907,15 @@ impl B0xSDK {
         }
 
         let genesis_b32 = text_id::encode_base32_crockford(&genesis_hash);
+        // Mandatory Kyber identity binding (DSM beta, no legacy path). Self-registration.
+        let (kyber_public_key, kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
         let req = dsm::types::proto::RegisterDeviceRequest {
             device_id: text_id::decode_base32_crockford(&device_id_b32).unwrap_or_default(),
             pubkey: device_identity.public_key.clone(),
             genesis_hash: genesis_hash.clone(),
+            kyber_public_key,
+            kyber_binding_sig,
         };
         let mut body = Vec::with_capacity(req.encoded_len());
         req.encode(&mut body).map_err(|e| {
@@ -1078,10 +1083,15 @@ impl B0xSDK {
             genesis_hash.len(),
         );
 
+        // Mandatory Kyber identity binding (DSM beta, no legacy path). Self-registration.
+        let (kyber_public_key, kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
         let req = dsm::types::proto::RegisterDeviceRequest {
             device_id: device_id_raw,
             pubkey: device_identity.public_key.clone(),
             genesis_hash: genesis_hash.clone(),
+            kyber_public_key,
+            kyber_binding_sig,
         };
         let mut body = Vec::with_capacity(req.encoded_len());
         req.encode(&mut body).map_err(|e| {
@@ -2074,7 +2084,7 @@ impl B0xSDK {
                     continue;
                 }
             };
-            let url = format!("{}/api/v2/b0x/retrieve", &epc);
+            let url = format!("{}/api/v2/b0x/retrieve", epc);
             // NOTE: Do not log the full Authorization header (it contains a bearer-like token).
             let did = self.device_id.trim();
             info!(
@@ -2375,7 +2385,7 @@ impl B0xSDK {
                     continue;
                 }
             };
-            let url = format!("{}/api/v2/b0x/ack", &epc);
+            let url = format!("{}/api/v2/b0x/ack", epc);
 
             let mut req = self
                 .http_client

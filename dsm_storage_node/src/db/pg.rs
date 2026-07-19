@@ -283,6 +283,8 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                         genesis_hash BYTEA NOT NULL,
                         pubkey      BYTEA NOT NULL,
                         token_hash  BYTEA NOT NULL,
+                        kyber_public_key  BYTEA NOT NULL,
+                        kyber_binding_sig BYTEA NOT NULL,
                         revoked     BOOLEAN NOT NULL DEFAULT FALSE
                     );
 
@@ -1415,35 +1417,63 @@ pub async fn get_dlv_slot_capacity(pool: &Pool, dlv_id: &[u8]) -> Result<Option<
 }
 
 /// Register a device (idempotent: ON CONFLICT DO NOTHING). Returns rows affected.
+#[allow(clippy::too_many_arguments)]
 pub async fn register_device(
     pool: &Pool,
     device_id: &str,
     genesis_hash: &[u8],
     pubkey: &[u8],
     token_hash: &[u8],
+    kyber_public_key: &[u8],
+    kyber_binding_sig: &[u8],
 ) -> Result<u64> {
     let client = pool.get().await?;
     let stmt = client
         .prepare_cached(
-            "INSERT INTO devices (device_id, genesis_hash, pubkey, token_hash, revoked)
-             VALUES ($1, $2, $3, $4, FALSE)
+            "INSERT INTO devices
+                (device_id, genesis_hash, pubkey, token_hash, kyber_public_key, kyber_binding_sig, revoked)
+             VALUES ($1, $2, $3, $4, $5, $6, FALSE)
              ON CONFLICT (device_id) DO NOTHING",
         )
         .await?;
     let rows = client
-        .execute(&stmt, &[&device_id, &genesis_hash, &pubkey, &token_hash])
+        .execute(
+            &stmt,
+            &[
+                &device_id,
+                &genesis_hash,
+                &pubkey,
+                &token_hash,
+                &kyber_public_key,
+                &kyber_binding_sig,
+            ],
+        )
         .await?;
     Ok(rows)
 }
 
-/// Get a device's genesis_hash and pubkey by device_id.
-pub async fn get_device(pool: &Pool, device_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+/// A device's registered identity row:
+/// `(genesis_hash, pubkey, kyber_public_key, kyber_binding_sig)`.
+pub type DeviceIdentityRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// Get a device's identity: (genesis_hash, pubkey, kyber_public_key, kyber_binding_sig).
+pub async fn get_device(pool: &Pool, device_id: &str) -> Result<Option<DeviceIdentityRow>> {
     let client = pool.get().await?;
     let stmt = client
-        .prepare_cached("SELECT genesis_hash, pubkey FROM devices WHERE device_id = $1")
+        .prepare_cached(
+            "SELECT genesis_hash, pubkey, kyber_public_key, kyber_binding_sig
+             FROM devices WHERE device_id = $1",
+        )
         .await?;
     let row_opt = client.query_opt(&stmt, &[&device_id]).await?;
-    Ok(row_opt.map(|r| (r.get::<_, Vec<u8>>(0), r.get::<_, Vec<u8>>(1))))
+    Ok(row_opt.map(|r| {
+        (
+            r.get::<_, Vec<u8>>(0),
+            r.get::<_, Vec<u8>>(1),
+            r.get::<_, Vec<u8>>(2),
+            r.get::<_, Vec<u8>>(3),
+        )
+    }))
 }
 
 /// Update a device's token_hash.

@@ -58,6 +58,8 @@ async fn register_test_device(state: &AppState, device_b32: &str) {
         &[0u8; 32],
         &[0u8; 32],
         &[0u8; 32],
+        &[0u8; 1184],
+        &[0u8; 64],
     )
     .await
     .expect("register_device");

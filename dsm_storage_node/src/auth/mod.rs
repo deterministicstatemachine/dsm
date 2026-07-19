@@ -211,8 +211,8 @@ pub async fn device_auth(
     // Log authenticated device + message id for correlation (info level)
     log::info!(
         "device_auth: authenticated device={} msg_id={}",
-        &device_id,
-        &msg_id
+        device_id,
+        msg_id
     );
 
     // Consume body (bounded) and rebuild request with identical bytes

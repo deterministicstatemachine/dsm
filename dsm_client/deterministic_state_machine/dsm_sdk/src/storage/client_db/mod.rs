@@ -22,6 +22,7 @@ mod bilateral_sessions;
 pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
+pub mod canonical_apply;
 pub mod cert_chain;
 mod contacts;
 mod dlv_receipts;
@@ -31,6 +32,7 @@ mod manifold_seeds;
 mod nonces;
 mod online_outbox;
 mod pending_transactions;
+pub mod recipient_receipt_fold;
 pub mod recovery;
 mod stitched_receipts;
 mod system_peers;
@@ -51,7 +53,9 @@ pub use bcr::*;
 pub use bilateral_sessions::*;
 pub use bitcoin_accounts::*;
 pub use ble_chunk_buffer::*;
+pub use canonical_apply::*;
 pub use cert_chain::*;
+pub use recipient_receipt_fold::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
 pub use export::*;
@@ -341,6 +345,114 @@ fn create_schema(conn: &Connection) -> Result<()> {
             message_id             TEXT NOT NULL,
             parent_tip             BLOB NOT NULL,
             next_tip               BLOB NOT NULL,
+            created_at             INTEGER NOT NULL
+        );
+
+        -- Recipient B-side acceptance-receipt fold journal (§16.6). One row per
+        -- consumed step (relationship_key, parent_tip): the exact countersigned
+        -- receipt bytes + the pre-step / new local B cert head + encrypted ek_sk_b,
+        -- written FIRST as durable evidence. An incomplete ('pending') row must
+        -- block every new op on the relationship until recovery converges it via
+        -- CAS phases (head advance, outbound-reply insert, mark complete).
+        -- Pre-release schema cut (§16.6 fold v2): the acceptance journal + marker
+        -- gained explicit A/B root pairs before ever shipping wired. The old-shape
+        -- tables never held live rows — drop the old names (bcr_states precedent).
+        DROP TABLE IF EXISTS recipient_acceptance_journal;
+        DROP TABLE IF EXISTS accepted_transition;
+
+        -- status: 'prepared' -> 'applied' -> 'complete' (+ 'rejected'). The receipt
+        -- is generated + persisted at 'prepared' (BEFORE apply); the B/A cert heads
+        -- and outbox are produced only after the transition is durably 'applied'.
+        -- receipt_*_root_a = party A's roots claimed by the inbound receipt (bound
+        -- by the semantic commitment the recipient countersigns).
+        CREATE TABLE IF NOT EXISTS acceptance_fold_journal(
+            relationship_key             BLOB NOT NULL,
+            parent_tip                   BLOB NOT NULL,
+            child_tip                    BLOB NOT NULL,
+            counterparty_device_id       BLOB NOT NULL,
+            commitment                   BLOB NOT NULL,
+            receipt_parent_root_a        BLOB NOT NULL,
+            receipt_child_root_a         BLOB NOT NULL,
+            precommit_digest             BLOB NOT NULL,
+            artifact_hash                BLOB NOT NULL,
+            expected_local_b_head        BLOB,
+            new_local_b_head             BLOB NOT NULL,
+            new_local_b_sk_enc           BLOB,
+            expected_counterparty_a_head BLOB,
+            new_counterparty_a_head      BLOB NOT NULL,
+            receipt_bytes                BLOB NOT NULL,
+            status                       TEXT NOT NULL,
+            created_at                   INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, parent_tip)
+        );
+
+        -- Immutable accepted-transition marker, keyed by (relationship_key, parent_tip):
+        -- the recipient's durable attestation that it applied EXACTLY this transition.
+        -- child_tip alone does NOT bind the state roots or the prepared receipt
+        -- commitment, so phase 2 (prepared -> applied) promotes ONLY on a
+        -- field-for-field match of this marker against the journal — never on tip
+        -- equality alone. Written atomically with the recipient's canonical tip
+        -- advance in the accept path.
+        -- Canonical apply identity/record (§16.6 single-commit apply). Written INSIDE
+        -- the full-state apply transaction; the durable proof that ONE exact
+        -- authenticated parent was consumed and replaced by ONE exact successor.
+        -- canonical_apply_id = BLAKE3("DSM/canonical-apply-id/v1" || pre-execution
+        -- request identity, NO roots). Loaded verbatim on duplicate re-delivery
+        -- (AlreadyAppliedSameOperation) — never reconstructed from mutable state.
+        -- record_hash = BLAKE3("DSM/canonical-apply-record/v1" || id || B-roots).
+        CREATE TABLE IF NOT EXISTS canonical_apply_identity(
+            canonical_apply_id     BLOB PRIMARY KEY,
+            relationship_key       BLOB NOT NULL,
+            parent_tip             BLOB NOT NULL,
+            child_tip              BLOB NOT NULL,
+            precommit_digest       BLOB NOT NULL,
+            operation_digest       BLOB NOT NULL,
+            sender_device          BLOB NOT NULL,
+            recipient_device       BLOB NOT NULL,
+            nonce_hash             BLOB NOT NULL,
+            applied_parent_root_b  BLOB NOT NULL,
+            applied_child_root_b   BLOB NOT NULL,
+            record_hash            BLOB NOT NULL,
+            created_at             INTEGER NOT NULL,
+            UNIQUE (relationship_key, parent_tip),
+            UNIQUE (nonce_hash)
+        );
+
+        -- Immutable accepted-transition marker: finalization evidence written
+        -- atomically WITH the contacts.chain_tip PROJECTION sync (never part of
+        -- the core apply transaction). Binds all three layers — the accepted
+        -- state transition with BOTH root pairs (A's receipt-claimed roots AND
+        -- B's authoritative applied roots from the CanonicalApplyRecord), the
+        -- semantic receipt commitment, and the exact persisted countersigned
+        -- artifact hash. Phase-2 promotion requires a field-for-field match
+        -- against the journal — never tip equality alone.
+        CREATE TABLE IF NOT EXISTS accepted_transition_marker(
+            relationship_key               BLOB NOT NULL,
+            parent_tip                     BLOB NOT NULL,
+            child_tip                      BLOB NOT NULL,
+            receipt_parent_root_a          BLOB NOT NULL,
+            receipt_child_root_a           BLOB NOT NULL,
+            applied_parent_root_b          BLOB NOT NULL,
+            applied_child_root_b           BLOB NOT NULL,
+            precommit_digest               BLOB NOT NULL,
+            prepared_receipt_commitment    BLOB NOT NULL,
+            prepared_receipt_artifact_hash BLOB NOT NULL,
+            sender_device                  BLOB NOT NULL,
+            recipient_device               BLOB NOT NULL,
+            created_at                     INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, parent_tip)
+        );
+
+        -- Durable outbound-reply record: the exact receipt bytes to (re)post to
+        -- the sender's reply window, keyed by receipt commitment. Store-before-send;
+        -- reposted until GC. Transport wiring is deferred (design step 6).
+        CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
+            commitment             BLOB PRIMARY KEY,
+            relationship_key       BLOB NOT NULL,
+            counterparty_device_id BLOB NOT NULL,
+            child_tip              BLOB NOT NULL,
+            receipt_bytes          BLOB NOT NULL,
+            submitted              INTEGER NOT NULL DEFAULT 0,
             created_at             INTEGER NOT NULL
         );
 

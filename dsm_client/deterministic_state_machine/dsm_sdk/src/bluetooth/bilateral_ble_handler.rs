@@ -5242,7 +5242,7 @@ impl BilateralBleHandler {
     /// Mark any Accepted sessions as Committed (test helper)
     pub async fn mark_sender_committed_after_ack(&self) {
         let mut sessions = self.sessions.sessions.lock().await;
-        for (_k, sess) in sessions.iter_mut() {
+        for sess in sessions.values_mut() {
             if sess.phase == BilateralPhase::Accepted {
                 sess.phase = BilateralPhase::Committed;
             }

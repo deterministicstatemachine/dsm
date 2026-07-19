@@ -34,6 +34,8 @@ pub enum RegisterError {
     InvalidDeviceId,
     InvalidPubkey,
     InvalidGenesisHash,
+    InvalidKyberKey,
+    InvalidKyberBinding,
     DeviceAlreadyExists,
     DeviceNotFound,
     DatabaseError(String),
@@ -47,6 +49,14 @@ impl IntoResponse for RegisterError {
             RegisterError::InvalidGenesisHash => {
                 (StatusCode::BAD_REQUEST, "Invalid genesis_hash format")
             }
+            RegisterError::InvalidKyberKey => (
+                StatusCode::BAD_REQUEST,
+                "Invalid or missing kyber_public_key (ML-KEM-768, 1184 bytes required)",
+            ),
+            RegisterError::InvalidKyberBinding => (
+                StatusCode::BAD_REQUEST,
+                "Invalid or missing kyber_binding_sig",
+            ),
             RegisterError::DeviceAlreadyExists => {
                 (StatusCode::CONFLICT, "Device already registered")
             }
@@ -84,6 +94,16 @@ pub async fn register_device(
         return Err(RegisterError::InvalidGenesisHash);
     }
 
+    // Validate Kyber material — MANDATORY (DSM beta has no legacy path). The node
+    // is a dumb indexer: it enforces length/presence only; the cryptographic
+    // identity binding is verified client-side against the peer's AK.
+    if req.kyber_public_key.len() != 1184 {
+        return Err(RegisterError::InvalidKyberKey);
+    }
+    if req.kyber_binding_sig.is_empty() || req.kyber_binding_sig.len() > 51200 {
+        return Err(RegisterError::InvalidKyberBinding);
+    }
+
     // Convert to Base32 for DB storage (DB uses string device_id)
     let device_id_b32 = text_id::encode_base32_crockford(&req.device_id);
 
@@ -102,6 +122,8 @@ pub async fn register_device(
         &req.genesis_hash,
         &req.pubkey,
         &token_hash_bytes,
+        &req.kyber_public_key,
+        &req.kyber_binding_sig,
     )
     .await
     .map_err(|e| RegisterError::DatabaseError(e.to_string()))?;
@@ -156,10 +178,14 @@ pub async fn get_device_identity(
     let stored = crate::db::get_device(&state.db_pool, device_id.trim())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some((genesis_hash, pubkey)) = stored else {
+    let Some((genesis_hash, pubkey, kyber_public_key, kyber_binding_sig)) = stored else {
         return Err(StatusCode::NOT_FOUND);
     };
-    if genesis_hash.len() != 32 || pubkey.is_empty() {
+    if genesis_hash.len() != 32
+        || pubkey.is_empty()
+        || kyber_public_key.len() != 1184
+        || kyber_binding_sig.is_empty()
+    {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -167,6 +193,8 @@ pub async fn get_device_identity(
         device_id: device_id_bytes,
         pubkey,
         genesis_hash,
+        kyber_public_key,
+        kyber_binding_sig,
     };
     let mut out = Vec::with_capacity(resp.encoded_len());
     resp.encode(&mut out)
@@ -200,10 +228,11 @@ pub async fn reissue_token(
     let device_id_b32 = text_id::encode_base32_crockford(&req.device_id);
 
     // Lookup existing device
-    let (stored_genesis, stored_pubkey) = crate::db::get_device(&state.db_pool, &device_id_b32)
-        .await
-        .map_err(|e| RegisterError::DatabaseError(e.to_string()))?
-        .ok_or(RegisterError::DeviceNotFound)?;
+    let (stored_genesis, stored_pubkey, _kyber_pk, _kyber_sig) =
+        crate::db::get_device(&state.db_pool, &device_id_b32)
+            .await
+            .map_err(|e| RegisterError::DatabaseError(e.to_string()))?
+            .ok_or(RegisterError::DeviceNotFound)?;
 
     if stored_genesis != req.genesis_hash || stored_pubkey != req.pubkey {
         // Provided identity doesn't match stored device
@@ -295,6 +324,8 @@ mod tests {
                 device_id: [1u8; 32].to_vec(),
                 pubkey: [2u8; 32].to_vec(),
                 genesis_hash: [3u8; 32].to_vec(),
+                kyber_public_key: vec![5u8; 1184],
+                kyber_binding_sig: vec![6u8; 64],
             };
             let mut buf = Vec::new();
             req.encode(&mut buf)
@@ -348,6 +379,8 @@ mod tests {
                 device_id: [1u8; 32].to_vec(),
                 pubkey: [2u8; 32].to_vec(),
                 genesis_hash: [3u8; 32].to_vec(),
+                kyber_public_key: vec![5u8; 1184],
+                kyber_binding_sig: vec![6u8; 64],
             };
             let mut buf = Vec::new();
             req.encode(&mut buf)
@@ -401,6 +434,8 @@ mod tests {
                 device_id: vec![1u8; 5],
                 pubkey: vec![2u8; 5],
                 genesis_hash: vec![3u8; 5],
+                kyber_public_key: vec![5u8; 1184],
+                kyber_binding_sig: vec![6u8; 64],
             };
             let mut buf = Vec::new();
             req.encode(&mut buf)
@@ -414,6 +449,8 @@ mod tests {
                 device_id: [1u8; 32].to_vec(),
                 pubkey: vec![],
                 genesis_hash: [3u8; 32].to_vec(),
+                kyber_public_key: vec![5u8; 1184],
+                kyber_binding_sig: vec![6u8; 64],
             };
             let mut buf = Vec::new();
             req.encode(&mut buf)
@@ -427,6 +464,8 @@ mod tests {
                 device_id: [1u8; 32].to_vec(),
                 pubkey: [2u8; 32].to_vec(),
                 genesis_hash: vec![3u8; 5],
+                kyber_public_key: vec![5u8; 1184],
+                kyber_binding_sig: vec![6u8; 64],
             };
             let mut buf = Vec::new();
             req.encode(&mut buf)

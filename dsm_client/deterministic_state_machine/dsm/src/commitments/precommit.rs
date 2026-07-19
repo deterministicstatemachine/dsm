@@ -876,21 +876,21 @@ impl Default for PreCommitment {
 
 impl Zeroize for PreCommitment {
     fn zeroize(&mut self) {
-        for (_, sig) in self.signatures.iter_mut() {
+        for sig in self.signatures.values_mut() {
             sig.zeroize();
         }
         self.hash.zeroize();
         self.commitment_hash.zeroize();
 
         for fork in &mut self.forks {
-            for (_, sig) in fork.signatures.iter_mut() {
+            for sig in fork.signatures.values_mut() {
                 sig.zeroize();
             }
             fork.hash.zeroize();
             fork.positions.zeroize();
 
             if let Some(proof) = &mut fork.invalidation_proof {
-                for (_, sig) in proof.signatures.iter_mut() {
+                for sig in proof.signatures.values_mut() {
                     sig.zeroize();
                 }
                 proof.fork_hash.zeroize();
@@ -1109,7 +1109,7 @@ impl Zeroize for ForwardLinkedCommitment {
         if let Some(ref mut sig) = self.counterparty_signature {
             sig.zeroize();
         }
-        for (_, v) in self.fixed_parameters.iter_mut() {
+        for v in self.fixed_parameters.values_mut() {
             v.zeroize();
         }
 

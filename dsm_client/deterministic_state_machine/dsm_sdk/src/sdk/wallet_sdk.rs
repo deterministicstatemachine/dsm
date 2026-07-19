@@ -448,7 +448,28 @@ impl WalletSDK {
         let current_id = self.device_id_string();
         let _ = self.current_signing_keypair()?;
 
-        let (kyber_pk, kyber_sk) = dsm::crypto::generate_keypair()?;
+        // Device Kyber keypair: THE SAME deterministic Smaster derivation Genesis
+        // v2 uses (`generate_kyber_keypair_from_entropy(smaster, "DSM/kyber\0")`,
+        // genesis.rs create_genesis_v2), so the keystore key is byte-identical to
+        // the one genesis derived — STABLE across app restarts and
+        // reinstalls-from-seed. A per-init random keypair silently invalidated
+        // every counterparty's stored copy on every restart, permanently
+        // fail-closing online receipt countersigning for any relationship without
+        // a fresh BLE exchange. Falls back to a random keypair ONLY when the
+        // wallet seed is not yet cached (pre-genesis wallet shells); the
+        // post-genesis router rebuild re-derives deterministically.
+        let (kyber_pk, kyber_sk) = match crate::init::current_smaster() {
+            Ok(smaster) => {
+                dsm::crypto::kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?
+            }
+            Err(_) => {
+                log::warn!(
+                    "[WalletSDK] wallet seed not cached — using EPHEMERAL Kyber keypair \
+                     (pre-genesis shell only; deterministic key installs after genesis)"
+                );
+                dsm::crypto::generate_keypair()?
+            }
+        };
 
         let mut ks_mut = self.keystore.write();
         ks_mut.insert(format!("{id}_device_kyber_pk", id = current_id), kyber_pk);
