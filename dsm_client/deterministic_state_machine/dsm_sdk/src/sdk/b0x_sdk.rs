@@ -435,7 +435,17 @@ pub struct B0xSDK {
     tokens_by_endpoint: tokio::sync::RwLock<HashMap<String, String>>, // (endpoint|genesis|device) -> token
     /// Write quorum K for multi-node ops (submit/ack). Default 3.
     quorum_k: usize,
+    /// §16.6 reply-window artifacts decoded during the most recent retrieve.
+    /// Buffered rather than returned so the retrieve signature (5 call sites)
+    /// stays stable; drained by the sender-finalization path via
+    /// [`Self::take_reply_artifacts`].
+    pending_reply_artifacts: Vec<dsm::types::proto::AcceptanceReceiptArtifact>,
 }
+
+/// Explicit invoke method that marks a §16.6 acceptance artifact on the wire.
+/// Both sides key off this exact string — it is the discriminator that keeps
+/// replies and forward transfers structurally distinct inside UniversalTx.
+pub(crate) const ACCEPTANCE_RECEIPT_METHOD: &str = "wallet.acceptanceReceipt";
 
 static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -582,6 +592,7 @@ impl B0xSDK {
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
+            pending_reply_artifacts: Vec::new(),
         };
 
         // Token loading is now lazy - happens on first use via ensure_token()
@@ -1201,6 +1212,230 @@ impl B0xSDK {
         );
         warn!("{}", msg);
         Err(DsmError::internal(msg, None::<std::io::Error>))
+    }
+
+    // ------------------------------------------------------------------------
+    // §16.6 reply window (Envelope v3 over HTTP)
+    // ------------------------------------------------------------------------
+
+    /// Decode a §16.6 acceptance artifact from a spooled envelope, or `None` if
+    /// this envelope is not one.
+    ///
+    /// Discrimination is on the EXPLICIT invoke method name, so a forward
+    /// transfer can never be mistaken for a reply (and vice versa) — the "no
+    /// trial-decode" rule holds even though both ride UniversalTx.
+    fn decode_acceptance_artifact(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<dsm::types::proto::AcceptanceReceiptArtifact> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != ACCEPTANCE_RECEIPT_METHOD {
+                continue;
+            }
+            let Some(args) = &invoke.args else { continue };
+            match dsm::types::proto::ReplyWindowArtifact::decode(&*args.body) {
+                Ok(rw) => {
+                    if let Some(
+                        dsm::types::proto::reply_window_artifact::Artifact::AcceptanceReceipt(a),
+                    ) = rw.artifact
+                    {
+                        return Some(a);
+                    }
+                    warn!("reply window: artifact oneof empty — ignoring");
+                }
+                Err(e) => {
+                    warn!("reply window: artifact decode failed: {e}");
+                }
+            }
+        }
+        None
+    }
+
+    /// Drain the acceptance artifacts decoded by the most recent retrieve.
+    /// Draining (rather than cloning) keeps a re-poll from re-finalizing the
+    /// same reply within one process lifetime; durable idempotency is enforced
+    /// downstream by the proposal's terminal status.
+    pub fn take_reply_artifacts(&mut self) -> Vec<dsm::types::proto::AcceptanceReceiptArtifact> {
+        std::mem::take(&mut self.pending_reply_artifacts)
+    }
+
+    /// Deliver the recipient's countersigned acceptance receipt BACK to the
+    /// original sender, so the sender can finalize on cryptographic proof rather
+    /// than on storage-node message deletion (which is best-effort GC only).
+    ///
+    /// ADDRESSING IS THE WHOLE GAME HERE. The reply must land on the address the
+    /// SENDER polls, which it derives from ITS genesis, ITS device id, and the
+    /// SYMMETRIC projection tip of the relationship. By the time the fold
+    /// completes, the recipient's own projection has already advanced to the
+    /// target, so `sender_projection_tip` MUST be the parent captured at PREPARE —
+    /// never a local `contacts.chain_tip` read. Addressing from the advanced tip
+    /// would spool the reply where nobody listens, reproducing the stranded-message
+    /// failure this window exists to eliminate.
+    ///
+    /// Delivery is at-least-once and the payload is byte-identical on every
+    /// attempt (the receipt is signed once, at prepare, and only replayed), so a
+    /// duplicate is harmless: the sender's finalization is idempotent.
+    pub async fn submit_acceptance_reply(
+        &mut self,
+        sender_genesis: &[u8; 32],
+        sender_device_id: &[u8; 32],
+        sender_projection_tip: &[u8; 32],
+        artifact: dsm::types::proto::AcceptanceReceiptArtifact,
+    ) -> Result<String, DsmError> {
+        use prost::Message as _;
+
+        let routing_key =
+            Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
+
+        // Transport-local id: 16 opaque bytes derived from the transition's own
+        // commitment (never wall-clock). Stable across reposts, so a redelivery
+        // collapses onto the same spool row instead of piling up duplicates.
+        let mut mid_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x-reply-message-id\0");
+        mid_hasher.update(&artifact.commitment);
+        mid_hasher.update(sender_projection_tip);
+        let message_id_bytes = mid_hasher.finalize().as_bytes()[..16].to_vec();
+        let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
+
+        let local_device_bytes =
+            crate::util::text_id::decode_base32_crockford(self.device_id.trim())
+                .filter(|b| b.len() == 32)
+                .ok_or_else(|| {
+                    DsmError::invalid_parameter(
+                        "submit_acceptance_reply: local device_id not base32(32)",
+                    )
+                })?;
+        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+
+        // CARRIER CHOICE (deliberate): storage nodes validate transport envelopes
+        // against a COMPILED-IN allowlist of payload tags. A brand-new payload
+        // variant is rejected with HTTP 400 by every node still running an older
+        // build, so the artifact rides inside UniversalTx (an allowlisted tag) as
+        // an explicit `wallet.acceptanceReceipt` invoke. Discrimination is by that
+        // method name — still structural, never a trial-decode.
+        let artifact_bytes = {
+            let wrapped = dsm::types::proto::ReplyWindowArtifact {
+                artifact: Some(
+                    dsm::types::proto::reply_window_artifact::Artifact::AcceptanceReceipt(artifact),
+                ),
+            };
+            let mut b = Vec::with_capacity(wrapped.encoded_len());
+            wrapped.encode(&mut b).map_err(|e| {
+                DsmError::internal(
+                    format!("reply artifact encode failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            b
+        };
+
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: ACCEPTANCE_RECEIPT_METHOD.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: 0,
+                body: artifact_bytes,
+            }),
+            pre_state_hash: None,
+            post_state_hash: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: message_id_bytes.clone(),
+            }),
+            actor: local_device_bytes.clone(),
+            genesis_hash: local_genesis.clone(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis,
+                // The tip this artifact is ADDRESSED to (the sender's projection
+                // parent), so the receiving side can correlate the route it polled.
+                chain_tip: sender_projection_tip.to_vec(),
+                seq: 0,
+            }),
+            message_id: message_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("reply envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        let auth_device_id = self.device_id.clone();
+        let mut last_err: Option<String> = None;
+        let mut delivered = 0usize;
+
+        for endpoint in self.storage_node_endpoints.clone() {
+            let token = match self.ensure_token_for_endpoint(&endpoint).await {
+                Ok(t) => t,
+                Err(e) => {
+                    last_err = Some(format!("token for {endpoint}: {e}"));
+                    continue;
+                }
+            };
+            let url = format!("{}/api/v2/b0x/submit", endpoint);
+            let resp = self
+                .http_client
+                .post(&url)
+                .header("Content-Type", "application/protobuf")
+                .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
+                .header("x-dsm-message-id", message_id_b32.clone())
+                .header("x-dsm-recipient", routing_key.clone())
+                .body(buf.clone())
+                .send()
+                .await;
+            match resp {
+                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                    delivered += 1;
+                    info!(
+                        "§16.6 reply delivered -> {} route={}.. msg={}..",
+                        endpoint,
+                        &routing_key[..8.min(routing_key.len())],
+                        &message_id_b32[..8.min(message_id_b32.len())],
+                    );
+                }
+                Ok(r) => {
+                    last_err = Some(format!("{endpoint} HTTP {}", r.status()));
+                }
+                Err(e) => {
+                    last_err = Some(format!("{endpoint}: {e}"));
+                }
+            }
+        }
+
+        if delivered == 0 {
+            return Err(DsmError::network(
+                format!(
+                    "§16.6 reply delivery failed on all endpoints: {}",
+                    last_err.unwrap_or_else(|| "no endpoints configured".into())
+                ),
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(message_id_b32)
     }
 
     // ------------------------------------------------------------------------
@@ -2190,6 +2425,20 @@ impl B0xSDK {
 
         let mut entries = Vec::new();
         for (_, env) in map.into_iter() {
+            // §16.6 reply window: an acceptance artifact is NOT a forward transfer and
+            // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
+            // (never a trial-decode) and buffered for the sender-finalization path;
+            // dropping it here is what would strand a countersigned receipt.
+            if let Some(artifact) = Self::decode_acceptance_artifact(&env) {
+                info!(
+                    "📬 reply window: acceptance artifact for commitment={}..",
+                    text_id::encode_base32_crockford(
+                        &artifact.commitment[..4.min(artifact.commitment.len())]
+                    )
+                );
+                self.pending_reply_artifacts.push(artifact);
+                continue;
+            }
             if let Some(mut e) = self.envelope_to_b0x_entry(env) {
                 e.inbox_key = b0x_address.to_string();
                 entries.push(e);

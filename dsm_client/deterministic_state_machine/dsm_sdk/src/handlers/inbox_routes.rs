@@ -254,8 +254,11 @@ impl AppRouterImpl {
                 ))
             }
             "inbox.stopPoller" => {
-                log::info!("[DSM_SDK] inbox.stopPoller called");
-                crate::sdk::inbox_poller::stop_poller();
+                // Lifecycle stop (Activity.onStop). Declines while a transfer is
+                // mid-settlement so money in flight is never blocked on the user
+                // keeping the app on screen.
+                log::info!("[DSM_SDK] inbox.stopPoller called (lifecycle)");
+                crate::sdk::inbox_poller::stop_poller_for_lifecycle();
                 pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(
                     generated::StorageSyncResponse {
                         success: true,

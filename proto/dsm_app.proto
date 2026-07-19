@@ -1381,7 +1381,9 @@ message SmartProof   { Hash32 policy_hash = 1; repeated ClauseWitness witnesses 
 
 // =================== UNIVERSAL ARG/RESULT PACKS =====================
 enum Codec { CODEC_UNSPECIFIED = 0; CODEC_PROTO = 1; }   // canonical: PROTO only
-message ArgPack    { Hash32 schema_hash = 1; Codec codec = 2; bytes body = 3 [(dsm_max_len)=65535]; }
+// body carries §16.6 acceptance artifacts (a countersigned StitchedReceiptV2 runs
+// ~218 KB: two SPHINCS+ signatures, two ek_certs, and both SMT proof sets).
+message ArgPack    { Hash32 schema_hash = 1; Codec codec = 2; bytes body = 3 [(dsm_max_len)=262144]; }
 message ResultPack { Hash32 schema_hash = 1; Codec codec = 2; bytes body = 3 [(dsm_max_len)=65535]; }
 
 // ============================ KV (binary) ===========================
@@ -1743,11 +1745,13 @@ message BilateralPrepareRequest {
   string memo_hint               = 13; // optional transfer memo
   string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
   reserved 15; // removed: legacy Safe-7 sender_anchor_identity (fused anchor is pinned out-of-band)
-  // Sender's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-  // The device Kyber keypair is deliberately RANDOMIZED per wallet init (no persisted device
-  // secret), so the peer's copy must be refreshed on every prepare exchange — exactly like
-  // sender_signing_public_key above. The receiver persists it on the contact record; the
-  // §11.1 per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
+  // Sender's ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
+  // The device Kyber keypair is DETERMINISTIC — derived from the wallet master secret
+  // with the Genesis v2 derivation ("DSM/kyber\0"), so it is stable across restarts and
+  // reinstalls-from-seed. It still rides every prepare exchange (like
+  // sender_signing_public_key above) so a peer paired before this key existed is
+  // upgraded in place. The receiver persists it on the contact record; the §11.1
+  // per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
   bytes  sender_kyber_public_key = 16 [(dsm_max_len)=1184];
 }
 // A -> B, rides BilateralConfirmRequest (Software-Authority / Hardware-Identity receiver-admit).
@@ -2704,6 +2708,38 @@ message Envelope {
 
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
+  // 114 was a §16.6 reply-window payload variant. Storage nodes validate transport
+  // envelopes against a COMPILED-IN allowlist of payload tags (currently <= 106), so a
+  // new tag is unroutable until every node is redeployed. The acceptance artifact
+  // therefore rides inside UniversalTx (tag 10) as an explicit `wallet.acceptanceReceipt`
+  // invoke instead. Reserved so the number is never silently reused.
+  reserved 114;
+}
+
+// ===================== §16.6 REPLY WINDOW =====================
+// Online finalization is driven by the recipient's countersigned acceptance receipt,
+// NOT by storage-node message deletion (which is best-effort GC). The artifact rides
+// back to the sender through the same b0x spool the forward transfer used, addressed
+// to the tip the SENDER polls (its projection parent), carried as the ArgPack body of a
+// `wallet.acceptanceReceipt` invoke. Discrimination is by that explicit method name --
+// never a trial-decode of the forward transfer.
+message ReplyWindowArtifact {
+  oneof artifact {
+    AcceptanceReceiptArtifact acceptance_receipt = 1;
+  }
+}
+
+// The recipient's B-side countersigned receipt for one canonical transition.
+// `receipt_bytes` is the canonical StitchedReceiptV2 the recipient persisted at PREPARE
+// (byte-identical across redeliveries — never re-signed). The sender matches it to its
+// ONE persisted proposal by `commitment`, verifies it against that proposal's CANONICAL
+// pair (never the gate's projection values), then finalizes the gate terminally.
+message AcceptanceReceiptArtifact {
+  bytes receipt_bytes         = 1 [(dsm_max_len)=262144]; // canonical StitchedReceiptV2
+  bytes commitment            = 2 [(dsm_fixed_len)=32];   // proposal/receipt commitment
+  bytes relationship_key      = 3 [(dsm_fixed_len)=32];   // k_{A<->B} (§2.2)
+  bytes recipient_device_id   = 4 [(dsm_fixed_len)=32];   // the countersigner (B side)
+  bytes canonical_child_tip   = 5 [(dsm_fixed_len)=32];   // signed child (A-space), diagnostic
 }
 
 // ===================== SDK INIT / STATUS =====================

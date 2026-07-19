@@ -1454,15 +1454,21 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             bleBackgroundService = null
         }
         if (!isChangingConfigurations && hasIdentityViaRust()) {
-            try {
-                invokeNativeRouterInvoke("inbox.stopPoller")
+            // Rust owns the entire backgrounding decision (stop the poller, or keep
+            // polling because a §16.6 transfer is still settling) and returns ONE
+            // directive. Kotlin relays it and performs no protocol reasoning.
+            val keepServiceAlive = try {
+                Unified.onAppBackgrounded()
             } catch (t: Throwable) {
-                Log.w(tag, "onStop: inbox.stopPoller failed", t)
+                Log.w(tag, "onStop: onAppBackgrounded failed", t)
+                false
             }
-            try {
-                BleBackgroundService.stop(this)
-            } catch (t: Throwable) {
-                Log.w(tag, "onStop: stopForegroundService failed", t)
+            if (!keepServiceAlive) {
+                try {
+                    BleBackgroundService.stop(this)
+                } catch (t: Throwable) {
+                    Log.w(tag, "onStop: stopForegroundService failed", t)
+                }
             }
         }
     }

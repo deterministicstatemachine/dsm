@@ -133,18 +133,32 @@ fn verify_inbound_receipt_sig_a(
     .map_err(|e| e.to_string())
 }
 
-/// §16.6 recipient-side Kyber repair. A paired contact whose record predates
-/// online ML-KEM carry has an empty `kyber_public_key`, which fail-closes every
-/// inbound acceptance (the B-side receipt encapsulates `kyber_ct_b` back to the
-/// sender's key). Fetch the sender's registry-published key and verify the AK
-/// identity binding BEFORE persisting. Trust roots are the STORED
-/// pairing-established AK + genesis — never wire evidence, never the registry
-/// record itself. Fail-closed on any divergence; nothing is persisted on error.
-async fn repair_sender_kyber_from_registry(
+/// AUTHENTICATED CAPABILITY HYDRATION (§16.6) — not migration residue.
+///
+/// A valid relationship can exist locally while its cached ML-KEM capability is
+/// absent; the B-side receipt encapsulates `kyber_ct_b` to the sender's key, so
+/// that gap fail-closes every inbound acceptance. This hydrates the missing
+/// capability from the registry under strict rules:
+///
+///   * runs ONLY when the local key is missing (caller-enforced, re-asserted here);
+///   * NEVER replaces a nonempty locally-bound key — persist is first-write-wins;
+///   * verifies the registry binding against the STORED pairing AK, device id,
+///     and genesis (never wire evidence, never the registry record itself);
+///   * conflicting or ambiguous registry data fails closed;
+///   * a registry failure returns an error and NEVER degrades into an insecure
+///     fallback — the acceptance simply stays fail-closed and retries later.
+///
+/// Nothing is persisted on any error path.
+async fn hydrate_missing_sender_kyber_capability(
     storage_endpoints: &[String],
     sender_device_id: [u8; 32],
     contact: &crate::storage::client_db::ContactRecord,
 ) -> Result<Vec<u8>, String> {
+    // Re-assert the precondition at the boundary: hydration is only ever for an
+    // ABSENT capability. A present key is authoritative and is returned as-is.
+    if !contact.kyber_public_key.is_empty() {
+        return Ok(contact.kyber_public_key.clone());
+    }
     if contact.public_key.is_empty() {
         return Err(
             "contact has no pairing-established AK to verify the Kyber binding".to_string(),
@@ -156,11 +170,16 @@ async fn repair_sender_kyber_from_registry(
         .try_into()
         .map_err(|_| "contact genesis_hash is not 32 bytes".to_string())?;
 
+    // Quorum lookup: a single equivocating node cannot decide this. Any transport
+    // or agreement failure propagates as an error (no fallback).
     let identity = crate::handlers::app_router_impl::fetch_quorum_device_identity(
         storage_endpoints,
         sender_device_id,
     )
     .await?;
+    if identity.device_id != sender_device_id {
+        return Err("registry device_id diverges from the relationship counterparty".to_string());
+    }
     if identity.genesis_hash != contact_genesis {
         return Err("registry genesis diverges from the pairing-established genesis".to_string());
     }
@@ -173,12 +192,264 @@ async fn repair_sender_kyber_from_registry(
     )
     .map_err(|e| format!("sender Kyber identity binding invalid: {e}"))?;
 
-    crate::storage::client_db::update_contact_kyber_key(
+    // First-write-wins. Losing the race means another path bound a key
+    // concurrently; that stored key is authoritative and is used instead.
+    let bound = crate::storage::client_db::bind_contact_kyber_key_if_absent(
         &sender_device_id,
         &identity.kyber_public_key,
     )
     .map_err(|e| format!("failed to persist verified sender Kyber key: {e}"))?;
-    Ok(identity.kyber_public_key)
+    if bound {
+        return Ok(identity.kyber_public_key);
+    }
+    match crate::storage::client_db::get_contact_by_device_id(&sender_device_id) {
+        Ok(Some(c)) if !c.kyber_public_key.is_empty() => Ok(c.kyber_public_key),
+        _ => Err("Kyber capability vanished between bind and read — failing closed".to_string()),
+    }
+}
+
+/// §16.6 SENDER FINALIZATION on cryptographic proof.
+///
+/// An online transition finalizes here — on a verified recipient countersignature —
+/// and NEVER on storage-node message deletion, which is best-effort GC. The
+/// returned receipt is matched to the sender's ONE persisted proposal by
+/// commitment, verified against that proposal's CANONICAL pair (the gate holds
+/// projection values and must never be used for this comparison), and only then
+/// is the gate released and the proposal terminally finalized.
+///
+/// Every failure path leaves the gate intact: an unmatched, stale, or invalid
+/// artifact must never release a pending transition. Idempotent — a redelivered
+/// reply finds the proposal already finalized and does nothing.
+async fn finalize_from_acceptance_artifact(
+    artifact: &dsm::types::proto::AcceptanceReceiptArtifact,
+) {
+    use crate::storage::client_db::sender_proposal::{
+        get_sender_proposal_by_commitment, mark_sender_proposal_finalized_by_canonical,
+        PROPOSAL_FINALIZED,
+    };
+
+    let commitment: [u8; 32] = match artifact.commitment.as_slice().try_into() {
+        Ok(c) => c,
+        Err(_) => {
+            log::warn!("[storage.sync] §16.6 reply ignored: commitment is not 32 bytes");
+            return;
+        }
+    };
+    let short = crate::util::text_id::encode_base32_crockford(&commitment[..4]);
+
+    // Decode the signed receipt — every value used from here on comes from it,
+    // never from the unsigned artifact envelope.
+    let receipt = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &artifact.receipt_bytes,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[storage.sync] §16.6 reply {short}..: receipt decode failed: {e}");
+            return;
+        }
+    };
+
+    let proposal = match get_sender_proposal_by_commitment(&commitment) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            log::warn!(
+                "[storage.sync] §16.6 reply ignored: no proposal for commitment {short}.. \
+                 (not ours) — gate retained"
+            );
+            return;
+        }
+        Err(e) => {
+            log::warn!("[storage.sync] §16.6 reply lookup failed for {short}..: {e}");
+            return;
+        }
+    };
+
+    if proposal.status == PROPOSAL_FINALIZED {
+        log::info!("[storage.sync] §16.6 reply {short}.. already finalized — idempotent no-op");
+        return;
+    }
+
+    let self_device_id: [u8; 32] = match crate::sdk::app_state::AppState::get_device_id()
+        .and_then(|d| <[u8; 32]>::try_from(d.as_slice()).ok())
+    {
+        Some(d) => d,
+        None => {
+            log::warn!("[storage.sync] §16.6 reply {short}..: local device_id unavailable");
+            return;
+        }
+    };
+
+    // The recipient's AK from the STORED contact — the cert-chain genesis root.
+    // Never taken from the wire artifact.
+    let recipient_ak_pk = match crate::storage::client_db::get_contact_public_key_by_device_id(
+        &crate::util::text_id::encode_base32_crockford(&proposal.counterparty_device_id),
+    ) {
+        Some(pk) => pk,
+        None => {
+            match crate::storage::client_db::get_contact_by_device_id(
+                &proposal.counterparty_device_id,
+            ) {
+                Ok(Some(c)) if !c.public_key.is_empty() => c.public_key,
+                _ => {
+                    log::warn!(
+                        "[storage.sync] §16.6 reply {short}..: no stored AK for the recipient \
+                             — cannot verify sig_b, gate retained"
+                    );
+                    return;
+                }
+            }
+        }
+    };
+
+    match crate::handlers::online_finalize::verify_acceptance_receipt(
+        &self_device_id,
+        &proposal.counterparty_device_id,
+        &receipt,
+        &proposal,
+        &recipient_ak_pk,
+        None,
+        None,
+    ) {
+        Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
+        Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason }) => {
+            log::error!("[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained");
+            return;
+        }
+        Err(e) => {
+            log::error!("[storage.sync] §16.6 reply {short}.. verification errored: {e}");
+            return;
+        }
+    }
+
+    // Verified. Release the gate on its PROJECTION pair (the space the gate is keyed in)
+    // and terminally finalize the proposal by canonical identity.
+    match crate::storage::client_db::clear_pending_online_outbox_if_matches(
+        &proposal.counterparty_device_id,
+        &proposal.projection_parent,
+        &proposal.projection_target,
+    ) {
+        Ok(true) => log::info!("[storage.sync] §16.6 gate released for {short}.. (verified sig_b)"),
+        Ok(false) => log::info!(
+            "[storage.sync] §16.6 gate for {short}.. already cleared — finalizing proposal"
+        ),
+        Err(e) => {
+            log::error!("[storage.sync] §16.6 gate release failed for {short}..: {e}");
+            return;
+        }
+    }
+
+    match mark_sender_proposal_finalized_by_canonical(
+        &proposal.relationship_key,
+        &proposal.canonical_parent,
+    ) {
+        Ok(true) => log::info!(
+            "[storage.sync] §16.6 FINALIZED on acceptance proof: commitment={short}.. tx={}",
+            proposal.tx_id
+        ),
+        Ok(false) => log::info!("[storage.sync] §16.6 proposal {short}.. already terminal"),
+        Err(e) => log::error!("[storage.sync] §16.6 proposal finalize failed for {short}..: {e}"),
+    }
+}
+
+/// §16.6 reply-window delivery sweep.
+///
+/// Hands every durably-countersigned-but-undelivered acceptance receipt back to
+/// its original sender. Each reply is addressed to the tip the SENDER polls (the
+/// projection parent captured at PREPARE, carried in the journal) — NOT to this
+/// device's own projection, which has already advanced past it by the time the
+/// fold completes.
+///
+/// The sender's identity comes from the STORED contact (genesis + device id),
+/// never from wire material. A reply whose counterparty contact is missing is
+/// skipped and retried next sweep rather than guessed at.
+async fn deliver_pending_acceptance_replies(
+    storage_endpoints: &[String],
+    core_sdk: std::sync::Arc<crate::sdk::core_sdk::CoreSDK>,
+) -> Result<(), String> {
+    use crate::storage::client_db::{mark_reply_submitted, pending_outbound_replies};
+
+    let pending = pending_outbound_replies().map_err(|e| e.to_string())?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    log::info!(
+        "[storage.sync] §16.6 reply window: {} undelivered acceptance repl{}",
+        pending.len(),
+        if pending.len() == 1 { "y" } else { "ies" }
+    );
+
+    let local_device_b32 = match crate::sdk::app_state::AppState::get_device_id() {
+        Some(d) if d.len() == 32 => crate::util::text_id::encode_base32_crockford(&d),
+        _ => return Err("local device_id unavailable for reply delivery".to_string()),
+    };
+
+    for reply in pending {
+        let contact = match crate::storage::client_db::get_contact_by_device_id(
+            &reply.counterparty_device_id,
+        ) {
+            Ok(Some(c)) => c,
+            _ => {
+                log::warn!(
+                    "[storage.sync] §16.6 reply skipped: no contact for counterparty {}.. (retry next sweep)",
+                    crate::util::text_id::encode_base32_crockford(&reply.counterparty_device_id[..4]),
+                );
+                continue;
+            }
+        };
+        let sender_genesis: [u8; 32] = match contact.genesis_hash.as_slice().try_into() {
+            Ok(g) => g,
+            Err(_) => {
+                log::warn!("[storage.sync] §16.6 reply skipped: contact genesis not 32 bytes");
+                continue;
+            }
+        };
+
+        // NOTE: the envelope is built from `dsm::types::proto`, which is a SEPARATE
+        // prost generation from `crate::generated` — same schema, distinct Rust types.
+        let artifact = dsm::types::proto::AcceptanceReceiptArtifact {
+            receipt_bytes: reply.receipt_bytes.clone(),
+            commitment: reply.commitment.to_vec(),
+            relationship_key: reply.relationship_key.to_vec(),
+            recipient_device_id: crate::util::text_id::decode_base32_crockford(&local_device_b32)
+                .unwrap_or_default(),
+            canonical_child_tip: reply.child_tip.to_vec(),
+        };
+
+        let mut b0x = match crate::sdk::b0x_sdk::B0xSDK::new(
+            local_device_b32.clone(),
+            core_sdk.clone(),
+            storage_endpoints.to_vec(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[storage.sync] §16.6 reply skipped: B0xSDK init failed: {e}");
+                continue;
+            }
+        };
+        match b0x
+            .submit_acceptance_reply(
+                &sender_genesis,
+                &reply.counterparty_device_id,
+                &reply.projection_parent_tip,
+                artifact,
+            )
+            .await
+        {
+            Ok(msg_id) => {
+                mark_reply_submitted(&reply.commitment).map_err(|e| e.to_string())?;
+                log::info!(
+                    "[storage.sync] §16.6 acceptance reply delivered msg={}.. commitment={}..",
+                    &msg_id[..8.min(msg_id.len())],
+                    crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
+                );
+            }
+            Err(e) => {
+                // Left unmarked on purpose — retried on the next sweep.
+                log::warn!("[storage.sync] §16.6 reply delivery failed (will retry): {e}");
+            }
+        }
+    }
+    Ok(())
 }
 
 impl AppRouterImpl {
@@ -502,6 +773,17 @@ impl AppRouterImpl {
                                             }
                                         }
                                     };
+                                // §16.6 SENDER FINALIZATION: drain any acceptance artifacts
+                                // this poll decoded. They ride the same spool as forward
+                                // transfers but are a distinct payload variant, so they are
+                                // discriminated structurally rather than trial-decoded.
+                                // Draining happens regardless of `entries_res` — a poll that
+                                // yields no forward transfers can still carry the reply that
+                                // releases this device's pending gate.
+                                for artifact in b0x_sdk.take_reply_artifacts() {
+                                    finalize_from_acceptance_artifact(&artifact).await;
+                                }
+
                                 match entries_res {
                                     Ok(items) => {
                                         // §5.2: Items from PreviousTip addresses that are non-adjacent
@@ -1313,7 +1595,7 @@ impl AppRouterImpl {
                                         let sender_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(&from_device_id) {
                                             Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
                                             Ok(Some(c)) => {
-                                                match repair_sender_kyber_from_registry(
+                                                match hydrate_missing_sender_kyber_capability(
                                                     &storage_endpoints,
                                                     from_device_id,
                                                     &c,
@@ -1321,13 +1603,13 @@ impl AppRouterImpl {
                                                 .await
                                                 {
                                                     Ok(k) => {
-                                                        log::info!("[storage.sync] §16.6 sender Kyber key repaired from registry (AK binding verified) for tx {}", entry.transaction_id);
+                                                        log::info!("[storage.sync] §16.6 sender Kyber capability hydrated from registry (AK binding verified) for tx {}", entry.transaction_id);
                                                         k
                                                     }
                                                     Err(e) => {
-                                                        log::error!("[storage.sync] §16.6 sender contact missing Kyber pubkey for tx {} and registry repair failed: {} — fail closed, no ACK", entry.transaction_id, e);
+                                                        log::error!("[storage.sync] §16.6 sender contact missing Kyber capability for tx {} and registry hydration failed: {} — fail closed, no ACK", entry.transaction_id, e);
                                                         let mut sg = batch_state.lock().await;
-                                                        sg.errors.push(format!("sender Kyber pubkey missing for tx {} (registry repair: {})", entry.transaction_id, e));
+                                                        sg.errors.push(format!("sender Kyber capability missing for tx {} (hydration: {})", entry.transaction_id, e));
                                                         continue;
                                                     }
                                                 }
@@ -1745,6 +2027,20 @@ impl AppRouterImpl {
                                 Err(_) => {
                                     log::debug!("[storage.sync] §16.6 acceptance recovery skipped (wallet locked)");
                                 }
+                            }
+
+                            // §16.6 REPLY WINDOW: deliver every countersigned acceptance
+                            // receipt that is durably persisted but not yet handed to the
+                            // sender. Store-before-send + repost-until-delivered: the row
+                            // survives crashes and an offline sender, and the bytes are
+                            // byte-identical on every attempt (signed once, at prepare).
+                            if let Err(e) = deliver_pending_acceptance_replies(
+                                &storage_endpoints,
+                                self.core_sdk.clone(),
+                            )
+                            .await
+                            {
+                                log::warn!("[storage.sync] §16.6 reply delivery sweep errored (non-fatal): {e}");
                             }
 
                             // §5.4 Outbox sweep: runs on EVERY storage.sync poll, regardless

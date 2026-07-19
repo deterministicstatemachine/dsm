@@ -28,7 +28,7 @@
 //! devid_b)` and matched to the pending gate by counterparty device id.
 
 use crate::sdk::receipts::{verify_per_step_ek_signing, BilateralSide};
-use crate::storage::client_db::types::PendingOnlineOutboxRecord;
+use crate::storage::client_db::sender_proposal::SenderOnlineProposal;
 use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 use anyhow::{anyhow, Result};
 use dsm::types::receipt_types::StitchedReceiptV2;
@@ -52,7 +52,11 @@ pub enum ReceiptVerifyOutcome {
 /// Checks, in order:
 ///  1. `receipt.devid_a` is this sender and `receipt.devid_b` is the gate
 ///     counterparty (recipient);
-///  2. `receipt.parent_tip == gate.parent_tip` and `receipt.child_tip == gate.next_tip`;
+///  2. `receipt.parent_tip == proposal.canonical_parent`, `receipt.child_tip ==
+///     proposal.canonical_child`, and the recomputed receipt commitment equals
+///     `proposal.commitment` — all in the ASYMMETRIC canonical space. The gate's
+///     SYMMETRIC projection pair is deliberately NOT used: cross-space comparison
+///     rejects valid countersignatures;
 ///  3. `expected_parent_root` / `expected_child_root`, when known from the
 ///     sender's stored proposal, equal the receipt's roots (pass `None` to skip
 ///     until proposal storage lands — a `Some` mismatch is a hard reject);
@@ -60,6 +64,9 @@ pub enum ReceiptVerifyOutcome {
 ///     stored Counterparty (recipient) cert head over `h_n` (or `recipient_ak_pk`
 ///     at relationship genesis), then `sig_b` verifies under `ek_pk_b`;
 ///  5. Kyber consistency: `ek_pk_b` present ⇒ `kyber_ct_b` present.
+///
+/// `proposal` is the sender's ONE persisted proposal for this canonical step —
+/// the single artifact carrying both the canonical and projection pairs.
 ///
 /// `recipient_ak_pk` MUST be the recipient's already-authenticated contact
 /// signing key (AK, the cert-chain genesis root) from the sender's contact book —
@@ -72,34 +79,42 @@ pub fn verify_acceptance_receipt(
     self_device_id: &[u8; 32],
     counterparty_device_id: &[u8; 32],
     receipt: &StitchedReceiptV2,
-    gate: &PendingOnlineOutboxRecord,
+    proposal: &SenderOnlineProposal,
     recipient_ak_pk: &[u8],
     expected_parent_root: Option<&[u8; 32]>,
     expected_child_root: Option<&[u8; 32]>,
 ) -> Result<ReceiptVerifyOutcome> {
     // ---- 1-2. Structural binding: the receipt must name THIS exact transition ----
-    let gate_parent: [u8; 32] = gate
-        .parent_tip
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("gate parent_tip is not 32 bytes"))?;
-    let gate_next: [u8; 32] = gate
-        .next_tip
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("gate next_tip is not 32 bytes"))?;
-
+    //
+    // FORMULA SPACE MATTERS HERE. The receipt's parent/child are ASYMMETRIC
+    // canonical tips (DeviceState-embedded). The pending GATE stores the
+    // SYMMETRIC projection pair used for routing and b0x addressing. Comparing
+    // the receipt against the gate compares two different spaces and rejects a
+    // perfectly valid countersignature — the exact failure that stranded
+    // AWYPCNK8. The persisted proposal is the single artifact holding BOTH
+    // pairs, so the canonical comparison is made against it.
     if &receipt.devid_a != self_device_id {
         return Ok(reject("receipt devid_a is not this sender"));
     }
     if &receipt.devid_b != counterparty_device_id {
-        return Ok(reject("receipt devid_b is not the gate counterparty"));
+        return Ok(reject("receipt devid_b is not the proposal counterparty"));
     }
-    if receipt.parent_tip != gate_parent {
-        return Ok(reject("receipt parent_tip != gate parent_tip"));
+    if receipt.parent_tip != proposal.canonical_parent {
+        return Ok(reject(
+            "receipt parent_tip != proposal canonical_parent (A-space)",
+        ));
     }
-    if receipt.child_tip != gate_next {
-        return Ok(reject("receipt child_tip != gate next_tip"));
+    if receipt.child_tip != proposal.canonical_child {
+        return Ok(reject(
+            "receipt child_tip != proposal canonical_child (A-space)",
+        ));
+    }
+    if receipt
+        .compute_commitment()
+        .map_err(|e| anyhow!("receipt commitment failed: {e}"))?
+        != proposal.commitment
+    {
+        return Ok(reject("receipt commitment != proposal commitment"));
     }
 
     // ---- 3. Root binding against the sender's stored proposal (when known) ----
@@ -161,7 +176,6 @@ fn reject(reason: &str) -> ReceiptVerifyOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::client_db::types::PendingOnlineOutboxRecord;
 
     fn base_receipt(
         a: [u8; 32],
@@ -183,12 +197,39 @@ mod tests {
         )
     }
 
-    fn gate(cp: [u8; 32], parent: [u8; 32], next: [u8; 32]) -> PendingOnlineOutboxRecord {
-        PendingOnlineOutboxRecord {
-            counterparty_device_id: cp.to_vec(),
-            message_id: "MSG-TEST".to_string(),
-            parent_tip: parent.to_vec(),
-            next_tip: next.to_vec(),
+    /// A proposal whose CANONICAL pair is the transition under test, and whose
+    /// PROJECTION pair is deliberately DIFFERENT. Any check that reads the
+    /// projection values where it should read canonical ones fails these tests —
+    /// which is exactly the cross-space bug that stranded AWYPCNK8 in production.
+    fn proposal(cp: [u8; 32], parent: [u8; 32], child: [u8; 32]) -> SenderOnlineProposal {
+        proposal_with_commitment(cp, parent, child, [0u8; 32])
+    }
+
+    fn proposal_with_commitment(
+        cp: [u8; 32],
+        parent: [u8; 32],
+        child: [u8; 32],
+        commitment: [u8; 32],
+    ) -> SenderOnlineProposal {
+        SenderOnlineProposal {
+            relationship_key: dsm::verification::smt_replace_witness::compute_smt_key(
+                &[0x11u8; 32],
+                &cp,
+            ),
+            canonical_parent: parent,
+            canonical_child: child,
+            // Divergent on purpose (symmetric routing space).
+            projection_parent: [0xAAu8; 32],
+            projection_target: [0xBBu8; 32],
+            commitment,
+            operation_digest: [0u8; 32],
+            nonce_hash: [0u8; 32],
+            message_id: Some("MSG-TEST".to_string()),
+            tx_id: "TX-TEST".to_string(),
+            counterparty_device_id: cp,
+            amount: 0,
+            token_id: "ERA".to_string(),
+            status: "submitted".to_string(),
             created_at: 0,
         }
     }
@@ -197,7 +238,7 @@ mod tests {
     fn rejects_receipt_naming_a_different_sender() {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt([0x99u8; 32], b, parent, child);
-        let g = gate(b, parent, child);
+        let g = proposal(b, parent, child);
         let out = verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], None, None).unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
@@ -205,7 +246,7 @@ mod tests {
     #[test]
     fn rejects_receipt_with_different_parent_or_child() {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let g = gate(b, parent, child);
+        let g = proposal(b, parent, child);
         let r1 = base_receipt(a, b, [0xEEu8; 32], child);
         assert!(matches!(
             verify_acceptance_receipt(&a, &b, &r1, &g, &[0u8; 32], None, None).unwrap(),
@@ -222,7 +263,7 @@ mod tests {
     fn rejects_receipt_with_mismatched_stored_root() {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt(a, b, parent, child); // roots are [0u8;32]
-        let g = gate(b, parent, child);
+        let g = proposal(b, parent, child);
         let expected_parent_root = [0x77u8; 32];
         assert!(matches!(
             verify_acceptance_receipt(
@@ -247,9 +288,68 @@ mod tests {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let mut receipt = base_receipt(a, b, parent, child);
         receipt.sig_b = vec![0xADu8; 64]; // present but no ek_pk_b/ek_cert_b
-        let g = gate(b, parent, child);
+        let g = proposal(b, parent, child);
         let out =
             verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], None, None).unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
+    }
+
+    /// LIVE REGRESSION (AWYPCNK8, 2026-07-19).
+    ///
+    /// A structurally valid receipt whose CANONICAL pair matches the proposal
+    /// must never be rejected for a tip/space reason, even though the gate's
+    /// SYMMETRIC projection pair diverges wildly from it. The production bug
+    /// compared the receipt's A-space tips against the gate's projection tips
+    /// and fail-closed a transfer that was entirely correct.
+    ///
+    /// This receipt still fails later (it carries no per-step EK material), so
+    /// the assertion is specifically that the rejection is NOT about parent,
+    /// child, or commitment — i.e. it survived the structural binding stage.
+    #[test]
+    fn divergent_projection_does_not_reject_a_valid_canonical_pair() {
+        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
+        let receipt = base_receipt(a, b, parent, child);
+        let commitment = receipt.compute_commitment().expect("commitment");
+        let p = proposal_with_commitment(b, parent, child, commitment);
+
+        // Sanity: the proposal's projection pair is deliberately NOT the
+        // canonical pair — the exact live condition.
+        assert_ne!(p.projection_parent, p.canonical_parent);
+        assert_ne!(p.projection_target, p.canonical_child);
+
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], None, None).unwrap();
+        match out {
+            ReceiptVerifyOutcome::Rejected { reason } => {
+                assert!(
+                    !reason.contains("parent_tip")
+                        && !reason.contains("child_tip")
+                        && !reason.contains("commitment"),
+                    "valid canonical pair must clear structural binding; \
+                     rejected instead with: {reason}"
+                );
+            }
+            ReceiptVerifyOutcome::Verified { .. } => {}
+        }
+    }
+
+    /// A forged canonical child must still fail closed — retargeting the check
+    /// onto the proposal tightened the comparison, it did not relax it.
+    #[test]
+    fn forged_canonical_child_is_rejected() {
+        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
+        let receipt = base_receipt(a, b, parent, [0xEEu8; 32]);
+        let commitment = receipt.compute_commitment().expect("commitment");
+        let p = proposal_with_commitment(b, parent, child, commitment);
+        let out =
+            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], None, None).unwrap();
+        match out {
+            ReceiptVerifyOutcome::Rejected { reason } => {
+                assert!(reason.contains("child_tip"), "unexpected reason: {reason}");
+            }
+            ReceiptVerifyOutcome::Verified { .. } => {
+                panic!("a forged canonical child must never verify")
+            }
+        }
     }
 }

@@ -530,6 +530,84 @@ pub fn insert_outbound_reply(
     Ok(())
 }
 
+/// One undelivered acceptance reply, joined with the routing material the
+/// §16.6 reply window needs to address it.
+///
+/// `projection_parent_tip` is the SYMMETRIC tip captured at PREPARE — the value
+/// the ORIGINAL SENDER is still polling its inbox at. The recipient's own
+/// projection has already advanced to the target by the time the fold completes,
+/// so addressing the reply from local `contacts.chain_tip` would strand it at a
+/// tip nobody reads. The journal's captured parent is the authority here.
+#[derive(Debug, Clone)]
+pub struct PendingOutboundReply {
+    pub commitment: [u8; 32],
+    pub relationship_key: [u8; 32],
+    pub counterparty_device_id: [u8; 32],
+    pub child_tip: [u8; 32],
+    pub receipt_bytes: Vec<u8>,
+    pub projection_parent_tip: [u8; 32],
+}
+
+fn col32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 32]> {
+    let v: Vec<u8> = row.get(idx)?;
+    <[u8; 32]>::try_from(v.as_slice()).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            rusqlite::types::Type::Blob,
+            "expected 32 bytes".into(),
+        )
+    })
+}
+
+/// Every acceptance reply that has been durably countersigned but not yet
+/// delivered to the sender. Repost-until-delivered: rows stay until the submit
+/// path marks them, so a crash or an offline sender simply retries next sweep.
+///
+/// The 32-byte length predicate is an INVARIANT check, not a compatibility
+/// shim: a reply can only be addressed from the projection parent captured at
+/// PREPARE, and inventing one would strand the message exactly like the bug
+/// this window exists to fix. A malformed row fails closed rather than being
+/// guessed at.
+pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(
+        "SELECT r.commitment, r.relationship_key, r.counterparty_device_id, r.child_tip,
+                r.receipt_bytes, j.projection_parent_tip
+         FROM recipient_outbound_reply r
+         JOIN acceptance_fold_journal j
+           ON j.commitment = r.commitment
+         WHERE r.submitted = 0
+           AND j.status = 'complete'
+           AND length(j.projection_parent_tip) = 32",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PendingOutboundReply {
+                commitment: col32(row, 0)?,
+                relationship_key: col32(row, 1)?,
+                counterparty_device_id: col32(row, 2)?,
+                child_tip: col32(row, 3)?,
+                receipt_bytes: row.get::<_, Vec<u8>>(4)?,
+                projection_parent_tip: col32(row, 5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Mark a reply delivered. Idempotent — a duplicate submit is a no-op, and the
+/// row is retained as the durable record that this transition was answered.
+pub fn mark_reply_submitted(commitment: &[u8; 32]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.execute(
+        "UPDATE recipient_outbound_reply SET submitted = 1 WHERE commitment = ?1",
+        params![commitment.as_slice()],
+    )?;
+    Ok(())
+}
+
 pub fn outbound_reply_exists(commitment: &[u8; 32]) -> Result<bool> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -1046,5 +1124,113 @@ mod tests {
         let err = insert_prepared_acceptance_journal(&rec2).unwrap_err();
         assert!(err.to_string().contains("DIFFERENT receipt"));
         insert_prepared_acceptance_journal(&rec1).unwrap(); // idempotent identical re-insert
+    }
+
+    // ---------------------------------------------------------------------
+    // §16.6 REPLY WINDOW — delivery queue semantics.
+    //
+    // The sweep that drains these rows is what releases the SENDER's gate. A
+    // reply that is invisible, mis-addressed, or re-sent forever is money left
+    // in limbo, so each property below is asserted directly.
+    // ---------------------------------------------------------------------
+
+    /// A completed acceptance surfaces for delivery carrying the PROJECTION
+    /// parent captured at PREPARE — the tip the sender polls. Addressing from
+    /// the recipient's own (already advanced) projection would strand it.
+    #[test]
+    #[serial]
+    fn pending_reply_surfaces_with_the_senders_projection_parent() {
+        init_test_db();
+        let rec = prepared_row(
+            [0x21u8; 32],
+            [0x22u8; 32],
+            [0x23u8; 32],
+            [0x24u8; 32],
+            vec![0xB1u8; 8],
+            &[0xB2u8; 8],
+            vec![0xA1u8; 8],
+        );
+        insert_prepared_acceptance_journal(&rec).unwrap();
+        set_applied(&rec);
+        promote_prepared_to_applied(&rec.relationship_key, &rec.parent_tip).unwrap();
+        complete_applied_acceptance(&rec, &WRAP).unwrap();
+
+        let pending = pending_outbound_replies().expect("query pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "a completed acceptance must be deliverable"
+        );
+        let r = &pending[0];
+        assert_eq!(
+            r.projection_parent_tip, rec.projection_parent_tip,
+            "reply must be addressed to the SENDER's projection parent"
+        );
+        assert_ne!(
+            r.projection_parent_tip, rec.projection_target_tip,
+            "addressing from the advanced target would strand the reply"
+        );
+        assert_eq!(r.commitment, rec.commitment);
+        assert_eq!(r.counterparty_device_id, rec.counterparty_device_id);
+        assert_eq!(
+            r.receipt_bytes, rec.receipt_bytes,
+            "exact stored bytes, never re-signed"
+        );
+    }
+
+    /// Delivery is at-least-once but must CONVERGE: once marked, the row stops
+    /// resurfacing. Without this the sweep reposts the same reply forever.
+    #[test]
+    #[serial]
+    fn marking_delivered_is_idempotent_and_stops_resurfacing() {
+        init_test_db();
+        let rec = prepared_row(
+            [0x31u8; 32],
+            [0x32u8; 32],
+            [0x33u8; 32],
+            [0x34u8; 32],
+            vec![0xB3u8; 8],
+            &[0xB4u8; 8],
+            vec![0xA2u8; 8],
+        );
+        insert_prepared_acceptance_journal(&rec).unwrap();
+        set_applied(&rec);
+        promote_prepared_to_applied(&rec.relationship_key, &rec.parent_tip).unwrap();
+        complete_applied_acceptance(&rec, &WRAP).unwrap();
+        assert_eq!(pending_outbound_replies().unwrap().len(), 1);
+
+        mark_reply_submitted(&rec.commitment).unwrap();
+        assert!(
+            pending_outbound_replies().unwrap().is_empty(),
+            "a delivered reply must not resurface"
+        );
+        // Second mark (duplicate delivery / crash-retry) is a no-op, and the
+        // durable record of the answered transition is retained.
+        mark_reply_submitted(&rec.commitment).unwrap();
+        assert!(pending_outbound_replies().unwrap().is_empty());
+        assert!(outbound_reply_exists(&rec.commitment).unwrap());
+    }
+
+    /// An acceptance that has NOT completed the fold is not deliverable: sending
+    /// a countersignature before the transition is durably applied would let the
+    /// sender finalize against state this device might still fail to commit.
+    #[test]
+    #[serial]
+    fn prepared_but_incomplete_acceptance_is_not_deliverable() {
+        init_test_db();
+        let rec = prepared_row(
+            [0x41u8; 32],
+            [0x42u8; 32],
+            [0x43u8; 32],
+            [0x44u8; 32],
+            vec![0xB5u8; 8],
+            &[0xB6u8; 8],
+            vec![0xA3u8; 8],
+        );
+        insert_prepared_acceptance_journal(&rec).unwrap();
+        assert!(
+            pending_outbound_replies().unwrap().is_empty(),
+            "a prepared-but-unapplied acceptance must never be delivered"
+        );
     }
 }

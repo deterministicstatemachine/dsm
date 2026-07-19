@@ -1019,6 +1019,35 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
     )
 }
 
+/// App-backgrounded lifecycle transition. Rust performs the ENTIRE decision:
+/// it stops the inbox poller unless a §16.6 settlement step is still owed (a
+/// sender-side pending gate, or a countersigned reply not yet delivered), and
+/// returns the single directive the platform layer must obey.
+///
+/// Returns TRUE when the host MUST keep its foreground service alive: killing
+/// the service kills the poller with it, stranding money in flight until the
+/// user happens to reopen the app. The caller performs no protocol reasoning of
+/// its own — it relays this directive and nothing else.
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_onAppBackgrounded(
+    _env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+) -> jni::sys::jboolean {
+    let keep_alive = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::logging::init_android_device_logging();
+        ensure_bootstrap();
+        // Declines internally while settlement work is outstanding.
+        crate::sdk::inbox_poller::stop_poller_for_lifecycle();
+        crate::sdk::inbox_poller::has_pending_settlement_work()
+    }))
+    .unwrap_or(false);
+    if keep_alive {
+        1
+    } else {
+        0
+    }
+}
+
 /// Returns the local device id as raw bytes (32 bytes) when available.
 ///
 /// Kotlin expects this exact symbol for `Unified.getDeviceIdBin()`.

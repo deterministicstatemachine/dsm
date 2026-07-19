@@ -2324,16 +2324,21 @@ impl BilateralBleHandler {
                 );
             }
 
-            // Refresh the sender's Kyber (ML-KEM-768) key alongside the signing key: it is
-            // randomized per wallet init on the peer, and the per-step EK receipt this transfer
-            // builds fail-closes without a current copy on the contact record.
+            // Bind the sender's Kyber (ML-KEM-768) capability alongside the signing key: the
+            // per-step EK receipt this transfer builds fail-closes without a copy on the contact
+            // record. FIRST-WRITE-WINS — the peer's key is deterministic (Genesis v2 derivation),
+            // so it never legitimately changes; rebinding it from a live exchange would let a
+            // handshake redirect where future receipts encapsulate.
             if !prepare_request.sender_kyber_public_key.is_empty() {
-                match crate::storage::client_db::update_contact_kyber_key(
+                match crate::storage::client_db::bind_contact_kyber_key_if_absent(
                     &counterparty_device_id,
                     &prepare_request.sender_kyber_public_key,
                 ) {
-                    Ok(()) => log::info!(
-                        "[BilateralBleHandler] ✅ Refreshed contact kyber_public_key from prepare request"
+                    Ok(true) => log::info!(
+                        "[BilateralBleHandler] ✅ Bound contact kyber_public_key from prepare request"
+                    ),
+                    Ok(false) => log::debug!(
+                        "[BilateralBleHandler] contact kyber_public_key already bound — keeping it"
                     ),
                     Err(e) => log::warn!(
                         "[BilateralBleHandler] ⚠️ Failed to persist contact kyber_public_key: {e}"
@@ -3087,16 +3092,20 @@ impl BilateralBleHandler {
                     );
                 }
 
-                // Refresh the responder's Kyber (ML-KEM-768) key alongside the signing key: the
-                // per-step EK receipt built in send_bilateral_confirm (immediately after this)
-                // encapsulates to it and fail-closes when the contact record has no current copy.
+                // Bind the responder's Kyber (ML-KEM-768) capability alongside the signing key:
+                // the per-step EK receipt built in send_bilateral_confirm (immediately after this)
+                // encapsulates to it and fail-closes without a copy on the contact record.
+                // FIRST-WRITE-WINS for the same reason as the request path above.
                 if !prepare_response.responder_kyber_public_key.is_empty() {
-                    match crate::storage::client_db::update_contact_kyber_key(
+                    match crate::storage::client_db::bind_contact_kyber_key_if_absent(
                         &counterparty_device_id,
                         &prepare_response.responder_kyber_public_key,
                     ) {
-                        Ok(()) => log::info!(
-                            "[BilateralBleHandler] ✅ Refreshed contact kyber_public_key from prepare response"
+                        Ok(true) => log::info!(
+                            "[BilateralBleHandler] ✅ Bound contact kyber_public_key from prepare response"
+                        ),
+                        Ok(false) => log::debug!(
+                            "[BilateralBleHandler] contact kyber_public_key already bound — keeping it"
                         ),
                         Err(e) => log::warn!(
                             "[BilateralBleHandler] ⚠️ Failed to persist responder kyber_public_key: {e}"

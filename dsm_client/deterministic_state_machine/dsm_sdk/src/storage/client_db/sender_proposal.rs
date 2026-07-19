@@ -174,6 +174,47 @@ pub fn get_sender_proposal_by_message_id(message_id: &str) -> Result<Option<Send
         .optional()?)
 }
 
+/// Look up the proposal a returned acceptance receipt answers.
+///
+/// The commitment is the ONLY identifier shared by both sides of the reply
+/// window: the recipient countersigns it and echoes it back, and the sender
+/// bound it at canonical preparation. Matching on it (rather than on any tip)
+/// keeps the lookup inside a single formula space.
+pub fn get_sender_proposal_by_commitment(
+    commitment: &[u8; 32],
+) -> Result<Option<SenderOnlineProposal>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(conn
+        .query_row(
+            &format!("SELECT {COLS} FROM sender_online_proposal WHERE commitment = ?1"),
+            params![commitment.as_slice()],
+            row_to_proposal,
+        )
+        .optional()?)
+}
+
+/// Terminally finalize by canonical identity — the reply window keys off the
+/// canonical step, not the wire message id. Idempotent: a second call after
+/// finalization returns `Ok(false)`.
+pub fn mark_sender_proposal_finalized_by_canonical(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    let n = conn.execute(
+        "UPDATE sender_online_proposal SET status = ?3
+         WHERE relationship_key = ?1 AND canonical_parent = ?2 AND status != ?3",
+        params![
+            relationship_key.as_slice(),
+            canonical_parent.as_slice(),
+            PROPOSAL_FINALIZED
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 /// Bind the b0x message id and mark `submitted`. Refuses to rebind a DIFFERENT
 /// id (one proposal = one wire submission identity).
 pub fn mark_sender_proposal_submitted(
@@ -245,6 +286,27 @@ pub fn mark_sender_proposal_rolled_back(
     Ok(n > 0)
 }
 
+/// Rollback marking by (relationship, tx_id) — the rollback path knows the
+/// wallet transaction, not the canonical parent. Never touches `finalized`.
+pub fn mark_sender_proposals_rolled_back_for_tx(
+    relationship_key: &[u8; 32],
+    tx_id: &str,
+) -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    let n = conn.execute(
+        "UPDATE sender_online_proposal SET status = ?3
+         WHERE relationship_key = ?1 AND tx_id = ?2 AND status != ?4",
+        params![
+            relationship_key.as_slice(),
+            tx_id,
+            PROPOSAL_ROLLED_BACK,
+            PROPOSAL_FINALIZED,
+        ],
+    )?;
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,258 +362,5 @@ mod tests {
         assert!(
             !mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap()
         );
-    }
-}
-
-/// Rollback marking by (relationship, tx_id) — the rollback path knows the
-/// wallet transaction, not the canonical parent. Never touches `finalized`.
-pub fn mark_sender_proposals_rolled_back_for_tx(
-    relationship_key: &[u8; 32],
-    tx_id: &str,
-) -> Result<usize> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    let n = conn.execute(
-        "UPDATE sender_online_proposal SET status = ?3
-         WHERE relationship_key = ?1 AND tx_id = ?2 AND status != ?4",
-        params![
-            relationship_key.as_slice(),
-            tx_id,
-            PROPOSAL_ROLLED_BACK,
-            PROPOSAL_FINALIZED,
-        ],
-    )?;
-    Ok(n)
-}
-
-/// LEGACY PROPOSAL REPAIR (one-time migration, §16.6 proposal authority).
-///
-/// A pending online gate that predates proposal persistence has no proposal
-/// row, so the strict ACK finalizer fails closed on it forever. Materialize
-/// the missing proposal FROM DURABLE CANONICAL EVIDENCE — the archived BCR row
-/// of the send's canonical advance — without touching balances, canonical
-/// state, signatures, or cert heads:
-///
-///   canonical pair  ← the relationship's single unclaimed `bcr_chain_states`
-///                     row on this device (the advance the send performed);
-///   projection pair ← the gate row itself (its symmetric values are correct
-///                     in their own formula-space);
-///   wire identity   ← the gate's message_id (status: submitted).
-///
-/// STRICTLY UNAMBIGUOUS: repairs only when the relationship has exactly ONE
-/// unclaimed BCR transition. Anything else is logged and left for inspection.
-/// Idempotent — repaired gates have proposals and are skipped on later runs.
-pub fn repair_legacy_sender_proposals(local_device_id: &[u8; 32]) -> Result<usize> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-
-    struct Gate {
-        counterparty: Vec<u8>,
-        message_id: String,
-        parent_tip: Vec<u8>,
-        next_tip: Vec<u8>,
-    }
-    let gates: Vec<Gate> = {
-        let mut stmt = conn.prepare(
-            "SELECT counterparty_device_id, message_id, parent_tip, next_tip
-             FROM pending_online_outbox",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Gate {
-                counterparty: r.get(0)?,
-                message_id: r.get(1)?,
-                parent_tip: r.get(2)?,
-                next_tip: r.get(3)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
-
-    let mut repaired = 0usize;
-    for gate in gates {
-        let has_proposal: bool = conn
-            .query_row(
-                "SELECT 1 FROM sender_online_proposal WHERE message_id = ?1 LIMIT 1",
-                params![gate.message_id],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if has_proposal {
-            continue;
-        }
-        let cp: [u8; 32] = match gate.counterparty.as_slice().try_into() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(local_device_id, &cp);
-
-        // The relationship's UNCLAIMED canonical transitions on this device.
-        let candidates: Vec<([u8; 32], [u8; 32])> = {
-            let mut stmt = conn.prepare(
-                "SELECT b.embedded_parent, b.chain_tip FROM bcr_chain_states b
-                 WHERE b.device_id = ?1 AND b.rel_key = ?2
-                   AND NOT EXISTS (
-                       SELECT 1 FROM sender_online_proposal p
-                       WHERE p.relationship_key = b.rel_key
-                         AND p.canonical_parent = b.embedded_parent
-                   )
-                 ORDER BY b.rowid",
-            )?;
-            let rows = stmt.query_map(
-                params![local_device_id.as_slice(), rel_key.as_slice()],
-                |r| {
-                    let pv: Vec<u8> = r.get(0)?;
-                    let cv: Vec<u8> = r.get(1)?;
-                    Ok((pv, cv))
-                },
-            )?;
-            rows.filter_map(|r| r.ok())
-                .filter_map(|(pv, cv)| {
-                    Some((
-                        <[u8; 32]>::try_from(pv.as_slice()).ok()?,
-                        <[u8; 32]>::try_from(cv.as_slice()).ok()?,
-                    ))
-                })
-                .collect()
-        };
-        if candidates.len() != 1 {
-            log::warn!(
-                "[proposal-repair] gate {} has {} unclaimed canonical transitions for its \
-                 relationship — ambiguous, left for inspection",
-                gate.message_id,
-                candidates.len()
-            );
-            continue;
-        }
-        let (canonical_parent, canonical_child) = candidates[0];
-        let (proj_parent, proj_target) = match (
-            <[u8; 32]>::try_from(gate.parent_tip.as_slice()),
-            <[u8; 32]>::try_from(gate.next_tip.as_slice()),
-        ) {
-            (Ok(a), Ok(b)) => (a, b),
-            _ => continue,
-        };
-        // Sentinel zeros for fields the legacy artifacts cannot supply
-        // (commitment / op digest / nonce hash live only in the wire receipt);
-        // the ACK finalizer needs the projection pair + message binding only.
-        conn.execute(
-            &format!(
-                "INSERT INTO sender_online_proposal ({COLS}) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
-            ),
-            params![
-                rel_key.as_slice(),
-                canonical_parent.as_slice(),
-                canonical_child.as_slice(),
-                proj_parent.as_slice(),
-                proj_target.as_slice(),
-                [0u8; 32].as_slice(),
-                [0u8; 32].as_slice(),
-                [0u8; 32].as_slice(),
-                gate.message_id,
-                format!("legacy:{}", gate.message_id),
-                cp.as_slice(),
-                0i64,
-                "",
-                PROPOSAL_SUBMITTED,
-                tick() as i64,
-            ],
-        )?;
-        log::info!(
-            "[proposal-repair] materialized legacy proposal for gate {} (canonical {}.. -> {}..)",
-            gate.message_id,
-            crate::util::text_id::encode_base32_crockford(&canonical_parent[..4]),
-            crate::util::text_id::encode_base32_crockford(&canonical_child[..4]),
-        );
-        repaired += 1;
-    }
-    Ok(repaired)
-}
-
-#[cfg(test)]
-mod repair_tests {
-    use super::*;
-    use serial_test::serial;
-
-    /// Legacy repair: a gate with NO proposal + exactly ONE unclaimed canonical
-    /// BCR transition → proposal materialized (canonical pair from BCR,
-    /// projection pair from the gate, status submitted). Ambiguity repairs
-    /// nothing. Idempotent on re-run.
-    #[test]
-    #[serial]
-    fn repair_materializes_from_single_unclaimed_bcr_only() {
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().unwrap();
-        let local = [0x01u8; 32];
-        let cp = [0x02u8; 32];
-        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &cp);
-
-        let binding = get_connection().unwrap();
-        {
-            let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-            // The gate (symmetric pair) + the canonical BCR evidence (asym pair).
-            conn.execute(
-                "INSERT INTO pending_online_outbox (counterparty_device_id, message_id, parent_tip, next_tip, created_at)
-                 VALUES (?1, 'LEGACYMSG', ?2, ?3, 0)",
-                params![cp.as_slice(), [0x10u8; 32].as_slice(), [0x11u8; 32].as_slice()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO bcr_chain_states (device_id, rel_key, chain_tip, embedded_parent, state_bytes, published, created_at)
-                 VALUES (?1, ?2, ?3, ?4, X'00', 0, 0)",
-                params![
-                    local.as_slice(),
-                    rel.as_slice(),
-                    [0x21u8; 32].as_slice(),
-                    [0x20u8; 32].as_slice()
-                ],
-            )
-            .unwrap();
-        }
-
-        assert_eq!(repair_legacy_sender_proposals(&local).unwrap(), 1);
-        let p = get_sender_proposal_by_message_id("LEGACYMSG")
-            .unwrap()
-            .expect("materialized");
-        assert_eq!(p.canonical_parent, [0x20u8; 32]);
-        assert_eq!(p.canonical_child, [0x21u8; 32]);
-        assert_eq!(p.projection_parent, [0x10u8; 32]);
-        assert_eq!(p.projection_target, [0x11u8; 32]);
-        assert_eq!(p.status, PROPOSAL_SUBMITTED);
-        // Idempotent re-run repairs nothing further.
-        assert_eq!(repair_legacy_sender_proposals(&local).unwrap(), 0);
-
-        // Ambiguity: a second unclaimed BCR for another gate's relationship
-        // blocks repair.
-        let cp2 = [0x03u8; 32];
-        let rel2 = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &cp2);
-        {
-            let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-            conn.execute(
-                "INSERT INTO pending_online_outbox (counterparty_device_id, message_id, parent_tip, next_tip, created_at)
-                 VALUES (?1, 'AMBIGMSG', ?2, ?3, 0)",
-                params![cp2.as_slice(), [0x30u8; 32].as_slice(), [0x31u8; 32].as_slice()],
-            )
-            .unwrap();
-            for i in 0..2u8 {
-                conn.execute(
-                    "INSERT INTO bcr_chain_states (device_id, rel_key, chain_tip, embedded_parent, state_bytes, published, created_at)
-                     VALUES (?1, ?2, ?3, ?4, X'00', 0, 0)",
-                    params![
-                        local.as_slice(),
-                        rel2.as_slice(),
-                        [0x41u8 + i; 32].as_slice(),
-                        [0x40u8 + i; 32].as_slice()
-                    ],
-                )
-                .unwrap();
-            }
-        }
-        assert_eq!(repair_legacy_sender_proposals(&local).unwrap(), 0);
-        assert!(get_sender_proposal_by_message_id("AMBIGMSG")
-            .unwrap()
-            .is_none());
     }
 }
