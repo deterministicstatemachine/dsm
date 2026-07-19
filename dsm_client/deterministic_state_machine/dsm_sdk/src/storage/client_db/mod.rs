@@ -138,7 +138,6 @@ pub fn init_database() -> Result<()> {
         ensure_bitcoin_accounts_active_receive_index(&conn)?;
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
-        ensure_acceptance_journal_projection_columns(&conn)?;
         ensure_stitched_receipts_dual_signature_schema(&conn)?;
         ensure_bilateral_sessions_created_at_step(&conn)?;
         ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
@@ -273,7 +272,59 @@ fn get_database_path() -> Result<PathBuf> {
     }
 }
 
+/// Current client-database schema generation.
+///
+/// DSM beta carries NO migrations: incompatible schemas are reset, never
+/// upgraded in place. Bump this whenever a change would make an older database
+/// structurally invalid (a new NOT NULL column, a renamed/removed table, an
+/// altered key). See [`enforce_schema_version`].
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 2;
+
+/// Honest incompatibility detection — NOT legacy support.
+///
+/// With migration shims removed, an older database would otherwise stumble into
+/// opaque "no such column" failures deep inside unrelated queries. This checks
+/// `PRAGMA user_version` up front and fails with an explicit, actionable
+/// condition instead. A fresh (empty) database is stamped with the current
+/// version; a matching database passes; anything else is reported as requiring
+/// a reset.
+fn enforce_schema_version(conn: &Connection) -> Result<()> {
+    let found: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+    // An unstamped database is either brand new or predates versioning. Treat
+    // "has no tables" as new and stamp it; anything else is pre-versioning and
+    // must be reset rather than guessed at.
+    if found == 0 {
+        let table_count: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )?;
+        if table_count > 0 {
+            return Err(anyhow!(
+                "SCHEMA RESET REQUIRED: client database predates schema versioning \
+                 (expected version {CLIENT_DB_SCHEMA_VERSION}). DSM beta does not migrate — \
+                 wipe the app database and re-provision from the wallet seed."
+            ));
+        }
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {CLIENT_DB_SCHEMA_VERSION};"
+        ))?;
+        return Ok(());
+    }
+
+    if found != CLIENT_DB_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "SCHEMA RESET REQUIRED: client database is version {found}, this build expects \
+             {CLIENT_DB_SCHEMA_VERSION}. DSM beta does not migrate — wipe the app database \
+             and re-provision from the wallet seed."
+        ));
+    }
+    Ok(())
+}
+
 fn create_schema(conn: &Connection) -> Result<()> {
+    enforce_schema_version(conn)?;
     // Creating schema can race when multiple test tasks initialize the DB
     // concurrently (shared in-memory SQLite URI). Retry on busy/locking
     // errors to avoid transient test failures.
@@ -384,11 +435,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             expected_counterparty_a_head BLOB,
             new_counterparty_a_head      BLOB NOT NULL,
             receipt_bytes                BLOB NOT NULL,
-            -- SYMMETRIC-space projection CAS pair captured at PREPARE (empty on
-            -- pre-authority-fix rows; such rows can no longer converge and are
-            -- inert). Authority pair above is ASYMMETRIC (signed receipt).
-            projection_parent_tip        BLOB NOT NULL DEFAULT X'',
-            projection_target_tip        BLOB NOT NULL DEFAULT X'',
+            -- SYMMETRIC-space projection CAS pair captured at PREPARE. The
+            -- authority pair above is ASYMMETRIC (signed receipt); these two are
+            -- the routing/addressing lineage and are never compared across.
+            projection_parent_tip        BLOB NOT NULL,
+            projection_target_tip        BLOB NOT NULL,
             status                       TEXT NOT NULL,
             created_at                   INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, parent_tip)
@@ -1233,30 +1284,6 @@ fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> 
 /// predate the SYMMETRIC projection-CAS columns. Added with empty defaults —
 /// an empty pair means the row was prepared under metadata-derived keying and
 /// can no longer converge (inert; the strict apply refuses its lineage anyway).
-fn ensure_acceptance_journal_projection_columns(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(acceptance_fold_journal)")?;
-    let mut has_projection = false;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for name in rows {
-        if name? == "projection_parent_tip" {
-            has_projection = true;
-            break;
-        }
-    }
-    drop(stmt);
-    if !has_projection {
-        conn.execute(
-            "ALTER TABLE acceptance_fold_journal ADD COLUMN projection_parent_tip BLOB NOT NULL DEFAULT X''",
-            [],
-        )?;
-        conn.execute(
-            "ALTER TABLE acceptance_fold_journal ADD COLUMN projection_target_tip BLOB NOT NULL DEFAULT X''",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
 fn ensure_stitched_receipts_dual_signature_schema(conn: &Connection) -> Result<()> {
     // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
     let mut stmt = conn.prepare("PRAGMA table_info(stitched_receipts)")?;
@@ -2734,5 +2761,46 @@ mod tests {
             )
             .expect("sqlite_master");
         assert_eq!(frontier_count, 0, "migration left anchor_frontiers");
+    }
+
+    /// Beta has NO migrations: a database from an older schema generation must
+    /// fail with an explicit "SCHEMA RESET REQUIRED" condition, never stumble
+    /// into an opaque missing-column error deep in an unrelated query.
+    #[test]
+    fn stale_schema_version_fails_closed_with_reset_required() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        // A populated database stamped with an older generation.
+        conn.execute_batch("CREATE TABLE marker(x INTEGER); PRAGMA user_version = 1;")
+            .expect("seed stale db");
+
+        let err = enforce_schema_version(&conn).expect_err("stale schema must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("SCHEMA RESET REQUIRED"), "unexpected: {msg}");
+        assert!(msg.contains("does not migrate"), "unexpected: {msg}");
+    }
+
+    /// A populated but UNVERSIONED database predates versioning and is equally
+    /// incompatible — it must not be silently adopted by stamping it.
+    #[test]
+    fn unversioned_populated_schema_fails_closed() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch("CREATE TABLE marker(x INTEGER);")
+            .expect("seed unversioned db");
+        let err = enforce_schema_version(&conn).expect_err("unversioned db must fail closed");
+        assert!(err.to_string().contains("SCHEMA RESET REQUIRED"));
+    }
+
+    /// A brand-new (empty) database is stamped with the current generation and
+    /// accepted — this is the fresh-install path.
+    #[test]
+    fn fresh_database_is_stamped_and_accepted() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        enforce_schema_version(&conn).expect("fresh db must be accepted");
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("user_version");
+        assert_eq!(v, CLIENT_DB_SCHEMA_VERSION);
+        // Idempotent on re-open.
+        enforce_schema_version(&conn).expect("second open must pass");
     }
 }

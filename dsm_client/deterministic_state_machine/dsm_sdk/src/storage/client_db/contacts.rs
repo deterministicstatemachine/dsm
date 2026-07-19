@@ -1332,15 +1332,20 @@ pub fn update_contact_public_key(device_id: &[u8], public_key: &[u8]) -> Result<
     Ok(())
 }
 
-/// Update a contact's ML-KEM-768 (Kyber) encapsulation key from a live bilateral prepare
-/// exchange. The peer's Kyber keypair is randomized per wallet init, so this is refreshed on
-/// every exchange (mirrors [`update_contact_public_key`]); per-step EK receipts encapsulate
-/// to this key and fail-close when it is absent.
-pub fn update_contact_kyber_key(device_id: &[u8], kyber_public_key: &[u8]) -> Result<()> {
+/// FIRST-WRITE-WINS persist of a counterparty's ML-KEM capability.
+///
+/// Writes ONLY when the contact currently has no key. A locally-bound nonempty
+/// key is never replaced — a counterparty's encapsulation target is identity
+/// material, so silently rebinding it would let a registry answer redirect
+/// where future receipts encapsulate. Rotation, if DSM ever needs it, is an
+/// explicit protocol, never a side effect of a lookup.
+///
+/// Returns `Ok(true)` when this call bound the key, `Ok(false)` when a key was
+/// already present (caller keeps the existing one) or no such contact exists.
+pub fn bind_contact_kyber_key_if_absent(device_id: &[u8], kyber_public_key: &[u8]) -> Result<bool> {
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length"));
     }
-    // ML-KEM-768 encapsulation key is exactly 1184 bytes; never persist anything else.
     if kyber_public_key.len() != 1184 {
         return Err(anyhow!(
             "Invalid Kyber public key length {} (expected 1184)",
@@ -1355,24 +1360,12 @@ pub fn update_contact_kyber_key(device_id: &[u8], kyber_public_key: &[u8]) -> Re
     });
 
     let rows_changed = conn.execute(
-        "UPDATE contacts SET kyber_public_key = ?1 WHERE device_id = ?2",
+        "UPDATE contacts SET kyber_public_key = ?1
+         WHERE device_id = ?2
+           AND (kyber_public_key IS NULL OR length(kyber_public_key) = 0)",
         params![kyber_public_key, device_id],
     )?;
-
-    if rows_changed == 0 {
-        info!(
-            "No contact found with device_id={:?} to update kyber_public_key",
-            &device_id[..8]
-        );
-    } else {
-        info!(
-            "Updated contact kyber_public_key: device_id={:?} key_len={}",
-            &device_id[..8],
-            kyber_public_key.len()
-        );
-    }
-
-    Ok(())
+    Ok(rows_changed > 0)
 }
 
 /// Remove a contact by its contact_id. Returns Ok(true) if a row was deleted, Ok(false) if not found.
@@ -1511,6 +1504,36 @@ mod tests {
         assert_eq!(loaded.alias, "alice");
         assert_eq!(loaded.device_id, device_id.to_vec());
         assert_eq!(loaded.public_key, vec![0xBBu8; 64]);
+    }
+
+    /// Cold-peer RPA rotation: after a paired peer's BLE address rotates, the canonical re-persist
+    /// (`update_contact_ble_status(device_id, None, Some(new))`, driven by the probe's on-match
+    /// `observeGattIdentityRead`) must re-point the contact so the FRESH address resolves and the
+    /// STALE one no longer does — the storage half of the directed-probe fix.
+    #[test]
+    #[serial]
+    fn update_contact_ble_status_repoints_rotated_address() {
+        init_test_db();
+        let device_id = [0x0Au8; 32];
+        store_contact(&make_contact(device_id, "rotator")).expect("store contact");
+
+        let old_addr = "AA:BB:CC:DD:EE:01";
+        let new_addr = "11:22:33:44:55:66";
+
+        // Initial BLE address, then confirm it resolves.
+        update_contact_ble_status(&device_id, None, Some(old_addr)).expect("set old addr");
+        assert!(get_contact_by_ble_address(old_addr).unwrap().is_some());
+
+        // RPA rotates: re-point to the fresh address.
+        update_contact_ble_status(&device_id, None, Some(new_addr)).expect("repoint addr");
+
+        let hit = get_contact_by_ble_address(new_addr).expect("query new addr");
+        assert!(hit.is_some(), "fresh rotated address must resolve");
+        assert_eq!(hit.unwrap().device_id, device_id.to_vec());
+        assert!(
+            get_contact_by_ble_address(old_addr).unwrap().is_none(),
+            "stale rotated address must no longer resolve",
+        );
     }
 
     #[test]
