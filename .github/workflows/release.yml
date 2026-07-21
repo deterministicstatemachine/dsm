@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [validate-tag]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -109,7 +109,7 @@ jobs:
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -161,7 +161,7 @@ jobs:
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -217,7 +217,7 @@ jobs:
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -283,7 +283,7 @@ jobs:
       - build-frontend
       - build-sbom
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download storage node artifact
         uses: actions/download-artifact@v8
