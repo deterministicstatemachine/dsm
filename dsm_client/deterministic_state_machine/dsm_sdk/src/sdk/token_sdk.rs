@@ -2749,8 +2749,17 @@ impl<I: Send + Sync> TokenSDK<I> {
         )?;
         log::debug!("[TOKEN] execute_transfer_op: execute_on_relationship OK");
 
+        // Post-commit: in-memory cache projection only. The advance and the durable
+        // bundle committed inside `execute_on_relationship_staged`, so returning Err
+        // here would tell the caller "nothing happened" about a committed,
+        // deliverable transfer. The cache rebuilds via `reload_balance_cache_for_self`.
         log::debug!("[TOKEN] execute_transfer_op: projecting local cache from canonical state...");
-        self.project_balance_cache_from_state(sender, &new_state)?;
+        if let Err(e) = self.project_balance_cache_from_state(sender, &new_state) {
+            log::error!(
+                "[TOKEN] execute_transfer_op: post-commit cache projection FAILED ({e}). \
+                 The transfer stands; the cache rebuilds from canonical state."
+            );
+        }
         log::debug!("[TOKEN] execute_transfer_op: local cache projected");
 
         // Record history

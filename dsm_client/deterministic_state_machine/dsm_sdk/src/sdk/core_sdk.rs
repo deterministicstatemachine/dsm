@@ -4608,6 +4608,63 @@ mod tests {
             "no canonical advance may survive a failed artifact build"
         );
     }
+
+    /// GAP 1 CRITERION 3 — a failure in ANY extra write must roll the canonical
+    /// advance back with it.
+    ///
+    /// `write_extra` runs INSIDE the advance transaction, so the durable bundle
+    /// (proposal, gate, pending EK head, outbox row) and the canonical advance
+    /// share one commit. If any of those writes fails, the advance must not
+    /// survive on its own — otherwise the debit lands with no lifecycle record
+    /// and nothing can ever settle or reconcile it.
+    #[test]
+    #[serial_test::serial]
+    fn extra_write_failure_rolls_back_the_canonical_advance() {
+        let sdk = full_state_apply_harness();
+        let (sender, _) = sender_ids();
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &sdk.device_info.device_id,
+            &sender,
+        );
+        let head_before = device_root(&sdk);
+
+        let built = std::cell::Cell::new(false);
+        let err = sdk
+            .execute_on_relationship_staged(
+                rel,
+                sender,
+                incoming_transfer_op(&sdk.device_info.device_id, 9, vec![0x41u8; 32]),
+                &[dsm::types::device_state::BalanceDelta {
+                    policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: 9,
+                }],
+                Some([0u8; 32]),
+                |_o| -> Result<(), DsmError> {
+                    built.set(true);
+                    Ok(())
+                },
+                // The bundle write fails — e.g. the outbox UNIQUE(commitment)
+                // constraint rejects a second lifecycle row for one identity.
+                |_tx, _o, _a| {
+                    Err(DsmError::internal(
+                        "outbox insert failed",
+                        None::<std::io::Error>,
+                    ))
+                },
+            )
+            .expect_err("a failed extra write must abort the whole advance");
+        assert!(err.to_string().contains("outbox insert failed"));
+        assert!(built.get(), "the builder must have run before the write");
+
+        assert_eq!(
+            device_root(&sdk),
+            head_before,
+            "the canonical advance MUST roll back with the failed bundle write — \
+             a debit with no durable lifecycle record is exactly the hazard this \
+             seam exists to prevent"
+        );
+    }
 }
 
 /* ---------------------------- Result Structures ------------------------- */

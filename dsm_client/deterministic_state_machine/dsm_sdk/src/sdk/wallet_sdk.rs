@@ -898,11 +898,43 @@ impl WalletSDK {
         }
         self.update_activity_sync();
 
+        // Everything fallible that is NOT part of the advance runs BEFORE it, so
+        // that an `Err` from the staged call keeps meaning "nothing was committed".
+        // `token_sdk` resolves the same policy commit pre-advance already, so this
+        // is a pure re-read — failing it here is strictly correct and costs nothing.
+        let sender = self.device_id_string();
+        let token_id_owned = if transaction.token_id.is_empty() {
+            "ERA".to_string()
+        } else {
+            transaction.token_id.clone()
+        };
+        let policy_commit = self
+            .token_sdk
+            .resolve_policy_commit_strict(&token_id_owned)?;
+        let existing_locked =
+            match crate::storage::client_db::get_locked_balance(&sender, &token_id_owned) {
+                Ok(l) => l,
+                Err(e) => {
+                    log::error!("[WALLET] send_transfer_op: failed to read locked balance: {e}");
+                    0
+                }
+            };
+
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
         let (new_state, outcome, artifacts) =
             self.token_sdk
                 .execute_transfer_op_staged(op, build_artifacts, write_extra)?;
         log::debug!("[WALLET] send_transfer_op: execute_transfer_op OK");
+
+        // ==================================================================
+        // PAST THIS POINT THE ADVANCE AND THE DURABLE BUNDLE ARE COMMITTED.
+        //
+        // Nothing below may return `Err`. Everything below is a PROJECTION or a
+        // local history row — derived state, rebuildable from canonical. Failing
+        // the send here would tell the caller "this did not happen" about a
+        // transfer that is committed and deliverable, and the caller would roll
+        // back a durable debit. Log and reconcile forward instead.
+        // ==================================================================
 
         let mut tx_copy = transaction.clone();
         tx_copy.status = TransactionStatus::Confirmed;
@@ -915,21 +947,7 @@ impl WalletSDK {
         // using compute_precommit + compute_successor_tip with the shared nonce.
 
         // Persist canonical balance projection + transaction record
-        let sender = self.device_id_string();
-        let token_id = if transaction.token_id.is_empty() {
-            "ERA"
-        } else {
-            transaction.token_id.as_str()
-        };
-        let existing_locked = match crate::storage::client_db::get_locked_balance(&sender, token_id)
-        {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("[WALLET] send_transfer_op: failed to read locked balance: {e}");
-                0
-            }
-        };
-        let policy_commit = self.token_sdk.resolve_policy_commit_strict(token_id)?;
+        let token_id = token_id_owned.as_str();
         if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
             &sender,
             token_id,
@@ -938,13 +956,12 @@ impl WalletSDK {
             existing_locked,
         ) {
             log::error!(
-                "[WALLET] send_transfer_op: CRITICAL: failed to sync token projection for {}: {}",
+                "[WALLET] send_transfer_op: post-commit projection sync FAILED for {} ({}). \
+                 The advance and the durable outbox are committed; the transfer stands and \
+                 the projection rebuilds from canonical state.",
                 transaction.token_id,
                 e
             );
-            return Err(DsmError::invalid_operation(format!(
-                "failed to sync token projection: {e}"
-            )));
         } else {
             log::info!(
                 "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
@@ -984,12 +1001,16 @@ impl WalletSDK {
                 metadata: meta,
                 created_at: 0,
             };
-            crate::storage::client_db::store_transaction(&rec).map_err(|e| {
-                DsmError::internal(
-                    format!("Failed to persist transaction record: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
+            // Post-commit: local history only. A failure here must NOT fail the
+            // send — the advance and the durable outbox are already committed and
+            // the transfer is deliverable. The row is rebuildable from canonical
+            // BCR state (see the canonical/projection rebuild work item).
+            if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
+                log::error!(
+                    "[WALLET] send_transfer_op: post-commit history row FAILED to persist \
+                     ({e}). The transfer stands; history rebuilds from canonical state."
+                );
+            }
         }
 
         log::info!(
