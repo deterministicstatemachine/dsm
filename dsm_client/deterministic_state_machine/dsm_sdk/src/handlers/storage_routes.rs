@@ -224,8 +224,7 @@ async fn finalize_from_acceptance_artifact(
     artifact: &dsm::types::proto::AcceptanceReceiptArtifact,
 ) {
     use crate::storage::client_db::sender_proposal::{
-        get_sender_proposal_by_commitment, mark_sender_proposal_finalized_by_canonical,
-        PROPOSAL_FINALIZED,
+        get_sender_proposal_by_commitment, PROPOSAL_FINALIZED,
     };
 
     let commitment: [u8; 32] = match artifact.commitment.as_slice().try_into() {
@@ -321,33 +320,62 @@ async fn finalize_from_acceptance_artifact(
         }
     }
 
-    // Verified. Release the gate on its PROJECTION pair (the space the gate is keyed in)
-    // and terminally finalize the proposal by canonical identity.
-    match crate::storage::client_db::clear_pending_online_outbox_if_matches(
+    // ====================================================================
+    // §16.6 DEFECT 1 — ONE ATOMIC FINALIZATION.
+    //
+    // Verified. Everything this acceptance proof authorises now commits in a
+    // SINGLE transaction: projection tip advance, Local EK-head promotion,
+    // Counterparty EK-head advance, proposal finalization, gate release, and
+    // the outbox moving to `gc_pending`.
+    //
+    // The previous code finalized the proposal and deleted the gate HERE, and
+    // left the tip advance and head promotion to the §5.4 ACK sweep — which
+    // iterates the very gate this had just deleted, making them unreachable.
+    // That is why every SECOND transfer on a relationship failed ("divergent
+    // local bilateral chain tip") and re-chained from the root AK
+    // (`used_root_ak=true`). Splitting this sequence is the defect, so it is
+    // not split.
+    // ====================================================================
+    let expected_counterparty_head = match crate::storage::client_db::load_cert_chain_head_pubkey(
+        &proposal.relationship_key,
+        crate::storage::client_db::CertChainSide::Counterparty,
+    ) {
+        Ok(head) => head,
+        Err(e) => {
+            log::error!(
+                "[storage.sync] §16.6 could not read counterparty head for {short}.. — \
+                 refusing to finalize (retry from the durable outbox): {e}"
+            );
+            return;
+        }
+    };
+
+    match crate::storage::client_db::finalize_on_acceptance_atomically(
+        &proposal.relationship_key,
+        &proposal.canonical_parent,
+        &proposal.nonce_hash,
+        &proposal.commitment,
         &proposal.counterparty_device_id,
         &proposal.projection_parent,
         &proposal.projection_target,
+        expected_counterparty_head.as_deref(),
+        &receipt.ek_pk_b,
     ) {
-        Ok(true) => log::info!("[storage.sync] §16.6 gate released for {short}.. (verified sig_b)"),
-        Ok(false) => log::info!(
-            "[storage.sync] §16.6 gate for {short}.. already cleared — finalizing proposal"
-        ),
-        Err(e) => {
-            log::error!("[storage.sync] §16.6 gate release failed for {short}..: {e}");
-            return;
+        Ok(()) => {
+            log::info!(
+                "[storage.sync] §16.6 FINALIZED atomically on acceptance proof: \
+                 commitment={short}.. tx={} (tip advanced, both cert heads promoted, \
+                 gate released, outbox gc_pending)",
+                proposal.tx_id
+            );
+            // The retired §5.4 sweep emitted this on tip advance; the tip now
+            // advances here, so the refresh belongs here.
+            emit_authoritative_wallet_refresh();
         }
-    }
-
-    match mark_sender_proposal_finalized_by_canonical(
-        &proposal.relationship_key,
-        &proposal.canonical_parent,
-    ) {
-        Ok(true) => log::info!(
-            "[storage.sync] §16.6 FINALIZED on acceptance proof: commitment={short}.. tx={}",
-            proposal.tx_id
+        Err(e) => log::error!(
+            "[storage.sync] §16.6 atomic finalization failed for {short}.. — NOTHING \
+             committed, retries from the durable outbox row: {e}"
         ),
-        Ok(false) => log::info!("[storage.sync] §16.6 proposal {short}.. already terminal"),
-        Err(e) => log::error!("[storage.sync] §16.6 proposal finalize failed for {short}..: {e}"),
     }
 }
 
@@ -2043,188 +2071,49 @@ impl AppRouterImpl {
                                 log::warn!("[storage.sync] §16.6 reply delivery sweep errored (non-fatal): {e}");
                             }
 
-                            // §5.4 Outbox sweep: runs on EVERY storage.sync poll, regardless
-                            // of whether new inbox items were pulled. The sender holds a pending
-                            // online outbox entry until the recipient's ACK is confirmed on b0x.
-                            // Without this sweep (previously gated behind `!all_items.is_empty()`),
-                            // the sender's canonical tip never advanced in the common case where
-                            // the sender had no further inbound traffic after its own send, which
-                            // broke subsequent BLE handshakes with the recipient.
-                            if let Ok(pending_entries) =
-                                crate::storage::client_db::get_all_pending_online_outbox()
+                            // §5.4 RETIRED AS PROTOCOL AUTHORITY — TRANSPORT GC ONLY.
+                            //
+                            // This sweep used to advance the projection tip, promote the
+                            // Local cert head, finalize the proposal and release the gate,
+                            // all keyed off a storage-node ACK. It no longer touches any of
+                            // them. The verified countersigned acceptance artifact is the
+                            // sole finalization authority and commits that whole sequence in
+                            // ONE transaction (`finalize_on_acceptance_atomically`).
+                            //
+                            // An ACK is a TRANSPORT fact: a node observed the recipient
+                            // consume its spooled copy. It carries no evidence the recipient
+                            // ACCEPTED the transfer, so it may never mutate canonical,
+                            // projection, proposal, gate, or certificate state. What remains
+                            // is collection: outbox rows the finalizer already moved to
+                            // `gc_pending`, whose wire copies are now consumed.
+                            if let Ok(collectable) =
+                                crate::storage::client_db::gc_pending_sender_outbox()
                             {
-                                for pending in &pending_entries {
-                                    let pending_next: Option<[u8; 32]> =
-                                        pending.next_tip.as_slice().try_into().ok();
-                                    let current_tip =
-                                        crate::storage::client_db::get_contact_chain_tip_raw(
-                                            &pending.counterparty_device_id,
-                                        );
-
-                                    let pending_parent: Option<[u8; 32]> =
-                                        pending.parent_tip.as_slice().try_into().ok();
-                                    // Per Tripwire, only consider the gate already-advanced
-                                    // if current_tip exactly equals pending.next_tip.
-                                    let already_advanced = match (current_tip, pending_next) {
-                                        (Some(ct), Some(pn)) => ct == pn,
-                                        _ => false,
-                                    };
-
-                                    let gate_parent: [u8; 32] = pending_parent.unwrap_or([0u8; 32]);
-                                    let gate_next: [u8; 32] = pending_next.unwrap_or([0u8; 32]);
-                                    let cp_arr: [u8; 32] = match pending
-                                        .counterparty_device_id
-                                        .as_slice()
-                                        .try_into()
-                                    {
-                                        Ok(a) => a,
-                                        Err(_) => {
-                                            continue;
-                                        }
-                                    };
-                                    let observed_gate = crate::storage::client_db::bilateral_tip_sync::ObservedPendingGate {
-                                        counterparty_device_id: cp_arr,
-                                        parent_tip: gate_parent,
-                                        next_tip: gate_next,
-                                    };
-
-                                    if already_advanced {
-                                        log::info!(
-                                            "[storage.sync] §5.4 sweep: outbox gate stale (tip advanced); clearing for counterparty {:02x}{:02x}{:02x}{:02x}...",
-                                            pending.counterparty_device_id[0], pending.counterparty_device_id[1],
-                                            pending.counterparty_device_id[2], pending.counterparty_device_id[3],
-                                        );
-                                        if let Some(ct) = current_tip {
-                                            let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                                                counterparty_device_id: cp_arr,
-                                                expected_parent_tip: ct,
-                                                target_tip: ct,
-                                                observed_gate: Some(observed_gate),
-                                                clear_gate_on_success: true,
-                                            };
-                                            if crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request).is_ok() {
-                                                emit_authoritative_wallet_refresh();
-                                            }
-                                        } else if crate::storage::client_db::clear_pending_online_outbox_if_matches(
-                                            &pending.counterparty_device_id,
-                                            &gate_parent,
-                                            &gate_next,
-                                        )
-                                        .is_ok()
-                                        {
-                                            emit_authoritative_wallet_refresh();
-                                        }
-                                        // §11.1 lockstep: tip already at next ⇒ this transfer was
-                                        // accepted (in this or a prior cycle) — promote the pending
-                                        // Local cert head now (idempotent no-op if already promoted).
-                                        let rel_key =
-                                            dsm::verification::smt_replace_witness::compute_smt_key(
-                                                &self.device_id_bytes,
-                                                &cp_arr,
-                                            );
-                                        let _ = crate::storage::client_db::promote_pending_local_head_by_relationship(&rel_key);
+                                for row in &collectable {
+                                    let Some(message_id) = row.message_ids.as_deref() else {
+                                        // No wire id was ever bound — nothing spooled to collect.
                                         continue;
-                                    }
-
-                                    // Network path: check ACK via storage nodes
-                                    match b0x_sdk.is_message_acknowledged(&pending.message_id).await
-                                    {
-                                        Ok(true) => {
-                                            log::info!(
-                                                "[storage.sync] §5.4 sweep: message {} ACKed; finalizing tip atomically",
-                                                pending.message_id,
-                                            );
-                                            // §16.6 PROPOSAL AUTHORITY: finalization requires the
-                                            // persisted sender proposal for this wire identity, and
-                                            // the gate must match its projection pair. A gate with
-                                            // no (or divergent) proposal is fail-closed — the legacy
-                                            // repair sweep materializes proposals for pre-proposal
-                                            // gates from canonical BCR evidence.
-                                            let ack_proposal = match crate::storage::client_db::get_sender_proposal_by_message_id(&pending.message_id) {
-                                                Ok(Some(p)) => p,
-                                                Ok(None) => {
-                                                    log::error!("[storage.sync] §5.4 sweep: ACKed message {} has NO sender proposal — fail closed, gate retained (repair sweep should materialize it)", pending.message_id);
-                                                    continue;
-                                                }
-                                                Err(e) => {
-                                                    log::warn!("[storage.sync] §5.4 sweep: proposal lookup failed for {}: {} — gate retained", pending.message_id, e);
-                                                    continue;
-                                                }
-                                            };
-                                            if pending.parent_tip.as_slice()
-                                                != ack_proposal.projection_parent.as_slice()
-                                                || pending.next_tip.as_slice()
-                                                    != ack_proposal.projection_target.as_slice()
-                                            {
-                                                log::error!("[storage.sync] §5.4 sweep: gate for {} diverges from its proposal's projection pair — fail closed, gate retained", pending.message_id);
-                                                mark_contact_needs_online_reconcile_and_refresh(
-                                                    &pending.counterparty_device_id,
-                                                );
-                                                continue;
-                                            }
-                                            match (
-                                                pending_next,
-                                                <[u8; 32]>::try_from(pending.parent_tip.as_slice()),
-                                            ) {
-                                                (Some(pn), Ok(parent)) => {
-                                                    let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                                                        counterparty_device_id: cp_arr,
-                                                        expected_parent_tip: parent,
-                                                        target_tip: pn,
-                                                        observed_gate: Some(observed_gate),
-                                                        clear_gate_on_success: true,
-                                                    };
-                                                    match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                                                        Ok(outcome) => match outcome {
-                                                            crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
-                                                            | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
-                                                            | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {
-                                                                log::info!("[storage.sync] §5.4 sweep: tip advanced and gate cleared for {}", pending.message_id);
-                                                                // §11.1 lockstep: the receiver ACKed acceptance —
-                                                                // NOW promote the sender's pending Local cert head
-                                                                // into cert_chain_heads (idempotent). Until this
-                                                                // point the committed head stayed put, so an
-                                                                // unaccepted transfer never advanced the chain.
-                                                                let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
-                                                                    &self.device_id_bytes,
-                                                                    &cp_arr,
-                                                                );
-                                                                let _ = crate::storage::client_db::promote_pending_local_head_by_relationship(&rel_key);
-                                                                if let Ok(true) = crate::storage::client_db::mark_sender_proposal_finalized(&pending.message_id) {
-                                                                    log::info!("[storage.sync] §16.6 sender proposal finalized for {}", pending.message_id);
-                                                                }
-                                                                emit_authoritative_wallet_refresh();
-                                                            }
-                                                            _ => {
-                                                                log::warn!("[storage.sync] §5.4 sweep: ParentConsumed for message {}; gate retained", pending.message_id);
-                                                                mark_contact_needs_online_reconcile_and_refresh(&pending.counterparty_device_id);
-                                                            }
-                                                        },
-                                                        Err(e) => {
-                                                            log::warn!("[storage.sync] §5.4 sweep: finalize failed for {}: {}; gate retained", pending.message_id, e);
-                                                        }
-                                                    }
-                                                }
-                                                _ => {
-                                                    log::warn!(
-                                                        "[storage.sync] §5.4 sweep: missing next_tip or malformed parent_tip for {}; gate retained",
-                                                        pending.message_id,
-                                                    );
-                                                }
-                                            };
-                                        }
-                                        Ok(false) => {
-                                            log::debug!(
-                                                "[storage.sync] §5.4 sweep: message {} not yet ACKed",
-                                                pending.message_id,
-                                            );
-                                        }
-                                        Err(e) => {
-                                            log::debug!(
-                                                "[storage.sync] §5.4 sweep: ACK check failed for {}: {}",
-                                                pending.message_id, e,
-                                            );
-                                        }
+                                    };
+                                    match b0x_sdk.is_message_acknowledged(message_id).await {
+                                        Ok(true) => match crate::storage::client_db::set_sender_outbox_status(
+                                            &row.relationship_key,
+                                            &row.canonical_parent,
+                                            &row.proposal_nonce,
+                                            crate::storage::client_db::OUTBOX_COMPLETE,
+                                        ) {
+                                            Ok(_) => log::info!(
+                                                "[storage.sync] §5.4 GC: {message_id} consumed by the recipient; outbox row complete"
+                                            ),
+                                            Err(e) => log::warn!(
+                                                "[storage.sync] §5.4 GC: could not mark {message_id} complete: {e}"
+                                            ),
+                                        },
+                                        Ok(false) => log::debug!(
+                                            "[storage.sync] §5.4 GC: {message_id} still spooled; retaining the outbox row"
+                                        ),
+                                        Err(e) => log::debug!(
+                                            "[storage.sync] §5.4 GC: ACK check failed for {message_id}: {e}"
+                                        ),
                                     }
                                 }
                             }

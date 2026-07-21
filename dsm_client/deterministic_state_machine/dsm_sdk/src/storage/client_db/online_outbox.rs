@@ -346,6 +346,26 @@ pub fn clear_pending_online_outbox(counterparty_device_id: &[u8]) -> Result<()> 
 /// concurrent online send.
 ///
 /// Returns `Ok(true)` if the exact row was deleted, `Ok(false)` if no match.
+/// Exact-match gate delete INSIDE a caller-owned transaction (§16.6 defect 1).
+pub fn clear_pending_online_outbox_if_matches_with_conn(
+    conn: &Connection,
+    counterparty_device_id: &[u8],
+    expected_parent_tip: &[u8],
+    expected_next_tip: &[u8],
+) -> Result<bool> {
+    if counterparty_device_id.len() != 32
+        || expected_parent_tip.len() != 32
+        || expected_next_tip.len() != 32
+    {
+        return Err(anyhow!("Invalid identifier length for gate clear"));
+    }
+    let rows = conn.execute(
+        "DELETE FROM pending_online_outbox WHERE counterparty_device_id = ?1 AND parent_tip = ?2 AND next_tip = ?3",
+        params![counterparty_device_id, expected_parent_tip, expected_next_tip],
+    )?;
+    Ok(rows > 0)
+}
+
 pub fn clear_pending_online_outbox_if_matches(
     counterparty_device_id: &[u8],
     expected_parent_tip: &[u8],

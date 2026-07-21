@@ -391,6 +391,66 @@ pub fn cas_advance_local_cert_chain_head_with_sk(
 /// one). Same semantics as [`cas_advance_local_cert_chain_head_with_sk`]:
 /// advance only if current == `expected_current` (or genesis when `None`);
 /// already-at-`new_pubkey` is idempotent; a third value is a fail-closed Conflict.
+/// CAS-advance the Counterparty head INSIDE a caller-owned transaction
+/// (§16.6 defect 1 — acceptance finalization is one transaction).
+///
+/// Same semantics as [`cas_advance_counterparty_cert_chain_head`]: advance only
+/// if current == expected; target already present ⇒ done; any third value ⇒
+/// fail closed.
+pub fn cas_advance_counterparty_cert_chain_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    expected_current: Option<&[u8]>,
+    new_pubkey: &[u8],
+) -> Result<CasHeadOutcome> {
+    if let Some(expected) = expected_current {
+        let now = tick() as i64;
+        let updated = conn.execute(
+            "UPDATE cert_chain_heads
+             SET chain_head_pubkey = ?1, step_count = step_count + 1, updated_at = ?2
+             WHERE relationship_key = ?3 AND side = 1 AND chain_head_pubkey = ?4",
+            params![new_pubkey, now, relationship_key.as_slice(), expected],
+        )?;
+        if updated == 1 {
+            let step: i64 = conn
+                .query_row(
+                    "SELECT step_count FROM cert_chain_heads WHERE relationship_key = ?1 AND side = 1",
+                    params![relationship_key.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            return Ok(CasHeadOutcome::Advanced { step: step as u64 });
+        }
+    }
+
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 1",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match current {
+        Some(cur) if cur.as_slice() == new_pubkey => Ok(CasHeadOutcome::AlreadyAtTarget),
+        Some(cur) => Ok(CasHeadOutcome::Conflict { current: Some(cur) }),
+        None => {
+            if expected_current.is_some() {
+                return Ok(CasHeadOutcome::Conflict { current: None });
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO cert_chain_heads
+                    (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
+                     step_count, updated_at)
+                 VALUES (?1, 1, ?2, NULL, 0, ?3)",
+                params![relationship_key.as_slice(), new_pubkey, tick() as i64],
+            )?;
+            Ok(CasHeadOutcome::GenesisInit)
+        }
+    }
+}
+
 pub fn cas_advance_counterparty_cert_chain_head(
     relationship_key: &[u8; 32],
     expected_current: Option<&[u8]>,
@@ -663,6 +723,21 @@ pub fn promote_pending_local_head(
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let tx = conn.transaction()?;
+    let step = promote_pending_local_head_with_conn(&tx, relationship_key, commitment_hash)?;
+    tx.commit()?;
+    Ok(step)
+}
+
+/// Same promotion, INSIDE a caller-owned transaction (§16.6 defect 1).
+///
+/// Keyed by COMMITMENT, not "latest for the relationship", so a retried or
+/// concurrent finalization promotes exactly the head the verified acceptance
+/// artifact names.
+pub fn promote_pending_local_head_with_conn(
+    tx: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+) -> Result<Option<u64>> {
     let row: Option<(Vec<u8>, Vec<u8>, i64)> = tx
         .query_row(
             "SELECT ek_pubkey, ek_sk_encrypted, is_init FROM pending_local_cert_heads
@@ -718,52 +793,7 @@ pub fn promote_pending_local_head(
             |r| r.get(0),
         )
         .optional()?;
-    tx.commit()?;
     Ok(step.map(|s| s as u64))
-}
-
-/// Promote the most-recent pending Local head for `relationship_key` — the
-/// online counterpart to [`promote_pending_local_head`], for callers that know
-/// the relationship (e.g. the sender's storage-sync ACK sweep, which has the
-/// counterparty but not the receipt commitment).
-///
-/// The in-flight online transfer per relationship is unique (the modal §5.4 lock
-/// admits one, and `pending_online_outbox` is keyed by counterparty), so the
-/// most-recent pending row is the one just acknowledged. Older pending rows are
-/// superseded attempts that were never accepted and are dropped. Returns the
-/// resulting step count, or `None` if no pending row exists.
-pub fn promote_pending_local_head_by_relationship(
-    relationship_key: &[u8; 32],
-) -> Result<Option<u64>> {
-    let commitment: Option<Vec<u8>> = {
-        let binding = get_connection()?;
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        conn.query_row(
-            "SELECT commitment_hash FROM pending_local_cert_heads
-             WHERE relationship_key = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![relationship_key.as_slice()],
-            |r| r.get(0),
-        )
-        .optional()?
-    };
-    let Some(commitment) = commitment else {
-        return Ok(None);
-    };
-    let commitment_arr: [u8; 32] = commitment
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("pending head commitment_hash is not 32 bytes"))?;
-    // Drop superseded (older) pending rows for this relationship before promoting.
-    {
-        let binding = get_connection()?;
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        conn.execute(
-            "DELETE FROM pending_local_cert_heads
-             WHERE relationship_key = ?1 AND commitment_hash != ?2",
-            params![relationship_key.as_slice(), commitment_arr.as_slice()],
-        )?;
-    }
-    promote_pending_local_head(relationship_key, &commitment_arr)
 }
 
 /// Drop a pending Local chain-head advance whose confirm terminally
@@ -1364,14 +1394,26 @@ mod tests {
         assert_eq!(pending_count(&r), 1, "pending row must exist");
     }
 
+    /// Promote through the commitment-keyed in-transaction path — the only
+    /// promotion path that exists. Wraps it in a transaction the way the
+    /// acceptance finalizer does.
+    fn promote_by_commitment(r: &[u8; 32], c: &[u8; 32]) -> Option<u64> {
+        let binding = get_connection().unwrap();
+        let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.transaction().unwrap();
+        let step = promote_pending_local_head_with_conn(&tx, r, c).unwrap();
+        tx.commit().unwrap();
+        step
+    }
+
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_genesis_seeds_head() {
+    fn promote_genesis_seeds_head() {
         reset_database_for_tests();
         let r = rel(0xE1);
         let wrap = [0x77u8; 32];
         stash_pending_local_head(&r, &commit(1), &ek(1), &[0x55u8; 128], &wrap, true).unwrap();
-        let step = promote_pending_local_head_by_relationship(&r).unwrap();
+        let step = promote_by_commitment(&r, &commit(1));
         assert_eq!(step, Some(0), "genesis promote makes EK the step-0 head");
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
@@ -1384,17 +1426,14 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_steady_state_bumps_step() {
+    fn promote_steady_state_bumps_step() {
         reset_database_for_tests();
         let r = rel(0xE2);
         let wrap = [0x77u8; 32];
         let ak = vec![0xA0u8; 64];
         init_cert_chain_head(&r, CertChainSide::Local, &ak).unwrap();
         stash_pending_local_head(&r, &commit(1), &ek(1), &[0x55u8; 128], &wrap, false).unwrap();
-        assert_eq!(
-            promote_pending_local_head_by_relationship(&r).unwrap(),
-            Some(1)
-        );
+        assert_eq!(promote_by_commitment(&r, &commit(1)), Some(1));
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
                 .unwrap()
@@ -1406,15 +1445,13 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_none_leaves_head_unchanged() {
+    fn promote_none_leaves_head_unchanged() {
         // Lost PREPARE / no stash: nothing to promote, committed head untouched.
         reset_database_for_tests();
         let r = rel(0xE3);
         let ak = vec![0xA0u8; 64];
         init_cert_chain_head(&r, CertChainSide::Local, &ak).unwrap();
-        assert!(promote_pending_local_head_by_relationship(&r)
-            .unwrap()
-            .is_none());
+        assert!(promote_by_commitment(&r, &commit(1)).is_none());
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
                 .unwrap()
@@ -1445,22 +1482,17 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn promote_twice_is_idempotent_no_double_advance() {
-        // Duplicate acceptance ACK must not double-advance the committed head.
+        // A redelivered acceptance artifact must not double-advance the head.
         reset_database_for_tests();
         let r = rel(0xE5);
         let wrap = [0x77u8; 32];
         let ak = vec![0xA0u8; 64];
         init_cert_chain_head(&r, CertChainSide::Local, &ak).unwrap();
         stash_pending_local_head(&r, &commit(1), &ek(1), &[0x55u8; 128], &wrap, false).unwrap();
-        assert_eq!(
-            promote_pending_local_head_by_relationship(&r).unwrap(),
-            Some(1)
-        );
+        assert_eq!(promote_by_commitment(&r, &commit(1)), Some(1));
         assert!(
-            promote_pending_local_head_by_relationship(&r)
-                .unwrap()
-                .is_none(),
-            "second promote finds no pending row"
+            promote_by_commitment(&r, &commit(1)).is_none(),
+            "second promote of the same commitment finds no pending row"
         );
         let h = load_cert_chain_head(&r, CertChainSide::Local)
             .unwrap()
@@ -1471,10 +1503,11 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_clears_superseded_no_double_advance() {
-        // Multiple retry attempts each stash a pending head. A single acceptance
-        // promotes exactly one step and clears all pending rows (no double-spend
-        // of chain steps from superseded attempts).
+    fn promote_advances_only_its_own_attempt() {
+        // Commitment keying replaced "promote whatever is latest". An acceptance
+        // names exactly one commitment and advances exactly that one step — a
+        // pending row belonging to a different attempt is neither promoted nor
+        // silently destroyed by this call.
         reset_database_for_tests();
         let r = rel(0xE6);
         let wrap = [0x77u8; 32];
@@ -1484,15 +1517,21 @@ mod tests {
         stash_pending_local_head(&r, &commit(2), &ek(2), &[0x55u8; 128], &wrap, false).unwrap();
         assert_eq!(pending_count(&r), 2);
         assert_eq!(
-            promote_pending_local_head_by_relationship(&r).unwrap(),
+            promote_by_commitment(&r, &commit(1)),
             Some(1),
-            "exactly one advance regardless of how many attempts were stashed"
+            "exactly one advance, and it is the named commitment's"
         );
-        assert_eq!(pending_count(&r), 0, "all pending rows cleared");
         let h = load_cert_chain_head(&r, CertChainSide::Local)
             .unwrap()
             .unwrap();
         assert_eq!(h.step_count, 1);
+        assert_eq!(h.chain_head_pubkey, ek(1), "promoted the NAMED attempt");
+        assert_eq!(
+            pending_count(&r),
+            1,
+            "the other attempt's row is left for its own acceptance or an \
+             explicit drop — never collaterally promoted"
+        );
     }
 
     // ---------------------------------------------------------------------

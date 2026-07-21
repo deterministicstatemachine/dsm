@@ -243,6 +243,122 @@ pub fn commit_send_prerequisites_atomically(
     Ok(())
 }
 
+/// §16.6 DEFECT 1 — ATOMIC ACCEPTANCE-PROOF FINALIZATION.
+///
+/// The verified countersigned acceptance artifact is the SOLE protocol
+/// authority for finalizing an online send. This performs, as ONE literal
+/// SQLite transaction:
+///
+///   1. advance the projection tip (chain_tip = local_bilateral_chain_tip)
+///   2. promote the pending Local EK head (keyed by commitment)
+///   3. CAS-advance the Counterparty EK head to the recipient's `ek_pk_b`
+///   4. finalize the proposal
+///   5. release the gate
+///   6. mark the outbox `gc_pending`
+///
+/// WHY ONE TRANSACTION. The previous design did (4) and (5) in one place and
+/// left (1) and (2) to a separate ACK sweep keyed on the gate that (5) had just
+/// deleted — so the remainder became permanently unreachable and every SECOND
+/// transfer on a relationship failed: the projection tip never advanced, and
+/// the sender re-chained from its root AK (`used_root_ak=true`). Splitting this
+/// sequence is exactly what caused that regression, so it is not split.
+///
+/// The outbox row deliberately SURVIVES as `gc_pending` — it is the durable
+/// record the transport-GC sweep keys on. Only the gate (a concurrency lock) is
+/// deleted here.
+///
+/// Idempotent: a redelivered acceptance finds the proposal already finalized
+/// and the heads already at target, and commits the same terminal state.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_on_acceptance_atomically(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+    proposal_nonce: &[u8; 32],
+    commitment: &[u8; 32],
+    counterparty_device_id: &[u8; 32],
+    projection_parent: &[u8; 32],
+    projection_target: &[u8; 32],
+    expected_counterparty_head: Option<&[u8]>,
+    new_counterparty_head: &[u8],
+) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let tx = conn.transaction()?;
+
+    // (1) Projection tip: chain_tip and local_bilateral_chain_tip converge on
+    // the target. This is the step whose absence stranded transfer #2 behind a
+    // "divergent local bilateral chain tip" rejection.
+    let request = super::bilateral_tip_sync::TipSyncRequest {
+        counterparty_device_id: *counterparty_device_id,
+        expected_parent_tip: *projection_parent,
+        target_tip: *projection_target,
+        observed_gate: None,
+        clear_gate_on_success: false,
+    };
+    match super::bilateral_tip_sync::sync_tip_projections_in_tx(&tx, &request, None)? {
+        super::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+        | super::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+        | super::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
+        other => {
+            return Err(anyhow!(
+                "acceptance finalization: projection tip refused to converge ({other:?}) — \
+                 aborting the whole finalization"
+            ));
+        }
+    }
+
+    // (2) Local EK head, keyed by the commitment the artifact names.
+    super::cert_chain::promote_pending_local_head_with_conn(&tx, relationship_key, commitment)?;
+
+    // (3) Counterparty EK head. AlreadyAtTarget counts as success ONLY because
+    // it means the persisted value already equals this proposal's expected
+    // result; any third value is a Conflict and aborts.
+    match super::cert_chain::cas_advance_counterparty_cert_chain_head_with_conn(
+        &tx,
+        relationship_key,
+        expected_counterparty_head,
+        new_counterparty_head,
+    )? {
+        super::cert_chain::CasHeadOutcome::Advanced { .. }
+        | super::cert_chain::CasHeadOutcome::GenesisInit
+        | super::cert_chain::CasHeadOutcome::AlreadyAtTarget => {}
+        super::cert_chain::CasHeadOutcome::Conflict { current } => {
+            return Err(anyhow!(
+                "acceptance finalization: counterparty head conflict (current={:?}..) — \
+                 aborting",
+                current.as_ref().map(|c| &c[..4.min(c.len())])
+            ));
+        }
+    }
+
+    // (4) Proposal terminal.
+    super::sender_proposal::mark_sender_proposal_finalized_by_canonical_with_conn(
+        &tx,
+        relationship_key,
+        canonical_parent,
+    )?;
+
+    // (5) Release the gate (a concurrency lock, not the durable record).
+    super::online_outbox::clear_pending_online_outbox_if_matches_with_conn(
+        &tx,
+        counterparty_device_id,
+        projection_parent,
+        projection_target,
+    )?;
+
+    // (6) Outbox survives as the GC-driving record.
+    set_sender_outbox_status_with_conn(
+        &tx,
+        relationship_key,
+        canonical_parent,
+        proposal_nonce,
+        OUTBOX_GC_PENDING,
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
 /// Look up by the finalization identity (the receipt commitment).
 pub fn get_sender_outbox_by_commitment(
     commitment: &[u8; 32],
@@ -436,6 +552,282 @@ mod tests {
         let binding = crate::storage::client_db::get_connection().expect("conn");
         let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
         f(&conn)
+    }
+
+    // =====================================================================
+    // §16.6 DEFECT 1 — the finalization must be ONE transaction.
+    //
+    // These build a complete pre-finalization world (contact at the projection
+    // parent, gate, proposal, pending Local EK head, submitted outbox row) and
+    // then assert the six mutations land together or not at all.
+    // =====================================================================
+
+    const CP: [u8; 32] = [0x99u8; 32];
+    const T0: [u8; 32] = [0xAAu8; 32];
+    const T1: [u8; 32] = [0xBBu8; 32];
+    const EK_B: [u8; 8] = [0xB0u8; 8];
+
+    /// Seed everything a send leaves behind just before its acceptance lands.
+    fn seed_pre_finalization(r: &SenderOutboxRecord) {
+        with_conn(|c| {
+            c.execute(
+                "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, chain_tip,
+                     added_at, verified, status, needs_online_reconcile,
+                     last_seen_online_counter, last_seen_ble_counter, local_bilateral_chain_tip)
+                 VALUES ('c1', ?1, 'peer', X'00', ?2, 0, 1, 'active', 0, 0, 0, ?2)",
+                rusqlite::params![&CP[..], &T0[..]],
+            )
+            .expect("seed contact");
+        });
+        // Faithful ordering: at send time BOTH tips sit at the projection
+        // parent. The gate write is what moves `local_bilateral_chain_tip` to
+        // the target, leaving the asymmetry (chain_tip=T0, local=T1) that
+        // finalization must resolve.
+        crate::storage::client_db::record_pending_online_transition(&CP, "MSGID", &T0, &T1)
+            .expect("seed gate");
+        let proposal = crate::storage::client_db::SenderOnlineProposal {
+            relationship_key: r.relationship_key,
+            canonical_parent: r.canonical_parent,
+            canonical_child: r.canonical_child,
+            projection_parent: T0,
+            projection_target: T1,
+            commitment: r.commitment,
+            operation_digest: [0x5Au8; 32],
+            nonce_hash: r.proposal_nonce,
+            message_id: None,
+            tx_id: "tx-1".into(),
+            counterparty_device_id: CP,
+            amount: 15,
+            token_id: "ERA".into(),
+            status: crate::storage::client_db::PROPOSAL_PROPOSED.into(),
+            created_at: 0,
+        };
+        crate::storage::client_db::insert_sender_proposal(&proposal).expect("seed proposal");
+        crate::storage::client_db::mark_sender_proposal_submitted(
+            &r.relationship_key,
+            &r.canonical_parent,
+            "MSGID",
+        )
+        .expect("submit proposal");
+        crate::storage::client_db::stash_pending_local_head(
+            &r.relationship_key,
+            &r.commitment,
+            &[0xE1u8; 8],
+            &[0x55u8; 128],
+            &[0x77u8; 32],
+            true,
+        )
+        .expect("seed pending head");
+        with_conn(|c| insert_sender_outbox_with_conn(c, r)).expect("seed outbox");
+        set_sender_outbox_status(
+            &r.relationship_key,
+            &r.canonical_parent,
+            &r.proposal_nonce,
+            OUTBOX_SUBMITTED,
+        )
+        .expect("submitted");
+    }
+
+    fn tips() -> (Vec<u8>, Vec<u8>) {
+        with_conn(|c| {
+            c.query_row(
+                "SELECT chain_tip, local_bilateral_chain_tip FROM contacts WHERE device_id = ?1",
+                rusqlite::params![&CP[..]],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("tips")
+        })
+    }
+
+    fn gate_rows() -> i64 {
+        with_conn(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM pending_online_outbox WHERE counterparty_device_id = ?1",
+                rusqlite::params![&CP[..]],
+                |row| row.get(0),
+            )
+            .expect("gate count")
+        })
+    }
+
+    fn statuses(r: &SenderOutboxRecord) -> (String, String) {
+        let proposal = crate::storage::client_db::get_sender_proposal_by_commitment(&r.commitment)
+            .expect("proposal")
+            .expect("present");
+        let outbox = get_sender_outbox_by_commitment(&r.commitment)
+            .expect("outbox")
+            .expect("present");
+        (proposal.status, outbox.status)
+    }
+
+    /// The happy path: all six mutations land in one commit.
+    #[test]
+    #[serial]
+    fn finalization_commits_all_six_mutations() {
+        init_test_db();
+        let r = rec(1);
+        seed_pre_finalization(&r);
+
+        finalize_on_acceptance_atomically(
+            &r.relationship_key,
+            &r.canonical_parent,
+            &r.proposal_nonce,
+            &r.commitment,
+            &CP,
+            &T0,
+            &T1,
+            None,
+            &EK_B,
+        )
+        .expect("finalization");
+
+        let (chain_tip, local_tip) = tips();
+        assert_eq!(chain_tip, T1.to_vec(), "projection tip advanced");
+        assert_eq!(local_tip, T1.to_vec(), "both spaces converge");
+        assert_eq!(
+            crate::storage::client_db::load_cert_chain_head_pubkey(
+                &r.relationship_key,
+                crate::storage::client_db::CertChainSide::Local,
+            )
+            .unwrap()
+            .unwrap(),
+            vec![0xE1u8; 8],
+            "pending Local EK head promoted — this is what makes transfer #2 \
+             chain from the EK instead of falling back to the root AK"
+        );
+        assert_eq!(
+            crate::storage::client_db::load_cert_chain_head_pubkey(
+                &r.relationship_key,
+                crate::storage::client_db::CertChainSide::Counterparty,
+            )
+            .unwrap()
+            .unwrap(),
+            EK_B.to_vec(),
+            "counterparty head advanced to the recipient's ek_pk_b"
+        );
+        let (proposal_status, outbox_status) = statuses(&r);
+        assert_eq!(
+            proposal_status,
+            crate::storage::client_db::PROPOSAL_FINALIZED
+        );
+        assert_eq!(gate_rows(), 0, "gate released");
+        assert_eq!(
+            outbox_status, OUTBOX_GC_PENDING,
+            "the outbox row SURVIVES finalization — it is what transport GC keys on"
+        );
+    }
+
+    /// THE ATOMICITY PROOF. The counterparty-head CAS is the third of six
+    /// mutations; force it to conflict and the two that already ran (tip
+    /// advance, Local head promotion) must be gone too. If this ever passes
+    /// with a partially-advanced tip, the finalization has been split again and
+    /// the transfer-#2 defect is back in a new shape.
+    #[test]
+    #[serial]
+    fn a_failure_midway_rolls_back_the_whole_finalization() {
+        init_test_db();
+        let r = rec(2);
+        seed_pre_finalization(&r);
+        // A head already exists, so passing `None` as the expectation is a
+        // genuine CAS conflict rather than a genesis init.
+        crate::storage::client_db::init_cert_chain_head(
+            &r.relationship_key,
+            crate::storage::client_db::CertChainSide::Counterparty,
+            &[0xC0u8; 8],
+        )
+        .expect("seed counterparty head");
+
+        let err = finalize_on_acceptance_atomically(
+            &r.relationship_key,
+            &r.canonical_parent,
+            &r.proposal_nonce,
+            &r.commitment,
+            &CP,
+            &T0,
+            &T1,
+            Some(&[0xDEu8; 8]), // stale expectation — conflicts with 0xC0
+            &EK_B,
+        );
+        assert!(err.is_err(), "a conflicting head must abort finalization");
+
+        let (chain_tip, local_tip) = tips();
+        assert_eq!(chain_tip, T0.to_vec(), "tip advance ROLLED BACK");
+        assert_eq!(local_tip, T1.to_vec(), "local tip untouched");
+        assert_eq!(
+            crate::storage::client_db::load_cert_chain_head_pubkey(
+                &r.relationship_key,
+                crate::storage::client_db::CertChainSide::Local,
+            )
+            .unwrap(),
+            None,
+            "Local head promotion ROLLED BACK"
+        );
+        assert_eq!(
+            crate::storage::client_db::load_cert_chain_head_pubkey(
+                &r.relationship_key,
+                crate::storage::client_db::CertChainSide::Counterparty,
+            )
+            .unwrap()
+            .unwrap(),
+            vec![0xC0u8; 8],
+            "counterparty head unchanged"
+        );
+        let (proposal_status, outbox_status) = statuses(&r);
+        assert_eq!(
+            proposal_status,
+            crate::storage::client_db::PROPOSAL_SUBMITTED,
+            "proposal NOT finalized"
+        );
+        assert_eq!(gate_rows(), 1, "gate NOT released");
+        assert_eq!(
+            outbox_status, OUTBOX_SUBMITTED,
+            "outbox still drives a retry — the whole sequence re-runs cleanly"
+        );
+    }
+
+    /// A redelivered acceptance artifact must be a no-op, not a second advance.
+    #[test]
+    #[serial]
+    fn redelivered_acceptance_is_idempotent() {
+        init_test_db();
+        let r = rec(3);
+        seed_pre_finalization(&r);
+        let call = || {
+            finalize_on_acceptance_atomically(
+                &r.relationship_key,
+                &r.canonical_parent,
+                &r.proposal_nonce,
+                &r.commitment,
+                &CP,
+                &T0,
+                &T1,
+                None,
+                &EK_B,
+            )
+        };
+        call().expect("first finalization");
+        let head_after_first = crate::storage::client_db::load_cert_chain_head(
+            &r.relationship_key,
+            crate::storage::client_db::CertChainSide::Local,
+        )
+        .unwrap()
+        .unwrap();
+
+        call().expect("redelivery must not error");
+
+        let head_after_second = crate::storage::client_db::load_cert_chain_head(
+            &r.relationship_key,
+            crate::storage::client_db::CertChainSide::Local,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            head_after_first.step_count, head_after_second.step_count,
+            "a redelivered acceptance must NOT double-advance the cert chain"
+        );
+        assert_eq!(tips().0, T1.to_vec(), "tip stays at target");
+        let (_, outbox_status) = statuses(&r);
+        assert_eq!(outbox_status, OUTBOX_GC_PENDING);
     }
 
     /// The submission id must be a pure function of the commitment: known

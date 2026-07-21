@@ -176,18 +176,6 @@ pub fn get_sender_proposal(
         .optional()?)
 }
 
-pub fn get_sender_proposal_by_message_id(message_id: &str) -> Result<Option<SenderOnlineProposal>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(conn
-        .query_row(
-            &format!("SELECT {COLS} FROM sender_online_proposal WHERE message_id = ?1"),
-            params![message_id],
-            row_to_proposal,
-        )
-        .optional()?)
-}
-
 /// Look up the proposal a returned acceptance receipt answers.
 ///
 /// The commitment is the ONLY identifier shared by both sides of the reply
@@ -211,6 +199,25 @@ pub fn get_sender_proposal_by_commitment(
 /// Terminally finalize by canonical identity — the reply window keys off the
 /// canonical step, not the wire message id. Idempotent: a second call after
 /// finalization returns `Ok(false)`.
+/// Finalize by canonical identity INSIDE a caller-owned transaction
+/// (§16.6 defect 1). Idempotent: a second call after finalization is `false`.
+pub fn mark_sender_proposal_finalized_by_canonical_with_conn(
+    conn: &rusqlite::Connection,
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE sender_online_proposal SET status = ?3
+         WHERE relationship_key = ?1 AND canonical_parent = ?2 AND status != ?3",
+        params![
+            relationship_key.as_slice(),
+            canonical_parent.as_slice(),
+            PROPOSAL_FINALIZED
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn mark_sender_proposal_finalized_by_canonical(
     relationship_key: &[u8; 32],
     canonical_parent: &[u8; 32],
@@ -266,19 +273,6 @@ pub fn mark_sender_proposal_submitted(
         ],
     )?;
     Ok(())
-}
-
-/// Terminal transitions. `finalized` only from `submitted`; `rolled_back` from
-/// any non-finalized state.
-pub fn mark_sender_proposal_finalized(message_id: &str) -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    let n = conn.execute(
-        "UPDATE sender_online_proposal SET status = ?2
-         WHERE message_id = ?1 AND status = ?3",
-        params![message_id, PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED],
-    )?;
-    Ok(n > 0)
 }
 
 pub fn mark_sender_proposal_rolled_back(
@@ -366,13 +360,26 @@ mod tests {
             mark_sender_proposal_submitted(&p.relationship_key, &p.canonical_parent, "MSG2")
                 .is_err()
         );
-        let loaded = get_sender_proposal_by_message_id("MSG1").unwrap().unwrap();
+        // Lookup and finalization both key on PROTOCOL identity — the receipt
+        // commitment and the canonical parent. A storage message id is transport
+        // metadata and never resolves or finalizes a proposal.
+        let loaded = get_sender_proposal_by_commitment(&p.commitment)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.status, PROPOSAL_SUBMITTED);
         assert_eq!(loaded.canonical_child, p.canonical_child);
 
         // Finalize only from submitted; rolled_back refused after finalize.
-        assert!(mark_sender_proposal_finalized("MSG1").unwrap());
-        assert!(!mark_sender_proposal_finalized("MSG1").unwrap());
+        assert!(mark_sender_proposal_finalized_by_canonical(
+            &p.relationship_key,
+            &p.canonical_parent
+        )
+        .unwrap());
+        assert!(!mark_sender_proposal_finalized_by_canonical(
+            &p.relationship_key,
+            &p.canonical_parent
+        )
+        .unwrap());
         assert!(
             !mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap()
         );
