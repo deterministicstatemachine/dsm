@@ -25,7 +25,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use rand::rngs::OsRng;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use crate::util::deterministic_time::tick;
@@ -544,9 +544,95 @@ pub fn stash_pending_local_head(
     chain_head_wrap_key: &[u8; 32],
     is_init: bool,
 ) -> Result<()> {
-    let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    stash_pending_local_head_with_conn(
+        &conn,
+        relationship_key,
+        commitment_hash,
+        ek_pubkey,
+        ek_secret_key,
+        chain_head_wrap_key,
+        is_init,
+    )
+}
+
+/// Same stash, INSIDE a caller-owned transaction.
+///
+/// §16.6 defect zero: the pending EK head is committed together with the
+/// canonical advance so a signed-but-unrecorded step cannot exist. Takes
+/// `&Connection` (a `&Transaction` derefs to one) and never calls
+/// `get_connection()` — the advance already holds the global connection mutex.
+///
+/// EXPECTED-PREVIOUS-HEAD CAS: the caller passes the Local head it snapshotted
+/// *before* signing. If the committed head has moved since (the async
+/// acceptance finalizer also advances heads), this fails closed so the whole
+/// advance transaction aborts — nothing is written and nothing is deliverable.
+/// `expected_prev == None` is honoured only when `is_first_ek_step` is true;
+/// an unexplained `None` is never treated as genesis.
+#[allow(clippy::too_many_arguments)]
+pub fn stash_pending_local_head_cas_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+    ek_pubkey: &[u8],
+    ek_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+    is_init: bool,
+    expected_prev: Option<&[u8]>,
+    is_first_ek_step: bool,
+) -> Result<()> {
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 0",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    match (current.as_deref(), expected_prev) {
+        (None, None) if is_first_ek_step => {}
+        (None, None) => {
+            return Err(anyhow!(
+                "pending EK head CAS: no Local head and no expectation, but the proposal does \
+                 not declare this the first EK step — refusing to treat an unexplained absence \
+                 as genesis"
+            ));
+        }
+        (Some(now), Some(expected)) if now == expected => {}
+        (now, expected) => {
+            return Err(anyhow!(
+                "pending EK head CAS failed: Local head moved between signing and commit \
+                 (current={:?}.., expected={:?}..) — aborting before anything is deliverable",
+                now.map(|b| &b[..4.min(b.len())]),
+                expected.map(|b| &b[..4.min(b.len())]),
+            ));
+        }
+    }
+
+    stash_pending_local_head_with_conn(
+        conn,
+        relationship_key,
+        commitment_hash,
+        ek_pubkey,
+        ek_secret_key,
+        chain_head_wrap_key,
+        is_init,
+    )
+}
+
+/// Stash without the CAS (BLE path, and the inner half of the CAS variant).
+pub fn stash_pending_local_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+    ek_pubkey: &[u8],
+    ek_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+    is_init: bool,
+) -> Result<()> {
+    let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
     let now = tick() as i64;
     conn.execute(
         "INSERT OR REPLACE INTO pending_local_cert_heads
@@ -1407,5 +1493,125 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(h.step_count, 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // §16.6 defect zero — pending EK head CAS.
+    //
+    // Signing must happen OUTSIDE the advance transaction (the signer reads
+    // cert heads through its own connection), which opens a window between
+    // reading the Local head and committing the pending one. The async
+    // acceptance finalizer also advances heads. If that race is lost, the
+    // send must abort BEFORE the canonical advance commits — because after
+    // that point a message becomes deliverable and rollback is forbidden.
+    // ---------------------------------------------------------------------
+
+    const WRAP: [u8; 32] = [0x5Au8; 32];
+
+    fn with_conn<T>(f: impl FnOnce(&Connection) -> T) -> T {
+        let binding = crate::storage::client_db::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+        f(&conn)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cas_accepts_an_unchanged_head_and_a_declared_first_step() {
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let r = rel(0xC1);
+
+        // First EK step: no Local head exists, and the proposal SAYS so.
+        with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x01u8; 32],
+                &[0xAAu8; 64],
+                &[0xBBu8; 64],
+                &WRAP,
+                true,
+                None,
+                /* is_first_ek_step */ true,
+            )
+        })
+        .expect("declared first step with no head must be accepted");
+
+        // Now a committed head exists; a matching expectation must pass.
+        init_local_cert_chain_head_with_sk(&r, &[0xAAu8; 64], &[0xBBu8; 64], &WRAP).unwrap();
+        with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x02u8; 32],
+                &[0xCCu8; 64],
+                &[0xDDu8; 64],
+                &WRAP,
+                false,
+                Some(&[0xAAu8; 64]),
+                false,
+            )
+        })
+        .expect("unchanged head must be accepted");
+    }
+
+    /// THE RACE: the head moved between signing and commit.
+    #[test]
+    #[serial_test::serial]
+    fn cas_fails_closed_when_the_head_moved_after_signing() {
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let r = rel(0xC2);
+        init_local_cert_chain_head_with_sk(&r, &[0x11u8; 64], &[0x22u8; 64], &WRAP).unwrap();
+
+        // Sender snapshotted 0x11.., signed, and meanwhile the finalizer
+        // advanced the head to 0x99...
+        advance_local_cert_chain_head_with_sk(&r, &[0x99u8; 64], &[0x88u8; 64], &WRAP).unwrap();
+
+        let err = with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x03u8; 32],
+                &[0xEEu8; 64],
+                &[0xFFu8; 64],
+                &WRAP,
+                false,
+                Some(&[0x11u8; 64]),
+                false,
+            )
+        })
+        .expect_err("a moved head must abort the send before anything is deliverable");
+        assert!(err.to_string().contains("CAS failed"), "unexpected: {err}");
+    }
+
+    /// An unexplained absence must never be silently read as genesis — that is
+    /// how a second EK step would quietly re-chain from the root AK.
+    #[test]
+    #[serial_test::serial]
+    fn cas_refuses_to_treat_an_unexplained_absence_as_genesis() {
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let r = rel(0xC3);
+
+        let err = with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x04u8; 32],
+                &[0x0Au8; 64],
+                &[0x0Bu8; 64],
+                &WRAP,
+                false,
+                None,
+                /* is_first_ek_step */ false,
+            )
+        })
+        .expect_err("absent head + no expectation + not-first-step must fail closed");
+        assert!(
+            err.to_string()
+                .contains("does not declare this the first EK step"),
+            "unexpected: {err}"
+        );
     }
 }

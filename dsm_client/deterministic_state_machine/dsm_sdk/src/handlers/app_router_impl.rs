@@ -268,6 +268,23 @@ pub(crate) fn build_testnet_faucet_policy() -> PolicyFile {
     policy
 }
 
+/// §16.6 defect zero: per-step EK material captured at signing time and written
+/// LATER, inside the single pre-submit transaction.
+///
+/// `expected_prev` is the committed Local cert head as it stood BEFORE signing.
+/// The acceptance finalizer also advances cert heads, so the durable write CASes
+/// against this snapshot: if the head moved in between, the whole commit aborts
+/// while nothing has been sent yet — the only point at which losing that race is
+/// still free.
+struct PendingEkMaterial {
+    ek_pk: Vec<u8>,
+    ek_sk: Vec<u8>,
+    at_rest_key: [u8; 32],
+    is_init: bool,
+    expected_prev: Option<Vec<u8>>,
+    is_first_ek_step: bool,
+}
+
 struct OnlineTransferRollback<'a> {
     smt_key: &'a [u8; 32],
     parent_chain_tip: &'a [u8; 32],
@@ -1407,6 +1424,10 @@ impl AppRouterImpl {
         // first-ever relationship advance, the internal seed step changes the
         // Merkle preimage before `smt_replace`, so the parent proof verifies
         // against `smt_proofs.pre_root`, not `parent_r_a`.
+        // §16.6 defect zero: EK material captured during signing, written later
+        // inside the single pre-submit transaction (see PendingEkMaterial).
+        #[allow(unused_assignments)]
+        let mut pending_ek_material: Option<PendingEkMaterial> = None;
         let (receipt_commit_bytes, receipt_canonical_bytes) = {
             let pre_proof_bytes = advance_outcome.smt_proofs.parent_proof.to_bytes();
             let post_proof_bytes = advance_outcome.smt_proofs.child_proof.to_bytes();
@@ -1501,17 +1522,43 @@ impl AppRouterImpl {
                         let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                             Ok(kp) => kp,
                             Err(e) => {
+                                // The canonical advance has ALREADY happened at this
+                                // point, so bailing out without unwinding it would
+                                // strand a debit and leave the relationship's modal
+                                // lock held (blocking every later send). Every
+                                // neighbouring arm rolls back; this one used to just
+                                // return.
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
                                 return err(format!(
-                                    "wallet.send: AK keypair unavailable for cert chain: {e}"
+                                    "wallet.send: AK keypair unavailable for cert chain: {e}{rollback_error}"
                                 ));
                             }
                         };
 
+                        // §16.6 defect zero: snapshot the committed Local cert head
+                        // BEFORE signing. Signing must run outside the durable
+                        // transaction (it reads cert heads through its own
+                        // connection), so this snapshot is what the later CAS
+                        // compares against to detect the acceptance finalizer moving
+                        // the head underneath us.
+                        //
                         // Compute relationship_key for chain head lookup.
                         let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
                             &receipt.devid_a,
                             &receipt.devid_b,
                         );
+                        let local_head_before_signing =
+                            crate::storage::client_db::load_cert_chain_head_pubkey(
+                                &rel_key,
+                                crate::storage::client_db::CertChainSide::Local,
+                            )
+                            .ok()
+                            .flatten();
 
                         // Per-step Kyber per whitepaper §11: encapsulate
                         // against the recipient's Kyber pubkey to derive
@@ -1590,24 +1637,21 @@ impl AppRouterImpl {
                                 // the sender's committed head unchanged for a transfer
                                 // that is never accepted, so a failed/timed-out attempt
                                 // cannot run the chain ahead of the receiver.
-                                if let Err(e) = crate::storage::client_db::stash_pending_local_head(
-                                    &rel_key,
-                                    &commitment,
-                                    &out.ek_pk,
-                                    &out.ek_sk,
-                                    &at_rest_key,
-                                    out.used_root_ak,
-                                ) {
-                                    let rollback_error = self
-                                        .rollback_failed_online_transfer(&rollback_request)
-                                        .await
-                                        .err()
-                                        .map(|rb| format!("; rollback failed: {rb}"))
-                                        .unwrap_or_default();
-                                    return err(format!(
-                                        "wallet.send: §11.1 pending chain head stash failed: {e}{rollback_error}"
-                                    ));
-                                }
+                                // §16.6 defect zero: the pending head is NOT written
+                                // here. It is committed in ONE transaction with the
+                                // proposal, the gate, and the durable outbox row —
+                                // before anything is submitted — so a local failure can
+                                // never strand a deliverable message against a
+                                // rolled-back debit. Carry the material forward, plus
+                                // the pre-signing head snapshot that guards the CAS.
+                                pending_ek_material = Some(PendingEkMaterial {
+                                    ek_pk: out.ek_pk.clone(),
+                                    ek_sk: out.ek_sk.clone(),
+                                    at_rest_key,
+                                    is_init: out.used_root_ak,
+                                    expected_prev: local_head_before_signing.clone(),
+                                    is_first_ek_step: out.used_root_ak,
+                                });
 
                                 match receipt.to_full_protobuf() {
                                     Ok(full_bytes) => full_bytes,
@@ -1737,17 +1781,54 @@ impl AppRouterImpl {
                 created_at: 0,
             }
         };
-        if let Err(e) = crate::storage::client_db::insert_sender_proposal(&sender_proposal) {
-            let rollback_error = self
-                .rollback_failed_online_transfer(&rollback_request)
-                .await
-                .err()
-                .map(|rb| format!("; rollback failed: {rb}"))
-                .unwrap_or_default();
-            return err(format!(
-                "wallet.send: sender proposal persistence failed: {e}{rollback_error}"
-            ));
-        }
+        // =====================================================================
+        // §16.6 DEFECT ZERO — ATOMIC PRE-SUBMIT COMMIT.
+        //
+        // Everything the transfer needs locally lands in ONE transaction BEFORE
+        // a single byte goes to the network: proposal, pending online gate,
+        // pending Local EK head (CAS'd against the pre-signing snapshot), and
+        // the durable outbox row carrying the exact submission inputs.
+        //
+        // Failing here is safe and rolls back freely — nothing has been sent.
+        // Succeeding here makes the transfer FORWARD-ONLY: from this point a
+        // quorum may accept the message at any moment, so no later failure may
+        // unwind the debit.
+        // =====================================================================
+        let ek_material = match pending_ek_material.take() {
+            Some(m) => m,
+            None => {
+                let rollback_error = self
+                    .rollback_failed_online_transfer(&rollback_request)
+                    .await
+                    .err()
+                    .map(|rb| format!("; rollback failed: {rb}"))
+                    .unwrap_or_default();
+                return err(format!(
+                    "wallet.send: per-step EK material missing before durable commit{rollback_error}"
+                ));
+            }
+        };
+
+        let submission_id =
+            crate::storage::client_db::derive_submission_id(&sender_proposal.commitment);
+
+        let mut outbox_record = crate::storage::client_db::SenderOutboxRecord {
+            relationship_key: sender_proposal.relationship_key,
+            canonical_parent: sender_proposal.canonical_parent,
+            proposal_nonce: sender_proposal.nonce_hash,
+            canonical_child: sender_proposal.canonical_child,
+            commitment: sender_proposal.commitment,
+            projection_parent: sender_proposal.projection_parent,
+            projection_target: sender_proposal.projection_target,
+            routing_address: String::new(), // bound below, before submission
+            submission_id: submission_id.clone(),
+            envelope_bytes: Vec::new(), // bound below, before submission
+            local_expected_prev: ek_material.expected_prev.clone(),
+            is_first_ek_step: ek_material.is_first_ek_step,
+            status: crate::storage::client_db::OUTBOX_PENDING_SUBMIT.to_string(),
+            message_ids: None,
+            created_at: 0,
+        };
 
         // =====================================================================
         // B0X SUBMISSION (deliver to recipient's inbox)
@@ -1886,6 +1967,10 @@ impl AppRouterImpl {
             };
 
             let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
+                // Deterministic, derived from the receipt commitment: known
+                // before the local commit and identical on every retry, so a
+                // resend collapses onto the same node spool row.
+                submission_id: Some(submission_id.clone()),
                 recipient_device_id: to_device_id_str.clone(),
                 recipient_genesis_hash: recipient_genesis_b32,
                 transaction: transfer_op,
@@ -1897,9 +1982,81 @@ impl AppRouterImpl {
                 seq,
                 next_chain_tip: Some(b0x_next_chain_tip),
                 receipt_commit: receipt_commit_bytes,
-                routing_address,
+                routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
             };
+
+            // ============================================================
+            // §16.6 DEFECT ZERO — DURABILITY BEFORE DELIVERABILITY.
+            //
+            // The submission inputs are now fully determined, so freeze them
+            // into the outbox row and commit proposal + gate + pending EK head
+            // + outbox in ONE transaction. Only after this returns Ok may a
+            // network call happen.
+            //
+            // A failure here is free: nothing has been sent, so the normal
+            // rollback applies. After it succeeds, rollback is FORBIDDEN.
+            // ============================================================
+            outbox_record.routing_address = routing_address.clone();
+
+            // Build the FINAL canonical envelope (no transmission) so the exact
+            // wire bytes — not a recipe for rebuilding them — are what gets
+            // frozen durably. A later retry replays these verbatim, so retry
+            // identity survives any future change to envelope construction.
+            let sender_b32_for_build =
+                crate::util::text_id::encode_base32_crockford(&from_device_id);
+            let prebuilt = match crate::sdk::b0x_sdk::B0xSDK::new(
+                sender_b32_for_build,
+                self.core_sdk.clone(),
+                storage_endpoints.clone(),
+            ) {
+                Ok(mut builder) => builder.build_envelope_bytes(b0x_params.clone()).await,
+                Err(e) => Err(e),
+            };
+            let (envelope_bytes, _built_msg_id) = match prebuilt {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|rb| format!("; rollback failed: {rb}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: envelope build failed (nothing sent): {e}{rollback_error}"
+                    ));
+                }
+            };
+            outbox_record.envelope_bytes = envelope_bytes.clone();
+
+            if let Err(e) = crate::storage::client_db::commit_send_prerequisites_atomically(
+                &sender_proposal,
+                &outbox_record,
+                &submission_id,
+                &ek_material.ek_pk,
+                &ek_material.ek_sk,
+                &ek_material.at_rest_key,
+                ek_material.is_init,
+            ) {
+                let rollback_error = self
+                    .rollback_failed_online_transfer(&rollback_request)
+                    .await
+                    .err()
+                    .map(|rb| format!("; rollback failed: {rb}"))
+                    .unwrap_or_default();
+                return err(format!(
+                    "wallet.send: durable pre-submit commit failed (nothing sent): {e}{rollback_error}"
+                ));
+            }
+
+            // Durably marked BEFORE entering the network call, so a crash
+            // mid-call can never leave a row that merely LOOKS pre-submit.
+            let _ = crate::storage::client_db::set_sender_outbox_status(
+                &outbox_record.relationship_key,
+                &outbox_record.canonical_parent,
+                &outbox_record.proposal_nonce,
+                crate::storage::client_db::OUTBOX_SUBMITTING,
+            );
 
             // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
             let sender_b32_for_b0x = crate::util::text_id::encode_base32_crockford(&from_device_id);
@@ -1909,11 +2066,19 @@ impl AppRouterImpl {
                 storage_endpoints,
             ) {
                 Ok(mut b0x_sdk) => {
+                    // Transmit the EXACT bytes frozen in the outbox — never a
+                    // rebuild. The deterministic submission id makes a retry
+                    // idempotent at the node.
                     let submit_result = tokio::time::timeout(
                         std::time::Duration::from_secs(10),
-                        b0x_sdk.submit_to_b0x(b0x_params),
+                        b0x_sdk.submit_stored_envelope(
+                            &envelope_bytes,
+                            &routing_address,
+                            &submission_id,
+                        ),
                     )
-                    .await;
+                    .await
+                    .map(|r| r.map(|()| submission_id.clone()));
                     match submit_result {
                         Ok(Ok(msg_id)) => {
                             log::info!("[wallet.send] ✅ Submitted to b0x: {}", msg_id);
@@ -1979,57 +2144,80 @@ impl AppRouterImpl {
         // ATOMIC ROLLBACK: If b0x delivery failed, restore canonical state,
         // shared SMT, persisted transaction/projection rows, and in-memory caches.
         // =====================================================================
+        // =====================================================================
+        // §16.6 DEFECT ZERO — FORWARD-ONLY AFTER THE DURABLE COMMIT.
+        //
+        // A submission failure here is NOT proof of non-delivery. A quorum may
+        // have accepted the envelope while the response was lost, the socket
+        // timed out, or the process was killed. Rolling the debit back on that
+        // evidence is exactly how a creditable message ends up stranded against
+        // restored funds — the live hazard this work exists to remove.
+        //
+        // So the debit, proposal, gate, pending EK head and outbox row all
+        // STAY. The row moves to `submission_uncertain` and the reconciliation
+        // sweep resubmits the byte-identical stored envelope; the node's
+        // UNIQUE(message_id) makes that idempotent.
+        // =====================================================================
         if !b0x_succeeded {
-            let rollback_error = self
-                .rollback_failed_online_transfer(&rollback_request)
-                .await
-                .err()
-                .map(|e| format!("; rollback failed: {e}"))
-                .unwrap_or_default();
-            return err(format!(
-                "wallet.send: transfer rolled back — could not deliver to recipient inbox. Check storage node connectivity.{rollback_error}"
-            ));
+            let _ = crate::storage::client_db::set_sender_outbox_status(
+                &outbox_record.relationship_key,
+                &outbox_record.canonical_parent,
+                &outbox_record.proposal_nonce,
+                crate::storage::client_db::OUTBOX_SUBMISSION_UNCERTAIN,
+            );
+            log::warn!(
+                "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
+                 outbox; reconciling forward (a timeout is not proof of non-delivery)"
+            );
+            return err(
+                "wallet.send: delivery outcome unknown — the transfer is retained and will be \
+                 retried automatically. Funds are not lost; do not resend."
+                    .to_string(),
+            );
         }
+        let _ = crate::storage::client_db::set_sender_outbox_status(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+            crate::storage::client_db::OUTBOX_SUBMITTED,
+        );
 
         // Record a single outstanding online transition for this relationship.
         // The shared contact tip remains at h_n until the recipient ACKs the prior
         // message; only the sender's local restore tip advances to h_{n+1}.
         {
-            let msg_id = match b0x_message_id {
-                Some(ref msg_id) => msg_id,
-                None => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|e| format!("; rollback failed: {e}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: delivery succeeded but no b0x message id was returned{rollback_error}"
-                    ));
-                }
-            };
+            // The gate is ALREADY durable — it was committed atomically with the
+            // proposal, the pending EK head and the outbox row before anything
+            // was submitted. Nothing here may fail the transfer: the two former
+            // rollback sites (missing message id, gate-persist failure) are gone
+            // because neither is evidence that the message was not delivered.
+            //
+            // The returned storage message id is GC metadata ONLY. Finalization
+            // keys on the receipt commitment, so a missing or unbindable id
+            // costs nothing but a later spool cleanup.
             let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&new_chain_tip);
-            if let Err(e) = crate::storage::client_db::record_pending_online_transition(
-                &sender_proposal.counterparty_device_id,
-                msg_id,
-                &sender_proposal.projection_parent,
-                &sender_proposal.projection_target,
-            ) {
-                let _ =
-                    crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
-                let rollback_error = self
-                    .rollback_failed_online_transfer(&rollback_request)
-                    .await
-                    .err()
-                    .map(|rb| format!("; rollback failed: {rb}"))
-                    .unwrap_or_default();
-                return err(format!(
-                    "wallet.send: delivered transfer but failed to persist sender-side online gate: {e}{rollback_error}"
-                ));
+            match b0x_message_id {
+                Some(ref msg_id) => {
+                    if let Err(e) = crate::storage::client_db::bind_sender_outbox_message_ids(
+                        &outbox_record.relationship_key,
+                        &outbox_record.canonical_parent,
+                        &outbox_record.proposal_nonce,
+                        msg_id,
+                    ) {
+                        log::warn!(
+                            "[wallet.send] §16.6 message-id bind failed (GC metadata only, \
+                             transfer unaffected): {e}"
+                        );
+                    }
+                }
+                None => log::warn!(
+                    "[wallet.send] §16.6 no storage message id returned — transfer stands \
+                     (finalization keys on the receipt commitment); spool GC will rely on \
+                     the deterministic submission id"
+                ),
             }
             log::info!(
-                "[wallet.send] §16.6 Pending online transition recorded: parent={} next={}",
+                "[wallet.send] §16.6 Pending online transition already durable: parent={} next={}",
                 &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
                 &new_tip_b32[..8]
             );
@@ -2216,6 +2404,7 @@ impl AppRouterImpl {
         };
 
         let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
+            submission_id: None,
             recipient_device_id: to_device_id_str.clone(),
             recipient_genesis_hash: recipient_genesis_b32,
             transaction: msg_op,

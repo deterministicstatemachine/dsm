@@ -924,6 +924,7 @@ impl CoreSDK {
             anchor_leaf,
             offline_spend,
             None,
+            None,
         )
     }
 
@@ -945,6 +946,97 @@ impl CoreSDK {
     /// transfer (child) and every transfer after the first (parent).
     /// A-side authority is validated where it belongs — see
     /// [`Self::apply_incoming_transfer_full_state`].
+    /// §16.6 defect zero — STAGED advance: build artifacts between the pure
+    /// prepare and the durable write, then commit them in the SAME transaction.
+    ///
+    /// THE ORDERING PROBLEM THIS SOLVES. An online send must not emit anything
+    /// externally deliverable before the local state justifying it is durable:
+    /// a storage quorum can accept a transfer, a local write can then fail, and
+    /// a rollback would restore the debit while the message stays creditable.
+    /// So proposal + gate + pending EK head + the exact envelope bytes have to
+    /// land in one transaction with the canonical advance.
+    ///
+    /// But the receipt cannot be built inside that transaction: signing reads
+    /// cert heads through `get_connection()`, and the advance already holds
+    /// that single global mutex — re-entering it deadlocks. `prepare_advance_relationship`
+    /// is pure (no writes), which is what makes the split legal:
+    ///
+    /// ```text
+    /// prepare (pure)  →  build_artifacts (DB reads, signing)  →  ONE tx { advance + write_extra }
+    /// ```
+    ///
+    /// `build_artifacts` sees the `AdvanceOutcome` (canonical parent/child, SMT
+    /// roots) and returns whatever the caller needs to persist; `write_extra`
+    /// then writes it inside the advance transaction. If `build_artifacts`
+    /// fails — including a lost cert-head CAS — nothing is written and nothing
+    /// was ever deliverable.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        // Artifacts are built once in `pre_write` (outside the transaction, so
+        // signing may read the DB) and shared with the in-tx writer through a
+        // cell. The in-tx closure NEVER rebuilds them — retries and the durable
+        // record must carry byte-identical bytes.
+        let built: std::cell::RefCell<Option<A>> = std::cell::RefCell::new(None);
+        let builder: std::cell::RefCell<Option<_>> = std::cell::RefCell::new(Some(build_artifacts));
+
+        let pre = |outcome: &dsm::types::device_state::AdvanceOutcome| -> Result<(), DsmError> {
+            let f = builder.borrow_mut().take().ok_or_else(|| {
+                DsmError::internal(
+                    "staged advance: artifact builder already consumed",
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            *built.borrow_mut() = Some(f(outcome)?);
+            Ok(())
+        };
+
+        let write = |tx: &rusqlite::Transaction<'_>,
+                     outcome: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), DsmError> {
+            let guard = built.borrow();
+            let artifacts = guard.as_ref().ok_or_else(|| {
+                DsmError::internal(
+                    "staged advance: artifacts missing at write time",
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            write_extra(tx, outcome, artifacts)
+        };
+
+        let (state, outcome) = self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            None,
+            None,
+            Some(&write),
+            Some(&pre),
+        )?;
+
+        let artifacts = built.borrow_mut().take().ok_or_else(|| {
+            DsmError::internal(
+                "staged advance committed without artifacts",
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        Ok((state, outcome, artifacts))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_on_relationship_guarded(
         &self,
@@ -969,6 +1061,7 @@ impl CoreSDK {
             None,
             None,
             in_tx_extra,
+            None,
         )
     }
 
@@ -987,6 +1080,15 @@ impl CoreSDK {
                 &rusqlite::Transaction<'_>,
                 &dsm::types::device_state::AdvanceOutcome,
             ) -> Result<(), DsmError>,
+        >,
+        // §16.6 staged advance: runs AFTER the pure prepare and BEFORE the
+        // durable write opens its transaction. This is the only window in
+        // which a caller may do work that itself touches the database (e.g.
+        // per-step EK signing, which reads cert heads) — inside the write
+        // transaction the global connection mutex is held and re-entry
+        // deadlocks. An Err here aborts before anything is persisted.
+        pre_write: Option<
+            &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
         >,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
@@ -1066,6 +1168,12 @@ impl CoreSDK {
         // the capsule being marked dirty. `in_tx_extra` (nonce consumption +
         // canonical apply record on the incoming-transfer path) runs in the SAME
         // transaction (§16.6 full-state consumption).
+        // Staged artifact build (signing, envelope construction) — outside the
+        // write transaction, so DB reads here cannot deadlock. Failing now
+        // means nothing was persisted and nothing became deliverable.
+        if let Some(pre) = pre_write {
+            pre(&outcome)?;
+        }
         Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)?;
         sm.commit_advance(&outcome);
 
@@ -4375,6 +4483,130 @@ mod tests {
         let current = sdk.get_current_state().expect("current state");
         assert_eq!(current.hash[0] as u64, prior.hash[0] as u64);
         assert_eq!(current.hash, prior.hash);
+    }
+
+    // ---------------------------------------------------------------------
+    // §16.6 defect zero — staged advance seam.
+    //
+    // An online send must not emit anything deliverable before the local state
+    // justifying it is durable, which forces proposal + gate + pending EK head
+    // + exact envelope bytes into the SAME transaction as the canonical
+    // advance. But the receipt cannot be built inside that transaction:
+    // signing reads cert heads through get_connection(), and the advance
+    // already holds that single global mutex, so re-entry deadlocks. The
+    // staged seam makes the only legal ordering explicit:
+    //     prepare (pure) -> build (DB reads OK) -> ONE tx.
+    // ---------------------------------------------------------------------
+
+    /// The builder must run BEFORE the write transaction opens, and a DB read
+    /// inside it must not deadlock. If this test hangs, the seam is wrong.
+    #[test]
+    #[serial]
+    fn staged_builder_runs_before_the_write_and_may_read_the_db() {
+        let sdk = full_state_apply_harness();
+        let (sender, _) = sender_ids();
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &sdk.device_info.device_id,
+            &sender,
+        );
+
+        let (_state, outcome, artifacts) = sdk
+            .execute_on_relationship_staged(
+                rel,
+                sender,
+                incoming_transfer_op(&sdk.device_info.device_id, 5, vec![0x31u8; 32]),
+                &[dsm::types::device_state::BalanceDelta {
+                    policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: 5,
+                }],
+                Some([0u8; 32]),
+                |o| {
+                    // A real builder signs here, which touches the DB. Prove
+                    // that is safe at this point in the sequence.
+                    let _ = crate::storage::client_db::load_cert_chain_head_pubkey(
+                        &rel,
+                        crate::storage::client_db::CertChainSide::Local,
+                    );
+                    Ok(o.new_chain_state.compute_chain_tip())
+                },
+                |tx, _o, child: &[u8; 32]| {
+                    tx.execute(
+                        "CREATE TABLE IF NOT EXISTS staged_probe(child BLOB NOT NULL)",
+                        [],
+                    )
+                    .map_err(|e| {
+                        DsmError::storage(format!("probe: {e}"), None::<std::io::Error>)
+                    })?;
+                    tx.execute(
+                        "INSERT INTO staged_probe(child) VALUES (?1)",
+                        rusqlite::params![child.as_slice()],
+                    )
+                    .map_err(|e| {
+                        DsmError::storage(format!("probe: {e}"), None::<std::io::Error>)
+                    })?;
+                    Ok(())
+                },
+            )
+            .expect("staged advance");
+
+        assert_eq!(
+            artifacts,
+            outcome.new_chain_state.compute_chain_tip(),
+            "builder saw the real AdvanceOutcome and its artifacts reached the caller"
+        );
+
+        let persisted: Vec<u8> = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+            conn.query_row("SELECT child FROM staged_probe", [], |r| r.get(0))
+                .expect("probe row committed with the advance")
+        };
+        assert_eq!(
+            persisted,
+            artifacts.to_vec(),
+            "in-tx writer persisted the builder's artifacts, never a rebuild"
+        );
+    }
+
+    /// A failing builder must abort BEFORE anything is persisted — this is the
+    /// window where a lost cert-head CAS lands, and it must leave nothing
+    /// deliverable behind.
+    #[test]
+    #[serial]
+    fn staged_builder_failure_persists_nothing() {
+        let sdk = full_state_apply_harness();
+        let (sender, _) = sender_ids();
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &sdk.device_info.device_id,
+            &sender,
+        );
+        let head_before = device_root(&sdk);
+
+        let err = sdk
+            .execute_on_relationship_staged(
+                rel,
+                sender,
+                incoming_transfer_op(&sdk.device_info.device_id, 7, vec![0x32u8; 32]),
+                &[dsm::types::device_state::BalanceDelta {
+                    policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: 7,
+                }],
+                Some([0u8; 32]),
+                |_o| -> Result<(), DsmError> {
+                    Err(DsmError::invalid_operation("cert-head CAS lost the race"))
+                },
+                |_tx, _o, _a| Ok(()),
+            )
+            .expect_err("a failed build must abort the advance");
+        assert!(err.to_string().contains("CAS lost the race"));
+
+        assert_eq!(
+            device_root(&sdk),
+            head_before,
+            "no canonical advance may survive a failed artifact build"
+        );
     }
 }
 

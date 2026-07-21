@@ -67,6 +67,7 @@ async fn main() {
     };
 
     let params = B0xSubmissionParams {
+        submission_id: None,
         recipient_device_id: to_device_b32.clone(),
         recipient_genesis_hash: genesis_b32.clone(),
         transaction: op,

@@ -99,6 +99,20 @@ fn row_to_proposal(row: &rusqlite::Row) -> rusqlite::Result<SenderOnlineProposal
 pub fn insert_sender_proposal(p: &SenderOnlineProposal) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    insert_sender_proposal_with_conn(&conn, p)
+}
+
+/// Same insert, INSIDE a caller-owned transaction.
+///
+/// §16.6 defect zero: the proposal is committed together with the canonical
+/// advance, the gate, the pending EK head, and the outbox row — one
+/// transaction, before anything is deliverable. Takes `&Connection` (a
+/// `&Transaction` derefs to one) and never calls `get_connection()`: the
+/// advance already holds the single global connection mutex.
+pub fn insert_sender_proposal_with_conn(
+    conn: &rusqlite::Connection,
+    p: &SenderOnlineProposal,
+) -> Result<()> {
     let existing: Option<(Vec<u8>, Vec<u8>)> = conn
         .query_row(
             "SELECT canonical_child, commitment FROM sender_online_proposal

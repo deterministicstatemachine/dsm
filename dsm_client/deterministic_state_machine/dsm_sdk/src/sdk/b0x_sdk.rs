@@ -189,6 +189,17 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
+    /// §16.6 defect zero: caller-supplied DETERMINISTIC submission id.
+    ///
+    /// The forward-transfer path derives this from the receipt commitment
+    /// (`sender_outbox::derive_submission_id`) so the id is known BEFORE the
+    /// send is committed locally and is identical on every retry. Storage nodes
+    /// enforce `UNIQUE(message_id)` with `ON CONFLICT DO NOTHING`, so a resend
+    /// collapses onto the same spool row instead of spawning duplicates.
+    ///
+    /// `None` keeps the legacy random derivation for callers with no durable
+    /// identity to key on (non-transfer submissions).
+    pub submission_id: Option<String>,
 }
 
 impl B0xSubmissionParams {
@@ -389,6 +400,7 @@ impl B0xSubmissionParams {
         }
 
         Ok(Self {
+            submission_id: None,
             recipient_device_id,
             recipient_genesis_hash,
             transaction,
@@ -1442,6 +1454,33 @@ impl B0xSDK {
     // Submission (Envelope v3 over HTTP)
     // ------------------------------------------------------------------------
 
+    /// Build the FINAL canonical envelope bytes for `params` without sending
+    /// anything. Used by the send path to freeze the exact wire artifact into
+    /// the durable outbox before any network call.
+    pub async fn build_envelope_bytes(
+        &mut self,
+        params: B0xSubmissionParams,
+    ) -> Result<(Vec<u8>, String), DsmError> {
+        let mut sink: Option<Vec<u8>> = None;
+        let no_send = B0xRetryConfig {
+            max_retries: 0,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            backoff_multiplier: 1.0,
+        };
+        // `dry_run` stops before the HTTP loop; the sink receives the bytes.
+        let msg_id = self
+            .submit_inner(params, &no_send, Some(&mut sink), true)
+            .await?;
+        let bytes = sink.ok_or_else(|| {
+            DsmError::internal(
+                "envelope build produced no bytes",
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        Ok((bytes, msg_id))
+    }
+
     pub async fn submit_to_b0x(&mut self, params: B0xSubmissionParams) -> Result<String, DsmError> {
         if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
             let test_retry = B0xRetryConfig {
@@ -1463,35 +1502,77 @@ impl B0xSDK {
         params: B0xSubmissionParams,
         retry_config: &B0xRetryConfig,
     ) -> Result<String, DsmError> {
+        self.submit_inner(params, retry_config, None, false).await
+    }
+
+    /// Shared implementation. `envelope_bytes_sink` receives the FINAL canonical
+    /// bytes once built; `dry_run` returns before any network call so the caller
+    /// can freeze those bytes durably first (§16.6 defect zero).
+    async fn submit_inner(
+        &mut self,
+        params: B0xSubmissionParams,
+        retry_config: &B0xRetryConfig,
+        envelope_bytes_sink: Option<&mut Option<Vec<u8>>>,
+        dry_run: bool,
+    ) -> Result<String, DsmError> {
         info!("🎯 submit_to_b0x_with_retry");
 
         // Enhanced input validation
         self.validate_submission_params(&params)?;
 
-        // 2) Build Envelope v3 with proper request payload
-        let mut rand_bytes = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut rand_bytes).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let mut msgid_buf = Vec::with_capacity(11 + 16 + 8 + self.device_id.len());
-        msgid_buf.extend_from_slice(b"DSM/b0x-msgid\0");
-        msgid_buf.extend_from_slice(&rand_bytes);
-        msgid_buf.extend_from_slice(&dt::tick().to_le_bytes());
-        msgid_buf.extend_from_slice(&std::process::id().to_le_bytes());
-        let ctr = MSG_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        msgid_buf.extend_from_slice(&ctr.to_le_bytes());
-        msgid_buf.extend_from_slice(self.device_id.as_bytes());
-        let full = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_B0X_MSGID,
-            &msgid_buf,
-        );
-        let mut message_id_bytes = [0u8; 16];
-        message_id_bytes.copy_from_slice(&full.as_bytes()[..16]);
-        let message_id_b32 = text_id::encode_base32_crockford(&message_id_bytes);
+        // 2) Build Envelope v3 with proper request payload.
+        //
+        // MESSAGE ID. A caller-supplied deterministic id WINS and short-circuits
+        // the random derivation entirely — the fallback is never evaluated, so a
+        // deterministic send consumes no OS entropy and does not bump the
+        // process-global counter. The supplied id comes from the receipt
+        // commitment (`sender_outbox::derive_submission_id`), so it is known
+        // before the send is committed locally and is identical on every retry;
+        // storage nodes enforce `UNIQUE(message_id)`, making a resend collapse
+        // onto the same spool row instead of spooling a duplicate.
+        let (message_id_bytes, message_id_b32) = match params.submission_id.as_deref() {
+            Some(supplied) => {
+                let decoded = text_id::decode_base32_crockford(supplied).ok_or_else(|| {
+                    DsmError::invalid_parameter("submission_id must be canonical base32 Crockford")
+                })?;
+                let arr: [u8; 16] = decoded.as_slice().try_into().map_err(|_| {
+                    DsmError::invalid_parameter(format!(
+                        "submission_id must decode to 16 bytes (deployed nodes enforce this), got {}",
+                        decoded.len()
+                    ))
+                })?;
+                (arr, supplied.to_string())
+            }
+            // Legacy random derivation, for callers with no durable identity to
+            // key on (non-transfer submissions). Retries here are NOT idempotent
+            // at the node — each attempt spools a distinct row.
+            None => {
+                let mut rand_bytes = [0u8; 16];
+                let mut os_rng = OsRng;
+                rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut rand_bytes).map_err(|e| {
+                    DsmError::crypto(
+                        format!("OsRng entropy failure: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+                let mut msgid_buf = Vec::with_capacity(11 + 16 + 8 + self.device_id.len());
+                msgid_buf.extend_from_slice(b"DSM/b0x-msgid\0");
+                msgid_buf.extend_from_slice(&rand_bytes);
+                msgid_buf.extend_from_slice(&dt::tick().to_le_bytes());
+                msgid_buf.extend_from_slice(&std::process::id().to_le_bytes());
+                let ctr = MSG_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+                msgid_buf.extend_from_slice(&ctr.to_le_bytes());
+                msgid_buf.extend_from_slice(self.device_id.as_bytes());
+                let full = dsm::crypto::blake3::domain_hash(
+                    dsm::common::domain_tags::TAG_DSM_B0X_MSGID,
+                    &msgid_buf,
+                );
+                let mut b = [0u8; 16];
+                b.copy_from_slice(&full.as_bytes()[..16]);
+                let b32 = text_id::encode_base32_crockford(&b);
+                (b, b32)
+            }
+        };
         if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
             log::debug!("[B0X] submit msg_id={}", message_id_b32);
         }
@@ -1767,8 +1848,20 @@ impl B0xSDK {
             nonce: None,
         };
 
-        // Build UniversalOp with the Invoke
-        let local_genesis_bytes = self.core_sdk.local_genesis_hash().await?;
+        // Build UniversalOp with the Invoke.
+        //
+        // §16.6 defect zero: use the sender genesis ALREADY carried (and
+        // validated as base32(32)) in `params` rather than an async DB read.
+        // That keeps envelope construction fully SYNCHRONOUS, which is the
+        // precondition for building it inside the staged advance closure — the
+        // closure runs under the state-machine lock and cannot await.
+        let local_genesis_bytes = text_id::decode_base32_crockford(&params.sender_genesis_hash)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "sender_genesis_hash must be base32 Crockford of exactly 32 bytes",
+                )
+            })?;
         // AF-4 fix: routing MUST be keyed by the *sender's* current relationship parent tip (hn)
         // (whitepaper: b0x key rotates with hn; sender posts to the key derived from the live parent)
         // Do NOT use a cached/stale recipient tip for routing.
@@ -1811,6 +1904,19 @@ impl B0xSDK {
             )
         })?;
         info!("submit_to_b0x: envelope bytes={}", buf.len());
+
+        // §16.6 defect zero: hand the caller the FINAL canonical bytes so they
+        // can be frozen in the durable outbox BEFORE submission. A retry then
+        // replays these exact bytes rather than re-running envelope
+        // construction — retry identity therefore does not depend on
+        // envelope-building code staying unchanged across upgrades.
+        if let Some(sink) = envelope_bytes_sink {
+            *sink = Some(buf.clone());
+        }
+        if dry_run {
+            // Envelope built and handed back; nothing is transmitted.
+            return Ok(message_id_b32);
+        }
 
         // Signature is embedded in the request body only (canonical path).
         // Avoid duplicating into EvidenceOracle.signature to keep payload bounded.
@@ -1930,6 +2036,60 @@ impl B0xSDK {
             format!(
                 "submit quorum not met: {}/{} (K={}); msg_id={}; errors={:?}",
                 successes, total, quorum, message_id_b32, submit_errors
+            ),
+            None::<std::io::Error>,
+        ))
+    }
+
+    /// §16.6 defect zero — submit the EXACT bytes frozen in the durable outbox.
+    ///
+    /// Replays a stored artifact verbatim: no envelope reconstruction, so retry
+    /// identity cannot drift if envelope-building code changes across upgrades,
+    /// and the deterministic `message_id` makes the node collapse duplicates
+    /// onto one spool row (`UNIQUE(message_id)` + `ON CONFLICT DO NOTHING`).
+    pub async fn submit_stored_envelope(
+        &mut self,
+        envelope_bytes: &[u8],
+        routing_address: &str,
+        message_id_b32: &str,
+    ) -> Result<(), DsmError> {
+        let auth_device_id = self.device_id.clone();
+        let endpoints: Vec<String> = self.storage_node_endpoints.clone();
+        let total = endpoints.len();
+        let quorum = self.quorum_k.min(total.max(1));
+        let mut successes = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        let retry = B0xRetryConfig::default();
+
+        for endpoint in endpoints {
+            match self
+                .submit_with_retry(
+                    &endpoint,
+                    envelope_bytes,
+                    &auth_device_id,
+                    routing_address,
+                    message_id_b32,
+                    &retry,
+                )
+                .await
+            {
+                Ok(()) => {
+                    successes += 1;
+                    if successes >= quorum {
+                        info!(
+                            "✅ stored-envelope resubmit quorum satisfied: {}/{} (K={})",
+                            successes, total, quorum
+                        );
+                        return Ok(());
+                    }
+                }
+                Err(e) => errors.push(format!("{endpoint}: {e}")),
+            }
+        }
+        Err(DsmError::internal(
+            format!(
+                "stored-envelope resubmit quorum not met: {successes}/{total} (K={quorum}); \
+                 msg_id={message_id_b32}; errors={errors:?}"
             ),
             None::<std::io::Error>,
         ))
@@ -3091,6 +3251,7 @@ impl B0xSDK {
             };
 
             let params = B0xSubmissionParams {
+                submission_id: None,
                 recipient_device_id,
                 recipient_genesis_hash,
                 transaction: operation,

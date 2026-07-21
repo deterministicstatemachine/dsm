@@ -34,6 +34,7 @@ mod online_outbox;
 mod pending_transactions;
 pub mod recipient_receipt_fold;
 pub mod recovery;
+pub mod sender_outbox;
 pub mod sender_proposal;
 mod stitched_receipts;
 mod system_peers;
@@ -57,6 +58,7 @@ pub use ble_chunk_buffer::*;
 pub use canonical_apply::*;
 pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
+pub use sender_outbox::*;
 pub use sender_proposal::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
@@ -525,6 +527,39 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_sender_proposal_message
             ON sender_online_proposal(message_id) WHERE message_id IS NOT NULL;
+
+        -- §16.6 durable sender outbox. Committed together with the canonical
+        -- advance BEFORE any network call, so a local failure can never strand a
+        -- deliverable message against a rolled-back debit. Carries the EXACT
+        -- envelope bytes (retries resubmit the identical artifact, never a
+        -- rebuild) and outlives finalization as `gc_pending` so the remaining
+        -- lifecycle work stays reachable.
+        CREATE TABLE IF NOT EXISTS sender_outbox(
+            relationship_key    BLOB NOT NULL,
+            canonical_parent    BLOB NOT NULL,   -- ASYM canonical parent (proposal identity)
+            canonical_child     BLOB NOT NULL,
+            commitment          BLOB NOT NULL,   -- receipt commitment = finalization identity
+            projection_parent   BLOB NOT NULL,   -- SYM routing/gate space
+            projection_target   BLOB NOT NULL,
+            routing_address     TEXT NOT NULL,
+            submission_id       TEXT NOT NULL,   -- deterministic; equals the node message_id
+            envelope_bytes      BLOB NOT NULL,   -- exact submitted bytes
+            proposal_nonce      BLOB NOT NULL,   -- completes the durable identity
+            -- Local cert-head CAS expectation. NULL is meaningful ONLY when
+            -- is_first_ek_step = 1; an unexplained NULL is never read as genesis.
+            local_expected_prev BLOB,
+            is_first_ek_step    INTEGER NOT NULL CHECK(is_first_ek_step IN (0, 1)),
+            status              TEXT NOT NULL,
+            message_ids         TEXT,            -- GC metadata ONLY, never authority
+            created_at          INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, canonical_parent, proposal_nonce),
+            UNIQUE (commitment),
+            UNIQUE (submission_id),
+            CHECK (status IN (
+                'pending_submit', 'submitting', 'submitted',
+                'submission_uncertain', 'gc_pending', 'complete'
+            ))
+        );
 
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
             commitment             BLOB PRIMARY KEY,
