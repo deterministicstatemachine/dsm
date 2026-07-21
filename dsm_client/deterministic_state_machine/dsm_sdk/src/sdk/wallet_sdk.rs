@@ -859,11 +859,37 @@ impl WalletSDK {
     /// so `app_router_impl::wallet.send` can build the ReceiptCommit (§4.2)
     /// directly from `smt_proofs` + `parent_r_a` + `child_r_a` — no separate
     /// `smt_replace` on any shadow SMT.
+    /// Non-staged convenience wrapper. One implementation: delegates to the
+    /// staged form with inert closures.
     pub fn send_transfer_op(
         &self,
         op: dsm::types::operations::Operation,
         transaction: &WalletTransaction,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        let (state, outcome, ()) =
+            self.send_transfer_op_staged(op, transaction, |_| Ok(()), |_, _, _| Ok(()))?;
+        Ok((state, outcome))
+    }
+
+    /// §16.6 defect zero — STAGED send.
+    ///
+    /// `build_artifacts` runs after the pure prepare and before the durable
+    /// write (the only window where DB-reading work such as per-step EK signing
+    /// is legal); `write_extra` persists the result INSIDE the advance
+    /// transaction. The canonical advance and every local record justifying the
+    /// outgoing message therefore commit atomically — there is no observable
+    /// state in which a debit exists without its durable lifecycle record.
+    pub fn send_transfer_op_staged<A>(
+        &self,
+        op: dsm::types::operations::Operation,
+        transaction: &WalletTransaction,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         if *self.locked.read() {
             return Err(DsmError::unauthorized(
                 "Wallet is locked",
@@ -873,7 +899,9 @@ impl WalletSDK {
         self.update_activity_sync();
 
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
-        let (new_state, outcome) = self.token_sdk.execute_transfer_op(op)?;
+        let (new_state, outcome, artifacts) =
+            self.token_sdk
+                .execute_transfer_op_staged(op, build_artifacts, write_extra)?;
         log::debug!("[WALLET] send_transfer_op: execute_transfer_op OK");
 
         let mut tx_copy = transaction.clone();
@@ -972,7 +1000,7 @@ impl WalletSDK {
             transaction.token_id
         );
 
-        Ok((new_state, outcome))
+        Ok((new_state, outcome, artifacts))
     }
 
     pub fn lock(&self) -> Result<(), DsmError> {

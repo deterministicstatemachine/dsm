@@ -2663,10 +2663,35 @@ impl<I: Send + Sync> TokenSDK<I> {
     /// downstream callers (`WalletSDK::send_transfer_op`, `wallet.send` in
     /// `app_router_impl`) can build the canonical ReceiptCommit (§4.2) from
     /// `smt_proofs` + `parent_r_a` + `child_r_a` without re-reading any SMT.
+    /// Non-staged convenience wrapper — no extra artifacts, no extra writes.
+    /// One implementation: delegates to the staged form with inert closures.
     pub fn execute_transfer_op(
         &self,
         op: Operation,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        let (state, outcome, ()) =
+            self.execute_transfer_op_staged(op, |_| Ok(()), |_, _, _| Ok(()))?;
+        Ok((state, outcome))
+    }
+
+    /// §16.6 defect zero — STAGED transfer execution.
+    ///
+    /// `build_artifacts` runs after the pure prepare and BEFORE the durable
+    /// write opens its transaction; it is the only place a caller may do work
+    /// that itself reads the database (per-step EK signing, envelope
+    /// construction). `write_extra` then persists those artifacts INSIDE the
+    /// advance transaction, so the canonical advance and everything justifying
+    /// the resulting message commit together or not at all.
+    pub fn execute_transfer_op_staged<A>(
+        &self,
+        op: Operation,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         // Extract fields for balance cache updates before consuming the operation
         let (token_id, amount_val, recipient_device_id, memo) = match &op {
             Operation::Transfer {
@@ -2713,12 +2738,14 @@ impl<I: Send + Sync> TokenSDK<I> {
                 &recipient_devid,
             );
         log::debug!("[TOKEN] execute_transfer_op: calling execute_on_relationship...");
-        let (new_state, outcome) = self.core_sdk.execute_on_relationship(
+        let (new_state, outcome, artifacts) = self.core_sdk.execute_on_relationship_staged(
             rel_key,
             recipient_devid,
             op,
             &deltas,
             Some(initial_tip),
+            build_artifacts,
+            write_extra,
         )?;
         log::debug!("[TOKEN] execute_transfer_op: execute_on_relationship OK");
 
@@ -2745,7 +2772,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             history.push((token_op, crate::util::deterministic_time::tick()));
         }
 
-        Ok((new_state, outcome))
+        Ok((new_state, outcome, artifacts))
     }
 }
 
