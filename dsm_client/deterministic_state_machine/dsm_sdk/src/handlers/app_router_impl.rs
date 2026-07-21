@@ -1860,13 +1860,14 @@ impl AppRouterImpl {
                 authority_policy: None,
             };
 
-            let sender_genesis_b32 = crate::util::text_id::encode_base32_crockford(
-                &self
-                    .core_sdk
-                    .local_genesis_hash()
-                    .await
-                    .unwrap_or_else(|_| vec![0u8; 32]),
-            );
+            // Reuse the genesis already resolved FAIL-CLOSED at the top of this
+            // handler. Re-fetching here used to fall back to `vec![0u8; 32]`, which
+            // would freeze an all-zero sender genesis into the durable envelope
+            // bytes — unverifiable by the recipient and impossible to correct after
+            // the outbox commits. It was also the last happy-path `.await` in the
+            // block that must become a synchronous builder.
+            let sender_genesis_b32 =
+                crate::util::text_id::encode_base32_crockford(&local_genesis_for_routing);
             let sender_chain_tip_b32 =
                 crate::util::text_id::encode_base32_crockford(&sender_proposal.projection_parent);
             // Use the signing authority's public key — derived from the same

@@ -1789,18 +1789,30 @@ impl B0xSDK {
         // produced the signature; using `state.device_info.public_key` or
         // `AppState::get_public_key()` can drift (stale genesis pk, fallback
         // 32-byte placeholder, etc.) and silently poison the inbox.
+        // DEADLOCK: the fallback here used to be `self.core_sdk.get_current_state()`,
+        // which takes the `state_machine` lock (core_sdk.rs:420). This builder runs
+        // inside `pre_write`, where that NON-REENTRANT parking_lot mutex is ALREADY
+        // held (core_sdk.rs:1116). Re-locking it hangs silently — no panic, no error.
+        //
+        // The caller has already resolved this key fail-closed, so prefer the value
+        // it handed us over re-deriving one. That removes the re-entry AND removes a
+        // live source of public-key drift: the param was previously length-validated
+        // and then ignored.
         let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key() {
             Ok(pk) => pk,
+            Err(e) if !params.sender_signing_public_key.is_empty() => {
+                log::warn!(
+                    "submit_to_b0x: signing_authority pk unavailable ({e}); using caller-supplied \
+                     sender_signing_public_key"
+                );
+                params.sender_signing_public_key.clone()
+            }
             Err(e) => {
                 log::warn!(
-                        "submit_to_b0x: signing_authority pk unavailable ({e}); falling back to core state pk"
-                    );
-                self.core_sdk
-                    .get_current_state()
-                    .map(|s| s.device_info.public_key.clone())
-                    .unwrap_or_else(|_| {
-                        crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
-                    })
+                    "submit_to_b0x: signing_authority pk unavailable ({e}) and caller supplied \
+                     none; falling back to persisted app-state pk"
+                );
+                crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
             }
         };
 
