@@ -2010,7 +2010,7 @@ impl AppRouterImpl {
                 self.core_sdk.clone(),
                 storage_endpoints.clone(),
             ) {
-                Ok(mut builder) => builder.build_envelope_bytes(b0x_params.clone()).await,
+                Ok(builder) => builder.build_envelope_bytes(&b0x_params),
                 Err(e) => Err(e),
             };
             let (envelope_bytes, _built_msg_id) = match prebuilt {

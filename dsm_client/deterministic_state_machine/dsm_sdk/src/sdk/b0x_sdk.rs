@@ -163,6 +163,16 @@ pub struct B0xEntry {
     pub canonical_operation_bytes: Vec<u8>,
 }
 
+/// The product of pure envelope construction: the exact canonical wire bytes
+/// plus the identity they were built under. Carries no network capability.
+pub(crate) struct BuiltEnvelope {
+    /// EXACT bytes. The durable outbox freezes these; a retry replays them
+    /// verbatim rather than re-running construction.
+    pub bytes: Vec<u8>,
+    pub message_id_b32: String,
+    pub to_device_id_bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct B0xSubmissionParams {
     // Textual params must be base32-encoded when provided
@@ -1457,30 +1467,6 @@ impl B0xSDK {
     /// Build the FINAL canonical envelope bytes for `params` without sending
     /// anything. Used by the send path to freeze the exact wire artifact into
     /// the durable outbox before any network call.
-    pub async fn build_envelope_bytes(
-        &mut self,
-        params: B0xSubmissionParams,
-    ) -> Result<(Vec<u8>, String), DsmError> {
-        let mut sink: Option<Vec<u8>> = None;
-        let no_send = B0xRetryConfig {
-            max_retries: 0,
-            base_delay_ms: 0,
-            max_delay_ms: 0,
-            backoff_multiplier: 1.0,
-        };
-        // `dry_run` stops before the HTTP loop; the sink receives the bytes.
-        let msg_id = self
-            .submit_inner(params, &no_send, Some(&mut sink), true)
-            .await?;
-        let bytes = sink.ok_or_else(|| {
-            DsmError::internal(
-                "envelope build produced no bytes",
-                None::<std::convert::Infallible>,
-            )
-        })?;
-        Ok((bytes, msg_id))
-    }
-
     pub async fn submit_to_b0x(&mut self, params: B0xSubmissionParams) -> Result<String, DsmError> {
         if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
             let test_retry = B0xRetryConfig {
@@ -1502,23 +1488,24 @@ impl B0xSDK {
         params: B0xSubmissionParams,
         retry_config: &B0xRetryConfig,
     ) -> Result<String, DsmError> {
-        self.submit_inner(params, retry_config, None, false).await
+        self.submit_inner(params, retry_config).await
     }
 
-    /// Shared implementation. `envelope_bytes_sink` receives the FINAL canonical
-    /// bytes once built; `dry_run` returns before any network call so the caller
-    /// can freeze those bytes durably first (§16.6 defect zero).
-    async fn submit_inner(
-        &mut self,
-        params: B0xSubmissionParams,
-        retry_config: &B0xRetryConfig,
-        envelope_bytes_sink: Option<&mut Option<Vec<u8>>>,
-        dry_run: bool,
-    ) -> Result<String, DsmError> {
+    /// PURE envelope construction — no network capability, by type.
+    ///
+    /// Takes `&self` and returns bytes. It cannot submit, retry, or touch the
+    /// circuit breaker, and a future edit cannot make it do so without changing
+    /// this signature. That is the point: the durable outbox freezes the exact
+    /// wire bytes BEFORE anything is deliverable, so the builder must be
+    /// callable from inside a synchronous, pre-commit context.
+    fn build_envelope_for_submission(
+        &self,
+        params: &B0xSubmissionParams,
+    ) -> Result<BuiltEnvelope, DsmError> {
         info!("🎯 submit_to_b0x_with_retry");
 
         // Enhanced input validation
-        self.validate_submission_params(&params)?;
+        self.validate_submission_params(params)?;
 
         // 2) Build Envelope v3 with proper request payload.
         //
@@ -1904,19 +1891,35 @@ impl B0xSDK {
             )
         })?;
         info!("submit_to_b0x: envelope bytes={}", buf.len());
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32,
+            to_device_id_bytes: to_device_id_bytes.to_vec(),
+        })
+    }
 
-        // §16.6 defect zero: hand the caller the FINAL canonical bytes so they
-        // can be frozen in the durable outbox BEFORE submission. A retry then
-        // replays these exact bytes rather than re-running envelope
-        // construction — retry identity therefore does not depend on
-        // envelope-building code staying unchanged across upgrades.
-        if let Some(sink) = envelope_bytes_sink {
-            *sink = Some(buf.clone());
-        }
-        if dry_run {
-            // Envelope built and handed back; nothing is transmitted.
-            return Ok(message_id_b32);
-        }
+    /// Build the exact canonical wire bytes without transmitting them.
+    /// Synchronous: freezing bytes into the durable outbox must not require an
+    /// async context.
+    pub fn build_envelope_bytes(
+        &self,
+        params: &B0xSubmissionParams,
+    ) -> Result<(Vec<u8>, String), DsmError> {
+        let built = self.build_envelope_for_submission(params)?;
+        Ok((built.bytes, built.message_id_b32))
+    }
+
+    /// Submit: build the envelope, then replicate it to quorum.
+    async fn submit_inner(
+        &mut self,
+        params: B0xSubmissionParams,
+        retry_config: &B0xRetryConfig,
+    ) -> Result<String, DsmError> {
+        let BuiltEnvelope {
+            bytes: buf,
+            message_id_b32,
+            to_device_id_bytes,
+        } = self.build_envelope_for_submission(&params)?;
 
         // Signature is embedded in the request body only (canonical path).
         // Avoid duplicating into EvidenceOracle.signature to keep payload bounded.
