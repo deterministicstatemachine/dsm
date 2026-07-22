@@ -193,10 +193,13 @@ pub fn insert_sender_outbox_with_conn(conn: &Connection, r: &SenderOutboxRecord)
 ///   * this outbox row, carrying the exact submission inputs.
 ///
 /// Either all of it is durable or none of it is. Only after this commits may a
-/// network call be made — and from that moment the transfer is FORWARD-ONLY:
-/// [`sender_outbox_exists`] returning true forbids rollback, because a crash
-/// can strand a status mid-update while a quorum has already accepted the
-/// message.
+/// network call be made — and from that moment the transfer is FORWARD-ONLY.
+///
+/// That is now a STRUCTURAL property rather than a rule anyone has to remember:
+/// the online-send rollback path has been deleted outright, so there is nothing
+/// left that could unwind a committed transfer. A crash can still strand a status
+/// mid-update while a quorum has already accepted the message; recovery sweeps the
+/// durable row forward and never backward.
 ///
 /// The cert-head CAS runs inside this transaction, so losing the race against
 /// the acceptance finalizer aborts the whole commit — nothing is written and
@@ -436,14 +439,6 @@ pub fn get_sender_outbox(
 /// `false`; once a row exists the transfer is forward-only regardless of its
 /// status, because a crash can strand a row mid-status while the message is
 /// already accepted.
-pub fn sender_outbox_exists(
-    relationship_key: &[u8; 32],
-    canonical_parent: &[u8; 32],
-    proposal_nonce: &[u8; 32],
-) -> Result<bool> {
-    Ok(get_sender_outbox(relationship_key, canonical_parent, proposal_nonce)?.is_some())
-}
-
 /// Advance the lifecycle status by proposal identity.
 pub fn set_sender_outbox_status(
     relationship_key: &[u8; 32],
@@ -884,19 +879,23 @@ mod tests {
     /// the whole value-safety argument rests on it.
     #[test]
     #[serial]
-    fn existence_is_the_rollback_gate() {
+    fn the_outbox_row_is_the_forward_only_marker() {
         init_test_db();
         let r = rec(0x01);
+        let exists = |r: &SenderOutboxRecord| {
+            get_sender_outbox(&r.relationship_key, &r.canonical_parent, &r.proposal_nonce)
+                .unwrap()
+                .is_some()
+        };
         assert!(
-            !sender_outbox_exists(&r.relationship_key, &r.canonical_parent, &r.proposal_nonce)
-                .unwrap(),
-            "before commit there is no record — rollback permitted"
+            !exists(&r),
+            "before the commit there is no durable record of this send"
         );
         with_conn(|c| insert_sender_outbox_with_conn(c, &r)).unwrap();
         assert!(
-            sender_outbox_exists(&r.relationship_key, &r.canonical_parent, &r.proposal_nonce)
-                .unwrap(),
-            "after commit the transfer is forward-only"
+            exists(&r),
+            "after the commit the transfer is FORWARD-ONLY — this row is what \
+             recovery sweeps forward, and nothing exists that could unwind it"
         );
     }
 
@@ -1101,7 +1100,9 @@ mod tests {
             "gate must be durable before anything is sent"
         );
         assert!(
-            sender_outbox_exists(&rel, &p.canonical_parent, &p.nonce_hash).unwrap(),
+            get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+                .unwrap()
+                .is_some(),
             "outbox row is the rollback gate — it must exist"
         );
         let stored = get_sender_outbox_by_commitment(&p.commitment)
@@ -1150,7 +1151,9 @@ mod tests {
             "proposal must NOT survive an aborted commit"
         );
         assert!(
-            !sender_outbox_exists(&rel, &p.canonical_parent, &p.nonce_hash).unwrap(),
+            !get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+                .unwrap()
+                .is_some(),
             "no outbox row ⇒ rollback stays permitted ⇒ no stranded deliverable"
         );
     }
@@ -1190,7 +1193,9 @@ mod tests {
         assert!(err.to_string().contains("CAS failed"), "got: {err}");
 
         assert!(
-            !sender_outbox_exists(&rel, &p.canonical_parent, &p.nonce_hash).unwrap(),
+            !get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+                .unwrap()
+                .is_some(),
             "nothing durable ⇒ nothing was ever deliverable"
         );
         assert!(
@@ -1296,7 +1301,9 @@ mod tests {
         );
         assert_eq!(recovered[0].status, OUTBOX_SUBMITTING);
         assert!(
-            sender_outbox_exists(&rel, &p.canonical_parent, &p.nonce_hash).unwrap(),
+            get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+                .unwrap()
+                .is_some(),
             "existence forbids rollback — status alone can be stranded by the crash"
         );
     }
