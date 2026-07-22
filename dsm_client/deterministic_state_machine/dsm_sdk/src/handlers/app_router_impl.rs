@@ -350,8 +350,6 @@ impl AppRouterImpl {
             rollback_errors.push(format!("pending cert head drop failed: {e}"));
         }
 
-        crate::security::modal_sync_lock::clear_pending_online(rollback.smt_key).await;
-
         if rollback_errors.is_empty() {
             Ok(())
         } else {
@@ -1304,12 +1302,21 @@ impl AppRouterImpl {
 
         // §5.4 Modal lock: reserve this (A,B) relationship before any local mutation.
         // If another online transition is already pending, fail closed.
-        if !crate::security::modal_sync_lock::set_pending_online(&smt_key).await {
-            return err(
-                "wallet.send: relationship already has a pending online transition; retry after sync"
-                    .to_string(),
-            );
-        }
+        // Held for the rest of this function. Releasing it is the guard's job, on
+        // EVERY exit — success, each early error return, and panic. It is
+        // application state: the advance transaction does not unwind it, so it
+        // must not be tangled up with the protocol rollbacks being removed here.
+        let _modal_lock = match crate::security::modal_sync_lock::PendingOnlineGuard::acquire(
+            &smt_key,
+        ) {
+            Some(guard) => guard,
+            None => {
+                return err(
+                    "wallet.send: relationship already has a pending online transition; retry after sync"
+                        .to_string(),
+                )
+            }
+        };
 
         // Durable pending-gate guard — DELIVERY SAFETY. The modal lock above is
         // in-memory only: it does not survive a process restart, and it is cleared
@@ -1324,7 +1331,6 @@ impl AppRouterImpl {
         // while a prior transfer to this contact is genuinely still pending.
         match crate::storage::client_db::get_pending_online_outbox(&to_device_id) {
             Ok(Some(_pending)) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
                 return err(
@@ -1334,7 +1340,6 @@ impl AppRouterImpl {
             }
             Ok(None) => {}
             Err(e) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 return err(format!(
                     "wallet.send: failed to check pending online gate before send: {e}"
                 ));
@@ -1348,7 +1353,6 @@ impl AppRouterImpl {
         ) {
             Ok(true) => {}
             Ok(false) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
                 return err(
@@ -1357,7 +1361,6 @@ impl AppRouterImpl {
                 );
             }
             Err(e) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 return err(format!(
                     "wallet.send: failed to validate relationship parent tip: {e}"
                 ));
@@ -1380,7 +1383,6 @@ impl AppRouterImpl {
         {
             Ok(pair) => pair,
             Err(e) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 let failure_class = self.classify_local_state_update_failure(&e);
                 log::error!("[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}");
                 return err(format!("wallet.send: local state update failed: {e}"));
@@ -2242,7 +2244,6 @@ impl AppRouterImpl {
             // before the canonical tip advances, keeping recipient polling aligned
             // with the sender's actual finalized relationship tip.
         }
-        crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
 
         // Get new balance for response
         let token_id_ref = if token_id.is_empty() {

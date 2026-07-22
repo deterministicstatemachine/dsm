@@ -241,6 +241,27 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                 } else {
                     log::info!("[SDK] §16.6 startup acceptance recovery ({origin}) swept");
                 }
+
+                // Durable reconcile-forward. Post-commit projection/history
+                // failures persist an intent row; drain it by rebuilding from
+                // CANONICAL state. Without this the intent is just a log line
+                // that dies with the process.
+                let self_device: Option<[u8; 32]> = crate::sdk::app_state::AppState::get_device_id()
+                    .and_then(|v| v.as_slice().try_into().ok());
+                if let Some(device_id) = self_device {
+                    match crate::storage::client_db::drain_projection_repairs(&device_id, |token| {
+                        crate::policy::builtin_policy_commit(token)
+                    }) {
+                        Ok((0, 0)) => {}
+                        Ok((repaired, remaining)) => log::info!(
+                            "[SDK] projection repair ({origin}): {repaired} rebuilt from canonical, \
+                             {remaining} retained"
+                        ),
+                        Err(e) => log::warn!(
+                            "[SDK] projection repair ({origin}) errored (non-fatal): {e}"
+                        ),
+                    }
+                }
             }
             Err(_) => {
                 log::debug!(

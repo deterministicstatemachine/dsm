@@ -957,11 +957,22 @@ impl WalletSDK {
         ) {
             log::error!(
                 "[WALLET] send_transfer_op: post-commit projection sync FAILED for {} ({}). \
-                 The advance and the durable outbox are committed; the transfer stands and \
-                 the projection rebuilds from canonical state.",
+                 The advance and the durable outbox are committed; the transfer stands.",
                 transaction.token_id,
                 e
             );
+            // DURABLE reconcile-forward. A log line dies with the process; this
+            // row does not. The startup sweep rebuilds the projection from
+            // canonical BCR state.
+            if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
+                &sender,
+                token_id,
+                &format!("post-commit projection sync failed: {e}"),
+            ) {
+                log::error!(
+                    "[WALLET] send_transfer_op: could not QUEUE projection repair for {sender}:{token_id}: {q}"
+                );
+            }
         } else {
             log::info!(
                 "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
@@ -1008,8 +1019,16 @@ impl WalletSDK {
             if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
                 log::error!(
                     "[WALLET] send_transfer_op: post-commit history row FAILED to persist \
-                     ({e}). The transfer stands; history rebuilds from canonical state."
+                     ({e}). The transfer stands."
                 );
+                // Durable intent to rebuild — see the projection-repair queue.
+                if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
+                    &sender,
+                    &token_id_owned,
+                    &format!("post-commit history row failed: {e}"),
+                ) {
+                    log::error!("[WALLET] send_transfer_op: could not QUEUE history repair: {q}");
+                }
             }
         }
 

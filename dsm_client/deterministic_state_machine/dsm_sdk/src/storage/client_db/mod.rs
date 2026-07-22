@@ -32,6 +32,7 @@ mod manifold_seeds;
 mod nonces;
 mod online_outbox;
 mod pending_transactions;
+mod projection_repair;
 pub mod recipient_receipt_fold;
 pub mod recovery;
 pub mod sender_outbox;
@@ -58,6 +59,7 @@ pub use ble_chunk_buffer::*;
 pub use canonical_apply::*;
 pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
+pub use projection_repair::*;
 pub use sender_outbox::*;
 pub use sender_proposal::*;
 pub use contacts::*;
@@ -534,6 +536,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- envelope bytes (retries resubmit the identical artifact, never a
         -- rebuild) and outlives finalization as `gc_pending` so the remaining
         -- lifecycle work stays reachable.
+        CREATE TABLE IF NOT EXISTS projection_repair_queue(
+            device_id   TEXT NOT NULL,
+            token_id    TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            PRIMARY KEY (device_id, token_id)
+        );
+
         CREATE TABLE IF NOT EXISTS sender_outbox(
             relationship_key    BLOB NOT NULL,
             canonical_parent    BLOB NOT NULL,   -- ASYM canonical parent (proposal identity)

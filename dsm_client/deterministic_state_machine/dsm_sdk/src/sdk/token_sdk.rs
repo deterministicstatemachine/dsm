@@ -2757,8 +2757,17 @@ impl<I: Send + Sync> TokenSDK<I> {
         if let Err(e) = self.project_balance_cache_from_state(sender, &new_state) {
             log::error!(
                 "[TOKEN] execute_transfer_op: post-commit cache projection FAILED ({e}). \
-                 The transfer stands; the cache rebuilds from canonical state."
+                 The transfer stands."
             );
+            // Durable reconcile-forward: the in-memory cache is rebuilt on the
+            // next load, but persist the intent so a crash cannot lose it.
+            if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
+                &crate::util::text_id::encode_base32_crockford(&sender),
+                &token_id,
+                &format!("post-commit cache projection failed: {e}"),
+            ) {
+                log::error!("[TOKEN] execute_transfer_op: could not QUEUE cache repair: {q}");
+            }
         }
         log::debug!("[TOKEN] execute_transfer_op: local cache projected");
 

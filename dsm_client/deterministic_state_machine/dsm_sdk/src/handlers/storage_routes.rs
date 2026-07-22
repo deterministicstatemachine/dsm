@@ -1399,9 +1399,7 @@ impl AppRouterImpl {
                                                     );
                                             if crate::security::modal_sync_lock::is_pending_online(
                                                 &smt_key,
-                                            )
-                                            .await
-                                            {
+                                            ) {
                                                 log::warn!(
                                                             "[storage.sync] Deferring tx {} because relationship {} has a pending local online projection",
                                                             entry.transaction_id,

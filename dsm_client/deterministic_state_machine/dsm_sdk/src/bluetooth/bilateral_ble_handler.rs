@@ -2176,7 +2176,7 @@ impl BilateralBleHandler {
                     &counterparty_device_id,
                 );
                 let mut modal_locked =
-                    crate::security::modal_sync_lock::is_pending_online(&smt_key).await;
+                    crate::security::modal_sync_lock::is_pending_online(&smt_key);
                 if modal_locked {
                     log::warn!(
                         "[BilateralBleHandler] ⚠️ §5.4 in-memory modal lock set for ({}, {}). Checking SQLite recovery before rejecting.",
@@ -2239,7 +2239,7 @@ impl BilateralBleHandler {
                             {
                                 warn!("[BilateralBleHandler] Failed to clear stale gate: {}", e);
                             }
-                            crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                            crate::security::modal_sync_lock::clear_pending_online(&smt_key);
                             modal_locked = false;
                         } else {
                             log::error!(
