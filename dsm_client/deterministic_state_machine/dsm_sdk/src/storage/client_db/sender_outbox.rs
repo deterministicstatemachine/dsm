@@ -214,11 +214,45 @@ pub fn commit_send_prerequisites_atomically(
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let tx = conn.transaction()?;
+    commit_send_prerequisites_with_conn(
+        &tx,
+        proposal,
+        outbox,
+        gate_message_id,
+        ek_pubkey,
+        ek_secret_key,
+        chain_head_wrap_key,
+        ek_is_init,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
 
-    super::sender_proposal::insert_sender_proposal_with_conn(&tx, proposal)?;
+/// The four durable writes of a send, as ONE unit, inside a caller's transaction.
+///
+/// This is the single implementation. The production send path calls it from
+/// `write_extra` so the writes land in the SAME transaction as the canonical
+/// advance; [`commit_send_prerequisites_atomically`] wraps it in a transaction of
+/// its own for callers that are not already inside one.
+///
+/// Keeping one body matters: if production inlined these four calls and the tests
+/// exercised a separate copy, the tests would be validating a path production no
+/// longer takes.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_send_prerequisites_with_conn(
+    tx: &Connection,
+    proposal: &super::sender_proposal::SenderOnlineProposal,
+    outbox: &SenderOutboxRecord,
+    gate_message_id: &str,
+    ek_pubkey: &[u8],
+    ek_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+    ek_is_init: bool,
+) -> Result<()> {
+    super::sender_proposal::insert_sender_proposal_with_conn(tx, proposal)?;
 
     super::cert_chain::stash_pending_local_head_cas_with_conn(
-        &tx,
+        tx,
         &proposal.relationship_key,
         &proposal.commitment,
         ek_pubkey,
@@ -230,16 +264,14 @@ pub fn commit_send_prerequisites_atomically(
     )?;
 
     super::online_outbox::record_pending_online_transition_with_conn(
-        &tx,
+        tx,
         &proposal.counterparty_device_id,
         gate_message_id,
         &proposal.projection_parent,
         &proposal.projection_target,
     )?;
 
-    insert_sender_outbox_with_conn(&tx, outbox)?;
-
-    tx.commit()?;
+    insert_sender_outbox_with_conn(tx, outbox)?;
     Ok(())
 }
 

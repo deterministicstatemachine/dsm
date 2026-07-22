@@ -1901,60 +1901,24 @@ impl AppRouterImpl {
             &signed_tx,
             build_online_send_artifacts,
             |tx, _outcome, artifacts: &OnlineSendArtifacts| {
-                let proposal = &artifacts.sender_proposal;
-                let outbox = &artifacts.outbox_record;
-                let ek = &artifacts.ek_material;
-
-                crate::storage::client_db::insert_sender_proposal_with_conn(tx, proposal).map_err(
-                    |e| {
-                        dsm::types::error::DsmError::internal(
-                            format!("proposal write failed: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    },
-                )?;
-
-                crate::storage::client_db::stash_pending_local_head_cas_with_conn(
+                // ONE implementation, shared with the non-transactional wrapper the
+                // tests use — so the tests exercise production's actual writes.
+                crate::storage::client_db::commit_send_prerequisites_with_conn(
                     tx,
-                    &proposal.relationship_key,
-                    &proposal.commitment,
-                    &ek.ek_pk,
-                    &ek.ek_sk,
-                    &ek.at_rest_key,
-                    ek.is_init,
-                    outbox.local_expected_prev.as_deref(),
-                    outbox.is_first_ek_step,
-                )
-                .map_err(|e| {
-                    dsm::types::error::DsmError::internal(
-                        format!("pending EK head CAS failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-
-                crate::storage::client_db::record_pending_online_transition_with_conn(
-                    tx,
-                    &proposal.counterparty_device_id,
+                    &artifacts.sender_proposal,
+                    &artifacts.outbox_record,
                     &artifacts.submission_id,
-                    &proposal.projection_parent,
-                    &proposal.projection_target,
+                    &artifacts.ek_material.ek_pk,
+                    &artifacts.ek_material.ek_sk,
+                    &artifacts.ek_material.at_rest_key,
+                    artifacts.ek_material.is_init,
                 )
                 .map_err(|e| {
                     dsm::types::error::DsmError::internal(
-                        format!("gate write failed: {e}"),
+                        format!("durable send bundle write failed: {e}"),
                         None::<std::io::Error>,
                     )
                 })?;
-
-                crate::storage::client_db::insert_sender_outbox_with_conn(tx, outbox).map_err(
-                    |e| {
-                        dsm::types::error::DsmError::internal(
-                            format!("outbox write failed: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    },
-                )?;
-
                 Ok(())
             },
         ) {
