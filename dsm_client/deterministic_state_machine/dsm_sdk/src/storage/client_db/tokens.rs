@@ -282,16 +282,6 @@ pub fn get_locked_balance(device_id: &str, token_id: &str) -> Result<u64> {
     Ok(0)
 }
 
-pub fn delete_balance_projection(device_id: &str, token_id: &str) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "DELETE FROM balance_projections WHERE device_id = ?1 AND token_id = ?2",
-        params![device_id, token_id],
-    )?;
-    Ok(())
-}
-
 pub fn sync_token_projection_from_state(
     device_id: &str,
     token_id: &str,

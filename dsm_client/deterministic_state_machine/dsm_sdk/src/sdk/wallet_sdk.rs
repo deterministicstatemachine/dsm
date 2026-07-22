@@ -317,22 +317,6 @@ pub struct WalletSDK {
     device_book: RwLock<HashMap<String, Counterparty>>,
 }
 
-pub struct FailedOnlineSendRollback<'a> {
-    pub tx_id: &'a str,
-    pub token_id: &'a str,
-    pub failed_state: &'a State,
-    pub previous_state: &'a State,
-    /// Optional pre-send DeviceState head; when provided, the head cache row
-    /// in `bcr_device_heads` is reverted to this snapshot in the same SQLite
-    /// txn that wipes the failed `bcr_chain_states` row. Without it the
-    /// cache stays pointed at the failed advance until the next successful
-    /// op UPSERTs over it.
-    pub previous_head: Option<&'a dsm::types::device_state::DeviceState>,
-    pub recipient_device_id: &'a [u8; 32],
-    pub amount: u64,
-    pub memo: Option<&'a str>,
-}
-
 impl fmt::Debug for WalletSDK {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let did = self.device_id.read().clone();
@@ -1582,45 +1566,6 @@ impl WalletSDK {
         let device_id = self.device_id_array();
         self.token_sdk
             .project_balance_cache_from_state(device_id, state)
-    }
-
-    pub(crate) fn rollback_failed_online_send(
-        &self,
-        rollback: &FailedOnlineSendRollback<'_>,
-    ) -> Result<(), DsmError> {
-        let canonical_token_id = if rollback.token_id.is_empty() {
-            "ERA"
-        } else {
-            rollback.token_id
-        };
-        crate::storage::client_db::rollback_failed_online_send_atomic(
-            &self.device_id_array(),
-            &rollback.failed_state.hash,
-            rollback.tx_id,
-            &self.device_id_base32(),
-            canonical_token_id,
-            rollback.previous_head,
-        )
-        .map_err(|e| {
-            DsmError::internal(
-                format!("Failed to rollback failed online-send artifacts: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        self.core_sdk
-            .restore_state_snapshot(rollback.previous_state)?;
-        self.transactions
-            .write()
-            .retain(|tx| tx.id != rollback.tx_id);
-        let _ = self.token_sdk.discard_transfer_history_entry(
-            canonical_token_id,
-            rollback.recipient_device_id,
-            rollback.amount,
-            rollback.memo,
-        );
-        self.reload_balance_cache_for_self()?;
-        Ok(())
     }
 
     pub fn seed_token_balance_for_self(&self, token_id: &str, amount: u64) -> Result<(), DsmError> {
