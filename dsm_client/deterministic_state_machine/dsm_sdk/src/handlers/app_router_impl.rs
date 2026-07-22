@@ -1183,6 +1183,13 @@ impl AppRouterImpl {
             }
         }
 
+        // Pure function of the two device ids; hoisted because the transfer id now
+        // binds to it (identity v2).
+        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &from_device_id,
+            &to_device_id,
+        );
+
         // Create the local transaction record (needed for metadata/bilateral tip updates)
         let unsigned_tx = match self
             .wallet
@@ -1196,6 +1203,11 @@ impl AppRouterImpl {
                 },
                 Some(&transfer_req.memo),
                 None, // fee
+                // Identity v2: bind the transfer id to the relationship and the
+                // operation nonce, so two same-amount sends can no longer share an
+                // id merely by landing in the same commit height.
+                Some(&smt_key),
+                Some(nonce.as_slice()),
             )
             .await
         {
@@ -1243,10 +1255,6 @@ impl AppRouterImpl {
                 "wallet.send: failed to prepare authoritative state before send: {e}"
             ));
         }
-        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &from_device_id,
-            &to_device_id,
-        );
 
         // §5.4 Modal lock: reserve this (A,B) relationship before any local mutation.
         // If another online transition is already pending, fail closed.

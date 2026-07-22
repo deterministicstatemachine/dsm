@@ -30,3 +30,8 @@ pub const TAG_DSM_SMART_COMMIT_PREDICATE: &str = "DSM/smart-commit-predicate";
 pub const TAG_DSM_TLS_CERT_HASH: &str = "DSM/tls-cert-hash";
 pub const TAG_DSM_TOKEN_HASH: &str = "DSM/token-hash";
 pub const TAG_DSM_TX_HASH: &str = "DSM/tx-hash";
+
+/// Online transfer identity v2 — bound to (relationship_key ‖ operation_nonce).
+/// v1 folded a commit height into the id, so same-amount sends in one height
+/// collided; this derivation consults no clock.
+pub const TAG_ONLINE_TX_ID_V2: &str = "DSM/online-tx-id/v2";

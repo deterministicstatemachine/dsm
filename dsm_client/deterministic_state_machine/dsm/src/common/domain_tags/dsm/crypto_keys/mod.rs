@@ -66,6 +66,7 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_TLS_CERT_HASH,
     TAG_DSM_TOKEN_HASH,
     TAG_DSM_TX_HASH,
+    TAG_ONLINE_TX_ID_V2,
     TAG_DSM_WALK_SEED,
     TAG_DSM_WALK_STEP,
 ];

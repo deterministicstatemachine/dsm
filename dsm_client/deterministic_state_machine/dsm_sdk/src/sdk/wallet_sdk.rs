@@ -195,6 +195,7 @@ impl fmt::Debug for WalletTransaction {
     }
 }
 impl WalletTransaction {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         from_device_id: String,
         to_device_id: String,
@@ -203,6 +204,10 @@ impl WalletTransaction {
         memo: Option<String>,
         fee: u64,
         chain_tip_id: String,
+        // `relationship_key` + `operation_nonce` are Some for bilateral transfers
+        // and None for faucet / protocol-actor records (see identity v2 below).
+        relationship_key: Option<&[u8; 32]>,
+        operation_nonce: Option<&[u8]>,
     ) -> Self {
         let now = dt::tick();
 
@@ -221,14 +226,45 @@ impl WalletTransaction {
         tx_hasher.update(&fee.to_le_bytes());
         let tx_hash = tx_hasher.finalize();
 
-        let id = format!(
-            "tx:{}:{}:{}:{}:{}",
-            first8_le_u64(tx_hash.as_bytes()),
-            from_device_id,
-            to_device_id,
-            amount,
-            fee
-        );
+        // IDENTITY v2 — derived from PROTOCOL identity, not from a clock.
+        //
+        // v1 was `tx:{first8(hash)}:{from}:{to}:{amount}:{fee}` where the hash folded
+        // in `tick()`. `tick()` is a COMMIT HEIGHT, constant within a height, so two
+        // same-amount sends to the same recipient in one height produced a
+        // byte-identical id. That is not hypothetical: 8XK carries two proposals —
+        // one finalized, one rolled back — sharing `tx:8099128616718722169`.
+        //
+        // v2 binds the id to the transfer's own protocol identity: the relationship
+        // and the operation nonce. The nonce is already `H(h_n ‖ seq ‖ amount ‖
+        // token ‖ recipient)`, so it separates transfers by relationship STEP and by
+        // payload without consulting any clock or in-memory cache.
+        //
+        // Two attempts at the same step with the same payload still share an id, and
+        // that is correct — they are the same logical transfer, and a stable id is
+        // what makes a retry idempotent rather than a second debit.
+        let id = match (relationship_key, operation_nonce) {
+            (Some(rel), Some(nonce)) => {
+                let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_ONLINE_TX_ID_V2,
+                );
+                h.update(rel);
+                h.update(nonce);
+                format!(
+                    "tx2:{}",
+                    crate::util::text_id::encode_base32_crockford(h.finalize().as_bytes())
+                )
+            }
+            // Paths with no relationship identity (faucet, protocol actors) keep the
+            // legacy shape; they are not bilateral transfers and never rolled back.
+            _ => format!(
+                "tx:{}:{}:{}:{}:{}",
+                first8_le_u64(tx_hash.as_bytes()),
+                from_device_id,
+                to_device_id,
+                amount,
+                fee
+            ),
+        };
 
         Self {
             id,
@@ -679,6 +715,7 @@ impl WalletSDK {
         Ok(self.token_sdk.get_token_balance(&owner, token_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_transaction(
         &self,
         to_device_id: &str,
@@ -686,6 +723,10 @@ impl WalletSDK {
         token_id: Option<&str>,
         memo: Option<&str>,
         fee: Option<u64>,
+        // Protocol identity for the transfer id (identity v2). Bilateral transfers
+        // pass both; callers with no relationship pass None and keep the legacy id.
+        relationship_key: Option<&[u8; 32]>,
+        operation_nonce: Option<&[u8]>,
     ) -> Result<WalletTransaction, DsmError> {
         log::debug!("[WALLET] create_transaction: start");
         if *self.locked.read() {
@@ -730,6 +771,8 @@ impl WalletSDK {
             memo.map(|s| s.to_string()),
             fee,
             base32::encode(base32::Alphabet::Crockford, &chain_tip.chain_tip_id),
+            relationship_key,
+            operation_nonce,
         ))
     }
 
@@ -1429,6 +1472,8 @@ impl WalletSDK {
             Some("faucet".to_string()), // memo
             0,                          // fee
             protocol_chain_tip_id,      // protocol actor child tip
+            None,                       // faucet: no relationship identity
+            None,
         );
         tx.status = TransactionStatus::Confirmed;
 
@@ -1715,6 +1760,94 @@ impl WalletSDK {
 mod tests {
     use super::WalletSDK;
     use serial_test::serial;
+    use super::WalletTransaction;
+
+    /// The 8XK collision, as a test.
+    ///
+    /// v1 folded `tick()` — a commit HEIGHT, constant within a height — into the
+    /// transfer id, so two same-amount sends to the same recipient in one height
+    /// produced byte-identical ids. 8XK carries exactly that: two proposals, one
+    /// finalized and one rolled back, both `tx:8099128616718722169`. An unscoped
+    /// `DELETE ... WHERE tx_id` then destroyed the finalized one.
+    #[test]
+    fn identity_v2_separates_transfers_that_v1_collided() {
+        let rel = [0x11u8; 32];
+        let mk = |nonce: &[u8]| {
+            WalletTransaction::new(
+                "SENDER".into(),
+                "RECIPIENT".into(),
+                15,
+                "ERA".into(),
+                None,
+                0,
+                "TIP".into(),
+                Some(&rel),
+                Some(nonce),
+            )
+            .id
+        };
+
+        // Same amount, recipient, token and chain-tip string — the exact shape that
+        // collided. Different relationship STEPS give different nonces.
+        let a = mk(&[0xAAu8; 32]);
+        let b = mk(&[0xBBu8; 32]);
+        assert_ne!(a, b, "distinct transfers must not share an identity");
+        assert!(a.starts_with("tx2:"), "bilateral transfers use identity v2");
+
+        // A retry of the SAME logical transfer keeps its id — that is what makes a
+        // resend idempotent instead of a second debit.
+        assert_eq!(
+            mk(&[0xAAu8; 32]),
+            a,
+            "same step + payload is the same transfer"
+        );
+    }
+
+    /// The id must not depend on a clock at all, so it cannot collide because of
+    /// commit height.
+    #[test]
+    fn identity_v2_is_independent_of_the_commit_height() {
+        let rel = [0x22u8; 32];
+        let nonce = [0x33u8; 32];
+        let mk = |tip: &str, amount: u64| {
+            WalletTransaction::new(
+                "S".into(),
+                "R".into(),
+                amount,
+                "ERA".into(),
+                None,
+                0,
+                tip.into(),
+                Some(&rel),
+                Some(&nonce),
+            )
+            .id
+        };
+        // Neither the chain-tip cache string nor the amount may perturb it: the
+        // nonce already binds both, so identity comes from the nonce alone.
+        assert_eq!(mk("TIP-A", 15), mk("TIP-B", 15));
+        assert_eq!(mk("TIP-A", 15), mk("TIP-A", 99));
+    }
+
+    /// Faucet / protocol-actor records are not bilateral transfers and keep the
+    /// legacy shape.
+    #[test]
+    fn non_relationship_records_keep_the_legacy_identity() {
+        let id = WalletTransaction::new(
+            "S".into(),
+            "R".into(),
+            100,
+            "ERA".into(),
+            None,
+            0,
+            "TIP".into(),
+            None,
+            None,
+        )
+        .id;
+        assert!(id.starts_with("tx:"), "got {id}");
+        assert!(!id.starts_with("tx2:"));
+    }
 
     #[test]
     #[serial]
@@ -1791,7 +1924,7 @@ mod tests {
         wallet.add_counterparty(&to_device_id, vec![1, 2, 3], Some("Recipient"))?;
         wallet.initialize_bilateral_chain(&to_device_id, &[0; 32])?;
         let tx = wallet
-            .create_transaction(&to_device_id, 100, None, Some("memo"), None)
+            .create_transaction(&to_device_id, 100, None, Some("memo"), None, None, None)
             .await?;
         assert_eq!(tx.to_device_id, to_device_id);
         assert_eq!(tx.amount, 100);
