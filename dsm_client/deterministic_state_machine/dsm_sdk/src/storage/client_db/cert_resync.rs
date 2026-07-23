@@ -171,15 +171,35 @@ pub fn begin_cert_resync(relationship_key: &[u8; 32], proposed_epoch: i64) -> Re
 pub fn relationships_requiring_resync() -> Result<Vec<[u8; 32]>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    // REQUIRED (never started) AND PENDING (started but not finalized — a lost ack
+    // or a stale-format peer). Re-initiating bumps the epoch, so a retry is a fresh
+    // request the peer accepts; a stranded resync self-heals.
     let mut stmt =
-        conn.prepare("SELECT relationship_key FROM cert_resync_state WHERE state = ?1")?;
+        conn.prepare("SELECT relationship_key FROM cert_resync_state WHERE state IN (?1, ?2)")?;
     let rows = stmt
-        .query_map(params![RESYNC_REQUIRED], |r| r.get::<_, Vec<u8>>(0))?
+        .query_map(params![RESYNC_REQUIRED, RESYNC_PENDING], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
         .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
         .collect())
+}
+
+/// True while any relationship owes a resync (REQUIRED or PENDING). Keeps the
+/// poller alive so the recovery actually runs.
+pub fn has_outstanding_cert_resync() -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM cert_resync_state WHERE state IN (?1, ?2) LIMIT 1",
+            params![RESYNC_REQUIRED, RESYNC_PENDING],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
 }
 
 /// The fresh EK a device installs on ITS OWN Local side (pubkey + secret).
@@ -473,6 +493,10 @@ pub struct CertResyncRequest {
     pub agreed_tip: [u8; 32],
     pub epoch: i64,
     pub preserved_acceptance_commitment: [u8; 32],
+    /// The tip the INITIATOR actually polls for its inbox — the responder MUST
+    /// address the ack here, or it strands (the initiator's own relationship tip
+    /// may have diverged from `agreed_tip`).
+    pub reply_to_tip: [u8; 32],
     pub initiator_ek_pubkey: Vec<u8>,
     pub intent_sig: Vec<u8>,
 }
@@ -484,19 +508,21 @@ impl CertResyncRequest {
         o.extend_from_slice(&self.agreed_tip);
         o.extend_from_slice(&self.epoch.to_le_bytes());
         o.extend_from_slice(&self.preserved_acceptance_commitment);
+        o.extend_from_slice(&self.reply_to_tip);
         put_bytes(&mut o, &self.initiator_ek_pubkey);
         put_bytes(&mut o, &self.intent_sig);
         o
     }
     pub fn from_body(b: &[u8]) -> Option<Self> {
-        if b.len() < 104 {
+        if b.len() < 136 {
             return None;
         }
         let relationship_key = b[0..32].try_into().ok()?;
         let agreed_tip = b[32..64].try_into().ok()?;
         let epoch = i64::from_le_bytes(b[64..72].try_into().ok()?);
         let preserved_acceptance_commitment = b[72..104].try_into().ok()?;
-        let mut off = 104;
+        let reply_to_tip = b[104..136].try_into().ok()?;
+        let mut off = 136;
         let initiator_ek_pubkey = take_bytes(b, &mut off)?.to_vec();
         let intent_sig = take_bytes(b, &mut off)?.to_vec();
         Some(Self {
@@ -504,6 +530,7 @@ impl CertResyncRequest {
             agreed_tip,
             epoch,
             preserved_acceptance_commitment,
+            reply_to_tip,
             initiator_ek_pubkey,
             intent_sig,
         })
@@ -733,6 +760,7 @@ mod tests {
             agreed_tip: [0x22u8; 32],
             epoch: 7,
             preserved_acceptance_commitment: [0xEFu8; 32],
+            reply_to_tip: [0x3Bu8; 32],
             initiator_ek_pubkey: vec![0xA1u8; 64],
             intent_sig: vec![0x5Au8; 128],
         };
@@ -748,7 +776,7 @@ mod tests {
         };
         assert_eq!(CertResyncAck::from_body(&ack.to_body()).unwrap(), ack);
         // Truncated bodies decode to None, never panic.
-        assert!(CertResyncRequest::from_body(&req.to_body()[..90]).is_none());
+        assert!(CertResyncRequest::from_body(&req.to_body()[..120]).is_none());
     }
 
     /// The joint auth hash binds all four fields — changing any one changes it.

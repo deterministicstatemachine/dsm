@@ -113,24 +113,41 @@ pub fn insert_sender_proposal_with_conn(
     conn: &rusqlite::Connection,
     p: &SenderOnlineProposal,
 ) -> Result<()> {
-    let existing: Option<(Vec<u8>, Vec<u8>)> = conn
+    let existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
         .query_row(
-            "SELECT canonical_child, commitment FROM sender_online_proposal
+            "SELECT canonical_child, commitment, status FROM sender_online_proposal
              WHERE relationship_key = ?1 AND canonical_parent = ?2",
             params![p.relationship_key.as_slice(), p.canonical_parent.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((child, commitment)) = existing {
+    if let Some((child, commitment, status)) = existing {
         if child.as_slice() == p.canonical_child.as_slice()
             && commitment.as_slice() == p.commitment.as_slice()
         {
             return Ok(()); // idempotent re-entry
         }
-        return Err(anyhow!(
-            "a DIFFERENT sender proposal already consumed this (relationship, canonical_parent) — \
-             refusing a second proposal for one canonical step"
-        ));
+        // A ROLLED_BACK proposal ABANDONED this canonical step — the head never
+        // advanced past the parent, so the parent is canonically free and a fresh
+        // proposal (a legitimate retry, or a post-recovery send) may supersede it.
+        // Any other status (proposed/submitted/finalized) is a live or committed
+        // step and still fails closed.
+        if status == PROPOSAL_ROLLED_BACK {
+            conn.execute(
+                "DELETE FROM sender_online_proposal
+                  WHERE relationship_key = ?1 AND canonical_parent = ?2 AND status = ?3",
+                params![
+                    p.relationship_key.as_slice(),
+                    p.canonical_parent.as_slice(),
+                    PROPOSAL_ROLLED_BACK
+                ],
+            )?;
+        } else {
+            return Err(anyhow!(
+                "a DIFFERENT sender proposal already consumed this (relationship, canonical_parent) — \
+                 refusing a second proposal for one canonical step"
+            ));
+        }
     }
     conn.execute(
         &format!(
@@ -403,6 +420,44 @@ mod tests {
         .unwrap());
         assert!(
             !mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap()
+        );
+    }
+
+    /// A ROLLED_BACK proposal must not permanently block the canonical parent it
+    /// abandoned — a fresh proposal (retry / post-recovery send) supersedes it.
+    /// This is exactly the residue that blocked 8XK's first send after resync.
+    #[test]
+    #[serial]
+    fn rolled_back_proposal_is_superseded_by_a_fresh_one() {
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().unwrap();
+
+        let mut p = fixture();
+        insert_sender_proposal(&p).unwrap();
+        // Abandon it.
+        assert!(
+            mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap()
+        );
+
+        // A DIFFERENT proposal at the SAME (relationship, canonical_parent) — a
+        // legitimate retry — is now accepted, superseding the rolled-back one.
+        p.canonical_child = [0x7Bu8; 32];
+        p.commitment = [0x7Cu8; 32];
+        p.status = PROPOSAL_PROPOSED.into();
+        insert_sender_proposal(&p).expect("retry supersedes a rolled-back proposal");
+
+        let loaded = get_sender_proposal(&p.relationship_key, &p.canonical_parent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.canonical_child, [0x7Bu8; 32]);
+        assert_eq!(loaded.status, PROPOSAL_PROPOSED);
+
+        // But a live/committed proposal still fails closed.
+        let mut q = fixture();
+        q.canonical_child = [0x9Au8; 32];
+        assert!(
+            insert_sender_proposal(&q).is_err(),
+            "a proposed (non-rolled-back) step must not be superseded"
         );
     }
 }

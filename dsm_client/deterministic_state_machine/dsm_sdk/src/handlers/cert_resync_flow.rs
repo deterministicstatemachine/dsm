@@ -127,19 +127,39 @@ impl super::app_router_impl::AppRouterImpl {
         let (ek_pk_a, _ek_sk_a) = derive_resync_ek(&rel_key, &agreed_tip, &joint, epoch)?;
         let (_ak_pk, ak_sk) = self.wallet.ak_keypair_for_cert_chain()?;
         let intent_sig = sphincs_sign(&ak_sk, &cert_resync_signing_target(&joint, &ek_pk_a))?;
+        let _ = (accepted_parent, accepted_child); // carried by the responder's audit lookup
+
+        let (peer_device, peer_genesis, _peer_ak) =
+            peer_for_relationship(&self.device_id_bytes, &rel_key)?;
+
+        // Tell the responder EXACTLY where to address the ack: the route THIS
+        // device polls for this relationship. The initiator's own tip may have
+        // diverged from `agreed_tip`, so addressing the ack to `agreed_tip` would
+        // strand it.
+        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash()
+            .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+            .unwrap_or([0u8; 32]);
+        let reply_to_tip = client_db::get_contact_by_device_id(&peer_device)
+            .ok()
+            .flatten()
+            .and_then(|c| {
+                super::app_router_impl::relationship_tip_for_contact_restore(
+                    self.device_id_bytes,
+                    local_genesis,
+                    &c,
+                )
+            })
+            .unwrap_or(agreed_tip);
 
         let req = CertResyncRequest {
             relationship_key: rel_key,
             agreed_tip,
             epoch,
             preserved_acceptance_commitment: commitment,
+            reply_to_tip,
             initiator_ek_pubkey: ek_pk_a,
             intent_sig,
         };
-        let _ = (accepted_parent, accepted_child); // carried by the responder's audit lookup
-
-        let (peer_device, peer_genesis, _peer_ak) =
-            peer_for_relationship(&self.device_id_bytes, &rel_key)?;
 
         let sender_b32 = crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
         let mut b0x =
@@ -252,7 +272,7 @@ impl super::app_router_impl::AppRouterImpl {
             ack.to_body(),
             &initiator_genesis,
             &initiator_device,
-            &req.agreed_tip,
+            &req.reply_to_tip,
         )
         .await?;
         log::info!(
