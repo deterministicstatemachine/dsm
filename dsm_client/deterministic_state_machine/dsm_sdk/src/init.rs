@@ -261,6 +261,21 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                             "[SDK] projection repair ({origin}) errored (non-fatal): {e}"
                         ),
                     }
+
+                    // Belt-and-braces: rebuild any projection that diverges from the
+                    // canonical head, even if a failure was never queued (e.g. 8XK's
+                    // projection was blanked out-of-band by the deleted rollback while
+                    // its head kept 275). The head is authority; this only touches the
+                    // cache.
+                    match crate::storage::client_db::reconcile_projections_against_head(&device_id) {
+                        Ok((0, _)) => {}
+                        Ok((rebuilt, checked)) => log::info!(
+                            "[SDK] projection reconcile ({origin}): {rebuilt}/{checked} rebuilt from canonical head"
+                        ),
+                        Err(e) => log::warn!(
+                            "[SDK] projection reconcile ({origin}) errored (non-fatal): {e}"
+                        ),
+                    }
                 }
             }
             Err(_) => {

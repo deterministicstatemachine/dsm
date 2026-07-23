@@ -172,6 +172,72 @@ pub fn drain_projection_repairs(
     Ok((repaired, remaining))
 }
 
+/// STARTUP RECONCILE — rebuild any projection that diverges from the canonical head.
+///
+/// The queue above only catches projections a live send FAILED to write. It does
+/// NOT catch a projection that was blanked out-of-band (e.g. by the deleted
+/// destructive rollback, which is how 8XK ended up with an empty
+/// `balance_projections` while its head still held 275). This sweep is the
+/// belt-and-braces: for every token the CANONICAL head carries, ensure the
+/// projection row exists and equals the head's balance; rebuild it from the head
+/// if missing or divergent.
+///
+/// The head is never touched — it is the authority; the projection is the cache.
+/// Idempotent and cheap (one row per token), so it is safe to run every startup.
+/// Returns `(rebuilt, checked)`.
+pub fn reconcile_projections_against_head(device_id_bytes: &[u8; 32]) -> Result<(usize, usize)> {
+    let Some(head) = super::load_bcr_device_head(device_id_bytes)? else {
+        return Ok((0, 0));
+    };
+    let device_txt = crate::util::text_id::encode_base32_crockford(device_id_bytes);
+
+    let mut rebuilt = 0usize;
+    let mut checked = 0usize;
+    for (policy_commit, head_balance) in head.balances_snapshot() {
+        // Only builtin tokens have a stable ticker resolvable from the policy
+        // commit alone; the projection is keyed by that ticker.
+        let Some(token_id) = dsm::core::token::builtin_token_id_for_policy_commit(policy_commit)
+        else {
+            continue;
+        };
+        checked += 1;
+
+        let locked = super::get_locked_balance(&device_txt, token_id).unwrap_or(0);
+        let expected_available = head_balance.saturating_sub(locked);
+
+        let current = super::get_balance_projection(&device_txt, token_id)?;
+        let matches = current
+            .as_ref()
+            .map(|r| r.available == expected_available && r.locked == locked)
+            .unwrap_or(false);
+        if matches {
+            continue;
+        }
+
+        match super::build_balance_projection_from_device_head(
+            &device_txt,
+            token_id,
+            policy_commit,
+            &head,
+            *head_balance,
+            locked,
+        )
+        .and_then(|record| super::upsert_balance_projection(&record))
+        {
+            Ok(()) => {
+                rebuilt += 1;
+                log::info!(
+                    "[projection-reconcile] {device_txt}:{token_id} rebuilt from canonical head (available={expected_available})"
+                );
+            }
+            Err(e) => log::warn!(
+                "[projection-reconcile] {device_txt}:{token_id} rebuild failed ({e}) — head unchanged"
+            ),
+        }
+    }
+    Ok((rebuilt, checked))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +247,99 @@ mod tests {
         unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
+    }
+
+    /// Build a canonical head carrying `amount` ERA via a self-mint advance, and
+    /// return (devid, head).
+    fn head_with_era(amount: u64) -> ([u8; 32], dsm::types::device_state::DeviceState) {
+        use dsm::types::device_state::{BalanceDelta, BalanceDirection};
+        let devid = [0x8Cu8; 32];
+        let base = dsm::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64);
+        let policy = crate::policy::builtin_policy_commit("ERA").unwrap();
+        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
+        let init = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &devid, &devid,
+        );
+        let outcome = base
+            .advance(
+                rel,
+                devid,
+                dsm::types::operations::Operation::Mint {
+                    amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
+                    token_id: b"ERA".to_vec(),
+                    authorized_by: b"self".to_vec(),
+                    proof_of_authorization: Vec::new(),
+                    message: "mint".to_string(),
+                },
+                vec![0x11u8; 32],
+                None,
+                &[BalanceDelta {
+                    policy_commit: policy,
+                    direction: BalanceDirection::Credit,
+                    amount,
+                }],
+                Some(init),
+                None,
+                None,
+            )
+            .expect("mint advance");
+        (devid, outcome.new_device_state)
+    }
+
+    /// THE 8XK CASE. Head intact at 275, projection empty (blanked out-of-band, no
+    /// repair ever queued). The startup reconcile must rebuild the projection from
+    /// the head WITHOUT touching the head.
+    #[test]
+    #[serial]
+    fn reconcile_rebuilds_a_projection_blanked_out_of_band() {
+        init();
+        let (devid, head) = head_with_era(275);
+        crate::storage::client_db::update_bcr_device_head(&head).expect("write head");
+        let root_before = head.root();
+
+        let devid_txt = crate::util::text_id::encode_base32_crockford(&devid);
+        assert!(
+            crate::storage::client_db::get_balance_projection(&devid_txt, "ERA")
+                .unwrap()
+                .is_none(),
+            "precondition: projection is empty, like 8XK"
+        );
+        // Nothing was ever queued — the queue-driven drain cannot help here.
+        assert!(!has_pending_projection_repairs().unwrap());
+
+        let (rebuilt, checked) = reconcile_projections_against_head(&devid).unwrap();
+        assert_eq!((rebuilt, checked), (1, 1));
+
+        let proj = crate::storage::client_db::get_balance_projection(&devid_txt, "ERA")
+            .unwrap()
+            .expect("projection rebuilt");
+        assert_eq!(
+            proj.available, 275,
+            "projection rebuilt to the head's balance"
+        );
+
+        // The head is the authority and must be byte-identical after reconcile.
+        let head_after = crate::storage::client_db::load_bcr_device_head(&devid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            head_after.root(),
+            root_before,
+            "reconcile must NOT touch the head"
+        );
+        assert_eq!(head_after.balances_snapshot(), head.balances_snapshot());
+    }
+
+    /// A projection that already matches the head is left alone (idempotent, cheap).
+    #[test]
+    #[serial]
+    fn reconcile_is_a_noop_when_projection_matches() {
+        init();
+        let (devid, head) = head_with_era(100);
+        crate::storage::client_db::update_bcr_device_head(&head).expect("write head");
+        assert_eq!(reconcile_projections_against_head(&devid).unwrap(), (1, 1));
+        // Second pass: already matches → nothing rebuilt.
+        assert_eq!(reconcile_projections_against_head(&devid).unwrap(), (0, 1));
     }
 
     /// The whole point: the intent to repair outlives the process that formed it.
