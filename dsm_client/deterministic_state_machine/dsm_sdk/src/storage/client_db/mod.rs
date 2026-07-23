@@ -25,6 +25,7 @@ mod ble_chunk_buffer;
 pub mod canonical_apply;
 mod canonical_rebuild;
 pub mod cert_chain;
+mod cert_resync;
 mod contacts;
 mod dlv_receipts;
 mod export;
@@ -61,6 +62,7 @@ pub use canonical_apply::*;
 pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
 pub use canonical_rebuild::*;
+pub use cert_resync::*;
 pub use projection_repair::*;
 pub use sender_outbox::*;
 pub use sender_proposal::*;
@@ -538,6 +540,36 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- envelope bytes (retries resubmit the identical artifact, never a
         -- rebuild) and outlives finalization as `gc_pending` so the remaining
         -- lifecycle work stays reachable.
+        CREATE TABLE IF NOT EXISTS cert_resync_state(
+            relationship_key   BLOB NOT NULL PRIMARY KEY,
+            -- 0 = CLEAR (ordinary sending allowed), 1 = REQUIRED, 2 = PENDING.
+            -- Any non-zero value BLOCKS ordinary sends on this relationship.
+            state              INTEGER NOT NULL DEFAULT 0 CHECK(state IN (0, 1, 2)),
+            -- Monotonic per-relationship epoch. A resync tuple whose epoch is not
+            -- strictly greater than this is rejected (anti-replay).
+            epoch              INTEGER NOT NULL DEFAULT 0,
+            updated_at         INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS cert_chain_resync_audit(
+            relationship_key              BLOB NOT NULL,
+            -- The PRESERVED accepted commitment this restart is anchored to
+            -- (content identity — one resync per agreed accepted transition).
+            preserved_acceptance_commitment BLOB NOT NULL,
+            accepted_parent_tip           BLOB NOT NULL,
+            accepted_child_tip            BLOB NOT NULL,
+            -- Digest of the jointly-authorized restart statement.
+            joint_auth_hash               BLOB NOT NULL,
+            epoch                         INTEGER NOT NULL,
+            old_local_head                BLOB,
+            old_counterparty_head         BLOB,
+            new_local_head                BLOB NOT NULL,
+            new_counterparty_head         BLOB NOT NULL,
+            reason_code                   TEXT NOT NULL,
+            created_at                    INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, preserved_acceptance_commitment)
+        );
+
         CREATE TABLE IF NOT EXISTS projection_repair_queue(
             device_id   TEXT NOT NULL,
             token_id    TEXT NOT NULL,

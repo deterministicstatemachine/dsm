@@ -451,6 +451,87 @@ pub fn cas_advance_counterparty_cert_chain_head_with_conn(
     }
 }
 
+/// CAS-advance the LOCAL (side 0) cert-chain head INSIDE a caller-owned
+/// transaction, carrying the encrypted secret key. This is the in-tx sibling of
+/// [`cas_advance_local_cert_chain_head_with_sk`], which opens its own connection
+/// and therefore cannot run inside a held-mutex transaction.
+///
+/// Why this exists: the cert-resync finalizer installs BOTH heads in one
+/// transaction. The only in-tx local writer that existed —
+/// `promote_pending_local_head_with_conn` — advances with a BARE unconditional
+/// UPDATE (no expected-current guard) and its genesis branch is the documented
+/// root-AK path; reusing it would disguise a recovery as ordinary genesis and
+/// give up the CAS fail-closed guarantee. This writer is CAS-guarded on
+/// `expected_current` exactly like the counterparty side.
+pub fn cas_advance_local_cert_chain_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    expected_current: Option<&[u8]>,
+    new_pubkey: &[u8],
+    new_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+) -> Result<CasHeadOutcome> {
+    let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
+    if let Some(expected) = expected_current {
+        let now = tick() as i64;
+        let updated = conn.execute(
+            "UPDATE cert_chain_heads
+             SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
+                 step_count = step_count + 1, updated_at = ?3
+             WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
+            params![
+                new_pubkey,
+                encrypted_sk,
+                now,
+                relationship_key.as_slice(),
+                expected
+            ],
+        )?;
+        if updated == 1 {
+            let step: i64 = conn
+                .query_row(
+                    "SELECT step_count FROM cert_chain_heads WHERE relationship_key = ?1 AND side = 0",
+                    params![relationship_key.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            return Ok(CasHeadOutcome::Advanced { step: step as u64 });
+        }
+    }
+
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 0",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match current {
+        Some(cur) if cur.as_slice() == new_pubkey => Ok(CasHeadOutcome::AlreadyAtTarget),
+        Some(cur) => Ok(CasHeadOutcome::Conflict { current: Some(cur) }),
+        None => {
+            if expected_current.is_some() {
+                return Ok(CasHeadOutcome::Conflict { current: None });
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO cert_chain_heads
+                    (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
+                     step_count, updated_at)
+                 VALUES (?1, 0, ?2, ?3, 0, ?4)",
+                params![
+                    relationship_key.as_slice(),
+                    new_pubkey,
+                    encrypted_sk,
+                    tick() as i64
+                ],
+            )?;
+            Ok(CasHeadOutcome::GenesisInit)
+        }
+    }
+}
+
 pub fn cas_advance_counterparty_cert_chain_head(
     relationship_key: &[u8; 32],
     expected_current: Option<&[u8]>,

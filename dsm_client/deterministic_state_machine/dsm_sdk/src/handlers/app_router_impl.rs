@@ -970,6 +970,55 @@ impl AppRouterImpl {
             );
         }
 
+        // CERT-RESYNC GATE (fail-closed). A relationship whose per-step-EK cert
+        // chain was lost must NOT fall back to the root AK — the peer chains
+        // against its stored head and would reject us, and silently root-AK
+        // sending is exactly the recovery-disguised-as-transfer the resync
+        // protocol forbids. Ordinary sending stays blocked until an explicit
+        // jointly-authorized resync finalizes.
+        let resync_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &from_device_id,
+            &to_device_id,
+        );
+        // Detect head-loss on an ESTABLISHED relationship: no Local cert head, but
+        // the relationship has a real advanced tip (not the genesis initial tip).
+        // A genuine first transfer (initial tip, no head) is NOT a resync — it is
+        // the normal root-AK genesis bootstrap and is allowed through.
+        let local_head_present = crate::storage::client_db::load_cert_chain_head_pubkey(
+            &resync_rel_key,
+            crate::storage::client_db::CertChainSide::Local,
+        )
+        .map(|h| h.is_some())
+        .unwrap_or(true);
+        // Precise signal: THIS device previously initiated a send on this
+        // relationship (a sender proposal exists). "Local head absent + we sent
+        // before" = head loss (8XK). It does NOT false-positive on a
+        // receive-established relationship's legitimate first send (no prior
+        // proposal → normal root-AK genesis, allowed through).
+        let had_prior_send =
+            crate::storage::client_db::relationship_had_prior_send(&resync_rel_key)
+                .unwrap_or(false);
+        if !local_head_present && had_prior_send {
+            if let Err(e) = crate::storage::client_db::mark_cert_resync_required(&resync_rel_key) {
+                log::warn!("[wallet.send] could not mark cert resync required: {e}");
+            }
+        }
+        match crate::storage::client_db::cert_resync_blocks_send(&resync_rel_key) {
+            Ok(true) => {
+                return err(
+                    "wallet.send: this relationship needs a cert-chain resync before sending \
+                     (per-step-EK head was lost); an ordinary send is blocked until the \
+                     jointly-authorized resync finalizes"
+                        .to_string(),
+                )
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Fail closed: if we cannot read the resync state, do not send.
+                return err(format!("wallet.send: cert-resync gate check failed: {e}"));
+            }
+        }
+
         let token_id = if transfer_req.token_id.is_empty() {
             "ERA".to_string()
         } else {
