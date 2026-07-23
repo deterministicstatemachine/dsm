@@ -462,6 +462,8 @@ pub struct B0xSDK {
     /// stays stable; drained by the sender-finalization path via
     /// [`Self::take_reply_artifacts`].
     pending_reply_artifacts: Vec<dsm::types::proto::AcceptanceReceiptArtifact>,
+    /// Cert-resync control messages decoded on retrieve: (method, framed body).
+    pending_cert_resync: Vec<(String, Vec<u8>)>,
 }
 
 /// Explicit invoke method that marks a §16.6 acceptance artifact on the wire.
@@ -615,6 +617,7 @@ impl B0xSDK {
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
             pending_reply_artifacts: Vec::new(),
+            pending_cert_resync: Vec::new(),
         };
 
         // Token loading is now lazy - happens on first use via ensure_token()
@@ -1286,6 +1289,32 @@ impl B0xSDK {
         std::mem::take(&mut self.pending_reply_artifacts)
     }
 
+    /// Decode a cert-resync control message (method + framed body) from a spooled
+    /// envelope, discriminated on the EXPLICIT invoke method — never trial-decoded.
+    fn decode_cert_resync_message(env: &dsm::types::proto::Envelope) -> Option<(String, Vec<u8>)> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
+                || invoke.method == crate::storage::client_db::CERT_RESYNC_ACK_METHOD
+            {
+                if let Some(args) = &invoke.args {
+                    return Some((invoke.method.clone(), args.body.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Drain cert-resync control messages decoded by the most recent retrieve.
+    pub fn take_cert_resync_messages(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.pending_cert_resync)
+    }
+
     /// Deliver the recipient's countersigned acceptance receipt BACK to the
     /// original sender, so the sender can finalize on cryptographic proof rather
     /// than on storage-node message deletion (which is best-effort GC only).
@@ -1453,6 +1482,138 @@ impl B0xSDK {
                 format!(
                     "§16.6 reply delivery failed on all endpoints: {}",
                     last_err.unwrap_or_else(|| "no endpoints configured".into())
+                ),
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(message_id_b32)
+    }
+
+    /// Submit a cert-resync control message (an explicit `invoke.method` with the
+    /// framed body in `ArgPack.body`) addressed to the recipient's b0x route. Rides
+    /// the SAME allowlisted UniversalTx tag as everything else — no new payload tag,
+    /// no fleet redeploy. Mirrors `submit_acceptance_reply`'s carrier choice.
+    ///
+    /// NOTE ON PAIDK: the deployed fleet does not currently enforce the PaidK gate
+    /// on submit; the structural exemption (a recovery message must never depend on
+    /// the spend authority it restores) is tracked as node-side follow-up.
+    pub async fn submit_cert_resync_message(
+        &mut self,
+        method: &str,
+        body: Vec<u8>,
+        recipient_genesis: &[u8; 32],
+        recipient_device: &[u8; 32],
+        recipient_tip: &[u8; 32],
+    ) -> Result<String, DsmError> {
+        use prost::Message as _;
+        let routing_key =
+            Self::compute_b0x_address(recipient_genesis, recipient_device, recipient_tip)?;
+
+        // Deterministic transport id from method + route + a digest of the body.
+        let mut mid = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x-certresync-message-id\0");
+        mid.update(method.as_bytes());
+        mid.update(recipient_tip);
+        mid.update(&body);
+        let message_id_bytes = mid.finalize().as_bytes()[..16].to_vec();
+        let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
+
+        let local_device_bytes =
+            crate::util::text_id::decode_base32_crockford(self.device_id.trim())
+                .filter(|b| b.len() == 32)
+                .ok_or_else(|| {
+                    DsmError::invalid_parameter(
+                        "submit_cert_resync: local device_id not base32(32)",
+                    )
+                })?;
+        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: method.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: 0,
+                body,
+            }),
+            pre_state_hash: None,
+            post_state_hash: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: message_id_bytes.clone(),
+            }),
+            actor: local_device_bytes.clone(),
+            genesis_hash: local_genesis.clone(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis,
+                chain_tip: recipient_tip.to_vec(),
+                seq: 0,
+            }),
+            message_id: message_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("cert-resync envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        let auth_device_id = self.device_id.clone();
+        let mut delivered = 0usize;
+        let mut last_err: Option<String> = None;
+        for endpoint in self.storage_node_endpoints.clone() {
+            let token = match self.ensure_token_for_endpoint(&endpoint).await {
+                Ok(t) => t,
+                Err(e) => {
+                    last_err = Some(format!("token for {endpoint}: {e}"));
+                    continue;
+                }
+            };
+            let url = format!("{}/api/v2/b0x/submit", endpoint);
+            match self
+                .http_client
+                .post(&url)
+                .header("Content-Type", "application/protobuf")
+                .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
+                .header("x-dsm-message-id", message_id_b32.clone())
+                .header("x-dsm-recipient", routing_key.clone())
+                .body(buf.clone())
+                .send()
+                .await
+            {
+                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                    delivered += 1;
+                    info!(
+                        "cert-resync {} delivered -> {} route={}..",
+                        method,
+                        endpoint,
+                        &routing_key[..8.min(routing_key.len())]
+                    );
+                }
+                Ok(r) => last_err = Some(format!("{endpoint} HTTP {}", r.status())),
+                Err(e) => last_err = Some(format!("{endpoint}: {e}")),
+            }
+        }
+        if delivered == 0 {
+            return Err(DsmError::network(
+                format!(
+                    "cert-resync delivery failed on all endpoints: {}",
+                    last_err.unwrap_or_else(|| "none".into())
                 ),
                 None::<std::io::Error>,
             ));
@@ -2604,6 +2765,15 @@ impl B0xSDK {
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
             // dropping it here is what would strand a countersigned receipt.
+            if let Some((method, body)) = Self::decode_cert_resync_message(&env) {
+                info!(
+                    "📬 cert-resync message method={} body={}B",
+                    method,
+                    body.len()
+                );
+                self.pending_cert_resync.push((method, body));
+                continue;
+            }
             if let Some(artifact) = Self::decode_acceptance_artifact(&env) {
                 info!(
                     "📬 reply window: acceptance artifact for commitment={}..",

@@ -313,6 +313,236 @@ pub fn finalize_cert_resync_atomically(
     Ok(())
 }
 
+/// The jointly-authorized restart statement both AKs sign. Binds the restart to
+/// the relationship, the agreed accepted tip, the monotonic epoch, and the
+/// preserved acceptance commitment — so a signature for one restart cannot be
+/// replayed for another.
+pub fn compute_joint_auth_hash(
+    relationship_key: &[u8; 32],
+    agreed_tip: &[u8; 32],
+    epoch: i64,
+    preserved_acceptance_commitment: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/cert-restart/v1\0");
+    h.update(relationship_key);
+    h.update(agreed_tip);
+    h.update(&epoch.to_le_bytes());
+    h.update(preserved_acceptance_commitment);
+    *h.finalize().as_bytes()
+}
+
+/// The message an AK actually signs: the joint statement bound to the signer's
+/// fresh EK public key, so a signature authorizes exactly this key.
+pub fn cert_resync_signing_target(joint_auth_hash: &[u8; 32], ek_pubkey: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(32 + ek_pubkey.len());
+    v.extend_from_slice(joint_auth_hash);
+    v.extend_from_slice(ek_pubkey);
+    v
+}
+
+/// Responder-side finalize (the HEALTHY peer, e.g. D3). ASYMMETRIC: it does NOT
+/// touch its own Local head — it only CAS-advances the STALE Counterparty head it
+/// holds for the initiator to the initiator's fresh EK, records the epoch, and
+/// audits. One transaction.
+///
+/// The healthy side is never blocked from sending, so there is no send-gate to
+/// clear here — but the epoch is still recorded and must strictly increase, so a
+/// replayed request cannot re-drive it.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_cert_resync_responder_atomically(
+    relationship_key: &[u8; 32],
+    epoch: i64,
+    counterparty_new_pubkey: &[u8],
+    expected_counterparty: Option<&[u8]>,
+    audit: ResyncAudit<'_>,
+    responder_local_head: &[u8],
+) -> Result<()> {
+    if let Some(reason) = resync_pending_obligation(relationship_key)? {
+        return Err(anyhow!("responder cannot finalize cert resync: {reason}"));
+    }
+    let (_state, current_epoch) = cert_resync_status(relationship_key)?;
+    if epoch <= current_epoch {
+        return Err(anyhow!(
+            "responder cert resync epoch {epoch} not greater than current {current_epoch}"
+        ));
+    }
+
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let tx = conn.transaction()?;
+
+    // Counterparty head only — CAS-advance the stale head to the initiator's EK.
+    match cas_advance_counterparty_cert_chain_head_with_conn(
+        &tx,
+        relationship_key,
+        expected_counterparty,
+        counterparty_new_pubkey,
+    )? {
+        CasHeadOutcome::Advanced { .. }
+        | CasHeadOutcome::GenesisInit
+        | CasHeadOutcome::AlreadyAtTarget => {}
+        CasHeadOutcome::Conflict { current } => {
+            return Err(anyhow!(
+                "responder cert resync: counterparty CAS conflict (current={:?}..)",
+                current.as_ref().map(|c| &c[..4.min(c.len())])
+            ))
+        }
+    }
+
+    tx.execute(
+        "INSERT OR IGNORE INTO cert_chain_resync_audit(
+            relationship_key, preserved_acceptance_commitment, accepted_parent_tip,
+            accepted_child_tip, joint_auth_hash, epoch, old_local_head,
+            old_counterparty_head, new_local_head, new_counterparty_head,
+            reason_code, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        params![
+            relationship_key.as_slice(),
+            audit.preserved_acceptance_commitment.as_slice(),
+            audit.accepted_parent_tip.as_slice(),
+            audit.accepted_child_tip.as_slice(),
+            audit.joint_auth_hash.as_slice(),
+            epoch,
+            responder_local_head, // old_local_head == kept (unchanged)
+            expected_counterparty,
+            responder_local_head, // new_local_head == same (asymmetric: untouched)
+            counterparty_new_pubkey,
+            audit.reason_code,
+            tick() as i64,
+        ],
+    )?;
+
+    // Record the epoch (state stays CLEAR — the responder is not blocked).
+    tx.execute(
+        "INSERT INTO cert_resync_state (relationship_key, state, epoch, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(relationship_key) DO UPDATE SET epoch = ?3, updated_at = ?4",
+        params![
+            relationship_key.as_slice(),
+            RESYNC_CLEAR,
+            epoch,
+            tick() as i64
+        ],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+// ---- wire framing (rides ArgPack.body; no proto change) ----
+
+fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    out.extend_from_slice(b);
+}
+fn take_bytes<'a>(b: &'a [u8], off: &mut usize) -> Option<&'a [u8]> {
+    if *off + 4 > b.len() {
+        return None;
+    }
+    let n = u32::from_le_bytes(b[*off..*off + 4].try_into().ok()?) as usize;
+    *off += 4;
+    if *off + n > b.len() {
+        return None;
+    }
+    let s = &b[*off..*off + n];
+    *off += n;
+    Some(s)
+}
+
+/// MSG1 — initiator → responder. Carries the initiator's fresh EK, its cosignature,
+/// and the agreed restart identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertResyncRequest {
+    pub relationship_key: [u8; 32],
+    pub agreed_tip: [u8; 32],
+    pub epoch: i64,
+    pub preserved_acceptance_commitment: [u8; 32],
+    pub initiator_ek_pubkey: Vec<u8>,
+    pub intent_sig: Vec<u8>,
+}
+
+impl CertResyncRequest {
+    pub fn to_body(&self) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(&self.relationship_key);
+        o.extend_from_slice(&self.agreed_tip);
+        o.extend_from_slice(&self.epoch.to_le_bytes());
+        o.extend_from_slice(&self.preserved_acceptance_commitment);
+        put_bytes(&mut o, &self.initiator_ek_pubkey);
+        put_bytes(&mut o, &self.intent_sig);
+        o
+    }
+    pub fn from_body(b: &[u8]) -> Option<Self> {
+        if b.len() < 104 {
+            return None;
+        }
+        let relationship_key = b[0..32].try_into().ok()?;
+        let agreed_tip = b[32..64].try_into().ok()?;
+        let epoch = i64::from_le_bytes(b[64..72].try_into().ok()?);
+        let preserved_acceptance_commitment = b[72..104].try_into().ok()?;
+        let mut off = 104;
+        let initiator_ek_pubkey = take_bytes(b, &mut off)?.to_vec();
+        let intent_sig = take_bytes(b, &mut off)?.to_vec();
+        Some(Self {
+            relationship_key,
+            agreed_tip,
+            epoch,
+            preserved_acceptance_commitment,
+            initiator_ek_pubkey,
+            intent_sig,
+        })
+    }
+}
+
+/// MSG2 — responder → initiator. Carries the responder's CURRENT Local head (the
+/// asymmetric assertion — it is NOT re-rooted) and its cosignature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertResyncAck {
+    pub relationship_key: [u8; 32],
+    pub agreed_tip: [u8; 32],
+    pub epoch: i64,
+    pub preserved_acceptance_commitment: [u8; 32],
+    pub responder_local_head: Vec<u8>,
+    pub assert_sig: Vec<u8>,
+}
+
+impl CertResyncAck {
+    pub fn to_body(&self) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.extend_from_slice(&self.relationship_key);
+        o.extend_from_slice(&self.agreed_tip);
+        o.extend_from_slice(&self.epoch.to_le_bytes());
+        o.extend_from_slice(&self.preserved_acceptance_commitment);
+        put_bytes(&mut o, &self.responder_local_head);
+        put_bytes(&mut o, &self.assert_sig);
+        o
+    }
+    pub fn from_body(b: &[u8]) -> Option<Self> {
+        if b.len() < 104 {
+            return None;
+        }
+        let relationship_key = b[0..32].try_into().ok()?;
+        let agreed_tip = b[32..64].try_into().ok()?;
+        let epoch = i64::from_le_bytes(b[64..72].try_into().ok()?);
+        let preserved_acceptance_commitment = b[72..104].try_into().ok()?;
+        let mut off = 104;
+        let responder_local_head = take_bytes(b, &mut off)?.to_vec();
+        let assert_sig = take_bytes(b, &mut off)?.to_vec();
+        Some(Self {
+            relationship_key,
+            agreed_tip,
+            epoch,
+            preserved_acceptance_commitment,
+            responder_local_head,
+            assert_sig,
+        })
+    }
+}
+
+/// Wire method discriminators (ride existing UniversalTx tag 10; client-side only).
+pub const CERT_RESYNC_REQUEST_METHOD: &str = "wallet.certResyncRequest";
+pub const CERT_RESYNC_ACK_METHOD: &str = "wallet.certResyncAck";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +707,121 @@ mod tests {
         );
         // Even a direct finalize is refused.
         assert!(do_finalize(1).is_err(), "pending head must block finalize");
+    }
+
+    /// Wire framing round-trips exactly (it rides ArgPack.body).
+    #[test]
+    fn request_and_ack_framing_round_trip() {
+        let req = CertResyncRequest {
+            relationship_key: [0x11u8; 32],
+            agreed_tip: [0x22u8; 32],
+            epoch: 7,
+            preserved_acceptance_commitment: [0xEFu8; 32],
+            initiator_ek_pubkey: vec![0xA1u8; 64],
+            intent_sig: vec![0x5Au8; 128],
+        };
+        assert_eq!(CertResyncRequest::from_body(&req.to_body()).unwrap(), req);
+
+        let ack = CertResyncAck {
+            relationship_key: [0x11u8; 32],
+            agreed_tip: [0x22u8; 32],
+            epoch: 7,
+            preserved_acceptance_commitment: [0xEFu8; 32],
+            responder_local_head: vec![0xB2u8; 64],
+            assert_sig: vec![0xC3u8; 128],
+        };
+        assert_eq!(CertResyncAck::from_body(&ack.to_body()).unwrap(), ack);
+        // Truncated bodies decode to None, never panic.
+        assert!(CertResyncRequest::from_body(&req.to_body()[..90]).is_none());
+    }
+
+    /// The joint auth hash binds all four fields — changing any one changes it.
+    #[test]
+    fn joint_auth_hash_binds_every_field() {
+        let base = compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 3, &[4u8; 32]);
+        assert_ne!(
+            base,
+            compute_joint_auth_hash(&[9u8; 32], &[2u8; 32], 3, &[4u8; 32])
+        );
+        assert_ne!(
+            base,
+            compute_joint_auth_hash(&[1u8; 32], &[9u8; 32], 3, &[4u8; 32])
+        );
+        assert_ne!(
+            base,
+            compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 9, &[4u8; 32])
+        );
+        assert_ne!(
+            base,
+            compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 3, &[9u8; 32])
+        );
+    }
+
+    /// The RESPONDER leg (asymmetric): CAS-advances only the stale Counterparty
+    /// head, leaves its own Local head untouched, records the epoch, and never
+    /// blocks its own sending.
+    #[test]
+    #[serial_test::serial]
+    fn responder_advances_counterparty_only_and_keeps_local() {
+        init();
+        use crate::storage::client_db::cert_chain::{
+            init_cert_chain_head, load_cert_chain_head_pubkey, CertChainSide,
+        };
+        // Healthy responder: has its own Local head P_D3 and a stale Counterparty EK_N.
+        init_cert_chain_head(&REL, CertChainSide::Local, &[0xD3u8; 8]).unwrap();
+        init_cert_chain_head(&REL, CertChainSide::Counterparty, &[0xE0u8; 8]).unwrap();
+        let (commit, parent, child, joint) = audit();
+
+        finalize_cert_resync_responder_atomically(
+            &REL,
+            1,
+            &[0xA1u8; 8],
+            Some(&[0xE0u8; 8]),
+            ResyncAudit {
+                preserved_acceptance_commitment: &commit,
+                accepted_parent_tip: &parent,
+                accepted_child_tip: &child,
+                joint_auth_hash: &joint,
+                reason_code: "peer-head-loss",
+            },
+            &[0xD3u8; 8],
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_cert_chain_head_pubkey(&REL, CertChainSide::Local)
+                .unwrap()
+                .unwrap(),
+            vec![0xD3u8; 8],
+            "responder Local head UNTOUCHED (asymmetric)"
+        );
+        assert_eq!(
+            load_cert_chain_head_pubkey(&REL, CertChainSide::Counterparty)
+                .unwrap()
+                .unwrap(),
+            vec![0xA1u8; 8],
+            "counterparty advanced to the initiator's fresh EK"
+        );
+        assert!(
+            !cert_resync_blocks_send(&REL).unwrap(),
+            "responder is never blocked"
+        );
+        // Replay at the same epoch is rejected.
+        assert!(finalize_cert_resync_responder_atomically(
+            &REL,
+            1,
+            &[0xA1u8; 8],
+            Some(&[0xA1u8; 8]),
+            ResyncAudit {
+                preserved_acceptance_commitment: &commit,
+                accepted_parent_tip: &parent,
+                accepted_child_tip: &child,
+                joint_auth_hash: &joint,
+                reason_code: "x"
+            },
+            &[0xD3u8; 8]
+        )
+        .is_err());
     }
 
     /// The detection signal: only a relationship this device previously SENT on
