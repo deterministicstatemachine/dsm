@@ -276,6 +276,16 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                             "[SDK] projection reconcile ({origin}) errored (non-fatal): {e}"
                         ),
                     }
+
+                    // Heal pre-existing symmetric-space residue: a contact whose
+                    // chain_tip diverged from local_bilateral by one accepted
+                    // transition (defect-1 era data) is converged from finalized-
+                    // proposal evidence, so a send can proceed.
+                    match crate::storage::client_db::reconcile_diverged_projection_tips() {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("[SDK] tip reconcile ({origin}): {n} healed"),
+                        Err(e) => log::warn!("[SDK] tip reconcile ({origin}) errored (non-fatal): {e}"),
+                    }
                 }
             }
             Err(_) => {

@@ -238,6 +238,42 @@ pub fn reconcile_projections_against_head(device_id_bytes: &[u8; 32]) -> Result<
     Ok((rebuilt, checked))
 }
 
+/// EVIDENCE-BASED TIP RECONCILE — converge a relationship's symmetric projection
+/// tips when they diverged by exactly one ACCEPTED transition.
+///
+/// The original defect-1 incident could leave `contacts.chain_tip` stuck at an
+/// accepted transition's projection_parent while `local_bilateral_chain_tip`
+/// correctly advanced to its projection_target (8XK's residue). A send from the
+/// stale `chain_tip` then fails the gate's "would overwrite a divergent local
+/// bilateral chain tip" check. `finalize_on_acceptance_atomically` prevents this
+/// going forward; this heals PRE-EXISTING data.
+///
+/// It converges ONLY when a FINALIZED proposal attests the exact
+/// (chain_tip -> local_bilateral) advance — never a guess. Returns rows healed.
+pub fn reconcile_diverged_projection_tips() -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let n = conn.execute(
+        "UPDATE contacts
+            SET chain_tip = local_bilateral_chain_tip, needs_online_reconcile = 0
+          WHERE needs_online_reconcile != 0
+            AND local_bilateral_chain_tip IS NOT NULL
+            AND chain_tip IS NOT NULL
+            AND chain_tip != local_bilateral_chain_tip
+            AND EXISTS (
+                SELECT 1 FROM sender_online_proposal p
+                 WHERE p.status = 'finalized'
+                   AND p.projection_parent = contacts.chain_tip
+                   AND p.projection_target = contacts.local_bilateral_chain_tip
+            )",
+        [],
+    )?;
+    if n > 0 {
+        log::info!("[tip-reconcile] converged {n} diverged projection tip(s) from finalized-proposal evidence");
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +283,12 @@ mod tests {
         unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn with_conn<T>(f: impl FnOnce(&rusqlite::Connection) -> T) -> T {
+        let binding = crate::storage::client_db::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+        f(&conn)
     }
 
     /// Build a canonical head carrying `amount` ERA via a self-mint advance, and
@@ -328,6 +370,62 @@ mod tests {
             "reconcile must NOT touch the head"
         );
         assert_eq!(head_after.balances_snapshot(), head.balances_snapshot());
+    }
+
+    /// Evidence-based tip reconcile heals a diverged (chain_tip, local_bilateral)
+    /// pair ONLY when a finalized proposal attests the exact advance.
+    #[test]
+    #[serial]
+    fn tip_reconcile_converges_from_finalized_proposal_evidence() {
+        init();
+        let parent = [0x28u8; 32];
+        let target = [0x63u8; 32];
+        let devd = [0xB1u8; 32];
+        // A contact stuck: chain_tip at the parent, local_bilateral at the target.
+        with_conn(|c| {
+            c.execute(
+                "INSERT INTO contacts (contact_id, device_id, alias, genesis_hash, chain_tip,
+                     added_at, verified, status, needs_online_reconcile,
+                     last_seen_online_counter, last_seen_ble_counter, local_bilateral_chain_tip)
+                 VALUES ('c1', ?1, 'peer', X'00', ?2, 0, 1, 'active', 1, 0, 0, ?3)",
+                rusqlite::params![&devd[..], &parent[..], &target[..]],
+            )
+            .unwrap();
+        });
+        // No evidence yet → no heal.
+        assert_eq!(reconcile_diverged_projection_tips().unwrap(), 0);
+
+        // A finalized proposal attesting parent -> target.
+        let proposal = crate::storage::client_db::SenderOnlineProposal {
+            relationship_key: [0x11u8; 32],
+            canonical_parent: [0x22u8; 32],
+            canonical_child: [0x33u8; 32],
+            projection_parent: parent,
+            projection_target: target,
+            commitment: [0x44u8; 32],
+            operation_digest: [0x55u8; 32],
+            nonce_hash: [0x66u8; 32],
+            message_id: None,
+            tx_id: "tx2:x".into(),
+            counterparty_device_id: devd,
+            amount: 6,
+            token_id: "ERA".into(),
+            status: crate::storage::client_db::PROPOSAL_FINALIZED.into(),
+            created_at: 0,
+        };
+        crate::storage::client_db::insert_sender_proposal(&proposal).unwrap();
+
+        assert_eq!(
+            reconcile_diverged_projection_tips().unwrap(),
+            1,
+            "healed with evidence"
+        );
+        let (ct, lt, recon): (Vec<u8>, Vec<u8>, i64) = with_conn(|c| {
+            c.query_row("SELECT chain_tip, local_bilateral_chain_tip, needs_online_reconcile FROM contacts WHERE device_id=?1",
+                rusqlite::params![&devd[..]], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+        });
+        assert_eq!(ct, lt, "chain_tip converged to local_bilateral");
+        assert_eq!(recon, 0, "reconcile flag cleared");
     }
 
     /// A projection that already matches the head is left alone (idempotent, cheap).
