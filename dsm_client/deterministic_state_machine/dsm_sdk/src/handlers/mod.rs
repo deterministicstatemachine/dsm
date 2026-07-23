@@ -11,6 +11,7 @@
 pub mod app_router_impl;
 pub mod bilateral_impl;
 pub mod bilateral_settlement;
+pub mod cert_resync_flow;
 pub mod core_bridge_adapters;
 pub use bilateral_settlement::DefaultBilateralSettlementDelegate;
 pub mod unilateral_impl;

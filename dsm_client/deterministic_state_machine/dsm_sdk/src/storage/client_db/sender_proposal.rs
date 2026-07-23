@@ -182,6 +182,27 @@ pub fn get_sender_proposal(
 /// window: the recipient countersigns it and echoes it back, and the sender
 /// bound it at canonical preparation. Matching on it (rather than on any tip)
 /// keeps the lookup inside a single formula space.
+/// Fetch a FINALIZED proposal for a relationship (the accepted-transition anchor a
+/// cert resync is bound to). Returns the most recent finalized one.
+pub fn get_finalized_proposal_for_relationship(
+    relationship_key: &[u8; 32],
+) -> Result<Option<SenderOnlineProposal>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM sender_online_proposal
+          WHERE relationship_key = ?1 AND status = ?2
+          ORDER BY created_at DESC LIMIT 1"
+    ))?;
+    let row = stmt
+        .query_row(
+            params![relationship_key.as_slice(), PROPOSAL_FINALIZED],
+            row_to_proposal,
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn get_sender_proposal_by_commitment(
     commitment: &[u8; 32],
 ) -> Result<Option<SenderOnlineProposal>> {

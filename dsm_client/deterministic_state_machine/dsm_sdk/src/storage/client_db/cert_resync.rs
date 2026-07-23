@@ -166,6 +166,22 @@ pub fn begin_cert_resync(relationship_key: &[u8; 32], proposed_epoch: i64) -> Re
     Ok(proposed_epoch)
 }
 
+/// Relationships currently in REQUIRED state (detected head-loss, resync not yet
+/// initiated). The poller drives these to PENDING by sending a request.
+pub fn relationships_requiring_resync() -> Result<Vec<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt =
+        conn.prepare("SELECT relationship_key FROM cert_resync_state WHERE state = ?1")?;
+    let rows = stmt
+        .query_map(params![RESYNC_REQUIRED], |r| r.get::<_, Vec<u8>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .collect())
+}
+
 /// The fresh EK a device installs on ITS OWN Local side (pubkey + secret).
 pub struct LocalResyncKey<'a> {
     pub pubkey: &'a [u8],

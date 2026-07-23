@@ -811,6 +811,53 @@ impl AppRouterImpl {
                                 for artifact in b0x_sdk.take_reply_artifacts() {
                                     finalize_from_acceptance_artifact(&artifact).await;
                                 }
+                                // Cert-resync control messages ride the same spool,
+                                // discriminated by their explicit method. Dispatch each
+                                // to the matching leg; errors are logged, never fatal to
+                                // the poll (a malformed/foreign message must not wedge sync).
+                                for (method, rbody) in b0x_sdk.take_cert_resync_messages() {
+                                    let outcome = if method
+                                        == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
+                                    {
+                                        self.handle_cert_resync_request(
+                                            &rbody,
+                                            storage_endpoints.clone(),
+                                        )
+                                        .await
+                                    } else {
+                                        self.handle_cert_resync_ack(&rbody).await
+                                    };
+                                    if let Err(e) = outcome {
+                                        log::warn!("[cert-resync] {method} handling errored: {e}");
+                                    }
+                                }
+
+                                // Auto-initiate: any relationship the send-gate marked
+                                // REQUIRED gets its resync request sent here (which moves
+                                // it to PENDING, so it is not re-sent every poll). This is
+                                // what turns a blocked send into an actual recovery.
+                                if let Ok(rels) =
+                                    crate::storage::client_db::relationships_requiring_resync()
+                                {
+                                    for rel in rels {
+                                        match crate::handlers::cert_resync_flow::peer_device_for_relationship(
+                                            &self.device_id_bytes,
+                                            &rel,
+                                        ) {
+                                            Some(peer) => {
+                                                if let Err(e) = self
+                                                    .initiate_cert_resync(peer, storage_endpoints.clone())
+                                                    .await
+                                                {
+                                                    log::warn!("[cert-resync] auto-initiate failed: {e}");
+                                                }
+                                            }
+                                            None => log::warn!(
+                                                "[cert-resync] REQUIRED relationship has no resolvable peer"
+                                            ),
+                                        }
+                                    }
+                                }
 
                                 match entries_res {
                                     Ok(items) => {
