@@ -410,13 +410,10 @@ impl CoreSDK {
     /// Returns a compatibility `State` view derived from the canonical
     /// `DeviceState`. Prefer `device_head()` for new code.
     pub fn get_current_state(&self) -> Result<State, DsmError> {
-        // Delegate to StateMachine::current_state so callers always see the
-        // single source of truth: an explicit `legacy_state` (set via
-        // `set_state` / `restore_state_snapshot`) wins over the projected
-        // DeviceState view. If no legacy_state is pinned, the StateMachine
-        // synthesizes a compat State from the DeviceState head's SMT root +
-        // balances. Pre-genesis paths return None which we surface as an
-        // explicit error.
+        // Delegate to StateMachine::current_state. The canonical DeviceState head
+        // is the single source of truth: the compat `State` is always synthesized
+        // from the head's SMT root + balances, with no override that could shadow
+        // it. Pre-genesis paths return None which we surface as an explicit error.
         let sm = self.state_machine.lock();
         sm.current_state()
             .ok_or_else(|| DsmError::state_machine("No current state available"))
@@ -426,18 +423,6 @@ impl CoreSDK {
     /// snapshot for this device.
     pub fn restore_latest_archived_state_for_device(&self) -> Result<(), DsmError> {
         Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
-    }
-
-    /// Replace the in-memory canonical tip with a caller-supplied archived state snapshot.
-    /// Used by failed-online-send rollback after the bad archived successor has been removed.
-    pub fn restore_state_snapshot(&self, state: &State) -> Result<(), DsmError> {
-        if state.device_info.device_id != self.device_info.device_id {
-            return Err(DsmError::state_machine(
-                "restore_state_snapshot: device mismatch",
-            ));
-        }
-        self.state_machine.lock().set_state(state.clone());
-        Ok(())
     }
 
     /// Normalize stale balance key formats in the current state.
@@ -4408,81 +4393,6 @@ mod tests {
             Some(outcome.new_chain_state.compute_chain_tip()),
             "restored device head must carry the latest relationship tip"
         );
-    }
-
-    #[test]
-    #[serial]
-    fn restore_state_snapshot_rewinds_in_memory_tip() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        let _ = crate::storage_utils::set_storage_base_dir(
-            std::env::temp_dir().join("dsm_core_sdk_rollback_state_test"),
-        );
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let device_id = vec![0x47; 32];
-        let genesis_hash = vec![0x57; 32];
-        let binding_key = vec![0x67; 32];
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id.clone(),
-            public_key.clone(),
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        let device = DeviceInfo::new(device_id.try_into().expect("device id"), public_key.clone());
-        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
-        sdk.initialize_with_genesis_state()
-            .expect("initialize genesis state");
-        let current = sdk
-            .get_current_state()
-            .expect("current state after genesis");
-        assert_eq!(current.device_info.public_key, device.public_key);
-        let prior = sdk.get_current_state().expect("prior state");
-
-        let op = sdk
-            .sign_operation_sphincs(DsmOperation::Generic {
-                operation_type: b"rollback.test".to_vec(),
-                data: vec![0x01],
-                message: "advance".to_string(),
-                signature: vec![],
-            })
-            .expect("sign operation");
-        let signature = op.get_signature().expect("signature present");
-        let payload = op.with_cleared_signature().to_bytes();
-        assert!(
-            dsm::crypto::sphincs::sphincs_verify(&device.public_key, &payload, &signature)
-                .expect("direct signature verify"),
-            "canonical CoreSDK test signature must self-verify"
-        );
-        let dev_id2 = device.device_id;
-        let rel_key2 =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id2, &dev_id2);
-        let init_tip2 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id2, &dev_id2,
-        );
-        let (advanced, _) = sdk
-            .execute_on_relationship(rel_key2, dev_id2, op, &[], Some(init_tip2))
-            .expect("execute operation");
-        assert_ne!(advanced.hash, prior.hash, "state must advance");
-
-        sdk.restore_state_snapshot(&prior)
-            .expect("restore prior snapshot");
-        let current = sdk.get_current_state().expect("current state");
-        assert_eq!(current.hash[0] as u64, prior.hash[0] as u64);
-        assert_eq!(current.hash, prior.hash);
     }
 
     // ---------------------------------------------------------------------

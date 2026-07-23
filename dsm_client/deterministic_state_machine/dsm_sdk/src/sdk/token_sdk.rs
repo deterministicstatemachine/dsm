@@ -2903,49 +2903,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn reload_balance_cache_for_self_projects_from_current_state() {
-        let device_info = DeviceInfo::from_hashed_label("projection-reload", vec![7u8; 32]);
-        let core_sdk = Arc::new(
-            CoreSDK::new_with_device(device_info.clone())
-                .expect("CoreSDK should initialize for projection test"),
-        );
-        let sdk: TokenSDK<()> = TokenSDK::new(core_sdk.clone(), device_info.device_id);
-        let canonical_balance = Balance::from_state(100, [7u8; 32]);
-        let state = build_state(
-            device_info.clone(),
-            7,
-            &[("ERA", canonical_balance.clone())],
-            Operation::Generic {
-                operation_type: b"noop".to_vec(),
-                data: Vec::new(),
-                message: "noop".to_string(),
-                signature: Vec::new(),
-            },
-        );
-        core_sdk
-            .restore_state_snapshot(&state)
-            .expect("state snapshot restore should succeed");
-
-        sdk.balances.write().insert(
-            device_info.device_id,
-            HashMap::from([("ERA".to_string(), Balance::from_state(1, [1u8; 32]))]),
-        );
-
-        sdk.reload_balance_cache_for_self(device_info.device_id)
-            .expect("reload should project from canonical state");
-
-        let cached = sdk
-            .balances
-            .read()
-            .get(&device_info.device_id)
-            .and_then(|balances| balances.get("ERA"))
-            .cloned()
-            .expect("ERA balance should exist after projection");
-        assert_eq!(cached, canonical_balance);
-    }
-
-    #[test]
     fn project_balance_cache_from_state_replaces_stale_tokens_on_non_token_transition() {
         let device_info = DeviceInfo::from_hashed_label("projection-generic", vec![9u8; 32]);
         let core_sdk = Arc::new(
