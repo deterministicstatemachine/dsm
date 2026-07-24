@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Two-device cert-head forward resync — the online b0x flow.
 //!
 //! Three legs over the existing UniversalTx tag (no new payload tag, no fleet

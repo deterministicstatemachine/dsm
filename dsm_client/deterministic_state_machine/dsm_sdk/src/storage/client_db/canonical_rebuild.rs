@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Predecessor-linked canonical head reconstruction.
 //!
 //! Rebuilds a device head by replaying preserved relationship chain states from a

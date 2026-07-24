@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Durable "reconcile forward" queue for post-commit projection failures.
 //!
 //! Once the canonical advance and the durable send bundle commit, nothing

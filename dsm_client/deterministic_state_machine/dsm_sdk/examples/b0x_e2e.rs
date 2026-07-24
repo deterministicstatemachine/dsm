@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Minimal E2E: submit to own inbox, then retrieve and ack.
 #![allow(clippy::disallowed_methods)]
 

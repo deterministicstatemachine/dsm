@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Authenticated bilateral cert-head forward resync — the HARDENED CORE.
 //!
 //! When a device loses its per-step-EK cert-chain state for a relationship (as

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #![allow(clippy::disallowed_methods)]
 
 use dsm_sdk::sdk::b0x_sdk::{B0xSDK, B0xSubmissionParams};

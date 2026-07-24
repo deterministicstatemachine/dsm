@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // tests are appended at end to not break module-level inner doc comments
 // SPDX-License-Identifier: Apache-2.0
 //! DSM API v2: Protobuf-only b0x spool (deterministic, clockless)
