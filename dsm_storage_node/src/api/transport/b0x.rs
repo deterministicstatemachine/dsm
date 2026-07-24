@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // tests are appended at end to not break module-level inner doc comments
 // SPDX-License-Identifier: Apache-2.0
 //! DSM API v2: Protobuf-only b0x spool (deterministic, clockless)
@@ -30,6 +31,30 @@ use dsm_sdk::util::text_id;
 
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;
+
+/// Client-side invoke methods for the cert-head resync control handshake. Kept in
+/// sync with `dsm_sdk::storage::client_db::CERT_RESYNC_{REQUEST,ACK}_METHOD`.
+const CERT_RESYNC_REQUEST_METHOD: &str = "wallet.certResyncRequest";
+const CERT_RESYNC_ACK_METHOD: &str = "wallet.certResyncAck";
+
+/// True if `env` is a bounded cert-resync control message. Discrimination is on
+/// the EXPLICIT invoke method only — never a trial-decode of the body.
+fn is_cert_resync_recovery(env: &dsm::types::proto::Envelope, body_len: usize) -> bool {
+    if body_len > MAX_ENVELOPE_BYTES {
+        return false;
+    }
+    let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+        return false;
+    };
+    tx.ops.iter().any(|op| {
+        matches!(
+            &op.kind,
+            Some(dsm::types::proto::universal_op::Kind::Invoke(invoke))
+                if invoke.method == CERT_RESYNC_REQUEST_METHOD
+                    || invoke.method == CERT_RESYNC_ACK_METHOD
+        )
+    })
+}
 
 fn valid_spool_key(value: &str) -> bool {
     matches!(
@@ -192,7 +217,20 @@ async fn submit_b0x_envelope(
     // PaidK spend-gate (whitepaper §16): b0x submission is a device-initiated
     // write that stores an artifact addressed to the recipient. The sender
     // device must have satisfied PaidK before its envelope is admitted.
-    crate::api::vault::paidk::require_paidk(&app, &_ctx.device_id).await?;
+    //
+    // RECOVERY EXEMPTION. A cert-head resync is a control handshake that re-enables
+    // a device's ability to send. It must NOT depend on the very spend authority it
+    // exists to restore — otherwise an exhausted PaidK balance is a permanent
+    // recovery deadlock. So a cert-resync message (discriminated by its explicit
+    // invoke method, bounded in size, carrying no value transfer) is admitted
+    // WITHOUT the PaidK gate; legitimacy (both-device cosignatures, monotonic
+    // epoch, one-per-relationship) is verified CLIENT-side, like every other claim
+    // the dumb-mirror node does not adjudicate.
+    if is_cert_resync_recovery(&env, body.len()) {
+        log::info!("b0x submit: cert-resync recovery message — PaidK gate exempt");
+    } else {
+        crate::api::vault::paidk::require_paidk(&app, &_ctx.device_id).await?;
+    }
 
     // NOTE: Storage nodes are dumb mirrors.
     // Do NOT validate SmartPolicy / protocol semantics here (clients verify).
@@ -936,5 +974,66 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("oneshot failed: {e}"));
         assert_eq!(resp_receiver_retrieve2.status(), HttpStatus::NO_CONTENT);
+    }
+}
+
+#[cfg(test)]
+mod cert_resync_exemption_tests {
+    use super::*;
+
+    fn env_with_method(method: &str) -> dsm::types::proto::Envelope {
+        let invoke = dsm::types::proto::Invoke {
+            method: method.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: 0,
+                body: vec![0u8; 100],
+            }),
+            program: None,
+            pre_state_hash: None,
+            post_state_hash: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let op = dsm::types::proto::UniversalOp {
+            op_id: None,
+            actor: vec![],
+            genesis_hash: vec![],
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        dsm::types::proto::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![],
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn exempts_resync_methods_only_and_bounded() {
+        assert!(is_cert_resync_recovery(
+            &env_with_method(CERT_RESYNC_REQUEST_METHOD),
+            100
+        ));
+        assert!(is_cert_resync_recovery(
+            &env_with_method(CERT_RESYNC_ACK_METHOD),
+            100
+        ));
+        // An ordinary transfer method is NOT exempt.
+        assert!(!is_cert_resync_recovery(
+            &env_with_method("wallet.send"),
+            100
+        ));
+        // Over-size is NOT exempt even with a resync method (bounds abuse).
+        assert!(!is_cert_resync_recovery(
+            &env_with_method(CERT_RESYNC_REQUEST_METHOD),
+            MAX_ENVELOPE_BYTES + 1
+        ));
     }
 }

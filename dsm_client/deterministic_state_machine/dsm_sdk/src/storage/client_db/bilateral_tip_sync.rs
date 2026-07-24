@@ -134,7 +134,7 @@ fn sync_projection_with_optional_acceptance(
 /// the acceptance marker — never BCR state, balances, or `DeviceState`.
 /// Performs NO commit/rollback; the wrapper commits only the committing
 /// outcomes (`Advanced` / `RepairedAtTarget` / `AlreadyAtTarget`).
-fn sync_tip_projections_in_tx(
+pub(crate) fn sync_tip_projections_in_tx(
     tx: &rusqlite::Transaction<'_>,
     request: &TipSyncRequest,
     acceptance: Option<&super::recipient_receipt_fold::AcceptedTransition>,

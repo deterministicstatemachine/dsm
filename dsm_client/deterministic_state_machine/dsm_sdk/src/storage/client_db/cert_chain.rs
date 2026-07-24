@@ -25,7 +25,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use rand::rngs::OsRng;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use crate::util::deterministic_time::tick;
@@ -391,6 +391,147 @@ pub fn cas_advance_local_cert_chain_head_with_sk(
 /// one). Same semantics as [`cas_advance_local_cert_chain_head_with_sk`]:
 /// advance only if current == `expected_current` (or genesis when `None`);
 /// already-at-`new_pubkey` is idempotent; a third value is a fail-closed Conflict.
+/// CAS-advance the Counterparty head INSIDE a caller-owned transaction
+/// (§16.6 defect 1 — acceptance finalization is one transaction).
+///
+/// Same semantics as [`cas_advance_counterparty_cert_chain_head`]: advance only
+/// if current == expected; target already present ⇒ done; any third value ⇒
+/// fail closed.
+pub fn cas_advance_counterparty_cert_chain_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    expected_current: Option<&[u8]>,
+    new_pubkey: &[u8],
+) -> Result<CasHeadOutcome> {
+    if let Some(expected) = expected_current {
+        let now = tick() as i64;
+        let updated = conn.execute(
+            "UPDATE cert_chain_heads
+             SET chain_head_pubkey = ?1, step_count = step_count + 1, updated_at = ?2
+             WHERE relationship_key = ?3 AND side = 1 AND chain_head_pubkey = ?4",
+            params![new_pubkey, now, relationship_key.as_slice(), expected],
+        )?;
+        if updated == 1 {
+            let step: i64 = conn
+                .query_row(
+                    "SELECT step_count FROM cert_chain_heads WHERE relationship_key = ?1 AND side = 1",
+                    params![relationship_key.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            return Ok(CasHeadOutcome::Advanced { step: step as u64 });
+        }
+    }
+
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 1",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match current {
+        Some(cur) if cur.as_slice() == new_pubkey => Ok(CasHeadOutcome::AlreadyAtTarget),
+        Some(cur) => Ok(CasHeadOutcome::Conflict { current: Some(cur) }),
+        None => {
+            if expected_current.is_some() {
+                return Ok(CasHeadOutcome::Conflict { current: None });
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO cert_chain_heads
+                    (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
+                     step_count, updated_at)
+                 VALUES (?1, 1, ?2, NULL, 0, ?3)",
+                params![relationship_key.as_slice(), new_pubkey, tick() as i64],
+            )?;
+            Ok(CasHeadOutcome::GenesisInit)
+        }
+    }
+}
+
+/// CAS-advance the LOCAL (side 0) cert-chain head INSIDE a caller-owned
+/// transaction, carrying the encrypted secret key. This is the in-tx sibling of
+/// [`cas_advance_local_cert_chain_head_with_sk`], which opens its own connection
+/// and therefore cannot run inside a held-mutex transaction.
+///
+/// Why this exists: the cert-resync finalizer installs BOTH heads in one
+/// transaction. The only in-tx local writer that existed —
+/// `promote_pending_local_head_with_conn` — advances with a BARE unconditional
+/// UPDATE (no expected-current guard) and its genesis branch is the documented
+/// root-AK path; reusing it would disguise a recovery as ordinary genesis and
+/// give up the CAS fail-closed guarantee. This writer is CAS-guarded on
+/// `expected_current` exactly like the counterparty side.
+pub fn cas_advance_local_cert_chain_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    expected_current: Option<&[u8]>,
+    new_pubkey: &[u8],
+    new_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+) -> Result<CasHeadOutcome> {
+    let encrypted_sk = encrypt_chain_sk(new_secret_key, chain_head_wrap_key)?;
+    if let Some(expected) = expected_current {
+        let now = tick() as i64;
+        let updated = conn.execute(
+            "UPDATE cert_chain_heads
+             SET chain_head_pubkey = ?1, chain_head_sk_encrypted = ?2,
+                 step_count = step_count + 1, updated_at = ?3
+             WHERE relationship_key = ?4 AND side = 0 AND chain_head_pubkey = ?5",
+            params![
+                new_pubkey,
+                encrypted_sk,
+                now,
+                relationship_key.as_slice(),
+                expected
+            ],
+        )?;
+        if updated == 1 {
+            let step: i64 = conn
+                .query_row(
+                    "SELECT step_count FROM cert_chain_heads WHERE relationship_key = ?1 AND side = 0",
+                    params![relationship_key.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            return Ok(CasHeadOutcome::Advanced { step: step as u64 });
+        }
+    }
+
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 0",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match current {
+        Some(cur) if cur.as_slice() == new_pubkey => Ok(CasHeadOutcome::AlreadyAtTarget),
+        Some(cur) => Ok(CasHeadOutcome::Conflict { current: Some(cur) }),
+        None => {
+            if expected_current.is_some() {
+                return Ok(CasHeadOutcome::Conflict { current: None });
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO cert_chain_heads
+                    (relationship_key, side, chain_head_pubkey, chain_head_sk_encrypted,
+                     step_count, updated_at)
+                 VALUES (?1, 0, ?2, ?3, 0, ?4)",
+                params![
+                    relationship_key.as_slice(),
+                    new_pubkey,
+                    encrypted_sk,
+                    tick() as i64
+                ],
+            )?;
+            Ok(CasHeadOutcome::GenesisInit)
+        }
+    }
+}
+
 pub fn cas_advance_counterparty_cert_chain_head(
     relationship_key: &[u8; 32],
     expected_current: Option<&[u8]>,
@@ -544,9 +685,95 @@ pub fn stash_pending_local_head(
     chain_head_wrap_key: &[u8; 32],
     is_init: bool,
 ) -> Result<()> {
-    let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    stash_pending_local_head_with_conn(
+        &conn,
+        relationship_key,
+        commitment_hash,
+        ek_pubkey,
+        ek_secret_key,
+        chain_head_wrap_key,
+        is_init,
+    )
+}
+
+/// Same stash, INSIDE a caller-owned transaction.
+///
+/// §16.6 defect zero: the pending EK head is committed together with the
+/// canonical advance so a signed-but-unrecorded step cannot exist. Takes
+/// `&Connection` (a `&Transaction` derefs to one) and never calls
+/// `get_connection()` — the advance already holds the global connection mutex.
+///
+/// EXPECTED-PREVIOUS-HEAD CAS: the caller passes the Local head it snapshotted
+/// *before* signing. If the committed head has moved since (the async
+/// acceptance finalizer also advances heads), this fails closed so the whole
+/// advance transaction aborts — nothing is written and nothing is deliverable.
+/// `expected_prev == None` is honoured only when `is_first_ek_step` is true;
+/// an unexplained `None` is never treated as genesis.
+#[allow(clippy::too_many_arguments)]
+pub fn stash_pending_local_head_cas_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+    ek_pubkey: &[u8],
+    ek_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+    is_init: bool,
+    expected_prev: Option<&[u8]>,
+    is_first_ek_step: bool,
+) -> Result<()> {
+    let current: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_head_pubkey FROM cert_chain_heads
+             WHERE relationship_key = ?1 AND side = 0",
+            params![relationship_key.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    match (current.as_deref(), expected_prev) {
+        (None, None) if is_first_ek_step => {}
+        (None, None) => {
+            return Err(anyhow!(
+                "pending EK head CAS: no Local head and no expectation, but the proposal does \
+                 not declare this the first EK step — refusing to treat an unexplained absence \
+                 as genesis"
+            ));
+        }
+        (Some(now), Some(expected)) if now == expected => {}
+        (now, expected) => {
+            return Err(anyhow!(
+                "pending EK head CAS failed: Local head moved between signing and commit \
+                 (current={:?}.., expected={:?}..) — aborting before anything is deliverable",
+                now.map(|b| &b[..4.min(b.len())]),
+                expected.map(|b| &b[..4.min(b.len())]),
+            ));
+        }
+    }
+
+    stash_pending_local_head_with_conn(
+        conn,
+        relationship_key,
+        commitment_hash,
+        ek_pubkey,
+        ek_secret_key,
+        chain_head_wrap_key,
+        is_init,
+    )
+}
+
+/// Stash without the CAS (BLE path, and the inner half of the CAS variant).
+pub fn stash_pending_local_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+    ek_pubkey: &[u8],
+    ek_secret_key: &[u8],
+    chain_head_wrap_key: &[u8; 32],
+    is_init: bool,
+) -> Result<()> {
+    let encrypted_sk = encrypt_chain_sk(ek_secret_key, chain_head_wrap_key)?;
     let now = tick() as i64;
     conn.execute(
         "INSERT OR REPLACE INTO pending_local_cert_heads
@@ -577,6 +804,21 @@ pub fn promote_pending_local_head(
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let tx = conn.transaction()?;
+    let step = promote_pending_local_head_with_conn(&tx, relationship_key, commitment_hash)?;
+    tx.commit()?;
+    Ok(step)
+}
+
+/// Same promotion, INSIDE a caller-owned transaction (§16.6 defect 1).
+///
+/// Keyed by COMMITMENT, not "latest for the relationship", so a retried or
+/// concurrent finalization promotes exactly the head the verified acceptance
+/// artifact names.
+pub fn promote_pending_local_head_with_conn(
+    tx: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+) -> Result<Option<u64>> {
     let row: Option<(Vec<u8>, Vec<u8>, i64)> = tx
         .query_row(
             "SELECT ek_pubkey, ek_sk_encrypted, is_init FROM pending_local_cert_heads
@@ -632,52 +874,7 @@ pub fn promote_pending_local_head(
             |r| r.get(0),
         )
         .optional()?;
-    tx.commit()?;
     Ok(step.map(|s| s as u64))
-}
-
-/// Promote the most-recent pending Local head for `relationship_key` — the
-/// online counterpart to [`promote_pending_local_head`], for callers that know
-/// the relationship (e.g. the sender's storage-sync ACK sweep, which has the
-/// counterparty but not the receipt commitment).
-///
-/// The in-flight online transfer per relationship is unique (the modal §5.4 lock
-/// admits one, and `pending_online_outbox` is keyed by counterparty), so the
-/// most-recent pending row is the one just acknowledged. Older pending rows are
-/// superseded attempts that were never accepted and are dropped. Returns the
-/// resulting step count, or `None` if no pending row exists.
-pub fn promote_pending_local_head_by_relationship(
-    relationship_key: &[u8; 32],
-) -> Result<Option<u64>> {
-    let commitment: Option<Vec<u8>> = {
-        let binding = get_connection()?;
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        conn.query_row(
-            "SELECT commitment_hash FROM pending_local_cert_heads
-             WHERE relationship_key = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![relationship_key.as_slice()],
-            |r| r.get(0),
-        )
-        .optional()?
-    };
-    let Some(commitment) = commitment else {
-        return Ok(None);
-    };
-    let commitment_arr: [u8; 32] = commitment
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("pending head commitment_hash is not 32 bytes"))?;
-    // Drop superseded (older) pending rows for this relationship before promoting.
-    {
-        let binding = get_connection()?;
-        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        conn.execute(
-            "DELETE FROM pending_local_cert_heads
-             WHERE relationship_key = ?1 AND commitment_hash != ?2",
-            params![relationship_key.as_slice(), commitment_arr.as_slice()],
-        )?;
-    }
-    promote_pending_local_head(relationship_key, &commitment_arr)
 }
 
 /// Drop a pending Local chain-head advance whose confirm terminally
@@ -1278,14 +1475,26 @@ mod tests {
         assert_eq!(pending_count(&r), 1, "pending row must exist");
     }
 
+    /// Promote through the commitment-keyed in-transaction path — the only
+    /// promotion path that exists. Wraps it in a transaction the way the
+    /// acceptance finalizer does.
+    fn promote_by_commitment(r: &[u8; 32], c: &[u8; 32]) -> Option<u64> {
+        let binding = get_connection().unwrap();
+        let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.transaction().unwrap();
+        let step = promote_pending_local_head_with_conn(&tx, r, c).unwrap();
+        tx.commit().unwrap();
+        step
+    }
+
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_genesis_seeds_head() {
+    fn promote_genesis_seeds_head() {
         reset_database_for_tests();
         let r = rel(0xE1);
         let wrap = [0x77u8; 32];
         stash_pending_local_head(&r, &commit(1), &ek(1), &[0x55u8; 128], &wrap, true).unwrap();
-        let step = promote_pending_local_head_by_relationship(&r).unwrap();
+        let step = promote_by_commitment(&r, &commit(1));
         assert_eq!(step, Some(0), "genesis promote makes EK the step-0 head");
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
@@ -1298,17 +1507,14 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_steady_state_bumps_step() {
+    fn promote_steady_state_bumps_step() {
         reset_database_for_tests();
         let r = rel(0xE2);
         let wrap = [0x77u8; 32];
         let ak = vec![0xA0u8; 64];
         init_cert_chain_head(&r, CertChainSide::Local, &ak).unwrap();
         stash_pending_local_head(&r, &commit(1), &ek(1), &[0x55u8; 128], &wrap, false).unwrap();
-        assert_eq!(
-            promote_pending_local_head_by_relationship(&r).unwrap(),
-            Some(1)
-        );
+        assert_eq!(promote_by_commitment(&r, &commit(1)), Some(1));
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
                 .unwrap()
@@ -1320,15 +1526,13 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_none_leaves_head_unchanged() {
+    fn promote_none_leaves_head_unchanged() {
         // Lost PREPARE / no stash: nothing to promote, committed head untouched.
         reset_database_for_tests();
         let r = rel(0xE3);
         let ak = vec![0xA0u8; 64];
         init_cert_chain_head(&r, CertChainSide::Local, &ak).unwrap();
-        assert!(promote_pending_local_head_by_relationship(&r)
-            .unwrap()
-            .is_none());
+        assert!(promote_by_commitment(&r, &commit(1)).is_none());
         assert_eq!(
             load_cert_chain_head_pubkey(&r, CertChainSide::Local)
                 .unwrap()
@@ -1359,22 +1563,17 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn promote_twice_is_idempotent_no_double_advance() {
-        // Duplicate acceptance ACK must not double-advance the committed head.
+        // A redelivered acceptance artifact must not double-advance the head.
         reset_database_for_tests();
         let r = rel(0xE5);
         let wrap = [0x77u8; 32];
         let ak = vec![0xA0u8; 64];
         init_cert_chain_head(&r, CertChainSide::Local, &ak).unwrap();
         stash_pending_local_head(&r, &commit(1), &ek(1), &[0x55u8; 128], &wrap, false).unwrap();
-        assert_eq!(
-            promote_pending_local_head_by_relationship(&r).unwrap(),
-            Some(1)
-        );
+        assert_eq!(promote_by_commitment(&r, &commit(1)), Some(1));
         assert!(
-            promote_pending_local_head_by_relationship(&r)
-                .unwrap()
-                .is_none(),
-            "second promote finds no pending row"
+            promote_by_commitment(&r, &commit(1)).is_none(),
+            "second promote of the same commitment finds no pending row"
         );
         let h = load_cert_chain_head(&r, CertChainSide::Local)
             .unwrap()
@@ -1385,10 +1584,11 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn promote_by_relationship_clears_superseded_no_double_advance() {
-        // Multiple retry attempts each stash a pending head. A single acceptance
-        // promotes exactly one step and clears all pending rows (no double-spend
-        // of chain steps from superseded attempts).
+    fn promote_advances_only_its_own_attempt() {
+        // Commitment keying replaced "promote whatever is latest". An acceptance
+        // names exactly one commitment and advances exactly that one step — a
+        // pending row belonging to a different attempt is neither promoted nor
+        // silently destroyed by this call.
         reset_database_for_tests();
         let r = rel(0xE6);
         let wrap = [0x77u8; 32];
@@ -1398,14 +1598,140 @@ mod tests {
         stash_pending_local_head(&r, &commit(2), &ek(2), &[0x55u8; 128], &wrap, false).unwrap();
         assert_eq!(pending_count(&r), 2);
         assert_eq!(
-            promote_pending_local_head_by_relationship(&r).unwrap(),
+            promote_by_commitment(&r, &commit(1)),
             Some(1),
-            "exactly one advance regardless of how many attempts were stashed"
+            "exactly one advance, and it is the named commitment's"
         );
-        assert_eq!(pending_count(&r), 0, "all pending rows cleared");
         let h = load_cert_chain_head(&r, CertChainSide::Local)
             .unwrap()
             .unwrap();
         assert_eq!(h.step_count, 1);
+        assert_eq!(h.chain_head_pubkey, ek(1), "promoted the NAMED attempt");
+        assert_eq!(
+            pending_count(&r),
+            1,
+            "the other attempt's row is left for its own acceptance or an \
+             explicit drop — never collaterally promoted"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // §16.6 defect zero — pending EK head CAS.
+    //
+    // Signing must happen OUTSIDE the advance transaction (the signer reads
+    // cert heads through its own connection), which opens a window between
+    // reading the Local head and committing the pending one. The async
+    // acceptance finalizer also advances heads. If that race is lost, the
+    // send must abort BEFORE the canonical advance commits — because after
+    // that point a message becomes deliverable and rollback is forbidden.
+    // ---------------------------------------------------------------------
+
+    const WRAP: [u8; 32] = [0x5Au8; 32];
+
+    fn with_conn<T>(f: impl FnOnce(&Connection) -> T) -> T {
+        let binding = crate::storage::client_db::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+        f(&conn)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cas_accepts_an_unchanged_head_and_a_declared_first_step() {
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let r = rel(0xC1);
+
+        // First EK step: no Local head exists, and the proposal SAYS so.
+        with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x01u8; 32],
+                &[0xAAu8; 64],
+                &[0xBBu8; 64],
+                &WRAP,
+                true,
+                None,
+                /* is_first_ek_step */ true,
+            )
+        })
+        .expect("declared first step with no head must be accepted");
+
+        // Now a committed head exists; a matching expectation must pass.
+        init_local_cert_chain_head_with_sk(&r, &[0xAAu8; 64], &[0xBBu8; 64], &WRAP).unwrap();
+        with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x02u8; 32],
+                &[0xCCu8; 64],
+                &[0xDDu8; 64],
+                &WRAP,
+                false,
+                Some(&[0xAAu8; 64]),
+                false,
+            )
+        })
+        .expect("unchanged head must be accepted");
+    }
+
+    /// THE RACE: the head moved between signing and commit.
+    #[test]
+    #[serial_test::serial]
+    fn cas_fails_closed_when_the_head_moved_after_signing() {
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let r = rel(0xC2);
+        init_local_cert_chain_head_with_sk(&r, &[0x11u8; 64], &[0x22u8; 64], &WRAP).unwrap();
+
+        // Sender snapshotted 0x11.., signed, and meanwhile the finalizer
+        // advanced the head to 0x99...
+        advance_local_cert_chain_head_with_sk(&r, &[0x99u8; 64], &[0x88u8; 64], &WRAP).unwrap();
+
+        let err = with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x03u8; 32],
+                &[0xEEu8; 64],
+                &[0xFFu8; 64],
+                &WRAP,
+                false,
+                Some(&[0x11u8; 64]),
+                false,
+            )
+        })
+        .expect_err("a moved head must abort the send before anything is deliverable");
+        assert!(err.to_string().contains("CAS failed"), "unexpected: {err}");
+    }
+
+    /// An unexplained absence must never be silently read as genesis — that is
+    /// how a second EK step would quietly re-chain from the root AK.
+    #[test]
+    #[serial_test::serial]
+    fn cas_refuses_to_treat_an_unexplained_absence_as_genesis() {
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let r = rel(0xC3);
+
+        let err = with_conn(|c| {
+            stash_pending_local_head_cas_with_conn(
+                c,
+                &r,
+                &[0x04u8; 32],
+                &[0x0Au8; 64],
+                &[0x0Bu8; 64],
+                &WRAP,
+                false,
+                None,
+                /* is_first_ek_step */ false,
+            )
+        })
+        .expect_err("absent head + no expectation + not-first-step must fail closed");
+        assert!(
+            err.to_string()
+                .contains("does not declare this the first EK step"),
+            "unexpected: {err}"
+        );
     }
 }

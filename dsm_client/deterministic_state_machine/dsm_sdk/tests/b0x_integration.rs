@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #![allow(clippy::disallowed_methods)]
 
 use dsm_sdk::sdk::b0x_sdk::{B0xSDK, B0xSubmissionParams};
@@ -114,6 +115,7 @@ async fn test_b0x_integration_full_flow() {
             .expect("routing address");
 
     let submission = B0xSubmissionParams {
+        submission_id: None,
         recipient_device_id: recipient_b32.clone(),
         recipient_genesis_hash: recipient_genesis_b32,
         transaction: op,
@@ -307,6 +309,7 @@ async fn test_b0x_live_recipient_roundtrip() {
     };
 
     let submission = B0xSubmissionParams {
+        submission_id: None,
         recipient_device_id: receiver_b32.clone(),
         recipient_genesis_hash: text_id::encode_base32_crockford(&receiver_genesis),
         transaction: op,

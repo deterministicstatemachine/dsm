@@ -130,6 +130,12 @@ pub fn has_pending_settlement_work() -> bool {
     if has_pending_online_catchup() {
         return true;
     }
+    // A relationship owing a cert-head resync is settlement work: the poller must
+    // stay alive to drive it, otherwise a device with no other traffic can never
+    // recover its ability to send.
+    if crate::storage::client_db::has_outstanding_cert_resync().unwrap_or(false) {
+        return true;
+    }
     crate::storage::client_db::pending_outbound_replies()
         .map(|r| !r.is_empty())
         .unwrap_or(false)

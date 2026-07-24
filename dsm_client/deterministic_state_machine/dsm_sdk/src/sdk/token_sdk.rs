@@ -2663,10 +2663,35 @@ impl<I: Send + Sync> TokenSDK<I> {
     /// downstream callers (`WalletSDK::send_transfer_op`, `wallet.send` in
     /// `app_router_impl`) can build the canonical ReceiptCommit (§4.2) from
     /// `smt_proofs` + `parent_r_a` + `child_r_a` without re-reading any SMT.
+    /// Non-staged convenience wrapper — no extra artifacts, no extra writes.
+    /// One implementation: delegates to the staged form with inert closures.
     pub fn execute_transfer_op(
         &self,
         op: Operation,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        let (state, outcome, ()) =
+            self.execute_transfer_op_staged(op, |_| Ok(()), |_, _, _| Ok(()))?;
+        Ok((state, outcome))
+    }
+
+    /// §16.6 defect zero — STAGED transfer execution.
+    ///
+    /// `build_artifacts` runs after the pure prepare and BEFORE the durable
+    /// write opens its transaction; it is the only place a caller may do work
+    /// that itself reads the database (per-step EK signing, envelope
+    /// construction). `write_extra` then persists those artifacts INSIDE the
+    /// advance transaction, so the canonical advance and everything justifying
+    /// the resulting message commit together or not at all.
+    pub fn execute_transfer_op_staged<A>(
+        &self,
+        op: Operation,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         // Extract fields for balance cache updates before consuming the operation
         let (token_id, amount_val, recipient_device_id, memo) = match &op {
             Operation::Transfer {
@@ -2713,17 +2738,37 @@ impl<I: Send + Sync> TokenSDK<I> {
                 &recipient_devid,
             );
         log::debug!("[TOKEN] execute_transfer_op: calling execute_on_relationship...");
-        let (new_state, outcome) = self.core_sdk.execute_on_relationship(
+        let (new_state, outcome, artifacts) = self.core_sdk.execute_on_relationship_staged(
             rel_key,
             recipient_devid,
             op,
             &deltas,
             Some(initial_tip),
+            build_artifacts,
+            write_extra,
         )?;
         log::debug!("[TOKEN] execute_transfer_op: execute_on_relationship OK");
 
+        // Post-commit: in-memory cache projection only. The advance and the durable
+        // bundle committed inside `execute_on_relationship_staged`, so returning Err
+        // here would tell the caller "nothing happened" about a committed,
+        // deliverable transfer. The cache rebuilds via `reload_balance_cache_for_self`.
         log::debug!("[TOKEN] execute_transfer_op: projecting local cache from canonical state...");
-        self.project_balance_cache_from_state(sender, &new_state)?;
+        if let Err(e) = self.project_balance_cache_from_state(sender, &new_state) {
+            log::error!(
+                "[TOKEN] execute_transfer_op: post-commit cache projection FAILED ({e}). \
+                 The transfer stands."
+            );
+            // Durable reconcile-forward: the in-memory cache is rebuilt on the
+            // next load, but persist the intent so a crash cannot lose it.
+            if let Err(q) = crate::storage::client_db::enqueue_projection_repair(
+                &crate::util::text_id::encode_base32_crockford(&sender),
+                &token_id,
+                &format!("post-commit cache projection failed: {e}"),
+            ) {
+                log::error!("[TOKEN] execute_transfer_op: could not QUEUE cache repair: {q}");
+            }
+        }
         log::debug!("[TOKEN] execute_transfer_op: local cache projected");
 
         // Record history
@@ -2745,7 +2790,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             history.push((token_op, crate::util::deterministic_time::tick()));
         }
 
-        Ok((new_state, outcome))
+        Ok((new_state, outcome, artifacts))
     }
 }
 
@@ -2855,49 +2900,6 @@ mod tests {
                 .insert((*token_id).to_string(), balance.clone());
         }
         state
-    }
-
-    #[test]
-    #[ignore]
-    fn reload_balance_cache_for_self_projects_from_current_state() {
-        let device_info = DeviceInfo::from_hashed_label("projection-reload", vec![7u8; 32]);
-        let core_sdk = Arc::new(
-            CoreSDK::new_with_device(device_info.clone())
-                .expect("CoreSDK should initialize for projection test"),
-        );
-        let sdk: TokenSDK<()> = TokenSDK::new(core_sdk.clone(), device_info.device_id);
-        let canonical_balance = Balance::from_state(100, [7u8; 32]);
-        let state = build_state(
-            device_info.clone(),
-            7,
-            &[("ERA", canonical_balance.clone())],
-            Operation::Generic {
-                operation_type: b"noop".to_vec(),
-                data: Vec::new(),
-                message: "noop".to_string(),
-                signature: Vec::new(),
-            },
-        );
-        core_sdk
-            .restore_state_snapshot(&state)
-            .expect("state snapshot restore should succeed");
-
-        sdk.balances.write().insert(
-            device_info.device_id,
-            HashMap::from([("ERA".to_string(), Balance::from_state(1, [1u8; 32]))]),
-        );
-
-        sdk.reload_balance_cache_for_self(device_info.device_id)
-            .expect("reload should project from canonical state");
-
-        let cached = sdk
-            .balances
-            .read()
-            .get(&device_info.device_id)
-            .and_then(|balances| balances.get("ERA"))
-            .cloned()
-            .expect("ERA balance should exist after projection");
-        assert_eq!(cached, canonical_balance);
     }
 
     #[test]

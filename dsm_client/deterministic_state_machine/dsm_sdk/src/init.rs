@@ -241,6 +241,52 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                 } else {
                     log::info!("[SDK] §16.6 startup acceptance recovery ({origin}) swept");
                 }
+
+                // Durable reconcile-forward. Post-commit projection/history
+                // failures persist an intent row; drain it by rebuilding from
+                // CANONICAL state. Without this the intent is just a log line
+                // that dies with the process.
+                let self_device: Option<[u8; 32]> = crate::sdk::app_state::AppState::get_device_id()
+                    .and_then(|v| v.as_slice().try_into().ok());
+                if let Some(device_id) = self_device {
+                    match crate::storage::client_db::drain_projection_repairs(&device_id, |token| {
+                        crate::policy::builtin_policy_commit(token)
+                    }) {
+                        Ok((0, 0)) => {}
+                        Ok((repaired, remaining)) => log::info!(
+                            "[SDK] projection repair ({origin}): {repaired} rebuilt from canonical, \
+                             {remaining} retained"
+                        ),
+                        Err(e) => log::warn!(
+                            "[SDK] projection repair ({origin}) errored (non-fatal): {e}"
+                        ),
+                    }
+
+                    // Belt-and-braces: rebuild any projection that diverges from the
+                    // canonical head, even if a failure was never queued (e.g. 8XK's
+                    // projection was blanked out-of-band by the deleted rollback while
+                    // its head kept 275). The head is authority; this only touches the
+                    // cache.
+                    match crate::storage::client_db::reconcile_projections_against_head(&device_id) {
+                        Ok((0, _)) => {}
+                        Ok((rebuilt, checked)) => log::info!(
+                            "[SDK] projection reconcile ({origin}): {rebuilt}/{checked} rebuilt from canonical head"
+                        ),
+                        Err(e) => log::warn!(
+                            "[SDK] projection reconcile ({origin}) errored (non-fatal): {e}"
+                        ),
+                    }
+
+                    // Heal pre-existing symmetric-space residue: a contact whose
+                    // chain_tip diverged from local_bilateral by one accepted
+                    // transition (defect-1 era data) is converged from finalized-
+                    // proposal evidence, so a send can proceed.
+                    match crate::storage::client_db::reconcile_diverged_projection_tips() {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("[SDK] tip reconcile ({origin}): {n} healed"),
+                        Err(e) => log::warn!("[SDK] tip reconcile ({origin}) errored (non-fatal): {e}"),
+                    }
+                }
             }
             Err(_) => {
                 log::debug!(

@@ -47,9 +47,18 @@ pub struct StateMachine {
     /// Canonical device state per §2.2: SMT root + device-level balances +
     /// per-relationship chain tips. This IS the device head.
     device_state: Option<crate::types::device_state::DeviceState>,
-    /// Legacy `State` mirror used by migration shims and validation tooling
-    /// that still exercise `apply_transition` directly.
-    legacy_state: Option<State>,
+    /// Verbatim `State` mirror for the validation tooling's `apply_transition`
+    /// compat shims ONLY (`tools/vertical_validation`). It carries the full
+    /// legacy `State` — including `token_balances` and `entropy` — which the
+    /// synthesized `current_state()` view intentionally cannot reproduce.
+    ///
+    /// This is NOT the 8XK override. `current_state()` NEVER reads this field;
+    /// the canonical head is the sole truth for every production/UI read. The
+    /// removed `legacy_state` field was dangerous precisely because
+    /// `current_state()` returned it and let it shadow the head. This mirror is
+    /// reachable only through `compat_shim_state()`, so it can never win over
+    /// the canonical head.
+    compat_shim_state: Option<State>,
 }
 
 impl StateMachine {
@@ -63,7 +72,7 @@ impl StateMachine {
     pub fn new() -> Self {
         StateMachine {
             device_state: None,
-            legacy_state: None,
+            compat_shim_state: None,
         }
     }
 
@@ -75,20 +84,34 @@ impl StateMachine {
     /// Install a canonical DeviceState head directly.
     pub fn set_device_head(&mut self, head: crate::types::device_state::DeviceState) {
         self.device_state = Some(head);
-        self.legacy_state = None;
+        self.compat_shim_state = None;
+    }
+
+    /// Verbatim compat `State` last handed to `set_state`, for the validation
+    /// tooling's `apply_transition` shims only. Returns `None` once a real head
+    /// is installed (`set_device_head`/`commit_advance`), because the mirror is
+    /// then stale. Production code must use `current_state()` / `device_head()`;
+    /// this deliberately exposes what those synthesize away (balances/entropy).
+    pub fn compat_shim_state(&self) -> Option<State> {
+        self.compat_shim_state.clone()
     }
 
     /// Get a compatibility State view from DeviceState. Used by legacy
     /// callers during migration; prefer `device_head()` for new code.
     pub fn current_state(&self) -> Option<State> {
-        if let Some(state) = &self.legacy_state {
-            return Some(state.clone());
-        }
-
+        // The canonical DeviceState head is the SOLE source of truth. There is no
+        // override: the removed `legacy_state` field once let a pinned `State` win
+        // over the head, which is exactly how a stale snapshot came to shadow a
+        // correct canonical balance. The compat `State` is now always SYNTHESIZED
+        // from the head, so it can never diverge from it.
         let ds = self.device_state.as_ref()?;
         let device_info =
             crate::types::state_types::DeviceInfo::new(ds.devid(), ds.public_key().to_vec());
-        let hash = ds.root();
+        let hash = if ds.relationship_count() == 0 && ds.balances_snapshot().is_empty() {
+            ds.legacy_anchor().unwrap_or_else(|| ds.root())
+        } else {
+            ds.root()
+        };
         let mut token_balances = std::collections::HashMap::new();
         // Project DeviceState.balances (keyed by 32-byte policy_commit) into the
         // legacy State.token_balances format (keyed by the canonical
@@ -129,7 +152,9 @@ impl StateMachine {
     /// so legacy callers' verify_state checks have a head_hash to compare.
     pub fn set_state(&mut self, state: State) {
         let state_hash = state.hash().unwrap_or(state.hash);
-        self.legacy_state = Some(state.clone());
+        // Mirror the verbatim State for the validation-tooling compat shims.
+        // NOT read by current_state(); see the field doc.
+        self.compat_shim_state = Some(state.clone());
         if self.device_state.is_none() {
             let mut ds = crate::types::device_state::DeviceState::new(
                 [0u8; 32],
@@ -216,10 +241,10 @@ impl StateMachine {
     /// Install a previously prepared AdvanceOutcome as the new device head.
     ///
     /// Pairs with `prepare_advance_relationship`. After this returns the
-    /// in-memory head reflects the outcome and `legacy_state` is cleared.
+    /// in-memory head reflects the outcome.
     pub fn commit_advance(&mut self, outcome: &crate::types::device_state::AdvanceOutcome) {
         self.device_state = Some(outcome.new_device_state.clone());
-        self.legacy_state = None;
+        self.compat_shim_state = None;
     }
 
     /// Prepare a vault state SMT leaf update without committing it to
@@ -255,7 +280,7 @@ impl StateMachine {
         outcome: &crate::types::device_state::VaultLeafOutcome,
     ) {
         self.device_state = Some(outcome.new_device_state.clone());
-        self.legacy_state = None;
+        self.compat_shim_state = None;
     }
 
     /// Convenience wrapper: prepare + commit a vault state leaf update
@@ -364,6 +389,72 @@ impl Default for StateMachine {
 #[cfg(test)]
 mod state_machine_tests {
     use super::*;
+
+    /// REGRESSION — the 8XK incident. A pinned legacy `State` must never be able
+    /// to shadow the canonical DeviceState head. The override field is gone, so
+    /// `current_state()` can only ever reflect the head. If this file ever
+    /// reintroduces a way to pin a `State` that wins over the head, this fails to
+    /// compile or fails here — and a stale snapshot could again show the wrong
+    /// balance over a correct canonical head.
+    #[test]
+    fn current_state_always_reflects_the_canonical_head_never_an_override() {
+        use crate::types::device_state::{BalanceDelta, BalanceDirection};
+        use crate::types::operations::Operation;
+
+        let devid = [0x42u8; 32];
+        let head0 =
+            crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64);
+
+        // Mint 275 to self so the head carries a real balance, exactly like 8XK.
+        let policy = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
+        let rel = crate::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
+        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &devid, &devid,
+        );
+        let outcome = head0
+            .advance(
+                rel,
+                devid,
+                Operation::Mint {
+                    amount: crate::types::token_types::Balance::from_state(275, [0u8; 32]),
+                    token_id: b"ERA".to_vec(),
+                    authorized_by: b"self".to_vec(),
+                    proof_of_authorization: Vec::new(),
+                    message: "mint".to_string(),
+                },
+                vec![0x11u8; 32],
+                None,
+                &[BalanceDelta {
+                    policy_commit: policy,
+                    direction: BalanceDirection::Credit,
+                    amount: 275,
+                }],
+                Some(init),
+                None,
+                None,
+            )
+            .expect("mint advance");
+
+        let mut sm = StateMachine::new();
+        sm.set_device_head(outcome.new_device_state.clone());
+
+        let cs = sm.current_state().expect("state from head");
+        let era = cs
+            .token_balances
+            .values()
+            .map(|b| b.value())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            era, 275,
+            "current_state must reflect the canonical head's balance"
+        );
+        assert_eq!(
+            cs.hash,
+            outcome.new_device_state.root(),
+            "hash is the canonical SMT root"
+        );
+    }
     use crate::types::state_types::DeviceInfo;
     use crate::types::token_types::Balance;
     use crate::{

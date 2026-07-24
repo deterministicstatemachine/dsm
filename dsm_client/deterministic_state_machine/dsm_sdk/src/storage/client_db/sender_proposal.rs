@@ -99,24 +99,55 @@ fn row_to_proposal(row: &rusqlite::Row) -> rusqlite::Result<SenderOnlineProposal
 pub fn insert_sender_proposal(p: &SenderOnlineProposal) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    let existing: Option<(Vec<u8>, Vec<u8>)> = conn
+    insert_sender_proposal_with_conn(&conn, p)
+}
+
+/// Same insert, INSIDE a caller-owned transaction.
+///
+/// §16.6 defect zero: the proposal is committed together with the canonical
+/// advance, the gate, the pending EK head, and the outbox row — one
+/// transaction, before anything is deliverable. Takes `&Connection` (a
+/// `&Transaction` derefs to one) and never calls `get_connection()`: the
+/// advance already holds the single global connection mutex.
+pub fn insert_sender_proposal_with_conn(
+    conn: &rusqlite::Connection,
+    p: &SenderOnlineProposal,
+) -> Result<()> {
+    let existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
         .query_row(
-            "SELECT canonical_child, commitment FROM sender_online_proposal
+            "SELECT canonical_child, commitment, status FROM sender_online_proposal
              WHERE relationship_key = ?1 AND canonical_parent = ?2",
             params![p.relationship_key.as_slice(), p.canonical_parent.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((child, commitment)) = existing {
+    if let Some((child, commitment, status)) = existing {
         if child.as_slice() == p.canonical_child.as_slice()
             && commitment.as_slice() == p.commitment.as_slice()
         {
             return Ok(()); // idempotent re-entry
         }
-        return Err(anyhow!(
-            "a DIFFERENT sender proposal already consumed this (relationship, canonical_parent) — \
-             refusing a second proposal for one canonical step"
-        ));
+        // A ROLLED_BACK proposal ABANDONED this canonical step — the head never
+        // advanced past the parent, so the parent is canonically free and a fresh
+        // proposal (a legitimate retry, or a post-recovery send) may supersede it.
+        // Any other status (proposed/submitted/finalized) is a live or committed
+        // step and still fails closed.
+        if status == PROPOSAL_ROLLED_BACK {
+            conn.execute(
+                "DELETE FROM sender_online_proposal
+                  WHERE relationship_key = ?1 AND canonical_parent = ?2 AND status = ?3",
+                params![
+                    p.relationship_key.as_slice(),
+                    p.canonical_parent.as_slice(),
+                    PROPOSAL_ROLLED_BACK
+                ],
+            )?;
+        } else {
+            return Err(anyhow!(
+                "a DIFFERENT sender proposal already consumed this (relationship, canonical_parent) — \
+                 refusing a second proposal for one canonical step"
+            ));
+        }
     }
     conn.execute(
         &format!(
@@ -162,24 +193,33 @@ pub fn get_sender_proposal(
         .optional()?)
 }
 
-pub fn get_sender_proposal_by_message_id(message_id: &str) -> Result<Option<SenderOnlineProposal>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(conn
-        .query_row(
-            &format!("SELECT {COLS} FROM sender_online_proposal WHERE message_id = ?1"),
-            params![message_id],
-            row_to_proposal,
-        )
-        .optional()?)
-}
-
 /// Look up the proposal a returned acceptance receipt answers.
 ///
 /// The commitment is the ONLY identifier shared by both sides of the reply
 /// window: the recipient countersigns it and echoes it back, and the sender
 /// bound it at canonical preparation. Matching on it (rather than on any tip)
 /// keeps the lookup inside a single formula space.
+/// Fetch a FINALIZED proposal for a relationship (the accepted-transition anchor a
+/// cert resync is bound to). Returns the most recent finalized one.
+pub fn get_finalized_proposal_for_relationship(
+    relationship_key: &[u8; 32],
+) -> Result<Option<SenderOnlineProposal>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM sender_online_proposal
+          WHERE relationship_key = ?1 AND status = ?2
+          ORDER BY created_at DESC LIMIT 1"
+    ))?;
+    let row = stmt
+        .query_row(
+            params![relationship_key.as_slice(), PROPOSAL_FINALIZED],
+            row_to_proposal,
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn get_sender_proposal_by_commitment(
     commitment: &[u8; 32],
 ) -> Result<Option<SenderOnlineProposal>> {
@@ -197,6 +237,25 @@ pub fn get_sender_proposal_by_commitment(
 /// Terminally finalize by canonical identity — the reply window keys off the
 /// canonical step, not the wire message id. Idempotent: a second call after
 /// finalization returns `Ok(false)`.
+/// Finalize by canonical identity INSIDE a caller-owned transaction
+/// (§16.6 defect 1). Idempotent: a second call after finalization is `false`.
+pub fn mark_sender_proposal_finalized_by_canonical_with_conn(
+    conn: &rusqlite::Connection,
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE sender_online_proposal SET status = ?3
+         WHERE relationship_key = ?1 AND canonical_parent = ?2 AND status != ?3",
+        params![
+            relationship_key.as_slice(),
+            canonical_parent.as_slice(),
+            PROPOSAL_FINALIZED
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn mark_sender_proposal_finalized_by_canonical(
     relationship_key: &[u8; 32],
     canonical_parent: &[u8; 32],
@@ -252,19 +311,6 @@ pub fn mark_sender_proposal_submitted(
         ],
     )?;
     Ok(())
-}
-
-/// Terminal transitions. `finalized` only from `submitted`; `rolled_back` from
-/// any non-finalized state.
-pub fn mark_sender_proposal_finalized(message_id: &str) -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
-    let n = conn.execute(
-        "UPDATE sender_online_proposal SET status = ?2
-         WHERE message_id = ?1 AND status = ?3",
-        params![message_id, PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED],
-    )?;
-    Ok(n > 0)
 }
 
 pub fn mark_sender_proposal_rolled_back(
@@ -352,15 +398,66 @@ mod tests {
             mark_sender_proposal_submitted(&p.relationship_key, &p.canonical_parent, "MSG2")
                 .is_err()
         );
-        let loaded = get_sender_proposal_by_message_id("MSG1").unwrap().unwrap();
+        // Lookup and finalization both key on PROTOCOL identity — the receipt
+        // commitment and the canonical parent. A storage message id is transport
+        // metadata and never resolves or finalizes a proposal.
+        let loaded = get_sender_proposal_by_commitment(&p.commitment)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.status, PROPOSAL_SUBMITTED);
         assert_eq!(loaded.canonical_child, p.canonical_child);
 
         // Finalize only from submitted; rolled_back refused after finalize.
-        assert!(mark_sender_proposal_finalized("MSG1").unwrap());
-        assert!(!mark_sender_proposal_finalized("MSG1").unwrap());
+        assert!(mark_sender_proposal_finalized_by_canonical(
+            &p.relationship_key,
+            &p.canonical_parent
+        )
+        .unwrap());
+        assert!(!mark_sender_proposal_finalized_by_canonical(
+            &p.relationship_key,
+            &p.canonical_parent
+        )
+        .unwrap());
         assert!(
             !mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap()
+        );
+    }
+
+    /// A ROLLED_BACK proposal must not permanently block the canonical parent it
+    /// abandoned — a fresh proposal (retry / post-recovery send) supersedes it.
+    /// This is exactly the residue that blocked 8XK's first send after resync.
+    #[test]
+    #[serial]
+    fn rolled_back_proposal_is_superseded_by_a_fresh_one() {
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().unwrap();
+
+        let mut p = fixture();
+        insert_sender_proposal(&p).unwrap();
+        // Abandon it.
+        assert!(
+            mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap()
+        );
+
+        // A DIFFERENT proposal at the SAME (relationship, canonical_parent) — a
+        // legitimate retry — is now accepted, superseding the rolled-back one.
+        p.canonical_child = [0x7Bu8; 32];
+        p.commitment = [0x7Cu8; 32];
+        p.status = PROPOSAL_PROPOSED.into();
+        insert_sender_proposal(&p).expect("retry supersedes a rolled-back proposal");
+
+        let loaded = get_sender_proposal(&p.relationship_key, &p.canonical_parent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.canonical_child, [0x7Bu8; 32]);
+        assert_eq!(loaded.status, PROPOSAL_PROPOSED);
+
+        // But a live/committed proposal still fails closed.
+        let mut q = fixture();
+        q.canonical_child = [0x9Au8; 32];
+        assert!(
+            insert_sender_proposal(&q).is_err(),
+            "a proposed (non-rolled-back) step must not be superseded"
         );
     }
 }

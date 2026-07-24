@@ -268,80 +268,45 @@ pub(crate) fn build_testnet_faucet_policy() -> PolicyFile {
     policy
 }
 
-struct OnlineTransferRollback<'a> {
-    smt_key: &'a [u8; 32],
-    parent_chain_tip: &'a [u8; 32],
-    token_id: &'a str,
-    failed_state: &'a dsm::types::state_types::State,
-    previous_state: &'a dsm::types::state_types::State,
-    /// Pre-send DeviceState head, captured at the same instant as
-    /// `previous_state`. Used by `rollback_failed_online_send_atomic` to
-    /// revert `bcr_device_heads` in the same SQLite txn that wipes the
-    /// failed advance's `bcr_chain_states` row.
-    previous_head: Option<&'a dsm::types::device_state::DeviceState>,
-    tx_id: &'a str,
-    recipient_device_id: &'a [u8; 32],
-    amount: u64,
-    memo: Option<&'a str>,
+/// §16.6 defect zero: per-step EK material captured at signing time and written
+/// LATER, inside the single pre-submit transaction.
+///
+/// `expected_prev` is the committed Local cert head as it stood BEFORE signing.
+/// The acceptance finalizer also advances cert heads, so the durable write CASes
+/// against this snapshot: if the head moved in between, the whole commit aborts
+/// while nothing has been sent yet — the only point at which losing that race is
+/// still free.
+struct PendingEkMaterial {
+    ek_pk: Vec<u8>,
+    ek_sk: Vec<u8>,
+    at_rest_key: [u8; 32],
+    is_init: bool,
+    expected_prev: Option<Vec<u8>>,
+    is_first_ek_step: bool,
+}
+
+/// Everything an online send determines before anything becomes deliverable.
+///
+/// Produced by the synchronous builder that runs between the pure advance
+/// preparation and the durable write, then committed — in full — inside the same
+/// SQLite transaction as the canonical advance. No partial combination of these
+/// is a valid state.
+struct OnlineSendArtifacts {
+    sender_proposal: crate::storage::client_db::SenderOnlineProposal,
+    outbox_record: crate::storage::client_db::SenderOutboxRecord,
+    /// Deterministic in the receipt commitment; equals the node message id.
+    submission_id: String,
+    routing_address: String,
+    /// Per-step EK material captured during signing, written with the bundle.
+    ek_material: PendingEkMaterial,
+    /// EXACT wire bytes, frozen before anything is deliverable. A retry replays
+    /// these verbatim rather than rebuilding them.
+    envelope_bytes: Vec<u8>,
+    /// Canonical receipt bytes, retained for the acceptance-reply path.
+    receipt_canonical_bytes: Vec<u8>,
 }
 
 impl AppRouterImpl {
-    async fn rollback_failed_online_transfer(
-        &self,
-        rollback: &OnlineTransferRollback<'_>,
-    ) -> Result<(), String> {
-        let mut rollback_errors = Vec::new();
-
-        // §16.6 proposal authority: a rolled-back send terminally marks its
-        // proposal (any non-finalized proposal for this relationship + tx).
-        // Runs first so a partially-failed rollback still leaves the proposal
-        // unusable by the strict finalizer.
-        if let Err(e) = crate::storage::client_db::mark_sender_proposals_rolled_back_for_tx(
-            rollback.smt_key,
-            rollback.tx_id,
-        ) {
-            rollback_errors.push(format!("proposal rollback mark failed: {e}"));
-        }
-
-        // Canonical rollback deletes the archived `bcr_chain_states` row +
-        // resets `bcr_device_heads` inside `rollback_failed_online_send_atomic`
-        // (invoked by `WalletSDK::rollback_failed_online_send`).  No shadow
-        // SMT needs rolling back separately.
-
-        if let Err(e) = self.wallet.rollback_failed_online_send(
-            &crate::sdk::wallet_sdk::FailedOnlineSendRollback {
-                tx_id: rollback.tx_id,
-                token_id: rollback.token_id,
-                failed_state: rollback.failed_state,
-                previous_state: rollback.previous_state,
-                previous_head: rollback.previous_head,
-                recipient_device_id: rollback.recipient_device_id,
-                amount: rollback.amount,
-                memo: rollback.memo,
-            },
-        ) {
-            rollback_errors.push(format!("wallet rollback failed: {e}"));
-        }
-
-        // §11.1 lockstep: a terminally-failed online send must leave NO pending
-        // Local cert head behind — the committed head was never advanced (we only
-        // stash at sign time), so dropping the pending stash returns this
-        // relationship to exactly its pre-send cert-chain state.
-        if let Err(e) =
-            crate::storage::client_db::drop_pending_local_heads_for_relationship(rollback.smt_key)
-        {
-            rollback_errors.push(format!("pending cert head drop failed: {e}"));
-        }
-
-        crate::security::modal_sync_lock::clear_pending_online(rollback.smt_key).await;
-
-        if rollback_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(rollback_errors.join("; "))
-        }
-    }
-
     async fn repair_contact_identity_from_quorum(
         &self,
         mut contact_record: crate::storage::client_db::ContactRecord,
@@ -1005,6 +970,55 @@ impl AppRouterImpl {
             );
         }
 
+        // CERT-RESYNC GATE (fail-closed). A relationship whose per-step-EK cert
+        // chain was lost must NOT fall back to the root AK — the peer chains
+        // against its stored head and would reject us, and silently root-AK
+        // sending is exactly the recovery-disguised-as-transfer the resync
+        // protocol forbids. Ordinary sending stays blocked until an explicit
+        // jointly-authorized resync finalizes.
+        let resync_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &from_device_id,
+            &to_device_id,
+        );
+        // Detect head-loss on an ESTABLISHED relationship: no Local cert head, but
+        // the relationship has a real advanced tip (not the genesis initial tip).
+        // A genuine first transfer (initial tip, no head) is NOT a resync — it is
+        // the normal root-AK genesis bootstrap and is allowed through.
+        let local_head_present = crate::storage::client_db::load_cert_chain_head_pubkey(
+            &resync_rel_key,
+            crate::storage::client_db::CertChainSide::Local,
+        )
+        .map(|h| h.is_some())
+        .unwrap_or(true);
+        // Precise signal: THIS device previously initiated a send on this
+        // relationship (a sender proposal exists). "Local head absent + we sent
+        // before" = head loss (8XK). It does NOT false-positive on a
+        // receive-established relationship's legitimate first send (no prior
+        // proposal → normal root-AK genesis, allowed through).
+        let had_prior_send =
+            crate::storage::client_db::relationship_had_prior_send(&resync_rel_key)
+                .unwrap_or(false);
+        if !local_head_present && had_prior_send {
+            if let Err(e) = crate::storage::client_db::mark_cert_resync_required(&resync_rel_key) {
+                log::warn!("[wallet.send] could not mark cert resync required: {e}");
+            }
+        }
+        match crate::storage::client_db::cert_resync_blocks_send(&resync_rel_key) {
+            Ok(true) => {
+                return err(
+                    "wallet.send: this relationship needs a cert-chain resync before sending \
+                     (per-step-EK head was lost); an ordinary send is blocked until the \
+                     jointly-authorized resync finalizes"
+                        .to_string(),
+                )
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Fail closed: if we cannot read the resync state, do not send.
+                return err(format!("wallet.send: cert-resync gate check failed: {e}"));
+            }
+        }
+
         let token_id = if transfer_req.token_id.is_empty() {
             "ERA".to_string()
         } else {
@@ -1218,6 +1232,13 @@ impl AppRouterImpl {
             }
         }
 
+        // Pure function of the two device ids; hoisted because the transfer id now
+        // binds to it (identity v2).
+        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &from_device_id,
+            &to_device_id,
+        );
+
         // Create the local transaction record (needed for metadata/bilateral tip updates)
         let unsigned_tx = match self
             .wallet
@@ -1231,6 +1252,11 @@ impl AppRouterImpl {
                 },
                 Some(&transfer_req.memo),
                 None, // fee
+                // Identity v2: bind the transfer id to the relationship and the
+                // operation nonce, so two same-amount sends can no longer share an
+                // id merely by landing in the same commit height.
+                Some(&smt_key),
+                Some(nonce.as_slice()),
             )
             .await
         {
@@ -1266,33 +1292,36 @@ impl AppRouterImpl {
             authority_policy: None,
         };
 
-        // Capture the canonical pre-send head BEFORE any local advance so the
-        // rollback path can revert `bcr_device_heads` to it (same SQLite txn
-        // as the chain-state delete). `device_head()` returns `None` only
-        // before genesis — never on an active wallet — but we tolerate that
-        // shape and pass `Option<&DeviceState>` straight through.
-        let pre_send_head = self.core_sdk.device_head();
-        let pre_send_state = match self.ensure_authoritative_wallet_state("wallet.send") {
-            Ok(state) => state,
-            Err(e) => {
-                return err(format!(
-                    "wallet.send: failed to prepare authoritative state before send: {e}"
-                ))
-            }
-        };
-        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &from_device_id,
-            &to_device_id,
-        );
+        // The pre-send head snapshot is gone: it existed ONLY to let the rollback
+        // path revert `bcr_device_heads`, and the advance transaction now unwinds
+        // that itself.
+        //
+        // This call is NOT dead with it. It is a fail-closed precondition that
+        // also performs cold-start archive restore and projects the balance
+        // cache; only its return value was rollback bookkeeping.
+        if let Err(e) = self.ensure_authoritative_wallet_state("wallet.send") {
+            return err(format!(
+                "wallet.send: failed to prepare authoritative state before send: {e}"
+            ));
+        }
 
         // §5.4 Modal lock: reserve this (A,B) relationship before any local mutation.
         // If another online transition is already pending, fail closed.
-        if !crate::security::modal_sync_lock::set_pending_online(&smt_key).await {
-            return err(
-                "wallet.send: relationship already has a pending online transition; retry after sync"
-                    .to_string(),
-            );
-        }
+        // Held for the rest of this function. Releasing it is the guard's job, on
+        // EVERY exit — success, each early error return, and panic. It is
+        // application state: the advance transaction does not unwind it, so it
+        // must not be tangled up with the protocol rollbacks being removed here.
+        let _modal_lock = match crate::security::modal_sync_lock::PendingOnlineGuard::acquire(
+            &smt_key,
+        ) {
+            Some(guard) => guard,
+            None => {
+                return err(
+                    "wallet.send: relationship already has a pending online transition; retry after sync"
+                        .to_string(),
+                )
+            }
+        };
 
         // Durable pending-gate guard — DELIVERY SAFETY. The modal lock above is
         // in-memory only: it does not survive a process restart, and it is cleared
@@ -1307,7 +1336,6 @@ impl AppRouterImpl {
         // while a prior transfer to this contact is genuinely still pending.
         match crate::storage::client_db::get_pending_online_outbox(&to_device_id) {
             Ok(Some(_pending)) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
                 return err(
@@ -1317,7 +1345,6 @@ impl AppRouterImpl {
             }
             Ok(None) => {}
             Err(e) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 return err(format!(
                     "wallet.send: failed to check pending online gate before send: {e}"
                 ));
@@ -1331,7 +1358,6 @@ impl AppRouterImpl {
         ) {
             Ok(true) => {}
             Ok(false) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
                 return err(
@@ -1340,7 +1366,6 @@ impl AppRouterImpl {
                 );
             }
             Err(e) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 return err(format!(
                     "wallet.send: failed to validate relationship parent tip: {e}"
                 ));
@@ -1359,28 +1384,6 @@ impl AppRouterImpl {
         // Operation (empty nonce, different Balance) causing signature verification failure.
         // Returns the display State view plus the AdvanceOutcome whose smt_proofs
         // / parent_r_a / child_r_a drive the canonical ReceiptCommit build below.
-        let (new_state, advance_outcome) = match self.wallet.send_transfer_op(signed_op, &signed_tx)
-        {
-            Ok(pair) => pair,
-            Err(e) => {
-                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
-                let failure_class = self.classify_local_state_update_failure(&e);
-                log::error!("[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}");
-                return err(format!("wallet.send: local state update failed: {e}"));
-            }
-        };
-        let rollback_request = OnlineTransferRollback {
-            smt_key: &smt_key,
-            parent_chain_tip: &chain_tip_arr,
-            token_id: &token_id,
-            failed_state: &new_state,
-            previous_state: &pre_send_state,
-            previous_head: pre_send_head.as_ref(),
-            tx_id: &signed_tx.id,
-            recipient_device_id: &to_device_id,
-            amount: transfer_req.amount,
-            memo: Some(&transfer_req.memo),
-        };
 
         // Canonical C_pre is symmetric over h_n, payload bytes, and nonce.
         // Both sender and receiver derive identical h_{n+1} from the same envelope fields.
@@ -1407,356 +1410,366 @@ impl AppRouterImpl {
         // first-ever relationship advance, the internal seed step changes the
         // Merkle preimage before `smt_replace`, so the parent proof verifies
         // against `smt_proofs.pre_root`, not `parent_r_a`.
-        let (receipt_commit_bytes, receipt_canonical_bytes) = {
-            let pre_proof_bytes = advance_outcome.smt_proofs.parent_proof.to_bytes();
-            let post_proof_bytes = advance_outcome.smt_proofs.child_proof.to_bytes();
-            // h_n / h_{n+1} asymmetric (A-side) values stored in T_A.
-            let parent_tip_asymmetric = advance_outcome
-                .smt_proofs
-                .parent_proof
-                .value
-                .unwrap_or([0u8; 32]);
-            let child_tip_asymmetric = advance_outcome.new_chain_state.compute_chain_tip();
-            let parent_root_for_receipt = advance_outcome.smt_proofs.pre_root;
+        // §16.6 defect zero: EK material captured during signing, written later
+        // inside the single pre-submit transaction (see PendingEkMaterial).
+        // =====================================================================
+        // GAP 1 — STAGED PAYLOAD.
+        //
+        // Everything the send must decide BEFORE anything is deliverable now runs
+        // inside `build_online_send_artifacts`: receipt construction and
+        // self-verification, per-step EK signing, final envelope construction, and
+        // the proposal / gate / pending-head / outbox material.
+        //
+        // It runs AFTER the pure `prepare_advance_relationship` and BEFORE the
+        // durable write, so a failure here has nothing to unwind — that is why all
+        // 18 rollback branches below collapsed into plain `Err`. The canonical
+        // advance and this whole bundle then commit in ONE transaction, so the
+        // debit can never exist without its lifecycle record.
+        //
+        // DEADLOCK: this closure runs while `core_sdk`'s `state_machine`
+        // parking_lot mutex is HELD and that mutex is NOT reentrant. Nothing here
+        // may call into `CoreSDK` — a re-lock hangs silently, with no panic and no
+        // error. DB reads are fine: the connection mutex is taken later.
+        // =====================================================================
+        let build_online_send_artifacts = |advance_outcome: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<OnlineSendArtifacts, dsm::types::error::DsmError> {
+            #[allow(unused_assignments)]
+            let mut pending_ek_material: Option<PendingEkMaterial> = None;
+            let (receipt_commit_bytes, receipt_canonical_bytes) = {
+                let pre_proof_bytes = advance_outcome.smt_proofs.parent_proof.to_bytes();
+                let post_proof_bytes = advance_outcome.smt_proofs.child_proof.to_bytes();
+                // h_n / h_{n+1} asymmetric (A-side) values stored in T_A.
+                let parent_tip_asymmetric = advance_outcome
+                    .smt_proofs
+                    .parent_proof
+                    .value
+                    .unwrap_or([0u8; 32]);
+                let child_tip_asymmetric = advance_outcome.new_chain_state.compute_chain_tip();
+                let parent_root_for_receipt = advance_outcome.smt_proofs.pre_root;
 
-            // Build ReceiptCommit with real SMT roots and proofs
-            // Use local Device Tree root (R_G) for receipt construction
-            let local_device_tree_commitment =
-                crate::sdk::app_state::AppState::get_device_tree_commitment();
-            let rc_canonical = match crate::sdk::receipts::build_bilateral_receipt_with_smt(
-                from_device_id,
-                to_device_id,
-                parent_tip_asymmetric,
-                child_tip_asymmetric,
-                parent_root_for_receipt,
-                advance_outcome.child_r_a,
-                pre_proof_bytes,
-                post_proof_bytes,
-                local_device_tree_commitment,
-            ) {
-                Some(bytes) => bytes,
-                None => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|e| format!("; rollback failed: {e}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: Failed to build ReceiptCommit (terminal){rollback_error}"
+                // Build ReceiptCommit with real SMT roots and proofs
+                // Use local Device Tree root (R_G) for receipt construction
+                let local_device_tree_commitment =
+                    crate::sdk::app_state::AppState::get_device_tree_commitment();
+                let rc_canonical = match crate::sdk::receipts::build_bilateral_receipt_with_smt(
+                    from_device_id,
+                    to_device_id,
+                    parent_tip_asymmetric,
+                    child_tip_asymmetric,
+                    parent_root_for_receipt,
+                    advance_outcome.child_r_a,
+                    pre_proof_bytes,
+                    post_proof_bytes,
+                    local_device_tree_commitment,
+                ) {
+                    Some(bytes) => bytes,
+                    None => {
+                        return Err(dsm::types::error::DsmError::invalid_operation(
+                            "wallet.send: Failed to build ReceiptCommit (terminal)",
+                        ));
+                    }
+                };
+
+                // §4.3#6 Defensive: Sender self-verifies the ReceiptCommit before sending.
+                // Catches corrupted SMT state before propagating invalid proofs to receiver.
+                if !crate::sdk::receipts::verify_receipt_bytes(
+                    &rc_canonical,
+                    local_device_tree_commitment,
+                ) {
+                    return Err(dsm::types::error::DsmError::invalid_operation(
+                        "wallet.send: ReceiptCommit self-verification FAILED — SMT proofs are invalid, aborting"
                     ));
                 }
-            };
 
-            // §4.3#6 Defensive: Sender self-verifies the ReceiptCommit before sending.
-            // Catches corrupted SMT state before propagating invalid proofs to receiver.
-            if !crate::sdk::receipts::verify_receipt_bytes(
-                &rc_canonical,
-                local_device_tree_commitment,
-            ) {
-                let rollback_error = self
-                    .rollback_failed_online_transfer(&rollback_request)
-                    .await
-                    .err()
-                    .map(|e| format!("; rollback failed: {e}"))
-                    .unwrap_or_default();
-                return err(format!(
-                    "wallet.send: ReceiptCommit self-verification FAILED — SMT proofs are invalid, aborting{rollback_error}"
-                ));
-            }
-
-            // §4.2 + §11.1 Non-repudiation: Sender answers the receipt
-            // challenge as sig_a using a freshly-derived per-step ephemeral
-            // SPHINCS+ key (§11.1).
-            // The cert chain anchors the per-step EK back to the device's AK_pk;
-            // the receipt response is verified against the EK_pk_a carried in
-            // the envelope (proto field 16). Verifiers don't need the wallet's
-            // long-term identity key out-of-band — sig_a verifies against
-            // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
-            //
-            // The receipt challenge is signed by a per-step EK derived from
-            // canonical C_pre and fresh Kyber k_step material (keyed under Smaster).
-            let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                &rc_canonical,
-            ) {
-                Ok(mut receipt) => match receipt.compute_commitment() {
-                    Ok(commitment) => {
-                        // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
-                        // unlocked wallet; no C-DBRW) + root AK keypair. The per-step EK seed +
-                        // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
-                        let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
-                            Ok(k) => k,
-                            Err(e) => {
-                                let rollback_error = self
-                                    .rollback_failed_online_transfer(&rollback_request)
-                                    .await
-                                    .err()
-                                    .map(|rb| format!("; rollback failed: {rb}"))
-                                    .unwrap_or_default();
-                                return err(format!(
-                                    "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}{rollback_error}"
-                                ));
-                            }
-                        };
-                        let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
-                            Ok(kp) => kp,
-                            Err(e) => {
-                                return err(format!(
-                                    "wallet.send: AK keypair unavailable for cert chain: {e}"
-                                ));
-                            }
-                        };
-
-                        // Compute relationship_key for chain head lookup.
-                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
-                            &receipt.devid_a,
-                            &receipt.devid_b,
-                        );
-
-                        // Per-step Kyber per whitepaper §11: encapsulate
-                        // against the recipient's Kyber pubkey to derive
-                        // `k_step`. Pull the pubkey from the contact record;
-                        // fail-closed if missing (no root path — contact
-                        // must be re-established with peer Kyber pubkey to
-                        // enable per-step EK signing).
-                        let recipient_kyber_pk =
-                            match crate::storage::client_db::get_contact_by_device_id(
-                                &receipt.devid_b,
-                            ) {
-                                Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
-                                Ok(Some(_)) => {
-                                    let rollback_error = self
-                                        .rollback_failed_online_transfer(&rollback_request)
-                                        .await
-                                        .err()
-                                        .map(|rb| format!("; rollback failed: {rb}"))
-                                        .unwrap_or_default();
-                                    return err(format!(
-                                    "wallet.send: recipient contact missing Kyber public key — \
-                                     re-establish contact to upgrade for per-step EK signing\
-                                     {rollback_error}"
-                                ));
+                // §4.2 + §11.1 Non-repudiation: Sender answers the receipt
+                // challenge as sig_a using a freshly-derived per-step ephemeral
+                // SPHINCS+ key (§11.1).
+                // The cert chain anchors the per-step EK back to the device's AK_pk;
+                // the receipt response is verified against the EK_pk_a carried in
+                // the envelope (proto field 16). Verifiers don't need the wallet's
+                // long-term identity key out-of-band — sig_a verifies against
+                // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
+                //
+                // The receipt challenge is signed by a per-step EK derived from
+                // canonical C_pre and fresh Kyber k_step material (keyed under Smaster).
+                let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                    &rc_canonical,
+                ) {
+                    Ok(mut receipt) => match receipt.compute_commitment() {
+                        Ok(commitment) => {
+                            // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
+                            // unlocked wallet; no C-DBRW) + root AK keypair. The per-step EK seed +
+                            // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
+                            let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
+                                Ok(k) => k,
+                                Err(e) => {
+                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                        "wallet.send: chain-head key unavailable for cert chain (wallet locked?): {e}"
+                                    )));
                                 }
-                                _ => {
-                                    let rollback_error = self
-                                        .rollback_failed_online_transfer(&rollback_request)
-                                        .await
-                                        .err()
-                                        .map(|rb| format!("; rollback failed: {rb}"))
-                                        .unwrap_or_default();
-                                    return err(format!(
-                                    "wallet.send: recipient contact lookup failed{rollback_error}"
-                                ));
+                            };
+                            let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
+                                Ok(kp) => kp,
+                                Err(e) => {
+                                    // The canonical advance has ALREADY happened at this
+                                    // point, so bailing out without unwinding it would
+                                    // strand a debit and leave the relationship's modal
+                                    // lock held (blocking every later send). Every
+                                    // neighbouring arm rolls back; this one used to just
+                                    // return.
+                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                        "wallet.send: AK keypair unavailable for cert chain: {e}"
+                                    )));
                                 }
                             };
 
-                        // Sign with per-step EK (whitepaper §11.1 cert chain).
-                        let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
-                            commitment: &commitment,
-                            h_n: receipt.parent_tip,
-                            c_pre: receipt_sigma,
-                            devid_sender: receipt.devid_a,
-                            relationship_key: rel_key,
-                            root_ak_keypair: Some((&ak_pk, &ak_sk)),
-                            recipient_kyber_pk: &recipient_kyber_pk,
-                            // §11.1 Item 7: bind the per-step EK response
-                            // to the receipt commitment for this online
-                            // wallet.send transition.
-                            session_binding: &commitment,
-                        };
-                        match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
-                            Ok(out) => {
-                                log::info!(
-                                    "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
-                                     cert_len={}, sig_len={}, used_root_ak={}",
-                                    out.ek_pk.len(),
-                                    out.ek_cert.len(),
-                                    out.sig.len(),
-                                    out.used_root_ak,
-                                );
-
-                                // Stamp per-step artifacts on the receipt.
-                                receipt.set_ek_pk_a(out.ek_pk.clone());
-                                receipt.set_ek_cert_a(out.ek_cert);
-                                receipt.set_kyber_ct_a(out.kyber_ct);
-                                receipt.add_sig_a(out.sig);
-
-                                // §11.1 lockstep: do NOT advance the committed Local
-                                // chain head at sign time. STASH the new EK head as
-                                // pending, keyed by this receipt commitment. It is
-                                // promoted into `cert_chain_heads` only once the
-                                // receiver's acceptance ACK is observed (storage.sync
-                                // sweep), and dropped if the transfer fails. This keeps
-                                // the sender's committed head unchanged for a transfer
-                                // that is never accepted, so a failed/timed-out attempt
-                                // cannot run the chain ahead of the receiver.
-                                if let Err(e) = crate::storage::client_db::stash_pending_local_head(
+                            // §16.6 defect zero: snapshot the committed Local cert head
+                            // BEFORE signing. Signing must run outside the durable
+                            // transaction (it reads cert heads through its own
+                            // connection), so this snapshot is what the later CAS
+                            // compares against to detect the acceptance finalizer moving
+                            // the head underneath us.
+                            //
+                            // Compute relationship_key for chain head lookup.
+                            let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                                &receipt.devid_a,
+                                &receipt.devid_b,
+                            );
+                            let local_head_before_signing =
+                                crate::storage::client_db::load_cert_chain_head_pubkey(
                                     &rel_key,
-                                    &commitment,
-                                    &out.ek_pk,
-                                    &out.ek_sk,
-                                    &at_rest_key,
-                                    out.used_root_ak,
-                                ) {
-                                    let rollback_error = self
-                                        .rollback_failed_online_transfer(&rollback_request)
-                                        .await
-                                        .err()
-                                        .map(|rb| format!("; rollback failed: {rb}"))
-                                        .unwrap_or_default();
-                                    return err(format!(
-                                        "wallet.send: §11.1 pending chain head stash failed: {e}{rollback_error}"
-                                    ));
-                                }
+                                    crate::storage::client_db::CertChainSide::Local,
+                                )
+                                .ok()
+                                .flatten();
 
-                                match receipt.to_full_protobuf() {
-                                    Ok(full_bytes) => full_bytes,
-                                    Err(e) => {
-                                        let rollback_error = self
-                                            .rollback_failed_online_transfer(&rollback_request)
-                                            .await
-                                            .err()
-                                            .map(|rb| format!("; rollback failed: {rb}"))
-                                            .unwrap_or_default();
-                                        return err(format!(
-                                            "wallet.send: receipt full serialization failed: {e}{rollback_error}"
-                                        ));
+                            // Per-step Kyber per whitepaper §11: encapsulate
+                            // against the recipient's Kyber pubkey to derive
+                            // `k_step`. Pull the pubkey from the contact record;
+                            // fail-closed if missing (no root path — contact
+                            // must be re-established with peer Kyber pubkey to
+                            // enable per-step EK signing).
+                            let recipient_kyber_pk =
+                                match crate::storage::client_db::get_contact_by_device_id(
+                                    &receipt.devid_b,
+                                ) {
+                                    Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                                    Ok(Some(_)) => {
+                                        return Err(dsm::types::error::DsmError::invalid_operation(
+                                        "wallet.send: recipient contact missing Kyber public key — \
+                                         re-establish contact to upgrade for per-step EK signing\
+                                         "
+                    ));
+                                    }
+                                    _ => {
+                                        return Err(dsm::types::error::DsmError::invalid_operation(
+                                        "wallet.send: recipient contact lookup failed"
+                    ));
+                                    }
+                                };
+
+                            // Sign with per-step EK (whitepaper §11.1 cert chain).
+                            let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
+                                commitment: &commitment,
+                                h_n: receipt.parent_tip,
+                                c_pre: receipt_sigma,
+                                devid_sender: receipt.devid_a,
+                                relationship_key: rel_key,
+                                root_ak_keypair: Some((&ak_pk, &ak_sk)),
+                                recipient_kyber_pk: &recipient_kyber_pk,
+                                // §11.1 Item 7: bind the per-step EK response
+                                // to the receipt commitment for this online
+                                // wallet.send transition.
+                                session_binding: &commitment,
+                            };
+                            match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
+                                Ok(out) => {
+                                    log::info!(
+                                        "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
+                                         cert_len={}, sig_len={}, used_root_ak={}",
+                                        out.ek_pk.len(),
+                                        out.ek_cert.len(),
+                                        out.sig.len(),
+                                        out.used_root_ak,
+                                    );
+
+                                    // Stamp per-step artifacts on the receipt.
+                                    receipt.set_ek_pk_a(out.ek_pk.clone());
+                                    receipt.set_ek_cert_a(out.ek_cert);
+                                    receipt.set_kyber_ct_a(out.kyber_ct);
+                                    receipt.add_sig_a(out.sig);
+
+                                    // §11.1 lockstep: do NOT advance the committed Local
+                                    // chain head at sign time. STASH the new EK head as
+                                    // pending, keyed by this receipt commitment. It is
+                                    // promoted into `cert_chain_heads` only once the
+                                    // receiver's acceptance ACK is observed (storage.sync
+                                    // sweep), and dropped if the transfer fails. This keeps
+                                    // the sender's committed head unchanged for a transfer
+                                    // that is never accepted, so a failed/timed-out attempt
+                                    // cannot run the chain ahead of the receiver.
+                                    // §16.6 defect zero: the pending head is NOT written
+                                    // here. It is committed in ONE transaction with the
+                                    // proposal, the gate, and the durable outbox row —
+                                    // before anything is submitted — so a local failure can
+                                    // never strand a deliverable message against a
+                                    // rolled-back debit. Carry the material forward, plus
+                                    // the pre-signing head snapshot that guards the CAS.
+                                    pending_ek_material = Some(PendingEkMaterial {
+                                        ek_pk: out.ek_pk.clone(),
+                                        ek_sk: out.ek_sk.clone(),
+                                        at_rest_key,
+                                        is_init: out.used_root_ak,
+                                        expected_prev: local_head_before_signing.clone(),
+                                        is_first_ek_step: out.used_root_ak,
+                                    });
+
+                                    match receipt.to_full_protobuf() {
+                                        Ok(full_bytes) => full_bytes,
+                                        Err(e) => {
+                                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                                "wallet.send: receipt full serialization failed: {e}"
+                                            )));
+                                        }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                let rollback_error = self
-                                    .rollback_failed_online_transfer(&rollback_request)
-                                    .await
-                                    .err()
-                                    .map(|rb| format!("; rollback failed: {rb}"))
-                                    .unwrap_or_default();
-                                return err(format!(
-                                    "wallet.send: per-step EK signing failed: {e}{rollback_error}"
-                                ));
+                                Err(e) => {
+                                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                        "wallet.send: per-step EK signing failed: {e}"
+                                    )));
+                                }
                             }
                         }
-                    }
+                        Err(e) => {
+                            return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                                "wallet.send: receipt commitment hash failed: {e}"
+                            )));
+                        }
+                    },
                     Err(e) => {
-                        let rollback_error = self
-                            .rollback_failed_online_transfer(&rollback_request)
-                            .await
-                            .err()
-                            .map(|rb| format!("; rollback failed: {rb}"))
-                            .unwrap_or_default();
-                        return err(format!(
-                            "wallet.send: receipt commitment hash failed: {e}{rollback_error}"
-                        ));
+                        return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                            "wallet.send: receipt deserialization for signing failed: {e}"
+                        )));
                     }
-                },
-                Err(e) => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|rb| format!("; rollback failed: {rb}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: receipt deserialization for signing failed: {e}{rollback_error}"
+                };
+
+                log::info!(
+                    "[wallet.send] §4.2 canonical advance + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
+                    &smt_key[..4],
+                    &advance_outcome.parent_r_a[..4],
+                    &advance_outcome.child_r_a[..4],
+                    rc.len(),
+                );
+                (rc, rc_canonical)
+            };
+
+            // =====================================================================
+            // §16.6 CANONICAL SENDER PROPOSAL (proposal authority) — ONE persisted
+            // record written BEFORE any wire work. Its canonical pair comes from
+            // the SIGNED artifact itself; its projection pair is the symmetric
+            // routing lineage snapshotted at preparation. Every downstream
+            // consumer (gate, wire entry, ACK finalization, rollback) reads THIS
+            // record — `contacts.chain_tip` is never reread past this point.
+            // =====================================================================
+            let sender_proposal = {
+                let parsed = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                    &receipt_commit_bytes,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                            "wallet.send: signed artifact reparse for proposal failed: {e}"
+                        )));
+                    }
+                };
+                let proposal_commitment = match parsed.compute_commitment() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                            "wallet.send: proposal commitment failed: {e}"
+                        )));
+                    }
+                };
+                let operation_digest = {
+                    let mut h =
+                        dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-op-digest/v1");
+                    h.update(&op_bytes);
+                    let mut out32 = [0u8; 32];
+                    out32.copy_from_slice(&h.finalize().as_bytes()[..32]);
+                    out32
+                };
+                crate::storage::client_db::SenderOnlineProposal {
+                    relationship_key: smt_key,
+                    canonical_parent: parsed.parent_tip,
+                    canonical_child: parsed.child_tip,
+                    projection_parent: chain_tip_arr,
+                    projection_target: new_chain_tip,
+                    commitment: proposal_commitment,
+                    operation_digest,
+                    nonce_hash: crate::storage::codecs::hash_blake3_bytes(&nonce),
+                    message_id: None,
+                    tx_id: signed_tx.id.to_string(),
+                    counterparty_device_id: to_device_id,
+                    amount: transfer_req.amount,
+                    token_id: token_id.clone(),
+                    status: crate::storage::client_db::PROPOSAL_PROPOSED.to_string(),
+                    created_at: 0,
+                }
+            };
+            // =====================================================================
+            // §16.6 DEFECT ZERO — ATOMIC PRE-SUBMIT COMMIT.
+            //
+            // Everything the transfer needs locally lands in ONE transaction BEFORE
+            // a single byte goes to the network: proposal, pending online gate,
+            // pending Local EK head (CAS'd against the pre-signing snapshot), and
+            // the durable outbox row carrying the exact submission inputs.
+            //
+            // Failing here is safe and rolls back freely — nothing has been sent.
+            // Succeeding here makes the transfer FORWARD-ONLY: from this point a
+            // quorum may accept the message at any moment, so no later failure may
+            // unwind the debit.
+            // =====================================================================
+            let ek_material = match pending_ek_material.take() {
+                Some(m) => m,
+                None => {
+                    return Err(dsm::types::error::DsmError::invalid_operation(
+                        "wallet.send: per-step EK material missing before durable commit"
                     ));
                 }
             };
 
-            log::info!(
-                "[wallet.send] §4.2 canonical advance + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
-                &smt_key[..4],
-                &advance_outcome.parent_r_a[..4],
-                &advance_outcome.child_r_a[..4],
-                rc.len(),
-            );
-            (rc, rc_canonical)
-        };
+            let submission_id =
+                crate::storage::client_db::derive_submission_id(&sender_proposal.commitment);
 
-        // =====================================================================
-        // §16.6 CANONICAL SENDER PROPOSAL (proposal authority) — ONE persisted
-        // record written BEFORE any wire work. Its canonical pair comes from
-        // the SIGNED artifact itself; its projection pair is the symmetric
-        // routing lineage snapshotted at preparation. Every downstream
-        // consumer (gate, wire entry, ACK finalization, rollback) reads THIS
-        // record — `contacts.chain_tip` is never reread past this point.
-        // =====================================================================
-        let sender_proposal = {
-            let parsed = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                &receipt_commit_bytes,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|rb| format!("; rollback failed: {rb}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: signed artifact reparse for proposal failed: {e}{rollback_error}"
-                    ));
-                }
-            };
-            let proposal_commitment = match parsed.compute_commitment() {
-                Ok(c) => c,
-                Err(e) => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|rb| format!("; rollback failed: {rb}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: proposal commitment failed: {e}{rollback_error}"
-                    ));
-                }
-            };
-            let operation_digest = {
-                let mut h =
-                    dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-op-digest/v1");
-                h.update(&op_bytes);
-                let mut out32 = [0u8; 32];
-                out32.copy_from_slice(&h.finalize().as_bytes()[..32]);
-                out32
-            };
-            crate::storage::client_db::SenderOnlineProposal {
-                relationship_key: smt_key,
-                canonical_parent: parsed.parent_tip,
-                canonical_child: parsed.child_tip,
-                projection_parent: chain_tip_arr,
-                projection_target: new_chain_tip,
-                commitment: proposal_commitment,
-                operation_digest,
-                nonce_hash: crate::storage::codecs::hash_blake3_bytes(&nonce),
-                message_id: None,
-                tx_id: signed_tx.id.to_string(),
-                counterparty_device_id: to_device_id,
-                amount: transfer_req.amount,
-                token_id: token_id.clone(),
-                status: crate::storage::client_db::PROPOSAL_PROPOSED.to_string(),
+            let mut outbox_record = crate::storage::client_db::SenderOutboxRecord {
+                relationship_key: sender_proposal.relationship_key,
+                canonical_parent: sender_proposal.canonical_parent,
+                proposal_nonce: sender_proposal.nonce_hash,
+                canonical_child: sender_proposal.canonical_child,
+                commitment: sender_proposal.commitment,
+                projection_parent: sender_proposal.projection_parent,
+                projection_target: sender_proposal.projection_target,
+                routing_address: String::new(), // bound below, before submission
+                submission_id: submission_id.clone(),
+                envelope_bytes: Vec::new(), // bound below, before submission
+                local_expected_prev: ek_material.expected_prev.clone(),
+                is_first_ek_step: ek_material.is_first_ek_step,
+                status: crate::storage::client_db::OUTBOX_PENDING_SUBMIT.to_string(),
+                message_ids: None,
                 created_at: 0,
-            }
-        };
-        if let Err(e) = crate::storage::client_db::insert_sender_proposal(&sender_proposal) {
-            let rollback_error = self
-                .rollback_failed_online_transfer(&rollback_request)
-                .await
-                .err()
-                .map(|rb| format!("; rollback failed: {rb}"))
-                .unwrap_or_default();
-            return err(format!(
-                "wallet.send: sender proposal persistence failed: {e}{rollback_error}"
-            ));
-        }
+            };
 
-        // =====================================================================
-        // B0X SUBMISSION (deliver to recipient's inbox)
-        // ATOMIC: If b0x fails, rollback the local balance deduction.
-        // Use the CANONICAL signature so receiver verification succeeds.
-        // =====================================================================
-        let mut b0x_succeeded = false;
-        let mut b0x_message_id: Option<String> = None;
-        if !storage_endpoints.is_empty() {
+            // =====================================================================
+            // B0X SUBMISSION (deliver to recipient's inbox)
+            // ATOMIC: If b0x fails, rollback the local balance deduction.
+            // Use the CANONICAL signature so receiver verification succeeds.
+            // =====================================================================
+            // The empty-endpoints case is UNREACHABLE here: `fetch_quorum_device_identity`
+            // rejects an empty endpoint list and this handler returns long before the
+            // advance. The old `if !storage_endpoints.is_empty()` wrapper was therefore
+            // dead, and — worse — it made the DURABLE COMMIT conditional. Flattened so
+            // the commit is unconditional.
+            log::info!("[wallet.send] Submitting to b0x with canonical signature");
             log::info!("[wallet.send] Submitting to b0x with canonical signature");
 
             // Build Operation for b0x submission
@@ -1779,13 +1792,14 @@ impl AppRouterImpl {
                 authority_policy: None,
             };
 
-            let sender_genesis_b32 = crate::util::text_id::encode_base32_crockford(
-                &self
-                    .core_sdk
-                    .local_genesis_hash()
-                    .await
-                    .unwrap_or_else(|_| vec![0u8; 32]),
-            );
+            // Reuse the genesis already resolved FAIL-CLOSED at the top of this
+            // handler. Re-fetching here used to fall back to `vec![0u8; 32]`, which
+            // would freeze an all-zero sender genesis into the durable envelope
+            // bytes — unverifiable by the recipient and impossible to correct after
+            // the outbox commits. It was also the last happy-path `.await` in the
+            // block that must become a synchronous builder.
+            let sender_genesis_b32 =
+                crate::util::text_id::encode_base32_crockford(&local_genesis_for_routing);
             let sender_chain_tip_b32 =
                 crate::util::text_id::encode_base32_crockford(&sender_proposal.projection_parent);
             // Use the signing authority's public key — derived from the same
@@ -1795,15 +1809,9 @@ impl AppRouterImpl {
             ) {
                 Ok(pk) => pk,
                 Err(e) => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|e| format!("; rollback failed: {e}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                            "wallet.send: cannot retrieve signing authority public key: {e}{rollback_error}"
-                        ));
+                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                            "wallet.send: cannot retrieve signing authority public key: {e}"
+                        )));
                 }
             };
 
@@ -1816,14 +1824,8 @@ impl AppRouterImpl {
             {
                 Ok(genesis) => genesis,
                 Err(_) => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|e| format!("; rollback failed: {e}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: recipient contact has invalid genesis hash for rotated b0x routing{rollback_error}"
+                    return Err(dsm::types::error::DsmError::invalid_operation(
+                        "wallet.send: recipient contact has invalid genesis hash for rotated b0x routing"
                     ));
                 }
             };
@@ -1839,15 +1841,9 @@ impl AppRouterImpl {
             // genesis/device/tip components, and the recipient derives the same
             // routing key during storage.sync polling.
             if recipient_genesis_raw == [0u8; 32] {
-                let rollback_error = self
-                    .rollback_failed_online_transfer(&rollback_request)
-                    .await
-                    .err()
-                    .map(|e| format!("; rollback failed: {e}"))
-                    .unwrap_or_default();
-                return err(format!(
-                    "wallet.send: recipient genesis is required for rotated b0x routing{rollback_error}"
-                ));
+                return Err(dsm::types::error::DsmError::invalid_operation(
+                    "wallet.send: recipient genesis is required for rotated b0x routing"
+                    ));
             }
 
             // DIAGNOSTIC: Log the exact inputs used for b0x address computation so
@@ -1873,19 +1869,17 @@ impl AppRouterImpl {
                     addr
                 }
                 Err(e) => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|rb| format!("; rollback failed: {rb}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: b0x address rotation failed: {e}{rollback_error}"
-                    ));
+                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                        "wallet.send: b0x address rotation failed: {e}"
+                    )));
                 }
             };
 
             let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
+                // Deterministic, derived from the receipt commitment: known
+                // before the local commit and identical on every retry, so a
+                // resend collapses onto the same node spool row.
+                submission_id: Some(submission_id.clone()),
                 recipient_device_id: to_device_id_str.clone(),
                 recipient_genesis_hash: recipient_genesis_b32,
                 transaction: transfer_op,
@@ -1897,139 +1891,277 @@ impl AppRouterImpl {
                 seq,
                 next_chain_tip: Some(b0x_next_chain_tip),
                 receipt_commit: receipt_commit_bytes,
-                routing_address,
+                routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
             };
 
-            // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
-            let sender_b32_for_b0x = crate::util::text_id::encode_base32_crockford(&from_device_id);
-            match crate::sdk::b0x_sdk::B0xSDK::new(
-                sender_b32_for_b0x,
-                self.core_sdk.clone(),
-                storage_endpoints,
-            ) {
-                Ok(mut b0x_sdk) => {
-                    let submit_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        b0x_sdk.submit_to_b0x(b0x_params),
-                    )
-                    .await;
-                    match submit_result {
-                        Ok(Ok(msg_id)) => {
-                            log::info!("[wallet.send] ✅ Submitted to b0x: {}", msg_id);
-                            b0x_succeeded = true;
-                            b0x_message_id = Some(msg_id.clone());
-                            // §16.6 proposal authority: bind the wire identity
-                            // to the persisted proposal (exactly once).
-                            if let Err(e) =
-                                crate::storage::client_db::mark_sender_proposal_submitted(
-                                    &sender_proposal.relationship_key,
-                                    &sender_proposal.canonical_parent,
-                                    &msg_id,
-                                )
-                            {
-                                log::error!(
-                                    "[wallet.send] §16.6 proposal message-id bind failed: {e}"
-                                );
-                            }
-                            // Wake our own inbox poller so we pick up the recipient's
-                            // ACK faster — reduces tip-drift on subsequent sends.
-                            crate::sdk::inbox_poller::resume_poller();
-                            // Record network success for connectivity monitoring
-                            #[cfg(feature = "dev-discovery")]
-                            network_gate.record_network_success();
-                            // Backfill the receipt into the local transaction record
-                            // so the sender's history shows "Verified" instead of "N/A".
-                            if let Err(e) = crate::storage::client_db::update_transaction_proof_data(
-                                &signed_tx.id,
-                                &receipt_canonical_bytes,
-                            ) {
-                                log::warn!(
-                                    "[wallet.send] Failed to persist receipt locally: {}",
-                                    e
-                                );
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            // Record network failure for connectivity monitoring
-                            #[cfg(feature = "dev-discovery")]
-                            network_gate.record_network_failure();
+            // ============================================================
+            // §16.6 DEFECT ZERO — DURABILITY BEFORE DELIVERABILITY.
+            //
+            // The submission inputs are now fully determined, so freeze them
+            // into the outbox row and commit proposal + gate + pending EK head
+            // + outbox in ONE transaction. Only after this returns Ok may a
+            // network call happen.
+            //
+            // A failure here is free: nothing has been sent, so the normal
+            // rollback applies. After it succeeds, rollback is FORBIDDEN.
+            // ============================================================
+            outbox_record.routing_address = routing_address.clone();
 
-                            log::error!("[wallet.send] ❌ B0x submission failed: {}", e);
+            // Build the FINAL canonical envelope (no transmission) so the exact
+            // wire bytes — not a recipe for rebuilding them — are what gets
+            // frozen durably. A later retry replays these verbatim, so retry
+            // identity survives any future change to envelope construction.
+            let sender_b32_for_build =
+                crate::util::text_id::encode_base32_crockford(&from_device_id);
+            let prebuilt = match crate::sdk::b0x_sdk::B0xSDK::new(
+                sender_b32_for_build,
+                self.core_sdk.clone(),
+                storage_endpoints.clone(),
+            ) {
+                Ok(builder) => builder.build_envelope_bytes(&b0x_params),
+                Err(e) => Err(e),
+            };
+            let (envelope_bytes, _built_msg_id) = match prebuilt {
+                Ok(pair) => pair,
+                Err(e) => {
+                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                        "wallet.send: envelope build failed (nothing sent): {e}"
+                    )));
+                }
+            };
+            outbox_record.envelope_bytes = envelope_bytes.clone();
+
+            Ok(OnlineSendArtifacts {
+                sender_proposal,
+                outbox_record,
+                submission_id,
+                routing_address,
+                ek_material,
+                envelope_bytes,
+                receipt_canonical_bytes,
+            })
+        };
+
+        // =====================================================================
+        // ONE COMMIT. `write_extra` runs INSIDE the canonical advance's
+        // transaction, so the advance and the entire durable bundle — proposal,
+        // gate, pending EK head, exact submission material, outbox row — land
+        // together or not at all. There is no window in which a debit exists
+        // without the record that drives its settlement.
+        //
+        // Every helper here MUST take the transaction: the global connection
+        // mutex is already held, so anything that opens its own would deadlock.
+        // =====================================================================
+        let (new_state, advance_outcome, artifacts) = match self.wallet.send_transfer_op_staged(
+            signed_op,
+            &signed_tx,
+            build_online_send_artifacts,
+            |tx, _outcome, artifacts: &OnlineSendArtifacts| {
+                // ONE implementation, shared with the non-transactional wrapper the
+                // tests use — so the tests exercise production's actual writes.
+                crate::storage::client_db::commit_send_prerequisites_with_conn(
+                    tx,
+                    &artifacts.sender_proposal,
+                    &artifacts.outbox_record,
+                    &artifacts.submission_id,
+                    &artifacts.ek_material.ek_pk,
+                    &artifacts.ek_material.ek_sk,
+                    &artifacts.ek_material.at_rest_key,
+                    artifacts.ek_material.is_init,
+                )
+                .map_err(|e| {
+                    dsm::types::error::DsmError::internal(
+                        format!("durable send bundle write failed: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+                Ok(())
+            },
+        ) {
+            Ok(triple) => triple,
+            Err(e) => {
+                // Nothing was committed — the transaction rolled the advance back
+                // with the bundle, and the builder runs before the write. There is
+                // no durable state to unwind and nothing became deliverable.
+                let failure_class = self.classify_local_state_update_failure(&e);
+                log::error!("[wallet.send] staged send FAILED class={failure_class}: {e}");
+                return err(format!("wallet.send: local state update failed: {e}"));
+            }
+        };
+
+        let OnlineSendArtifacts {
+            sender_proposal,
+            outbox_record,
+            submission_id,
+            routing_address,
+            ek_material,
+            envelope_bytes,
+            receipt_canonical_bytes,
+        } = artifacts;
+        let _ = (&new_state, &advance_outcome, &ek_material, &routing_address);
+
+        let mut b0x_succeeded = false;
+        let mut b0x_message_id: Option<String> = None;
+
+        // Durably marked BEFORE entering the network call, so a crash
+        // mid-call can never leave a row that merely LOOKS pre-submit.
+        let _ = crate::storage::client_db::set_sender_outbox_status(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+            crate::storage::client_db::OUTBOX_SUBMITTING,
+        );
+
+        // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
+        let sender_b32_for_b0x = crate::util::text_id::encode_base32_crockford(&from_device_id);
+        match crate::sdk::b0x_sdk::B0xSDK::new(
+            sender_b32_for_b0x,
+            self.core_sdk.clone(),
+            storage_endpoints,
+        ) {
+            Ok(mut b0x_sdk) => {
+                // Transmit the EXACT bytes frozen in the outbox — never a
+                // rebuild. The deterministic submission id makes a retry
+                // idempotent at the node.
+                let submit_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    b0x_sdk.submit_stored_envelope(
+                        &envelope_bytes,
+                        &routing_address,
+                        &submission_id,
+                    ),
+                )
+                .await
+                .map(|r| r.map(|()| submission_id.clone()));
+                match submit_result {
+                    Ok(Ok(msg_id)) => {
+                        log::info!("[wallet.send] ✅ Submitted to b0x: {}", msg_id);
+                        b0x_succeeded = true;
+                        b0x_message_id = Some(msg_id.clone());
+                        // §16.6 proposal authority: bind the wire identity
+                        // to the persisted proposal (exactly once).
+                        if let Err(e) = crate::storage::client_db::mark_sender_proposal_submitted(
+                            &sender_proposal.relationship_key,
+                            &sender_proposal.canonical_parent,
+                            &msg_id,
+                        ) {
+                            log::error!("[wallet.send] §16.6 proposal message-id bind failed: {e}");
                         }
-                        Err(_elapsed) => {
-                            log::error!("[wallet.send] ❌ B0x submission timed out");
+                        // Wake our own inbox poller so we pick up the recipient's
+                        // ACK faster — reduces tip-drift on subsequent sends.
+                        crate::sdk::inbox_poller::resume_poller();
+                        // Record network success for connectivity monitoring
+                        #[cfg(feature = "dev-discovery")]
+                        network_gate.record_network_success();
+                        // Backfill the receipt into the local transaction record
+                        // so the sender's history shows "Verified" instead of "N/A".
+                        if let Err(e) = crate::storage::client_db::update_transaction_proof_data(
+                            &signed_tx.id,
+                            &receipt_canonical_bytes,
+                        ) {
+                            log::warn!("[wallet.send] Failed to persist receipt locally: {}", e);
                         }
                     }
-                }
-                Err(e) => {
-                    // Record network failure for connectivity monitoring
-                    #[cfg(feature = "dev-discovery")]
-                    network_gate.record_network_failure();
+                    Ok(Err(e)) => {
+                        // Record network failure for connectivity monitoring
+                        #[cfg(feature = "dev-discovery")]
+                        network_gate.record_network_failure();
 
-                    log::error!("[wallet.send] ❌ B0xSDK init failed: {}", e);
+                        log::error!("[wallet.send] ❌ B0x submission failed: {}", e);
+                    }
+                    Err(_elapsed) => {
+                        log::error!("[wallet.send] ❌ B0x submission timed out");
+                    }
                 }
             }
-        } else {
-            // No storage endpoints configured — cannot deliver
-            log::error!("[wallet.send] ❌ No storage endpoints — cannot deliver to recipient");
+            Err(e) => {
+                // Record network failure for connectivity monitoring
+                #[cfg(feature = "dev-discovery")]
+                network_gate.record_network_failure();
+
+                log::error!("[wallet.send] ❌ B0xSDK init failed: {}", e);
+            }
         }
 
         // =====================================================================
         // ATOMIC ROLLBACK: If b0x delivery failed, restore canonical state,
         // shared SMT, persisted transaction/projection rows, and in-memory caches.
         // =====================================================================
+        // =====================================================================
+        // §16.6 DEFECT ZERO — FORWARD-ONLY AFTER THE DURABLE COMMIT.
+        //
+        // A submission failure here is NOT proof of non-delivery. A quorum may
+        // have accepted the envelope while the response was lost, the socket
+        // timed out, or the process was killed. Rolling the debit back on that
+        // evidence is exactly how a creditable message ends up stranded against
+        // restored funds — the live hazard this work exists to remove.
+        //
+        // So the debit, proposal, gate, pending EK head and outbox row all
+        // STAY. The row moves to `submission_uncertain` and the reconciliation
+        // sweep resubmits the byte-identical stored envelope; the node's
+        // UNIQUE(message_id) makes that idempotent.
+        // =====================================================================
         if !b0x_succeeded {
-            let rollback_error = self
-                .rollback_failed_online_transfer(&rollback_request)
-                .await
-                .err()
-                .map(|e| format!("; rollback failed: {e}"))
-                .unwrap_or_default();
-            return err(format!(
-                "wallet.send: transfer rolled back — could not deliver to recipient inbox. Check storage node connectivity.{rollback_error}"
-            ));
+            let _ = crate::storage::client_db::set_sender_outbox_status(
+                &outbox_record.relationship_key,
+                &outbox_record.canonical_parent,
+                &outbox_record.proposal_nonce,
+                crate::storage::client_db::OUTBOX_SUBMISSION_UNCERTAIN,
+            );
+            log::warn!(
+                "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
+                 outbox; reconciling forward (a timeout is not proof of non-delivery)"
+            );
+            return err(
+                "wallet.send: delivery outcome unknown — the transfer is retained and will be \
+                 retried automatically. Funds are not lost; do not resend."
+                    .to_string(),
+            );
         }
+        let _ = crate::storage::client_db::set_sender_outbox_status(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+            crate::storage::client_db::OUTBOX_SUBMITTED,
+        );
 
         // Record a single outstanding online transition for this relationship.
         // The shared contact tip remains at h_n until the recipient ACKs the prior
         // message; only the sender's local restore tip advances to h_{n+1}.
         {
-            let msg_id = match b0x_message_id {
-                Some(ref msg_id) => msg_id,
-                None => {
-                    let rollback_error = self
-                        .rollback_failed_online_transfer(&rollback_request)
-                        .await
-                        .err()
-                        .map(|e| format!("; rollback failed: {e}"))
-                        .unwrap_or_default();
-                    return err(format!(
-                        "wallet.send: delivery succeeded but no b0x message id was returned{rollback_error}"
-                    ));
-                }
-            };
+            // The gate is ALREADY durable — it was committed atomically with the
+            // proposal, the pending EK head and the outbox row before anything
+            // was submitted. Nothing here may fail the transfer: the two former
+            // rollback sites (missing message id, gate-persist failure) are gone
+            // because neither is evidence that the message was not delivered.
+            //
+            // The returned storage message id is GC metadata ONLY. Finalization
+            // keys on the receipt commitment, so a missing or unbindable id
+            // costs nothing but a later spool cleanup.
             let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&new_chain_tip);
-            if let Err(e) = crate::storage::client_db::record_pending_online_transition(
-                &sender_proposal.counterparty_device_id,
-                msg_id,
-                &sender_proposal.projection_parent,
-                &sender_proposal.projection_target,
-            ) {
-                let _ =
-                    crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
-                let rollback_error = self
-                    .rollback_failed_online_transfer(&rollback_request)
-                    .await
-                    .err()
-                    .map(|rb| format!("; rollback failed: {rb}"))
-                    .unwrap_or_default();
-                return err(format!(
-                    "wallet.send: delivered transfer but failed to persist sender-side online gate: {e}{rollback_error}"
-                ));
+            match b0x_message_id {
+                Some(ref msg_id) => {
+                    if let Err(e) = crate::storage::client_db::bind_sender_outbox_message_ids(
+                        &outbox_record.relationship_key,
+                        &outbox_record.canonical_parent,
+                        &outbox_record.proposal_nonce,
+                        msg_id,
+                    ) {
+                        log::warn!(
+                            "[wallet.send] §16.6 message-id bind failed (GC metadata only, \
+                             transfer unaffected): {e}"
+                        );
+                    }
+                }
+                None => log::warn!(
+                    "[wallet.send] §16.6 no storage message id returned — transfer stands \
+                     (finalization keys on the receipt commitment); spool GC will rely on \
+                     the deterministic submission id"
+                ),
             }
             log::info!(
-                "[wallet.send] §16.6 Pending online transition recorded: parent={} next={}",
+                "[wallet.send] §16.6 Pending online transition already durable: parent={} next={}",
                 &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
                 &new_tip_b32[..8]
             );
@@ -2053,7 +2185,6 @@ impl AppRouterImpl {
             // before the canonical tip advances, keeping recipient polling aligned
             // with the sender's actual finalized relationship tip.
         }
-        crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
 
         // Get new balance for response
         let token_id_ref = if token_id.is_empty() {
@@ -2216,6 +2347,7 @@ impl AppRouterImpl {
         };
 
         let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
+            submission_id: None,
             recipient_device_id: to_device_id_str.clone(),
             recipient_genesis_hash: recipient_genesis_b32,
             transaction: msg_op,

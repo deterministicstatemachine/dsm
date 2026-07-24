@@ -187,6 +187,7 @@ impl UnilateralOpsSDK {
                 source: None,
             })?;
         let params = B0xSubmissionParams {
+            submission_id: None,
             recipient_device_id: recipient_device_id.clone(),
             recipient_genesis_hash: recipient_genesis_hash.clone(),
             transaction: operation.clone(),

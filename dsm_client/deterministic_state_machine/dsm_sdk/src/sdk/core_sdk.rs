@@ -410,13 +410,10 @@ impl CoreSDK {
     /// Returns a compatibility `State` view derived from the canonical
     /// `DeviceState`. Prefer `device_head()` for new code.
     pub fn get_current_state(&self) -> Result<State, DsmError> {
-        // Delegate to StateMachine::current_state so callers always see the
-        // single source of truth: an explicit `legacy_state` (set via
-        // `set_state` / `restore_state_snapshot`) wins over the projected
-        // DeviceState view. If no legacy_state is pinned, the StateMachine
-        // synthesizes a compat State from the DeviceState head's SMT root +
-        // balances. Pre-genesis paths return None which we surface as an
-        // explicit error.
+        // Delegate to StateMachine::current_state. The canonical DeviceState head
+        // is the single source of truth: the compat `State` is always synthesized
+        // from the head's SMT root + balances, with no override that could shadow
+        // it. Pre-genesis paths return None which we surface as an explicit error.
         let sm = self.state_machine.lock();
         sm.current_state()
             .ok_or_else(|| DsmError::state_machine("No current state available"))
@@ -426,18 +423,6 @@ impl CoreSDK {
     /// snapshot for this device.
     pub fn restore_latest_archived_state_for_device(&self) -> Result<(), DsmError> {
         Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
-    }
-
-    /// Replace the in-memory canonical tip with a caller-supplied archived state snapshot.
-    /// Used by failed-online-send rollback after the bad archived successor has been removed.
-    pub fn restore_state_snapshot(&self, state: &State) -> Result<(), DsmError> {
-        if state.device_info.device_id != self.device_info.device_id {
-            return Err(DsmError::state_machine(
-                "restore_state_snapshot: device mismatch",
-            ));
-        }
-        self.state_machine.lock().set_state(state.clone());
-        Ok(())
     }
 
     /// Normalize stale balance key formats in the current state.
@@ -924,6 +909,7 @@ impl CoreSDK {
             anchor_leaf,
             offline_spend,
             None,
+            None,
         )
     }
 
@@ -945,6 +931,97 @@ impl CoreSDK {
     /// transfer (child) and every transfer after the first (parent).
     /// A-side authority is validated where it belongs — see
     /// [`Self::apply_incoming_transfer_full_state`].
+    /// §16.6 defect zero — STAGED advance: build artifacts between the pure
+    /// prepare and the durable write, then commit them in the SAME transaction.
+    ///
+    /// THE ORDERING PROBLEM THIS SOLVES. An online send must not emit anything
+    /// externally deliverable before the local state justifying it is durable:
+    /// a storage quorum can accept a transfer, a local write can then fail, and
+    /// a rollback would restore the debit while the message stays creditable.
+    /// So proposal + gate + pending EK head + the exact envelope bytes have to
+    /// land in one transaction with the canonical advance.
+    ///
+    /// But the receipt cannot be built inside that transaction: signing reads
+    /// cert heads through `get_connection()`, and the advance already holds
+    /// that single global mutex — re-entering it deadlocks. `prepare_advance_relationship`
+    /// is pure (no writes), which is what makes the split legal:
+    ///
+    /// ```text
+    /// prepare (pure)  →  build_artifacts (DB reads, signing)  →  ONE tx { advance + write_extra }
+    /// ```
+    ///
+    /// `build_artifacts` sees the `AdvanceOutcome` (canonical parent/child, SMT
+    /// roots) and returns whatever the caller needs to persist; `write_extra`
+    /// then writes it inside the advance transaction. If `build_artifacts`
+    /// fails — including a lost cert-head CAS — nothing is written and nothing
+    /// was ever deliverable.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        // Artifacts are built once in `pre_write` (outside the transaction, so
+        // signing may read the DB) and shared with the in-tx writer through a
+        // cell. The in-tx closure NEVER rebuilds them — retries and the durable
+        // record must carry byte-identical bytes.
+        let built: std::cell::RefCell<Option<A>> = std::cell::RefCell::new(None);
+        let builder: std::cell::RefCell<Option<_>> = std::cell::RefCell::new(Some(build_artifacts));
+
+        let pre = |outcome: &dsm::types::device_state::AdvanceOutcome| -> Result<(), DsmError> {
+            let f = builder.borrow_mut().take().ok_or_else(|| {
+                DsmError::internal(
+                    "staged advance: artifact builder already consumed",
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            *built.borrow_mut() = Some(f(outcome)?);
+            Ok(())
+        };
+
+        let write = |tx: &rusqlite::Transaction<'_>,
+                     outcome: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), DsmError> {
+            let guard = built.borrow();
+            let artifacts = guard.as_ref().ok_or_else(|| {
+                DsmError::internal(
+                    "staged advance: artifacts missing at write time",
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            write_extra(tx, outcome, artifacts)
+        };
+
+        let (state, outcome) = self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            None,
+            None,
+            Some(&write),
+            Some(&pre),
+        )?;
+
+        let artifacts = built.borrow_mut().take().ok_or_else(|| {
+            DsmError::internal(
+                "staged advance committed without artifacts",
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        Ok((state, outcome, artifacts))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_on_relationship_guarded(
         &self,
@@ -969,6 +1046,7 @@ impl CoreSDK {
             None,
             None,
             in_tx_extra,
+            None,
         )
     }
 
@@ -987,6 +1065,15 @@ impl CoreSDK {
                 &rusqlite::Transaction<'_>,
                 &dsm::types::device_state::AdvanceOutcome,
             ) -> Result<(), DsmError>,
+        >,
+        // §16.6 staged advance: runs AFTER the pure prepare and BEFORE the
+        // durable write opens its transaction. This is the only window in
+        // which a caller may do work that itself touches the database (e.g.
+        // per-step EK signing, which reads cert heads) — inside the write
+        // transaction the global connection mutex is held and re-entry
+        // deadlocks. An Err here aborts before anything is persisted.
+        pre_write: Option<
+            &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
         >,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
@@ -1066,6 +1153,12 @@ impl CoreSDK {
         // the capsule being marked dirty. `in_tx_extra` (nonce consumption +
         // canonical apply record on the incoming-transfer path) runs in the SAME
         // transaction (§16.6 full-state consumption).
+        // Staged artifact build (signing, envelope construction) — outside the
+        // write transaction, so DB reads here cannot deadlock. Failing now
+        // means nothing was persisted and nothing became deliverable.
+        if let Some(pre) = pre_write {
+            pre(&outcome)?;
+        }
         Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)?;
         sm.commit_advance(&outcome);
 
@@ -4302,79 +4395,185 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // §16.6 defect zero — staged advance seam.
+    //
+    // An online send must not emit anything deliverable before the local state
+    // justifying it is durable, which forces proposal + gate + pending EK head
+    // + exact envelope bytes into the SAME transaction as the canonical
+    // advance. But the receipt cannot be built inside that transaction:
+    // signing reads cert heads through get_connection(), and the advance
+    // already holds that single global mutex, so re-entry deadlocks. The
+    // staged seam makes the only legal ordering explicit:
+    //     prepare (pure) -> build (DB reads OK) -> ONE tx.
+    // ---------------------------------------------------------------------
+
+    /// The builder must run BEFORE the write transaction opens, and a DB read
+    /// inside it must not deadlock. If this test hangs, the seam is wrong.
     #[test]
     #[serial]
-    fn restore_state_snapshot_rewinds_in_memory_tip() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        let _ = crate::storage_utils::set_storage_base_dir(
-            std::env::temp_dir().join("dsm_core_sdk_rollback_state_test"),
+    fn staged_builder_runs_before_the_write_and_may_read_the_db() {
+        let sdk = full_state_apply_harness();
+        let (sender, _) = sender_ids();
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &sdk.device_info.device_id,
+            &sender,
         );
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
 
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let device_id = vec![0x47; 32];
-        let genesis_hash = vec![0x57; 32];
-        let binding_key = vec![0x67; 32];
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
+        let (_state, outcome, artifacts) = sdk
+            .execute_on_relationship_staged(
+                rel,
+                sender,
+                incoming_transfer_op(&sdk.device_info.device_id, 5, vec![0x31u8; 32]),
+                &[dsm::types::device_state::BalanceDelta {
+                    policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: 5,
+                }],
+                Some([0u8; 32]),
+                |o| {
+                    // A real builder signs here, which touches the DB. Prove
+                    // that is safe at this point in the sequence.
+                    let _ = crate::storage::client_db::load_cert_chain_head_pubkey(
+                        &rel,
+                        crate::storage::client_db::CertChainSide::Local,
+                    );
+                    Ok(o.new_chain_state.compute_chain_tip())
+                },
+                |tx, _o, child: &[u8; 32]| {
+                    tx.execute(
+                        "CREATE TABLE IF NOT EXISTS staged_probe(child BLOB NOT NULL)",
+                        [],
+                    )
+                    .map_err(|e| {
+                        DsmError::storage(format!("probe: {e}"), None::<std::io::Error>)
+                    })?;
+                    tx.execute(
+                        "INSERT INTO staged_probe(child) VALUES (?1)",
+                        rusqlite::params![child.as_slice()],
+                    )
+                    .map_err(|e| {
+                        DsmError::storage(format!("probe: {e}"), None::<std::io::Error>)
+                    })?;
+                    Ok(())
+                },
             )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id.clone(),
-            public_key.clone(),
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        let device = DeviceInfo::new(device_id.try_into().expect("device id"), public_key.clone());
-        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
-        sdk.initialize_with_genesis_state()
-            .expect("initialize genesis state");
-        let current = sdk
-            .get_current_state()
-            .expect("current state after genesis");
-        assert_eq!(current.device_info.public_key, device.public_key);
-        let prior = sdk.get_current_state().expect("prior state");
+            .expect("staged advance");
 
-        let op = sdk
-            .sign_operation_sphincs(DsmOperation::Generic {
-                operation_type: b"rollback.test".to_vec(),
-                data: vec![0x01],
-                message: "advance".to_string(),
-                signature: vec![],
-            })
-            .expect("sign operation");
-        let signature = op.get_signature().expect("signature present");
-        let payload = op.with_cleared_signature().to_bytes();
-        assert!(
-            dsm::crypto::sphincs::sphincs_verify(&device.public_key, &payload, &signature)
-                .expect("direct signature verify"),
-            "canonical CoreSDK test signature must self-verify"
+        assert_eq!(
+            artifacts,
+            outcome.new_chain_state.compute_chain_tip(),
+            "builder saw the real AdvanceOutcome and its artifacts reached the caller"
         );
-        let dev_id2 = device.device_id;
-        let rel_key2 =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id2, &dev_id2);
-        let init_tip2 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id2, &dev_id2,
-        );
-        let (advanced, _) = sdk
-            .execute_on_relationship(rel_key2, dev_id2, op, &[], Some(init_tip2))
-            .expect("execute operation");
-        assert_ne!(advanced.hash, prior.hash, "state must advance");
 
-        sdk.restore_state_snapshot(&prior)
-            .expect("restore prior snapshot");
-        let current = sdk.get_current_state().expect("current state");
-        assert_eq!(current.hash[0] as u64, prior.hash[0] as u64);
-        assert_eq!(current.hash, prior.hash);
+        let persisted: Vec<u8> = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+            conn.query_row("SELECT child FROM staged_probe", [], |r| r.get(0))
+                .expect("probe row committed with the advance")
+        };
+        assert_eq!(
+            persisted,
+            artifacts.to_vec(),
+            "in-tx writer persisted the builder's artifacts, never a rebuild"
+        );
+    }
+
+    /// A failing builder must abort BEFORE anything is persisted — this is the
+    /// window where a lost cert-head CAS lands, and it must leave nothing
+    /// deliverable behind.
+    #[test]
+    #[serial]
+    fn staged_builder_failure_persists_nothing() {
+        let sdk = full_state_apply_harness();
+        let (sender, _) = sender_ids();
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &sdk.device_info.device_id,
+            &sender,
+        );
+        let head_before = device_root(&sdk);
+
+        let err = sdk
+            .execute_on_relationship_staged(
+                rel,
+                sender,
+                incoming_transfer_op(&sdk.device_info.device_id, 7, vec![0x32u8; 32]),
+                &[dsm::types::device_state::BalanceDelta {
+                    policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: 7,
+                }],
+                Some([0u8; 32]),
+                |_o| -> Result<(), DsmError> {
+                    Err(DsmError::invalid_operation("cert-head CAS lost the race"))
+                },
+                |_tx, _o, _a| Ok(()),
+            )
+            .expect_err("a failed build must abort the advance");
+        assert!(err.to_string().contains("CAS lost the race"));
+
+        assert_eq!(
+            device_root(&sdk),
+            head_before,
+            "no canonical advance may survive a failed artifact build"
+        );
+    }
+
+    /// GAP 1 CRITERION 3 — a failure in ANY extra write must roll the canonical
+    /// advance back with it.
+    ///
+    /// `write_extra` runs INSIDE the advance transaction, so the durable bundle
+    /// (proposal, gate, pending EK head, outbox row) and the canonical advance
+    /// share one commit. If any of those writes fails, the advance must not
+    /// survive on its own — otherwise the debit lands with no lifecycle record
+    /// and nothing can ever settle or reconcile it.
+    #[test]
+    #[serial_test::serial]
+    fn extra_write_failure_rolls_back_the_canonical_advance() {
+        let sdk = full_state_apply_harness();
+        let (sender, _) = sender_ids();
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &sdk.device_info.device_id,
+            &sender,
+        );
+        let head_before = device_root(&sdk);
+
+        let built = std::cell::Cell::new(false);
+        let err = sdk
+            .execute_on_relationship_staged(
+                rel,
+                sender,
+                incoming_transfer_op(&sdk.device_info.device_id, 9, vec![0x41u8; 32]),
+                &[dsm::types::device_state::BalanceDelta {
+                    policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: 9,
+                }],
+                Some([0u8; 32]),
+                |_o| -> Result<(), DsmError> {
+                    built.set(true);
+                    Ok(())
+                },
+                // The bundle write fails — e.g. the outbox UNIQUE(commitment)
+                // constraint rejects a second lifecycle row for one identity.
+                |_tx, _o, _a| {
+                    Err(DsmError::internal(
+                        "outbox insert failed",
+                        None::<std::io::Error>,
+                    ))
+                },
+            )
+            .expect_err("a failed extra write must abort the whole advance");
+        assert!(err.to_string().contains("outbox insert failed"));
+        assert!(built.get(), "the builder must have run before the write");
+
+        assert_eq!(
+            device_root(&sdk),
+            head_before,
+            "the canonical advance MUST roll back with the failed bundle write — \
+             a debit with no durable lifecycle record is exactly the hazard this \
+             seam exists to prevent"
+        );
     }
 }
 

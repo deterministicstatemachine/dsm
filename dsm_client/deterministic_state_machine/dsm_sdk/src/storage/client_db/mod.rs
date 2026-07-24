@@ -23,7 +23,9 @@ pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
 pub mod canonical_apply;
+mod canonical_rebuild;
 pub mod cert_chain;
+mod cert_resync;
 mod contacts;
 mod dlv_receipts;
 mod export;
@@ -32,8 +34,10 @@ mod manifold_seeds;
 mod nonces;
 mod online_outbox;
 mod pending_transactions;
+mod projection_repair;
 pub mod recipient_receipt_fold;
 pub mod recovery;
+pub mod sender_outbox;
 pub mod sender_proposal;
 mod stitched_receipts;
 mod system_peers;
@@ -57,6 +61,10 @@ pub use ble_chunk_buffer::*;
 pub use canonical_apply::*;
 pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
+pub use canonical_rebuild::*;
+pub use cert_resync::*;
+pub use projection_repair::*;
+pub use sender_outbox::*;
 pub use sender_proposal::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
@@ -525,6 +533,77 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_sender_proposal_message
             ON sender_online_proposal(message_id) WHERE message_id IS NOT NULL;
+
+        -- §16.6 durable sender outbox. Committed together with the canonical
+        -- advance BEFORE any network call, so a local failure can never strand a
+        -- deliverable message against a rolled-back debit. Carries the EXACT
+        -- envelope bytes (retries resubmit the identical artifact, never a
+        -- rebuild) and outlives finalization as `gc_pending` so the remaining
+        -- lifecycle work stays reachable.
+        CREATE TABLE IF NOT EXISTS cert_resync_state(
+            relationship_key   BLOB NOT NULL PRIMARY KEY,
+            -- 0 = CLEAR (ordinary sending allowed), 1 = REQUIRED, 2 = PENDING.
+            -- Any non-zero value BLOCKS ordinary sends on this relationship.
+            state              INTEGER NOT NULL DEFAULT 0 CHECK(state IN (0, 1, 2)),
+            -- Monotonic per-relationship epoch. A resync tuple whose epoch is not
+            -- strictly greater than this is rejected (anti-replay).
+            epoch              INTEGER NOT NULL DEFAULT 0,
+            updated_at         INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS cert_chain_resync_audit(
+            relationship_key              BLOB NOT NULL,
+            -- The PRESERVED accepted commitment this restart is anchored to
+            -- (content identity — one resync per agreed accepted transition).
+            preserved_acceptance_commitment BLOB NOT NULL,
+            accepted_parent_tip           BLOB NOT NULL,
+            accepted_child_tip            BLOB NOT NULL,
+            -- Digest of the jointly-authorized restart statement.
+            joint_auth_hash               BLOB NOT NULL,
+            epoch                         INTEGER NOT NULL,
+            old_local_head                BLOB,
+            old_counterparty_head         BLOB,
+            new_local_head                BLOB NOT NULL,
+            new_counterparty_head         BLOB NOT NULL,
+            reason_code                   TEXT NOT NULL,
+            created_at                    INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, preserved_acceptance_commitment)
+        );
+
+        CREATE TABLE IF NOT EXISTS projection_repair_queue(
+            device_id   TEXT NOT NULL,
+            token_id    TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            PRIMARY KEY (device_id, token_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS sender_outbox(
+            relationship_key    BLOB NOT NULL,
+            canonical_parent    BLOB NOT NULL,   -- ASYM canonical parent (proposal identity)
+            canonical_child     BLOB NOT NULL,
+            commitment          BLOB NOT NULL,   -- receipt commitment = finalization identity
+            projection_parent   BLOB NOT NULL,   -- SYM routing/gate space
+            projection_target   BLOB NOT NULL,
+            routing_address     TEXT NOT NULL,
+            submission_id       TEXT NOT NULL,   -- deterministic; equals the node message_id
+            envelope_bytes      BLOB NOT NULL,   -- exact submitted bytes
+            proposal_nonce      BLOB NOT NULL,   -- completes the durable identity
+            -- Local cert-head CAS expectation. NULL is meaningful ONLY when
+            -- is_first_ek_step = 1; an unexplained NULL is never read as genesis.
+            local_expected_prev BLOB,
+            is_first_ek_step    INTEGER NOT NULL CHECK(is_first_ek_step IN (0, 1)),
+            status              TEXT NOT NULL,
+            message_ids         TEXT,            -- GC metadata ONLY, never authority
+            created_at          INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, canonical_parent, proposal_nonce),
+            UNIQUE (commitment),
+            UNIQUE (submission_id),
+            CHECK (status IN (
+                'pending_submit', 'submitting', 'submitted',
+                'submission_uncertain', 'gc_pending', 'complete'
+            ))
+        );
 
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
             commitment             BLOB PRIMARY KEY,

@@ -2,7 +2,7 @@
 //! Persisted sender-side online transition gating.
 
 use anyhow::{anyhow, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use super::types::PendingOnlineOutboxRecord;
@@ -111,6 +111,53 @@ pub fn record_pending_online_transition(
     });
 
     let tx = conn.transaction()?;
+    record_pending_online_transition_with_conn(
+        &tx,
+        counterparty_device_id,
+        message_id,
+        parent_tip,
+        next_tip,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Same gate write, INSIDE a caller-owned transaction.
+///
+/// §16.6 defect zero: the gate must be committed together with the canonical
+/// advance, the proposal, the pending EK head, and the outbox row — one
+/// transaction, before anything is deliverable. This variant therefore takes
+/// `&Connection` (a `&Transaction` derefs to one) and never calls
+/// `get_connection()`: the advance already holds the single global connection
+/// mutex, so opening another here would deadlock.
+///
+/// Validation and semantics are identical to the self-opening wrapper above;
+/// only the transaction ownership differs.
+pub fn record_pending_online_transition_with_conn(
+    tx: &Connection,
+    counterparty_device_id: &[u8],
+    message_id: &str,
+    parent_tip: &[u8],
+    next_tip: &[u8],
+) -> Result<()> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid counterparty_device_id length"));
+    }
+    if parent_tip.len() != 32 {
+        return Err(anyhow!("Invalid parent_tip length"));
+    }
+    if next_tip.len() != 32 {
+        return Err(anyhow!("Invalid next_tip length"));
+    }
+    if message_id.trim().is_empty() {
+        return Err(anyhow!("message_id cannot be empty"));
+    }
+    if parent_tip == next_tip {
+        return Err(anyhow!(
+            "Pending online transition requires next_tip different from parent_tip"
+        ));
+    }
+
     let existing_gate: Option<(String, Vec<u8>, Vec<u8>)> = tx
         .query_row(
             "SELECT message_id, parent_tip, next_tip
@@ -205,7 +252,6 @@ pub fn record_pending_online_transition(
         )?;
     }
 
-    tx.commit()?;
     Ok(())
 }
 
@@ -300,6 +346,26 @@ pub fn clear_pending_online_outbox(counterparty_device_id: &[u8]) -> Result<()> 
 /// concurrent online send.
 ///
 /// Returns `Ok(true)` if the exact row was deleted, `Ok(false)` if no match.
+/// Exact-match gate delete INSIDE a caller-owned transaction (§16.6 defect 1).
+pub fn clear_pending_online_outbox_if_matches_with_conn(
+    conn: &Connection,
+    counterparty_device_id: &[u8],
+    expected_parent_tip: &[u8],
+    expected_next_tip: &[u8],
+) -> Result<bool> {
+    if counterparty_device_id.len() != 32
+        || expected_parent_tip.len() != 32
+        || expected_next_tip.len() != 32
+    {
+        return Err(anyhow!("Invalid identifier length for gate clear"));
+    }
+    let rows = conn.execute(
+        "DELETE FROM pending_online_outbox WHERE counterparty_device_id = ?1 AND parent_tip = ?2 AND next_tip = ?3",
+        params![counterparty_device_id, expected_parent_tip, expected_next_tip],
+    )?;
+    Ok(rows > 0)
+}
+
 pub fn clear_pending_online_outbox_if_matches(
     counterparty_device_id: &[u8],
     expected_parent_tip: &[u8],
