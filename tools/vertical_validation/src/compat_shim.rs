@@ -45,8 +45,12 @@ pub fn machine_execute_transition(
     machine: &mut StateMachine,
     operation: Operation,
 ) -> Result<State, DsmError> {
+    // Read the verbatim compat mirror, NOT the synthesized `current_state()`.
+    // `current_state()` reflects only the canonical DeviceState head and cannot
+    // reproduce the legacy `State`'s `token_balances`/`entropy` — which the
+    // §11 eq.14 entropy formula and `apply_transition`'s balance checks require.
     let current = machine
-        .current_state()
+        .compat_shim_state()
         .ok_or_else(|| DsmError::state_machine("no current state for execute_transition shim"))?;
 
     // §11 eq.14 entropy

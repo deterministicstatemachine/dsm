@@ -47,6 +47,18 @@ pub struct StateMachine {
     /// Canonical device state per §2.2: SMT root + device-level balances +
     /// per-relationship chain tips. This IS the device head.
     device_state: Option<crate::types::device_state::DeviceState>,
+    /// Verbatim `State` mirror for the validation tooling's `apply_transition`
+    /// compat shims ONLY (`tools/vertical_validation`). It carries the full
+    /// legacy `State` — including `token_balances` and `entropy` — which the
+    /// synthesized `current_state()` view intentionally cannot reproduce.
+    ///
+    /// This is NOT the 8XK override. `current_state()` NEVER reads this field;
+    /// the canonical head is the sole truth for every production/UI read. The
+    /// removed `legacy_state` field was dangerous precisely because
+    /// `current_state()` returned it and let it shadow the head. This mirror is
+    /// reachable only through `compat_shim_state()`, so it can never win over
+    /// the canonical head.
+    compat_shim_state: Option<State>,
 }
 
 impl StateMachine {
@@ -58,7 +70,10 @@ impl StateMachine {
 
     /// Create a new state machine instance
     pub fn new() -> Self {
-        StateMachine { device_state: None }
+        StateMachine {
+            device_state: None,
+            compat_shim_state: None,
+        }
     }
 
     /// Get the canonical device state (§2.2 SMT head).
@@ -69,6 +84,16 @@ impl StateMachine {
     /// Install a canonical DeviceState head directly.
     pub fn set_device_head(&mut self, head: crate::types::device_state::DeviceState) {
         self.device_state = Some(head);
+        self.compat_shim_state = None;
+    }
+
+    /// Verbatim compat `State` last handed to `set_state`, for the validation
+    /// tooling's `apply_transition` shims only. Returns `None` once a real head
+    /// is installed (`set_device_head`/`commit_advance`), because the mirror is
+    /// then stale. Production code must use `current_state()` / `device_head()`;
+    /// this deliberately exposes what those synthesize away (balances/entropy).
+    pub fn compat_shim_state(&self) -> Option<State> {
+        self.compat_shim_state.clone()
     }
 
     /// Get a compatibility State view from DeviceState. Used by legacy
@@ -127,6 +152,9 @@ impl StateMachine {
     /// so legacy callers' verify_state checks have a head_hash to compare.
     pub fn set_state(&mut self, state: State) {
         let state_hash = state.hash().unwrap_or(state.hash);
+        // Mirror the verbatim State for the validation-tooling compat shims.
+        // NOT read by current_state(); see the field doc.
+        self.compat_shim_state = Some(state.clone());
         if self.device_state.is_none() {
             let mut ds = crate::types::device_state::DeviceState::new(
                 [0u8; 32],
@@ -216,6 +244,7 @@ impl StateMachine {
     /// in-memory head reflects the outcome.
     pub fn commit_advance(&mut self, outcome: &crate::types::device_state::AdvanceOutcome) {
         self.device_state = Some(outcome.new_device_state.clone());
+        self.compat_shim_state = None;
     }
 
     /// Prepare a vault state SMT leaf update without committing it to
@@ -251,6 +280,7 @@ impl StateMachine {
         outcome: &crate::types::device_state::VaultLeafOutcome,
     ) {
         self.device_state = Some(outcome.new_device_state.clone());
+        self.compat_shim_state = None;
     }
 
     /// Convenience wrapper: prepare + commit a vault state leaf update
