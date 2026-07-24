@@ -1151,9 +1151,9 @@ mod tests {
             "proposal must NOT survive an aborted commit"
         );
         assert!(
-            !get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+            get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
                 .unwrap()
-                .is_some(),
+                .is_none(),
             "no outbox row ⇒ rollback stays permitted ⇒ no stranded deliverable"
         );
     }
@@ -1193,9 +1193,9 @@ mod tests {
         assert!(err.to_string().contains("CAS failed"), "got: {err}");
 
         assert!(
-            !get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+            get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
                 .unwrap()
-                .is_some(),
+                .is_none(),
             "nothing durable ⇒ nothing was ever deliverable"
         );
         assert!(
