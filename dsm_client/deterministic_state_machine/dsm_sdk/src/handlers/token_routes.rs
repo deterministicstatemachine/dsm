@@ -167,19 +167,36 @@ fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
     }
 }
 
-async fn try_publish_policy_to_network(body: &[u8]) -> Result<Option<[u8; 32]>, String> {
+/// Publish policy bytes to the storage nodes.
+///
+/// The policy anchor is content-addressed BY DEFINITION —
+/// `BLAKE3(TAG_DSM_POLICY, policy_bytes)` — so it is ALWAYS derived locally
+/// and a node has no authority to name it. A node's 32-byte reply is treated
+/// purely as an echo: it must equal the locally derived anchor, otherwise
+/// that node is lying (or broken) and its answer is discarded.
+///
+/// This is load-bearing for value safety. The anchor becomes the
+/// `policy_commit` on a `BalanceDelta`, so a node that could name it could
+/// name an EXISTING asset's commit (e.g. ERA) and mint real balance on this
+/// device. The anchor never leaves local derivation.
+///
+/// Returns `true` when at least one node stored the bytes and echoed the
+/// correct anchor. Publication is best-effort: `false` only means the policy
+/// is not yet mirrored, never that the anchor is in doubt.
+async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> bool {
     let urls = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
         Ok(cfg) => cfg.node_urls,
         Err(e) => {
             log::warn!("[tokens.publishPolicy] No storage node config: {}", e);
-            return Ok(None);
+            return false;
         }
     };
     if urls.is_empty() {
-        return Ok(None);
+        return false;
     }
 
     let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
+    let mut published = false;
     let mut last_err: Option<String> = None;
 
     for url in urls {
@@ -192,14 +209,15 @@ async fn try_publish_policy_to_network(body: &[u8]) -> Result<Option<[u8; 32]>, 
             .await
         {
             Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) if bytes.len() == 32 => {
-                    let mut anchor = [0u8; 32];
-                    anchor.copy_from_slice(&bytes);
-                    return Ok(Some(anchor));
+                Ok(bytes) if bytes.as_ref() == expected_anchor.as_slice() => {
+                    published = true;
                 }
                 Ok(bytes) => {
+                    // The node named a different anchor than the content
+                    // hash. Discard it — never adopt a node-supplied commit.
                     last_err = Some(format!(
-                        "storage node returned invalid policy anchor length {}",
+                        "storage node echoed a policy anchor that is not the content hash \
+                         (len {}); discarding that node's answer",
                         bytes.len()
                     ));
                 }
@@ -215,9 +233,9 @@ async fn try_publish_policy_to_network(body: &[u8]) -> Result<Option<[u8; 32]>, 
     }
 
     if let Some(msg) = last_err {
-        log::warn!("[tokens.publishPolicy] Network publish failed: {}", msg);
+        log::warn!("[tokens.publishPolicy] Network publish issue: {}", msg);
     }
-    Ok(None)
+    published
 }
 
 async fn try_fetch_policy_from_network(anchor: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
@@ -406,6 +424,18 @@ impl AppRouterImpl {
                     }
                 };
 
+                // A new token may NEVER be issued under an existing asset's
+                // policy commit. The anchor becomes the `policy_commit` on the
+                // issuance BalanceDelta, so a colliding anchor would credit a
+                // builtin asset (e.g. real ERA) instead of the new token.
+                if let Some(builtin) =
+                    dsm::core::token::builtin_token_id_for_policy_commit(&policy_anchor)
+                {
+                    return err(format!(
+                        "token.create: policy_anchor collides with builtin asset {builtin}"
+                    ));
+                }
+
                 let mut max_supply: u128 = 0;
                 for b in &req.max_supply_u128 {
                     max_supply = (max_supply << 8) | (*b as u128);
@@ -424,34 +454,63 @@ impl AppRouterImpl {
                 fields.insert("max_supply".to_string(), max_supply.to_string());
                 fields.insert("policy_anchor".to_string(), anchor_b32.clone());
 
-                let parsed = self
-                    .load_policy_bytes(policy_anchor)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|raw_proto| parse_token_policy(&raw_proto));
-
-                if let Some(ref m) = parsed {
-                    if let Some(kind) = &m.kind {
-                        fields.insert("kind".to_string(), kind.clone());
+                // Fail closed on the policy. A token whose policy could not be
+                // read or parsed would silently acquire default semantics
+                // (no kind, zero allocation, transferable) — a silently-wrong
+                // token is worse than no token.
+                let raw_proto = match self.load_policy_bytes(policy_anchor).await {
+                    Ok(Some(raw)) => raw,
+                    Ok(None) => {
+                        return err(format!(
+                            "token.create: policy {anchor_b32} not found — publish it before creating"
+                        ));
                     }
-                    fields.insert(
-                        "mint_burn_enabled".to_string(),
-                        m.mint_burn_enabled.to_string(),
-                    );
-                    fields.insert("transferable".to_string(), m.transferable.to_string());
-                    fields.insert(
-                        "unlimited_supply".to_string(),
-                        m.unlimited_supply.to_string(),
-                    );
+                    Err(e) => {
+                        return err(format!(
+                            "token.create: policy {anchor_b32} load failed: {e}"
+                        ));
+                    }
+                };
+
+                // Re-derive the anchor from the bytes we actually loaded and
+                // require it to equal the requested one. The anchor is the
+                // content hash, so this proves the policy we are about to
+                // enforce is exactly the policy the caller committed to.
+                let derived_anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+                    dsm::common::domain_tags::TAG_DSM_POLICY,
+                    &raw_proto,
+                );
+                if derived_anchor != policy_anchor {
+                    return err(format!(
+                        "token.create: policy bytes for {anchor_b32} do not hash to that anchor"
+                    ));
                 }
+
+                let Some(parsed) = parse_token_policy(&raw_proto) else {
+                    return err(format!(
+                        "token.create: policy {anchor_b32} is malformed and cannot be parsed"
+                    ));
+                };
+
+                if let Some(kind) = &parsed.kind {
+                    fields.insert("kind".to_string(), kind.clone());
+                }
+                fields.insert(
+                    "mint_burn_enabled".to_string(),
+                    parsed.mint_burn_enabled.to_string(),
+                );
+                fields.insert("transferable".to_string(), parsed.transferable.to_string());
+                fields.insert(
+                    "unlimited_supply".to_string(),
+                    parsed.unlimited_supply.to_string(),
+                );
 
                 let metadata = TokenMetadata {
                     token_id: token_id.clone(),
                     name: req.alias.clone(),
                     symbol: ticker.clone(),
-                    description: parsed.as_ref().and_then(|m| m.description.clone()),
-                    icon_url: parsed.as_ref().and_then(|m| m.icon_url.clone()),
+                    description: parsed.description.clone(),
+                    icon_url: parsed.icon_url.clone(),
                     decimals: (req.decimals as u8).min(18),
                     token_type: TokenType::Created,
                     owner_id: self.device_id_bytes,
@@ -464,8 +523,8 @@ impl AppRouterImpl {
                 // Build a PolicyFile matching parsed policy bytes, then bind it
                 // to the externally supplied policy_anchor commitment.
                 let policy_file = {
-                    let transferable = parsed.as_ref().map(|p| p.transferable).unwrap_or(true);
-                    let description = parsed.as_ref().and_then(|p| p.description.clone());
+                    let transferable = parsed.transferable;
+                    let description = parsed.description.clone();
                     let mut pf =
                         dsm::types::policy_types::PolicyFile::new(&ticker, "1", "dsm_token_route");
                     if let Some(desc) = description.as_ref() {
@@ -502,7 +561,7 @@ impl AppRouterImpl {
                 }
 
                 // Materialise initial supply via a self-loop Mint, if any.
-                let initial_alloc = parsed.as_ref().map(|p| p.initial_alloc).unwrap_or(0);
+                let initial_alloc = parsed.initial_alloc;
                 if initial_alloc > 0 {
                     let initial_alloc_u64: u64 = match u64::try_from(initial_alloc) {
                         Ok(v) => v,
@@ -572,15 +631,19 @@ impl AppRouterImpl {
                     return err("tokens.publishPolicy: empty body".into());
                 }
 
-                let fallback_anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+                // The anchor is the content hash, always. Publication is
+                // best-effort mirroring and can never change it.
+                let anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
                     dsm::common::domain_tags::TAG_DSM_POLICY,
                     body,
                 );
-                let anchor = match try_publish_policy_to_network(body).await {
-                    Ok(Some(network_anchor)) => network_anchor,
-                    Ok(None) => fallback_anchor,
-                    Err(e) => return err(format!("tokens.publishPolicy failed: {e}")),
-                };
+                let mirrored = try_publish_policy_to_network(body, &anchor).await;
+                if !mirrored {
+                    log::warn!(
+                        "[tokens.publishPolicy] policy not mirrored to any storage node; \
+                         anchor is still valid (content-addressed) but remote fetch may fail"
+                    );
+                }
 
                 self.cache_policy_bytes(anchor, body.to_vec()).await;
                 AppResult {
