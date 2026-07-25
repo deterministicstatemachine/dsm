@@ -66,9 +66,6 @@ internal const val FAUCET_CLAIM_AMOUNT: Long = 100L
 
 internal const val VAULT1_FEE_BPS: Int = 30
 internal const val VAULT2_FEE_BPS: Int = 50
-internal const val MAX_PATHS: Int = 3
-internal const val SLIPPAGE_BPS: Int = 50
-internal const val FLOOR_BPS: Int = 50
 
 /** Bounded poll for post-trade reserve drift — handler commits the
  *  on-chain DlvUnlock then updates vault state in a second lock
@@ -427,8 +424,9 @@ internal class SoFiTestContext(
         routerInvoke("route.syncVaultsForPair", req.toByteArray())
     }
 
-    /** route.findAndBindBestPath — Tier 2: maxPaths=3, slippageBps=50.
-     *  Returns the unsigned RouteCommit proto bytes. */
+    /** route.findAndBindBestPath — binds the single best path to one
+     *  anchored vault state (exact output, no fallback, no slippage
+     *  floor).  Returns the unsigned RouteCommit proto bytes. */
     fun findAndBindBestPath(): ByteArray {
         val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val req = FindAndBindRouteRequest.newBuilder()
@@ -437,9 +435,6 @@ internal class SoFiTestContext(
             .setInputAmountU128(ByteString.copyFrom(u128be(INPUT_AMOUNT)))
             .setMaxHops(0) // 0 → server default (4)
             .setNonce(ByteString.copyFrom(nonce))
-            .setMaxPaths(MAX_PATHS)
-            .setSlippageBps(SLIPPAGE_BPS)
-            .setFloorBps(FLOOR_BPS)
             .build()
         val env = routerInvoke("route.findAndBindBestPath", req.toByteArray())
         val unsignedB32 = appStateValue(env, "route.findAndBindBestPath")

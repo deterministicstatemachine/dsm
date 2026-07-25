@@ -38,6 +38,15 @@ pub(crate) const EXT_COMMIT_DOMAIN: &str = "DSM/ext";
 /// existence-proof identifier.
 pub(crate) const EXT_COMMIT_ROOT: &str = "sofi/extcommit/";
 
+/// Required `RouteCommitV1.version`. Bumped 1 → 2 with the removal of the
+/// pre-signed multi-route fallback and the slippage floors. Every decode
+/// boundary (`verify_route_commit_unlock_eligibility`) rejects any other
+/// version as a hard error — an old (v1) envelope is never silently
+/// accepted with its removed fields skipped. A route is now exactly one
+/// path bound to one anchored state producing one exact output under one
+/// signature; any state change rejects and forces a fresh quote + sign.
+pub(crate) const ROUTE_COMMIT_VERSION: u32 = 2;
+
 /// Anchor key for a given `X`.
 pub(crate) fn external_commitment_key(x: &[u8; 32]) -> String {
     format!("{}{}", EXT_COMMIT_ROOT, encode_base32_crockford(x))
@@ -159,15 +168,11 @@ pub(crate) fn bind_path_to_route_commit(
             vault_state_anchor_seq: 0,
             vault_state_reserves_digest: Vec::new(),
             vault_state_anchor_digest: Vec::new(),
-            // Tier 2 intent-bound. Empty bytes = no per-hop floor;
-            // build_route_commit_with_envelope() callers populate this
-            // when intent enforcement is requested.
-            min_output_amount_u128: Vec::new(),
         });
     }
 
     Ok(generated::RouteCommitV1 {
-        version: 1,
+        version: ROUTE_COMMIT_VERSION,
         nonce: input.nonce.to_vec(),
         input_token: input.path.input_token.clone(),
         output_token: input.path.output_token.clone(),
@@ -175,11 +180,6 @@ pub(crate) fn bind_path_to_route_commit(
         expected_final_output_amount_u128: u128_to_be_bytes(input.path.final_output_amount),
         total_fee_bps: input.path.total_fee_bps,
         hops: hops_proto,
-        // Tier 2 envelope fields default-empty here. The Tier 2 builder
-        // (`build_route_commit_with_envelope`) populates them when the
-        // trader requests intent-bound semantics.
-        floor_final_output_amount_u128: Vec::new(),
-        fallbacks: Vec::new(),
         initiator_public_key: input.initiator_public_key.to_vec(),
         initiator_signature: input.initiator_signature,
     })
@@ -208,121 +208,7 @@ pub(crate) fn compute_external_commitment(rc: &generated::RouteCommitV1) -> [u8;
     dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes)
 }
 
-// =============================================================================
-// Tier 2 envelope binder (intent-bound + fallback)
-// =============================================================================
-
-/// Tier 2: bind a primary path + N-1 fallback paths into a single signed
-/// envelope. All paths share:
-///   - One envelope nonce + initiator pk + signature (signed once over
-///     canonical bytes of the WHOLE envelope including fallbacks)
-///   - The same `floor_final_output_amount_u128` floor — any path
-///     whose simulated final output falls below this is rejected by
-///     the unlock-routed gate before the wallet commits.
-///   - Per-hop `min_output_amount_u128` floors (derived from the
-///     trader's slippage tolerance applied to each hop's expected
-///     output).
-///
-/// At unlock time, the gate tries the primary `hops` first. If
-/// rejected (vault state moved past the floor, anchor seq stale, etc.),
-/// the wallet attempts `fallbacks[0].hops`, then `fallbacks[1].hops`,
-/// etc., all under the same X commitment.
-///
-/// `slippage_bps` is the trader's per-hop slippage tolerance in basis
-/// points (e.g. 50 = 0.5%). Each hop's `min_output_amount_u128` is set
-/// to `expected_output * (10000 - slippage_bps) / 10000`.
-///
-/// `floor_bps` is the trader's envelope-level slippage tolerance for
-/// the final output (often equal to `slippage_bps` but allowed to
-/// differ — e.g. tighter envelope, looser per-hop).
-pub(crate) struct BindRouteCommitEnvelopeInput<'a> {
-    pub primary: &'a Path,
-    pub fallbacks: &'a [Path],
-    pub nonce: [u8; 32],
-    pub initiator_public_key: &'a [u8],
-    pub initiator_signature: Vec<u8>,
-    pub slippage_bps: u32,
-    pub floor_bps: u32,
-}
-
-pub(crate) fn bind_envelope_to_route_commit(
-    input: BindRouteCommitEnvelopeInput<'_>,
-) -> Result<generated::RouteCommitV1, RouteCommitError> {
-    if input.primary.hops.is_empty() {
-        return Err(RouteCommitError::EmptyPath);
-    }
-    if input.nonce == [0u8; 32] {
-        return Err(RouteCommitError::InvalidNonce);
-    }
-    if input.slippage_bps > 10_000 || input.floor_bps > 10_000 {
-        // slippage > 100% would underflow the floor computation
-        return Err(RouteCommitError::EmptyPath); // reuse error variant; could add InvalidSlippage
-    }
-
-    // Helper: build hops_proto with per-hop intent-bound floor stamped.
-    let build_hops = |path: &Path| -> Vec<generated::RouteCommitHopV1> {
-        path.hops
-            .iter()
-            .map(|hop| {
-                let floor = apply_slippage_floor(hop.expected_output_amount, input.slippage_bps);
-                generated::RouteCommitHopV1 {
-                    vault_id: hop.vault_id.to_vec(),
-                    token_in: hop.token_in.clone(),
-                    token_out: hop.token_out.clone(),
-                    input_amount_u128: u128_to_be_bytes(hop.input_amount),
-                    expected_output_amount_u128: u128_to_be_bytes(hop.expected_output_amount),
-                    fee_bps: hop.fee_bps,
-                    advertisement_digest: hop.advertisement_digest.to_vec(),
-                    state_number: hop.state_number,
-                    unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
-                    owner_public_key: hop.owner_public_key.clone(),
-                    // Stamped by `stamp_anchor_bindings` on the unsigned
-                    // envelope (primary + fallbacks) before signing.
-                    vault_state_anchor_seq: 0,
-                    vault_state_reserves_digest: Vec::new(),
-                    vault_state_anchor_digest: Vec::new(),
-                    min_output_amount_u128: u128_to_be_bytes(floor),
-                }
-            })
-            .collect()
-    };
-
-    let primary_hops = build_hops(input.primary);
-    let primary_floor = apply_slippage_floor(input.primary.final_output_amount, input.floor_bps);
-
-    let fallback_groups: Vec<generated::RouteCommitFallbackV1> = input
-        .fallbacks
-        .iter()
-        .map(|p| generated::RouteCommitFallbackV1 {
-            hops: build_hops(p),
-        })
-        .collect();
-
-    Ok(generated::RouteCommitV1 {
-        version: 1,
-        nonce: input.nonce.to_vec(),
-        input_token: input.primary.input_token.clone(),
-        output_token: input.primary.output_token.clone(),
-        input_amount_u128: u128_to_be_bytes(input.primary.input_amount),
-        expected_final_output_amount_u128: u128_to_be_bytes(input.primary.final_output_amount),
-        total_fee_bps: input.primary.total_fee_bps,
-        hops: primary_hops,
-        floor_final_output_amount_u128: u128_to_be_bytes(primary_floor),
-        fallbacks: fallback_groups,
-        initiator_public_key: input.initiator_public_key.to_vec(),
-        initiator_signature: input.initiator_signature,
-    })
-}
-
-fn apply_slippage_floor(expected: u128, slippage_bps: u32) -> u128 {
-    let factor = 10_000_u128.saturating_sub(u128::from(slippage_bps));
-    expected
-        .checked_mul(factor)
-        .map(|p| p / 10_000)
-        .unwrap_or(0)
-}
-
-/// One vault's Tier-2 anchor-state binding, computed by the route binder
+/// One vault's anchor-state binding, computed by the route binder
 /// from the composed+synced vault state at quote time.  Carries the exact
 /// values the vault-side unlock gate re-derives and compares against its
 /// LOCAL current state (`current_sequence` + `current_reserves_digest`).
@@ -339,9 +225,8 @@ pub(crate) struct HopAnchorBinding {
 
 /// Stamp each hop's anchor-state binding fields (`vault_state_anchor_seq`,
 /// `vault_state_reserves_digest`, `vault_state_anchor_digest`) from
-/// `bindings`, keyed by the hop's 32-byte `vault_id`.  Applies to the
-/// primary hops AND every fallback group's hops so a fallback path is
-/// bound to state exactly like the primary.
+/// `bindings`, keyed by the hop's 32-byte `vault_id`.  A route binds one
+/// path, so this stamps that path's hops.
 ///
 /// MUST run on the UNSIGNED RouteCommit, before the initiator signs it, so
 /// the SPHINCS+ signature and the external commitment `X` both cover the
@@ -355,26 +240,17 @@ pub(crate) fn stamp_anchor_bindings(
     rc: &mut generated::RouteCommitV1,
     bindings: &std::collections::HashMap<[u8; 32], HopAnchorBinding>,
 ) {
-    fn stamp_hops(
-        hops: &mut [generated::RouteCommitHopV1],
-        bindings: &std::collections::HashMap<[u8; 32], HopAnchorBinding>,
-    ) {
-        for hop in hops.iter_mut() {
-            if hop.vault_id.len() != 32 {
-                continue;
-            }
-            let mut vid = [0u8; 32];
-            vid.copy_from_slice(&hop.vault_id);
-            if let Some(b) = bindings.get(&vid) {
-                hop.vault_state_anchor_seq = b.seq;
-                hop.vault_state_reserves_digest = b.reserves_digest.clone();
-                hop.vault_state_anchor_digest = b.anchor_digest.clone();
-            }
+    for hop in rc.hops.iter_mut() {
+        if hop.vault_id.len() != 32 {
+            continue;
         }
-    }
-    stamp_hops(&mut rc.hops, bindings);
-    for fb in rc.fallbacks.iter_mut() {
-        stamp_hops(&mut fb.hops, bindings);
+        let mut vid = [0u8; 32];
+        vid.copy_from_slice(&hop.vault_id);
+        if let Some(b) = bindings.get(&vid) {
+            hop.vault_state_anchor_seq = b.seq;
+            hop.vault_state_reserves_digest = b.reserves_digest.clone();
+            hop.vault_state_anchor_digest = b.anchor_digest.clone();
+        }
     }
 }
 
@@ -464,84 +340,6 @@ pub(crate) fn enforce_anchor_binding(
         }
         (AnchorEnforcement::Optional, false) => Ok(AnchorPosture::BypassedOptional),
         (AnchorEnforcement::Unspecified, _) => Ok(AnchorPosture::BypassedUnspecified),
-    }
-}
-
-/// Tier 2 gate: check that a candidate hop's simulated output meets
-/// both the per-hop floor AND the envelope's final-output floor.
-///
-/// Called from `dlv.unlockRouted` for each hop in the envelope (primary
-/// plus fallbacks). Returns Ok(()) when the hop passes; Err with a typed
-/// reason when the gate must reject and the wallet should try the next
-/// fallback group.
-pub(crate) fn check_intent_bound_hop(
-    hop_proto: &generated::RouteCommitHopV1,
-    actual_output_u128: u128,
-) -> Result<(), IntentBoundReject> {
-    let floor = be_bytes_to_u128(&hop_proto.min_output_amount_u128);
-    if let Some(min_out) = floor {
-        if actual_output_u128 < min_out {
-            return Err(IntentBoundReject::HopFloorViolation {
-                expected_min: min_out,
-                actual: actual_output_u128,
-            });
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn check_envelope_floor(
-    rc: &generated::RouteCommitV1,
-    actual_final_output_u128: u128,
-) -> Result<(), IntentBoundReject> {
-    let floor = be_bytes_to_u128(&rc.floor_final_output_amount_u128);
-    if let Some(min_final) = floor {
-        if actual_final_output_u128 < min_final {
-            return Err(IntentBoundReject::EnvelopeFloorViolation {
-                expected_min: min_final,
-                actual: actual_final_output_u128,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn be_bytes_to_u128(b: &[u8]) -> Option<u128> {
-    if b.is_empty() {
-        return None;
-    }
-    if b.len() != 16 {
-        return None;
-    }
-    let mut arr = [0u8; 16];
-    arr.copy_from_slice(b);
-    Some(u128::from_be_bytes(arr))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IntentBoundReject {
-    HopFloorViolation { expected_min: u128, actual: u128 },
-    EnvelopeFloorViolation { expected_min: u128, actual: u128 },
-}
-
-impl std::fmt::Display for IntentBoundReject {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IntentBoundReject::HopFloorViolation {
-                expected_min,
-                actual,
-            } => write!(
-                f,
-                "hop output {actual} below intent-bound floor {expected_min}",
-            ),
-            IntentBoundReject::EnvelopeFloorViolation {
-                expected_min,
-                actual,
-            } => write!(
-                f,
-                "envelope final output {actual} below floor {expected_min}",
-            ),
-        }
     }
 }
 
@@ -911,29 +709,16 @@ pub(crate) fn verify_amm_swap_against_reserves(
     )
     .ok_or(AmmVerifyError::InsufficientReservesOrOverflow)?;
 
-    // Tier 2: if the hop carries a `min_output_amount_u128` floor, the
-    // gate uses intent-bound semantics — accept any simulated output
-    // ≥ floor (not strict equality). Without a floor (empty bytes),
-    // fall back to the Tier 1 strict-equality check, preserving exact
-    // backward compatibility for pre-Tier-2 RouteCommits.
-    let intent_bound_floor = be_bytes_to_u128(&hop.min_output_amount_u128);
-    match intent_bound_floor {
-        Some(floor) => {
-            if simulated < floor {
-                return Err(AmmVerifyError::OutputMismatch {
-                    simulated,
-                    expected: floor,
-                });
-            }
-        }
-        None => {
-            if simulated != expected_output {
-                return Err(AmmVerifyError::OutputMismatch {
-                    simulated,
-                    expected: expected_output,
-                });
-            }
-        }
+    // Strict equality — a hop is bound to an exact anchored reserve
+    // state, so re-simulating against those reserves MUST reproduce the
+    // trader's signed `expected_output` exactly. Any deviation means the
+    // vault moved between quote and unlock; the trade rejects and the
+    // trader re-quotes + re-signs. There is no acceptable-output band.
+    if simulated != expected_output {
+        return Err(AmmVerifyError::OutputMismatch {
+            simulated,
+            expected: expected_output,
+        });
     }
 
     // Standard Uniswap V2 invariant: the FULL input_amount enters the
@@ -961,13 +746,8 @@ pub(crate) fn verify_amm_swap_against_reserves(
 /// Locate a hop in the RouteCommit by `vault_id`.  Vault owners use
 /// this at unlock time: given the RouteCommit the trader handed them,
 /// find their own hop and verify the bound amounts / digests against
-/// their live advertisement before honouring the unlock.
-/// Find the hop for `vault_id` in the route commit. Tier 2: searches
-/// the primary `hops` first, then walks each fallback group in order.
-/// Returns the first match — the verifier doesn't care which group it
-/// came from because the envelope's intent-bounds + floor apply
-/// uniformly across all groups (a vault may legitimately appear in
-/// multiple groups, e.g. as the same hop on different paths).
+/// their live advertisement before honouring the unlock. A route binds
+/// exactly one path, so this searches that path's `hops`.
 pub(crate) fn find_hop<'a>(
     rc: &'a generated::RouteCommitV1,
     vault_id: &[u8; 32],
@@ -975,14 +755,6 @@ pub(crate) fn find_hop<'a>(
     rc.hops
         .iter()
         .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
-        .or_else(|| {
-            rc.fallbacks.iter().find_map(|group| {
-                group
-                    .hops
-                    .iter()
-                    .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
-            })
-        })
 }
 
 /// Typed failure of the routed-unlock eligibility check.  Each
@@ -993,6 +765,12 @@ pub(crate) fn find_hop<'a>(
 pub(crate) enum RouteCommitVerifyError {
     /// `route_commit_bytes` failed prost decode.
     InvalidRouteCommitEncoding,
+    /// `version` is not the required `ROUTE_COMMIT_VERSION`.  An old (v1)
+    /// envelope — which carried the removed pre-signed fallback and
+    /// slippage floors — is a HARD error here, never silently accepted
+    /// with its removed fields skipped.  The trader must re-quote and
+    /// re-sign under the current schema.
+    UnsupportedVersion { got: u32 },
     /// `initiator_public_key` is empty on the wire.  Without a public
     /// key the `initiator_signature` cannot be verified, and the
     /// eligibility gate fails closed.
@@ -1052,6 +830,15 @@ pub(crate) async fn verify_route_commit_unlock_eligibility(
 ) -> Result<generated::RouteCommitHopV1, RouteCommitVerifyError> {
     let rc = generated::RouteCommitV1::decode(route_commit_bytes)
         .map_err(|_| RouteCommitVerifyError::InvalidRouteCommitEncoding)?;
+
+    // Schema-boundary version gate.  Reject any envelope that is not the
+    // current schema BEFORE spending a SPHINCS+ verify — a v1 envelope
+    // (pre-signed fallback + slippage floors) is rejected outright, not
+    // decoded-and-ignored.  One route, one anchored state, one exact
+    // output, one signature; a stale schema forces a fresh quote + sign.
+    if rc.version != ROUTE_COMMIT_VERSION {
+        return Err(RouteCommitVerifyError::UnsupportedVersion { got: rc.version });
+    }
 
     // SPHINCS+ verification (chunk #5).  Run BEFORE every other
     // expensive check so a forged route fails fast.
@@ -1162,7 +949,7 @@ mod tests {
             initiator_signature: vec![],
         })
         .expect("bind");
-        assert_eq!(rc.version, 1);
+        assert_eq!(rc.version, ROUTE_COMMIT_VERSION);
         assert_eq!(rc.nonce, nonce(1).to_vec());
         assert_eq!(rc.input_token, path.input_token);
         assert_eq!(rc.output_token, path.output_token);
@@ -1177,131 +964,6 @@ mod tests {
                 proto_hop.advertisement_digest,
                 path_hop.advertisement_digest.to_vec()
             );
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // Tier 2 envelope binder + intent-bound gate
-    // ─────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn envelope_binder_stamps_per_hop_floor_from_slippage() {
-        let path = sample_path();
-        let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
-            primary: &path,
-            fallbacks: &[],
-            nonce: nonce(2),
-            initiator_public_key: &[0x22u8; 64],
-            initiator_signature: vec![],
-            slippage_bps: 100, // 1%
-            floor_bps: 100,
-        })
-        .expect("envelope bind");
-
-        assert!(!rc.hops[0].min_output_amount_u128.is_empty());
-        let floor_hop0 = be_bytes_to_u128(&rc.hops[0].min_output_amount_u128).unwrap();
-        // expected = path.hops[0].expected_output_amount (computed in
-        // make_hop helper) * 0.99
-        let expected_floor = path.hops[0].expected_output_amount * 9_900 / 10_000;
-        assert_eq!(floor_hop0, expected_floor);
-
-        let envelope_floor = be_bytes_to_u128(&rc.floor_final_output_amount_u128).unwrap();
-        let expected_env = path.final_output_amount * 9_900 / 10_000;
-        assert_eq!(envelope_floor, expected_env);
-    }
-
-    #[test]
-    fn envelope_binder_stamps_fallback_groups() {
-        let primary = sample_path();
-        let fallback = sample_path();
-        let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
-            primary: &primary,
-            fallbacks: std::slice::from_ref(&fallback),
-            nonce: nonce(3),
-            initiator_public_key: &[0x33u8; 64],
-            initiator_signature: vec![],
-            slippage_bps: 50,
-            floor_bps: 50,
-        })
-        .expect("envelope bind");
-
-        assert_eq!(rc.fallbacks.len(), 1);
-        assert_eq!(rc.fallbacks[0].hops.len(), fallback.hops.len());
-        // Fallback hops also get per-hop floors stamped from the same
-        // slippage_bps — verifier walks each group with the same gate.
-        for hop in &rc.fallbacks[0].hops {
-            assert!(!hop.min_output_amount_u128.is_empty());
-        }
-    }
-
-    #[test]
-    fn intent_bound_gate_accepts_when_actual_meets_floor() {
-        let mut hop_proto = make_proto_hop_with_floor(1_000, 950);
-        // actual = 970 ≥ 950 floor → pass
-        assert!(check_intent_bound_hop(&hop_proto, 970).is_ok());
-        // actual = exactly floor → pass (≥ is inclusive)
-        assert!(check_intent_bound_hop(&hop_proto, 950).is_ok());
-        // empty floor → pass regardless
-        hop_proto.min_output_amount_u128.clear();
-        assert!(check_intent_bound_hop(&hop_proto, 0).is_ok());
-    }
-
-    #[test]
-    fn intent_bound_gate_rejects_when_actual_below_floor() {
-        let hop_proto = make_proto_hop_with_floor(1_000, 950);
-        match check_intent_bound_hop(&hop_proto, 949) {
-            Err(IntentBoundReject::HopFloorViolation {
-                expected_min,
-                actual,
-            }) => {
-                assert_eq!(expected_min, 950);
-                assert_eq!(actual, 949);
-            }
-            other => panic!("expected HopFloorViolation, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn envelope_floor_gate_rejects_low_final_output() {
-        let path = sample_path();
-        let rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
-            primary: &path,
-            fallbacks: &[],
-            nonce: nonce(4),
-            initiator_public_key: &[0x44u8; 64],
-            initiator_signature: vec![],
-            slippage_bps: 50,
-            floor_bps: 100, // 1% floor
-        })
-        .expect("envelope bind");
-        let floor = be_bytes_to_u128(&rc.floor_final_output_amount_u128).unwrap();
-        // Just below the envelope floor → reject.
-        assert!(matches!(
-            check_envelope_floor(&rc, floor - 1),
-            Err(IntentBoundReject::EnvelopeFloorViolation { .. })
-        ));
-        // At the envelope floor → pass.
-        assert!(check_envelope_floor(&rc, floor).is_ok());
-    }
-
-    fn make_proto_hop_with_floor(expected: u128, floor: u128) -> generated::RouteCommitHopV1 {
-        let a = token("AAA");
-        let b = token("BBB");
-        generated::RouteCommitHopV1 {
-            vault_id: vec![0xAAu8; 32],
-            token_in: a,
-            token_out: b,
-            input_amount_u128: u128_to_be_bytes(1_000),
-            expected_output_amount_u128: u128_to_be_bytes(expected),
-            fee_bps: 30,
-            advertisement_digest: vec![0u8; 32],
-            state_number: 1,
-            unlock_spec_digest: vec![0u8; 32],
-            owner_public_key: vec![0xABu8; 64],
-            vault_state_anchor_seq: 0,
-            vault_state_reserves_digest: Vec::new(),
-            vault_state_anchor_digest: Vec::new(),
-            min_output_amount_u128: u128_to_be_bytes(floor),
         }
     }
 
@@ -1607,6 +1269,39 @@ mod tests {
         assert_eq!(hop2.vault_id, vid(2).to_vec());
     }
 
+    /// Schema-boundary rejection: a RouteCommit whose `version` is not
+    /// the current `ROUTE_COMMIT_VERSION` (e.g. a v1 envelope that once
+    /// carried the removed pre-signed fallback + slippage floors) is a
+    /// HARD error — rejected outright, never decoded-and-accepted with its
+    /// removed fields silently skipped. The version gate runs BEFORE the
+    /// SPHINCS+ verify, so it fires even though re-stamping the version
+    /// invalidates the signature.
+    #[tokio::test]
+    async fn eligibility_rejects_unsupported_version() {
+        let path = sample_path();
+        let (rc_bytes, _x, _pk) = make_signed_route_commit(&path, 0x4A, true).await;
+
+        // Downgrade to v1 (the removed-fallback schema) and re-encode.
+        let mut rc = generated::RouteCommitV1::decode(&rc_bytes[..]).expect("decode");
+        assert_eq!(rc.version, ROUTE_COMMIT_VERSION, "fixture must be current");
+        rc.version = 1;
+        let v1_bytes = rc.encode_to_vec();
+        match verify_route_commit_unlock_eligibility(&v1_bytes, &vid(1)).await {
+            Err(RouteCommitVerifyError::UnsupportedVersion { got }) => assert_eq!(got, 1),
+            other => panic!("expected UnsupportedVersion{{got:1}}, got {other:?}"),
+        }
+
+        // A future/unknown version is likewise rejected at the boundary.
+        rc.version = ROUTE_COMMIT_VERSION + 1;
+        let vn_bytes = rc.encode_to_vec();
+        match verify_route_commit_unlock_eligibility(&vn_bytes, &vid(1)).await {
+            Err(RouteCommitVerifyError::UnsupportedVersion { got }) => {
+                assert_eq!(got, ROUTE_COMMIT_VERSION + 1)
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn eligibility_rejects_vault_not_in_route() {
         let path = sample_path();
@@ -1813,10 +1508,8 @@ mod tests {
             state_number: 1,
             unlock_spec_digest: [0u8; 32].to_vec(),
             owner_public_key: vec![0xABu8; 64],
-            // Tier 2 Foundation default-init: anchor binding absent.
-            // OPTIONAL/UNSPECIFIED enforcement passes through; REQUIRED
-            // would fail-closed at the gate, which is correct.
-            min_output_amount_u128: Vec::new(),
+            // Anchor binding absent: OPTIONAL/UNSPECIFIED enforcement
+            // passes through; REQUIRED fails closed at the gate.
             vault_state_anchor_seq: 0,
             vault_state_reserves_digest: Vec::new(),
             vault_state_anchor_digest: Vec::new(),
@@ -2419,14 +2112,14 @@ mod tests {
     }
 
     #[test]
-    fn stamp_fills_primary_and_fallback_hops_and_skips_unknown() {
-        // Envelope with a 2-hop primary (vaults 1,2) and a 1-hop fallback
-        // (vault 3).  Bind an anchor for vaults 1 and 3 only; vault 2 has
-        // none.
+    fn stamp_fills_bound_hops_and_skips_unknown() {
+        // A 2-hop path (vaults 1,2). Bind an anchor for vault 1 only;
+        // vault 2 has none and must be left empty (fail-closed at a
+        // Required vault).
         let a = token("AAA");
         let b = token("BBB");
         let c = token("CCC");
-        let primary = Path {
+        let path = Path {
             input_token: a.clone(),
             output_token: c.clone(),
             input_amount: 10_000,
@@ -2434,24 +2127,13 @@ mod tests {
             total_fee_bps: 60,
             hops: vec![make_hop(1, &a, &b), make_hop(2, &b, &c)],
         };
-        let fallback = Path {
-            input_token: a.clone(),
-            output_token: c.clone(),
-            input_amount: 10_000,
-            final_output_amount: 9_650,
-            total_fee_bps: 30,
-            hops: vec![make_hop(3, &a, &c)],
-        };
-        let mut rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
-            primary: &primary,
-            fallbacks: &[fallback],
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
             nonce: nonce(2),
             initiator_public_key: &[],
             initiator_signature: vec![],
-            slippage_bps: 50,
-            floor_bps: 50,
         })
-        .expect("envelope bind");
+        .expect("path bind");
 
         let mut bindings = std::collections::HashMap::new();
         bindings.insert(
@@ -2462,30 +2144,17 @@ mod tests {
                 anchor_digest: vec![0xA1u8; 32],
             },
         );
-        bindings.insert(
-            vid(3),
-            HopAnchorBinding {
-                seq: 33,
-                reserves_digest: vec![0x33u8; 32],
-                anchor_digest: vec![0xA3u8; 32],
-            },
-        );
         stamp_anchor_bindings(&mut rc, &bindings);
 
-        // Primary hop 0 (vault 1) stamped.
+        // Hop 0 (vault 1) stamped.
         assert_eq!(rc.hops[0].vault_state_anchor_seq, 11);
         assert_eq!(rc.hops[0].vault_state_reserves_digest, vec![0x11u8; 32]);
-        // Primary hop 1 (vault 2) has no binding → left empty (fail-closed
-        // at a Required vault).
+        assert_eq!(rc.hops[0].vault_state_anchor_digest, vec![0xA1u8; 32]);
+        // Hop 1 (vault 2) has no binding → left empty (fail-closed at a
+        // Required vault).
         assert_eq!(rc.hops[1].vault_state_anchor_seq, 0);
         assert!(rc.hops[1].vault_state_reserves_digest.is_empty());
         assert!(rc.hops[1].vault_state_anchor_digest.is_empty());
-        // Fallback hop (vault 3) stamped too.
-        assert_eq!(rc.fallbacks[0].hops[0].vault_state_anchor_seq, 33);
-        assert_eq!(
-            rc.fallbacks[0].hops[0].vault_state_anchor_digest,
-            vec![0xA3u8; 32]
-        );
     }
 
     /// Route-level integration proof of stale-state rejection: the REAL

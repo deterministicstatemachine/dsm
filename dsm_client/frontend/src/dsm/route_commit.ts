@@ -442,17 +442,6 @@ export async function findAndBindBestPath(input: {
   nonce: Uint8Array;
   /** 0 → server default (4). */
   maxHops?: number;
-  /** Tier 2 envelope: number of N-best path candidates to bind into
-   *  the envelope.  0/1 → primary only (legacy); >1 → primary +
-   *  fallback groups under one signed X commitment. */
-  maxPaths?: number;
-  /** Tier 2 per-hop slippage tolerance in basis points (e.g. 50 =
-   *  0.5%).  Rust binder stamps each hop's `min_output_amount_u128`
-   *  to `expected_output * (10000 - slippage_bps) / 10000`. */
-  slippageBps?: number;
-  /** Tier 2 envelope-level floor in basis points.  Rust binder
-   *  stamps `floor_final_output_amount_u128` accordingly. */
-  floorBps?: number;
 }): Promise<{
   success: boolean;
   /** Raw unsigned RouteCommitV1 wire bytes — pass straight to
@@ -460,18 +449,17 @@ export async function findAndBindBestPath(input: {
   unsignedRouteCommitBytes?: Uint8Array;
   /** Decoded mirror of the Rust-computed quote so callers don't need
    *  to re-simulate AMM math in JS.  All business logic stays in
-   *  Rust; this surface is read-only. */
+   *  Rust; this surface is read-only.  A route binds ONE path to ONE
+   *  anchored state producing ONE exact output — there is no fallback
+   *  and no slippage floor. */
   quote?: {
     expectedFinalOutput: bigint;
-    floorFinalOutput: bigint;
     hops: Array<{
       vaultId: Uint8Array;
       tokenIn: Uint8Array;
       tokenOut: Uint8Array;
       expectedOutput: bigint;
-      minOutput: bigint;
     }>;
-    fallbackGroupCount: number;
   };
   error?: string;
 }> {
@@ -485,9 +473,6 @@ export async function findAndBindBestPath(input: {
       inputAmountU128: u128BigEndian(input.inputAmount) as any,
       maxHops: input.maxHops ?? 0,
       nonce: input.nonce as any,
-      maxPaths: input.maxPaths ?? 0,
-      slippageBps: input.slippageBps ?? 0,
-      floorBps: input.floorBps ?? 0,
     });
     const resBytes = await routerInvokeBin(
       'route.findAndBindBestPath',
@@ -504,30 +489,24 @@ export async function findAndBindBestPath(input: {
     let quote:
       | {
           expectedFinalOutput: bigint;
-          floorFinalOutput: bigint;
           hops: Array<{
             vaultId: Uint8Array;
             tokenIn: Uint8Array;
             tokenOut: Uint8Array;
             expectedOutput: bigint;
-            minOutput: bigint;
           }>;
-          fallbackGroupCount: number;
         }
       | undefined;
     try {
       const rc = pb.RouteCommitV1.fromBinary(unsignedRouteCommitBytes);
       quote = {
         expectedFinalOutput: decodeReserveBigInt(rc.expectedFinalOutputAmountU128 as Uint8Array),
-        floorFinalOutput: decodeReserveBigInt(rc.floorFinalOutputAmountU128 as Uint8Array),
         hops: rc.hops.map((h) => ({
           vaultId: h.vaultId as Uint8Array,
           tokenIn: h.tokenIn as Uint8Array,
           tokenOut: h.tokenOut as Uint8Array,
           expectedOutput: decodeReserveBigInt(h.expectedOutputAmountU128 as Uint8Array),
-          minOutput: decodeReserveBigInt(h.minOutputAmountU128 as Uint8Array),
         })),
-        fallbackGroupCount: rc.fallbacks.length,
       };
     } catch {
       quote = undefined;

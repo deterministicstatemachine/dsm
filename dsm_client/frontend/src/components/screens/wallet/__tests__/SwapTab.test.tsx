@@ -52,14 +52,7 @@ describe('SwapTab', () => {
     expect(screen.getByRole('button', { name: /Quote/ })).toBeDisabled();
   });
 
-  it('exposes a slippage tolerance input defaulted at 0.5%', () => {
-    render(<SwapTab {...makeProps()} />);
-    const slip = screen.getByLabelText(/Slippage tolerance percent/i) as HTMLInputElement;
-    expect(slip.value).toBe('0.5');
-    expect(slip).toHaveAttribute('max', '50');
-  });
-
-  it('discovers a route and shows expected output + slippage-adjusted min-out', async () => {
+  it('discovers a route and shows the exact expected output', async () => {
     mockedSync.mockResolvedValue({ success: true, newlyMirroredBase32: [] });
     mockedList.mockResolvedValue({
       success: true,
@@ -76,19 +69,16 @@ describe('SwapTab', () => {
         },
       ],
     });
-    // expectedFinalOutput and floorFinalOutput are stamped by the Rust
-    // binder; the frontend just displays what came back.  Mock both
-    // values directly here — the underlying AMM math (x=10000, y=1M,
-    // fee=30 → ~9871, with 0.5% floor → 9821) is exercised by
+    // expectedFinalOutput is the exact output the Rust binder bound to
+    // the anchored vault state; the frontend just displays it. The AMM
+    // math (x=10000, y=1M, fee=30 → 9871) is exercised by
     // `route_commit_sdk::tests` in Rust.
     mockedFindBind.mockResolvedValue({
       success: true,
       unsignedRouteCommitBytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
       quote: {
         expectedFinalOutput: 9871n,
-        floorFinalOutput: 9821n,
         hops: [],
-        fallbackGroupCount: 0,
       },
     });
 
@@ -97,8 +87,8 @@ describe('SwapTab', () => {
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(screen.getByText(/1 vault discovered/)).toBeInTheDocument());
-    expect(screen.getByText(/~9871 DEMO_BBB/)).toBeInTheDocument();
-    expect(screen.getByText(/9821/)).toBeInTheDocument();
+    expect(screen.getByText(/9871 DEMO_BBB/)).toBeInTheDocument();
+    expect(screen.getByText(/exact output/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Swap$/ })).toBeInTheDocument();
   });
 

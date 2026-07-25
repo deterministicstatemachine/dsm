@@ -909,99 +909,43 @@ impl AppRouterImpl {
         }
         let ads = ads_after_composition;
 
-        // Tier 2 envelope: when caller asks for N-best (max_paths > 1),
-        // run the verified N-best enumerator and bind primary +
-        // fallbacks under one envelope. Legacy single-path callers
-        // (max_paths == 0 or 1) keep the chunk #3 single-path binder
-        // path so the wire format remains identical for them.
-        let requested_paths = if req.max_paths == 0 {
-            1
-        } else {
-            req.max_paths as usize
-        };
-        let slippage_bps = req.slippage_bps;
-        let floor_bps = req.floor_bps;
-
-        let mut unsigned = if requested_paths <= 1 {
-            let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
-                &ads,
-                &req.input_token,
-                &req.output_token,
-                input_amount,
-                max_hops,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    return err(format!(
-                        "route.findAndBindBestPath: path search rejected: {e:?}"
-                    ));
-                }
-            };
-            match crate::sdk::route_commit_sdk::bind_path_to_route_commit(
-                crate::sdk::route_commit_sdk::BindRouteCommitInput {
-                    path: &path,
-                    nonce,
-                    initiator_public_key: &[],
-                    initiator_signature: vec![],
-                },
-            ) {
-                Ok(rc) => rc,
-                Err(e) => {
-                    return err(format!("route.findAndBindBestPath: bind rejected: {e:?}"));
-                }
-            }
-        } else {
-            let paths = match crate::sdk::routing_path_sdk::find_and_verify_n_best_paths(
-                &ads,
-                &req.input_token,
-                &req.output_token,
-                input_amount,
-                max_hops,
-                requested_paths,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    return err(format!(
-                        "route.findAndBindBestPath: N-best path search rejected: {e:?}"
-                    ));
-                }
-            };
-            // Guaranteed non-empty by the SDK contract; first is primary,
-            // rest are fallbacks.  Split safely without panic.
-            let (primary, fallbacks) = match paths.split_first() {
-                Some((p, rest)) => (p.clone(), rest.to_vec()),
-                None => {
-                    return err(
-                        "route.findAndBindBestPath: N-best search returned empty set".into(),
-                    );
-                }
-            };
-            match crate::sdk::route_commit_sdk::bind_envelope_to_route_commit(
-                crate::sdk::route_commit_sdk::BindRouteCommitEnvelopeInput {
-                    primary: &primary,
-                    fallbacks: &fallbacks,
-                    nonce,
-                    initiator_public_key: &[],
-                    initiator_signature: vec![],
-                    slippage_bps,
-                    floor_bps,
-                },
-            ) {
-                Ok(rc) => rc,
-                Err(e) => {
-                    return err(format!(
-                        "route.findAndBindBestPath: envelope bind rejected: {e:?}"
-                    ));
-                }
+        // Bind the single best path. A route is ONE path to ONE anchored
+        // state producing ONE exact output under ONE signature — there is
+        // no N-best enumeration and no pre-signed fallback. If the vault
+        // moves between quote and unlock, the gate rejects and the caller
+        // re-quotes + re-signs.
+        let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
+            &ads,
+            &req.input_token,
+            &req.output_token,
+            input_amount,
+            max_hops,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return err(format!(
+                    "route.findAndBindBestPath: path search rejected: {e:?}"
+                ));
             }
         };
-        // Stamp the anchor-state binding onto every hop (primary +
-        // fallbacks) BEFORE the client signs, so the SPHINCS+ signature
-        // and external commitment X cover it and it cannot be tampered.
+        let mut unsigned = match crate::sdk::route_commit_sdk::bind_path_to_route_commit(
+            crate::sdk::route_commit_sdk::BindRouteCommitInput {
+                path: &path,
+                nonce,
+                initiator_public_key: &[],
+                initiator_signature: vec![],
+            },
+        ) {
+            Ok(rc) => rc,
+            Err(e) => {
+                return err(format!("route.findAndBindBestPath: bind rejected: {e:?}"));
+            }
+        };
+        // Stamp the anchor-state binding onto every hop BEFORE the client
+        // signs, so the SPHINCS+ signature and external commitment X cover
+        // it and it cannot be tampered.
         crate::sdk::route_commit_sdk::stamp_anchor_bindings(&mut unsigned, &hop_anchor_bindings);
         let unsigned_bytes = unsigned.encode_to_vec();
         let resp = generated::AppStateResponse {
