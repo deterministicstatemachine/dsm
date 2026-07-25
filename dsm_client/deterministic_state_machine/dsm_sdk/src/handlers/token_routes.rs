@@ -14,9 +14,6 @@ use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{err, pack_envelope_ok};
 
-const POLICY_INDEX_KEY: &str = "dsm.policy.index";
-const POLICY_PREFIX: &str = "dsm.policy.";
-
 /// Canonical token-policy blob version. There is exactly one supported
 /// version: the blob is the anchored, content-addressed definition of a
 /// token, so a second parseable shape would be a second definition of the
@@ -58,42 +55,6 @@ struct ParsedTokenPolicy {
     signers: Vec<Vec<u8>>,
     /// Inline allowlist of 32-byte device ids; empty when not restricted.
     allowlist_device_ids: Vec<[u8; 32]>,
-}
-
-fn app_state_get(key: &str) -> String {
-    crate::sdk::app_state::AppState::handle_app_state_request(key, "get", "")
-}
-
-fn app_state_set(key: &str, value: &str) {
-    let _ = crate::sdk::app_state::AppState::handle_app_state_request(key, "set", value);
-}
-
-fn load_policy_from_pref(anchor_b32: &str) -> Option<Vec<u8>> {
-    let raw = app_state_get(&format!("{POLICY_PREFIX}{anchor_b32}"));
-    if raw.is_empty() {
-        return None;
-    }
-    crate::util::text_id::decode_base32_crockford(&raw)
-}
-
-fn list_cached_policy_ids_from_prefs() -> BTreeSet<String> {
-    app_state_get(POLICY_INDEX_KEY)
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
-}
-
-fn persist_policy_to_prefs(anchor_b32: &str, policy_bytes: &[u8]) {
-    let key = format!("{POLICY_PREFIX}{anchor_b32}");
-    let encoded = crate::util::text_id::encode_base32_crockford(policy_bytes);
-    app_state_set(&key, &encoded);
-
-    let mut ids = list_cached_policy_ids_from_prefs();
-    ids.insert(anchor_b32.to_string());
-    let joined = ids.into_iter().collect::<Vec<_>>().join(",");
-    app_state_set(POLICY_INDEX_KEY, &joined);
 }
 
 /// Byte-cursor over a policy blob. Every read is bounds-checked and the blob
@@ -495,26 +456,161 @@ async fn try_fetch_policy_from_network(anchor: &[u8; 32]) -> Result<Option<Vec<u
     Ok(None)
 }
 
+/// Build the enforcer's `PolicyFile` from a parsed policy.
+///
+/// SOLE constructor. It is a pure function of the parsed (and therefore of the
+/// anchored) policy, so every device that fetches the same policy bytes
+/// reconstructs a byte-identical `PolicyFile`. Creation and restart
+/// rehydration both call this — there is no second place that decides what a
+/// token's policy means.
+fn derive_policy_file(
+    ticker: &str,
+    parsed: &ParsedTokenPolicy,
+) -> dsm::types::policy_types::PolicyFile {
+    // Semantic version — the validator rejects a bare "1".
+    let mut pf = dsm::types::policy_types::PolicyFile::new(ticker, "1.0.0", "dsm_token_route");
+    if let Some(desc) = parsed.description.as_ref() {
+        pf.description = Some(desc.clone());
+    }
+    pf.add_metadata("created_by", "dsm_token_route")
+        .add_metadata("token_name", ticker)
+        .add_metadata(
+            "transferable",
+            if parsed.transferable { "true" } else { "false" },
+        );
+    if !parsed.transferable {
+        pf.add_metadata("transfer_restricted", "true")
+            .add_metadata("allowed_operations", "mint,burn");
+    }
+    pf
+}
+
 impl AppRouterImpl {
+    /// Re-register every persisted token's policy after a restart.
+    ///
+    /// The policy system is in-memory, and it fails closed for an unregistered
+    /// token — so without this a token created before the restart could not be
+    /// transferred, and `dlv.create` (which resolves the pair's policy commit
+    /// and fails closed) could not build a vault for it. The durable tables are
+    /// the source; this only rebuilds the derived in-memory view.
+    pub async fn rehydrate_token_registry(&self) {
+        let tokens = match crate::storage::client_db::token_registry::all_tokens() {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("[token] registry rehydrate: cannot read token_registry: {e}");
+                return;
+            }
+        };
+        if tokens.is_empty() {
+            return;
+        }
+
+        let mut restored = 0usize;
+        for row in tokens {
+            let Ok(Some(raw_proto)) =
+                crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+            else {
+                log::warn!(
+                    "[token] registry rehydrate: policy missing/corrupt for {}; it stays \
+                     unusable until the policy is re-fetched",
+                    row.token_id
+                );
+                continue;
+            };
+            let Some(parsed) = parse_token_policy(&raw_proto) else {
+                log::warn!(
+                    "[token] registry rehydrate: policy for {} no longer parses",
+                    row.token_id
+                );
+                continue;
+            };
+
+            {
+                let mut cache = self.policy_cache.lock().await;
+                cache.insert(row.policy_commit, raw_proto);
+            }
+
+            let policy_file = derive_policy_file(&row.ticker, &parsed);
+            if let Err(e) = self
+                .core_sdk
+                .register_token_policy_with_anchor(&row.token_id, policy_file, row.policy_commit)
+                .await
+            {
+                log::warn!(
+                    "[token] registry rehydrate: register failed for {}: {e}",
+                    row.token_id
+                );
+                continue;
+            }
+
+            // Re-seed the metadata cache so strict policy-commit resolution
+            // works without a chain scan.
+            let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+            let mut fields = HashMap::new();
+            fields.insert("max_supply".to_string(), row.max_supply.to_string());
+            fields.insert("policy_anchor".to_string(), anchor_b32.clone());
+            fields.insert("kind".to_string(), "FUNGIBLE".to_string());
+            let metadata = TokenMetadata {
+                token_id: row.token_id.clone(),
+                name: row.alias.clone(),
+                symbol: row.ticker.clone(),
+                description: parsed.description.clone(),
+                icon_url: parsed.icon_url.clone(),
+                decimals: row.decimals.min(18) as u8,
+                token_type: TokenType::Created,
+                owner_id: row.owner_device_id,
+                creation_tick: crate::util::deterministic_time::tick(),
+                metadata_uri: None,
+                policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
+                fields,
+            };
+            if let Err(e) = self.wallet.token_sdk.cache_token_metadata_strict(metadata) {
+                log::warn!(
+                    "[token] registry rehydrate: metadata cache failed for {}: {e}",
+                    row.token_id
+                );
+                continue;
+            }
+            restored += 1;
+        }
+
+        if restored > 0 {
+            log::info!("[token] registry rehydrate: restored {restored} token(s) after restart");
+        }
+    }
+
+    /// Persist an anchored policy. The in-memory map is only a read cache;
+    /// `token_policies` is the durable store, so a policy survives restart.
     async fn cache_policy_bytes(&self, anchor: [u8; 32], policy_bytes: Vec<u8>) {
-        let anchor_b32 = crate::util::text_id::encode_base32_crockford(&anchor);
         {
             let mut cache = self.policy_cache.lock().await;
             cache.insert(anchor, policy_bytes.clone());
         }
-        persist_policy_to_prefs(&anchor_b32, &policy_bytes);
+        if let Err(e) =
+            crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
+        {
+            log::error!("[token] failed to persist policy: {e}");
+        }
     }
 
+    /// Resolve policy bytes: memory cache → durable table → storage nodes.
+    ///
+    /// The table read re-verifies that the bytes hash to the anchor, so a
+    /// corrupted row reads as absent rather than yielding a policy that is not
+    /// the one the anchor names.
     async fn load_policy_bytes(&self, anchor: [u8; 32]) -> Result<Option<Vec<u8>>, String> {
         if let Some(bytes) = self.policy_cache.lock().await.get(&anchor).cloned() {
             return Ok(Some(bytes));
         }
 
-        let anchor_b32 = crate::util::text_id::encode_base32_crockford(&anchor);
-        if let Some(bytes) = load_policy_from_pref(&anchor_b32) {
-            let mut cache = self.policy_cache.lock().await;
-            cache.insert(anchor, bytes.clone());
-            return Ok(Some(bytes));
+        match crate::storage::client_db::token_registry::load_policy_verified(&anchor) {
+            Ok(Some(bytes)) => {
+                let mut cache = self.policy_cache.lock().await;
+                cache.insert(anchor, bytes.clone());
+                return Ok(Some(bytes));
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("[token] policy table read failed: {e}"),
         }
 
         if let Some(bytes) = try_fetch_policy_from_network(&anchor).await? {
@@ -551,28 +647,24 @@ impl AppRouterImpl {
             }
 
             "tokens.listCachedPolicies" => {
-                let mut anchors = list_cached_policy_ids_from_prefs();
+                // The durable table is the source of truth; the in-memory map
+                // is only a read cache and can add nothing it does not have.
+                let mut anchors: BTreeSet<[u8; 32]> =
+                    match crate::storage::client_db::token_registry::all_policies() {
+                        Ok(rows) => rows.into_iter().map(|(commit, _)| commit).collect(),
+                        Err(e) => {
+                            return err(format!("tokens.listCachedPolicies failed: {e}"));
+                        }
+                    };
                 {
                     let cache = self.policy_cache.lock().await;
                     for anchor in cache.keys() {
-                        anchors.insert(crate::util::text_id::encode_base32_crockford(anchor));
+                        anchors.insert(*anchor);
                     }
                 }
 
                 let mut policies = Vec::new();
-                for anchor_b32 in anchors {
-                    let Some(anchor_bytes) =
-                        crate::util::text_id::decode_base32_crockford(&anchor_b32)
-                    else {
-                        continue;
-                    };
-                    if anchor_bytes.len() != 32 {
-                        continue;
-                    }
-                    let anchor: [u8; 32] = match anchor_bytes[..].try_into() {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
+                for anchor in anchors {
                     let policy_bytes = match self.load_policy_bytes(anchor).await {
                         Ok(Some(bytes)) => bytes,
                         Ok(None) => continue,
@@ -777,34 +869,33 @@ impl AppRouterImpl {
                     fields,
                 };
 
-                // Build a PolicyFile matching parsed policy bytes, then bind it
-                // to the externally supplied policy_anchor commitment.
-                let policy_file = {
-                    let transferable = parsed.transferable;
-                    let description = parsed.description.clone();
-                    let mut pf =
-                        // Semantic version — the policy validator rejects a
-                        // bare "1", which silently broke every token create.
-                        dsm::types::policy_types::PolicyFile::new(
-                            &ticker,
-                            "1.0.0",
-                            "dsm_token_route",
-                        );
-                    if let Some(desc) = description.as_ref() {
-                        pf.description = Some(desc.clone());
-                    }
-                    pf.add_metadata("created_by", "dsm_token_route")
-                        .add_metadata("token_name", &ticker)
-                        .add_metadata("transferable", if transferable { "true" } else { "false" });
-                    if !transferable {
-                        pf.add_metadata("transfer_restricted", "true")
-                            .add_metadata("allowed_operations", "mint,burn");
-                    }
-                    pf
-                };
+                // Single source of truth for what the policy means — the
+                // same function restart rehydration uses.
+                let policy_file = derive_policy_file(&ticker, &parsed);
 
-                // Register policy mapping using the explicit anchor from the
-                // request so token_id -> policy_commit remains stable.
+                // Record the token durably BEFORE any in-memory registration.
+                // The unique constraints on (token_id, policy_commit, ticker)
+                // make a duplicate creation fail here rather than producing a
+                // second registration of the same identity.
+                if let Err(e) = crate::storage::client_db::token_registry::insert_token(
+                    &crate::storage::client_db::token_registry::TokenRegistryRow {
+                        token_id: token_id.clone(),
+                        policy_commit: policy_anchor,
+                        ticker: ticker.clone(),
+                        alias: parsed.alias.clone(),
+                        decimals: parsed.decimals,
+                        max_supply: parsed.max_supply,
+                        owner_device_id: self.device_id_bytes,
+                    },
+                ) {
+                    return err(format!(
+                        "token.create: token {ticker} already exists or conflicts with an \
+                         existing token: {e}"
+                    ));
+                }
+
+                // Register policy mapping under the derived anchor so
+                // token_id -> policy_commit stays stable.
                 if let Err(e) = self
                     .core_sdk
                     .register_token_policy_with_anchor(&token_id, policy_file, policy_anchor)
@@ -1183,41 +1274,13 @@ mod tests {
         };
         assert!(build_policy_v3_bytes(&too_many).is_err());
     }
-    #[test]
-    fn list_cached_splits_comma_separated() {
-        // Since list_cached_policy_ids_from_prefs calls app_state_get which
-        // depends on global state, we test the splitting logic directly.
-        let input = "abc123, def456 ,ghi789";
-        let ids: std::collections::BTreeSet<String> = input
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(ids.len(), 3);
-        assert!(ids.contains("abc123"));
-        assert!(ids.contains("def456"));
-        assert!(ids.contains("ghi789"));
-    }
-
-    #[test]
-    fn list_cached_empty_string_returns_empty_set() {
-        let input = "";
-        let ids: std::collections::BTreeSet<String> = input
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        assert!(ids.is_empty());
-    }
-
     // ── Token validation constants ────────────────────────────────────
 
     #[test]
     fn token_route_constants() {
-        assert_eq!(POLICY_INDEX_KEY, "dsm.policy.index");
-        assert!(POLICY_PREFIX.starts_with("dsm.policy."));
+        assert_eq!(TOKEN_POLICY_VERSION, 3);
+        assert_eq!(TOKEN_KIND_FUNGIBLE, 0);
+        assert_eq!(MAX_POLICY_SIGNERS, 16);
     }
 
     #[test]

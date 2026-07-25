@@ -509,6 +509,14 @@ impl<I: Send + Sync> TokenSDK<I> {
             }
         }
 
+        // Durable registry. The in-memory metadata map is dropped on process
+        // exit, so without this a token created before a restart could not be
+        // resolved at all — which fails closed in the send path and in
+        // `dlv.create`, making the token unusable rather than merely invisible.
+        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token(token_id) {
+            return Ok(row.policy_commit);
+        }
+
         let op = self.find_token_metadata_operation(token_id)?;
         let token_metadata = self
             .metadata_for_token_from_operation(&op, token_id)
