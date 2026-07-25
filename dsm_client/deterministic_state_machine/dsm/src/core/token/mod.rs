@@ -27,7 +27,7 @@ pub use token_factory::{
 pub use token_registry::TokenRegistry;
 pub use token_state_manager::{
     builtin_policy_commit_for_token, builtin_token_id_for_policy_commit,
-    canonical_balance_key_for_commit, register_policy_commit_ticker,
+    canonical_balance_key_for_commit, register_policy_commit_ticker, TOKEN_CREATION_FEE_ERA,
     resolve_ticker_for_policy_commit, derive_canonical_balance_key, resolve_policy_commit,
     PolicyCommitResolver, TokenStateManager, TokenTransfer,
 };

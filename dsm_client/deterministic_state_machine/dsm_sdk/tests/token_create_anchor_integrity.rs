@@ -84,6 +84,21 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
     })
 }
 
+/// Creation now costs ERA, so every fixture must fund the device first.
+fn fund_era(router: &AppRouterImpl) {
+    let req = generated::FaucetClaimRequest {
+        device_id: vec![0u8; 32],
+    };
+    let args = generated::ArgPack {
+        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+        codec: generated::Codec::Proto as i32,
+        body: req.encode_to_vec(),
+    }
+    .encode_to_vec();
+    let res = invoke(router, "faucet.claim", args);
+    assert!(res.success, "faucet claim failed: {:?}", res.error_message);
+}
+
 /// The publish route must return the LOCAL content hash, never a node-supplied
 /// value. With no storage nodes configured this holds trivially; the assertion
 /// pins the contract so a future change that adopts a remote anchor fails here.
@@ -91,6 +106,7 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
 #[serial_test::serial]
 fn publish_returns_the_local_content_hash() {
     let r = router();
+    fund_era(&r);
     let proto = generated::TokenPolicyV3 {
         policy_bytes: vec![0x01, 0x02, 0x03, 0x04],
     }
@@ -116,6 +132,7 @@ fn publish_returns_the_local_content_hash() {
 #[serial_test::serial]
 fn create_derives_its_own_anchor_from_the_policy_it_packs() {
     let r = router();
+    fund_era(&r);
     let res = invoke(&r, "token.create", create_request("MINE", 1_000_000, 1_000));
     assert!(
         res.success,
@@ -168,6 +185,7 @@ fn create_derives_its_own_anchor_from_the_policy_it_packs() {
 #[serial_test::serial]
 fn create_rejects_initial_alloc_above_max_supply() {
     let r = router();
+    fund_era(&r);
     let res = invoke(&r, "token.create", create_request("OVER", 100, 101));
     assert!(
         !res.success,
@@ -180,6 +198,7 @@ fn create_rejects_initial_alloc_above_max_supply() {
 #[serial_test::serial]
 fn create_rejects_bad_ticker() {
     let r = router();
+    fund_era(&r);
     let res = invoke(&r, "token.create", create_request("X", 1_000, 1));
     assert!(!res.success, "a 1-char ticker must be rejected");
 }

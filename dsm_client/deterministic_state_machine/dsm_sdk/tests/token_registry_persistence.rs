@@ -78,6 +78,21 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
     })
 }
 
+/// Creation now costs ERA, so every fixture must fund the device first.
+fn fund_era(router: &AppRouterImpl) {
+    let req = generated::FaucetClaimRequest {
+        device_id: vec![0u8; 32],
+    };
+    let args = generated::ArgPack {
+        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+        codec: generated::Codec::Proto as i32,
+        body: req.encode_to_vec(),
+    }
+    .encode_to_vec();
+    let res = invoke(router, "faucet.claim", args);
+    assert!(res.success, "faucet claim failed: {:?}", res.error_message);
+}
+
 fn create_token(router: &AppRouterImpl, ticker: &str) -> generated::TokenCreateResponse {
     let res = invoke(router, "token.create", create_request(ticker));
     assert!(res.success, "create failed: {:?}", res.error_message);
@@ -96,6 +111,7 @@ fn create_writes_durable_registry_and_policy_rows() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
+    fund_era(&r);
     let resp = create_token(&r, "PERSA");
 
     let row = token_registry::get_token(&resp.token_id)
@@ -127,6 +143,7 @@ fn token_survives_restart_and_resolves_from_the_database() {
     let anchor;
     {
         let first = new_router();
+        fund_era(&first);
         let resp = create_token(&first, "PERSB");
         token_id = resp.token_id.clone();
         anchor = resp.policy_anchor.clone();
@@ -173,6 +190,7 @@ fn duplicate_creation_is_rejected_by_the_registry() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
+    fund_era(&r);
 
     let first = create_token(&r, "PERSC");
     assert!(!first.token_id.is_empty());
@@ -198,6 +216,7 @@ fn created_token_projects_under_its_real_ticker() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
+    fund_era(&r);
     let resp = create_token(&r, "READBK");
 
     let row = token_registry::get_token(&resp.token_id)

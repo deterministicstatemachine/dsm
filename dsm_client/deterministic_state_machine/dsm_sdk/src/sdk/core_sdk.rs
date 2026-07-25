@@ -2365,6 +2365,40 @@ impl CoreSDK {
         token_id: &str,
     ) -> Option<TokenMetadata> {
         match op {
+            // The canonical creation operation. Recognising it here is what
+            // lets a token be recovered from the chain alone after a restart —
+            // creation previously emitted a bare `Mint`, which carries no
+            // metadata, so the resolver could never find it and the token
+            // became unusable once the in-memory caches were gone.
+            dsm::types::operations::Operation::CreateToken {
+                token_id: op_token_id,
+                symbol,
+                name,
+                decimals,
+                policy_commit,
+                metadata_uri,
+                ..
+            } => {
+                let op_token_id_str = String::from_utf8(op_token_id.clone()).ok()?;
+                if op_token_id_str != token_id && symbol != token_id {
+                    return None;
+                }
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
+                Some(TokenMetadata {
+                    token_id: op_token_id_str,
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    description: None,
+                    icon_url: None,
+                    decimals: *decimals,
+                    token_type: dsm::types::token_types::TokenType::Created,
+                    owner_id: self.device_info.device_id,
+                    creation_tick: 0,
+                    metadata_uri: metadata_uri.clone(),
+                    policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
+                    fields: std::collections::HashMap::new(),
+                })
+            }
             dsm::types::operations::Operation::Create { metadata, .. } => {
                 let proto = TokenMetadataProto::decode(metadata.as_slice()).ok()?;
                 let token_metadata = Self::token_metadata_from_proto(&proto);

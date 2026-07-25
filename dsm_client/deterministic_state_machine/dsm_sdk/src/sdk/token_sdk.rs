@@ -290,7 +290,10 @@ impl EraToken {
         let mut fee_schedule = HashMap::new();
         fee_schedule.insert(
             "token_creation".to_string(),
-            Balance::from_state(10, [0u8; 32]),
+            // Reads the CORE constant: the conservation guard validates this
+            // exact value, so a schedule that could disagree with it would be a
+            // second authority over a protocol rule.
+            Balance::from_state(dsm::core::token::TOKEN_CREATION_FEE_ERA, [0u8; 32]),
         );
         fee_schedule.insert("token_update".to_string(), Balance::zero());
         fee_schedule.insert("token_transfer".to_string(), Balance::zero());
@@ -352,10 +355,6 @@ impl EraToken {
             .get(operation_type)
             .cloned()
             .unwrap_or(Balance::from_state(1, [0u8; 32]))
-    }
-
-    pub fn update_fee_schedule(&mut self, new_schedule: HashMap<String, Balance>) {
-        self.fee_schedule = new_schedule;
     }
 }
 
@@ -1424,34 +1423,6 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
     }
 
-    pub fn calculate_fee(&self, operation_type: &str) -> Balance {
-        let era_token = self.era_token.read();
-        era_token.get_fee(operation_type)
-    }
-
-    pub async fn process_fee_payment(
-        &self,
-        _from_device_id: &str,
-        operation_type: &str,
-    ) -> Result<State, DsmError> {
-        let fee = self.calculate_fee(operation_type);
-
-        let fee_recipient_str = "system.fee.device_id";
-        let mut fee_recipient = [0u8; 32];
-        fee_recipient.copy_from_slice(&crate::util::domain_helpers::device_id_hash(
-            fee_recipient_str,
-        ));
-
-        let fee_op = TokenOperation::Transfer {
-            token_id: "ERA".to_string(),
-            recipient: fee_recipient,
-            amount: fee.value(),
-            memo: Some("Fee payment".to_string()),
-        };
-
-        self.execute_generic_token_operation(&fee_op).await
-    }
-
     #[allow(dead_code)]
     fn get_era_token_info(&self) -> EraToken {
         self.era_token.read().clone()
@@ -1619,51 +1590,6 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         Ok(op)
-    }
-
-    pub async fn adjust_fees(
-        &self,
-        network_load: f64,
-        state_hash: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let mut era_token = self.era_token.write();
-
-        let mut new_schedule = HashMap::new();
-        for (op_type, base_fee) in era_token.fee_schedule.iter() {
-            let adjusted_fee = (base_fee.value() as f64 * (1.0 + network_load * 0.1)) as u64;
-            new_schedule.insert(
-                op_type.clone(),
-                Balance::from_state(
-                    adjusted_fee,
-                    state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                ),
-            );
-        }
-
-        era_token.fee_schedule = new_schedule;
-        Ok(())
-    }
-
-    pub fn verify_operation_feasibility(
-        &self,
-        from_device_id: &str,
-        operation: &TokenOperation,
-        operation_type: &str,
-    ) -> Result<(), DsmError> {
-        let fee = self.calculate_fee(operation_type);
-        let total_required: u64 = match operation {
-            TokenOperation::Transfer { amount, .. } => *amount + fee.value(),
-            TokenOperation::Burn { amount, .. } => *amount + fee.value(),
-            _ => fee.value(),
-        };
-
-        if !self.has_sufficient_era(from_device_id, total_required) {
-            return Err(DsmError::invalid_operation(format!(
-                "Insufficient ERA balance for operation and fee. Required: {total_required}"
-            )));
-        }
-
-        Ok(())
     }
 
     /// Seed the in-memory balance for a device/token from a validated external

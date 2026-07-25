@@ -553,6 +553,76 @@ fn validate_conservation(
             }
             Ok(())
         }
+        // Token creation is the ONLY multi-asset operation. It destroys ERA to
+        // pay the creation fee and issues the new asset, in ONE advance — so
+        // either the token exists and the fee was paid, or neither happened.
+        //
+        // The rule is POSITIONAL and exact rather than set-membership: with a
+        // fixed order, a reordered or duplicated delta cannot satisfy it, and
+        // the whole rule stays a total function of the operation.
+        //
+        // Conservation holds per-asset. ERA: a strict destruction of
+        // `fee_amount` with no counterparty credit — the same semantics as
+        // `Burn`. New asset: genesis issuance of `initial_supply` against a
+        // commit proven distinct from every existing asset. It is the `Mint`
+        // rule generalized to two legs over two provably different assets.
+        Operation::CreateToken {
+            initial_supply,
+            policy_commit,
+            fee_amount,
+            ..
+        } => {
+            // A create may NEVER issue an existing asset. This is a second,
+            // independent barrier against a colliding anchor: even if one
+            // reached the guard, it could not mint a builtin here.
+            if crate::core::token::builtin_token_id_for_policy_commit(policy_commit).is_some() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: create-token policy_commit collides with a builtin asset",
+                ));
+            }
+
+            let era_commit = crate::core::token::builtin_policy_commit_for_token("ERA")
+                .ok_or_else(|| DsmError::invalid_operation("conservation: ERA commit missing"))?;
+
+            let mut i = 0usize;
+            if *fee_amount > 0 {
+                let d = deltas.get(i).ok_or_else(|| {
+                    DsmError::invalid_operation("conservation: create-token fee delta missing")
+                })?;
+                // The fee is always ERA. The caller has no field with which to
+                // point it at another asset.
+                if d.policy_commit != era_commit
+                    || d.direction != BalanceDirection::Debit
+                    || d.amount != *fee_amount
+                {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: create-token fee must be exactly one ERA debit of fee_amount",
+                    ));
+                }
+                i += 1;
+            }
+            if initial_supply.value() > 0 {
+                let d = deltas.get(i).ok_or_else(|| {
+                    DsmError::invalid_operation("conservation: create-token issuance delta missing")
+                })?;
+                if &d.policy_commit != policy_commit
+                    || d.direction != BalanceDirection::Credit
+                    || d.amount != initial_supply.value()
+                {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: create-token issuance must be exactly one credit of \
+                         initial_supply under the token's own policy_commit",
+                    ));
+                }
+                i += 1;
+            }
+            if deltas.len() != i {
+                return Err(DsmError::invalid_operation(
+                    "conservation: create-token carries unexpected extra balance deltas",
+                ));
+            }
+            Ok(())
+        }
         _ => {
             if !deltas.is_empty() {
                 return Err(DsmError::invalid_operation(

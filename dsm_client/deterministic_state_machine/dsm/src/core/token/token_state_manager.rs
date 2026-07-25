@@ -50,6 +50,15 @@ fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
     }
 }
 
+/// ERA destroyed to create a token.
+///
+/// This lives in CORE, not in the SDK's mutable `fee_schedule` map, because the
+/// conservation guard must be able to validate it. The guard is a pure function
+/// over `(operation, deltas)`; a fee it cannot see is a fee it cannot enforce,
+/// and a fee that a runtime map could change is not a protocol rule. The SDK's
+/// schedule now READS this value, so there is exactly one authority.
+pub const TOKEN_CREATION_FEE_ERA: u64 = 10;
+
 /// Display-only ticker resolution for non-builtin (CPTA-anchored) tokens.
 ///
 /// The canonical key for a balance is and remains the 32-byte `policy_commit`.

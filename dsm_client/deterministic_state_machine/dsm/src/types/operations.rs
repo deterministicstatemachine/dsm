@@ -529,8 +529,22 @@ pub enum Operation {
     CreateToken {
         /// Binary unique identifier for the new token type.
         token_id: Vec<u8>,
-        /// Initial supply minted at creation.
+        /// Initial supply minted at creation. May be zero.
         initial_supply: Balance,
+        /// CPTA commit of the NEW asset — mandatory.
+        ///
+        /// This is the content hash of the anchored policy, and it is the asset
+        /// the issuance delta credits. It was `Option<Vec<u8>>` while nothing
+        /// constructed this variant; issuance cannot be optional or
+        /// variable-length, so it mirrors `Transfer.policy_commit`.
+        policy_commit: [u8; 32],
+        /// ERA destroyed to create this token.
+        ///
+        /// Present on the operation so the conservation guard can see it: the
+        /// guard proves `delta == what was signed`, while the SDK proves
+        /// `what was signed == the authoritative schedule value`. Same
+        /// two-layer split `Transfer` uses for its amount.
+        fee_amount: u64,
         /// Human-readable name of the token.
         name: String,
         /// Short symbol (e.g., "DSM", "dBTC").
@@ -539,8 +553,6 @@ pub enum Operation {
         decimals: u8,
         /// Optional URI pointing to token metadata.
         metadata_uri: Option<String>,
-        /// Optional binary CPTA policy anchor hash constraining this token's behavior.
-        policy_anchor: Option<Vec<u8>>,
         /// SPHINCS+ signature authorizing this token creation.
         signature: Vec<u8>,
     },
@@ -637,9 +649,8 @@ impl Operation {
     /// could both move the same pre-recovery value — the split-acceptance
     /// recovery double-spend (spec vector V1).
     ///
-    /// Pure value *ingress* (receiving, minting, token creation) and
-    /// identity / relationship / recovery / link / neutral operations are NOT
-    /// egress and proceed normally — recovery itself must be able to advance, and
+    /// Pure value *ingress* (receiving, minting) and identity / relationship /
+    /// recovery / link / neutral operations are NOT egress and proceed normally — recovery itself must be able to advance, and
     /// receiving value can never create a double-spend of the owner's funds.
     ///
     /// The match is exhaustive (no wildcard): a new `Operation` variant will fail
@@ -659,9 +670,15 @@ impl Operation {
             | DlvCreate { .. }
             | DlvUnlock { .. }
             | DlvClaim { .. }
-            | DlvInvalidate { .. } => true,
+            | DlvInvalidate { .. }
+            // Token creation DESTROYS ERA to pay its fee, so it moves the
+            // owner's existing funds outward — egress, despite also issuing a
+            // new asset. Classifying it as ingress (as it was while nothing
+            // constructed it) would let a create-with-fee bypass the recovery
+            // egress gate and the per-asset bearer gate entirely.
+            | CreateToken { .. } => true,
 
-            // Not value egress: ingress (Receive / Mint / CreateToken), identity,
+            // Not value egress: ingress (Receive / Mint), identity,
             // relationship, recovery, links, invalidation, generic, and no-op.
             Genesis
             | Create { .. }
@@ -677,7 +694,6 @@ impl Operation {
             | Invalidate { .. }
             | Generic { .. }
             | Receive { .. }
-            | CreateToken { .. }
             | Noop => false,
         }
     }
@@ -767,6 +783,14 @@ impl Operation {
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
             DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
 
+            // Token creation: the asset that LEAVES is ERA (the burned fee) —
+            // NOT the new token, which is issued, not spent. Naming the new
+            // token here would gate the wrong asset and leave the fee ungated.
+            CreateToken { fee_amount, .. } => EgressAsset::Asset {
+                token_id: b"ERA".to_vec(),
+                amount: *fee_amount,
+            },
+
             // Non-egress: ingress, identity, relationship, recovery, links, generic, no-op.
             Genesis
             | Create { .. }
@@ -782,7 +806,6 @@ impl Operation {
             | Invalidate { .. }
             | Generic { .. }
             | Receive { .. }
-            | CreateToken { .. }
             | Noop => EgressAsset::NotEgress,
         }
     }
@@ -1203,17 +1226,22 @@ impl Operation {
             CreateToken {
                 token_id,
                 initial_supply,
+                policy_commit,
+                fee_amount,
                 name,
                 symbol,
                 decimals,
                 metadata_uri,
-                policy_anchor,
                 signature,
             } => {
                 put_u8(&mut out, 20);
                 put_bytes(&mut out, token_id);
                 let bal = initial_supply.to_le_bytes();
                 put_bytes(&mut out, &bal);
+                // Mandatory now: the issued asset and the ERA destroyed for it
+                // are both part of what gets signed.
+                put_bytes(&mut out, policy_commit);
+                put_u64(&mut out, *fee_amount);
                 put_str(&mut out, name);
                 put_str(&mut out, symbol);
                 put_u8(&mut out, *decimals);
@@ -1221,13 +1249,6 @@ impl Operation {
                     Some(u) => {
                         put_u8(&mut out, 1);
                         put_str(&mut out, u);
-                    }
-                    None => put_u8(&mut out, 0),
-                }
-                match policy_anchor {
-                    Some(a) => {
-                        put_u8(&mut out, 1);
-                        put_bytes(&mut out, a);
                     }
                     None => put_u8(&mut out, 0),
                 }
@@ -1887,17 +1908,17 @@ impl Operation {
             20 => {
                 let token_id = get_bytes(&mut input)?;
                 let initial_supply = dec_balance(&mut input)?;
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("create-token policy_commit must be 32 bytes")
+                    })?;
+                let fee_amount = get_u64(&mut input)?;
                 let name = get_str(&mut input)?;
                 let symbol = get_str(&mut input)?;
                 let decimals = get_u8(&mut input)?;
                 let metadata_uri = match get_u8(&mut input)? {
                     0 => None,
                     1 => Some(get_str(&mut input)?),
-                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
-                };
-                let policy_anchor = match get_u8(&mut input)? {
-                    0 => None,
-                    1 => Some(get_bytes(&mut input)?),
                     _ => return Err(DsmError::invalid_operation("bad opt flag")),
                 };
                 let signature = if input.is_empty() {
@@ -1908,11 +1929,12 @@ impl Operation {
                 CreateToken {
                     token_id,
                     initial_supply,
+                    policy_commit,
+                    fee_amount,
                     name,
                     symbol,
                     decimals,
                     metadata_uri,
-                    policy_anchor,
                     signature,
                 }
             }
@@ -3005,7 +3027,8 @@ mod tests {
                 symbol: "dBTC".into(),
                 decimals: 8,
                 metadata_uri: Some("https://example.com/dbtc".into()),
-                policy_anchor: Some(vec![0xAB; 32]),
+                policy_commit: [0xAB; 32],
+                fee_amount: 10,
                 signature: vec![0xCD; 64],
             });
         }
@@ -3019,7 +3042,8 @@ mod tests {
                 symbol: "T".into(),
                 decimals: 0,
                 metadata_uri: None,
-                policy_anchor: None,
+                policy_commit: [0u8; 32],
+                fee_amount: 0,
                 signature: vec![],
             });
         }
@@ -3401,7 +3425,8 @@ mod tests {
                 symbol: "T".into(),
                 decimals: 0,
                 metadata_uri: None,
-                policy_anchor: None,
+                policy_commit: [0u8; 32],
+                fee_amount: 0,
                 signature: vec![0xBB; 48],
             };
             let cleared = op.with_cleared_signature();

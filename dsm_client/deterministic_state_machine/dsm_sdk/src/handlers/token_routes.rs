@@ -878,27 +878,6 @@ impl AppRouterImpl {
                 // same function restart rehydration uses.
                 let policy_file = derive_policy_file(&ticker, &parsed);
 
-                // Record the token durably BEFORE any in-memory registration.
-                // The unique constraints on (token_id, policy_commit, ticker)
-                // make a duplicate creation fail here rather than producing a
-                // second registration of the same identity.
-                if let Err(e) = crate::storage::client_db::token_registry::insert_token(
-                    &crate::storage::client_db::token_registry::TokenRegistryRow {
-                        token_id: token_id.clone(),
-                        policy_commit: policy_anchor,
-                        ticker: ticker.clone(),
-                        alias: parsed.alias.clone(),
-                        decimals: parsed.decimals,
-                        max_supply: parsed.max_supply,
-                        owner_device_id: self.device_id_bytes,
-                    },
-                ) {
-                    return err(format!(
-                        "token.create: token {ticker} already exists or conflicts with an \
-                         existing token: {e}"
-                    ));
-                }
-
                 // Register policy mapping under the derived anchor so
                 // token_id -> policy_commit stays stable.
                 if let Err(e) = self
@@ -919,73 +898,147 @@ impl AppRouterImpl {
                     return err(format!("token.create: metadata cache failed: {e}"));
                 }
 
-                // Materialise initial supply via a self-loop Mint, if any.
-                let initial_alloc = parsed.initial_alloc;
-                if initial_alloc > 0 {
-                    let initial_alloc_u64: u64 = match u64::try_from(initial_alloc) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            return err(
-                                "token.create: initial_alloc exceeds u64::MAX (Balance is u64)"
-                                    .into(),
-                            );
-                        }
-                    };
-
-                    let dev_id = self.device_id_bytes;
-                    let rel_key =
-                        dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-                    let init_tip =
-                        dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                            &dev_id, &dev_id,
+                // ── Creation: ONE canonical advance carrying both legs ──
+                //
+                // The fee burn and the issuance land in a single
+                // DeviceState::advance — one SMT root, one CAS — so either the
+                // token exists and the fee was paid, or neither happened. The
+                // advance is performed even when initial_alloc == 0: creation
+                // is a canonical event, and skipping it would leave the token
+                // absent from the chain and unresolvable after a restart.
+                let initial_alloc_u64: u64 = match u64::try_from(parsed.initial_alloc) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return err(
+                            "token.create: initial_alloc exceeds u64::MAX (Balance is u64)".into(),
                         );
+                    }
+                };
 
-                    // Reference state hash for the Balance token (§4.3 positioning).
-                    let ref_hash = self
+                let fee_amount = dsm::core::token::TOKEN_CREATION_FEE_ERA;
+                let dev_id = self.device_id_bytes;
+                let device_txt = crate::util::text_id::encode_base32_crockford(&dev_id);
+
+                // Reject insufficient ERA BEFORE anything is committed. The
+                // advance's checked_sub is the backstop; this is the clear
+                // error the caller can act on.
+                if fee_amount > 0 {
+                    let era_commit = match dsm::core::token::builtin_policy_commit_for_token("ERA")
+                    {
+                        Some(c) => c,
+                        None => return err("token.create: ERA policy commit missing".into()),
+                    };
+                    let era_balance = self
                         .core_sdk
                         .device_head()
-                        .map(|s| s.genesis_digest())
-                        .unwrap_or([0u8; 32]);
+                        .map(|h| h.balance(&era_commit))
+                        .unwrap_or(0);
+                    if era_balance < fee_amount {
+                        return err(format!(
+                            "token.create: insufficient ERA for the {fee_amount} ERA creation fee                              (have {era_balance}) — claim from the faucet and retry"
+                        ));
+                    }
+                }
 
-                    let mint_op = dsm::types::operations::Operation::Mint {
-                        amount: dsm::types::token_types::Balance::from_state(
-                            initial_alloc_u64,
-                            ref_hash,
-                        ),
-                        token_id: token_id.as_bytes().to_vec(),
-                        policy_commit,
-                        authorized_by: dev_id.to_vec(),
-                        proof_of_authorization: policy_commit.to_vec(),
-                        message: format!("initial allocation for {ticker}"),
+                let rel_key =
+                    dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+                let init_tip =
+                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                        &dev_id, &dev_id,
+                    );
+                let ref_hash = self
+                    .core_sdk
+                    .device_head()
+                    .map(|s| s.genesis_digest())
+                    .unwrap_or([0u8; 32]);
+
+                let create_op = dsm::types::operations::Operation::CreateToken {
+                    token_id: token_id.as_bytes().to_vec(),
+                    initial_supply: dsm::types::token_types::Balance::from_state(
+                        initial_alloc_u64,
+                        ref_hash,
+                    ),
+                    policy_commit,
+                    fee_amount,
+                    name: parsed.alias.clone(),
+                    symbol: ticker.clone(),
+                    decimals: parsed.decimals.min(18) as u8,
+                    metadata_uri: Some(format!("dsm:policy:{anchor_b32}")),
+                    signature: Vec::new(),
+                };
+
+                // Positional, exactly as the conservation guard requires:
+                // [0] the ERA fee debit, [1] the issuance credit (if any).
+                let mut deltas: Vec<dsm::types::device_state::BalanceDelta> = Vec::new();
+                if fee_amount > 0 {
+                    let era_commit = match dsm::core::token::builtin_policy_commit_for_token("ERA")
+                    {
+                        Some(c) => c,
+                        None => return err("token.create: ERA policy commit missing".into()),
                     };
-
-                    let deltas = [dsm::types::device_state::BalanceDelta {
+                    deltas.push(dsm::types::device_state::BalanceDelta {
+                        policy_commit: era_commit,
+                        direction: dsm::types::device_state::BalanceDirection::Debit,
+                        amount: fee_amount,
+                    });
+                }
+                if initial_alloc_u64 > 0 {
+                    deltas.push(dsm::types::device_state::BalanceDelta {
                         policy_commit,
                         direction: dsm::types::device_state::BalanceDirection::Credit,
                         amount: initial_alloc_u64,
-                    }];
+                    });
+                }
 
-                    let outcome = match self.core_sdk.execute_on_relationship(
-                        rel_key,
-                        dev_id,
-                        mint_op,
-                        &deltas,
-                        Some(init_tip),
-                    ) {
-                        Ok((_state, outcome)) => outcome,
-                        Err(e) => {
-                            return err(format!(
-                                "token.create: initial-allocation Mint failed: {e}"
-                            ));
-                        }
-                    };
+                // The registry row lands INSIDE the advance transaction. A
+                // failed creation therefore leaves no row, and a concurrent
+                // duplicate hits PRIMARY KEY(token_id) / UNIQUE(ticker) and
+                // rolls the ENTIRE advance back — exactly-once against the
+                // database and canonical state together, not merely
+                // idempotent-looking.
+                let registry_row = crate::storage::client_db::token_registry::TokenRegistryRow {
+                    token_id: token_id.clone(),
+                    policy_commit: policy_anchor,
+                    ticker: ticker.clone(),
+                    alias: parsed.alias.clone(),
+                    decimals: parsed.decimals,
+                    max_supply: parsed.max_supply,
+                    owner_device_id: dev_id,
+                };
+                let insert_registry = |tx: &rusqlite::Transaction<'_>,
+                                       _outcome: &dsm::types::device_state::AdvanceOutcome|
+                 -> Result<(), dsm::types::error::DsmError> {
+                    crate::storage::client_db::token_registry::insert_token_with_conn(
+                        tx,
+                        &registry_row,
+                    )
+                    .map_err(|e| {
+                        dsm::types::error::DsmError::invalid_operation(format!(
+                            "token {} already exists or conflicts with an existing token: {e}",
+                            registry_row.ticker
+                        ))
+                    })
+                };
 
-                    // Write the balance projection from the canonical head the
-                    // advance just produced. Previously the outcome was
-                    // discarded, so a freshly created token had a canonical
-                    // balance but no projection row — the wallet showed
-                    // nothing until some unrelated sweep happened to rebuild it.
-                    let device_txt = crate::util::text_id::encode_base32_crockford(&dev_id);
+                let outcome = match self.core_sdk.execute_on_relationship_guarded(
+                    rel_key,
+                    dev_id,
+                    create_op,
+                    &deltas,
+                    Some(init_tip),
+                    Some(&insert_registry),
+                ) {
+                    Ok((_state, outcome)) => outcome,
+                    Err(e) => {
+                        // Nothing was committed: the guard and the balance
+                        // arithmetic both run before the durable write, so a
+                        // failed creation burns nothing.
+                        return err(format!("token.create: canonical creation failed: {e}"));
+                    }
+                };
+
+                // Projections for BOTH assets the advance moved.
+                if initial_alloc_u64 > 0 {
                     if let Err(e) =
                         crate::storage::client_db::build_balance_projection_from_device_head(
                             &device_txt,
@@ -1003,6 +1056,31 @@ impl AppRouterImpl {
                             "[token.create] projection write failed for {ticker} (canonical state \
                              is correct; a repair sweep will reconcile): {e}"
                         );
+                    }
+                }
+                if fee_amount > 0 {
+                    if let Some(era_commit) =
+                        dsm::core::token::builtin_policy_commit_for_token("ERA")
+                    {
+                        let era_after = outcome.new_device_state.balance(&era_commit);
+                        let locked =
+                            crate::storage::client_db::get_locked_balance(&device_txt, "ERA")
+                                .unwrap_or(0);
+                        if let Err(e) =
+                            crate::storage::client_db::build_balance_projection_from_device_head(
+                                &device_txt,
+                                "ERA",
+                                &era_commit,
+                                &outcome.new_device_state,
+                                era_after,
+                                locked,
+                            )
+                            .and_then(|record| {
+                                crate::storage::client_db::upsert_balance_projection(&record)
+                            })
+                        {
+                            log::warn!("[token.create] ERA projection write failed: {e}");
+                        }
                     }
                 }
 

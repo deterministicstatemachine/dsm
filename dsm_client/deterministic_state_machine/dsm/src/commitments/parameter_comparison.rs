@@ -490,11 +490,12 @@ pub fn extract_operation_parameters(
         Operation::CreateToken {
             token_id,
             initial_supply,
+            policy_commit,
+            fee_amount,
             name,
             symbol,
             decimals,
             metadata_uri,
-            policy_anchor,
             ..
         } => {
             let mut params = HashMap::new();
@@ -510,9 +511,8 @@ pub fn extract_operation_parameters(
             if let Some(uri) = metadata_uri {
                 params.insert("metadata_uri".to_string(), uri.as_bytes().to_vec());
             }
-            if let Some(anchor) = policy_anchor {
-                params.insert("policy_anchor".to_string(), anchor.clone());
-            }
+            params.insert("policy_commit".to_string(), policy_commit.to_vec());
+            params.insert("fee_amount".to_string(), fee_amount.to_le_bytes().to_vec());
             Ok(params)
         }
         Operation::Noop => {
