@@ -204,27 +204,17 @@ class SoFiCrossDeviceTraderTest {
                 "(matches ${if (pickedVaultId.contentEquals(ownerVault1Id)) "v1" else "v2"})",
         )
 
-        // Tier 2 envelope assertions — same shape as the Phase 5 test.
-        assertTrue(
-            "Tier 2 must populate fallbacks when 2 vaults advertise on the pair " +
-                "(got ${rc.fallbacksCount})",
-            rc.fallbacksCount >= 1,
-        )
-        val floorOut = u128beToLong(rc.floorFinalOutputAmountU128.toByteArray())
+        // Exact-output binding assertions: one route, one anchored state,
+        // one exact output. There is no fallback and no slippage floor —
+        // the hop carries a stamped anchor-state binding, and the
+        // unlock-time gate re-simulates for an EXACT output match.
         val expectedOut = u128beToLong(rc.expectedFinalOutputAmountU128.toByteArray())
-        assertTrue("envelope floor must be stamped (got $floorOut)", floorOut > 0L)
         assertTrue("expected output must be > 0 (got $expectedOut)", expectedOut > 0L)
         assertTrue(
-            "expected output $expectedOut must be >= envelope floor $floorOut",
-            expectedOut >= floorOut,
+            "hop must carry a stamped anchor-state binding (reserves digest)",
+            rc.hopsList[0].vaultStateReservesDigest.size() == 32,
         )
-        val perHopFloor = u128beToLong(rc.hopsList[0].minOutputAmountU128.toByteArray())
-        assertTrue("per-hop intent-bound floor must be stamped (got $perHopFloor)", perHopFloor > 0L)
-        Log.i(
-            TAG,
-            "trader quote: expected=$expectedOut floor=$floorOut perHopFloor=$perHopFloor " +
-                "fallbackGroups=${rc.fallbacksCount}",
-        )
+        Log.i(TAG, "trader quote: exact expected=$expectedOut (single route, anchor-bound)")
 
         // ── STEP 3: sign the RouteCommit (SPHINCS+ stays in Rust) ──
         val signedRcBytes = sofi.signRouteCommit(unsignedRcBytes)
@@ -260,9 +250,7 @@ class SoFiCrossDeviceTraderTest {
             XDEV_TAG,
             "trader_settled " +
                 "vault=${b32(pickedVaultId)} " +
-                "expected_out=$expectedOut " +
-                "floor=$floorOut " +
-                "fallbacks=${rc.fallbacksCount}",
+                "expected_out=$expectedOut",
         )
 
         // Note: post-trade reserve verification (assert reserveA shrunk,

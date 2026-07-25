@@ -7569,37 +7569,6 @@ export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
    */
   nonce = new Uint8Array(0);
 
-  /**
-   * Tier 2 envelope binding. When `max_paths > 1` the binder runs
-   * N-best path enumeration and stamps the primary path's hops into
-   * `RouteCommitV1.hops` and the runner-up paths into
-   * `RouteCommitV1.fallbacks[].hops`. All paths share one signature
-   * and one external commitment X. 0 → server default (1, primary-only,
-   * preserves legacy behavior).
-   *
-   * @generated from field: uint32 max_paths = 6;
-   */
-  maxPaths = 0;
-
-  /**
-   * Trader's per-hop slippage tolerance in basis points (e.g. 50 =
-   * 0.5%). Each hop's `min_output_amount_u128` is stamped to
-   * `expected_output * (10000 - slippage_bps) / 10000`. 0 → no
-   * per-hop floor (legacy / unbounded).
-   *
-   * @generated from field: uint32 slippage_bps = 7;
-   */
-  slippageBps = 0;
-
-  /**
-   * Trader's envelope-level slippage tolerance for the final output
-   * (often equal to `slippage_bps` but allowed to differ). 0 → no
-   * envelope floor (legacy / unbounded).
-   *
-   * @generated from field: uint32 floor_bps = 8;
-   */
-  floorBps = 0;
-
   constructor(data?: PartialMessage<FindAndBindRouteRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7613,9 +7582,6 @@ export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
     { no: 3, name: "input_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "max_hops", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 5, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "max_paths", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 7, name: "slippage_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
-    { no: 8, name: "floor_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FindAndBindRouteRequest {
@@ -7924,18 +7890,6 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
    */
   vaultStateAnchorDigest = new Uint8Array(0);
 
-  /**
-   * Tier 2 intent-bound: minimum acceptable output for THIS hop. If
-   * the unlock-time simulation yields less than this, the gate
-   * rejects and the wallet retries against the next fallback hop
-   * group (RouteCommitV1.fallbacks). Empty (zero-length) bytes mean
-   * "no per-hop floor" and the only check is the envelope-level
-   * floor on RouteCommitV1.floor_final_output_amount_u128.
-   *
-   * @generated from field: bytes min_output_amount_u128 = 14;
-   */
-  minOutputAmountU128 = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RouteCommitHopV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7957,7 +7911,6 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
     { no: 11, name: "vault_state_anchor_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "vault_state_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "vault_state_anchor_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 14, name: "min_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitHopV1 {
@@ -7978,49 +7931,6 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
 }
 
 /**
- * Tier 2: one fallback hop group. When the primary hops are blocked
- * (state-move, intent-bound violation), the wallet attempts each
- * fallback group in order under the SAME signed RouteCommitV1
- * envelope. Each group MUST satisfy the envelope's
- * floor_final_output_amount_u128.
- *
- * @generated from message dsm.RouteCommitFallbackV1
- */
-export class RouteCommitFallbackV1 extends Message<RouteCommitFallbackV1> {
-  /**
-   * @generated from field: repeated dsm.RouteCommitHopV1 hops = 1;
-   */
-  hops: RouteCommitHopV1[] = [];
-
-  constructor(data?: PartialMessage<RouteCommitFallbackV1>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.RouteCommitFallbackV1";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "hops", kind: "message", T: RouteCommitHopV1, repeated: true },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitFallbackV1 {
-    return new RouteCommitFallbackV1().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouteCommitFallbackV1 {
-    return new RouteCommitFallbackV1().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouteCommitFallbackV1 {
-    return new RouteCommitFallbackV1().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: RouteCommitFallbackV1 | PlainMessage<RouteCommitFallbackV1> | undefined, b: RouteCommitFallbackV1 | PlainMessage<RouteCommitFallbackV1> | undefined): boolean {
-    return proto3.util.equals(RouteCommitFallbackV1, a, b);
-  }
-}
-
-/**
  * Off-chain routing proof produced by chunk #2's path search and
  * signed by the initiating trader.  The external commitment
  * `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
@@ -8032,6 +7942,16 @@ export class RouteCommitFallbackV1 extends Message<RouteCommitFallbackV1> {
  */
 export class RouteCommitV1 extends Message<RouteCommitV1> {
   /**
+   * Schema version. MUST be 2. Version 1 carried a pre-signed
+   * multi-route fallback (`fallbacks`) and slippage floors
+   * (`floor_final_output_amount_u128`, per-hop `min_output_amount_u128`)
+   * — a second settlement model where a trade could execute against a
+   * changed state as long as it stayed above a floor. That is removed:
+   * one route, one anchored state, one exact output, one signature.
+   * Decoders MUST reject any version != 2 at the schema boundary (the
+   * removed fields are NOT silently ignored — an old envelope is a hard
+   * error), so no dormant compatibility path survives.
+   *
    * @generated from field: uint32 version = 1;
    */
   version = 0;
@@ -8092,27 +8012,6 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
    */
   initiatorSignature = new Uint8Array(0);
 
-  /**
-   * Tier 2 envelope-level floor: minimum total output the trader is
-   * willing to accept across the full path (or any fallback path).
-   * Empty bytes = no floor (trade succeeds at any output the picked
-   * path produces). When set, the unlock-routed gate rejects any
-   * path whose simulated final output < this value.
-   *
-   * @generated from field: bytes floor_final_output_amount_u128 = 11;
-   */
-  floorFinalOutputAmountU128 = new Uint8Array(0);
-
-  /**
-   * Tier 2 fallback hop groups. Tried in order when the primary `hops`
-   * fail intent-bound or state-move checks. All groups share the
-   * single envelope (X = BLAKE3 of canonical bytes including these
-   * groups) and one initiator_signature.
-   *
-   * @generated from field: repeated dsm.RouteCommitFallbackV1 fallbacks = 12;
-   */
-  fallbacks: RouteCommitFallbackV1[] = [];
-
   constructor(data?: PartialMessage<RouteCommitV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8131,8 +8030,6 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
     { no: 8, name: "hops", kind: "message", T: RouteCommitHopV1, repeated: true },
     { no: 9, name: "initiator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "initiator_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 11, name: "floor_final_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 12, name: "fallbacks", kind: "message", T: RouteCommitFallbackV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitV1 {
@@ -9612,6 +9509,9 @@ export class SmartProof extends Message<SmartProof> {
 }
 
 /**
+ * body carries §16.6 acceptance artifacts (a countersigned StitchedReceiptV2 runs
+ * ~218 KB: two SPHINCS+ signatures, two ek_certs, and both SMT proof sets).
+ *
  * @generated from message dsm.ArgPack
  */
 export class ArgPack extends Message<ArgPack> {
@@ -12174,6 +12074,24 @@ export class RegisterDeviceRequest extends Message<RegisterDeviceRequest> {
    */
   genesisHash = new Uint8Array(0);
 
+  /**
+   * ML-KEM-768 encapsulation public key (the recipient key online per-step-EK
+   * sends encapsulate against). MANDATORY — DSM beta has no legacy path; a
+   * registration/lookup without it is invalid.
+   *
+   * @generated from field: bytes kyber_public_key = 4;
+   */
+  kyberPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ (device AK) signature binding kyber_public_key to the device
+   * identity: sign( domain_hash("DSM/kyber-identity-binding\0",
+   *   device_id || genesis_hash || kyber_public_key) ). MANDATORY.
+   *
+   * @generated from field: bytes kyber_binding_sig = 5;
+   */
+  kyberBindingSig = new Uint8Array(0);
+
   constructor(data?: PartialMessage<RegisterDeviceRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12185,6 +12103,8 @@ export class RegisterDeviceRequest extends Message<RegisterDeviceRequest> {
     { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RegisterDeviceRequest {
@@ -12339,11 +12259,13 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
   transferAmountDisplay = "";
 
   /**
-   * Sender's CURRENT ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
-   * The device Kyber keypair is deliberately RANDOMIZED per wallet init (no persisted device
-   * secret), so the peer's copy must be refreshed on every prepare exchange — exactly like
-   * sender_signing_public_key above. The receiver persists it on the contact record; the
-   * §11.1 per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
+   * Sender's ML-KEM-768 encapsulation key (1184 bytes; empty = legacy peer).
+   * The device Kyber keypair is DETERMINISTIC — derived from the wallet master secret
+   * with the Genesis v2 derivation ("DSM/kyber\0"), so it is stable across restarts and
+   * reinstalls-from-seed. It still rides every prepare exchange (like
+   * sender_signing_public_key above) so a peer paired before this key existed is
+   * upgraded in place. The receiver persists it on the contact record; the §11.1
+   * per-step EK receipt (kyber_ct encapsulation) fail-closes without it.
    *
    * @generated from field: bytes sender_kyber_public_key = 16;
    */
@@ -18735,6 +18657,134 @@ export class Envelope extends Message<Envelope> {
 
   static equals(a: Envelope | PlainMessage<Envelope> | undefined, b: Envelope | PlainMessage<Envelope> | undefined): boolean {
     return proto3.util.equals(Envelope, a, b);
+  }
+}
+
+/**
+ * ===================== §16.6 REPLY WINDOW =====================
+ * Online finalization is driven by the recipient's countersigned acceptance receipt,
+ * NOT by storage-node message deletion (which is best-effort GC). The artifact rides
+ * back to the sender through the same b0x spool the forward transfer used, addressed
+ * to the tip the SENDER polls (its projection parent), carried as the ArgPack body of a
+ * `wallet.acceptanceReceipt` invoke. Discrimination is by that explicit method name --
+ * never a trial-decode of the forward transfer.
+ *
+ * @generated from message dsm.ReplyWindowArtifact
+ */
+export class ReplyWindowArtifact extends Message<ReplyWindowArtifact> {
+  /**
+   * @generated from oneof dsm.ReplyWindowArtifact.artifact
+   */
+  artifact: {
+    /**
+     * @generated from field: dsm.AcceptanceReceiptArtifact acceptance_receipt = 1;
+     */
+    value: AcceptanceReceiptArtifact;
+    case: "acceptanceReceipt";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<ReplyWindowArtifact>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReplyWindowArtifact";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "acceptance_receipt", kind: "message", T: AcceptanceReceiptArtifact, oneof: "artifact" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReplyWindowArtifact {
+    return new ReplyWindowArtifact().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReplyWindowArtifact {
+    return new ReplyWindowArtifact().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReplyWindowArtifact {
+    return new ReplyWindowArtifact().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReplyWindowArtifact | PlainMessage<ReplyWindowArtifact> | undefined, b: ReplyWindowArtifact | PlainMessage<ReplyWindowArtifact> | undefined): boolean {
+    return proto3.util.equals(ReplyWindowArtifact, a, b);
+  }
+}
+
+/**
+ * The recipient's B-side countersigned receipt for one canonical transition.
+ * `receipt_bytes` is the canonical StitchedReceiptV2 the recipient persisted at PREPARE
+ * (byte-identical across redeliveries — never re-signed). The sender matches it to its
+ * ONE persisted proposal by `commitment`, verifies it against that proposal's CANONICAL
+ * pair (never the gate's projection values), then finalizes the gate terminally.
+ *
+ * @generated from message dsm.AcceptanceReceiptArtifact
+ */
+export class AcceptanceReceiptArtifact extends Message<AcceptanceReceiptArtifact> {
+  /**
+   * canonical StitchedReceiptV2
+   *
+   * @generated from field: bytes receipt_bytes = 1;
+   */
+  receiptBytes = new Uint8Array(0);
+
+  /**
+   * proposal/receipt commitment
+   *
+   * @generated from field: bytes commitment = 2;
+   */
+  commitment = new Uint8Array(0);
+
+  /**
+   * k_{A<->B} (§2.2)
+   *
+   * @generated from field: bytes relationship_key = 3;
+   */
+  relationshipKey = new Uint8Array(0);
+
+  /**
+   * the countersigner (B side)
+   *
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * signed child (A-space), diagnostic
+   *
+   * @generated from field: bytes canonical_child_tip = 5;
+   */
+  canonicalChildTip = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AcceptanceReceiptArtifact>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AcceptanceReceiptArtifact";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipt_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "relationship_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "canonical_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AcceptanceReceiptArtifact {
+    return new AcceptanceReceiptArtifact().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AcceptanceReceiptArtifact {
+    return new AcceptanceReceiptArtifact().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AcceptanceReceiptArtifact {
+    return new AcceptanceReceiptArtifact().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AcceptanceReceiptArtifact | PlainMessage<AcceptanceReceiptArtifact> | undefined, b: AcceptanceReceiptArtifact | PlainMessage<AcceptanceReceiptArtifact> | undefined): boolean {
+    return proto3.util.equals(AcceptanceReceiptArtifact, a, b);
   }
 }
 

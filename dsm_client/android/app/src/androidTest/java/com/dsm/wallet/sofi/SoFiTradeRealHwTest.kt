@@ -29,7 +29,7 @@ import java.security.SecureRandom
  *   1. `dlv.create` × 2          (two AMM vaults, different fee tiers)
  *   2. `route.publishRoutingAdvertisement` × 2
  *   3. `route.syncVaultsForPair`
- *   4. `route.findAndBindBestPath` (Tier 2: maxPaths=3, slippageBps=50)
+ *   4. `route.findAndBindBestPath` (one route, anchor-bound, exact output)
  *   5. `route.signRouteCommit`
  *   6. `route.computeExternalCommitment` (query)
  *   7. `route.publishExternalCommitment`
@@ -73,12 +73,12 @@ import java.security.SecureRandom
  *
  * What this test proves that the Rust unit tests do NOT:
  *  - The JNI / SQLite / storage / proto-codec stack carries the full
- *    Tier 2 trade across the bridge without truncation, schema drift,
- *    or threading deadlocks.
- *  - `route.findAndBindBestPath(maxPaths=3)` actually returns a
- *    RouteCommit with a non-empty `fallbacks` field when two vaults
- *    advertise on the same pair (proves the N-best enumerator wired
- *    end-to-end through the handler).
+ *    trade across the bridge without truncation, schema drift, or
+ *    threading deadlocks.
+ *  - `route.findAndBindBestPath` returns a RouteCommit whose single hop
+ *    carries a stamped anchor-state binding, and the settled output
+ *    equals the quoted exact output (one route, one anchored state, one
+ *    exact output, one signature — no fallback, no slippage floor).
  *  - The post-trade reserve update (chunks #7 republish-on-settled)
  *    completes within the bounded poll window after `dlv.unlockRouted`.
  */
@@ -147,7 +147,7 @@ class SoFiTradeRealHwTest {
     }
 
     @Test
-    fun t01_trade_settles_against_tier2_envelope() {
+    fun t01_trade_settles_with_exact_anchor_bound_output() {
         // Per-run unique salt → unique content_digest → unique vault_id.
         // Vaults are immutable: a prior run's vault advertisements occupy
         // their storage keys forever. Each test run creates genuinely
@@ -174,29 +174,18 @@ class SoFiTradeRealHwTest {
         //            search sees the latest advertisement set ──
         sofi.syncVaultsForPair()
 
-        // ── STEP 4: findAndBindBestPath with Tier 2 envelope params ──
+        // ── STEP 4: findAndBindBestPath — one route bound to one
+        //            anchored vault state producing one exact output ──
         val unsignedRcBytes = sofi.findAndBindBestPath()
         val rc = RouteCommitV1.parseFrom(unsignedRcBytes)
         assertEquals("single-hop AMM route", 1, rc.hopsCount)
-        assertTrue(
-            "Tier 2 must populate fallbacks when 2 vaults advertise on the pair (got ${rc.fallbacksCount})",
-            rc.fallbacksCount >= 1,
-        )
-        val floorOut = u128beToLong(rc.floorFinalOutputAmountU128.toByteArray())
         val expectedOut = u128beToLong(rc.expectedFinalOutputAmountU128.toByteArray())
-        assertTrue("envelope floor must be stamped (got $floorOut)", floorOut > 0L)
         assertTrue("expected output must be > 0 (got $expectedOut)", expectedOut > 0L)
         assertTrue(
-            "expected output $expectedOut must be >= envelope floor $floorOut",
-            expectedOut >= floorOut,
+            "hop must carry a stamped anchor-state binding (reserves digest)",
+            rc.hopsList[0].vaultStateReservesDigest.size() == 32,
         )
-        val perHopFloor = u128beToLong(rc.hopsList[0].minOutputAmountU128.toByteArray())
-        assertTrue("per-hop intent-bound floor must be stamped (got $perHopFloor)", perHopFloor > 0L)
-        Log.i(
-            TAG,
-            "quote: expected=$expectedOut floor=$floorOut perHopFloor=$perHopFloor " +
-                "fallbackGroups=${rc.fallbacksCount}",
-        )
+        Log.i(TAG, "quote: exact expected=$expectedOut (single route, anchor-bound)")
 
         // ── STEP 5: wallet signs (SPHINCS+ stays in Rust) ──
         val signedRcBytes = sofi.signRouteCommit(unsignedRcBytes)
@@ -259,17 +248,19 @@ class SoFiTradeRealHwTest {
             raAfter < INITIAL_RESERVE_A,
         )
         val actualOut = INITIAL_RESERVE_A - raAfter
-        assertTrue(
-            "actual output $actualOut must meet intent-bound floor $floorOut",
-            actualOut >= floorOut,
+        // Exact-output guarantee: the trade was bound to the exact vault
+        // state, so the settled output equals the quoted expected output.
+        assertEquals(
+            "actual output must EXACTLY equal the quoted expected output",
+            expectedOut,
+            actualOut,
         )
 
         Log.i(
             TAG,
             "settled vault=${b32(primaryVaultId)} " +
-                "actual=$actualOut floor=$floorOut " +
-                "post: reserveA=$raAfter reserveB=$rbAfter " +
-                "fallbacks=${rc.fallbacksCount} attempts=$attempts",
+                "actual=$actualOut expected=$expectedOut " +
+                "post: reserveA=$raAfter reserveB=$rbAfter attempts=$attempts",
         )
     }
 }

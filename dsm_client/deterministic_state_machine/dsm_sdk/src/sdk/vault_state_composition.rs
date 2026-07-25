@@ -684,10 +684,9 @@ mod tests {
             vault_state_anchor_seq: parent_sequence,
             vault_state_reserves_digest: parent_digest.to_vec(),
             vault_state_anchor_digest: vec![0u8; 32],
-            min_output_amount_u128: Vec::new(),
         };
         let rc = generated::RouteCommitV1 {
-            version: 1,
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
             nonce: nonce_seed.to_vec(),
             input_token: token_a.to_vec(),
             output_token: token_b.to_vec(),
@@ -697,8 +696,6 @@ mod tests {
             hops: vec![hop],
             initiator_public_key: trader_pk.to_vec(),
             initiator_signature: Vec::new(),
-            floor_final_output_amount_u128: Vec::new(),
-            fallbacks: Vec::new(),
         };
         let canonical_bytes = rc.encode_to_vec();
         let sig = dsm::crypto::sphincs::sphincs_sign(trader_sk, &canonical_bytes)
