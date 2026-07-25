@@ -1159,50 +1159,25 @@ impl AppRouterImpl {
             // The (seq + reserves_digest) match is sufficient because
             // owner_signature on the storage anchor couples them.
             {
+                use crate::sdk::route_commit_sdk::{AnchorGateReject, AnchorPosture};
                 use dsm::types::proto::AnchorEnforcement;
                 let policy = AnchorEnforcement::try_from(vault.anchor_enforcement)
                     .unwrap_or(AnchorEnforcement::Unspecified);
-                // `vault_state_anchor_seq` is u64; its zero value is
-                // meaningful at genesis, so we cannot use 0 as
-                // "missing".  The two digest fields' emptiness is the
-                // missing-flag because both are 32-byte fixed-len when
-                // present.
-                let has_anchor_fields = !hop.vault_state_reserves_digest.is_empty()
-                    && !hop.vault_state_anchor_digest.is_empty();
-                match (policy, has_anchor_fields) {
-                    (AnchorEnforcement::Required, false) => {
-                        return err("dlv.unlockRouted: vault requires anchor binding but \
-                             RouteCommit hop omits one or more fields \
-                             (vault_state_reserves_digest / vault_state_anchor_digest)"
-                            .to_string());
-                    }
-                    (AnchorEnforcement::Required, true) | (AnchorEnforcement::Optional, true) => {
-                        let internal_seq = vault.current_sequence;
-                        if hop.vault_state_anchor_seq != internal_seq {
-                            return err(format!(
-                                "dlv.unlockRouted: vault state anchor sequence mismatch \
-                                 (route={}, vault={})",
-                                hop.vault_state_anchor_seq, internal_seq,
-                            ));
-                        }
-                        let internal_digest = match vault.current_reserves_digest() {
-                            Some(d) => d,
-                            None => {
-                                return err("dlv.unlockRouted: AMM reserves digest unavailable \
-                                     for non-AMM vault"
-                                    .to_string());
-                            }
-                        };
-                        if hop.vault_state_reserves_digest != internal_digest.to_vec() {
-                            return err("dlv.unlockRouted: vault state reserves digest mismatch"
-                                .to_string());
-                        }
-                        // anchor_digest is bound at quote time; the gate
-                        // does not re-fetch storage.  Architectural
-                        // commitment: never re-read storage to "confirm"
-                        // the anchor.
-                    }
-                    (AnchorEnforcement::Optional, false) | (AnchorEnforcement::Unspecified, _) => {
+                // Fail-closed anchor gate: the hop's bound (seq,
+                // reserves_digest, anchor_digest) must match the vault's
+                // LOCAL current state per policy.  A mismatch means the
+                // vault advanced since the RouteCommit was bound (stale
+                // state).  Pure + storage-free — never re-reads storage.
+                match crate::sdk::route_commit_sdk::enforce_anchor_binding(
+                    policy,
+                    &hop,
+                    &vault_id,
+                    vault.current_sequence,
+                    vault.current_reserves_digest(),
+                ) {
+                    Ok(AnchorPosture::Enforced) => {}
+                    Ok(AnchorPosture::BypassedOptional)
+                    | Ok(AnchorPosture::BypassedUnspecified) => {
                         anchor_bypassed_optional = true;
                         log::info!(
                             "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
@@ -1210,6 +1185,33 @@ impl AppRouterImpl {
                             crate::util::text_id::encode_base32_crockford(&vault_id),
                             policy,
                         );
+                    }
+                    Err(AnchorGateReject::MissingFields) => {
+                        return err("dlv.unlockRouted: vault requires anchor binding but \
+                             RouteCommit hop omits one or more fields \
+                             (vault_state_reserves_digest / vault_state_anchor_digest)"
+                            .to_string());
+                    }
+                    Err(AnchorGateReject::SequenceMismatch { route, vault }) => {
+                        return err(format!(
+                            "dlv.unlockRouted: vault state anchor sequence mismatch \
+                             (route={route}, vault={vault})"
+                        ));
+                    }
+                    Err(AnchorGateReject::ReservesDigestMismatch) => {
+                        return err(
+                            "dlv.unlockRouted: vault state reserves digest mismatch".to_string()
+                        );
+                    }
+                    Err(AnchorGateReject::AnchorDigestMismatch) => {
+                        return err(
+                            "dlv.unlockRouted: vault state anchor digest mismatch".to_string()
+                        );
+                    }
+                    Err(AnchorGateReject::ReservesDigestUnavailable) => {
+                        return err("dlv.unlockRouted: AMM reserves digest unavailable \
+                             for non-AMM vault"
+                            .to_string());
                     }
                 }
             }

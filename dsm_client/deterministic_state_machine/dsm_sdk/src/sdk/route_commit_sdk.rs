@@ -150,13 +150,12 @@ pub(crate) fn bind_path_to_route_commit(
             state_number: hop.state_number,
             unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
             owner_public_key: hop.owner_public_key.clone(),
-            // Tier 2 Foundation fields default-initialised here.  The
-            // trader-side anchor read populates them in a later phase
-            // (the `RouteCommitHop` input struct doesn't carry them
-            // yet — that wiring lives in the path-search +
-            // anchor-fetch flow).  Empty digests + zero seq mean
-            // "no anchor binding" — vault-side gate enforces per
-            // `anchor_enforcement` policy.
+            // Anchor-state binding fields left empty here; the caller
+            // stamps them from the composed+synced vault state via
+            // `stamp_anchor_bindings` on the UNSIGNED RouteCommit before
+            // signing (so the signature + external commitment cover
+            // them).  A hop left empty means "no fetchable anchor" — the
+            // vault-side gate then fails closed for a `Required` vault.
             vault_state_anchor_seq: 0,
             vault_state_reserves_digest: Vec::new(),
             vault_state_anchor_digest: Vec::new(),
@@ -277,6 +276,8 @@ pub(crate) fn bind_envelope_to_route_commit(
                     state_number: hop.state_number,
                     unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
                     owner_public_key: hop.owner_public_key.clone(),
+                    // Stamped by `stamp_anchor_bindings` on the unsigned
+                    // envelope (primary + fallbacks) before signing.
                     vault_state_anchor_seq: 0,
                     vault_state_reserves_digest: Vec::new(),
                     vault_state_anchor_digest: Vec::new(),
@@ -319,6 +320,151 @@ fn apply_slippage_floor(expected: u128, slippage_bps: u32) -> u128 {
         .checked_mul(factor)
         .map(|p| p / 10_000)
         .unwrap_or(0)
+}
+
+/// One vault's Tier-2 anchor-state binding, computed by the route binder
+/// from the composed+synced vault state at quote time.  Carries the exact
+/// values the vault-side unlock gate re-derives and compares against its
+/// LOCAL current state (`current_sequence` + `current_reserves_digest`).
+#[derive(Debug, Clone)]
+pub(crate) struct HopAnchorBinding {
+    /// The vault's composed current sequence at quote time.
+    pub seq: u64,
+    /// `compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps)`
+    /// over the composed reserves.
+    pub reserves_digest: Vec<u8>,
+    /// `compute_anchor_digest(vault_id, seq, reserves_digest)`.
+    pub anchor_digest: Vec<u8>,
+}
+
+/// Stamp each hop's anchor-state binding fields (`vault_state_anchor_seq`,
+/// `vault_state_reserves_digest`, `vault_state_anchor_digest`) from
+/// `bindings`, keyed by the hop's 32-byte `vault_id`.  Applies to the
+/// primary hops AND every fallback group's hops so a fallback path is
+/// bound to state exactly like the primary.
+///
+/// MUST run on the UNSIGNED RouteCommit, before the initiator signs it, so
+/// the SPHINCS+ signature and the external commitment `X` both cover the
+/// anchor binding (a hop's binding cannot be tampered post-signing).
+///
+/// A hop whose vault has no entry in `bindings` (e.g. no signed anchor was
+/// fetchable for it at quote time) is left with empty anchor fields; the
+/// vault-side gate then fails closed for a `Required`-policy vault — the
+/// intended behaviour, never a silent bypass.
+pub(crate) fn stamp_anchor_bindings(
+    rc: &mut generated::RouteCommitV1,
+    bindings: &std::collections::HashMap<[u8; 32], HopAnchorBinding>,
+) {
+    fn stamp_hops(
+        hops: &mut [generated::RouteCommitHopV1],
+        bindings: &std::collections::HashMap<[u8; 32], HopAnchorBinding>,
+    ) {
+        for hop in hops.iter_mut() {
+            if hop.vault_id.len() != 32 {
+                continue;
+            }
+            let mut vid = [0u8; 32];
+            vid.copy_from_slice(&hop.vault_id);
+            if let Some(b) = bindings.get(&vid) {
+                hop.vault_state_anchor_seq = b.seq;
+                hop.vault_state_reserves_digest = b.reserves_digest.clone();
+                hop.vault_state_anchor_digest = b.anchor_digest.clone();
+            }
+        }
+    }
+    stamp_hops(&mut rc.hops, bindings);
+    for fb in rc.fallbacks.iter_mut() {
+        stamp_hops(&mut fb.hops, bindings);
+    }
+}
+
+/// Outcome of the anchor-enforcement gate for one hop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnchorPosture {
+    /// Fields present and matched the vault's live state (Required or
+    /// Optional policy).  The trade is bound to a specific attested state.
+    Enforced,
+    /// Optional policy with fields absent — identity binding was NOT
+    /// enforced (grandfathered path); callers should surface this.
+    BypassedOptional,
+    /// Unspecified policy — grandfathered; no enforcement.
+    BypassedUnspecified,
+}
+
+/// Reason the anchor-enforcement gate rejected a hop.  Every variant is a
+/// fail-closed rejection; there is no "soft" mismatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AnchorGateReject {
+    /// Required policy but the hop omits `vault_state_reserves_digest`
+    /// and/or `vault_state_anchor_digest`.
+    MissingFields,
+    /// The hop's bound sequence != the vault's live `current_sequence`
+    /// (the vault advanced since the RouteCommit was bound — stale state).
+    SequenceMismatch { route: u64, vault: u64 },
+    /// The hop's bound reserves digest != the vault's live reserves digest.
+    ReservesDigestMismatch,
+    /// The hop's bound anchor digest != the digest re-derived from the
+    /// vault's live `(sequence, reserves_digest)`.
+    AnchorDigestMismatch,
+    /// The vault is not an AMM vault, so no reserves digest exists to
+    /// compare against — a routed AMM unlock cannot proceed.
+    ReservesDigestUnavailable,
+}
+
+/// Enforce a hop's anchor-state binding against the vault's LOCAL current
+/// state, per the vault's `anchor_enforcement` policy.  Pure and
+/// storage-free: it re-derives the expected anchor digest, never re-reads
+/// storage (that would re-introduce storage trust).
+///
+/// * `Required` — all three anchor fields MUST be present and match the
+///   live `(sequence, reserves_digest)`; any absent or mismatched field
+///   fails closed.
+/// * `Optional` — if fields present, they must match; if absent, bypass
+///   with `BypassedOptional` so callers can audit.
+/// * `Unspecified` — grandfathered; no enforcement.
+///
+/// A mismatch means the vault advanced between quote and unlock: the
+/// RouteCommit is bound to stale state and must be rejected.  This is the
+/// producer↔consumer half that makes `stamp_anchor_bindings` load-bearing.
+pub(crate) fn enforce_anchor_binding(
+    policy: generated::AnchorEnforcement,
+    hop: &generated::RouteCommitHopV1,
+    vault_id: &[u8; 32],
+    vault_current_sequence: u64,
+    vault_current_reserves_digest: Option<[u8; 32]>,
+) -> Result<AnchorPosture, AnchorGateReject> {
+    use generated::AnchorEnforcement;
+    // `vault_state_anchor_seq` is u64 and 0 is a valid genesis sequence,
+    // so presence is decided by the two fixed-length digest fields.
+    let has_anchor_fields =
+        !hop.vault_state_reserves_digest.is_empty() && !hop.vault_state_anchor_digest.is_empty();
+    match (policy, has_anchor_fields) {
+        (AnchorEnforcement::Required, false) => Err(AnchorGateReject::MissingFields),
+        (AnchorEnforcement::Required, true) | (AnchorEnforcement::Optional, true) => {
+            if hop.vault_state_anchor_seq != vault_current_sequence {
+                return Err(AnchorGateReject::SequenceMismatch {
+                    route: hop.vault_state_anchor_seq,
+                    vault: vault_current_sequence,
+                });
+            }
+            let internal_digest =
+                vault_current_reserves_digest.ok_or(AnchorGateReject::ReservesDigestUnavailable)?;
+            if hop.vault_state_reserves_digest != internal_digest.to_vec() {
+                return Err(AnchorGateReject::ReservesDigestMismatch);
+            }
+            let expected_anchor_digest = dsm::dlv::vault_state_anchor::compute_anchor_digest(
+                vault_id,
+                vault_current_sequence,
+                &internal_digest,
+            );
+            if hop.vault_state_anchor_digest != expected_anchor_digest.to_vec() {
+                return Err(AnchorGateReject::AnchorDigestMismatch);
+            }
+            Ok(AnchorPosture::Enforced)
+        }
+        (AnchorEnforcement::Optional, false) => Ok(AnchorPosture::BypassedOptional),
+        (AnchorEnforcement::Unspecified, _) => Ok(AnchorPosture::BypassedUnspecified),
+    }
 }
 
 /// Tier 2 gate: check that a candidate hop's simulated output meets
@@ -2203,5 +2349,233 @@ mod tests {
         // attack (2).  Reserves moved through the constant-product
         // invariant on each accepted swap.  Every gate fired correctly.
         // The protocol layer is end-to-end working.
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Tier-2 anchor-state binding: producer (stamp) ↔ consumer (gate)
+    // ─────────────────────────────────────────────────────────────────
+
+    use dsm::dlv::vault_state_anchor::{compute_anchor_digest, compute_reserves_digest};
+
+    /// Build a one-hop RouteCommit over `vault_id` and stamp its anchor
+    /// binding exactly as `route.findAndBindBestPath` does.  Returns the
+    /// stamped primary hop and the `(seq, reserves_digest)` it was bound
+    /// to — the values a fresh vault re-derives at unlock.
+    fn stamped_hop(
+        vault_id: [u8; 32],
+        token_a: &[u8],
+        token_b: &[u8],
+        reserve_a: u128,
+        reserve_b: u128,
+        fee_bps: u32,
+        seq: u64,
+    ) -> (generated::RouteCommitHopV1, [u8; 32]) {
+        let reserves_digest =
+            compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
+        let anchor_digest = compute_anchor_digest(&vault_id, seq, &reserves_digest);
+        let path = Path {
+            input_token: token_a.to_vec(),
+            output_token: token_b.to_vec(),
+            input_amount: 10_000,
+            final_output_amount: 9_870,
+            total_fee_bps: u64::from(fee_bps),
+            hops: vec![VaultHop {
+                vault_id,
+                token_in: token_a.to_vec(),
+                token_out: token_b.to_vec(),
+                input_amount: 10_000,
+                expected_output_amount: 9_870,
+                fee_bps,
+                advertisement_digest: [7u8; 32],
+                state_number: seq,
+                unlock_spec_digest: [9u8; 32],
+                owner_public_key: vec![0xABu8; 64],
+            }],
+        };
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(9),
+            initiator_public_key: &[],
+            initiator_signature: vec![],
+        })
+        .expect("bind");
+        // The binder leaves anchor fields empty; the stamp fills them.
+        assert!(rc.hops[0].vault_state_reserves_digest.is_empty());
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            vault_id,
+            HopAnchorBinding {
+                seq,
+                reserves_digest: reserves_digest.to_vec(),
+                anchor_digest: anchor_digest.to_vec(),
+            },
+        );
+        stamp_anchor_bindings(&mut rc, &bindings);
+        let hop = rc.hops.remove(0);
+        assert_eq!(hop.vault_state_anchor_seq, seq);
+        assert_eq!(hop.vault_state_reserves_digest, reserves_digest.to_vec());
+        assert_eq!(hop.vault_state_anchor_digest, anchor_digest.to_vec());
+        (hop, reserves_digest)
+    }
+
+    #[test]
+    fn stamp_fills_primary_and_fallback_hops_and_skips_unknown() {
+        // Envelope with a 2-hop primary (vaults 1,2) and a 1-hop fallback
+        // (vault 3).  Bind an anchor for vaults 1 and 3 only; vault 2 has
+        // none.
+        let a = token("AAA");
+        let b = token("BBB");
+        let c = token("CCC");
+        let primary = Path {
+            input_token: a.clone(),
+            output_token: c.clone(),
+            input_amount: 10_000,
+            final_output_amount: 9_700,
+            total_fee_bps: 60,
+            hops: vec![make_hop(1, &a, &b), make_hop(2, &b, &c)],
+        };
+        let fallback = Path {
+            input_token: a.clone(),
+            output_token: c.clone(),
+            input_amount: 10_000,
+            final_output_amount: 9_650,
+            total_fee_bps: 30,
+            hops: vec![make_hop(3, &a, &c)],
+        };
+        let mut rc = bind_envelope_to_route_commit(BindRouteCommitEnvelopeInput {
+            primary: &primary,
+            fallbacks: &[fallback],
+            nonce: nonce(2),
+            initiator_public_key: &[],
+            initiator_signature: vec![],
+            slippage_bps: 50,
+            floor_bps: 50,
+        })
+        .expect("envelope bind");
+
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(
+            vid(1),
+            HopAnchorBinding {
+                seq: 11,
+                reserves_digest: vec![0x11u8; 32],
+                anchor_digest: vec![0xA1u8; 32],
+            },
+        );
+        bindings.insert(
+            vid(3),
+            HopAnchorBinding {
+                seq: 33,
+                reserves_digest: vec![0x33u8; 32],
+                anchor_digest: vec![0xA3u8; 32],
+            },
+        );
+        stamp_anchor_bindings(&mut rc, &bindings);
+
+        // Primary hop 0 (vault 1) stamped.
+        assert_eq!(rc.hops[0].vault_state_anchor_seq, 11);
+        assert_eq!(rc.hops[0].vault_state_reserves_digest, vec![0x11u8; 32]);
+        // Primary hop 1 (vault 2) has no binding → left empty (fail-closed
+        // at a Required vault).
+        assert_eq!(rc.hops[1].vault_state_anchor_seq, 0);
+        assert!(rc.hops[1].vault_state_reserves_digest.is_empty());
+        assert!(rc.hops[1].vault_state_anchor_digest.is_empty());
+        // Fallback hop (vault 3) stamped too.
+        assert_eq!(rc.fallbacks[0].hops[0].vault_state_anchor_seq, 33);
+        assert_eq!(
+            rc.fallbacks[0].hops[0].vault_state_anchor_digest,
+            vec![0xA3u8; 32]
+        );
+    }
+
+    /// Route-level integration proof of stale-state rejection: the REAL
+    /// producer (`stamp_anchor_bindings`) and the REAL consumer gate
+    /// (`enforce_anchor_binding`, which `dlv.unlockRouted` calls with the
+    /// loaded vault's live state) agree byte-for-byte on a fresh vault and
+    /// reject every way the vault can have moved on.
+    #[test]
+    fn anchor_gate_accepts_fresh_and_rejects_stale() {
+        use generated::AnchorEnforcement::Required;
+        let vault_id = vid(5);
+        let (hop, rd) = stamped_hop(vault_id, b"AAA", b"BBB", 1_000_000, 2_000_000, 30, 7);
+
+        // FRESH — vault still at the quoted (seq, reserves) → enforced.
+        assert_eq!(
+            enforce_anchor_binding(Required, &hop, &vault_id, 7, Some(rd)),
+            Ok(AnchorPosture::Enforced)
+        );
+
+        // STALE sequence — vault advanced to seq 8.
+        assert_eq!(
+            enforce_anchor_binding(Required, &hop, &vault_id, 8, Some(rd)),
+            Err(AnchorGateReject::SequenceMismatch { route: 7, vault: 8 })
+        );
+
+        // STALE reserves — same seq, but the vault's live reserves moved.
+        let moved = compute_reserves_digest(b"AAA", b"BBB", 999_000, 2_001_000, 30);
+        assert_eq!(
+            enforce_anchor_binding(Required, &hop, &vault_id, 7, Some(moved)),
+            Err(AnchorGateReject::ReservesDigestMismatch)
+        );
+    }
+
+    #[test]
+    fn anchor_gate_missing_fields_required_rejects_optional_bypasses() {
+        use generated::AnchorEnforcement::{Optional, Required, Unspecified};
+        let vault_id = vid(6);
+        let path = Path {
+            input_token: token("AAA"),
+            output_token: token("BBB"),
+            input_amount: 10_000,
+            final_output_amount: 9_870,
+            total_fee_bps: 30,
+            hops: vec![make_hop(6, b"AAA", b"BBB")],
+        };
+        let rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(6),
+            initiator_public_key: &[],
+            initiator_signature: vec![],
+        })
+        .expect("bind");
+        let bare = &rc.hops[0];
+        assert!(bare.vault_state_reserves_digest.is_empty());
+
+        // Required + absent fields → fail closed.
+        assert_eq!(
+            enforce_anchor_binding(Required, bare, &vault_id, 0, Some([0u8; 32])),
+            Err(AnchorGateReject::MissingFields)
+        );
+        // Optional + absent → bypass (audited posture, not a hard fail).
+        assert_eq!(
+            enforce_anchor_binding(Optional, bare, &vault_id, 0, Some([0u8; 32])),
+            Ok(AnchorPosture::BypassedOptional)
+        );
+        // Unspecified → grandfathered bypass.
+        assert_eq!(
+            enforce_anchor_binding(Unspecified, bare, &vault_id, 0, Some([0u8; 32])),
+            Ok(AnchorPosture::BypassedUnspecified)
+        );
+    }
+
+    #[test]
+    fn anchor_gate_rejects_tampered_digest_and_non_amm_vault() {
+        use generated::AnchorEnforcement::Required;
+        let vault_id = vid(7);
+        let (mut hop, rd) = stamped_hop(vault_id, b"AAA", b"BBB", 1_000, 2_000, 30, 3);
+
+        // Tampered anchor digest (seq + reserves still match) → reject.
+        hop.vault_state_anchor_digest[0] ^= 0xFF;
+        assert_eq!(
+            enforce_anchor_binding(Required, &hop, &vault_id, 3, Some(rd)),
+            Err(AnchorGateReject::AnchorDigestMismatch)
+        );
+
+        // Non-AMM vault (no reserves digest available) → reject.
+        let (fresh, _) = stamped_hop(vault_id, b"AAA", b"BBB", 1_000, 2_000, 30, 3);
+        assert_eq!(
+            enforce_anchor_binding(Required, &fresh, &vault_id, 3, None),
+            Err(AnchorGateReject::ReservesDigestUnavailable)
+        );
     }
 }
