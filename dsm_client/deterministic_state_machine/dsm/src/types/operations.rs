@@ -298,6 +298,14 @@ pub enum Operation {
         amount: Balance,
         /// Binary identifier of the token type to mint.
         token_id: Vec<u8>,
+        /// CPTA commit of the asset being minted.
+        ///
+        /// The conservation guard binds the applied `BalanceDelta` to THIS
+        /// value, so a mint cannot credit an asset other than the one the
+        /// signed operation names. Without it the guard could only check the
+        /// delta's count/direction/amount, and a mint for token X could credit
+        /// ERA. Mirrors `Transfer.policy_commit`.
+        policy_commit: [u8; 32],
         /// Binary identifier of the authority that authorized this minting.
         authorized_by: Vec<u8>,
         /// Cryptographic proof from the minting authority.
@@ -311,6 +319,9 @@ pub enum Operation {
         amount: Balance,
         /// Binary identifier of the token type to burn.
         token_id: Vec<u8>,
+        /// CPTA commit of the asset being burned. Binds the applied debit to
+        /// the asset the signed operation names.
+        policy_commit: [u8; 32],
         /// Cryptographic proof that the burner owns these tokens.
         proof_of_ownership: Vec<u8>,
         /// Human-readable description of the burn event.
@@ -938,6 +949,7 @@ impl Operation {
             Mint {
                 amount,
                 token_id,
+                policy_commit,
                 authorized_by,
                 proof_of_authorization,
                 message,
@@ -946,6 +958,8 @@ impl Operation {
                 let bal = amount.to_le_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
+                // CPTA policy commitment — same length-prefixed convention as Transfer.
+                put_bytes(&mut out, policy_commit);
                 put_bytes(&mut out, authorized_by);
                 put_bytes(&mut out, proof_of_authorization);
                 put_str(&mut out, message);
@@ -953,6 +967,7 @@ impl Operation {
             Burn {
                 amount,
                 token_id,
+                policy_commit,
                 proof_of_ownership,
                 message,
             } => {
@@ -960,6 +975,7 @@ impl Operation {
                 let bal = amount.to_le_bytes();
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
+                put_bytes(&mut out, policy_commit);
                 put_bytes(&mut out, proof_of_ownership);
                 put_str(&mut out, message);
             }
@@ -1567,12 +1583,17 @@ impl Operation {
             4 => {
                 let amount = dec_balance(&mut input)?;
                 let token_id = get_bytes(&mut input)?;
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("mint policy_commit must be 32 bytes")
+                    })?;
                 let authorized_by = get_bytes(&mut input)?;
                 let proof_of_authorization = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
                 Mint {
                     amount,
                     token_id,
+                    policy_commit,
                     authorized_by,
                     proof_of_authorization,
                     message,
@@ -1581,11 +1602,16 @@ impl Operation {
             5 => {
                 let amount = dec_balance(&mut input)?;
                 let token_id = get_bytes(&mut input)?;
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("burn policy_commit must be 32 bytes")
+                    })?;
                 let proof_of_ownership = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
                 Burn {
                     amount,
                     token_id,
+                    policy_commit,
                     proof_of_ownership,
                     message,
                 }
@@ -2498,6 +2524,7 @@ mod tests {
         assert!(Operation::Burn {
             amount: test_balance(1),
             token_id: vec![1],
+            policy_commit: [0u8; 32],
             proof_of_ownership: vec![],
             message: String::new(),
         }
@@ -2518,6 +2545,7 @@ mod tests {
         assert!(!Operation::Mint {
             amount: test_balance(1),
             token_id: vec![1],
+            policy_commit: [0u8; 32],
             authorized_by: vec![],
             proof_of_authorization: vec![],
             message: String::new(),
@@ -2531,6 +2559,7 @@ mod tests {
         let burn = Operation::Burn {
             amount: test_balance(1),
             token_id: vec![1],
+            policy_commit: [0u8; 32],
             proof_of_ownership: vec![],
             message: String::new(),
         };
@@ -2541,6 +2570,7 @@ mod tests {
         let mint = Operation::Mint {
             amount: test_balance(1),
             token_id: vec![1],
+            policy_commit: [0u8; 32],
             authorized_by: vec![],
             proof_of_authorization: vec![],
             message: String::new(),
@@ -2583,6 +2613,7 @@ mod tests {
         let burn = Operation::Burn {
             amount: test_balance(7),
             token_id: b"ERA".to_vec(),
+            policy_commit: [0u8; 32],
             proof_of_ownership: vec![],
             message: String::new(),
         };
@@ -2628,6 +2659,7 @@ mod tests {
         let mint = Operation::Mint {
             amount: test_balance(1),
             token_id: b"ERA".to_vec(),
+            policy_commit: [0u8; 32],
             authorized_by: vec![],
             proof_of_authorization: vec![],
             message: String::new(),
@@ -2769,6 +2801,7 @@ mod tests {
             roundtrip(&Operation::Mint {
                 amount: test_balance(10_000),
                 token_id: b"ERA".to_vec(),
+                policy_commit: [0u8; 32],
                 authorized_by: vec![0xAA; 32],
                 proof_of_authorization: vec![0xBB; 64],
                 message: "mint tokens".into(),
@@ -2780,6 +2813,7 @@ mod tests {
             roundtrip(&Operation::Burn {
                 amount: test_balance(200),
                 token_id: b"TKN".to_vec(),
+                policy_commit: [0u8; 32],
                 proof_of_ownership: vec![0xCC; 64],
                 message: "burn tokens".into(),
             });
@@ -3253,6 +3287,7 @@ mod tests {
             let mint = Operation::Mint {
                 amount: test_balance(1),
                 token_id: vec![],
+                policy_commit: [0u8; 32],
                 authorized_by: vec![],
                 proof_of_authorization: vec![],
                 message: String::new(),
@@ -3262,6 +3297,7 @@ mod tests {
             let burn = Operation::Burn {
                 amount: test_balance(1),
                 token_id: vec![],
+                policy_commit: [0u8; 32],
                 proof_of_ownership: vec![],
                 message: String::new(),
             };
@@ -3655,6 +3691,7 @@ mod tests {
             let op = Operation::Mint {
                 amount: test_balance(50),
                 token_id: b"ERA".to_vec(),
+                policy_commit: [0u8; 32],
                 authorized_by: vec![],
                 proof_of_authorization: vec![],
                 message: String::new(),
@@ -3769,6 +3806,7 @@ mod tests {
             let op = Operation::Mint {
                 amount: bal.clone(),
                 token_id: b"T".to_vec(),
+                policy_commit: [0u8; 32],
                 authorized_by: vec![],
                 proof_of_authorization: vec![],
                 message: String::new(),
@@ -3787,6 +3825,7 @@ mod tests {
             let op = Operation::Burn {
                 amount: bal,
                 token_id: b"X".to_vec(),
+                policy_commit: [0u8; 32],
                 proof_of_ownership: vec![],
                 message: String::new(),
             };

@@ -1088,6 +1088,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let op = Operation::Mint {
                     amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
+                    policy_commit,
                     authorized_by,
                     proof_of_authorization: encode_embedded_proof(&signer_pk, &mint_sig)?,
                     message: "Mint operation via TokenSDK".to_string(),
@@ -1147,6 +1148,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let mut op = Operation::Burn {
                     amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
+                    policy_commit,
                     proof_of_ownership: Vec::new(),
                     message: "Burn operation via TokenSDK".to_string(),
                 };

@@ -314,6 +314,8 @@ mod tests {
                 dsm::types::operations::Operation::Mint {
                     amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
                     token_id: b"ERA".to_vec(),
+                    policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA")
+                        .unwrap(),
                     authorized_by: b"self".to_vec(),
                     proof_of_authorization: Vec::new(),
                     message: "mint".to_string(),

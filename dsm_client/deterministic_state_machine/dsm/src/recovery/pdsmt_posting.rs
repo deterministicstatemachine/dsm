@@ -804,6 +804,7 @@ mod tests {
                 Operation::Mint {
                     amount: Balance::from_state(10, [0u8; 32]),
                     token_id: b"ERA".to_vec(),
+                    policy_commit: [0xF1; 32],
                     authorized_by: vec![],
                     proof_of_authorization: vec![],
                     message: String::new(),

@@ -953,6 +953,7 @@ impl AppRouterImpl {
                             ref_hash,
                         ),
                         token_id: token_id.as_bytes().to_vec(),
+                        policy_commit,
                         authorized_by: dev_id.to_vec(),
                         proof_of_authorization: policy_commit.to_vec(),
                         message: format!("initial allocation for {ticker}"),

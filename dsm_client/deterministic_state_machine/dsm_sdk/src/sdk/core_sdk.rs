@@ -1567,6 +1567,9 @@ impl CoreSDK {
         let mint = O::Mint {
             amount: amt,
             token_id: b"ERA".to_vec(),
+            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").ok_or_else(
+                || DsmError::internal("ERA is a builtin token", None::<std::io::Error>),
+            )?,
             authorized_by: crate::util::text_id::encode_base32_crockford(
                 &self.device_info.device_id,
             )

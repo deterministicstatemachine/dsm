@@ -165,6 +165,7 @@ pub fn extract_operation_parameters(
         Operation::Mint {
             amount,
             token_id,
+            policy_commit,
             authorized_by,
             proof_of_authorization,
             message,
@@ -173,6 +174,7 @@ pub fn extract_operation_parameters(
             params.insert("operation_type".to_string(), b"mint".to_vec());
             params.insert("amount".to_string(), balance_to_bytes(amount));
             params.insert("token_id".to_string(), token_id.clone());
+            params.insert("policy_commit".to_string(), policy_commit.to_vec());
             params.insert("authorized_by".to_string(), authorized_by.clone());
             params.insert(
                 "proof_of_authorization".to_string(),
@@ -184,6 +186,7 @@ pub fn extract_operation_parameters(
         Operation::Burn {
             amount,
             token_id,
+            policy_commit,
             proof_of_ownership,
             message,
         } => {
@@ -191,6 +194,7 @@ pub fn extract_operation_parameters(
             params.insert("operation_type".to_string(), b"burn".to_vec());
             params.insert("amount".to_string(), balance_to_bytes(amount));
             params.insert("token_id".to_string(), token_id.clone());
+            params.insert("policy_commit".to_string(), policy_commit.to_vec());
             params.insert("proof_of_ownership".to_string(), proof_of_ownership.clone());
             params.insert("message".to_string(), message.as_bytes().to_vec());
             Ok(params)

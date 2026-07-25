@@ -1549,6 +1549,7 @@ mod tests {
                 balance
             },
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit: [0u8; 32],
             authorized_by: b"authority".to_vec(),
             proof_of_authorization: vec![],
             message: "test mint".to_string(),
@@ -1579,6 +1580,7 @@ mod tests {
                 balance
             },
             token_id: token_id.as_bytes().to_vec(),
+            policy_commit: [0u8; 32],
             proof_of_ownership: vec![],
             message: "test burn".to_string(),
         };
