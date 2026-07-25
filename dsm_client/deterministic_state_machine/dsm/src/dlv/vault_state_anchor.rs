@@ -81,6 +81,22 @@ fn anchor_sign_payload(vault_id: &[u8; 32], sequence: u64, reserves_digest: &[u8
     *h.finalize().as_bytes()
 }
 
+/// Canonical vault-state-anchor digest binding a vault to one attested
+/// `(sequence, reserves_digest)` state — `BLAKE3(DOMAIN_ANCHOR || vault_id
+/// || sequence_be || reserves_digest)`.  This is exactly the payload an
+/// owner-signed `VaultStateAnchorV1` signs over, so the RouteCommit hop's
+/// `vault_state_anchor_digest` (stamped by the routing binder from the
+/// composed vault state) and the vault-side unlock gate can independently
+/// recompute the same value and compare — the third anchor-binding field,
+/// alongside `vault_state_anchor_seq` and `vault_state_reserves_digest`.
+pub fn compute_anchor_digest(
+    vault_id: &[u8; 32],
+    sequence: u64,
+    reserves_digest: &[u8; 32],
+) -> [u8; 32] {
+    anchor_sign_payload(vault_id, sequence, reserves_digest)
+}
+
 /// Sign a vault state anchor with the owner's SPHINCS+ secret key.
 ///
 /// The signed payload is the BLAKE3 digest of
@@ -132,6 +148,22 @@ mod tests {
         let d1 = compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 30);
         let d2 = compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 30);
         assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn anchor_digest_is_deterministic_and_binds_every_field() {
+        let vault_id = [0x11u8; 32];
+        let rd = compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 30);
+        let base = compute_anchor_digest(&vault_id, 5, &rd);
+        // Deterministic.
+        assert_eq!(base, compute_anchor_digest(&vault_id, 5, &rd));
+        // It IS the payload an owner-signed anchor signs over.
+        assert_eq!(base, anchor_sign_payload(&vault_id, 5, &rd));
+        // Sensitive to vault_id, sequence, and reserves digest.
+        assert_ne!(base, compute_anchor_digest(&[0x22u8; 32], 5, &rd));
+        assert_ne!(base, compute_anchor_digest(&vault_id, 6, &rd));
+        let rd2 = compute_reserves_digest(b"AAA", b"BBB", 1001, 2000, 30);
+        assert_ne!(base, compute_anchor_digest(&vault_id, 5, &rd2));
     }
 
     #[test]

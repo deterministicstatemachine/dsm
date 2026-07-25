@@ -790,6 +790,14 @@ impl AppRouterImpl {
         // everyone but the first.
         let mut ads_after_composition: Vec<generated::RoutingVaultAdvertisementV1> =
             Vec::with_capacity(ads.len());
+        // Tier-2 anchor-state bindings, keyed by vault_id, computed from
+        // each vault's composed+synced current state.  Stamped onto the
+        // unsigned RouteCommit hops after binding so the signature + X
+        // cover them (see `stamp_anchor_bindings`).
+        let mut hop_anchor_bindings: std::collections::HashMap<
+            [u8; 32],
+            crate::sdk::route_commit_sdk::HopAnchorBinding,
+        > = std::collections::HashMap::new();
         for mut ad in ads.into_iter() {
             if ad.vault_id.len() != 32
                 || ad.reserve_a_u128.len() != 16
@@ -860,6 +868,34 @@ impl AppRouterImpl {
                     ad.reserve_a_u128 = composed.reserves_a.to_be_bytes().to_vec();
                     ad.reserve_b_u128 = composed.reserves_b.to_be_bytes().to_vec();
                     ad.updated_state_number = composed.sequence;
+                    // Record this vault's anchor-state binding over the
+                    // SAME composed values the vault-side unlock gate will
+                    // re-derive from its local `current_sequence` +
+                    // `current_reserves_digest`.  A vault that advances
+                    // between quote and unlock will mismatch here → the
+                    // Required-policy gate fails closed (stale-state
+                    // rejection).  Uses the ad's canonical token_a/token_b
+                    // ordering, matching the vault's fulfillment condition.
+                    let reserves_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
+                        &ad.token_a,
+                        &ad.token_b,
+                        composed.reserves_a,
+                        composed.reserves_b,
+                        ad.fee_bps,
+                    );
+                    let anchor_digest = dsm::dlv::vault_state_anchor::compute_anchor_digest(
+                        &vid,
+                        composed.sequence,
+                        &reserves_digest,
+                    );
+                    hop_anchor_bindings.insert(
+                        vid,
+                        crate::sdk::route_commit_sdk::HopAnchorBinding {
+                            seq: composed.sequence,
+                            reserves_digest: reserves_digest.to_vec(),
+                            anchor_digest: anchor_digest.to_vec(),
+                        },
+                    );
                     ads_after_composition.push(ad);
                 }
                 Err(e) => {
@@ -886,7 +922,7 @@ impl AppRouterImpl {
         let slippage_bps = req.slippage_bps;
         let floor_bps = req.floor_bps;
 
-        let unsigned = if requested_paths <= 1 {
+        let mut unsigned = if requested_paths <= 1 {
             let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
                 &ads,
                 &req.input_token,
@@ -963,6 +999,10 @@ impl AppRouterImpl {
                 }
             }
         };
+        // Stamp the anchor-state binding onto every hop (primary +
+        // fallbacks) BEFORE the client signs, so the SPHINCS+ signature
+        // and external commitment X cover it and it cannot be tampered.
+        crate::sdk::route_commit_sdk::stamp_anchor_bindings(&mut unsigned, &hop_anchor_bindings);
         let unsigned_bytes = unsigned.encode_to_vec();
         let resp = generated::AppStateResponse {
             key: "route.findAndBindBestPath".to_string(),
