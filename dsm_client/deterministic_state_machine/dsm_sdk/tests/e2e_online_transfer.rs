@@ -180,7 +180,6 @@ async fn e2e_online_transfer_era_and_custom_token() {
     println!("✅ Alice faucet: ERA = {}", era_after_faucet);
 
     // --- Alice: Create custom token "BETA" ---
-    let beta_policy_anchor = blake3::hash(b"DSM/test-policy-beta").as_bytes()[..32].to_vec();
     let beta_max_supply = {
         let mut buf = [0u8; 16];
         buf[8..].copy_from_slice(&1_000_000u64.to_be_bytes());
@@ -192,7 +191,14 @@ async fn e2e_online_transfer_era_and_custom_token() {
         alias: "Beta Token".to_string(),
         decimals: 2,
         max_supply_u128: beta_max_supply,
-        policy_anchor: beta_policy_anchor,
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
 
     let res = router

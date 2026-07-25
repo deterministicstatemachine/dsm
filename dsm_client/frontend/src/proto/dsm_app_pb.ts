@@ -7052,6 +7052,14 @@ export class PolicyAnchorV3 extends Message<PolicyAnchorV3> {
 
 /**
  * ---------------------------- Token Creation -----------------------------
+ * Token creation intent. The client sends only what the USER chose; Rust owns
+ * every protocol decision downstream — it packs the canonical v3 policy blob,
+ * derives the content-addressed anchor, publishes it, and creates the token in
+ * one invoke. The client never packs policy bytes and never supplies an anchor
+ * (a client-named anchor is precisely the value-safety hole closed earlier:
+ * the anchor becomes the issuance BalanceDelta's policy_commit).
+ *
+ *   5 = policy_anchor — removed; Rust derives it from the bytes it packs.
  *
  * @generated from message dsm.TokenCreateRequest
  */
@@ -7085,11 +7093,51 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
   maxSupplyU128 = new Uint8Array(0);
 
   /**
-   * anchor for the CPTA policy bytes
+   * big-endian u128
    *
-   * @generated from field: bytes policy_anchor = 5;
+   * @generated from field: bytes initial_alloc_u128 = 6;
    */
-  policyAnchor = new Uint8Array(0);
+  initialAllocU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bool mint_burn_enabled = 7;
+   */
+  mintBurnEnabled = false;
+
+  /**
+   * @generated from field: bool transferable = 8;
+   */
+  transferable = false;
+
+  /**
+   * @generated from field: bool unlimited_supply = 9;
+   */
+  unlimitedSupply = false;
+
+  /**
+   * 1..=255. Signatures required to authorize a mint or burn. The signer set
+   * itself is filled in by Rust (the creating device), never by the client.
+   *
+   * @generated from field: uint32 mint_burn_threshold = 10;
+   */
+  mintBurnThreshold = 0;
+
+  /**
+   * @generated from field: string description = 11;
+   */
+  description = "";
+
+  /**
+   * @generated from field: string icon_url = 12;
+   */
+  iconUrl = "";
+
+  /**
+   * Optional inline allowlist of 32-byte device ids.
+   *
+   * @generated from field: repeated bytes allowlist_device_ids = 13;
+   */
+  allowlistDeviceIds: Uint8Array[] = [];
 
   constructor(data?: PartialMessage<TokenCreateRequest>) {
     super();
@@ -7103,7 +7151,14 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
     { no: 2, name: "alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 4, name: "max_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "policy_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "initial_alloc_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "mint_burn_enabled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 8, name: "transferable", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "unlimited_supply", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 10, name: "mint_burn_threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 11, name: "description", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 12, name: "icon_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 13, name: "allowlist_device_ids", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenCreateRequest {

@@ -17,19 +17,47 @@ use super::response_helpers::{err, pack_envelope_ok};
 const POLICY_INDEX_KEY: &str = "dsm.policy.index";
 const POLICY_PREFIX: &str = "dsm.policy.";
 
+/// Canonical token-policy blob version. There is exactly one supported
+/// version: the blob is the anchored, content-addressed definition of a
+/// token, so a second parseable shape would be a second definition of the
+/// same thing. Older shapes are rejected, never migrated.
+const TOKEN_POLICY_VERSION: u8 = 3;
+
+/// Only fungible tokens exist. The kind byte is a discriminant, not an enum
+/// with unimplemented members: any other value is a hard parse error, so a
+/// policy claiming semantics the protocol does not enforce cannot be created.
+const TOKEN_KIND_FUNGIBLE: u8 = 0;
+
+const POLICY_FLAG_MINT_BURN: u8 = 0x01;
+const POLICY_FLAG_TRANSFERABLE: u8 = 0x02;
+const POLICY_FLAG_ALLOWLIST: u8 = 0x04;
+const POLICY_FLAG_UNLIMITED_SUPPLY: u8 = 0x08;
+
+const ALLOWLIST_KIND_NONE: u8 = 0;
+const ALLOWLIST_KIND_INLINE: u8 = 1;
+
+/// Upper bound on the mint/burn signer set. Bounded so a policy blob cannot
+/// be used to force unbounded work at parse or verification time.
+const MAX_POLICY_SIGNERS: usize = 16;
+
 #[derive(Debug, Clone, Default)]
 struct ParsedTokenPolicy {
     ticker: String,
     alias: String,
     decimals: u32,
-    max_supply: Option<String>,
+    max_supply: u128,
     initial_alloc: u128,
-    kind: Option<String>,
     description: Option<String>,
     icon_url: Option<String>,
     mint_burn_enabled: bool,
     transferable: bool,
     unlimited_supply: bool,
+    /// Signatures required to authorize a mint or burn (`k` in k-of-n).
+    mint_burn_threshold: u8,
+    /// The `n` in k-of-n: raw SPHINCS+ public keys permitted to mint/burn.
+    signers: Vec<Vec<u8>>,
+    /// Inline allowlist of 32-byte device ids; empty when not restricted.
+    allowlist_device_ids: Vec<[u8; 32]>,
 }
 
 fn app_state_get(key: &str) -> String {
@@ -68,103 +96,288 @@ fn persist_policy_to_prefs(anchor_b32: &str, policy_bytes: &[u8]) {
     app_state_set(POLICY_INDEX_KEY, &joined);
 }
 
+/// Byte-cursor over a policy blob. Every read is bounds-checked and the blob
+/// must be consumed exactly — trailing bytes are an error, so a truncated or
+/// padded policy can never parse as a valid one.
+struct PolicyReader<'a> {
+    b: &'a [u8],
+    off: usize,
+}
+
+impl<'a> PolicyReader<'a> {
+    fn new(b: &'a [u8]) -> Self {
+        Self { b, off: 0 }
+    }
+    fn u8(&mut self) -> Option<u8> {
+        let v = *self.b.get(self.off)?;
+        self.off += 1;
+        Some(v)
+    }
+    fn u16be(&mut self) -> Option<usize> {
+        let hi = *self.b.get(self.off)? as usize;
+        let lo = *self.b.get(self.off + 1)? as usize;
+        self.off += 2;
+        Some((hi << 8) | lo)
+    }
+    fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        let s = self.b.get(self.off..self.off + n)?;
+        self.off += n;
+        Some(s)
+    }
+    fn u128be(&mut self) -> Option<u128> {
+        let s = self.bytes(16)?;
+        let mut v = 0u128;
+        for b in s {
+            v = (v << 8) | (*b as u128);
+        }
+        Some(v)
+    }
+    fn utf8(&mut self, n: usize) -> Option<String> {
+        String::from_utf8(self.bytes(n)?.to_vec()).ok()
+    }
+    fn finished(&self) -> bool {
+        self.off == self.b.len()
+    }
+}
+
+/// Pack the canonical v3 policy blob.
+///
+/// This is the SOLE packer for the token-policy format. It lives in Rust
+/// because the blob is protocol — it is hashed into the CPTA anchor, it binds
+/// the issuance delta's asset, and it carries the mint/burn signer set. No
+/// other layer may construct it.
+///
+/// Layout (all integers big-endian):
+/// ```text
+///   u8   version = 3
+///   u8   kind = 0 (FUNGIBLE)
+///   u8   flags: 0x01 mint_burn | 0x02 transferable | 0x04 allowlist | 0x08 unlimited
+///   u8   mint_burn_threshold k        (1..=255)
+///   u8   signer_count n               (1..=16)
+///   n x  { u16 pk_len, pk }
+///   u8   ticker_len,  ticker
+///   u16  alias_len,   alias
+///   u8   decimals
+///   u128 max_supply
+///   u128 initial_alloc
+///   u16  description_len, description
+///   u16  icon_url_len,    icon_url
+///   u8   allowlist_kind (0 NONE | 1 INLINE)
+///   u16  allowlist_count, count x 32B device_id
+/// ```
+fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, String> {
+    if p.signers.is_empty() || p.signers.len() > MAX_POLICY_SIGNERS {
+        return Err(format!(
+            "policy: signer count must be 1..={MAX_POLICY_SIGNERS}, got {}",
+            p.signers.len()
+        ));
+    }
+    if p.mint_burn_threshold == 0 || (p.mint_burn_threshold as usize) > p.signers.len() {
+        return Err(format!(
+            "policy: threshold {} must be 1..={} (the signer count)",
+            p.mint_burn_threshold,
+            p.signers.len()
+        ));
+    }
+
+    let ticker = p.ticker.as_bytes();
+    let alias = p.alias.as_bytes();
+    let desc = p.description.as_deref().unwrap_or("").as_bytes();
+    let icon = p.icon_url.as_deref().unwrap_or("").as_bytes();
+
+    if ticker.len() > u8::MAX as usize {
+        return Err("policy: ticker too long".into());
+    }
+    for (label, field) in [("alias", alias), ("description", desc), ("icon_url", icon)] {
+        if field.len() > u16::MAX as usize {
+            return Err(format!("policy: {label} too long"));
+        }
+    }
+    if p.allowlist_device_ids.len() > u16::MAX as usize {
+        return Err("policy: allowlist too long".into());
+    }
+
+    let mut flags = 0u8;
+    if p.mint_burn_enabled {
+        flags |= POLICY_FLAG_MINT_BURN;
+    }
+    if p.transferable {
+        flags |= POLICY_FLAG_TRANSFERABLE;
+    }
+    if !p.allowlist_device_ids.is_empty() {
+        flags |= POLICY_FLAG_ALLOWLIST;
+    }
+    if p.unlimited_supply {
+        flags |= POLICY_FLAG_UNLIMITED_SUPPLY;
+    }
+
+    let mut out = vec![
+        TOKEN_POLICY_VERSION,
+        TOKEN_KIND_FUNGIBLE,
+        flags,
+        p.mint_burn_threshold,
+        p.signers.len() as u8,
+    ];
+    for pk in &p.signers {
+        if pk.len() > u16::MAX as usize {
+            return Err("policy: signer public key too long".into());
+        }
+        out.extend_from_slice(&(pk.len() as u16).to_be_bytes());
+        out.extend_from_slice(pk);
+    }
+    out.push(ticker.len() as u8);
+    out.extend_from_slice(ticker);
+    out.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+    out.extend_from_slice(alias);
+    out.push(p.decimals as u8);
+    out.extend_from_slice(&p.max_supply.to_be_bytes());
+    out.extend_from_slice(&p.initial_alloc.to_be_bytes());
+    out.extend_from_slice(&(desc.len() as u16).to_be_bytes());
+    out.extend_from_slice(desc);
+    out.extend_from_slice(&(icon.len() as u16).to_be_bytes());
+    out.extend_from_slice(icon);
+    if p.allowlist_device_ids.is_empty() {
+        out.push(ALLOWLIST_KIND_NONE);
+        out.extend_from_slice(&0u16.to_be_bytes());
+    } else {
+        out.push(ALLOWLIST_KIND_INLINE);
+        out.extend_from_slice(&(p.allowlist_device_ids.len() as u16).to_be_bytes());
+        for id in &p.allowlist_device_ids {
+            out.extend_from_slice(id);
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a canonical v3 policy blob. Fail-closed on every field: a policy
+/// that cannot be fully validated is not a policy, because it is the anchored
+/// definition of an asset's rules.
 fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
     let policy = generated::TokenPolicyV3::decode(raw_proto).ok()?;
-    let pb = policy.policy_bytes;
-    let version = *pb.first()?;
+    let mut r = PolicyReader::new(&policy.policy_bytes);
 
-    match version {
-        1 => {
-            let mut off = 1usize;
-            let ticker_len = *pb.get(off)? as usize;
-            off += 1;
-            let ticker = String::from_utf8(pb.get(off..off + ticker_len)?.to_vec()).ok()?;
-            off += ticker_len;
-
-            let alias_len = ((*pb.get(off)? as usize) << 8) | (*pb.get(off + 1)? as usize);
-            off += 2;
-            let alias = String::from_utf8(pb.get(off..off + alias_len)?.to_vec()).ok()?;
-            off += alias_len;
-
-            let decimals = *pb.get(off)? as u32;
-            Some(ParsedTokenPolicy {
-                ticker,
-                alias,
-                decimals,
-                ..Default::default()
-            })
-        }
-        2 => {
-            let mut off = 1usize;
-            let kind_byte = *pb.get(off)?;
-            off += 1;
-            let flags = *pb.get(off)?;
-            off += 1;
-            off += 1; // mintBurnThreshold
-
-            let ticker_len = *pb.get(off)? as usize;
-            off += 1;
-            let ticker = String::from_utf8(pb.get(off..off + ticker_len)?.to_vec()).ok()?;
-            off += ticker_len;
-
-            let alias_len = ((*pb.get(off)? as usize) << 8) | (*pb.get(off + 1)? as usize);
-            off += 2;
-            let alias = String::from_utf8(pb.get(off..off + alias_len)?.to_vec()).ok()?;
-            off += alias_len;
-
-            let decimals = *pb.get(off)? as u32;
-            off += 1;
-
-            let max_supply_bytes = pb.get(off..off + 16)?;
-            let mut max_supply = 0u128;
-            for b in max_supply_bytes {
-                max_supply = (max_supply << 8) | (*b as u128);
-            }
-            off += 16;
-
-            let initial_alloc_bytes = pb.get(off..off + 16)?;
-            let mut initial_alloc = 0u128;
-            for b in initial_alloc_bytes {
-                initial_alloc = (initial_alloc << 8) | (*b as u128);
-            }
-            off += 16;
-
-            let desc_len = ((*pb.get(off)? as usize) << 8) | (*pb.get(off + 1)? as usize);
-            off += 2;
-            let description = String::from_utf8(pb.get(off..off + desc_len)?.to_vec())
-                .ok()
-                .filter(|s| !s.is_empty());
-            off += desc_len;
-
-            let icon_len = ((*pb.get(off)? as usize) << 8) | (*pb.get(off + 1)? as usize);
-            off += 2;
-            let icon_url = String::from_utf8(pb.get(off..off + icon_len)?.to_vec())
-                .ok()
-                .filter(|s| !s.is_empty());
-
-            let kind = match kind_byte {
-                0 => Some("FUNGIBLE".to_string()),
-                1 => Some("NFT".to_string()),
-                2 => Some("SBT".to_string()),
-                _ => None,
-            };
-
-            Some(ParsedTokenPolicy {
-                ticker,
-                alias,
-                decimals,
-                max_supply: Some(max_supply.to_string()),
-                initial_alloc,
-                kind,
-                description,
-                icon_url,
-                mint_burn_enabled: flags & 0x01 != 0,
-                transferable: flags & 0x02 != 0,
-                unlimited_supply: flags & 0x08 != 0,
-            })
-        }
-        _ => None,
+    if r.u8()? != TOKEN_POLICY_VERSION {
+        return None;
     }
+    // Fungible only. NFT/SBT would need a per-item ownership primitive the
+    // protocol does not have; accepting them would mint a fungible balance
+    // under a policy claiming semantics nothing enforces.
+    if r.u8()? != TOKEN_KIND_FUNGIBLE {
+        return None;
+    }
+    let flags = r.u8()?;
+    let mint_burn_threshold = r.u8()?;
+    if mint_burn_threshold == 0 {
+        return None;
+    }
+
+    let signer_count = r.u8()? as usize;
+    if signer_count == 0 || signer_count > MAX_POLICY_SIGNERS {
+        return None;
+    }
+    if (mint_burn_threshold as usize) > signer_count {
+        // An unsatisfiable k-of-n token could never mint or burn again.
+        return None;
+    }
+    let mut signers: Vec<Vec<u8>> = Vec::with_capacity(signer_count);
+    for _ in 0..signer_count {
+        let pk_len = r.u16be()?;
+        if pk_len == 0 {
+            return None;
+        }
+        let pk = r.bytes(pk_len)?.to_vec();
+        if signers.contains(&pk) {
+            // Duplicate signers would let one key satisfy a k>1 threshold.
+            return None;
+        }
+        signers.push(pk);
+    }
+
+    let ticker_len = r.u8()? as usize;
+    let ticker = r.utf8(ticker_len)?;
+    if ticker.len() < 2 || ticker.len() > 8 {
+        return None;
+    }
+    let alias_len = r.u16be()?;
+    let alias = r.utf8(alias_len)?;
+    if alias.trim().is_empty() {
+        return None;
+    }
+
+    let decimals = r.u8()? as u32;
+    if decimals > 18 {
+        return None;
+    }
+
+    let max_supply = r.u128be()?;
+    let initial_alloc = r.u128be()?;
+    let unlimited_supply = flags & POLICY_FLAG_UNLIMITED_SUPPLY != 0;
+    if unlimited_supply {
+        // One canonical representation: an unlimited token carries no cap and
+        // no pre-allocation, so the two encodings can never disagree.
+        if max_supply != 0 || initial_alloc != 0 {
+            return None;
+        }
+    } else {
+        if max_supply == 0 {
+            return None;
+        }
+        if initial_alloc > max_supply {
+            return None;
+        }
+    }
+
+    let desc_len = r.u16be()?;
+    let description = r.utf8(desc_len).filter(|s| !s.is_empty());
+    let icon_len = r.u16be()?;
+    let icon_url = r.utf8(icon_len).filter(|s| !s.is_empty());
+
+    let allowlist_kind = r.u8()?;
+    let allowlist_count = r.u16be()?;
+    let mut allowlist_device_ids = Vec::with_capacity(allowlist_count);
+    match allowlist_kind {
+        ALLOWLIST_KIND_NONE => {
+            if allowlist_count != 0 {
+                return None;
+            }
+        }
+        ALLOWLIST_KIND_INLINE => {
+            if allowlist_count == 0 {
+                return None;
+            }
+            for _ in 0..allowlist_count {
+                let id: [u8; 32] = r.bytes(32)?.try_into().ok()?;
+                allowlist_device_ids.push(id);
+            }
+        }
+        _ => return None,
+    }
+    if (flags & POLICY_FLAG_ALLOWLIST != 0) != !allowlist_device_ids.is_empty() {
+        // The flag and the payload must agree; otherwise a reader that trusts
+        // the flag and one that trusts the payload disagree about the policy.
+        return None;
+    }
+
+    // Exact consumption: no trailing bytes.
+    if !r.finished() {
+        return None;
+    }
+
+    Some(ParsedTokenPolicy {
+        ticker,
+        alias,
+        decimals,
+        max_supply,
+        initial_alloc,
+        description,
+        icon_url,
+        mint_burn_enabled: flags & POLICY_FLAG_MINT_BURN != 0,
+        transferable: flags & POLICY_FLAG_TRANSFERABLE != 0,
+        unlimited_supply,
+        mint_burn_threshold,
+        signers,
+        allowlist_device_ids,
+    })
 }
 
 /// Publish policy bytes to the storage nodes.
@@ -365,14 +578,18 @@ impl AppRouterImpl {
                         Ok(None) => continue,
                         Err(e) => return err(format!("tokens.listCachedPolicies failed: {e}")),
                     };
-                    let meta = parse_token_policy(&policy_bytes).unwrap_or_default();
+                    // Skip anything that no longer parses rather than listing a
+                    // blank row — an unreadable policy is not a policy.
+                    let Some(meta) = parse_token_policy(&policy_bytes) else {
+                        continue;
+                    };
                     policies.push(generated::TokenPolicyCacheEntry {
                         policy_commit: anchor.to_vec(),
                         policy_bytes,
                         ticker: meta.ticker,
                         alias: meta.alias,
                         decimals: meta.decimals,
-                        max_supply: meta.max_supply.unwrap_or_default(),
+                        max_supply: meta.max_supply.to_string(),
                     });
                 }
 
@@ -414,15 +631,83 @@ impl AppRouterImpl {
                 if req.max_supply_u128.len() != 16 {
                     return err("token.create: max_supply_u128 must be 16 bytes".into());
                 }
-                if req.policy_anchor.len() != 32 {
-                    return err("token.create: policy_anchor must be 32 bytes".into());
+                if req.initial_alloc_u128.len() != 16 {
+                    return err("token.create: initial_alloc_u128 must be 16 bytes".into());
                 }
-                let policy_anchor: [u8; 32] = match req.policy_anchor.as_slice().try_into() {
-                    Ok(a) => a,
-                    Err(_) => {
-                        return err("token.create: policy_anchor must be 32 bytes".into());
+                let be_u128 = |b: &[u8]| -> u128 {
+                    let mut v = 0u128;
+                    for x in b {
+                        v = (v << 8) | (*x as u128);
                     }
+                    v
                 };
+                let max_supply = be_u128(&req.max_supply_u128);
+                let initial_alloc = be_u128(&req.initial_alloc_u128);
+
+                let mut allowlist_device_ids: Vec<[u8; 32]> = Vec::new();
+                for id in &req.allowlist_device_ids {
+                    match <[u8; 32]>::try_from(id.as_slice()) {
+                        Ok(v) => allowlist_device_ids.push(v),
+                        Err(_) => {
+                            return err(
+                                "token.create: allowlist device ids must be 32 bytes".into()
+                            );
+                        }
+                    }
+                }
+
+                // The mint/burn signer set. The creating device is the sole
+                // authority by default — the client never supplies a key, so
+                // it cannot name an authority it does not control.
+                let Some(creator_pk) = crate::sdk::app_state::AppState::get_public_key() else {
+                    return err("token.create: local signing identity unavailable".into());
+                };
+                let threshold = req.mint_burn_threshold.clamp(1, u8::MAX as u32) as u8;
+
+                let parsed = ParsedTokenPolicy {
+                    ticker: ticker.clone(),
+                    alias: req.alias.trim().to_string(),
+                    decimals: req.decimals,
+                    max_supply,
+                    initial_alloc,
+                    description: Some(req.description.trim().to_string()).filter(|s| !s.is_empty()),
+                    icon_url: Some(req.icon_url.trim().to_string()).filter(|s| !s.is_empty()),
+                    mint_burn_enabled: req.mint_burn_enabled,
+                    transferable: req.transferable,
+                    unlimited_supply: req.unlimited_supply,
+                    mint_burn_threshold: threshold,
+                    signers: vec![creator_pk],
+                    allowlist_device_ids,
+                };
+
+                // Pack the canonical policy HERE. The blob is protocol: it is
+                // hashed into the CPTA anchor and binds the issuance asset, so
+                // Rust is the only layer permitted to construct it.
+                let policy_bytes = match build_policy_v3_bytes(&parsed) {
+                    Ok(b) => b,
+                    Err(e) => return err(format!("token.create: {e}")),
+                };
+                let raw_proto = generated::TokenPolicyV3 {
+                    policy_bytes: policy_bytes.clone(),
+                }
+                .encode_to_vec();
+
+                // Round-trip the blob before committing to it: what we enforce
+                // must be exactly what we packed, and it must satisfy every
+                // parse invariant a remote verifier will apply.
+                let Some(parsed) = parse_token_policy(&raw_proto) else {
+                    return err(
+                        "token.create: packed policy failed its own validation — refusing to \
+                         create a token whose policy cannot be re-read"
+                            .into(),
+                    );
+                };
+
+                // The anchor is the content hash of those exact bytes.
+                let policy_anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+                    dsm::common::domain_tags::TAG_DSM_POLICY,
+                    &raw_proto,
+                );
 
                 // A new token may NEVER be issued under an existing asset's
                 // policy commit. The anchor becomes the `policy_commit` on the
@@ -436,65 +721,33 @@ impl AppRouterImpl {
                     ));
                 }
 
-                let mut max_supply: u128 = 0;
-                for b in &req.max_supply_u128 {
-                    max_supply = (max_supply << 8) | (*b as u128);
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(&policy_anchor);
+
+                // Mirror the policy so other devices can fetch it, then cache
+                // locally. Mirroring is best-effort; the anchor is already
+                // authoritative because it is content-addressed.
+                let mirrored = try_publish_policy_to_network(&raw_proto, &policy_anchor).await;
+                if !mirrored {
+                    log::warn!(
+                        "[token.create] policy {anchor_b32} not mirrored to any storage node; \
+                         remote verifiers may not be able to fetch it yet"
+                    );
                 }
+                self.cache_policy_bytes(policy_anchor, raw_proto.clone())
+                    .await;
 
                 let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher(
                     dsm::common::domain_tags::TAG_DSM_TOKEN_ID,
                 );
-                id_hasher.update(&req.policy_anchor);
+                id_hasher.update(&policy_anchor);
                 id_hasher.update(ticker.as_bytes());
                 let token_id =
                     crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
 
-                let anchor_b32 = crate::util::text_id::encode_base32_crockford(&policy_anchor);
                 let mut fields = HashMap::new();
-                fields.insert("max_supply".to_string(), max_supply.to_string());
+                fields.insert("max_supply".to_string(), parsed.max_supply.to_string());
                 fields.insert("policy_anchor".to_string(), anchor_b32.clone());
-
-                // Fail closed on the policy. A token whose policy could not be
-                // read or parsed would silently acquire default semantics
-                // (no kind, zero allocation, transferable) — a silently-wrong
-                // token is worse than no token.
-                let raw_proto = match self.load_policy_bytes(policy_anchor).await {
-                    Ok(Some(raw)) => raw,
-                    Ok(None) => {
-                        return err(format!(
-                            "token.create: policy {anchor_b32} not found — publish it before creating"
-                        ));
-                    }
-                    Err(e) => {
-                        return err(format!(
-                            "token.create: policy {anchor_b32} load failed: {e}"
-                        ));
-                    }
-                };
-
-                // Re-derive the anchor from the bytes we actually loaded and
-                // require it to equal the requested one. The anchor is the
-                // content hash, so this proves the policy we are about to
-                // enforce is exactly the policy the caller committed to.
-                let derived_anchor: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
-                    dsm::common::domain_tags::TAG_DSM_POLICY,
-                    &raw_proto,
-                );
-                if derived_anchor != policy_anchor {
-                    return err(format!(
-                        "token.create: policy bytes for {anchor_b32} do not hash to that anchor"
-                    ));
-                }
-
-                let Some(parsed) = parse_token_policy(&raw_proto) else {
-                    return err(format!(
-                        "token.create: policy {anchor_b32} is malformed and cannot be parsed"
-                    ));
-                };
-
-                if let Some(kind) = &parsed.kind {
-                    fields.insert("kind".to_string(), kind.clone());
-                }
+                fields.insert("kind".to_string(), "FUNGIBLE".to_string());
                 fields.insert(
                     "mint_burn_enabled".to_string(),
                     parsed.mint_burn_enabled.to_string(),
@@ -503,6 +756,10 @@ impl AppRouterImpl {
                 fields.insert(
                     "unlimited_supply".to_string(),
                     parsed.unlimited_supply.to_string(),
+                );
+                fields.insert(
+                    "mint_burn_threshold".to_string(),
+                    parsed.mint_burn_threshold.to_string(),
                 );
 
                 let metadata = TokenMetadata {
@@ -526,7 +783,13 @@ impl AppRouterImpl {
                     let transferable = parsed.transferable;
                     let description = parsed.description.clone();
                     let mut pf =
-                        dsm::types::policy_types::PolicyFile::new(&ticker, "1", "dsm_token_route");
+                        // Semantic version — the policy validator rejects a
+                        // bare "1", which silently broke every token create.
+                        dsm::types::policy_types::PolicyFile::new(
+                            &ticker,
+                            "1.0.0",
+                            "dsm_token_route",
+                        );
                     if let Some(desc) = description.as_ref() {
                         pf.description = Some(desc.clone());
                     }
@@ -663,176 +926,263 @@ mod tests {
     use super::*;
     use prost::Message;
 
-    /// Build a V1 policy_bytes blob: [version=1][ticker_len][ticker][alias_len_be16][alias][decimals]
-    fn build_v1_policy_bytes(ticker: &str, alias: &str, decimals: u8) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(1); // version
-        buf.push(ticker.len() as u8);
-        buf.extend_from_slice(ticker.as_bytes());
-        let alias_len = alias.len() as u16;
-        buf.push((alias_len >> 8) as u8);
-        buf.push((alias_len & 0xFF) as u8);
-        buf.extend_from_slice(alias.as_bytes());
-        buf.push(decimals);
-        buf
-    }
-
-    /// Build a V2 policy_bytes blob with the full field layout.
-    #[allow(clippy::too_many_arguments)]
-    fn build_v2_policy_bytes(
-        kind_byte: u8,
-        flags: u8,
-        ticker: &str,
-        alias: &str,
-        decimals: u8,
-        max_supply: u128,
-        description: &str,
-        icon_url: &str,
-    ) -> Vec<u8> {
-        let mut buf = vec![2, kind_byte, flags, 0]; // version + mintBurnThreshold
-
-        buf.push(ticker.len() as u8);
-        buf.extend_from_slice(ticker.as_bytes());
-
-        let alias_len = alias.len() as u16;
-        buf.push((alias_len >> 8) as u8);
-        buf.push((alias_len & 0xFF) as u8);
-        buf.extend_from_slice(alias.as_bytes());
-
-        buf.push(decimals);
-
-        // max_supply: 16 bytes big-endian
-        for i in (0..16).rev() {
-            buf.push(((max_supply >> (i * 8)) & 0xFF) as u8);
+    /// Build a canonical v3 policy via the SOLE production packer, so the
+    /// tests exercise the real format rather than a hand-rolled replica that
+    /// could drift from it.
+    fn v3_policy(p: ParsedTokenPolicy) -> Vec<u8> {
+        let bytes = build_policy_v3_bytes(&p).expect("packer should accept the fixture");
+        generated::TokenPolicyV3 {
+            policy_bytes: bytes,
         }
-        // initialAlloc: 16 bytes zeros
-        buf.extend_from_slice(&[0u8; 16]);
-
-        let desc_len = description.len() as u16;
-        buf.push((desc_len >> 8) as u8);
-        buf.push((desc_len & 0xFF) as u8);
-        buf.extend_from_slice(description.as_bytes());
-
-        let icon_len = icon_url.len() as u16;
-        buf.push((icon_len >> 8) as u8);
-        buf.push((icon_len & 0xFF) as u8);
-        buf.extend_from_slice(icon_url.as_bytes());
-
-        buf
+        .encode_to_vec()
     }
 
-    fn wrap_as_token_policy_v3(policy_bytes: Vec<u8>) -> Vec<u8> {
-        let msg = generated::TokenPolicyV3 { policy_bytes };
-        msg.encode_to_vec()
+    fn fungible_fixture() -> ParsedTokenPolicy {
+        ParsedTokenPolicy {
+            ticker: "DSM".into(),
+            alias: "DSM Token".into(),
+            decimals: 8,
+            max_supply: 1_000_000,
+            initial_alloc: 1_000,
+            description: Some("A test token".into()),
+            icon_url: None,
+            mint_burn_enabled: true,
+            transferable: true,
+            unlimited_supply: false,
+            mint_burn_threshold: 1,
+            signers: vec![vec![0xAB; 64]],
+            allowlist_device_ids: Vec::new(),
+        }
     }
 
-    // ── parse_token_policy tests ─────────────────────────────────────
+    // ── v3 round trip ────────────────────────────────────────────────
 
     #[test]
-    fn parse_v1_basic() {
-        let raw = build_v1_policy_bytes("ERA", "Era Token", 8);
-        let proto = wrap_as_token_policy_v3(raw);
-
-        let parsed = parse_token_policy(&proto).expect("should parse V1");
-        assert_eq!(parsed.ticker, "ERA");
-        assert_eq!(parsed.alias, "Era Token");
-        assert_eq!(parsed.decimals, 8);
-    }
-
-    #[test]
-    fn parse_v1_empty_ticker() {
-        let raw = build_v1_policy_bytes("", "Tok", 2);
-        let proto = wrap_as_token_policy_v3(raw);
-
-        let parsed = parse_token_policy(&proto).expect("should parse V1 with empty ticker");
-        assert_eq!(parsed.ticker, "");
-        assert_eq!(parsed.alias, "Tok");
-    }
-
-    #[test]
-    fn parse_v2_fungible() {
-        let raw = build_v2_policy_bytes(
-            0,    // FUNGIBLE
-            0x03, // mint_burn_enabled | transferable
-            "DSM",
-            "DSM Token",
-            18,
-            1_000_000,
-            "A test token",
-            "https://example.com/icon.png",
-        );
-        let proto = wrap_as_token_policy_v3(raw);
-
-        let parsed = parse_token_policy(&proto).expect("should parse V2 fungible");
-        assert_eq!(parsed.ticker, "DSM");
-        assert_eq!(parsed.alias, "DSM Token");
-        assert_eq!(parsed.decimals, 18);
-        assert_eq!(parsed.kind.as_deref(), Some("FUNGIBLE"));
+    fn v3_round_trips_every_field() {
+        let src = fungible_fixture();
+        let parsed = parse_token_policy(&v3_policy(src.clone())).expect("should parse v3");
+        assert_eq!(parsed.ticker, src.ticker);
+        assert_eq!(parsed.alias, src.alias);
+        assert_eq!(parsed.decimals, src.decimals);
+        assert_eq!(parsed.max_supply, src.max_supply);
+        assert_eq!(parsed.initial_alloc, src.initial_alloc);
+        assert_eq!(parsed.description, src.description);
         assert!(parsed.mint_burn_enabled);
         assert!(parsed.transferable);
         assert!(!parsed.unlimited_supply);
-        assert_eq!(parsed.max_supply.as_deref(), Some("1000000"));
-        assert_eq!(parsed.description.as_deref(), Some("A test token"));
-        assert_eq!(
-            parsed.icon_url.as_deref(),
-            Some("https://example.com/icon.png")
-        );
+        assert_eq!(parsed.mint_burn_threshold, 1);
+        assert_eq!(parsed.signers, src.signers);
+        assert!(parsed.allowlist_device_ids.is_empty());
     }
 
     #[test]
-    fn parse_v2_nft_with_unlimited_supply() {
-        let raw = build_v2_policy_bytes(
-            1,    // NFT
-            0x0A, // transferable(0x02) | unlimited_supply(0x08)
-            "MYNFT", "My NFT", 0, 0, "", "",
-        );
-        let proto = wrap_as_token_policy_v3(raw);
-
-        let parsed = parse_token_policy(&proto).expect("should parse V2 NFT");
-        assert_eq!(parsed.kind.as_deref(), Some("NFT"));
-        assert!(!parsed.mint_burn_enabled);
-        assert!(parsed.transferable);
+    fn v3_round_trips_unlimited_supply_and_allowlist() {
+        let src = ParsedTokenPolicy {
+            unlimited_supply: true,
+            max_supply: 0,
+            initial_alloc: 0,
+            allowlist_device_ids: vec![[0x11; 32], [0x22; 32]],
+            ..fungible_fixture()
+        };
+        let parsed = parse_token_policy(&v3_policy(src)).expect("should parse");
         assert!(parsed.unlimited_supply);
-        assert!(
-            parsed.description.is_none(),
-            "empty description should be None"
+        assert_eq!(parsed.max_supply, 0);
+        assert_eq!(parsed.allowlist_device_ids.len(), 2);
+    }
+
+    #[test]
+    fn v3_round_trips_multi_signer_threshold() {
+        let src = ParsedTokenPolicy {
+            mint_burn_threshold: 2,
+            signers: vec![vec![0x01; 64], vec![0x02; 64], vec![0x03; 64]],
+            ..fungible_fixture()
+        };
+        let parsed = parse_token_policy(&v3_policy(src)).expect("should parse");
+        assert_eq!(parsed.mint_burn_threshold, 2);
+        assert_eq!(parsed.signers.len(), 3);
+    }
+
+    // ── fail-closed rejections ───────────────────────────────────────
+
+    /// Mutate one byte of a valid v3 blob and assert it no longer parses.
+    fn assert_rejected_with(mutate: impl Fn(&mut Vec<u8>), why: &str) {
+        let bytes = build_policy_v3_bytes(&fungible_fixture()).expect("pack");
+        let mut mutated = bytes;
+        mutate(&mut mutated);
+        let proto = generated::TokenPolicyV3 {
+            policy_bytes: mutated,
+        }
+        .encode_to_vec();
+        assert!(parse_token_policy(&proto).is_none(), "{why}");
+    }
+
+    #[test]
+    fn v3_rejects_wrong_version() {
+        assert_rejected_with(|b| b[0] = 2, "v2 is deleted, not migrated");
+        assert_rejected_with(|b| b[0] = 4, "unknown future version must not parse");
+    }
+
+    /// NFT and SBT are not merely unsupported — the kind byte is a
+    /// discriminant, so a policy claiming those semantics cannot exist.
+    #[test]
+    fn v3_rejects_non_fungible_kinds() {
+        assert_rejected_with(|b| b[1] = 1, "NFT kind must be rejected");
+        assert_rejected_with(|b| b[1] = 2, "SBT kind must be rejected");
+        assert_rejected_with(|b| b[1] = 9, "unknown kind must be rejected");
+    }
+
+    #[test]
+    fn v3_rejects_zero_threshold_and_zero_signers() {
+        assert_rejected_with(|b| b[3] = 0, "threshold 0 is unsatisfiable");
+        assert_rejected_with(
+            |b| b[4] = 0,
+            "a token with no authority cannot mint or burn",
         );
-        assert!(parsed.icon_url.is_none(), "empty icon_url should be None");
+    }
+
+    /// k > n would produce a token that can never mint or burn again.
+    #[test]
+    fn v3_rejects_threshold_greater_than_signer_count() {
+        assert_rejected_with(|b| b[3] = 2, "k=2 with n=1 must be rejected");
     }
 
     #[test]
-    fn parse_v2_sbt() {
-        let raw = build_v2_policy_bytes(2, 0x00, "SBT1", "Soul Bound", 0, 1, "", "");
-        let proto = wrap_as_token_policy_v3(raw);
+    fn v3_rejects_duplicate_signers() {
+        // Two identical keys would let one signer satisfy a 2-of-2 threshold.
+        let src = ParsedTokenPolicy {
+            mint_burn_threshold: 2,
+            signers: vec![vec![0x07; 64], vec![0x07; 64]],
+            ..fungible_fixture()
+        };
+        let bytes = build_policy_v3_bytes(&src).expect("packer does not dedupe");
+        let proto = generated::TokenPolicyV3 {
+            policy_bytes: bytes,
+        }
+        .encode_to_vec();
+        assert!(
+            parse_token_policy(&proto).is_none(),
+            "duplicate signers must be rejected at parse"
+        );
+    }
 
-        let parsed = parse_token_policy(&proto).expect("should parse V2 SBT");
-        assert_eq!(parsed.kind.as_deref(), Some("SBT"));
-        assert!(!parsed.mint_burn_enabled);
-        assert!(!parsed.transferable);
+    /// Trailing bytes are the classic way a truncated/padded blob sneaks
+    /// through a length-prefixed parser.
+    #[test]
+    fn v3_rejects_trailing_bytes() {
+        assert_rejected_with(|b| b.push(0x00), "trailing byte must be rejected");
     }
 
     #[test]
-    fn parse_unknown_version_returns_none() {
-        let mut raw = vec![99u8]; // unknown version
-        raw.extend_from_slice(&[0; 20]);
-        let proto = wrap_as_token_policy_v3(raw);
+    fn v3_rejects_truncated_blob() {
+        assert_rejected_with(
+            |b| {
+                b.truncate(6);
+            },
+            "truncated blob must be rejected",
+        );
+    }
 
+    #[test]
+    fn v3_rejects_empty_and_garbage() {
+        let empty = generated::TokenPolicyV3 {
+            policy_bytes: Vec::new(),
+        }
+        .encode_to_vec();
+        assert!(parse_token_policy(&empty).is_none());
+        assert!(parse_token_policy(&[0xFF, 0xFF, 0xFF]).is_none());
+    }
+
+    /// `unlimited_supply` has exactly one canonical encoding, so a blob
+    /// carrying both a cap and the unlimited flag cannot parse.
+    #[test]
+    fn v3_rejects_unlimited_with_a_cap() {
+        let src = ParsedTokenPolicy {
+            unlimited_supply: true,
+            max_supply: 5,
+            initial_alloc: 0,
+            ..fungible_fixture()
+        };
+        let bytes = build_policy_v3_bytes(&src).expect("pack");
+        let proto = generated::TokenPolicyV3 {
+            policy_bytes: bytes,
+        }
+        .encode_to_vec();
         assert!(parse_token_policy(&proto).is_none());
     }
 
     #[test]
-    fn parse_empty_bytes_returns_none() {
-        assert!(parse_token_policy(&[]).is_none());
+    fn v3_rejects_initial_alloc_over_max_supply() {
+        let src = ParsedTokenPolicy {
+            max_supply: 100,
+            initial_alloc: 101,
+            ..fungible_fixture()
+        };
+        let bytes = build_policy_v3_bytes(&src).expect("pack");
+        let proto = generated::TokenPolicyV3 {
+            policy_bytes: bytes,
+        }
+        .encode_to_vec();
+        assert!(
+            parse_token_policy(&proto).is_none(),
+            "allocation above the cap must be rejected in Rust, not just in the UI"
+        );
     }
 
     #[test]
-    fn parse_truncated_v1_returns_none() {
-        let proto = wrap_as_token_policy_v3(vec![1]); // version only, no ticker
-        assert!(parse_token_policy(&proto).is_none());
+    fn v3_rejects_bad_ticker_and_decimals() {
+        let short = ParsedTokenPolicy {
+            ticker: "X".into(),
+            ..fungible_fixture()
+        };
+        let bytes = build_policy_v3_bytes(&short).expect("pack");
+        let proto = generated::TokenPolicyV3 {
+            policy_bytes: bytes,
+        }
+        .encode_to_vec();
+        assert!(parse_token_policy(&proto).is_none(), "1-char ticker");
+
+        assert_rejected_with(
+            |b| {
+                // decimals sits after: ver,kind,flags,k,n, [u16 pk_len + 64B pk],
+                // ticker_len + 3, alias_len(2) + 9
+                let idx = 5 + 2 + 64 + 1 + 3 + 2 + 9;
+                b[idx] = 19;
+            },
+            "decimals > 18 must be rejected",
+        );
     }
 
-    // ── list_cached_policy_ids_from_prefs ─────────────────────────────
+    // ── packer guards ────────────────────────────────────────────────
 
+    #[test]
+    fn packer_rejects_unsatisfiable_threshold() {
+        let bad = ParsedTokenPolicy {
+            mint_burn_threshold: 3,
+            signers: vec![vec![0x01; 64]],
+            ..fungible_fixture()
+        };
+        assert!(
+            build_policy_v3_bytes(&bad).is_err(),
+            "packer must refuse to build a token that can never mint or burn"
+        );
+    }
+
+    #[test]
+    fn packer_rejects_empty_and_oversized_signer_set() {
+        let none = ParsedTokenPolicy {
+            signers: Vec::new(),
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&none).is_err());
+
+        let too_many = ParsedTokenPolicy {
+            signers: (0..(MAX_POLICY_SIGNERS + 1))
+                .map(|i| vec![i as u8; 64])
+                .collect(),
+            ..fungible_fixture()
+        };
+        assert!(build_policy_v3_bytes(&too_many).is_err());
+    }
     #[test]
     fn list_cached_splits_comma_separated() {
         // Since list_cached_policy_ids_from_prefs calls app_state_get which
@@ -893,14 +1243,24 @@ mod tests {
         }
     }
 
+    /// The request carries the user's INTENT only. It must not carry a policy
+    /// anchor — Rust derives that from the bytes it packs, so a client can
+    /// never name the commit that binds the issuance delta's asset.
     #[test]
     fn token_create_request_roundtrip() {
         let req = generated::TokenCreateRequest {
             ticker: "ERA".into(),
             alias: "Era Token".into(),
             decimals: 8,
-            max_supply_u128: vec![0u8; 16],
-            policy_anchor: vec![0xAA; 32],
+            max_supply_u128: 1_000u128.to_be_bytes().to_vec(),
+            initial_alloc_u128: 250u128.to_be_bytes().to_vec(),
+            mint_burn_enabled: true,
+            transferable: true,
+            unlimited_supply: false,
+            mint_burn_threshold: 1,
+            description: "desc".into(),
+            icon_url: String::new(),
+            allowlist_device_ids: Vec::new(),
         };
         let bytes = req.encode_to_vec();
         let decoded = generated::TokenCreateRequest::decode(&*bytes).expect("decode");
@@ -908,6 +1268,8 @@ mod tests {
         assert_eq!(decoded.alias, "Era Token");
         assert_eq!(decoded.decimals, 8);
         assert_eq!(decoded.max_supply_u128.len(), 16);
-        assert_eq!(decoded.policy_anchor.len(), 32);
+        assert_eq!(decoded.initial_alloc_u128.len(), 16);
+        assert!(decoded.mint_burn_enabled);
+        assert_eq!(decoded.mint_burn_threshold, 1);
     }
 }

@@ -810,12 +810,33 @@ message PolicyAnchorV3 {
 }
 
 // ---------------------------- Token Creation -----------------------------
+// Token creation intent. The client sends only what the USER chose; Rust owns
+// every protocol decision downstream — it packs the canonical v3 policy blob,
+// derives the content-addressed anchor, publishes it, and creates the token in
+// one invoke. The client never packs policy bytes and never supplies an anchor
+// (a client-named anchor is precisely the value-safety hole closed earlier:
+// the anchor becomes the issuance BalanceDelta's policy_commit).
+//
+//   5 = policy_anchor — removed; Rust derives it from the bytes it packs.
 message TokenCreateRequest {
   string ticker = 1; // 2-8 uppercase
   string alias = 2; // display name
   uint32 decimals = 3; // 0..18
   bytes max_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128
-  bytes policy_anchor = 5 [(dsm_fixed_len)=32]; // anchor for the CPTA policy bytes
+  reserved 5;
+  reserved "policy_anchor";
+
+  bytes  initial_alloc_u128     = 6 [(dsm_fixed_len)=16]; // big-endian u128
+  bool   mint_burn_enabled      = 7;
+  bool   transferable           = 8;
+  bool   unlimited_supply       = 9;
+  // 1..=255. Signatures required to authorize a mint or burn. The signer set
+  // itself is filled in by Rust (the creating device), never by the client.
+  uint32 mint_burn_threshold    = 10;
+  string description            = 11 [(dsm_max_len)=65535];
+  string icon_url               = 12 [(dsm_max_len)=65535];
+  // Optional inline allowlist of 32-byte device ids.
+  repeated bytes allowlist_device_ids = 13 [(dsm_max_len)=32];
 }
 
 message TokenCreateResponse {

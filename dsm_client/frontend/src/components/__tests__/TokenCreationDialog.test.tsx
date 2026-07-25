@@ -11,25 +11,19 @@ jest.mock('@/services/dsmClient', () => ({
 }));
 
 describe('TokenCreationDialog token kind selector', () => {
-  it('keeps a single active token kind selection', () => {
+  // Fungible is the only kind the protocol enforces. NFT and SBT are not
+  // hidden behind a disabled control — they are deleted, because offering a
+  // kind whose semantics nothing enforces is a promise the state machine
+  // cannot keep.
+  it('offers only the fungible token kind', () => {
     render(<TokenCreationDialog onClose={jest.fn()} />);
 
     const fungible = screen.getByRole('button', { name: /FUNGIBLE/i });
-    const nft = screen.getByRole('button', { name: /NFT/i });
-    const sbt = screen.getByRole('button', { name: /SBT/i });
-
     expect(fungible).toHaveAttribute('aria-pressed', 'true');
     expect(fungible.className).toContain('tcd-kind-btn--active');
 
-    fireEvent.click(nft);
-    expect(nft).toHaveAttribute('aria-pressed', 'true');
-    expect(nft.className).toContain('tcd-kind-btn--active');
-    expect(fungible).toHaveAttribute('aria-pressed', 'false');
-
-    fireEvent.click(sbt);
-    expect(sbt).toHaveAttribute('aria-pressed', 'true');
-    expect(sbt.className).toContain('tcd-kind-btn--active');
-    expect(nft).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('button', { name: /^NFT$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^SBT$/i })).toBeNull();
   });
 
   it('does not show a transferable toggle on the rules step', () => {

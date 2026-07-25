@@ -5,7 +5,10 @@ import './TokenCreationDialog.css';
 import { dsmClient } from '@/services/dsmClient';
 
 // ── Types ────────────────────────────────────────────────────────────────────
-type TokenKind = 'FUNGIBLE' | 'NFT' | 'SBT';
+// Fungible is the only token kind the protocol enforces. NFT/SBT would need
+// a per-item ownership primitive that does not exist, and the Rust policy
+// parser rejects their discriminant outright — so they are not offered.
+type TokenKind = 'FUNGIBLE';
 type AllowlistKind = 'NONE' | 'INLINE';
 
 interface WizardState {
@@ -39,10 +42,6 @@ const DEFAULT: WizardState = {
   allowlistKind: 'NONE',
   allowlistData: '',
 };
-
-function isTransferableKind(kind: TokenKind): boolean {
-  return kind !== 'SBT';
-}
 
 // ── Validation ───────────────────────────────────────────────────────────────
 function validateStep1(s: WizardState): string | null {
@@ -110,8 +109,6 @@ function Toggle({ checked, onChange, id }: { checked: boolean; onChange: (v: boo
 // ── Sub-component: Step 1 — Token Identity ───────────────────────────────────
 const KIND_META: { kind: TokenKind; icon: string; name: string; desc: string }[] = [
   { kind: 'FUNGIBLE', icon: 'F', name: 'FUNGIBLE', desc: 'Interchangeable units' },
-  { kind: 'NFT',      icon: 'N', name: 'NFT',      desc: 'Unique collectible' },
-  { kind: 'SBT',      icon: 'S', name: 'SBT',      desc: 'Soul-bound credential' },
 ];
 
 function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
@@ -211,21 +208,12 @@ function Step2({
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
 }) {
-  const notFungible = state.kind !== 'FUNGIBLE';
-
   return (
     <div>
       <div className="tcd-section-title">Precision</div>
 
       <div className="tcd-field">
-        <label className="tcd-label">
-          Decimals
-          {notFungible && (
-            <span className="tcd-hint" style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
-              {' '}— locked to 0 for {state.kind}
-            </span>
-          )}
-        </label>
+        <label className="tcd-label">Decimals</label>
         <div className="tcd-slider-row">
           <input
             type="range"
@@ -233,8 +221,7 @@ function Step2({
             min={0}
             max={18}
             value={effectiveDecimals}
-            disabled={notFungible}
-            onChange={e => !notFungible && set({ decimals: Number(e.target.value) })}
+            onChange={e => set({ decimals: Number(e.target.value) })}
           />
           <span className="tcd-slider-val">{effectiveDecimals}</span>
         </div>
@@ -500,9 +487,10 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
     });
   }, []);
 
-  // Derived helpers
-  const effectiveDecimals     = state.kind !== 'FUNGIBLE' ? 0 : state.decimals;
-  const effectiveTransferable = isTransferableKind(state.kind);
+  // Derived helpers. Only fungible tokens exist, so decimals are whatever the
+  // user chose and the token is transferable.
+  const effectiveDecimals     = state.decimals;
+  const effectiveTransferable = true;
 
   const navigate = useCallback((to: number) => {
     setDir(to > step ? 'fwd' : 'bck');

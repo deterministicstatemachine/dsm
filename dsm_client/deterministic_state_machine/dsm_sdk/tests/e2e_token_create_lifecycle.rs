@@ -119,7 +119,6 @@ async fn e2e_token_create_lifecycle() {
     println!("✅ Faucet claim: ERA = {}", era);
 
     // ========== TEST 1: Create token "BETA" ==========
-    let beta_policy_anchor = blake3::hash(b"DSM/test-policy-beta").as_bytes()[..32].to_vec();
     let beta_max_supply = {
         let mut buf = [0u8; 16];
         buf[8..].copy_from_slice(&1_000_000u64.to_be_bytes());
@@ -131,7 +130,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Beta Token".to_string(),
         decimals: 2,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: beta_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
 
     let res = router
@@ -160,10 +166,12 @@ async fn e2e_token_create_lifecycle() {
     println!("✅ Token BETA created: token_id={}", beta_token_id);
 
     // ========== TEST 2: Verify deterministic token_id ==========
+    // The anchor is derived by Rust from the policy it packed and returned on
+    // the response — the client never names it.
     let expected_token_id = {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"DSM/token-id\0");
-        hasher.update(&beta_policy_anchor);
+        hasher.update(&beta_resp.policy_anchor);
         hasher.update(b"BETA");
         dsm_sdk::util::text_id::encode_base32_crockford(hasher.finalize().as_bytes())
     };
@@ -190,13 +198,19 @@ async fn e2e_token_create_lifecycle() {
     }
 
     // ========== TEST 4: Create second token "GAMMA" ==========
-    let gamma_policy_anchor = blake3::hash(b"DSM/test-policy-gamma").as_bytes()[..32].to_vec();
     let gamma_req = proto::TokenCreateRequest {
         ticker: "GAMMA".to_string(),
         alias: "Gamma Token".to_string(),
         decimals: 0,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: gamma_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
 
     let res = router
@@ -232,7 +246,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Beta Token".to_string(),
         decimals: 2,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: beta_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
 
     let res = router
@@ -267,7 +288,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Bad".to_string(),
         decimals: 0,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: beta_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
     let res = router
         .invoke(AppInvoke {
@@ -283,7 +311,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Bad".to_string(),
         decimals: 0,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: beta_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
     let res = router
         .invoke(AppInvoke {
@@ -299,7 +334,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Bad".to_string(),
         decimals: 255,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: beta_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
     let res = router
         .invoke(AppInvoke {
@@ -315,7 +357,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Bad".to_string(),
         decimals: 0,
         max_supply_u128: beta_max_supply.clone(),
-        policy_anchor: vec![0u8; 16], // wrong size
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
     let res = router
         .invoke(AppInvoke {
@@ -331,7 +380,14 @@ async fn e2e_token_create_lifecycle() {
         alias: "Bad".to_string(),
         decimals: 0,
         max_supply_u128: vec![0u8; 8], // wrong size
-        policy_anchor: beta_policy_anchor.clone(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
     };
     let res = router
         .invoke(AppInvoke {

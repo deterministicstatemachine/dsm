@@ -12,118 +12,54 @@ import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { emitWalletRefresh } from './events';
 
+/**
+ * Create a native DSM token.
+ *
+ * PURE TRANSPORT. Every protocol decision lives in Rust: it packs the
+ * canonical v3 policy blob, derives the content-addressed CPTA anchor,
+ * publishes it, and creates the token — all in one invoke. This layer must
+ * never pack policy bytes, compute an anchor, or validate protocol rules;
+ * doing so would put a second (and inevitably divergent) definition of the
+ * format outside the state machine.
+ *
+ * `details` carries the user's intent only.
+ */
 export async function createToken(details: any): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
-    const ticker = String(details?.ticker || '').trim().toUpperCase();
-    const alias = String(details?.alias || '').trim();
-    const decimals = Number(details?.decimals ?? 0);
-    const maxSupplyStr = String(details?.maxSupply ?? '').trim();
-
-    if (!ticker || ticker.length < 2 || ticker.length > 8) {
-      throw new Error('createToken: ticker must be 2-8 uppercase chars');
-    }
-    if (!alias) throw new Error('createToken: alias required');
-    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
-      throw new Error('createToken: decimals must be 0..18');
-    }
-    if (!/^[0-9]+$/.test(maxSupplyStr)) {
-      throw new Error('createToken: maxSupply must be a positive integer string');
-    }
-
-    const enc = new TextEncoder();
-    const tickerBytes = enc.encode(ticker);
-    const aliasBytes = enc.encode(alias);
-
-    if (tickerBytes.length > 255) throw new Error('createToken: ticker too long');
-    if (aliasBytes.length > 65535) throw new Error('createToken: alias too long');
-
-    const maxSupply = BigInt(maxSupplyStr);
-    if (maxSupply < 0n) throw new Error('createToken: maxSupply must be >= 0');
-
-    const kindMap: Record<string, number> = { FUNGIBLE: 0, NFT: 1, SBT: 2 };
-    const kindByte = kindMap[String(details?.kind || 'FUNGIBLE')] ?? 0;
-    const unlimitedSupplyV2 = Boolean(details?.unlimitedSupply);
-    const mintBurnEnabled = Boolean(details?.mintBurnEnabled);
-    const transferable = Boolean(details?.transferable !== false);
-    const allowlistKind = String(details?.allowlistKind || 'NONE') === 'INLINE' ? 'INLINE' : 'NONE';
-    const mintBurnThreshold = Math.max(1, Math.min(255, Number(details?.mintBurnThreshold ?? 1)));
-    const descBytes   = enc.encode(String(details?.description || '').trim());
-    const iconBytes   = enc.encode(String(details?.iconUrl    || '').trim());
-    const allocStr    = String(details?.initialAlloc || '0').trim();
-    const allocBig    = /^[0-9]+$/.test(allocStr) ? BigInt(allocStr) : 0n;
-    const alDataStr   = allowlistKind === 'INLINE' ? String(details?.allowlistData || '').trim() : '';
-    const alDataBytes = enc.encode(alDataStr);
-
-    const flags =
-      (mintBurnEnabled          ? 0x01 : 0) |
-      (transferable             ? 0x02 : 0) |
-      (allowlistKind !== 'NONE' ? 0x04 : 0) |
-      (unlimitedSupplyV2        ? 0x08 : 0);
-
-    const maxSupplyBytes = new Uint8Array(16);
-    {
-      let tmp = maxSupply;
+    const u128be = (v: string | number | undefined): Uint8Array => {
+      const out = new Uint8Array(16);
+      let n = BigInt(String(v ?? '0').trim() || '0');
+      if (n < 0n) throw new Error('createToken: amounts must be non-negative');
       for (let i = 15; i >= 0; i--) {
-        maxSupplyBytes[i] = Number(tmp & 0xffn);
-        tmp >>= 8n;
+        out[i] = Number(n & 0xffn);
+        n >>= 8n;
       }
-    }
+      if (n !== 0n) throw new Error('createToken: amount exceeds u128');
+      return out;
+    };
 
-    const allocBytes = new Uint8Array(16);
-    {
-      let tmp2 = allocBig;
-      for (let i = 15; i >= 0; i--) {
-        allocBytes[i] = Number(tmp2 & 0xffn);
-        tmp2 >>= 8n;
-      }
-    }
-    const payloadSize = 1 + 1 + 1 + 1                        // ver + kind + flags + threshold
-      + 1 + tickerBytes.length                               // tickerLen + ticker
-      + 2 + aliasBytes.length                                // aliasLen(2B) + alias
-      + 1 + 16 + 16                                          // decimals + maxSupply + initialAlloc
-      + 2 + descBytes.length                                 // descLen(2B) + desc
-      + 2 + iconBytes.length                                 // iconLen(2B) + icon
-      + 1 + 2 + alDataBytes.length;                          // alKind + alDataLen(2B) + alData
-    const policyPayload = new Uint8Array(payloadSize);
-    let off = 0;
-    policyPayload[off++] = 2;
-    policyPayload[off++] = kindByte;
-    policyPayload[off++] = flags;
-    policyPayload[off++] = mintBurnThreshold;
-    policyPayload[off++] = tickerBytes.length & 0xff;
-    policyPayload.set(tickerBytes, off); off += tickerBytes.length;
-    policyPayload[off++] = (aliasBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = aliasBytes.length & 0xff;
-    policyPayload.set(aliasBytes, off); off += aliasBytes.length;
-    policyPayload[off++] = decimals & 0xff;
-    policyPayload.set(maxSupplyBytes, off); off += 16;
-    policyPayload.set(allocBytes, off); off += 16;
-    policyPayload[off++] = (descBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = descBytes.length & 0xff;
-    policyPayload.set(descBytes, off); off += descBytes.length;
-    policyPayload[off++] = (iconBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = iconBytes.length & 0xff;
-    policyPayload.set(iconBytes, off); off += iconBytes.length;
-    policyPayload[off++] = allowlistKind === 'INLINE' ? 1 : 0;
-    policyPayload[off++] = (alDataBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = alDataBytes.length & 0xff;
-    policyPayload.set(alDataBytes, off);
-
-    const policy = new pb.TokenPolicyV3({ policyBytes: policyPayload as any });
-    const canonicalBytes = policy.toBinary();
-
-    const published = await publishTokenPolicyBytes(new Uint8Array(canonicalBytes));
-    const anchorBytes = published.anchorBytes;
-    if (!anchorBytes || anchorBytes.length !== 32) {
-      throw new Error('createToken: policy publish failed');
-    }
+    const allowlist: Uint8Array[] =
+      String(details?.allowlistKind || 'NONE') === 'INLINE'
+        ? String(details?.allowlistData || '')
+            .split(/[\s,]+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => new Uint8Array(decodeBase32Crockford(s)))
+        : [];
 
     const req = new pb.TokenCreateRequest({
-      ticker,
-      alias,
-      decimals,
-      maxSupplyU128: maxSupplyBytes as any,
-      policyAnchor: anchorBytes as any,
+      ticker: String(details?.ticker || '').trim().toUpperCase(),
+      alias: String(details?.alias || '').trim(),
+      decimals: Number(details?.decimals ?? 0),
+      maxSupplyU128: u128be(details?.maxSupply) as any,
+      initialAllocU128: u128be(details?.initialAlloc) as any,
+      mintBurnEnabled: Boolean(details?.mintBurnEnabled),
+      transferable: Boolean(details?.transferable !== false),
+      unlimitedSupply: Boolean(details?.unlimitedSupply),
+      mintBurnThreshold: Number(details?.mintBurnThreshold ?? 1),
+      description: String(details?.description || '').trim(),
+      iconUrl: String(details?.iconUrl || '').trim(),
+      allowlistDeviceIds: allowlist as any,
     } as any);
 
     const argPack = new pb.ArgPack({
@@ -132,46 +68,36 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
     });
 
     const resBytes = await routerInvokeBin('token.create', new Uint8Array(argPack.toBinary()));
-
-    // Canonical Envelope v3 decode (TokenCreateResponse now in Envelope payload oneof)
     const env = decodeFramedEnvelopeV3(resBytes);
-    
+
     if (env.payload.case === 'error') {
       throw new Error(`Token creation failed: ${env.payload.value.message}`);
     }
-    
     if (env.payload.case !== 'tokenCreateResponse') {
       throw new Error(`Expected tokenCreateResponse, got ${env.payload.case}`);
     }
-    
+
     const resp = env.payload.value;
-    const anchorB32 = resp.policyAnchor?.length === 32
-      ? encodeBase32Crockford(resp.policyAnchor)
-      : published.anchorBase32;
-    const tokenId = resp.tokenId || undefined;
     const success = Boolean(resp.success);
-    // Notify the wallet UI that a new token has been registered so
-    // `TokenManagementScreen` (and any other listener) can re-fetch
-    // its balances + metadata cache without the user having to pull-
-    // to-refresh.  Single canonical refresh event per
-    // `events.ts::DSM_WALLET_REFRESH_EVENT`.
+    const tokenId = resp.tokenId || undefined;
+    const anchorBase32 =
+      resp.policyAnchor?.length === 32 ? encodeBase32Crockford(resp.policyAnchor) : undefined;
+
+    // Single canonical refresh event so the wallet re-fetches balances and
+    // metadata without a manual pull-to-refresh.
     if (success) {
       try {
         emitWalletRefresh({
           source: 'token.create',
           tokenId: tokenId ?? '',
-          anchorBase32: anchorB32 ?? '',
+          anchorBase32: anchorBase32 ?? '',
         });
       } catch (e) {
         console.warn('createToken: emitWalletRefresh failed (non-fatal):', e);
       }
     }
-    return {
-      success,
-      tokenId,
-      anchorBase32: anchorB32,
-      message: resp.message || undefined,
-    };
+
+    return { success, tokenId, anchorBase32, message: resp.message || undefined };
   } catch (e) {
     console.warn('createToken failed:', e);
     return { success: false, message: e instanceof Error ? e.message : String(e) };
