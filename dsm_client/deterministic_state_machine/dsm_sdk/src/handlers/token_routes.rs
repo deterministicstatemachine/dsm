@@ -507,6 +507,11 @@ impl AppRouterImpl {
 
         let mut restored = 0usize;
         for row in tokens {
+            // Seed the display resolver first and unconditionally: even if the
+            // policy is momentarily unavailable, the wallet can still NAME the
+            // balance rather than omitting it.
+            dsm::core::token::register_policy_commit_ticker(row.policy_commit, &row.ticker);
+
             let Ok(Some(raw_proto)) =
                 crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
             else {
@@ -959,14 +964,44 @@ impl AppRouterImpl {
                         amount: initial_alloc_u64,
                     }];
 
-                    if let Err(e) = self.core_sdk.execute_on_relationship(
+                    let outcome = match self.core_sdk.execute_on_relationship(
                         rel_key,
                         dev_id,
                         mint_op,
                         &deltas,
                         Some(init_tip),
                     ) {
-                        return err(format!("token.create: initial-allocation Mint failed: {e}"));
+                        Ok((_state, outcome)) => outcome,
+                        Err(e) => {
+                            return err(format!(
+                                "token.create: initial-allocation Mint failed: {e}"
+                            ));
+                        }
+                    };
+
+                    // Write the balance projection from the canonical head the
+                    // advance just produced. Previously the outcome was
+                    // discarded, so a freshly created token had a canonical
+                    // balance but no projection row — the wallet showed
+                    // nothing until some unrelated sweep happened to rebuild it.
+                    let device_txt = crate::util::text_id::encode_base32_crockford(&dev_id);
+                    if let Err(e) =
+                        crate::storage::client_db::build_balance_projection_from_device_head(
+                            &device_txt,
+                            &ticker,
+                            &policy_commit,
+                            &outcome.new_device_state,
+                            initial_alloc_u64,
+                            0,
+                        )
+                        .and_then(|record| {
+                            crate::storage::client_db::upsert_balance_projection(&record)
+                        })
+                    {
+                        log::warn!(
+                            "[token.create] projection write failed for {ticker} (canonical state \
+                             is correct; a repair sweep will reconcile): {e}"
+                        );
                     }
                 }
 

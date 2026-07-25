@@ -686,10 +686,17 @@ impl<I: Send + Sync> TokenSDK<I> {
             metadata.policy_anchor = Some(policy_anchor);
         }
 
-        crate::policy::strict_policy_commit_for_token(
+        let policy_commit = crate::policy::strict_policy_commit_for_token(
             &metadata.token_id,
             metadata.policy_anchor.as_deref(),
         )?;
+
+        // Teach core how to NAME this token's balances. Core owns the
+        // compatibility projection but cannot see this registry, so without
+        // this every created token's balance is unnameable and therefore
+        // omitted from the projection. Display-only: `policy_commit` remains
+        // the canonical key.
+        dsm::core::token::register_policy_commit_ticker(policy_commit, &metadata.symbol);
 
         self.token_metadata
             .write()

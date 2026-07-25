@@ -188,3 +188,57 @@ fn duplicate_creation_is_rejected_by_the_registry() {
         "exactly one row must exist for one token identity"
     );
 }
+
+/// READ-BACK PROOF. A created token must surface in the canonical projection
+/// under its REAL ticker, never the old `{prefix}|?` placeholder, and with the
+/// decimals it was created with rather than a hardcoded 0.
+#[test]
+#[serial_test::serial]
+fn created_token_projects_under_its_real_ticker() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    let resp = create_token(&r, "READBK");
+
+    let row = token_registry::get_token(&resp.token_id)
+        .expect("registry read")
+        .expect("token recorded");
+
+    // Core can now NAME this balance.
+    let ticker = dsm::core::token::resolve_ticker_for_policy_commit(&row.policy_commit)
+        .expect("a created token's ticker must be resolvable for display");
+    assert_eq!(ticker, "READBK");
+
+    // ...and the canonical balance key carries the real ticker suffix, not "?".
+    let key = dsm::core::token::canonical_balance_key_for_commit(&row.policy_commit, &[0xBB; 32])
+        .expect("balance key must be derivable");
+    assert!(
+        key.ends_with("|READBK"),
+        "balance key must end with the real ticker, got {key}"
+    );
+    assert!(
+        !key.ends_with("|?"),
+        "the placeholder key is deleted — an unnameable balance is omitted, never shown wrong"
+    );
+
+    // Decimals come from the registry, not a hardcoded default.
+    assert_eq!(row.decimals, 8, "created token keeps its decimals");
+}
+
+/// An unknown policy commit must yield NO key at all. Absent is the honest
+/// failure mode; a row under a wrong token id would be worse than none.
+#[test]
+#[serial_test::serial]
+fn unnameable_balance_yields_no_key() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let unknown = [0x7Eu8; 32];
+    assert!(
+        dsm::core::token::resolve_ticker_for_policy_commit(&unknown).is_none(),
+        "an unregistered commit has no ticker"
+    );
+    assert!(
+        dsm::core::token::canonical_balance_key_for_commit(&unknown, &[0xBB; 32]).is_none(),
+        "an unnameable balance must produce no projection key"
+    );
+}

@@ -1177,22 +1177,14 @@ impl CoreSDK {
                 outcome.new_device_state.public_key().to_vec(),
             );
             // Sync balances from DeviceState → legacy HashMap<String, Balance>
-            // using the canonical `{prefix}|{token_id}` key format from
-            // derive_canonical_balance_key so balance.list can locate balances
-            // by their {token_id} suffix (e.g. "ERA", "dBTC").
+            // through the SAME shared helper the state machine's projection
+            // uses, so the two views cannot drift. An unnameable balance is
+            // omitted rather than surfaced under a `{prefix}|?` placeholder.
             let public_key = outcome.new_device_state.public_key();
             for (pc, val) in outcome.new_device_state.balances_snapshot() {
-                let token_id =
-                    dsm::core::token::builtin_token_id_for_policy_commit(pc).unwrap_or("");
-                let key = if token_id.is_empty() {
-                    let prefix = u128::from_le_bytes({
-                        let mut a = [0u8; 16];
-                        a.copy_from_slice(&pc[..16]);
-                        a
-                    });
-                    format!("{prefix}|?")
-                } else {
-                    dsm::core::token::derive_canonical_balance_key(pc, public_key, token_id)
+                let Some(key) = dsm::core::token::canonical_balance_key_for_commit(pc, public_key)
+                else {
+                    continue;
                 };
                 s.token_balances.insert(
                     key,
