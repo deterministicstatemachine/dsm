@@ -502,6 +502,22 @@ fn derive_policy_file(
     pf
 }
 
+/// Tell the WebView its token set changed.
+///
+/// Emitted from Rust beside the registry write, because the write is what made
+/// it true. The screen reloads from the persisted registry rather than trusting
+/// optimistic frontend state — an adopted token that exists only in React is a
+/// token this device cannot actually hold.
+#[cfg(all(target_os = "android", feature = "jni"))]
+fn push_wallet_refresh() {
+    let _ = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]);
+}
+
+#[cfg(not(all(target_os = "android", feature = "jni")))]
+fn push_wallet_refresh() {
+    // No-op on host builds; there is no WebView to notify.
+}
+
 impl AppRouterImpl {
     /// Re-register every persisted token's policy after a restart.
     ///
@@ -666,6 +682,133 @@ impl AppRouterImpl {
                     Ok(None) => err("tokens.getPolicy: policy not found".into()),
                     Err(e) => err(format!("tokens.getPolicy failed: {e}")),
                 }
+            }
+
+            // Adopt a token created by someone else, by its CPTA anchor.
+            //
+            // A device cannot hold or move a token whose policy it does not
+            // have: balances are keyed by policy commitment, and the enforcer
+            // needs the committed rules to decide anything. Creating a token
+            // registers it on the creator's device only — every other device
+            // has to ADD it, which is this route. Without it a freshly created
+            // token can never be received, which is exactly how a transfer to
+            // a second device fails with nothing obviously wrong.
+            //
+            // This is a local registration, not a state transition: no advance,
+            // no balance change, and no fee. Only the creator burns the fee.
+            //
+            // The anchor is re-derived from the fetched bytes and must match
+            // what was asked for. That is the same rule creation enforces, and
+            // for the same reason: a storage node that could hand back
+            // arbitrary bytes under a requested anchor would be defining the
+            // policy this device then enforces.
+            "tokens.addByAnchor" => {
+                if q.params.len() != 32 {
+                    return err(
+                        "tokens.addByAnchor: params must be exactly 32 bytes (policy anchor)"
+                            .into(),
+                    );
+                }
+                let Ok(anchor) = <[u8; 32]>::try_from(&q.params[..]) else {
+                    return err("tokens.addByAnchor: invalid anchor length".into());
+                };
+
+                let policy_bytes = match self.load_policy_bytes(anchor).await {
+                    Ok(Some(b)) if !b.is_empty() => b,
+                    Ok(_) => {
+                        return err(
+                            "POLICY_NOT_FOUND: no policy is published under that anchor".into()
+                        )
+                    }
+                    Err(e) => return err(format!("tokens.addByAnchor: {e}")),
+                };
+
+                let mut ah = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_POLICY,
+                );
+                ah.update(&policy_bytes);
+                let derived: [u8; 32] = *ah.finalize().as_bytes();
+                if derived != anchor {
+                    return err(
+                        "tokens.addByAnchor: fetched policy does not hash to the requested anchor"
+                            .into(),
+                    );
+                }
+
+                let Some(parsed) = parse_token_policy(&policy_bytes) else {
+                    return err(
+                        "tokens.addByAnchor: policy is not a readable v3 token policy".into(),
+                    );
+                };
+
+                let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_TOKEN_ID,
+                );
+                id_hasher.update(&anchor);
+                id_hasher.update(parsed.ticker.as_bytes());
+                let token_id =
+                    crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
+
+                // Adding the same token twice is a no-op, not an error — a user
+                // who taps twice, or adds a token they already hold, has done
+                // nothing wrong. A DIFFERENT token claiming the ticker is a
+                // conflict and is refused.
+                match crate::storage::client_db::token_registry::get_token_by_ticker(&parsed.ticker)
+                {
+                    Ok(Some(row)) if row.token_id != token_id => {
+                        return err(format!(
+                            "TICKER_CONFLICT: {} is already held by a different token on this \
+                             device; adopting this one would make the ticker ambiguous",
+                            parsed.ticker
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => return err(format!("tokens.addByAnchor: registry read failed: {e}")),
+                }
+
+                if let Err(e) =
+                    crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
+                {
+                    return err(format!("tokens.addByAnchor: could not store policy: {e}"));
+                }
+                let row = crate::storage::client_db::token_registry::TokenRegistryRow {
+                    token_id: token_id.clone(),
+                    policy_commit: anchor,
+                    ticker: parsed.ticker.clone(),
+                    alias: parsed.alias.clone(),
+                    decimals: parsed.decimals,
+                    max_supply: parsed.max_supply,
+                    owner_device_id: [0u8; 32], // not ours; ownership lives in the policy
+                };
+                if let Err(e) = crate::storage::client_db::token_registry::insert_token(&row) {
+                    // Already present is the idempotent case, not a failure.
+                    if crate::storage::client_db::token_registry::get_token(&token_id)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
+                        return err(format!("tokens.addByAnchor: could not register token: {e}"));
+                    }
+                }
+
+                dsm::core::token::register_policy_commit_ticker(anchor, &parsed.ticker);
+
+                // Tell the wallet its token set changed, from HERE — the
+                // registry write is what made it true, so the notification
+                // belongs beside it. The screen then reloads from the
+                // persisted registry rather than trusting anything the caller
+                // believes; an adopted token that is only in frontend state is
+                // a token this device cannot actually hold.
+                push_wallet_refresh();
+
+                pack_envelope_ok(generated::envelope::Payload::TokenCreateResponse(
+                    generated::TokenCreateResponse {
+                        success: true,
+                        token_id,
+                        policy_anchor: anchor.to_vec(),
+                        message: format!("Added {}", parsed.ticker),
+                    },
+                ))
             }
 
             "tokens.listCachedPolicies" => {

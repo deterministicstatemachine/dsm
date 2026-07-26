@@ -31,6 +31,11 @@ jest.mock('../../../services/dsmClient', () => ({
 jest.mock('../../../dsm/policies', () => ({
   mintToken: jest.fn(),
   burnToken: jest.fn(),
+  addTokenByAnchor: jest.fn(),
+}));
+
+jest.mock('../../../hooks/useWalletRefreshListener', () => ({
+  useWalletRefreshListener: () => {},
 }));
 
 jest.mock('../../../contexts/WalletContext', () => ({
@@ -46,7 +51,7 @@ jest.mock('../../TokenCreationDialog', () => ({
 }));
 
 import AccountsScreen from '../AccountsScreen';
-import { mintToken, burnToken } from '../../../dsm/policies';
+import { mintToken, burnToken, addTokenByAnchor } from '../../../dsm/policies';
 
 describe('AccountsScreen — the screen TOKENS actually opens', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -135,5 +140,66 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     fireEvent.click(screen.getByRole('button', { name: /CONFIRM/i }));
 
     expect(await screen.findByText(/maximum supply/i)).toBeInTheDocument();
+  });
+
+  /// (2) A successful adoption must appear in the list WITHOUT navigation or
+  /// restart, and the list must come from the persisted registry rather than
+  /// an optimistic row. On device the add succeeded in canonical state while
+  /// the screen showed nothing, which is indistinguishable from failure.
+  it('shows an adopted token immediately, reloaded from persisted state', async () => {
+    const { dsmClient } = require('../../../services/dsmClient');
+    (addTokenByAnchor as jest.Mock).mockImplementation(async () => {
+      // Rust persisted it; the next registry read is what must reveal it.
+      (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
+        ...balances,
+        { tokenId: 'RIGB', symbol: 'RIGB', balance: '0' },
+      ]);
+      return { success: true, ticker: 'RIGB', tokenId: 'Z68HWMYS' };
+    });
+
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByRole('button', { name: /add token/i }));
+    fireEvent.change(screen.getByPlaceholderText('CPTA policy anchor'), {
+      target: { value: '6PW31E7DEMNDVC11F88XTR9J9X90M90MF6M02JPV5BFRQE773BJ0' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^ADD$/ }));
+
+    // Visible in the list, with no navigation in between.
+    expect(await screen.findByText('RIGB')).toBeInTheDocument();
+  });
+
+  /// The acknowledgement must be durable and carry the identifiers a user needs
+  /// to check against the creating device.
+  it('shows a durable success panel with ticker, token id and anchor', async () => {
+    const ANCHOR = '6PW31E7DEMNDVC11F88XTR9J9X90M90MF6M02JPV5BFRQE773BJ0';
+    (addTokenByAnchor as jest.Mock).mockResolvedValue({
+      success: true, ticker: 'RIGB', tokenId: 'Z68HWMYSPT9B',
+    });
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByRole('button', { name: /add token/i }));
+    fireEvent.change(screen.getByPlaceholderText('CPTA policy anchor'), {
+      target: { value: ANCHOR },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^ADD$/ }));
+
+    expect(await screen.findByText(/RIGB added/)).toBeInTheDocument();
+    expect(screen.getByText('Z68HWMYSPT9B')).toBeInTheDocument();
+    expect(screen.getByText(ANCHOR)).toBeInTheDocument();
+  });
+
+  /// Typed refusals reach the user as written by Rust.
+  it('surfaces typed adoption errors verbatim', async () => {
+    (addTokenByAnchor as jest.Mock).mockResolvedValue({
+      success: false,
+      error: 'TICKER_CONFLICT: RIGB is already held by a different token on this device',
+    });
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByRole('button', { name: /add token/i }));
+    fireEvent.change(screen.getByPlaceholderText('CPTA policy anchor'), {
+      target: { value: 'ZZZZ' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^ADD$/ }));
+
+    expect(await screen.findByText(/TICKER_CONFLICT/)).toBeInTheDocument();
   });
 });

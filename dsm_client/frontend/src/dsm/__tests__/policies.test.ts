@@ -16,7 +16,6 @@ jest.mock('../events', () => ({
 import * as pb from '../../proto/dsm_app_pb';
 import {
   createToken,
-  importTokenPolicy,
   listPolicies,
   publishTokenPolicyBytes,
   getTokenPolicyBytes,
@@ -174,45 +173,6 @@ describe('policies.ts', () => {
     });
   });
 
-  // ── importTokenPolicy ──────────────────────────────────────────────
-
-  describe('importTokenPolicy', () => {
-    test('returns success when policy bytes are found', async () => {
-      const anchor = new Uint8Array(32).fill(0xDD);
-      const b32 = encodeBase32Crockford(anchor);
-      (getTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(new Uint8Array(64));
-
-      const result = await importTokenPolicy(b32);
-      expect(result.success).toBe(true);
-    });
-
-    test('accepts object form with anchorBase32', async () => {
-      const anchor = new Uint8Array(32).fill(0xEE);
-      const b32 = encodeBase32Crockford(anchor);
-      (getTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(new Uint8Array(64));
-
-      const result = await importTokenPolicy({ anchorBase32: b32 });
-      expect(result.success).toBe(true);
-    });
-
-    test('returns error for empty anchor', async () => {
-      const result = await importTokenPolicy('');
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/anchor required/);
-    });
-
-    test('returns error when policy bytes are empty', async () => {
-      const anchor = new Uint8Array(32).fill(0xFF);
-      const b32 = encodeBase32Crockford(anchor);
-      (getTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(new Uint8Array(0));
-
-      const result = await importTokenPolicy(b32);
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/empty policy bytes/);
-    });
-  });
-
-  // ── listPolicies ───────────────────────────────────────────────────
 
   describe('listPolicies', () => {
     test('maps policies from envelope', async () => {

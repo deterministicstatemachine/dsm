@@ -100,14 +100,13 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
 }
 
 fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
-    for token_id in ["ERA", "dBTC"] {
+    let push_zero = |items: &mut Vec<generated::BalanceGetResponse>, token_id: &str| {
         if items
             .iter()
             .any(|item| item.token_id.eq_ignore_ascii_case(token_id))
         {
-            continue;
+            return;
         }
-
         let mut reply = generated::BalanceGetResponse {
             token_id: token_id.to_string(),
             available: 0,
@@ -116,6 +115,26 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
         };
         enrich_balance_metadata(&mut reply);
         items.push(reply);
+    };
+
+    for token_id in ["ERA", "dBTC"] {
+        push_zero(items, token_id);
+    }
+
+    // Every token in the registry is visible, held or not.
+    //
+    // The list was built purely from balance projections, so a token this
+    // device had ADOPTED but held none of did not appear at all. On D3 the
+    // CPTA add succeeded — registry row written, policy stored — and the
+    // Tokens screen still showed only ERA and dBTC, which is indistinguishable
+    // from the add having failed. Worse, it hides the token you must be able
+    // to see in order to receive any of it.
+    //
+    // Registry membership, not balance, is what makes a token yours to hold.
+    if let Ok(rows) = crate::storage::client_db::token_registry::all_tokens() {
+        for row in rows {
+            push_zero(items, &row.ticker);
+        }
     }
 }
 

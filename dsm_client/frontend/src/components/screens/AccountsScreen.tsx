@@ -8,8 +8,9 @@ import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
 import { formatBtc } from '../../services/bitcoinTap';
 import { useDpadNav } from '../../hooks/useDpadNav';
+import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
-import { mintToken, burnToken } from '../../dsm/policies';
+import { mintToken, burnToken, addTokenByAnchor } from '../../dsm/policies';
 
 type TokenSymbol = 'ERA' | string;
 type Tab = 'tokens' | 'faucet';
@@ -108,6 +109,16 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   // they are described by CPTA_INFO and are not user-mintable; anything else in
   // this list was created by this device and carries its own policy.
   const [creating, setCreating] = useState(false);
+  /// Adding a token created elsewhere, by its CPTA anchor. A device cannot
+  /// hold a token whose policy it does not have, so this is the step between
+  /// someone creating a token and this device being able to receive any.
+  const [addingAnchor, setAddingAnchor] = useState<string | null>(null);
+  /// The adopted token's identifiers, kept on screen until dismissed. A
+  /// snackbar that fades is not an acknowledgement for something the user may
+  /// need to write down or check against the creating device.
+  const [addedToken, setAddedToken] = useState<
+    { ticker: string; tokenId: string; anchorBase32: string } | null
+  >(null);
   const [supplyAction, setSupplyAction] = useState<{ tokenId: string; kind: 'mint' | 'burn' } | null>(null);
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
@@ -148,6 +159,11 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   useEffect(() => {
     void loadBalances();
   }, [loadBalances]);
+
+  // Rust emits dsm-wallet-refresh beside the registry write, so the list
+  // refreshes from persisted state whatever caused the change — including an
+  // adoption that happened while this screen was already open.
+  useWalletRefreshListener(loadBalances, [loadBalances]);
 
   const claimFromFaucet = useCallback(
     async (tokenId: string, symbol: string) => {
@@ -236,6 +252,37 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       setBusy(false);
     }
   }, [supplyAction, amount, loadBalances, refreshAll]);
+
+  /// Add a token by CPTA anchor and show whatever Rust decided.
+  const runAddToken = useCallback(async () => {
+    const anchor = (addingAnchor || '').trim();
+    if (!anchor) return;
+    setBusy(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const res = await addTokenByAnchor({ anchorBase32: anchor });
+      if (res?.success) {
+        // Reload from the persisted registry before announcing anything. The
+        // route's reply says what Rust did; the list must show what Rust
+        // KEPT. Rendering an optimistic row would claim a token is holdable
+        // on the strength of a response rather than of stored state.
+        await loadBalances();
+        setAddedToken({
+          ticker: res.ticker || '',
+          tokenId: res.tokenId || '',
+          anchorBase32: anchor,
+        });
+        setAddingAnchor(null);
+      } else {
+        setError(res?.error || 'Could not add that token');
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not add that token');
+    } finally {
+      setBusy(false);
+    }
+  }, [addingAnchor, loadBalances]);
 
   // --- D-pad navigation ---
   // Items: [Balances tab, Faucet tab, Create token, ...content items]
@@ -385,6 +432,103 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               >
                 + Create Token
               </button>
+
+              {/* Adopting someone else's token. Separate from creation because
+                  it is a different act: no policy is authored, no fee is
+                  burned, nothing is issued — this device is only learning the
+                  rules of a token that already exists so it can hold it. */}
+              {addingAnchor === null ? (
+                <button
+                  type="button"
+                  onClick={() => { setAddingAnchor(''); setError(null); setSuccessMsg(null); }}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    marginBottom: 10,
+                    fontSize: 9,
+                    fontFamily: "'Martian Mono', monospace",
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.6,
+                    fontWeight: 700,
+                    background: 'transparent',
+                    color: 'var(--text-dark)',
+                    border: '2px solid var(--border)',
+                    borderRadius: 0,
+                    cursor: 'pointer',
+                  }}
+                >
+                  + Add Token (CPTA)
+                </button>
+              ) : (
+                <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <input
+                    type="text"
+                    placeholder="CPTA policy anchor"
+                    aria-label="CPTA policy anchor"
+                    value={addingAnchor}
+                    onChange={(e) => setAddingAnchor(e.target.value.trim().toUpperCase())}
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '8px 10px',
+                      fontSize: 9,
+                      fontFamily: "'Martian Mono', monospace",
+                      background: 'var(--bg)',
+                      color: 'var(--text)',
+                      border: '2px solid var(--border)',
+                      borderRadius: 0,
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      type="button"
+                      disabled={busy || !addingAnchor.trim()}
+                      onClick={() => void runAddToken()}
+                      style={SUPPLY_BTN}
+                    >
+                      {busy ? 'ADDING...' : 'ADD'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setAddingAnchor(null)}
+                      style={SUPPLY_BTN}
+                    >
+                      CANCEL
+                    </button>
+                  </div>
+                </div>
+              )}
+              {addedToken && (
+                <div
+                  role="status"
+                  style={{
+                    marginBottom: 10,
+                    padding: 10,
+                    border: '2px solid var(--border)',
+                    background: 'var(--text-dark)',
+                    color: 'var(--bg)',
+                    fontFamily: "'Martian Mono', monospace",
+                    fontSize: 8,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  <div style={{ fontWeight: 700, fontSize: 9, marginBottom: 6 }}>
+                    {addedToken.ticker ? `${addedToken.ticker} added` : 'Token added'}
+                  </div>
+                  <div style={{ opacity: 0.7, fontSize: 6, textTransform: 'uppercase' }}>Token ID</div>
+                  <div style={{ wordBreak: 'break-all', marginBottom: 4 }}>{addedToken.tokenId}</div>
+                  <div style={{ opacity: 0.7, fontSize: 6, textTransform: 'uppercase' }}>
+                    Policy Anchor (CPTA)
+                  </div>
+                  <div style={{ wordBreak: 'break-all', marginBottom: 8 }}>
+                    {addedToken.anchorBase32}
+                  </div>
+                  <button type="button" onClick={() => setAddedToken(null)} style={SUPPLY_BTN}>
+                    OK
+                  </button>
+                </div>
+              )}
               {successMsg && (
                 <div
                   role="status"

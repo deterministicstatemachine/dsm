@@ -5,6 +5,7 @@ import * as pb from '../proto/dsm_app_pb';
 import {
   routerInvokeBin,
   routerQueryBin,
+  addTokenByAnchor as addTokenByAnchorBridge,
   getTokenPolicyBytes as getTokenPolicyBytesBridge,
   listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
@@ -105,23 +106,37 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
   }
 }
 
-export async function importTokenPolicy(args: string | { anchorBase32: string }): Promise<{ success: boolean; error?: string }> {
+/**
+ * Add a token created on another device, by its CPTA anchor.
+ *
+ * PURE TRANSPORT. Rust fetches the published policy, re-derives the anchor
+ * from the bytes and requires it to match what was asked for, parses it, and
+ * registers the token locally. Nothing here interprets the policy.
+ *
+ * This is the step between "someone created a token" and "I can receive it":
+ * balances are keyed by policy commitment, so a device that has not added the
+ * CPTA has nowhere to put the token and no rules to enforce on it.
+ */
+export async function addTokenByAnchor(
+  args: string | { anchorBase32: string },
+): Promise<{ success: boolean; tokenId?: string; ticker?: string; error?: string }> {
   try {
-    const policyId = typeof args === 'string' ? args : args.anchorBase32;
-    const b32 = String(policyId || '').trim();
-    if (!b32) throw new Error('importTokenPolicy: anchor required');
+    const b32 = String(typeof args === 'string' ? args : args.anchorBase32 || '').trim();
+    if (!b32) throw new Error('addTokenByAnchor: anchor required');
     const anchorBytes = new Uint8Array(decodeBase32Crockford(b32));
-    if (anchorBytes.length !== 32) throw new Error('importTokenPolicy: anchor must be 32 bytes');
+    if (anchorBytes.length !== 32) throw new Error('addTokenByAnchor: anchor must be 32 bytes');
 
-    const policyBytes = await getTokenPolicyBytes(anchorBytes);
-    if (!policyBytes || policyBytes.length === 0) {
-      throw new Error('importTokenPolicy: empty policy bytes');
-    }
+    const raw = await addTokenByAnchorBridge(anchorBytes);
+    const env = decodeFramedEnvelopeV3(raw);
+    const p: any = env.payload;
+    if (p?.case === 'error') throw new Error(p.value?.message || 'add token failed');
+    const r = p?.case === 'tokenCreateResponse' ? p.value : null;
+    if (!r?.success) throw new Error(r?.message || 'add token failed');
 
-    return { success: true };
+    emitWalletRefresh({ source: 'tokens.addByAnchor', tokenId: r.tokenId, anchorBase32: b32 });
+    return { success: true, tokenId: r.tokenId, ticker: r.message?.replace(/^Added\s*/, '') };
   } catch (e: any) {
-    console.warn('importTokenPolicy failed:', e);
-    return { success: false, error: e.message || String(e) };
+    return { success: false, error: e?.message || String(e) };
   }
 }
 

@@ -3066,9 +3066,10 @@ impl AppRouter for AppRouterImpl {
             // Diagnostics routes
             "diagnostics.metrics" => self.handle_diagnostics_query(q).await,
             // Token query routes
-            "tokens.getPolicy" | "tokens.listCachedPolicies" | "tokens.getFeeSchedule" => {
-                self.handle_token_query(q).await
-            }
+            "tokens.getPolicy"
+            | "tokens.listCachedPolicies"
+            | "tokens.getFeeSchedule"
+            | "tokens.addByAnchor" => self.handle_token_query(q).await,
             // Debug routes
             "debug.dump_state" | "debug.trigger_genesis" => self.handle_debug_query(q).await,
             // Session routes
