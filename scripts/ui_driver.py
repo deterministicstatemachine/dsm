@@ -37,6 +37,9 @@ class Device:
     transport: str
     name: str
     port: int
+    package: str = "com.dsm.wallet"
+    # Debugger URL of the target proven live by attach(); never guessed.
+    _target_ws: str | None = None
 
     # ── adb ────────────────────────────────────────────────────────────────
     def adb(self, *args: str, timeout: int = 60) -> str:
@@ -54,23 +57,45 @@ class Device:
         return self.adb("shell", cmd, timeout=timeout)
 
     # ── CDP attach ─────────────────────────────────────────────────────────
-    def _webview_socket(self) -> str:
-        """Find the WebView's abstract unix socket for this app's process."""
-        out = self.shell("cat /proc/net/unix")
-        socks = [
-            line.split()[-1].lstrip("@")
-            for line in out.splitlines()
-            if "webview_devtools_remote" in line
-        ]
-        if not socks:
-            raise DriverError(
-                f"[{self.name}] no WebView devtools socket — is the app running "
-                "and is WebView debugging enabled in this build?"
-            )
-        return sorted(set(socks))[0]
+    #
+    # Attaching to the wrong WebView is silent and very convincing. A relaunched
+    # app leaves the old devtools socket in /proc/net/unix, and picking one by
+    # name order can land on a target that still answers, still renders the last
+    # screen it saw, and still returns plausible DOM — while every tap goes to
+    # the live app that this connection knows nothing about. Reads look right,
+    # presses do nothing, and the app appears broken.
+    #
+    # So the socket is chosen by the app's CURRENT pid, and the connection is
+    # not trusted until it proves it can see an event we cause.
 
-    def attach(self) -> None:
-        sock = self._webview_socket()
+    def _pid(self) -> str | None:
+        pid = self.shell(f"pidof {self.package}").strip().split()
+        return pid[0] if pid else None
+
+    def _webview_sockets(self) -> list[tuple[str, str | None]]:
+        """Every WebView devtools socket, paired with its owning pid.
+
+        Android names these `webview_devtools_remote_<pid>`; the suffix is the
+        only thing tying a socket to a process, and a socket whose pid no longer
+        exists is by definition stale.
+        """
+        out = self.shell("cat /proc/net/unix")
+        found: list[tuple[str, str | None]] = []
+        for line in out.splitlines():
+            if "webview_devtools_remote" not in line:
+                continue
+            sock = line.split()[-1].lstrip("@")
+            owner = sock.rsplit("_", 1)[-1]
+            found.append((sock, owner if owner.isdigit() else None))
+        return found
+
+    def _forward(self, sock: str) -> None:
+        subprocess.run(
+            ["adb", "-t", self.transport, "forward", "--remove", f"tcp:{self.port}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         subprocess.run(
             ["adb", "-t", self.transport, "forward", f"tcp:{self.port}", f"localabstract:{sock}"],
             capture_output=True,
@@ -78,6 +103,104 @@ class Device:
             check=True,
             timeout=30,
         )
+
+    def _live_page(self) -> dict[str, Any] | None:
+        """A page target on the currently forwarded socket that is worth using.
+
+        Blank and detached targets are rejected: `about:blank`, `chrome://`, and
+        anything with no debugger URL are exactly what a torn-down WebView
+        leaves behind.
+        """
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=10) as r:
+                targets = json.loads(r.read())
+        except Exception:
+            return None
+        for t in targets:
+            if t.get("type") != "page" or not t.get("webSocketDebuggerUrl"):
+                continue
+            url = (t.get("url") or "").strip()
+            if not url or url.startswith(("about:", "chrome://", "devtools://")):
+                continue
+            return t
+        return None
+
+    def attach(self, *, verify: bool = True, timeout: float = 60.0) -> None:
+        """Forward to the live app's WebView and prove the connection is real.
+
+        Call this after every force-stop, relaunch, or anything that recreates
+        the WebView. It is cheap and it is the only thing standing between a
+        run and an hour of debugging a phantom.
+        """
+        deadline = time.time() + timeout
+        last = "no attempt made"
+        while time.time() < deadline:
+            pid = self._pid()
+            if not pid:
+                last = f"{self.package} is not running"
+                time.sleep(1.0)
+                continue
+
+            socks = self._webview_sockets()
+            if not socks:
+                last = "no WebView devtools socket (is WebView debugging enabled?)"
+                time.sleep(1.0)
+                continue
+
+            # Prefer the socket owned by the running pid; fall back to sockets
+            # with no decipherable owner, never to one owned by a dead pid.
+            alive = {p for p in (s[1] for s in socks) if p and self._pid_alive(p)}
+            ordered = (
+                [s for s, o in socks if o == pid]
+                + [s for s, o in socks if o is None]
+                + [s for s, o in socks if o and o != pid and o in alive]
+            )
+            for sock in ordered:
+                self._forward(sock)
+                page = self._live_page()
+                if not page:
+                    last = f"socket {sock} exposed no usable page"
+                    continue
+                self._target_ws = page["webSocketDebuggerUrl"]
+                if not verify or self._heartbeat():
+                    return
+                last = f"socket {sock} did not echo a test event (stale target)"
+            time.sleep(1.0)
+
+        raise DriverError(f"[{self.name}] could not attach to a live WebView: {last}")
+
+    def _pid_alive(self, pid: str) -> bool:
+        return bool(self.shell(f"ls /proc/{pid}/cmdline 2>/dev/null").strip())
+
+    def _heartbeat(self) -> bool:
+        """Confirm this connection sees events happening on the visible app.
+
+        Reading the DOM is not enough — a stale target reads fine. So a
+        document-level listener is installed, one harmless synthetic event is
+        dispatched, and the same connection is asked whether it saw it. If the
+        target is detached from the live page the listener never fires and the
+        connection is rejected rather than used.
+        """
+        try:
+            marker = self.eval_js("document.body ? document.body.innerText.length : 0")
+            if not isinstance(marker, int) or marker <= 0:
+                return False
+            return bool(
+                self.eval_js(
+                    """
+                    (() => {
+                      let seen = false;
+                      const probe = () => { seen = true; };
+                      document.addEventListener('dsm-driver-probe', probe, true);
+                      document.dispatchEvent(new Event('dsm-driver-probe'));
+                      document.removeEventListener('dsm-driver-probe', probe, true);
+                      return seen;
+                    })()
+                    """
+                )
+            )
+        except DriverError:
+            return False
 
     def detach(self) -> None:
         subprocess.run(
@@ -89,12 +212,12 @@ class Device:
 
     # ── CDP plumbing ───────────────────────────────────────────────────────
     def _ws_url(self) -> str:
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json", timeout=15) as r:
-            targets = json.loads(r.read())
-        pages = [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
-        if not pages:
-            raise DriverError(f"[{self.name}] no debuggable page")
-        return pages[0]["webSocketDebuggerUrl"]
+        """The target attach() proved live — not whichever page answers first."""
+        if self._target_ws:
+            return self._target_ws
+        raise DriverError(
+            f"[{self.name}] not attached — call attach() first so the target can be verified"
+        )
 
     def cdp(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """One CDP call. Uses a short-lived websocket so a dropped BLE-busy
