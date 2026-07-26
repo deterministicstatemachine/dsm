@@ -467,21 +467,36 @@ fn derive_policy_file(
     ticker: &str,
     parsed: &ParsedTokenPolicy,
 ) -> dsm::types::policy_types::PolicyFile {
+    use dsm::types::policy_types::PolicyCondition;
+
     // Semantic version — the validator rejects a bare "1".
     let mut pf = dsm::types::policy_types::PolicyFile::new(ticker, "1.0.0", "dsm_token_route");
     if let Some(desc) = parsed.description.as_ref() {
         pf.description = Some(desc.clone());
     }
-    pf.add_metadata("created_by", "dsm_token_route")
-        .add_metadata("token_name", ticker)
-        .add_metadata(
-            "transferable",
-            if parsed.transferable { "true" } else { "false" },
-        );
+
+    // CONDITIONS, not metadata. `PolicyFile::metadata` is documented as
+    // "UI/ops only" and is EXCLUDED from `canonical_bytes` — anything put
+    // there is neither committed in the anchor nor read by the enforcer, which
+    // is why the previous transferable/allowed_operations metadata was inert.
+    // Conditions are both committed and evaluated.
+    pf.add_condition(PolicyCondition::TokenAuthority {
+        signers: parsed.signers.clone(),
+        threshold: parsed.mint_burn_threshold as u32,
+    });
+    pf.add_condition(PolicyCondition::SupplyCap {
+        max_supply: parsed.max_supply,
+        unlimited: parsed.unlimited_supply,
+    });
     if !parsed.transferable {
-        pf.add_metadata("transfer_restricted", "true")
-            .add_metadata("allowed_operations", "mint,burn");
+        // A non-transferable fungible token may still be minted and burned.
+        pf.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["mint".to_string(), "burn".to_string()],
+        });
     }
+
+    pf.add_metadata("created_by", "dsm_token_route")
+        .add_metadata("token_name", ticker);
     pf
 }
 
@@ -756,10 +771,20 @@ impl AppRouterImpl {
                 // The mint/burn signer set. The creating device is the sole
                 // authority by default — the client never supplies a key, so
                 // it cannot name an authority it does not control.
-                let Some(creator_pk) = crate::sdk::app_state::AppState::get_public_key() else {
-                    return err("token.create: local signing identity unavailable".into());
+                //
+                // This MUST be the signing authority's public key, not the
+                // AppState identity blob: the authority condition verifies a
+                // signature made with `current_secret_key()`, so naming any
+                // other key would produce a policy whose own creator cannot
+                // satisfy it.
+                let creator_pk = match crate::sdk::signing_authority::current_public_key() {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        return err(format!("token.create: signing identity unavailable: {e}"));
+                    }
                 };
                 let threshold = req.mint_burn_threshold.clamp(1, u8::MAX as u32) as u8;
+                let creator_pk_for_sig = creator_pk.clone();
 
                 let parsed = ParsedTokenPolicy {
                     ticker: ticker.clone(),
@@ -952,6 +977,34 @@ impl AppRouterImpl {
                     .map(|s| s.genesis_digest())
                     .unwrap_or([0u8; 32]);
 
+                // Sign the creation with the device key — the sole signer in
+                // the policy we just packed. The authority condition verifies
+                // against the POLICY's signer list, so an unsigned creation is
+                // correctly refused.
+                let auth_preimage =
+                    dsm::core::token::policy::policy_enforcement::token_authorization_preimage(
+                        &policy_commit,
+                        "create_token",
+                        token_id.as_bytes(),
+                        initial_alloc_u64,
+                        &[],
+                    );
+                let signing_key = match crate::sdk::signing_authority::current_secret_key() {
+                    Ok(k) => k,
+                    Err(e) => return err(format!("token.create: signing key unavailable: {e}")),
+                };
+                let create_sig =
+                    match dsm::crypto::sphincs::sphincs_sign(&signing_key, &auth_preimage) {
+                        Ok(sig) => sig,
+                        Err(e) => return err(format!("token.create: signing failed: {e}")),
+                    };
+                // Witness record: (u32 pk_len, pk, u32 sig_len, sig).
+                let mut authorization = Vec::new();
+                authorization.extend_from_slice(&(creator_pk_for_sig.len() as u32).to_le_bytes());
+                authorization.extend_from_slice(&creator_pk_for_sig);
+                authorization.extend_from_slice(&(create_sig.len() as u32).to_le_bytes());
+                authorization.extend_from_slice(&create_sig);
+
                 let create_op = dsm::types::operations::Operation::CreateToken {
                     token_id: token_id.as_bytes().to_vec(),
                     initial_supply: dsm::types::token_types::Balance::from_state(
@@ -964,7 +1017,7 @@ impl AppRouterImpl {
                     symbol: ticker.clone(),
                     decimals: parsed.decimals.min(18) as u8,
                     metadata_uri: Some(format!("dsm:policy:{anchor_b32}")),
-                    signature: Vec::new(),
+                    signature: authorization,
                 };
 
                 // Positional, exactly as the conservation guard requires:

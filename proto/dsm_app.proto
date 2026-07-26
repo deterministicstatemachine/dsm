@@ -3543,7 +3543,26 @@ message PolicyConditionProto {
     CreditBundlePolicyProto credit_bundle_policy = 6;
     CustomConstraintProto custom = 7;
     BitcoinTapConstraintProto bitcoin_tap_constraint = 8;
+    // Typed — deliberately NOT expressed via CustomConstraintProto, whose
+    // opaque payload the enforcer cannot validate and an attacker could shape.
+    TokenAuthorityProto token_authority = 9;
+    SupplyCapProto      supply_cap      = 10;
   }
+}
+
+// Who may mint or burn this token, and how many of them must co-sign.
+// `signers` are raw SPHINCS+ public keys; the verifier takes the key from
+// HERE, never from the caller's own proof.
+message TokenAuthorityProto {
+  repeated bytes signers = 1 [(dsm_max_len)=65535];
+  uint32 threshold       = 2;
+}
+
+// Hard ceiling on circulating supply. `unlimited` and `max_supply` are
+// mutually exclusive; the policy parser enforces one canonical encoding.
+message SupplyCapProto {
+  bytes max_supply_u128 = 1 [(dsm_max_len)=16];
+  bool  unlimited       = 2;
 }
 
 message IdentityConstraintProto { repeated string allowed_identities = 1; bool allow_derived = 2; }

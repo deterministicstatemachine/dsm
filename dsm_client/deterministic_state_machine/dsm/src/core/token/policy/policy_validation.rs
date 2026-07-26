@@ -391,6 +391,53 @@ impl PolicyValidator {
                     self.validate_vault_condition(condition, index, errors, warnings);
                 }
 
+                PolicyCondition::TokenAuthority { signers, threshold } => {
+                    if signers.is_empty() {
+                        errors.push(ValidationError::InvalidValue(
+                            format!("condition[{index}].TokenAuthority.signers"),
+                            "names no signers".into(),
+                        ));
+                    }
+                    if *threshold == 0 || *threshold as usize > signers.len() {
+                        // k > n can never be met: the token could never mint
+                        // or burn again.
+                        errors.push(ValidationError::InvalidValue(
+                            format!("condition[{index}].TokenAuthority.threshold"),
+                            format!(
+                                "threshold {threshold} is unsatisfiable with {} signer(s)",
+                                signers.len()
+                            ),
+                        ));
+                    }
+                    let mut uniq = HashSet::new();
+                    for pk in signers {
+                        if !uniq.insert(pk) {
+                            errors.push(ValidationError::InvalidValue(
+                                format!("condition[{index}].TokenAuthority.signers"),
+                                "duplicate signer would let one key satisfy a k>1 threshold".into(),
+                            ));
+                        }
+                    }
+                }
+
+                PolicyCondition::SupplyCap {
+                    max_supply,
+                    unlimited,
+                } => {
+                    if *unlimited && *max_supply != 0 {
+                        errors.push(ValidationError::InvalidValue(
+                            format!("condition[{index}].SupplyCap"),
+                            "is both unlimited and capped".into(),
+                        ));
+                    }
+                    if !*unlimited && *max_supply == 0 {
+                        errors.push(ValidationError::InvalidValue(
+                            format!("condition[{index}].SupplyCap.max_supply"),
+                            "a capped supply of 0 can never mint".into(),
+                        ));
+                    }
+                }
+
                 PolicyCondition::OperationRestriction { allowed_operations } => {
                     if allowed_operations.is_empty() {
                         errors.push(ValidationError::InvalidOperationRestriction(format!(

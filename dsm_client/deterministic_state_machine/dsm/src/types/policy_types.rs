@@ -188,6 +188,28 @@ pub enum PolicyCondition {
         /// Required Bitcoin block depth for entry/exit anchors (§12.1.3).
         min_confirmations: u64,
     },
+
+    /// Who may mint or burn this token, and how many must co-sign.
+    ///
+    /// The `signers` list is the "N" in k-of-N — it did not exist anywhere in
+    /// the data model before, which is why the threshold the wizard collected
+    /// could never be enforced against anything. Verification takes the public
+    /// key from HERE; taking it from the caller's own proof (as the dead
+    /// `verify_mint_authorization_for_transition` did) authorises anyone able
+    /// to sign with a key they generated themselves.
+    TokenAuthority {
+        /// Raw SPHINCS+ public keys permitted to mint/burn.
+        signers: Vec<Vec<u8>>,
+        /// Distinct signers required (`k`).
+        threshold: u32,
+    },
+
+    /// Hard ceiling on circulating supply.
+    SupplyCap {
+        max_supply: u128,
+        /// Mutually exclusive with a non-zero `max_supply`.
+        unlimited: bool,
+    },
 }
 
 /// Role-based access control for token policies.
@@ -470,6 +492,23 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                 dust_floor_sats: *dust_floor_sats,
                 min_confirmations: *min_confirmations,
             }),
+            PolicyCondition::TokenAuthority { signers, threshold } => {
+                // Sorted so the canonical bytes — and therefore the policy
+                // commitment — do not depend on signer ordering.
+                let mut sorted = signers.clone();
+                sorted.sort();
+                Kind::TokenAuthority(TokenAuthorityProto {
+                    signers: sorted,
+                    threshold: *threshold,
+                })
+            }
+            PolicyCondition::SupplyCap {
+                max_supply,
+                unlimited,
+            } => Kind::SupplyCap(SupplyCapProto {
+                max_supply_u128: max_supply.to_be_bytes().to_vec(),
+                unlimited: *unlimited,
+            }),
         };
 
         Self { kind: Some(kind) }
@@ -532,6 +571,44 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
                 dust_floor_sats: p.dust_floor_sats,
                 min_confirmations: p.min_confirmations,
             }),
+            Some(Kind::TokenAuthority(p)) => {
+                if p.signers.is_empty() {
+                    return Err(DsmError::SerializationError(
+                        "TokenAuthority must name at least one signer".into(),
+                    ));
+                }
+                if p.threshold == 0 || p.threshold as usize > p.signers.len() {
+                    // An unsatisfiable threshold would permanently freeze
+                    // mint/burn; reject rather than materialise it.
+                    return Err(DsmError::SerializationError(
+                        "TokenAuthority threshold must be 1..=signers.len()".into(),
+                    ));
+                }
+                Ok(PolicyCondition::TokenAuthority {
+                    signers: p.signers.clone(),
+                    threshold: p.threshold,
+                })
+            }
+            Some(Kind::SupplyCap(p)) => {
+                if p.max_supply_u128.len() != 16 {
+                    return Err(DsmError::SerializationError(
+                        "SupplyCap max_supply must be 16 bytes".into(),
+                    ));
+                }
+                let mut max_supply = 0u128;
+                for b in &p.max_supply_u128 {
+                    max_supply = (max_supply << 8) | (*b as u128);
+                }
+                if p.unlimited && max_supply != 0 {
+                    return Err(DsmError::SerializationError(
+                        "SupplyCap: unlimited and a non-zero cap are mutually exclusive".into(),
+                    ));
+                }
+                Ok(PolicyCondition::SupplyCap {
+                    max_supply,
+                    unlimited: p.unlimited,
+                })
+            }
             None => Err(DsmError::SerializationError(
                 "Missing policy condition kind".into(),
             )),

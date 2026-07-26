@@ -632,6 +632,41 @@ impl CoreSDK {
             .filter(|s| !s.is_empty())
     }
 
+    /// Populate the authorisation witness the `TokenAuthority` condition reads.
+    ///
+    /// Only raw material goes in — the asset, the amount, the authorising
+    /// identity and the presented `(pk, sig)` records. The enforcer rebuilds
+    /// the signed preimage itself from the operation being executed; handing
+    /// it a ready-made message would let a caller sign one thing and execute
+    /// another.
+    fn insert_auth_witness(
+        context: &mut HashMap<String, Vec<u8>>,
+        policy_commit: &[u8; 32],
+        token_id: &[u8],
+        amount: u64,
+        authorized_by: &[u8],
+        authorizations: &[u8],
+    ) {
+        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        context.insert(
+            witness_keys::POLICY_COMMIT.to_string(),
+            policy_commit.to_vec(),
+        );
+        context.insert(witness_keys::TOKEN_ID.to_string(), token_id.to_vec());
+        context.insert(
+            witness_keys::AMOUNT.to_string(),
+            amount.to_le_bytes().to_vec(),
+        );
+        context.insert(
+            witness_keys::AUTHORIZED_BY.to_string(),
+            authorized_by.to_vec(),
+        );
+        context.insert(
+            witness_keys::AUTHORIZATIONS.to_string(),
+            authorizations.to_vec(),
+        );
+    }
+
     fn build_token_policy_context(
         operation: &dsm::types::operations::Operation,
         state_hash: [u8; 32],
@@ -670,7 +705,9 @@ impl CoreSDK {
             DsmOperation::Mint {
                 token_id,
                 amount,
+                policy_commit,
                 authorized_by,
+                proof_of_authorization,
                 ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
@@ -682,10 +719,25 @@ impl CoreSDK {
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
                 context.insert("authorized_by".to_string(), authorized_by.clone());
+                // Authorisation witness for the TokenAuthority condition. The
+                // enforcer rebuilds the signed preimage from these, so it
+                // verifies the message actually being executed.
+                Self::insert_auth_witness(
+                    &mut context,
+                    policy_commit,
+                    token_id.as_bytes(),
+                    amount_u64,
+                    authorized_by,
+                    proof_of_authorization,
+                );
                 Ok(Some((token_id.to_string(), "mint".to_string(), context)))
             }
             DsmOperation::Burn {
-                token_id, amount, ..
+                token_id,
+                amount,
+                policy_commit,
+                proof_of_ownership,
+                ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
                     DsmError::invalid_operation(
@@ -695,7 +747,48 @@ impl CoreSDK {
                 let amount_u64 = amount.value();
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                // A burn is authorised by the same signer set as a mint.
+                Self::insert_auth_witness(
+                    &mut context,
+                    policy_commit,
+                    token_id.as_bytes(),
+                    amount_u64,
+                    &[],
+                    proof_of_ownership,
+                );
                 Ok(Some((token_id.to_string(), "burn".to_string(), context)))
+            }
+
+            // Creation is gated too: the fee burn and the issuance are one
+            // operation, so its authority is checked like any other issuance.
+            DsmOperation::CreateToken {
+                token_id,
+                initial_supply,
+                policy_commit,
+                signature,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = initial_supply.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                Self::insert_auth_witness(
+                    &mut context,
+                    policy_commit,
+                    token_id.as_bytes(),
+                    amount_u64,
+                    &[],
+                    signature,
+                );
+                Ok(Some((
+                    token_id.to_string(),
+                    "create_token".to_string(),
+                    context,
+                )))
             }
             DsmOperation::Lock {
                 token_id,
@@ -781,16 +874,78 @@ impl CoreSDK {
         }
     }
 
+    /// Circulating supply of an asset, DERIVED from canonical chain history.
+    ///
+    /// Never a cached counter. A stored count would be a second authority that
+    /// a restored snapshot could under-report, and the supply cap would then be
+    /// enforced against the wrong number — the cap would silently stop capping.
+    /// Recomputing from the chain costs a scan, but mints are rare and the
+    /// answer is always the one the chain actually justifies.
+    ///
+    ///   circulating = Σ CreateToken.initial_supply + Σ Mint − Σ Burn
+    ///                 (for operations naming this policy_commit)
+    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> u64 {
+        use dsm::types::operations::Operation as O;
+        let device_id = self.device_info.device_id;
+        let Ok(states) = crate::storage::client_db::get_bcr_chain_states(&device_id, false) else {
+            return 0;
+        };
+        let mut circulating: u128 = 0;
+        for state in states {
+            match &state.operation {
+                O::CreateToken {
+                    initial_supply,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_add(initial_supply.value() as u128);
+                }
+                O::Mint {
+                    amount,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_add(amount.value() as u128);
+                }
+                O::Burn {
+                    amount,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_sub(amount.value() as u128);
+                }
+                _ => {}
+            }
+        }
+        u64::try_from(circulating).unwrap_or(u64::MAX)
+    }
+
     fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
         state_hash: [u8; 32],
     ) -> Result<(), DsmError> {
-        let Some((token_id, op_type, context)) =
+        let Some((token_id, op_type, mut context)) =
             Self::build_token_policy_context(operation, state_hash)?
         else {
             return Ok(());
         };
+
+        // The supply cap is evaluated against canonical history, so the
+        // derivation happens HERE (where the chain is reachable) rather than
+        // in the pure context builder.
+        {
+            use dsm::core::token::policy::policy_enforcement::witness_keys;
+            if let Some(pc) = context.get(witness_keys::POLICY_COMMIT).cloned() {
+                if let Ok(commit) = <[u8; 32]>::try_from(pc.as_slice()) {
+                    let circulating = self.derive_circulating_supply(&commit);
+                    context.insert(
+                        witness_keys::CIRCULATING.to_string(),
+                        circulating.to_le_bytes().to_vec(),
+                    );
+                }
+            }
+        }
 
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             let policy_system = self.policy_system.clone();
