@@ -407,6 +407,51 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
     }
 
+    /// Resolve a token identity from the durable registry, accepting either the
+    /// canonical token id or a registered ticker.
+    ///
+    /// The registry is authoritative for the persisted identity mapping —
+    /// token_id, policy_commit, ticker, decimals, metadata. (Canonical
+    /// DeviceState remains authoritative for balances and transitions; this
+    /// answers "which asset", never "how much".)
+    ///
+    /// The live path resolved from the BCR archive instead, and on hardware a
+    /// send of a token the device had just created failed with
+    /// "Token metadata for RIGB not found in archived chain states". Two
+    /// reasons, either sufficient: the registry probe only ever looked up by
+    /// token id while the UI supplies a TICKER, and the archive matcher knew
+    /// `Operation::Create` but not `Operation::CreateToken`, which is what
+    /// creation actually emits now. So the archive could not match, and the
+    /// registry was never asked the question it could answer.
+    ///
+    /// Archive scanning is also the wrong instrument here. `get_bcr_chain_states`
+    /// SKIPS rows it cannot decode, so damaged history degrades into "token not
+    /// found" — a lookup miss that reads like the token never existed. And an
+    /// ADOPTED token has no creator-side `CreateToken` in this device's archive
+    /// at all, so no amount of scanning would ever find it. Reconstructing the
+    /// registry from the chain is a legitimate but SEPARATE recovery operation
+    /// that must fail loudly on undecodable rows; it is not a fallback for a
+    /// send.
+    fn resolve_registered_token(
+        &self,
+        identifier: &str,
+    ) -> Result<crate::storage::client_db::token_registry::TokenRegistryRow, DsmError> {
+        let id = identifier.trim();
+        if id.is_empty() {
+            return Err(DsmError::state("token identifier is empty"));
+        }
+        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token(id) {
+            return Ok(row);
+        }
+        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token_by_ticker(id) {
+            return Ok(row);
+        }
+        Err(DsmError::state(format!(
+            "{id} is not a registered token on this device — create it, or add it by its CPTA \
+             anchor before using it"
+        )))
+    }
+
     /// Locate the operation that registered metadata for `token_id` by
     /// scanning the per-relationship chain-state archive in newest-first
     /// order (§2.2/§4.3 — no counters, no state_number; the archive is
@@ -516,23 +561,13 @@ impl<I: Send + Sync> TokenSDK<I> {
         // exit, so without this a token created before a restart could not be
         // resolved at all — which fails closed in the send path and in
         // `dlv.create`, making the token unusable rather than merely invisible.
-        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token(token_id) {
-            return Ok(row.policy_commit);
-        }
-
-        let op = self.find_token_metadata_operation(token_id)?;
-        let token_metadata = self
-            .metadata_for_token_from_operation(&op, token_id)
-            .ok_or_else(|| {
-                DsmError::state(format!(
-                    "Token metadata operation for {token_id} did not carry canonical metadata"
-                ))
-            })?;
-
-        crate::policy::strict_policy_commit_for_token(
-            token_id,
-            token_metadata.policy_anchor.as_deref(),
-        )
+        // Registry is authoritative for token identity, and accepts either the
+        // canonical id or a registered ticker — which is what the send form
+        // supplies. No archive scan on the live path: see
+        // resolve_registered_token for why that was both wrong and unusable
+        // for adopted tokens.
+        self.resolve_registered_token(token_id)
+            .map(|row| row.policy_commit)
     }
 
     fn builtin_era_metadata(&self) -> TokenMetadata {
