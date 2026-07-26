@@ -313,9 +313,11 @@ fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
         }
         _ => return None,
     }
-    if (flags & POLICY_FLAG_ALLOWLIST != 0) != !allowlist_device_ids.is_empty() {
-        // The flag and the payload must agree; otherwise a reader that trusts
-        // the flag and one that trusts the payload disagree about the policy.
+    // The flag and the payload must agree; otherwise a reader that trusts the
+    // flag and one that trusts the payload disagree about the policy.
+    let flag_claims_allowlist = flags & POLICY_FLAG_ALLOWLIST != 0;
+    let payload_has_allowlist = !allowlist_device_ids.is_empty();
+    if flag_claims_allowlist != payload_has_allowlist {
         return None;
     }
 
