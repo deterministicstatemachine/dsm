@@ -884,12 +884,32 @@ impl CoreSDK {
     ///
     ///   circulating = Σ CreateToken.initial_supply + Σ Mint − Σ Burn
     ///                 (for operations naming this policy_commit)
-    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> u64 {
+    /// Circulating supply for `policy_commit`, derived from canonical history.
+    ///
+    /// Returns `None` when the history could not be read in full. That is not
+    /// the same as zero, and the difference is load-bearing: this figure is
+    /// what the supply cap is checked against, so a total that is too low
+    /// permits a mint that should have been refused. Returning 0 on a failed
+    /// read — as this did — reported maximum headroom precisely when the
+    /// chain was least trustworthy.
+    ///
+    /// `None` propagates as an ABSENT witness, and the enforcer already fails
+    /// closed on an absent circulating supply rather than guessing.
+    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> Option<u64> {
         use dsm::types::operations::Operation as O;
         let device_id = self.device_info.device_id;
         let Ok(states) = crate::storage::client_db::get_bcr_chain_states(&device_id, false) else {
-            return 0;
+            log::warn!("[supply] chain history unreadable — refusing to derive a supply figure");
+            return None;
         };
+        let dropped = crate::storage::client_db::last_load_dropped_rows();
+        if dropped > 0 {
+            log::warn!(
+                "[supply] {dropped} unreadable chain row(s) — refusing to derive a supply figure \
+                 from partial history"
+            );
+            return None;
+        }
         let mut circulating: u128 = 0;
         for state in states {
             match &state.operation {
@@ -917,7 +937,7 @@ impl CoreSDK {
                 _ => {}
             }
         }
-        u64::try_from(circulating).unwrap_or(u64::MAX)
+        Some(u64::try_from(circulating).unwrap_or(u64::MAX))
     }
 
     fn enforce_policy_for_operation(
@@ -938,11 +958,14 @@ impl CoreSDK {
             use dsm::core::token::policy::policy_enforcement::witness_keys;
             if let Some(pc) = context.get(witness_keys::POLICY_COMMIT).cloned() {
                 if let Ok(commit) = <[u8; 32]>::try_from(pc.as_slice()) {
-                    let circulating = self.derive_circulating_supply(&commit);
-                    context.insert(
-                        witness_keys::CIRCULATING.to_string(),
-                        circulating.to_le_bytes().to_vec(),
-                    );
+                    // Absent, not zero, when the history is incomplete — the
+                    // enforcer refuses a capped mint it cannot evaluate.
+                    if let Some(circulating) = self.derive_circulating_supply(&commit) {
+                        context.insert(
+                            witness_keys::CIRCULATING.to_string(),
+                            circulating.to_le_bytes().to_vec(),
+                        );
+                    }
                 }
             }
         }
