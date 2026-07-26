@@ -71,7 +71,7 @@ export default function DevPolicyScreen(): JSX.Element {
            Create Token (advanced)
          </button>
          <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-          Same wizard as Tokens → + CREATE TOKEN. Defines the token's CPTA policy (supply, ticker, decimals, mint/burn authority), anchors it, and creates the token bound to that anchor.
+          Same wizard as Tokens → + CREATE TOKEN. Defines the token&apos;s CPTA policy (supply, ticker, decimals, mint/burn authority), anchors it, and creates the token bound to that anchor.
          </div>
       </div>
 
