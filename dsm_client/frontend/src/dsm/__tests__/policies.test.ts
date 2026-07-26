@@ -44,102 +44,50 @@ describe('policies.ts', () => {
   // ── createToken ────────────────────────────────────────────────────
 
   describe('createToken', () => {
-    test('validates ticker length constraints', async () => {
+    // Protocol validation lives in Rust. This layer forwards the user's
+    // intent and surfaces the state machine's verdict verbatim — it must not
+    // re-implement (and therefore be able to disagree with) the rules.
+    test('forwards invalid intent to Rust and surfaces its rejection', async () => {
+      const env = new pb.Envelope({
+        version: 3,
+        payload: { case: 'error', value: new pb.ErrorResponse({ message: 'token.create: ticker must be 2-8 chars' }) },
+      });
+      const framed = new Uint8Array(1 + env.toBinary().length);
+      framed[0] = 0x03;
+      framed.set(env.toBinary(), 1);
+      (routerInvokeBin as jest.Mock).mockResolvedValue(framed);
+
       const result = await createToken({ ticker: 'X', alias: 'test', decimals: 0, maxSupply: '1000' });
+      expect(routerInvokeBin).toHaveBeenCalledWith('token.create', expect.any(Uint8Array));
       expect(result.success).toBe(false);
       expect(result.message).toMatch(/ticker must be 2-8/);
     });
 
-    test('rejects ticker longer than 8 chars', async () => {
-      const result = await createToken({ ticker: 'TOOLONGXX', alias: 'test', decimals: 0, maxSupply: '1000' });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/ticker must be 2-8/);
-    });
-
-    test('requires alias', async () => {
-      const result = await createToken({ ticker: 'TOK', alias: '', decimals: 0, maxSupply: '1000' });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/alias required/);
-    });
-
-    test('validates decimals range 0..18', async () => {
-      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 20, maxSupply: '1000' });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/decimals must be 0\.\.18/);
-    });
-
-    test('validates negative decimals', async () => {
-      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: -1, maxSupply: '1000' });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/decimals must be 0\.\.18/);
-    });
-
-    test('validates maxSupply is a positive integer string', async () => {
-      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 2, maxSupply: 'abc' });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/maxSupply must be a positive integer/);
-    });
-
-    test('successful creation returns token id and anchor', async () => {
-      const anchor = new Uint8Array(32).fill(0xAA);
-      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
-
+    // The client no longer publishes the policy separately, and no longer
+    // supplies an anchor: `token.create` is a single invoke and Rust derives
+    // the content-addressed anchor from the policy it packs.
+    test('creates in one invoke without a separate publish round-trip', async () => {
       const env = new pb.Envelope({
         version: 3,
         payload: {
           case: 'tokenCreateResponse',
           value: new pb.TokenCreateResponse({
             success: true,
-            tokenId: 'MY_TOKEN',
-            policyAnchor: anchor as any,
-            message: 'created',
+            tokenId: 'TOKEN123',
+            policyAnchor: new Uint8Array(32).fill(0xCC),
           }),
         },
       });
-      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      const framed = new Uint8Array(1 + env.toBinary().length);
+      framed[0] = 0x03;
+      framed.set(env.toBinary(), 1);
+      (routerInvokeBin as jest.Mock).mockResolvedValue(framed);
 
-      const result = await createToken({
-        ticker: 'MTK',
-        alias: 'My Token',
-        decimals: 8,
-        maxSupply: '1000000',
-      });
+      const result = await createToken({ ticker: 'TOK', alias: 'test', decimals: 0, maxSupply: '1000' });
       expect(result.success).toBe(true);
-      expect(result.tokenId).toBe('MY_TOKEN');
-      expect(result.anchorBase32).toBe(encodeBase32Crockford(anchor));
-    });
-
-    test('returns failure on error envelope', async () => {
-      const anchor = new Uint8Array(32).fill(0xBB);
-      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
-
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'error', value: new pb.Error({ message: 'token exists' }) },
-      });
-      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const result = await createToken({
-        ticker: 'DUP',
-        alias: 'Duplicate',
-        decimals: 0,
-        maxSupply: '100',
-      });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/token exists/);
-    });
-
-    test('returns failure when publish returns bad anchor', async () => {
-      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(new Uint8Array(16));
-
-      const result = await createToken({
-        ticker: 'TOK',
-        alias: 'test',
-        decimals: 0,
-        maxSupply: '1000',
-      });
-      expect(result.success).toBe(false);
-      expect(result.message).toMatch(/policy publish failed/);
+      expect(result.tokenId).toBe('TOKEN123');
+      expect(publishTokenPolicyBytesBridge).not.toHaveBeenCalled();
+      expect(routerInvokeBin).toHaveBeenCalledTimes(1);
     });
 
     test('handles default kind as FUNGIBLE', async () => {

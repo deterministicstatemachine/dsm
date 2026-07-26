@@ -517,6 +517,7 @@ pub fn get_bcr_chain_states(
         let tip: Vec<u8> = row.get(1)?;
         Ok((bytes, tip))
     })?;
+    let dropped = DroppedCounter::reset();
     let mut out = Vec::new();
     for row in iter {
         let (bytes, expected_tip) = row?;
@@ -525,15 +526,55 @@ pub fn get_bcr_chain_states(
                 if expected_tip.len() == 32 && recomputed_tip.as_slice() != expected_tip.as_slice()
                 {
                     warn!("[client_db] bcr_chain_states tip mismatch (corruption?), skipping row");
+                    dropped.set(dropped.get() + 1);
                     continue;
                 }
                 out.push(state);
             }
-            Err(e) => warn!("[client_db] Skipping invalid bcr_chain_states row: {e}"),
+            Err(e) => {
+                warn!("[client_db] Skipping invalid bcr_chain_states row: {e}");
+                dropped.set(dropped.get() + 1);
+            }
         }
     }
 
     Ok(out)
+}
+
+/// How many rows the last `get_bcr_chain_states` call on this thread dropped.
+///
+/// Skipping an unreadable row is right for display — one bad row should not
+/// blank the history. It is wrong for anything that DERIVES AN AMOUNT from that
+/// history: a dropped `Mint` silently lowers the total, and a supply cap
+/// checked against a total that is too low permits a mint it should refuse.
+/// That is a fail-open, so callers computing an authority figure must ask
+/// whether the history they just read was complete and refuse to answer when it
+/// was not. Thread-local because the read and the question are the same call
+/// chain; the value is reset at the start of every load.
+pub fn last_load_dropped_rows() -> u32 {
+    DROPPED_ROWS.with(|d| d.get())
+}
+
+thread_local! {
+    static DROPPED_ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Handle over the per-thread dropped-row counter for one load.
+struct DroppedCounter;
+
+impl DroppedCounter {
+    fn reset() -> Self {
+        DROPPED_ROWS.with(|d| d.set(0));
+        Self
+    }
+
+    fn get(&self) -> u32 {
+        DROPPED_ROWS.with(|d| d.get())
+    }
+
+    fn set(&self, n: u32) {
+        DROPPED_ROWS.with(|d| d.set(n));
+    }
 }
 
 /// Load all archived chain states for a specific relationship `rel_key`,

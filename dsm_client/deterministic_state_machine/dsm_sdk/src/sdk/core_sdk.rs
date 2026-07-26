@@ -632,6 +632,41 @@ impl CoreSDK {
             .filter(|s| !s.is_empty())
     }
 
+    /// Populate the authorisation witness the `TokenAuthority` condition reads.
+    ///
+    /// Only raw material goes in — the asset, the amount, the authorising
+    /// identity and the presented `(pk, sig)` records. The enforcer rebuilds
+    /// the signed preimage itself from the operation being executed; handing
+    /// it a ready-made message would let a caller sign one thing and execute
+    /// another.
+    fn insert_auth_witness(
+        context: &mut HashMap<String, Vec<u8>>,
+        policy_commit: &[u8; 32],
+        token_id: &[u8],
+        amount: u64,
+        authorized_by: &[u8],
+        authorizations: &[u8],
+    ) {
+        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        context.insert(
+            witness_keys::POLICY_COMMIT.to_string(),
+            policy_commit.to_vec(),
+        );
+        context.insert(witness_keys::TOKEN_ID.to_string(), token_id.to_vec());
+        context.insert(
+            witness_keys::AMOUNT.to_string(),
+            amount.to_le_bytes().to_vec(),
+        );
+        context.insert(
+            witness_keys::AUTHORIZED_BY.to_string(),
+            authorized_by.to_vec(),
+        );
+        context.insert(
+            witness_keys::AUTHORIZATIONS.to_string(),
+            authorizations.to_vec(),
+        );
+    }
+
     fn build_token_policy_context(
         operation: &dsm::types::operations::Operation,
         state_hash: [u8; 32],
@@ -670,7 +705,9 @@ impl CoreSDK {
             DsmOperation::Mint {
                 token_id,
                 amount,
+                policy_commit,
                 authorized_by,
+                proof_of_authorization,
                 ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
@@ -682,10 +719,25 @@ impl CoreSDK {
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
                 context.insert("authorized_by".to_string(), authorized_by.clone());
+                // Authorisation witness for the TokenAuthority condition. The
+                // enforcer rebuilds the signed preimage from these, so it
+                // verifies the message actually being executed.
+                Self::insert_auth_witness(
+                    &mut context,
+                    policy_commit,
+                    token_id.as_bytes(),
+                    amount_u64,
+                    authorized_by,
+                    proof_of_authorization,
+                );
                 Ok(Some((token_id.to_string(), "mint".to_string(), context)))
             }
             DsmOperation::Burn {
-                token_id, amount, ..
+                token_id,
+                amount,
+                policy_commit,
+                proof_of_ownership,
+                ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
                     DsmError::invalid_operation(
@@ -695,7 +747,48 @@ impl CoreSDK {
                 let amount_u64 = amount.value();
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                // A burn is authorised by the same signer set as a mint.
+                Self::insert_auth_witness(
+                    &mut context,
+                    policy_commit,
+                    token_id.as_bytes(),
+                    amount_u64,
+                    &[],
+                    proof_of_ownership,
+                );
                 Ok(Some((token_id.to_string(), "burn".to_string(), context)))
+            }
+
+            // Creation is gated too: the fee burn and the issuance are one
+            // operation, so its authority is checked like any other issuance.
+            DsmOperation::CreateToken {
+                token_id,
+                initial_supply,
+                policy_commit,
+                signature,
+                ..
+            } => {
+                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "Policy enforcement rejected: malformed or empty token_id",
+                    )
+                })?;
+                let amount_u64 = initial_supply.value();
+                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
+                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
+                Self::insert_auth_witness(
+                    &mut context,
+                    policy_commit,
+                    token_id.as_bytes(),
+                    amount_u64,
+                    &[],
+                    signature,
+                );
+                Ok(Some((
+                    token_id.to_string(),
+                    "create_token".to_string(),
+                    context,
+                )))
             }
             DsmOperation::Lock {
                 token_id,
@@ -781,16 +874,101 @@ impl CoreSDK {
         }
     }
 
+    /// Circulating supply of an asset, DERIVED from canonical chain history.
+    ///
+    /// Never a cached counter. A stored count would be a second authority that
+    /// a restored snapshot could under-report, and the supply cap would then be
+    /// enforced against the wrong number — the cap would silently stop capping.
+    /// Recomputing from the chain costs a scan, but mints are rare and the
+    /// answer is always the one the chain actually justifies.
+    ///
+    ///   circulating = Σ CreateToken.initial_supply + Σ Mint − Σ Burn
+    ///                 (for operations naming this policy_commit)
+    /// Circulating supply for `policy_commit`, derived from canonical history.
+    ///
+    /// Returns `None` when the history could not be read in full. That is not
+    /// the same as zero, and the difference is load-bearing: this figure is
+    /// what the supply cap is checked against, so a total that is too low
+    /// permits a mint that should have been refused. Returning 0 on a failed
+    /// read — as this did — reported maximum headroom precisely when the
+    /// chain was least trustworthy.
+    ///
+    /// `None` propagates as an ABSENT witness, and the enforcer already fails
+    /// closed on an absent circulating supply rather than guessing.
+    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> Option<u64> {
+        use dsm::types::operations::Operation as O;
+        let device_id = self.device_info.device_id;
+        let Ok(states) = crate::storage::client_db::get_bcr_chain_states(&device_id, false) else {
+            log::warn!("[supply] chain history unreadable — refusing to derive a supply figure");
+            return None;
+        };
+        let dropped = crate::storage::client_db::last_load_dropped_rows();
+        if dropped > 0 {
+            log::warn!(
+                "[supply] {dropped} unreadable chain row(s) — refusing to derive a supply figure \
+                 from partial history"
+            );
+            return None;
+        }
+        let mut circulating: u128 = 0;
+        for state in states {
+            match &state.operation {
+                O::CreateToken {
+                    initial_supply,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_add(initial_supply.value() as u128);
+                }
+                O::Mint {
+                    amount,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_add(amount.value() as u128);
+                }
+                O::Burn {
+                    amount,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_sub(amount.value() as u128);
+                }
+                _ => {}
+            }
+        }
+        Some(u64::try_from(circulating).unwrap_or(u64::MAX))
+    }
+
     fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
         state_hash: [u8; 32],
     ) -> Result<(), DsmError> {
-        let Some((token_id, op_type, context)) =
+        let Some((token_id, op_type, mut context)) =
             Self::build_token_policy_context(operation, state_hash)?
         else {
             return Ok(());
         };
+
+        // The supply cap is evaluated against canonical history, so the
+        // derivation happens HERE (where the chain is reachable) rather than
+        // in the pure context builder.
+        {
+            use dsm::core::token::policy::policy_enforcement::witness_keys;
+            if let Some(pc) = context.get(witness_keys::POLICY_COMMIT).cloned() {
+                if let Ok(commit) = <[u8; 32]>::try_from(pc.as_slice()) {
+                    // Absent, not zero, when the history is incomplete — the
+                    // enforcer refuses a capped mint it cannot evaluate.
+                    if let Some(circulating) = self.derive_circulating_supply(&commit) {
+                        context.insert(
+                            witness_keys::CIRCULATING.to_string(),
+                            circulating.to_le_bytes().to_vec(),
+                        );
+                    }
+                }
+            }
+        }
 
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             let policy_system = self.policy_system.clone();
@@ -1177,22 +1355,14 @@ impl CoreSDK {
                 outcome.new_device_state.public_key().to_vec(),
             );
             // Sync balances from DeviceState → legacy HashMap<String, Balance>
-            // using the canonical `{prefix}|{token_id}` key format from
-            // derive_canonical_balance_key so balance.list can locate balances
-            // by their {token_id} suffix (e.g. "ERA", "dBTC").
+            // through the SAME shared helper the state machine's projection
+            // uses, so the two views cannot drift. An unnameable balance is
+            // omitted rather than surfaced under a `{prefix}|?` placeholder.
             let public_key = outcome.new_device_state.public_key();
             for (pc, val) in outcome.new_device_state.balances_snapshot() {
-                let token_id =
-                    dsm::core::token::builtin_token_id_for_policy_commit(pc).unwrap_or("");
-                let key = if token_id.is_empty() {
-                    let prefix = u128::from_le_bytes({
-                        let mut a = [0u8; 16];
-                        a.copy_from_slice(&pc[..16]);
-                        a
-                    });
-                    format!("{prefix}|?")
-                } else {
-                    dsm::core::token::derive_canonical_balance_key(pc, public_key, token_id)
+                let Some(key) = dsm::core::token::canonical_balance_key_for_commit(pc, public_key)
+                else {
+                    continue;
                 };
                 s.token_balances.insert(
                     key,
@@ -1575,6 +1745,9 @@ impl CoreSDK {
         let mint = O::Mint {
             amount: amt,
             token_id: b"ERA".to_vec(),
+            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").ok_or_else(
+                || DsmError::internal("ERA is a builtin token", None::<std::io::Error>),
+            )?,
             authorized_by: crate::util::text_id::encode_base32_crockford(
                 &self.device_info.device_id,
             )
@@ -2370,6 +2543,40 @@ impl CoreSDK {
         token_id: &str,
     ) -> Option<TokenMetadata> {
         match op {
+            // The canonical creation operation. Recognising it here is what
+            // lets a token be recovered from the chain alone after a restart —
+            // creation previously emitted a bare `Mint`, which carries no
+            // metadata, so the resolver could never find it and the token
+            // became unusable once the in-memory caches were gone.
+            dsm::types::operations::Operation::CreateToken {
+                token_id: op_token_id,
+                symbol,
+                name,
+                decimals,
+                policy_commit,
+                metadata_uri,
+                ..
+            } => {
+                let op_token_id_str = String::from_utf8(op_token_id.clone()).ok()?;
+                if op_token_id_str != token_id && symbol != token_id {
+                    return None;
+                }
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
+                Some(TokenMetadata {
+                    token_id: op_token_id_str,
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    description: None,
+                    icon_url: None,
+                    decimals: *decimals,
+                    token_type: dsm::types::token_types::TokenType::Created,
+                    owner_id: self.device_info.device_id,
+                    creation_tick: 0,
+                    metadata_uri: metadata_uri.clone(),
+                    policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
+                    fields: std::collections::HashMap::new(),
+                })
+            }
             dsm::types::operations::Operation::Create { metadata, .. } => {
                 let proto = TokenMetadataProto::decode(metadata.as_slice()).ok()?;
                 let token_metadata = Self::token_metadata_from_proto(&proto);

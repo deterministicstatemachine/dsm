@@ -297,10 +297,22 @@ tasks.withType<KotlinCompile>().configureEach {
 }
 
 // ---- Native libs refresh (Rust cargo output -> Android jniLibs) ----
-// Prefer cargo's target/<triple> output, but also accept direct cargo-ndk `-o`
-// output written into jniLibs. Both are produced by the same Rust build.
+// The shipping native library is the `dsm-android-anchor` cdylib. It links
+// dsm_sdk statically, so it carries ALL of dsm_sdk's JNI exports PLUS the
+// anchor glue's; a plain `dsm_sdk` cdylib is missing the latter and the
+// offline/anchor paths silently die on device.
+//
+// This task used to prefer `deterministic_state_machine/target/<triple>/` over
+// everything else, with no recency check. That preferred the WRONG artifact
+// class, and preferred it even when it was stale: on 2026-07-26 it overwrote a
+// freshly staged anchor build with a three-day-old plain dsm_sdk .so and
+// packaged an APK whose native library had no token.mint/token.burn at all.
+// Gradle logged which file it used, and the APK still built and "succeeded".
+//
+// So: only real candidates are considered, and the NEWEST one wins. Nothing is
+// silently preferred by path order.
 val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
-    val cargoTarget = project.file("../../deterministic_state_machine/target")
+    val anchorTarget = project.file("../../../crates/dsm-android-anchor/target")
     val appJniLibs = project.file("src/main/jniLibs")
     val repoJniLibs = project.file("../../deterministic_state_machine/jniLibs")
 
@@ -311,18 +323,21 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
         "x86_64"      to "x86_64-linux-android",
     )
 
-    // Resolve .so path: prefer cargo target release/debug, then accept direct
-    // cargo-ndk `-o` output already written into jniLibs.
+    // The anchor cdylib is the SOURCE; the jniLibs copies are this task's own
+    // OUTPUT. Ranking them together is what made the bad build stick: the task
+    // writes into its own candidate set, so one wrong run leaves a poisoned
+    // copy that is newer than the real source and wins every run after it.
+    // A freshly built cdylib therefore always wins outright; the staged copies
+    // are consulted only when there is no cdylib at all (no Rust toolchain).
     fun resolveSo(abi: String, triple: String): File? {
-        val release = File(cargoTarget, "$triple/release/libdsm_sdk.so")
-        if (release.exists()) return release
-        val debug = File(cargoTarget, "$triple/debug/libdsm_sdk.so")
-        if (debug.exists()) return debug
-        val appOutput = File(File(appJniLibs, abi), "libdsm_sdk.so")
-        if (appOutput.exists()) return appOutput
-        val repoOutput = File(File(repoJniLibs, abi), "libdsm_sdk.so")
-        if (repoOutput.exists()) return repoOutput
-        return null
+        listOf("release", "debug")
+            .map { File(anchorTarget, "$triple/$it/libdsm_android_anchor.so") }
+            .firstOrNull { it.exists() }
+            ?.let { return it }
+        return listOf(
+            File(File(appJniLibs, abi), "libdsm_sdk.so"),
+            File(File(repoJniLibs, abi), "libdsm_sdk.so"),
+        ).firstOrNull { it.exists() }
     }
 
     // Declare cargo target .so files as inputs so Gradle detects rebuilds
@@ -350,8 +365,9 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
             val src = resolveSo(abi, triple)
             if (src == null) {
                 throw GradleException(
-                    "Missing Rust build output for $triple (checked release/, debug/, and jniLibs/)\n" +
-                    "(hint: run cargo ndk build first)"
+                    "Missing native library for $triple — checked the dsm-android-anchor " +
+                    "cdylib (release/ and debug/) and the staged jniLibs/ copies.\n" +
+                    "(hint: cd crates/dsm-android-anchor && cargo ndk -t $abi build --release --features on_device_installs)"
                 )
             }
 

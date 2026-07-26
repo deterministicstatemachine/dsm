@@ -415,34 +415,11 @@ export class DsmClient {
     }
   }
 
-  async createToken(params: {
-    ticker: string;
-    alias: string;
-    decimals: number;
-    maxSupply: string;
-    kind?: 'FUNGIBLE' | 'NFT' | 'SBT';
-    description?: string;
-    iconUrl?: string;
-    unlimitedSupply?: boolean;
-    initialAlloc?: string;
-    mintBurnEnabled?: boolean;
-    mintBurnThreshold?: number;
-    transferable?: boolean;
-    allowlistKind?: 'NONE' | 'INLINE';
-    allowlistData?: string;
-  }): Promise<{ success: boolean; result?: { success: boolean; tokenId?: string; anchorBase32?: string; message?: string }; error?: string }> {
-    if (!(await this.isReady())) return { success: false, error: 'Identity not initialized' };
-    try {
-  
-      const res = await (dsm as any).createToken(params);
-      if (res && typeof res === 'object' && 'success' in res) {
-        return { success: Boolean((res as any).success), result: res };
-      }
-      return { success: Boolean(res), result: res };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
+  // `createToken` intentionally does not exist on this class. The exported
+  // `dsmClient` is the flat namespace from `../dsm/index`, so a method here
+  // was unreachable dead code — and its `{success, result}` wrapper shape is
+  // what made the creation UI read `res.result?.tokenId` against a flat
+  // object and render nothing. Callers use `dsm/policies.ts::createToken`.
 
   async createCustomDlv(params: {
     lock: string;

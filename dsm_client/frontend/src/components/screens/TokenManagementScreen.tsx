@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCodeScannerPanel from '../qr/QRCodeScannerPanel';
 import EraFaucetScreen from './EraFaucetScreen';
 import { importTokenPolicyFromScanData } from '../../services/policy/policyScanService';
 import { mapPoliciesToDisplayEntries } from '../../services/policy/policyDisplayService';
 import { dsmClient } from '../../services/dsmClient';
+import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
+import { TokenCreationDialog } from '../TokenCreationDialog';
+import { mintToken, burnToken } from '../../dsm/policies';
 
 // PRODUCTION-ONLY: No placeholders, no localStorage.
 // Token creation is handled exclusively via Settings > Policy Tools (DevPolicyScreen).
@@ -112,7 +115,15 @@ function usePolicies(): { policies: unknown; refresh: () => void } {
     return () => { cancelled = true; };
   }, [version]);
 
-  return { policies, refresh: () => setVersion(v => v + 1) };
+  const refresh = useCallback(() => setVersion(v => v + 1), []);
+
+  // Subscribe to the canonical wallet-refresh event. Creating, minting or
+  // burning a token changes what this screen shows, and until now nothing
+  // reloaded it — the only caller of `refresh` was the QR scan handler, so a
+  // token created in the wizard did not appear here without a manual reload.
+  useWalletRefreshListener(refresh, [refresh]);
+
+  return { policies, refresh };
 }
 
 // Label + value row used inside the expanded CPTA panel.
@@ -150,6 +161,12 @@ export default function TokenManagementScreen(): JSX.Element | null {
   const { policies, refresh } = usePolicies();
   const snackbar = useSnackbar();
   const [activeTab, setActiveTab] = useState<Tab>('list');
+  const [creating, setCreating] = useState(false);
+  // Inline supply action on an expanded token: which token, which direction,
+  // and the amount. Kept local — this is presentation state only.
+  const [supplyAction, setSupplyAction] = useState<{ key: string; mode: 'mint' | 'burn' } | null>(null);
+  const [supplyAmount, setSupplyAmount] = useState('');
+  const [supplyBusy, setSupplyBusy] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
   const handleScan = async (data: string) => {
@@ -192,6 +209,46 @@ export default function TokenManagementScreen(): JSX.Element | null {
     setExpandedKey(prev => (prev === key ? null : key));
   };
 
+  const supplyBtnStyle: React.CSSProperties = {
+    flex: 1,
+    padding: '8px 10px',
+    borderRadius: 4,
+    border: '1px solid var(--border)',
+    background: 'transparent',
+    color: 'var(--text)',
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.06em',
+    cursor: 'pointer',
+  };
+
+  /// Run the pending mint/burn. Whether it is ALLOWED is decided entirely by
+  /// the token's committed policy in Rust — authority, threshold and supply
+  /// cap. This surfaces the verdict; it never pre-judges it.
+  const runSupplyAction = async (ticker: string) => {
+    if (!supplyAction) return;
+    const amount = supplyAmount.trim();
+    if (!amount) return;
+    setSupplyBusy(true);
+    try {
+      const res = supplyAction.mode === 'mint'
+        ? await mintToken({ tokenId: ticker, amount })
+        : await burnToken({ tokenId: ticker, amount });
+      if (res.success) {
+        snackbar.show(
+          `${supplyAction.mode === 'mint' ? 'Minted' : 'Burned'} ${amount} ${ticker}`,
+        );
+        setSupplyAction(null);
+        setSupplyAmount('');
+        refresh();
+      } else {
+        snackbar.show(res.message || `${supplyAction.mode} failed`);
+      }
+    } finally {
+      setSupplyBusy(false);
+    }
+  };
+
   const tabStyle = (tab: Tab): React.CSSProperties => ({
     flex: 1,
     padding: '12px 16px',
@@ -229,6 +286,26 @@ export default function TokenManagementScreen(): JSX.Element | null {
           </div>
         ) : (
           <div style={{ padding: '0 16px 16px 16px', overflowY: 'auto', height: '100%' }}>
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                marginBottom: 12,
+                borderRadius: 6,
+                border: '1px solid var(--accent)',
+                background: 'transparent',
+                color: 'var(--text)',
+                fontWeight: 700,
+                fontSize: 12,
+                letterSpacing: '0.04em',
+                cursor: 'pointer',
+              }}
+            >
+              + CREATE TOKEN
+            </button>
+
             <div style={{ display: 'grid', gap: 10 }}>
               {allTokens.map(token => {
                 const isExpanded = expandedKey === token.key;
@@ -314,6 +391,69 @@ export default function TokenManagementScreen(): JSX.Element | null {
                           mono
                           preWrap
                         />
+
+                        {!token.builtIn && token.ticker && (
+                          <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                            {supplyAction?.key !== token.key ? (
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  type="button"
+                                  onClick={() => { setSupplyAction({ key: token.key, mode: 'mint' }); setSupplyAmount(''); }}
+                                  style={supplyBtnStyle}
+                                >
+                                  MINT
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => { setSupplyAction({ key: token.key, mode: 'burn' }); setSupplyAmount(''); }}
+                                  style={supplyBtnStyle}
+                                >
+                                  BURN
+                                </button>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'grid', gap: 8 }}>
+                                <label style={{ fontSize: 10, letterSpacing: '0.08em', color: 'var(--text-dark)' }}>
+                                  {supplyAction.mode === 'mint' ? 'MINT AMOUNT' : 'BURN AMOUNT'}
+                                </label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  inputMode="numeric"
+                                  value={supplyAmount}
+                                  onChange={e => setSupplyAmount(e.target.value)}
+                                  placeholder="0"
+                                  autoFocus
+                                  style={{
+                                    padding: '8px 10px',
+                                    borderRadius: 4,
+                                    border: '1px solid var(--border)',
+                                    background: 'transparent',
+                                    color: 'var(--text)',
+                                  }}
+                                />
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                  <button
+                                    type="button"
+                                    disabled={supplyBusy}
+                                    onClick={() => { setSupplyAction(null); setSupplyAmount(''); }}
+                                    style={supplyBtnStyle}
+                                  >
+                                    CANCEL
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={supplyBusy || !supplyAmount.trim()}
+                                    onClick={() => void runSupplyAction(token.ticker as string)}
+                                    style={{ ...supplyBtnStyle, borderColor: 'var(--accent)' }}
+                                  >
+                                    {supplyBusy ? 'WORKING…' : 'CONFIRM'}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -323,6 +463,17 @@ export default function TokenManagementScreen(): JSX.Element | null {
           </div>
         )}
       </div>
+
+      {creating && (
+        <TokenCreationDialog
+          onClose={() => setCreating(false)}
+          onSuccess={() => {
+            // The wallet-refresh event also fires; refreshing here keeps the
+            // list correct even if this screen is not the active listener.
+            refresh();
+          }}
+        />
+      )}
 
       {/* Screen-local, event-driven snackbar (dismiss on click or ESC). */}
       {snackbar.open && (

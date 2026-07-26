@@ -195,12 +195,16 @@ pub fn reconcile_projections_against_head(device_id_bytes: &[u8; 32]) -> Result<
     let mut rebuilt = 0usize;
     let mut checked = 0usize;
     for (policy_commit, head_balance) in head.balances_snapshot() {
-        // Only builtin tokens have a stable ticker resolvable from the policy
-        // commit alone; the projection is keyed by that ticker.
-        let Some(token_id) = dsm::core::token::builtin_token_id_for_policy_commit(policy_commit)
+        // The projection is keyed by ticker. Builtins resolve from the commit
+        // alone; created tokens resolve through the registry-backed display
+        // resolver. A token that cannot be named yet is skipped — its
+        // canonical balance is unaffected, and repairing a row under the wrong
+        // ticker would be worse than leaving it for the next sweep.
+        let Some(token_id) = dsm::core::token::resolve_ticker_for_policy_commit(policy_commit)
         else {
             continue;
         };
+        let token_id = token_id.as_str();
         checked += 1;
 
         let locked = super::get_locked_balance(&device_txt, token_id).unwrap_or(0);
@@ -310,6 +314,8 @@ mod tests {
                 dsm::types::operations::Operation::Mint {
                     amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
                     token_id: b"ERA".to_vec(),
+                    policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA")
+                        .unwrap(),
                     authorized_by: b"self".to_vec(),
                     proof_of_authorization: Vec::new(),
                     message: "mint".to_string(),

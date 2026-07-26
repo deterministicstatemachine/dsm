@@ -68,10 +68,10 @@ export default function DevPolicyScreen(): JSX.Element {
            onClick={() => setIsCreationDialogOpen(true)}
            style={{ width: '100%', marginBottom: 4 }}
          >
-           Create Token Policy + Token
+           Create Token (advanced)
          </button>
          <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-          Define a CPTA token policy (supply, ticker, decimals, permissions), publish it, then mint a token bound to that policy.
+          Same wizard as Tokens → + CREATE TOKEN. Defines the token&apos;s CPTA policy (supply, ticker, decimals, mint/burn authority), anchors it, and creates the token bound to that anchor.
          </div>
       </div>
 

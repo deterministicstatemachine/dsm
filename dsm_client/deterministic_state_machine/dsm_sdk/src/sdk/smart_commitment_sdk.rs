@@ -143,12 +143,16 @@ impl SmartCommitmentSDK {
             Operation::Mint {
                 amount,
                 token_id,
+                policy_commit,
                 authorized_by,
                 proof_of_authorization,
                 message,
             } => {
                 buf.extend_from_slice(b"MINT");
                 Self::push_bytes(&mut buf, token_id);
+                // The asset being minted is part of what is signed; without it
+                // a signature would not say WHICH asset it authorises.
+                buf.extend_from_slice(policy_commit);
                 buf.extend_from_slice(&amount.value().to_le_bytes());
                 Self::push_bytes(&mut buf, authorized_by);
                 buf.extend_from_slice(&(proof_of_authorization.len() as u32).to_le_bytes());
@@ -158,11 +162,13 @@ impl SmartCommitmentSDK {
             Operation::Burn {
                 amount,
                 token_id,
+                policy_commit,
                 proof_of_ownership,
                 message,
             } => {
                 buf.extend_from_slice(b"BURN");
                 Self::push_bytes(&mut buf, token_id);
+                buf.extend_from_slice(policy_commit);
                 buf.extend_from_slice(&amount.value().to_le_bytes());
                 buf.extend_from_slice(&(proof_of_ownership.len() as u32).to_le_bytes());
                 buf.extend_from_slice(proof_of_ownership);
@@ -538,6 +544,7 @@ mod tests {
         Operation::Mint {
             amount: Balance::from_state(500, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
+            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
             authorized_by: b"authority".to_vec(),
             proof_of_authorization: b"auth_proof".to_vec(),
             message: "mint".to_string(),
@@ -548,6 +555,7 @@ mod tests {
         Operation::Burn {
             amount: Balance::from_state(250, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
+            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
             proof_of_ownership: b"ownership_proof".to_vec(),
             message: "burn".to_string(),
         }

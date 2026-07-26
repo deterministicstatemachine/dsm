@@ -128,11 +128,21 @@ VARIABLES
     \* === Recovery ===
     capsuleExists,   \* capsuleExists[d] \in BOOLEAN
     tombstoned,      \* tombstoned[d] \in BOOLEAN
-    successorOf      \* successorOf[d] \in Device \cup {NULL}
+    successorOf,     \* successorOf[d] \in Device \cup {NULL}
+
+    \* === Token creation ===
+    \* Total ERA DESTROYED by token creation. Creation burns the fee: the
+    \* value leaves circulation with no counterparty credit, so it must be
+    \* tracked explicitly or conservation would appear to be violated.
+    burnedTotal
 
 vars == <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
           sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-          vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+          vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf,
+          burnedTotal>>
+
+\* ERA destroyed to create one token (dsm::core::token::TOKEN_CREATION_FEE_ERA).
+TOKEN_CREATION_FEE == 10
 
 \* ========================================================================
 \* INITIAL STATE
@@ -158,6 +168,7 @@ Init ==
     /\ capsuleExists = [d \in Device |-> FALSE]
     /\ tombstoned = [d \in Device |-> FALSE]
     /\ successorOf = [d \in Device |-> NULL]
+    /\ burnedTotal = 0
 
 \* ========================================================================
 \* BILATERAL SESSION ACTIONS
@@ -190,7 +201,7 @@ SenderPrepare(sender, receiver, sid, amount) ==
          hasBothSigs |-> FALSE]]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- Phase 1→2: ReceiverReceivePrepare ----------
 \* Maps to handle_prepare_request() in bilateral_ble_handler.rs:1055
@@ -204,7 +215,7 @@ ReceiverReceivePrepare(sid) ==
     /\ sessions' = [sessions EXCEPT ![sid].phase = "PendingUserAction"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- Phase 2: UserAccept ----------
 \* Maps to create_prepare_accept_envelope() in bilateral_ble_handler.rs:1557
@@ -216,7 +227,7 @@ UserAccept(sid) ==
                                      ![sid].hasBothSigs = TRUE]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- Phase 2: UserReject ----------
 \* Maps to create_prepare_reject_envelope_with_cleanup()
@@ -226,7 +237,7 @@ UserReject(sid) ==
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Rejected"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- Phase 3: Commit ----------
 \* Maps to finalize_offline_transfer() in bilateral_transaction_manager.rs:952
@@ -252,7 +263,7 @@ Commit(sid) ==
                                           ![r] = chainTip[r] + 1]
           /\ relationshipTip' = relationshipTip + 1
     /\ UNCHANGED <<deviceAlive, modalLock, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- SessionFail ----------
 \* Any in-flight session can fail: BLE disconnect, crash, timeout.
@@ -263,7 +274,7 @@ SessionFail(sid) ==
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Failed"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- SessionRecover ----------
 \* Maps to recover_sender_commit_from_storage() in bilateral_ble_handler.rs:638
@@ -287,7 +298,7 @@ SessionRecover(sid) ==
                                           ![r] = chainTip[r] + 1]
           /\ relationshipTip' = relationshipTip + 1
     /\ UNCHANGED <<deviceAlive, modalLock, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- TripwireAbort ----------
 \* When the chain tip has moved since precommitment (another transaction consumed
@@ -300,7 +311,7 @@ TripwireAbort(sid) ==
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Failed"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ========================================================================
 \* MODAL LOCK / B0X ACTIONS
@@ -334,7 +345,7 @@ OnlineSubmit(sender, receiver, amount) ==
     /\ balance' = [balance EXCEPT ![sender] = balance[sender] - amount]
     /\ UNCHANGED <<chainTip, deviceAlive, relationshipTip,
                    sessions, vaults, coPresent, networkUp,
-                   capsuleExists, tombstoned, successorOf>>
+                   capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- OnlineDeliver ----------
 \* b0x item delivered and accepted by receiver. Releases modal lock.
@@ -356,7 +367,7 @@ OnlineDeliver ==
     /\ modalLock' = FALSE
     /\ b0xPending' = FALSE
     /\ UNCHANGED <<deviceAlive, sessions, vaults, coPresent, networkUp,
-                   capsuleExists, tombstoned, successorOf, b0xAmount, b0xSender, b0xReceiver>>
+                   capsuleExists, tombstoned, successorOf, b0xAmount, b0xSender, b0xReceiver, burnedTotal>>
 
 \* ---------- OnlineReject ----------
 \* b0x item rejected, cancelled, or expired. Releases modal lock.
@@ -369,7 +380,7 @@ OnlineReject ==
     /\ balance' = [balance EXCEPT ![b0xSender] = balance[b0xSender] + b0xAmount]
     /\ UNCHANGED <<chainTip, deviceAlive, relationshipTip, sessions,
                    vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf,
-                   b0xAmount, b0xSender, b0xReceiver>>
+                   b0xAmount, b0xSender, b0xReceiver, burnedTotal>>
 
 \* ========================================================================
 \* DLV VAULT ACTIONS
@@ -391,7 +402,7 @@ VaultCreate(vid, creator, recipient) ==
                                            recipient |-> recipient]]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- VaultUnlock ----------
 \* Intended recipient presents fulfillment proof. Maps to LimboVault::unlock()
@@ -406,7 +417,7 @@ VaultUnlock(vid) ==
     /\ vaults' = [vaults EXCEPT ![vid].state = "Unlocked"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- VaultClaim ----------
 \* Maps to LimboVault::claim() at line 1545.
@@ -419,7 +430,7 @@ VaultClaim(vid) ==
     /\ vaults' = [vaults EXCEPT ![vid].state = "Claimed"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- VaultInvalidate ----------
 \* Creator unilaterally invalidates vault. THE critical DLV liveness escape.
@@ -437,7 +448,7 @@ VaultInvalidate(vid) ==
     /\ vaults' = [vaults EXCEPT ![vid].state = "Invalidated"]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- VaultExpire ----------
 \* Vaults have a deterministic expiration (BLAKE3 iteration counter, not wall
@@ -454,7 +465,7 @@ VaultExpire(vid) ==
     /\ vaults' = [vaults EXCEPT ![vid].state = "Invalidated"]  \* Expiry => terminal
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ========================================================================
 \* ENVIRONMENT ACTIONS (nondeterministic)
@@ -466,14 +477,14 @@ PartitionStart(d) ==
     /\ networkUp' = [networkUp EXCEPT ![d] = FALSE]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 PartitionEnd(d) ==
     /\ ~networkUp[d]
     /\ networkUp' = [networkUp EXCEPT ![d] = TRUE]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* BLE proximity changes
 BleConnect ==
@@ -481,14 +492,14 @@ BleConnect ==
     /\ coPresent' = TRUE
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 BleDisconnect ==
     /\ coPresent
     /\ coPresent' = FALSE
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ========================================================================
 \* RECOVERY ACTIONS
@@ -502,7 +513,7 @@ CapsuleWrite(d) ==
     /\ capsuleExists' = [capsuleExists EXCEPT ![d] = TRUE]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, tombstoned, successorOf, burnedTotal>>
 
 \* Device failure — all in-flight sessions involving this device fail
 DeviceFail(d) ==
@@ -516,7 +527,7 @@ DeviceFail(d) ==
         ELSE sessions[sid]]
     /\ UNCHANGED <<chainTip, balance, modalLock, relationshipTip,
                    b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* Tombstone (marks old device invalid). Maps to TombstoneReceipt at tombstone.rs:28.
 TombstoneCreate(d) ==
@@ -526,7 +537,7 @@ TombstoneCreate(d) ==
     /\ tombstoned' = [tombstoned EXCEPT ![d] = TRUE]
     /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, successorOf>>
+                   vaults, coPresent, networkUp, capsuleExists, successorOf, burnedTotal>>
 
 \* Succession (new device takes over). Maps to SuccessionReceipt at tombstone.rs:46.
 SuccessionCreate(dOld, dNew) ==
@@ -541,13 +552,40 @@ SuccessionCreate(dOld, dNew) ==
                                   ![dOld] = 0]
     /\ UNCHANGED <<deviceAlive, modalLock, relationshipTip,
                    sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned>>
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned, burnedTotal>>
 
 \* ========================================================================
 \* NEXT-STATE RELATION
 \* ========================================================================
 
+\* ========================================================================
+\* TOKEN CREATION
+\* ========================================================================
+
+\* Create a token: DESTROY the fee from the creator's ERA balance.
+\*
+\* Models the fee leg of the two-leg create-token conservation rule. The
+\* issuance leg credits a DIFFERENT asset (the new token), which this
+\* single-asset model does not track — and that is exactly why it cannot
+\* offset the burn here. The fee is a strict destruction: no counterparty is
+\* credited, so it must land in `burnedTotal` for conservation to close.
+\*
+\* Insufficient balance means NO state change at all — a failed creation
+\* burns nothing.
+CreateTokenBurn(d) ==
+    /\ deviceAlive[d]
+    /\ ~modalLock
+    /\ balance[d] >= TOKEN_CREATION_FEE
+    /\ balance' = [balance EXCEPT ![d] = @ - TOKEN_CREATION_FEE]
+    /\ burnedTotal' = burnedTotal + TOKEN_CREATION_FEE
+    /\ UNCHANGED <<chainTip, deviceAlive, modalLock, relationshipTip,
+                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
+                   vaults, coPresent, networkUp, capsuleExists, tombstoned,
+                   successorOf, burnedTotal>>
+
 Next ==
+    \* Token creation (fee burn)
+    \/ \E d \in Device : CreateTokenBurn(d)
     \* Bilateral session actions
     \/ \E s, r \in Device, sid \in SessionId, amt \in 1..INITIAL_BALANCE :
         SenderPrepare(s, r, sid, amt)
@@ -624,9 +662,16 @@ NoFork ==
          /\ sessions[s1].sender = sessions[s2].sender)
         => sessions[s1].tipAtCreation /= sessions[s2].tipAtCreation
 
-\* TokenConservation (Theorem 4): total balance + escrowed amount is constant.
+\* TokenConservation (Theorem 4): ERA is conserved MODULO an explicitly
+\* tracked burn. Total balance + escrowed amount + burned amount is constant.
+\*
 \* When b0xPending, the escrowed amount was deducted from sender but not yet
 \* credited to receiver — so visible balances sum to (total - escrow).
+\*
+\* Token creation destroys `TOKEN_CREATION_FEE` with NO counterparty credit,
+\* so that value must appear in `burnedTotal` for the sum to close. This is
+\* what makes the two-leg create-token conservation rule checkable: the fee
+\* leg cannot silently vanish, and it cannot be credited anywhere.
 RECURSIVE SumBal(_)
 SumBal(S) == IF S = {} THEN 0
              ELSE LET d == CHOOSE x \in S : TRUE
@@ -635,7 +680,11 @@ SumBal(S) == IF S = {} THEN 0
 EscrowedAmount == IF b0xPending THEN b0xAmount ELSE 0
 
 TokenConservation ==
-    SumBal(Device) + EscrowedAmount = Cardinality(Device) * INITIAL_BALANCE
+    SumBal(Device) + EscrowedAmount + burnedTotal
+        = Cardinality(Device) * INITIAL_BALANCE
+
+\* The burn is monotone: destroyed value is never restored.
+BurnIsMonotone == burnedTotal >= 0
 
 \* ModalLockConsistency (Theorem 1): lock implies pending b0x item.
 ModalLockConsistency ==

@@ -133,15 +133,18 @@ pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
 }
 
 pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
-    match canonicalize_token_id(token_id).as_str() {
+    let canonical = canonicalize_token_id(token_id);
+    match canonical.as_str() {
         "ERA" => 0,
         "dBTC" => 8,
-        // Custom-token decimals formerly came from `dsm.token.<id>` +
-        // `dsm.policy.<anchor>` prefs; those paths are gone (plan Part E).
-        // The authoritative source is the TokenSDK metadata cache; a
-        // follow-up commit wires this lookup through AppRouterImpl.  For
-        // now custom tokens default to 0 decimals in the display path.
-        _ => 0,
+        // Created tokens carry their own decimals; read them from the durable
+        // registry rather than defaulting to 0, which silently mis-scaled every
+        // custom-token amount in the display path.
+        _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
+            .ok()
+            .flatten()
+            .map(|row| row.decimals)
+            .unwrap_or(0),
     }
 }
 

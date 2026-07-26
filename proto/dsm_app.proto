@@ -810,12 +810,69 @@ message PolicyAnchorV3 {
 }
 
 // ---------------------------- Token Creation -----------------------------
+// Token creation intent. The client sends only what the USER chose; Rust owns
+// every protocol decision downstream — it packs the canonical v3 policy blob,
+// derives the content-addressed anchor, publishes it, and creates the token in
+// one invoke. The client never packs policy bytes and never supplies an anchor
+// (a client-named anchor is precisely the value-safety hole closed earlier:
+// the anchor becomes the issuance BalanceDelta's policy_commit).
+//
+//   5 = policy_anchor — removed; Rust derives it from the bytes it packs.
 message TokenCreateRequest {
   string ticker = 1; // 2-8 uppercase
   string alias = 2; // display name
   uint32 decimals = 3; // 0..18
   bytes max_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128
-  bytes policy_anchor = 5 [(dsm_fixed_len)=32]; // anchor for the CPTA policy bytes
+  reserved 5;
+  reserved "policy_anchor";
+
+  bytes  initial_alloc_u128     = 6 [(dsm_fixed_len)=16]; // big-endian u128
+  bool   mint_burn_enabled      = 7;
+  bool   transferable           = 8;
+  bool   unlimited_supply       = 9;
+  // 1..=255. Signatures required to authorize a mint or burn. The signer set
+  // itself is filled in by Rust (the creating device), never by the client.
+  uint32 mint_burn_threshold    = 10;
+  string description            = 11 [(dsm_max_len)=65535];
+  string icon_url               = 12 [(dsm_max_len)=65535];
+  // Optional inline allowlist of 32-byte device ids.
+  repeated bytes allowlist_device_ids = 13 [(dsm_max_len)=32];
+}
+
+// Mint additional supply of an existing token. Authority and the supply cap
+// are enforced by the token's committed policy conditions; the client supplies
+// intent only and never an authorization it constructed itself.
+message TokenMintRequest {
+  string token_id  = 1;
+  uint64 amount    = 2;
+  string message   = 3 [(dsm_max_len)=1024];
+}
+message TokenMintResponse {
+  bool   success   = 1;
+  string token_id  = 2;
+  uint64 new_balance = 3;
+  string message   = 4;
+}
+
+// Burn supply the caller holds. Burn ≤ balance is enforced by the conservation
+// guard's checked_sub on every advance.
+message TokenBurnRequest {
+  string token_id  = 1;
+  uint64 amount    = 2;
+  string message   = 3 [(dsm_max_len)=1024];
+}
+message TokenBurnResponse {
+  bool   success   = 1;
+  string token_id  = 2;
+  uint64 new_balance = 3;
+  string message   = 4;
+}
+
+// Authoritative fee schedule. The UI DISPLAYS these values; it never computes
+// or assumes them, and it cannot change what is charged — the conservation
+// guard validates the fee against a core constant.
+message TokenFeeScheduleResponse {
+  uint64 token_creation_era = 1;
 }
 
 message TokenCreateResponse {
@@ -2691,6 +2748,11 @@ message Envelope {
 
     // Offline-cash load/unload (two-regime money model): device-bound allocation balance.
     OfflineCashResponse               offline_cash_response            = 113;
+    // Local-only responses: never routed through a storage node, so they sit
+    // above the nodes' compiled-in payload allowlist without needing a redeploy.
+    TokenMintResponse                 token_mint_response              = 115;
+    TokenBurnResponse                 token_burn_response              = 116;
+    TokenFeeScheduleResponse          token_fee_schedule_response      = 117;
 
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
@@ -3522,7 +3584,26 @@ message PolicyConditionProto {
     CreditBundlePolicyProto credit_bundle_policy = 6;
     CustomConstraintProto custom = 7;
     BitcoinTapConstraintProto bitcoin_tap_constraint = 8;
+    // Typed — deliberately NOT expressed via CustomConstraintProto, whose
+    // opaque payload the enforcer cannot validate and an attacker could shape.
+    TokenAuthorityProto token_authority = 9;
+    SupplyCapProto      supply_cap      = 10;
   }
+}
+
+// Who may mint or burn this token, and how many of them must co-sign.
+// `signers` are raw SPHINCS+ public keys; the verifier takes the key from
+// HERE, never from the caller's own proof.
+message TokenAuthorityProto {
+  repeated bytes signers = 1 [(dsm_max_len)=65535];
+  uint32 threshold       = 2;
+}
+
+// Hard ceiling on circulating supply. `unlimited` and `max_supply` are
+// mutually exclusive; the policy parser enforces one canonical encoding.
+message SupplyCapProto {
+  bytes max_supply_u128 = 1 [(dsm_max_len)=16];
+  bool  unlimited       = 2;
 }
 
 message IdentityConstraintProto { repeated string allowed_identities = 1; bool allow_derived = 2; }

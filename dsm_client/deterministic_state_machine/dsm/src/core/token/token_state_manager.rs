@@ -50,6 +50,68 @@ fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
     }
 }
 
+/// ERA destroyed to create a token.
+///
+/// This lives in CORE, not in the SDK's mutable `fee_schedule` map, because the
+/// conservation guard must be able to validate it. The guard is a pure function
+/// over `(operation, deltas)`; a fee it cannot see is a fee it cannot enforce,
+/// and a fee that a runtime map could change is not a protocol rule. The SDK's
+/// schedule now READS this value, so there is exactly one authority.
+pub const TOKEN_CREATION_FEE_ERA: u64 = 10;
+
+/// Display-only ticker resolution for non-builtin (CPTA-anchored) tokens.
+///
+/// The canonical key for a balance is and remains the 32-byte `policy_commit`.
+/// This map exists solely so the compatibility projection can render a
+/// human-readable ticker: core cannot see the SDK's token registry, and
+/// without it every created token surfaced under a placeholder key.
+///
+/// It is authoritative for NOTHING. A missing entry means "cannot name this
+/// balance yet", which callers must treat as "omit the row", never as "show a
+/// wrong one".
+static POLICY_COMMIT_TICKERS: RwLock<Option<HashMap<[u8; 32], String>>> = RwLock::new(None);
+
+/// Register a `policy_commit -> ticker` mapping for display. Called by the SDK
+/// when it loads or creates a token; idempotent.
+pub fn register_policy_commit_ticker(policy_commit: [u8; 32], ticker: &str) {
+    let mut guard = POLICY_COMMIT_TICKERS.write();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(policy_commit, ticker.to_string());
+}
+
+/// Resolve a ticker for display: builtins first (they are compiled in and
+/// always resolvable), then the registered map.
+pub fn resolve_ticker_for_policy_commit(policy_commit: &[u8; 32]) -> Option<String> {
+    if let Some(builtin) = builtin_token_id_for_policy_commit(policy_commit) {
+        return Some(builtin.to_string());
+    }
+    POLICY_COMMIT_TICKERS
+        .read()
+        .as_ref()
+        .and_then(|m| m.get(policy_commit).cloned())
+}
+
+/// Canonical balance key for a position, or `None` when the token cannot be
+/// named yet.
+///
+/// The SINGLE place the compatibility projection builds a balance key, so the
+/// state-machine view and the SDK view cannot drift. Returning `None` — rather
+/// than a placeholder key — is deliberate: an unnameable balance must be
+/// ABSENT from the projection, because a row with the wrong token id is worse
+/// than a missing row.
+pub fn canonical_balance_key_for_commit(
+    policy_commit: &[u8; 32],
+    owner_pk: &[u8],
+) -> Option<String> {
+    let ticker = resolve_ticker_for_policy_commit(policy_commit)?;
+    Some(derive_canonical_balance_key(
+        policy_commit,
+        owner_pk,
+        &ticker,
+    ))
+}
+
 /// Derive the stable canonical balance key for a token position.
 ///
 /// `balance_key` is the identity of the canonical balance entry. Freshness and

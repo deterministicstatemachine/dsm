@@ -204,6 +204,7 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
     let app_router = Arc::new(
         AppRouterImpl::new(cfg).map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
     );
+    let app_router_for_rehydrate = Arc::clone(&app_router);
     install_sdk_app_router(app_router)
         .map_err(|e| format!("Failed to install app router: {:?}", e))?;
     install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
@@ -215,6 +216,7 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
     ));
     crate::bridge::mark_full_app_router_installed(device_id);
     log::info!("[SDK] Full AppRouter hot-swapped in (canonical identity ready)");
+    spawn_token_registry_rehydrate(app_router_for_rehydrate, "warm-swap");
     spawn_acceptance_recovery_sweep("warm-swap");
     Ok(true)
 }
@@ -227,6 +229,19 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
 /// the spawned task and the sweep skips fail-closed when the wallet is locked
 /// or the DB is not initialized — recovery runs only after the database, wallet
 /// keys, and runtime all exist.
+/// Re-register persisted tokens' policies after a restart.
+///
+/// The policy system is in-memory and fails closed for an unregistered token,
+/// so without this a token created before the restart could not be transferred
+/// and no vault could be built for it. The durable tables are the source of
+/// truth; this only rebuilds the derived in-memory view.
+fn spawn_token_registry_rehydrate(router: std::sync::Arc<AppRouterImpl>, origin: &'static str) {
+    crate::runtime::get_runtime().spawn(async move {
+        router.rehydrate_token_registry().await;
+        log::debug!("[SDK] token registry rehydrate ({origin}) complete");
+    });
+}
+
 fn spawn_acceptance_recovery_sweep(origin: &'static str) {
     crate::runtime::get_runtime().spawn(async move {
         match current_chain_head_at_rest_key() {
@@ -572,6 +587,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             AppRouterImpl::new(cfg.clone())
                 .map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
         );
+        let app_router_for_rehydrate = Arc::clone(&app_router);
         install_sdk_app_router(app_router)
             .map_err(|e| format!("Failed to install app router: {:?}", e))?;
         install_app_router_adapter(crate::runtime::get_runtime().handle().clone());
@@ -582,6 +598,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         ));
         crate::bridge::mark_full_app_router_installed(device_id);
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
+        spawn_token_registry_rehydrate(app_router_for_rehydrate, "cold-boot");
         spawn_acceptance_recovery_sweep("cold-boot");
     } else {
         // Install minimal bootstrap router for pre-genesis queries

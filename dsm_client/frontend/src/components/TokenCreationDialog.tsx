@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import './TokenCreationDialog.css';
 import { dsmClient } from '@/services/dsmClient';
+import { getTokenCreationFeeEra } from '@/dsm/policies';
 
 // ── Types ────────────────────────────────────────────────────────────────────
-type TokenKind = 'FUNGIBLE' | 'NFT' | 'SBT';
+// Fungible is the only token kind the protocol enforces. NFT/SBT would need
+// a per-item ownership primitive that does not exist, and the Rust policy
+// parser rejects their discriminant outright — so they are not offered.
+type TokenKind = 'FUNGIBLE';
 type AllowlistKind = 'NONE' | 'INLINE';
 
 interface WizardState {
@@ -39,10 +43,6 @@ const DEFAULT: WizardState = {
   allowlistKind: 'NONE',
   allowlistData: '',
 };
-
-function isTransferableKind(kind: TokenKind): boolean {
-  return kind !== 'SBT';
-}
 
 // ── Validation ───────────────────────────────────────────────────────────────
 function validateStep1(s: WizardState): string | null {
@@ -110,8 +110,6 @@ function Toggle({ checked, onChange, id }: { checked: boolean; onChange: (v: boo
 // ── Sub-component: Step 1 — Token Identity ───────────────────────────────────
 const KIND_META: { kind: TokenKind; icon: string; name: string; desc: string }[] = [
   { kind: 'FUNGIBLE', icon: 'F', name: 'FUNGIBLE', desc: 'Interchangeable units' },
-  { kind: 'NFT',      icon: 'N', name: 'NFT',      desc: 'Unique collectible' },
-  { kind: 'SBT',      icon: 'S', name: 'SBT',      desc: 'Soul-bound credential' },
 ];
 
 function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
@@ -211,21 +209,12 @@ function Step2({
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
 }) {
-  const notFungible = state.kind !== 'FUNGIBLE';
-
   return (
     <div>
       <div className="tcd-section-title">Precision</div>
 
       <div className="tcd-field">
-        <label className="tcd-label">
-          Decimals
-          {notFungible && (
-            <span className="tcd-hint" style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
-              {' '}— locked to 0 for {state.kind}
-            </span>
-          )}
-        </label>
+        <label className="tcd-label">Decimals</label>
         <div className="tcd-slider-row">
           <input
             type="range"
@@ -233,8 +222,7 @@ function Step2({
             min={0}
             max={18}
             value={effectiveDecimals}
-            disabled={notFungible}
-            onChange={e => !notFungible && set({ decimals: Number(e.target.value) })}
+            onChange={e => set({ decimals: Number(e.target.value) })}
           />
           <span className="tcd-slider-val">{effectiveDecimals}</span>
         </div>
@@ -316,12 +304,14 @@ function Step2({
 
 // ── Sub-component: Step 3 — Access + Review ──────────────────────────────────
 function Step3({
-  state, set, effectiveDecimals, effectiveTransferable,
+  state, set, effectiveDecimals, effectiveTransferable, creationFeeEra,
 }: {
   state: WizardState;
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
   effectiveTransferable: boolean;
+  /** Authoritative fee from Rust; `undefined` until the query returns. */
+  creationFeeEra?: bigint;
 }) {
   const supplyLine = state.unlimitedSupply ? 'Unlimited' : Number(state.maxSupply || '0').toLocaleString();
   const allocLine  = state.unlimitedSupply ? '—' : Number(state.initialAlloc || '0').toLocaleString();
@@ -415,6 +405,12 @@ function Step3({
               : `Restricted (${state.allowlistData.trim().split('\n').filter(Boolean).length} entries)`}
           </span>
         </div>
+        <div className="tcd-review-row">
+          <span className="tcd-review-key">Creation fee</span>
+          <span className="tcd-review-val">
+            {creationFeeEra === undefined ? '…' : `${creationFeeEra} ERA (burned)`}
+          </span>
+        </div>
         {state.description.trim() && (
           <div className="tcd-review-row">
             <span className="tcd-review-key">Desc</span>
@@ -490,7 +486,20 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   const [creating, setCreating] = useState(false);
   const [error,    setError]    = useState<string | null>(null);
   const [created,  setCreated]  = useState<{ tokenId?: string; anchorBase32?: string } | null>(null);
+  // Authoritative creation fee, fetched from Rust. Never hardcoded here — the
+  // conservation guard validates the charged fee against a core constant, and a
+  // number invented in the UI could silently disagree with what is burned.
+  const [creationFeeEra, setCreationFeeEra] = useState<bigint | undefined>(undefined);
   const stateRef = useRef(state);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const fee = await getTokenCreationFeeEra();
+      if (!cancelled) setCreationFeeEra(fee);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const set = useCallback((patch: Partial<WizardState>) => {
     _setState(prev => {
@@ -500,9 +509,10 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
     });
   }, []);
 
-  // Derived helpers
-  const effectiveDecimals     = state.kind !== 'FUNGIBLE' ? 0 : state.decimals;
-  const effectiveTransferable = isTransferableKind(state.kind);
+  // Derived helpers. Only fungible tokens exist, so decimals are whatever the
+  // user chose and the token is transferable.
+  const effectiveDecimals     = state.decimals;
+  const effectiveTransferable = true;
 
   const navigate = useCallback((to: number) => {
     setDir(to > step ? 'fwd' : 'bck');
@@ -550,10 +560,14 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
           ? Boolean((res as { success?: boolean }).success)
           : false;
       if (ok) {
-        const r = (typeof res === 'object' && res !== null && 'result' in res)
-          ? (res as { result?: { tokenId?: string; anchorBase32?: string } }).result
-          : undefined;
-        setCreated(r ?? {});
+        // `createToken` returns a FLAT result. The old code reached for a
+        // `.result` wrapper that only the (now deleted, unreachable) DsmClient
+        // method produced, so `created` was always {} and the success screen
+        // rendered neither the token id nor the anchor.
+        const r = (typeof res === 'object' && res !== null)
+          ? (res as { tokenId?: string; anchorBase32?: string })
+          : {};
+        setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
         if (onSuccess) onSuccess();
       } else {
         const msg = (typeof res === 'object' && res !== null && 'error' in res)
@@ -608,6 +622,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               set={set}
               effectiveDecimals={effectiveDecimals}
               effectiveTransferable={effectiveTransferable}
+              creationFeeEra={creationFeeEra}
             />
           )}
         </div>

@@ -41,6 +41,7 @@ pub mod sender_outbox;
 pub mod sender_proposal;
 mod stitched_receipts;
 mod system_peers;
+pub mod token_registry;
 mod tokens;
 mod transactions;
 pub mod types;
@@ -577,6 +578,41 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at  INTEGER NOT NULL,
             PRIMARY KEY (device_id, token_id)
         );
+
+        -- Anchored token policies. A policy may exist WITHOUT a token: the
+        -- developer paste-raw-bytes path publishes one on its own, so this has
+        -- a separate lifetime from token_registry.
+        --
+        -- `policy_commit` IS the content hash: BLAKE3(TAG_DSM_POLICY,
+        -- policy_bytes). Storing it as the primary key makes the table
+        -- self-verifying — a row whose bytes do not hash to its key is
+        -- detectable without any external authority.
+        CREATE TABLE IF NOT EXISTS token_policies(
+            policy_commit  BLOB PRIMARY KEY,   -- 32B content hash
+            policy_bytes   BLOB NOT NULL,      -- TokenPolicyV3-encoded
+            created_at     INTEGER NOT NULL
+        );
+
+        -- Tokens created on this device.
+        --
+        -- Deliberately carries NO circulating-supply column. Circulating
+        -- supply is derived from the canonical BCR chain, not cached here: a
+        -- mutable counter would be a second authority that a restored snapshot
+        -- could disagree with, and the supply cap would then be enforceable
+        -- against the wrong number.
+        CREATE TABLE IF NOT EXISTS token_registry(
+            token_id        TEXT NOT NULL PRIMARY KEY,
+            policy_commit   BLOB NOT NULL,
+            ticker          TEXT NOT NULL,
+            alias           TEXT NOT NULL,
+            decimals        INTEGER NOT NULL CHECK (decimals BETWEEN 0 AND 18),
+            max_supply      BLOB NOT NULL,     -- 16B big-endian u128
+            owner_device_id BLOB NOT NULL,
+            created_at      INTEGER NOT NULL,
+            UNIQUE (policy_commit)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_token_registry_ticker
+            ON token_registry(ticker);
 
         CREATE TABLE IF NOT EXISTS sender_outbox(
             relationship_key    BLOB NOT NULL,

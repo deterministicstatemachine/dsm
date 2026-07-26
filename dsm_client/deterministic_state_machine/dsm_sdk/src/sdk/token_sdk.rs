@@ -290,7 +290,10 @@ impl EraToken {
         let mut fee_schedule = HashMap::new();
         fee_schedule.insert(
             "token_creation".to_string(),
-            Balance::from_state(10, [0u8; 32]),
+            // Reads the CORE constant: the conservation guard validates this
+            // exact value, so a schedule that could disagree with it would be a
+            // second authority over a protocol rule.
+            Balance::from_state(dsm::core::token::TOKEN_CREATION_FEE_ERA, [0u8; 32]),
         );
         fee_schedule.insert("token_update".to_string(), Balance::zero());
         fee_schedule.insert("token_transfer".to_string(), Balance::zero());
@@ -327,7 +330,11 @@ impl EraToken {
             symbol: "ERA".to_string(),
             description: Some("Resilient Oracle-Optimized Trustless token - the native token of the DSM ecosystem".to_string()),
             icon_url: None,
-            decimals: 18,
+            // ERA is whole-unit. The display path, the faucet and the fee
+            // schedule all treat it as 0 decimals; carrying 18 here was a
+            // second, contradicting answer that would mis-scale the fee
+            // display by 10^18 the moment anything read it.
+            decimals: 0,
             fields,
             token_id: "ERA".to_string(),
             token_type: TokenType::Native,
@@ -352,10 +359,6 @@ impl EraToken {
             .get(operation_type)
             .cloned()
             .unwrap_or(Balance::from_state(1, [0u8; 32]))
-    }
-
-    pub fn update_fee_schedule(&mut self, new_schedule: HashMap<String, Balance>) {
-        self.fee_schedule = new_schedule;
     }
 }
 
@@ -507,6 +510,14 @@ impl<I: Send + Sync> TokenSDK<I> {
                     token_metadata.policy_anchor.as_deref(),
                 );
             }
+        }
+
+        // Durable registry. The in-memory metadata map is dropped on process
+        // exit, so without this a token created before a restart could not be
+        // resolved at all — which fails closed in the send path and in
+        // `dlv.create`, making the token unusable rather than merely invisible.
+        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token(token_id) {
+            return Ok(row.policy_commit);
         }
 
         let op = self.find_token_metadata_operation(token_id)?;
@@ -678,10 +689,17 @@ impl<I: Send + Sync> TokenSDK<I> {
             metadata.policy_anchor = Some(policy_anchor);
         }
 
-        crate::policy::strict_policy_commit_for_token(
+        let policy_commit = crate::policy::strict_policy_commit_for_token(
             &metadata.token_id,
             metadata.policy_anchor.as_deref(),
         )?;
+
+        // Teach core how to NAME this token's balances. Core owns the
+        // compatibility projection but cannot see this registry, so without
+        // this every created token's balance is unnameable and therefore
+        // omitted from the projection. Display-only: `policy_commit` remains
+        // the canonical key.
+        dsm::core::token::register_policy_commit_ticker(policy_commit, &metadata.symbol);
 
         self.token_metadata
             .write()
@@ -1073,6 +1091,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let op = Operation::Mint {
                     amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
+                    policy_commit,
                     authorized_by,
                     proof_of_authorization: encode_embedded_proof(&signer_pk, &mint_sig)?,
                     message: "Mint operation via TokenSDK".to_string(),
@@ -1132,6 +1151,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let mut op = Operation::Burn {
                     amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
+                    policy_commit,
                     proof_of_ownership: Vec::new(),
                     message: "Burn operation via TokenSDK".to_string(),
                 };
@@ -1407,34 +1427,6 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
     }
 
-    pub fn calculate_fee(&self, operation_type: &str) -> Balance {
-        let era_token = self.era_token.read();
-        era_token.get_fee(operation_type)
-    }
-
-    pub async fn process_fee_payment(
-        &self,
-        _from_device_id: &str,
-        operation_type: &str,
-    ) -> Result<State, DsmError> {
-        let fee = self.calculate_fee(operation_type);
-
-        let fee_recipient_str = "system.fee.device_id";
-        let mut fee_recipient = [0u8; 32];
-        fee_recipient.copy_from_slice(&crate::util::domain_helpers::device_id_hash(
-            fee_recipient_str,
-        ));
-
-        let fee_op = TokenOperation::Transfer {
-            token_id: "ERA".to_string(),
-            recipient: fee_recipient,
-            amount: fee.value(),
-            memo: Some("Fee payment".to_string()),
-        };
-
-        self.execute_generic_token_operation(&fee_op).await
-    }
-
     #[allow(dead_code)]
     fn get_era_token_info(&self) -> EraToken {
         self.era_token.read().clone()
@@ -1602,51 +1594,6 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         Ok(op)
-    }
-
-    pub async fn adjust_fees(
-        &self,
-        network_load: f64,
-        state_hash: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let mut era_token = self.era_token.write();
-
-        let mut new_schedule = HashMap::new();
-        for (op_type, base_fee) in era_token.fee_schedule.iter() {
-            let adjusted_fee = (base_fee.value() as f64 * (1.0 + network_load * 0.1)) as u64;
-            new_schedule.insert(
-                op_type.clone(),
-                Balance::from_state(
-                    adjusted_fee,
-                    state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                ),
-            );
-        }
-
-        era_token.fee_schedule = new_schedule;
-        Ok(())
-    }
-
-    pub fn verify_operation_feasibility(
-        &self,
-        from_device_id: &str,
-        operation: &TokenOperation,
-        operation_type: &str,
-    ) -> Result<(), DsmError> {
-        let fee = self.calculate_fee(operation_type);
-        let total_required: u64 = match operation {
-            TokenOperation::Transfer { amount, .. } => *amount + fee.value(),
-            TokenOperation::Burn { amount, .. } => *amount + fee.value(),
-            _ => fee.value(),
-        };
-
-        if !self.has_sufficient_era(from_device_id, total_required) {
-            return Err(DsmError::invalid_operation(format!(
-                "Insufficient ERA balance for operation and fee. Required: {total_required}"
-            )));
-        }
-
-        Ok(())
     }
 
     /// Seed the in-memory balance for a device/token from a validated external
@@ -3063,10 +3010,19 @@ mod tests {
         let era = EraToken::new(1_000_000);
         assert_eq!(era.token_id, "ERA");
         assert_eq!(era.metadata.symbol, "ERA");
-        assert_eq!(era.metadata.decimals, 18);
+        // ERA is whole-unit everywhere that reads it — the display path, the
+        // faucet and the fee schedule. This pins the ONE answer.
+        assert_eq!(era.metadata.decimals, 0);
         assert_eq!(era.metadata.token_type, TokenType::Native);
         assert_eq!(era.total_supply.value(), 1_000_000);
-        assert!(era.fee_schedule.contains_key("token_creation"));
+        // The fee is the core constant, not a number this map may invent.
+        assert_eq!(
+            era.fee_schedule
+                .get("token_creation")
+                .expect("token_creation fee present")
+                .value(),
+            dsm::core::token::TOKEN_CREATION_FEE_ERA,
+        );
         assert!(era.fee_schedule.contains_key("smart_commitment"));
     }
 

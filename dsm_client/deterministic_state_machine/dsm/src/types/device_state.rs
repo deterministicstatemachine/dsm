@@ -509,7 +509,11 @@ fn validate_conservation(
             }
             Ok(())
         }
-        Operation::Mint { amount, .. } => {
+        Operation::Mint {
+            amount,
+            policy_commit,
+            ..
+        } => {
             if deltas.len() != 1
                 || deltas[0].direction != BalanceDirection::Credit
                 || deltas[0].amount != amount.value()
@@ -518,15 +522,103 @@ fn validate_conservation(
                     "conservation: mint must apply exactly one credit delta of the mint amount",
                 ));
             }
+            // Bind the credited ASSET to the one the signed operation names.
+            // Without this the guard checks only count/direction/amount, so a
+            // mint for token X could credit a different asset entirely (e.g.
+            // ERA) — the delta's policy_commit was unconstrained.
+            if &deltas[0].policy_commit != policy_commit {
+                return Err(DsmError::invalid_operation(
+                    "conservation: mint delta policy_commit != operation policy_commit",
+                ));
+            }
             Ok(())
         }
-        Operation::Burn { amount, .. } => {
+        Operation::Burn {
+            amount,
+            policy_commit,
+            ..
+        } => {
             if deltas.len() != 1
                 || deltas[0].direction != BalanceDirection::Debit
                 || deltas[0].amount != amount.value()
             {
                 return Err(DsmError::invalid_operation(
                     "conservation: burn must apply exactly one debit delta of the burn amount",
+                ));
+            }
+            if &deltas[0].policy_commit != policy_commit {
+                return Err(DsmError::invalid_operation(
+                    "conservation: burn delta policy_commit != operation policy_commit",
+                ));
+            }
+            Ok(())
+        }
+        // Token creation is the ONLY multi-asset operation. It destroys ERA to
+        // pay the creation fee and issues the new asset, in ONE advance — so
+        // either the token exists and the fee was paid, or neither happened.
+        //
+        // The rule is POSITIONAL and exact rather than set-membership: with a
+        // fixed order, a reordered or duplicated delta cannot satisfy it, and
+        // the whole rule stays a total function of the operation.
+        //
+        // Conservation holds per-asset. ERA: a strict destruction of
+        // `fee_amount` with no counterparty credit — the same semantics as
+        // `Burn`. New asset: genesis issuance of `initial_supply` against a
+        // commit proven distinct from every existing asset. It is the `Mint`
+        // rule generalized to two legs over two provably different assets.
+        Operation::CreateToken {
+            initial_supply,
+            policy_commit,
+            fee_amount,
+            ..
+        } => {
+            // A create may NEVER issue an existing asset. This is a second,
+            // independent barrier against a colliding anchor: even if one
+            // reached the guard, it could not mint a builtin here.
+            if crate::core::token::builtin_token_id_for_policy_commit(policy_commit).is_some() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: create-token policy_commit collides with a builtin asset",
+                ));
+            }
+
+            let era_commit = crate::core::token::builtin_policy_commit_for_token("ERA")
+                .ok_or_else(|| DsmError::invalid_operation("conservation: ERA commit missing"))?;
+
+            let mut i = 0usize;
+            if *fee_amount > 0 {
+                let d = deltas.get(i).ok_or_else(|| {
+                    DsmError::invalid_operation("conservation: create-token fee delta missing")
+                })?;
+                // The fee is always ERA. The caller has no field with which to
+                // point it at another asset.
+                if d.policy_commit != era_commit
+                    || d.direction != BalanceDirection::Debit
+                    || d.amount != *fee_amount
+                {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: create-token fee must be exactly one ERA debit of fee_amount",
+                    ));
+                }
+                i += 1;
+            }
+            if initial_supply.value() > 0 {
+                let d = deltas.get(i).ok_or_else(|| {
+                    DsmError::invalid_operation("conservation: create-token issuance delta missing")
+                })?;
+                if &d.policy_commit != policy_commit
+                    || d.direction != BalanceDirection::Credit
+                    || d.amount != initial_supply.value()
+                {
+                    return Err(DsmError::invalid_operation(
+                        "conservation: create-token issuance must be exactly one credit of \
+                         initial_supply under the token's own policy_commit",
+                    ));
+                }
+                i += 1;
+            }
+            if deltas.len() != i {
+                return Err(DsmError::invalid_operation(
+                    "conservation: create-token carries unexpected extra balance deltas",
                 ));
             }
             Ok(())
@@ -1498,10 +1590,20 @@ mod tests {
 
     /// A Mint op carrying one credit of `amount` — satisfies the conservation
     /// guard for a single Credit `BalanceDelta` of the same amount.
+    /// Mint of ERA — the common fixture. Use `mint_op_for` when the test needs
+    /// the operation to name a specific asset.
     fn mint_op(amount: u64) -> Operation {
+        mint_op_for(
+            amount,
+            crate::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
+        )
+    }
+
+    fn mint_op_for(amount: u64, policy_commit: [u8; 32]) -> Operation {
         Operation::Mint {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
+            policy_commit,
             authorized_by: vec![],
             proof_of_authorization: vec![],
             message: String::new(),
@@ -1510,20 +1612,22 @@ mod tests {
 
     /// A Burn op carrying one debit of `amount` — satisfies the conservation
     /// guard for a single Debit `BalanceDelta` of the same amount.
-    fn burn_op(amount: u64) -> Operation {
+    fn burn_op_for(amount: u64, policy_commit: [u8; 32]) -> Operation {
         Operation::Burn {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
+            policy_commit,
             proof_of_ownership: vec![],
             message: String::new(),
         }
     }
 
-    /// Value op matching a delta's direction/amount for conservation-guard tests.
-    fn value_op(dir: BalanceDirection, amount: u64) -> Operation {
+    /// Value op matching a delta's direction, amount AND asset — the guard now
+    /// binds all three, so a fixture must name the asset its delta moves.
+    fn value_op(dir: BalanceDirection, amount: u64, policy_commit: [u8; 32]) -> Operation {
         match dir {
-            BalanceDirection::Credit => mint_op(amount),
-            BalanceDirection::Debit => burn_op(amount),
+            BalanceDirection::Credit => mint_op_for(amount, policy_commit),
+            BalanceDirection::Debit => burn_op_for(amount, policy_commit),
         }
     }
 
@@ -1577,11 +1681,22 @@ mod tests {
         )
         .is_err());
         // Mint: one credit==amount; Burn: one debit==amount.
-        assert!(validate_conservation(&me, &mint_op(9), &[credit(9, pcx)], None).is_ok());
-        assert!(validate_conservation(&me, &mint_op(9), &[debit(9, pcx)], None).is_err());
-        assert!(validate_conservation(&me, &mint_op(9), &[credit(8, pcx)], None).is_err());
-        assert!(validate_conservation(&me, &burn_op(9), &[debit(9, pcx)], None).is_ok());
-        assert!(validate_conservation(&me, &burn_op(9), &[credit(9, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &mint_op_for(9, pcx), &[credit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &mint_op_for(9, pcx), &[debit(9, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &mint_op_for(9, pcx), &[credit(8, pcx)], None).is_err());
+        assert!(validate_conservation(&me, &burn_op_for(9, pcx), &[debit(9, pcx)], None).is_ok());
+        assert!(validate_conservation(&me, &burn_op_for(9, pcx), &[credit(9, pcx)], None).is_err());
+        // ASSET BINDING: a mint/burn may not move an asset other than the one
+        // the signed operation names. Without this the guard checked only
+        // count/direction/amount, so a mint for token X could credit ERA.
+        assert!(
+            validate_conservation(&me, &mint_op_for(9, pcx), &[credit(9, pc(0xEE))], None).is_err(),
+            "mint delta must be bound to the operation's policy_commit"
+        );
+        assert!(
+            validate_conservation(&me, &burn_op_for(9, pcx), &[debit(9, pc(0xEE))], None).is_err(),
+            "burn delta must be bound to the operation's policy_commit"
+        );
         // Non-balance op must carry no deltas.
         assert!(validate_conservation(&me, &op(), &[], None).is_ok());
         assert!(validate_conservation(&me, &op(), &[credit(1, pcx)], None).is_err());
@@ -1692,7 +1807,7 @@ mod tests {
             .advance(
                 rk_self,
                 bob.devid,
-                mint_op(50),
+                mint_op_for(50, custom_token),
                 entropy(42),
                 None,
                 &[BalanceDelta {
@@ -1740,7 +1855,7 @@ mod tests {
             .advance(
                 rk_self,
                 dev.devid,
-                mint_op(100),
+                mint_op_for(100, token),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -1887,7 +2002,7 @@ mod tests {
             .advance(
                 rk,
                 cp,
-                mint_op(10),
+                mint_op_for(10, pc(0xF1)),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -1953,7 +2068,7 @@ mod tests {
             .advance(
                 rk2,
                 cp2,
-                mint_op(5),
+                mint_op_for(5, pc(0xF2)),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -1976,7 +2091,7 @@ mod tests {
             .advance(
                 rk3,
                 cp3,
-                mint_op(7),
+                mint_op_for(7, pc(0xF3)),
                 entropy(3),
                 None,
                 &[BalanceDelta {
@@ -2023,7 +2138,7 @@ mod tests {
             .advance(
                 rk_self,
                 dev.devid,
-                mint_op(100),
+                mint_op_for(100, token),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -2214,7 +2329,7 @@ mod tests {
             dev.advance(
                 rk,
                 cp,
-                mint_op(1),
+                mint_op_for(1, pc(0xF0 + u as u8)),
                 entropy(u as u8 + 1),
                 None,
                 &[BalanceDelta {
@@ -2285,7 +2400,7 @@ mod tests {
             .advance(
                 rk,
                 cp,
-                mint_op(10),
+                mint_op_for(10, pc(0xF1)),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -2376,7 +2491,7 @@ mod tests {
             .advance(
                 rk_bob,
                 bob,
-                burn_op(30),
+                burn_op_for(30, token),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -2401,7 +2516,7 @@ mod tests {
             .advance(
                 rk_chrl,
                 charlie,
-                burn_op(50),
+                burn_op_for(50, token),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -2460,7 +2575,7 @@ mod tests {
             .advance(
                 rk_bob,
                 bob,
-                burn_op(10),
+                burn_op_for(10, token),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -2477,7 +2592,7 @@ mod tests {
             .advance(
                 rk_chrl,
                 charlie,
-                burn_op(20),
+                burn_op_for(20, token),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -2529,7 +2644,7 @@ mod tests {
             .advance(
                 rk,
                 bob,
-                burn_op(10),
+                burn_op_for(10, token),
                 entropy(1),
                 None,
                 &[BalanceDelta {
@@ -2546,7 +2661,7 @@ mod tests {
             .advance(
                 rk,
                 bob,
-                burn_op(20),
+                burn_op_for(20, token),
                 entropy(2),
                 None,
                 &[BalanceDelta {
@@ -2592,7 +2707,7 @@ mod tests {
         let r = dev.advance(
             rk,
             bob,
-            burn_op(10),
+            burn_op_for(10, token),
             entropy(1),
             None,
             &[BalanceDelta {
@@ -2626,7 +2741,7 @@ mod tests {
         let r = dev.advance(
             rk,
             bob,
-            mint_op(1),
+            mint_op_for(1, token),
             entropy(1),
             None,
             &[BalanceDelta {
@@ -2676,7 +2791,7 @@ mod tests {
                 .advance(
                     rk,
                     *party,
-                    value_op(dir, amt),
+                    value_op(dir, amt, token),
                     entropy(i as u8),
                     None,
                     &[BalanceDelta {
