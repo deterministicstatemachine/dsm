@@ -37,11 +37,35 @@ class Device:
     transport: str
     name: str
     port: int
+    # Serial is stable; transport ids are reassigned on every reconnect and
+    # silently start addressing a different phone (or none). When a serial is
+    # given the transport is re-resolved from it before each adb call.
+    serial: str | None = None
     package: str = "com.dsm.wallet"
     # Debugger URL of the target proven live by attach(); never guessed.
     _target_ws: str | None = None
 
     # ── adb ────────────────────────────────────────────────────────────────
+    def _resolve_transport(self) -> None:
+        """Re-point at this device's CURRENT transport id, by serial."""
+        if not self.serial:
+            return
+        out = subprocess.run(
+            ["adb", "devices", "-l"], capture_output=True, text=True, timeout=30
+        ).stdout
+        for line in out.splitlines()[1:]:
+            if "transport_id:" not in line or " device " not in f" {line} ":
+                continue
+            tid = line.split("transport_id:")[1].split()[0]
+            got = subprocess.run(
+                ["adb", "-t", tid, "shell", "getprop", "ro.serialno"],
+                capture_output=True, text=True, timeout=30,
+            ).stdout.strip()
+            if got == self.serial:
+                self.transport = tid
+                return
+        raise DriverError(f"[{self.name}] serial {self.serial} is not connected")
+
     def adb(self, *args: str, timeout: int = 60) -> str:
         proc = subprocess.run(
             ["adb", "-t", self.transport, *args],
@@ -50,7 +74,17 @@ class Device:
             timeout=timeout,
         )
         if proc.returncode != 0:
-            raise DriverError(f"[{self.name}] adb {' '.join(args)}: {proc.stderr.strip()}")
+            err_txt = proc.stderr.strip()
+            if self.serial and "no device with transport" in err_txt:
+                self._resolve_transport()
+                proc = subprocess.run(
+                    ["adb", "-t", self.transport, *args],
+                    capture_output=True, text=True, timeout=timeout,
+                )
+                if proc.returncode == 0:
+                    return proc.stdout
+                err_txt = proc.stderr.strip()
+            raise DriverError(f"[{self.name}] adb {' '.join(args)}: {err_txt}")
         return proc.stdout
 
     def shell(self, cmd: str, timeout: int = 60) -> str:
@@ -173,32 +207,51 @@ class Device:
         return bool(self.shell(f"ls /proc/{pid}/cmdline 2>/dev/null").strip())
 
     def _heartbeat(self) -> bool:
-        """Confirm this connection sees events happening on the visible app.
+        """Prove this connection drives the page a person is looking at.
 
-        Reading the DOM is not enough — a stale target reads fine. So a
-        document-level listener is installed, one harmless synthetic event is
-        dispatched, and the same connection is asked whether it saw it. If the
-        target is detached from the live page the listener never fires and the
-        connection is rejected rather than used.
+        The previous version dispatched an event and asked whether it was seen —
+        entirely inside one JS context. That proves the connection can run JS,
+        NOT that it is the visible page: a detached target passes it happily,
+        which is the exact failure it was supposed to catch.
+
+        So the proof is now causal and crosses the input boundary. Read a marker
+        off the rendered screen, send a REAL CDP pointer event at a harmless
+        spot, and require the page to report something only a live, painting
+        document can: a fresh animation frame. A detached or background target
+        does not paint, so it cannot answer.
         """
         try:
-            marker = self.eval_js("document.body ? document.body.innerText.length : 0")
+            marker = self.eval_js("document.body ? document.body.innerText.trim().length : 0")
             if not isinstance(marker, int) or marker <= 0:
                 return False
-            return bool(
-                self.eval_js(
-                    """
-                    (() => {
-                      let seen = false;
-                      const probe = () => { seen = true; };
-                      document.addEventListener('dsm-driver-probe', probe, true);
-                      document.dispatchEvent(new Event('dsm-driver-probe'));
-                      document.removeEventListener('dsm-driver-probe', probe, true);
-                      return seen;
-                    })()
-                    """
+
+            # Somewhere guaranteed inert: the very top-left corner. A real
+            # pointer event there changes nothing a user would notice.
+            for kind in ("mousePressed", "mouseReleased"):
+                self.cdp(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": kind,
+                        "x": 1,
+                        "y": 1,
+                        "button": "left",
+                        "clickCount": 1,
+                        "buttons": 1 if kind == "mousePressed" else 0,
+                    },
                 )
+
+            # requestAnimationFrame only fires for a document that is actually
+            # rendering. This is the part a stale target cannot fake.
+            painted = self.eval_js(
+                """
+                new Promise(resolve => {
+                  let done = false;
+                  requestAnimationFrame(() => { done = true; resolve(true); });
+                  setTimeout(() => { if (!done) resolve(false); }, 2000);
+                })
+                """
             )
+            return bool(painted)
         except DriverError:
             return False
 
