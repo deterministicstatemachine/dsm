@@ -1,10 +1,8 @@
-# DSM environment config — GCP storage nodes (6-node, 3-region)
-# Push to device with: scripts/push_env_override.sh --gcp
+# DSM environment config — Alibaba Cloud storage nodes (3-node, us-west-1)
+# Push to device with: scripts/push_env_override.sh --alibaba
 #
-# Nodes:
-#   us-east1:         34.73.141.32, 35.243.157.151
-#   europe-west1:     35.205.9.157, 34.53.251.120
-#   asia-southeast1:  34.21.157.56, 34.87.93.29
+# Nodes (ECS, VPC vpc-rj9oepiel1c2517avaboj, sg dsm-storage-sg):
+#   us-west-1a: 47.251.246.93, 47.251.250.159, 47.251.88.58
 
 protocol = "https"
 lan_ip = "0.0.0.0"
@@ -16,30 +14,18 @@ bitcoin_network = "signet"
 dbtc_min_confirmations = 1
 mempool_api_url = "https://mempool.space"
 
-# Self-signed CA for GCP storage node TLS certs
+# Self-signed CA for Alibaba storage node TLS certs
 # Path is relative to this config file's directory (resolved by SDK).
 custom_ca_certs = ["ca.crt"]
 
 [[nodes]]
-name = "us-east1-a"
-endpoint = "https://34.73.141.32:8080"
+name = "us-west-1a-1"
+endpoint = "https://47.251.246.93:8080"
 
 [[nodes]]
-name = "us-east1-b"
-endpoint = "https://35.243.157.151:8080"
+name = "us-west-1a-2"
+endpoint = "https://47.251.250.159:8080"
 
 [[nodes]]
-name = "europe-west1-a"
-endpoint = "https://35.205.9.157:8080"
-
-[[nodes]]
-name = "europe-west1-b"
-endpoint = "https://34.53.251.120:8080"
-
-[[nodes]]
-name = "asia-southeast1-a"
-endpoint = "https://34.21.157.56:8080"
-
-[[nodes]]
-name = "asia-southeast1-b"
-endpoint = "https://34.87.93.29:8080"
+name = "us-west-1a-3"
+endpoint = "https://47.251.88.58:8080"

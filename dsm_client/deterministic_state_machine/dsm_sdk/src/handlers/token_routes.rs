@@ -879,6 +879,66 @@ impl AppRouterImpl {
                 let token_id =
                     crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
 
+                // ── Canonical reconciliation, before anything is spent ──────
+                //
+                // `token_id` is BLAKE3(TAG_DSM_TOKEN_ID, policy_anchor ‖ ticker)
+                // and `policy_anchor` is the content address of the whole
+                // policy, so this id IS the creation commitment: identical
+                // inputs can only produce it, and any changed field produces a
+                // different one. That makes "has this exact creation already
+                // happened?" a lookup rather than a guess.
+                //
+                // It has to be a lookup, because a caller cannot tell a
+                // creation that failed from one that succeeded with its reply
+                // lost. On device the first attempt committed — fee burned,
+                // supply credited — while the reply never arrived, and the
+                // wizard reported "Token creation failed". Retrying then hit
+                // the registry's UNIQUE constraint and failed again, so a
+                // successful creation looked like two failures.
+                //
+                // A repeated submission of the SAME commitment is therefore
+                // answered from canonical state: success, no second advance,
+                // and no second fee. A different commitment claiming a taken
+                // ticker is a hard conflict, never silently accepted.
+                match crate::storage::client_db::token_registry::get_token(&token_id) {
+                    Ok(Some(row)) if row.policy_commit == policy_anchor => {
+                        log::info!(
+                            "[token.create] {ticker} already exists with this exact commitment; \
+                             reporting the existing token rather than creating a second one"
+                        );
+                        return pack_envelope_ok(
+                            generated::envelope::Payload::TokenCreateResponse(
+                                generated::TokenCreateResponse {
+                                    success: true,
+                                    token_id,
+                                    policy_anchor: policy_anchor.to_vec(),
+                                    message: "Token already created".to_string(),
+                                },
+                            ),
+                        );
+                    }
+                    Ok(Some(_)) => {
+                        // Same derived id, different committed policy. The hash
+                        // makes this unreachable without a collision; refuse
+                        // rather than pretend it is the caller's token.
+                        return err(format!(
+                            "token.create: {ticker} exists under a different committed policy"
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return err(format!("token.create: registry read failed: {e}")),
+                }
+                match crate::storage::client_db::token_registry::get_token_by_ticker(&ticker) {
+                    Ok(Some(row)) if row.token_id != token_id => {
+                        return err(format!(
+                            "token.create: ticker {ticker} is already held by a different token \
+                             created with different parameters"
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => return err(format!("token.create: registry read failed: {e}")),
+                }
+
                 let mut fields = HashMap::new();
                 fields.insert("max_supply".to_string(), parsed.max_supply.to_string());
                 fields.insert("policy_anchor".to_string(), anchor_b32.clone());
