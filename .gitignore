@@ -268,3 +268,4 @@ WEBSITE_ROADMAP.md
 crates/dsm-anchor-pico/*.uf2
 crates/dsm-anchor-pico/*.elf
 /.github/instructions
+dsm_client/android/.kotlin/
