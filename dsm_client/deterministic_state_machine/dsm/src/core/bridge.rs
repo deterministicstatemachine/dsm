@@ -1100,7 +1100,9 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::ContactQrResponse(_)
             | gp::envelope::Payload::StorageStatusResponse(_)
             | gp::envelope::Payload::TokenCreateRequest(_)
-            | gp::envelope::Payload::TokenCreateResponse(_),
+            | gp::envelope::Payload::TokenCreateResponse(_)
+            | gp::envelope::Payload::TokenMintResponse(_)
+            | gp::envelope::Payload::TokenBurnResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),

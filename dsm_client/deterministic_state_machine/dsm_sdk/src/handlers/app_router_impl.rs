@@ -3108,7 +3108,9 @@ impl AppRouter for AppRouterImpl {
             // Message
             "message.send" => self.handle_message_invoke(i).await,
             // Token
-            "token.create" | "tokens.publishPolicy" => self.handle_token_invoke(i).await,
+            "token.create" | "token.mint" | "token.burn" | "tokens.publishPolicy" => {
+                self.handle_token_invoke(i).await
+            }
             // DLV
             m if m.starts_with("dlv.") => self.handle_dlv_invoke(i).await,
             // Posted-mode DLV (recipient-side sync/mirror)

@@ -839,6 +839,35 @@ message TokenCreateRequest {
   repeated bytes allowlist_device_ids = 13 [(dsm_max_len)=32];
 }
 
+// Mint additional supply of an existing token. Authority and the supply cap
+// are enforced by the token's committed policy conditions; the client supplies
+// intent only and never an authorization it constructed itself.
+message TokenMintRequest {
+  string token_id  = 1;
+  uint64 amount    = 2;
+  string message   = 3 [(dsm_max_len)=1024];
+}
+message TokenMintResponse {
+  bool   success   = 1;
+  string token_id  = 2;
+  uint64 new_balance = 3;
+  string message   = 4;
+}
+
+// Burn supply the caller holds. Burn ≤ balance is enforced by the conservation
+// guard's checked_sub on every advance.
+message TokenBurnRequest {
+  string token_id  = 1;
+  uint64 amount    = 2;
+  string message   = 3 [(dsm_max_len)=1024];
+}
+message TokenBurnResponse {
+  bool   success   = 1;
+  string token_id  = 2;
+  uint64 new_balance = 3;
+  string message   = 4;
+}
+
 message TokenCreateResponse {
   bool success = 1;
   string token_id = 2; // deterministic token id
@@ -2712,6 +2741,10 @@ message Envelope {
 
     // Offline-cash load/unload (two-regime money model): device-bound allocation balance.
     OfflineCashResponse               offline_cash_response            = 113;
+    // Local-only responses: never routed through a storage node, so they sit
+    // above the nodes' compiled-in payload allowlist without needing a redeploy.
+    TokenMintResponse                 token_mint_response              = 115;
+    TokenBurnResponse                 token_burn_response              = 116;
 
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)

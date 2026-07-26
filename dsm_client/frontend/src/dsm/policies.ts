@@ -193,3 +193,77 @@ export async function publishTokenPolicy(input: {
     return { success: false, error: e?.message || 'Policy publish failed' };
   }
 }
+
+/**
+ * Mint additional supply of an existing token.
+ *
+ * PURE TRANSPORT. Authority, the k-of-N threshold and the supply cap are
+ * enforced by the token's committed policy conditions in Rust; this layer
+ * cannot approve or bypass any of them, and must never try to pre-judge them.
+ */
+export async function mintToken(args: { tokenId: string; amount: string | number; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
+  try {
+    const req = new pb.TokenMintRequest({
+      tokenId: String(args?.tokenId || '').trim(),
+      amount: BigInt(String(args?.amount ?? '0')),
+      message: String(args?.message || ''),
+    } as any);
+    const argPack = new pb.ArgPack({
+      codec: pb.Codec.PROTO as any,
+      body: new Uint8Array(req.toBinary()),
+    });
+    const env = decodeFramedEnvelopeV3(
+      await routerInvokeBin('token.mint', new Uint8Array(argPack.toBinary())),
+    );
+    if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+    if (env.payload.case !== 'tokenMintResponse') {
+      throw new Error(`Expected tokenMintResponse, got ${env.payload.case}`);
+    }
+    const resp = env.payload.value;
+    if (resp.success) {
+      try {
+        emitWalletRefresh({ source: 'token.mint', tokenId: resp.tokenId, anchorBase32: '' });
+      } catch (e) {
+        console.warn('mintToken: emitWalletRefresh failed (non-fatal):', e);
+      }
+    }
+    return { success: Boolean(resp.success), newBalance: resp.newBalance, message: resp.message || undefined };
+  } catch (e) {
+    console.warn('mintToken failed:', e);
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Burn supply the caller holds. Burn <= balance is enforced by the core conservation guard. */
+export async function burnToken(args: { tokenId: string; amount: string | number; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
+  try {
+    const req = new pb.TokenBurnRequest({
+      tokenId: String(args?.tokenId || '').trim(),
+      amount: BigInt(String(args?.amount ?? '0')),
+      message: String(args?.message || ''),
+    } as any);
+    const argPack = new pb.ArgPack({
+      codec: pb.Codec.PROTO as any,
+      body: new Uint8Array(req.toBinary()),
+    });
+    const env = decodeFramedEnvelopeV3(
+      await routerInvokeBin('token.burn', new Uint8Array(argPack.toBinary())),
+    );
+    if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+    if (env.payload.case !== 'tokenBurnResponse') {
+      throw new Error(`Expected tokenBurnResponse, got ${env.payload.case}`);
+    }
+    const resp = env.payload.value;
+    if (resp.success) {
+      try {
+        emitWalletRefresh({ source: 'token.burn', tokenId: resp.tokenId, anchorBase32: '' });
+      } catch (e) {
+        console.warn('burnToken: emitWalletRefresh failed (non-fatal):', e);
+      }
+    }
+    return { success: Boolean(resp.success), newBalance: resp.newBalance, message: resp.message || undefined };
+  } catch (e) {
+    console.warn('burnToken failed:', e);
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}

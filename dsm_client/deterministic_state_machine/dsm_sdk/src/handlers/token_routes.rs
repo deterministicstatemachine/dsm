@@ -1174,7 +1174,250 @@ impl AppRouterImpl {
                 }
             }
 
+            "token.mint" => self.handle_token_mint(i).await,
+            "token.burn" => self.handle_token_burn(i).await,
+
             other => err(format!("unknown token invoke method: {other}")),
+        }
+    }
+
+    /// Sign a mint/burn authorization with the device key.
+    ///
+    /// The witness is `(u32 pk_len, pk, u32 sig_len, sig)`; the enforcer
+    /// matches the key against the policy's signer list and rebuilds the
+    /// preimage itself, so this cannot authorize anything but the operation
+    /// actually being executed.
+    /// `authorized_by` MUST equal what the enforcement context will carry for
+    /// this operation, since the enforcer rebuilds the preimage from that
+    /// context. A mismatch here is indistinguishable from a forged signature —
+    /// which is precisely how it should behave.
+    fn sign_token_authorization(
+        policy_commit: &[u8; 32],
+        op: &str,
+        token_id: &str,
+        amount: u64,
+        authorized_by: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let preimage = dsm::core::token::policy::policy_enforcement::token_authorization_preimage(
+            policy_commit,
+            op,
+            token_id.as_bytes(),
+            amount,
+            authorized_by,
+        );
+        let pk = crate::sdk::signing_authority::current_public_key()
+            .map_err(|e| format!("signing identity unavailable: {e}"))?;
+        let sk = crate::sdk::signing_authority::current_secret_key()
+            .map_err(|e| format!("signing key unavailable: {e}"))?;
+        let sig = dsm::crypto::sphincs::sphincs_sign(&sk, &preimage)
+            .map_err(|e| format!("signing failed: {e}"))?;
+
+        let mut witness = Vec::new();
+        witness.extend_from_slice(&(pk.len() as u32).to_le_bytes());
+        witness.extend_from_slice(&pk);
+        witness.extend_from_slice(&(sig.len() as u32).to_le_bytes());
+        witness.extend_from_slice(&sig);
+        Ok(witness)
+    }
+
+    /// Resolve a token to its committed policy commit, failing closed.
+    fn resolve_token_for_value_op(&self, token_id: &str) -> Result<[u8; 32], String> {
+        self.wallet
+            .token_sdk
+            .resolve_policy_commit_strict(token_id)
+            .map_err(|e| format!("unknown token {token_id}: {e}"))
+    }
+
+    async fn handle_token_mint(&self, i: AppInvoke) -> AppResult {
+        let arg_pack = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p,
+            Err(e) => return err(format!("decode ArgPack failed: {e}")),
+        };
+        let req = match generated::TokenMintRequest::decode(&*arg_pack.body) {
+            Ok(r) => r,
+            Err(e) => return err(format!("decode TokenMintRequest failed: {e}")),
+        };
+        if req.amount == 0 {
+            return err("token.mint: amount must be > 0".into());
+        }
+        let policy_commit = match self.resolve_token_for_value_op(&req.token_id) {
+            Ok(c) => c,
+            Err(e) => return err(format!("token.mint: {e}")),
+        };
+        let dev_id = self.device_id_bytes;
+        let authorization = match Self::sign_token_authorization(
+            &policy_commit,
+            "mint",
+            &req.token_id,
+            req.amount,
+            &dev_id,
+        ) {
+            Ok(w) => w,
+            Err(e) => return err(format!("token.mint: {e}")),
+        };
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id, &dev_id,
+        );
+        let ref_hash = self
+            .core_sdk
+            .device_head()
+            .map(|s| s.genesis_digest())
+            .unwrap_or([0u8; 32]);
+
+        let op = dsm::types::operations::Operation::Mint {
+            amount: dsm::types::token_types::Balance::from_state(req.amount, ref_hash),
+            token_id: req.token_id.as_bytes().to_vec(),
+            policy_commit,
+            authorized_by: dev_id.to_vec(),
+            proof_of_authorization: authorization,
+            message: req.message.clone(),
+        };
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Credit,
+            amount: req.amount,
+        }];
+
+        let outcome = match self.core_sdk.execute_on_relationship(
+            rel_key,
+            dev_id,
+            op,
+            &deltas,
+            Some(init_tip),
+        ) {
+            Ok((_s, o)) => o,
+            Err(e) => return err(format!("token.mint: {e}")),
+        };
+
+        let new_balance = outcome.new_device_state.balance(&policy_commit);
+        self.write_token_projection(
+            &dev_id,
+            &req.token_id,
+            &policy_commit,
+            &outcome,
+            new_balance,
+        );
+
+        pack_envelope_ok(generated::envelope::Payload::TokenMintResponse(
+            generated::TokenMintResponse {
+                success: true,
+                token_id: req.token_id,
+                new_balance,
+                message: "Minted".to_string(),
+            },
+        ))
+    }
+
+    async fn handle_token_burn(&self, i: AppInvoke) -> AppResult {
+        let arg_pack = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p,
+            Err(e) => return err(format!("decode ArgPack failed: {e}")),
+        };
+        let req = match generated::TokenBurnRequest::decode(&*arg_pack.body) {
+            Ok(r) => r,
+            Err(e) => return err(format!("decode TokenBurnRequest failed: {e}")),
+        };
+        if req.amount == 0 {
+            return err("token.burn: amount must be > 0".into());
+        }
+        let policy_commit = match self.resolve_token_for_value_op(&req.token_id) {
+            Ok(c) => c,
+            Err(e) => return err(format!("token.burn: {e}")),
+        };
+        let authorization = match Self::sign_token_authorization(
+            &policy_commit,
+            "burn",
+            &req.token_id,
+            req.amount,
+            &[],
+        ) {
+            Ok(w) => w,
+            Err(e) => return err(format!("token.burn: {e}")),
+        };
+
+        let dev_id = self.device_id_bytes;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id, &dev_id,
+        );
+        let ref_hash = self
+            .core_sdk
+            .device_head()
+            .map(|s| s.genesis_digest())
+            .unwrap_or([0u8; 32]);
+
+        let op = dsm::types::operations::Operation::Burn {
+            amount: dsm::types::token_types::Balance::from_state(req.amount, ref_hash),
+            token_id: req.token_id.as_bytes().to_vec(),
+            policy_commit,
+            proof_of_ownership: authorization,
+            message: req.message.clone(),
+        };
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount: req.amount,
+        }];
+
+        // Burn > balance is refused by the conservation guard's checked_sub,
+        // which runs before the durable write — no pre-check can be more
+        // authoritative than that, so the error is surfaced verbatim.
+        let outcome = match self.core_sdk.execute_on_relationship(
+            rel_key,
+            dev_id,
+            op,
+            &deltas,
+            Some(init_tip),
+        ) {
+            Ok((_s, o)) => o,
+            Err(e) => return err(format!("token.burn: {e}")),
+        };
+
+        let new_balance = outcome.new_device_state.balance(&policy_commit);
+        self.write_token_projection(
+            &dev_id,
+            &req.token_id,
+            &policy_commit,
+            &outcome,
+            new_balance,
+        );
+
+        pack_envelope_ok(generated::envelope::Payload::TokenBurnResponse(
+            generated::TokenBurnResponse {
+                success: true,
+                token_id: req.token_id,
+                new_balance,
+                message: "Burned".to_string(),
+            },
+        ))
+    }
+
+    /// Refresh a token's balance projection from the canonical head an advance
+    /// produced. Best-effort: canonical state is already correct, and a repair
+    /// sweep reconciles a missed write.
+    fn write_token_projection(
+        &self,
+        dev_id: &[u8; 32],
+        token_id: &str,
+        policy_commit: &[u8; 32],
+        outcome: &dsm::types::device_state::AdvanceOutcome,
+        balance: u64,
+    ) {
+        let device_txt = crate::util::text_id::encode_base32_crockford(dev_id);
+        let locked =
+            crate::storage::client_db::get_locked_balance(&device_txt, token_id).unwrap_or(0);
+        if let Err(e) = crate::storage::client_db::build_balance_projection_from_device_head(
+            &device_txt,
+            token_id,
+            policy_commit,
+            &outcome.new_device_state,
+            balance,
+            locked,
+        )
+        .and_then(|record| crate::storage::client_db::upsert_balance_projection(&record))
+        {
+            log::warn!("[token] projection write failed for {token_id}: {e}");
         }
     }
 }

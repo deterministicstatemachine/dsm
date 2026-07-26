@@ -7179,6 +7179,221 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
 }
 
 /**
+ * Mint additional supply of an existing token. Authority and the supply cap
+ * are enforced by the token's committed policy conditions; the client supplies
+ * intent only and never an authorization it constructed itself.
+ *
+ * @generated from message dsm.TokenMintRequest
+ */
+export class TokenMintRequest extends Message<TokenMintRequest> {
+  /**
+   * @generated from field: string token_id = 1;
+   */
+  tokenId = "";
+
+  /**
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: string message = 3;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<TokenMintRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenMintRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMintRequest {
+    return new TokenMintRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenMintRequest {
+    return new TokenMintRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenMintRequest {
+    return new TokenMintRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenMintRequest | PlainMessage<TokenMintRequest> | undefined, b: TokenMintRequest | PlainMessage<TokenMintRequest> | undefined): boolean {
+    return proto3.util.equals(TokenMintRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.TokenMintResponse
+ */
+export class TokenMintResponse extends Message<TokenMintResponse> {
+  /**
+   * @generated from field: bool success = 1;
+   */
+  success = false;
+
+  /**
+   * @generated from field: string token_id = 2;
+   */
+  tokenId = "";
+
+  /**
+   * @generated from field: uint64 new_balance = 3;
+   */
+  newBalance = protoInt64.zero;
+
+  /**
+   * @generated from field: string message = 4;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<TokenMintResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenMintResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "new_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMintResponse {
+    return new TokenMintResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenMintResponse {
+    return new TokenMintResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenMintResponse {
+    return new TokenMintResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenMintResponse | PlainMessage<TokenMintResponse> | undefined, b: TokenMintResponse | PlainMessage<TokenMintResponse> | undefined): boolean {
+    return proto3.util.equals(TokenMintResponse, a, b);
+  }
+}
+
+/**
+ * Burn supply the caller holds. Burn ≤ balance is enforced by the conservation
+ * guard's checked_sub on every advance.
+ *
+ * @generated from message dsm.TokenBurnRequest
+ */
+export class TokenBurnRequest extends Message<TokenBurnRequest> {
+  /**
+   * @generated from field: string token_id = 1;
+   */
+  tokenId = "";
+
+  /**
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: string message = 3;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<TokenBurnRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenBurnRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenBurnRequest {
+    return new TokenBurnRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenBurnRequest {
+    return new TokenBurnRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenBurnRequest {
+    return new TokenBurnRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenBurnRequest | PlainMessage<TokenBurnRequest> | undefined, b: TokenBurnRequest | PlainMessage<TokenBurnRequest> | undefined): boolean {
+    return proto3.util.equals(TokenBurnRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.TokenBurnResponse
+ */
+export class TokenBurnResponse extends Message<TokenBurnResponse> {
+  /**
+   * @generated from field: bool success = 1;
+   */
+  success = false;
+
+  /**
+   * @generated from field: string token_id = 2;
+   */
+  tokenId = "";
+
+  /**
+   * @generated from field: uint64 new_balance = 3;
+   */
+  newBalance = protoInt64.zero;
+
+  /**
+   * @generated from field: string message = 4;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<TokenBurnResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenBurnResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "new_balance", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenBurnResponse {
+    return new TokenBurnResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenBurnResponse {
+    return new TokenBurnResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenBurnResponse {
+    return new TokenBurnResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenBurnResponse | PlainMessage<TokenBurnResponse> | undefined, b: TokenBurnResponse | PlainMessage<TokenBurnResponse> | undefined): boolean {
+    return proto3.util.equals(TokenBurnResponse, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.TokenCreateResponse
  */
 export class TokenCreateResponse extends Message<TokenCreateResponse> {
@@ -18591,6 +18806,21 @@ export class Envelope extends Message<Envelope> {
      */
     value: OfflineCashResponse;
     case: "offlineCashResponse";
+  } | {
+    /**
+     * Local-only responses: never routed through a storage node, so they sit
+     * above the nodes' compiled-in payload allowlist without needing a redeploy.
+     *
+     * @generated from field: dsm.TokenMintResponse token_mint_response = 115;
+     */
+    value: TokenMintResponse;
+    case: "tokenMintResponse";
+  } | {
+    /**
+     * @generated from field: dsm.TokenBurnResponse token_burn_response = 116;
+     */
+    value: TokenBurnResponse;
+    case: "tokenBurnResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18696,6 +18926,8 @@ export class Envelope extends Message<Envelope> {
     { no: 109, name: "device_admission", kind: "message", T: AddDeviceAdmissionV1, oneof: "payload" },
     { no: 112, name: "anchor_status_response", kind: "message", T: AnchorStatusResponse, oneof: "payload" },
     { no: 113, name: "offline_cash_response", kind: "message", T: OfflineCashResponse, oneof: "payload" },
+    { no: 115, name: "token_mint_response", kind: "message", T: TokenMintResponse, oneof: "payload" },
+    { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
@@ -24284,6 +24516,21 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
      */
     value: BitcoinTapConstraintProto;
     case: "bitcoinTapConstraint";
+  } | {
+    /**
+     * Typed — deliberately NOT expressed via CustomConstraintProto, whose
+     * opaque payload the enforcer cannot validate and an attacker could shape.
+     *
+     * @generated from field: dsm.TokenAuthorityProto token_authority = 9;
+     */
+    value: TokenAuthorityProto;
+    case: "tokenAuthority";
+  } | {
+    /**
+     * @generated from field: dsm.SupplyCapProto supply_cap = 10;
+     */
+    value: SupplyCapProto;
+    case: "supplyCap";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<PolicyConditionProto>) {
@@ -24302,6 +24549,8 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
     { no: 6, name: "credit_bundle_policy", kind: "message", T: CreditBundlePolicyProto, oneof: "kind" },
     { no: 7, name: "custom", kind: "message", T: CustomConstraintProto, oneof: "kind" },
     { no: 8, name: "bitcoin_tap_constraint", kind: "message", T: BitcoinTapConstraintProto, oneof: "kind" },
+    { no: 9, name: "token_authority", kind: "message", T: TokenAuthorityProto, oneof: "kind" },
+    { no: 10, name: "supply_cap", kind: "message", T: SupplyCapProto, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PolicyConditionProto {
@@ -24318,6 +24567,99 @@ export class PolicyConditionProto extends Message<PolicyConditionProto> {
 
   static equals(a: PolicyConditionProto | PlainMessage<PolicyConditionProto> | undefined, b: PolicyConditionProto | PlainMessage<PolicyConditionProto> | undefined): boolean {
     return proto3.util.equals(PolicyConditionProto, a, b);
+  }
+}
+
+/**
+ * Who may mint or burn this token, and how many of them must co-sign.
+ * `signers` are raw SPHINCS+ public keys; the verifier takes the key from
+ * HERE, never from the caller's own proof.
+ *
+ * @generated from message dsm.TokenAuthorityProto
+ */
+export class TokenAuthorityProto extends Message<TokenAuthorityProto> {
+  /**
+   * @generated from field: repeated bytes signers = 1;
+   */
+  signers: Uint8Array[] = [];
+
+  /**
+   * @generated from field: uint32 threshold = 2;
+   */
+  threshold = 0;
+
+  constructor(data?: PartialMessage<TokenAuthorityProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenAuthorityProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "signers", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 2, name: "threshold", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenAuthorityProto {
+    return new TokenAuthorityProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenAuthorityProto {
+    return new TokenAuthorityProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenAuthorityProto {
+    return new TokenAuthorityProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenAuthorityProto | PlainMessage<TokenAuthorityProto> | undefined, b: TokenAuthorityProto | PlainMessage<TokenAuthorityProto> | undefined): boolean {
+    return proto3.util.equals(TokenAuthorityProto, a, b);
+  }
+}
+
+/**
+ * Hard ceiling on circulating supply. `unlimited` and `max_supply` are
+ * mutually exclusive; the policy parser enforces one canonical encoding.
+ *
+ * @generated from message dsm.SupplyCapProto
+ */
+export class SupplyCapProto extends Message<SupplyCapProto> {
+  /**
+   * @generated from field: bytes max_supply_u128 = 1;
+   */
+  maxSupplyU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bool unlimited = 2;
+   */
+  unlimited = false;
+
+  constructor(data?: PartialMessage<SupplyCapProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SupplyCapProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "max_supply_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "unlimited", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SupplyCapProto {
+    return new SupplyCapProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SupplyCapProto {
+    return new SupplyCapProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SupplyCapProto {
+    return new SupplyCapProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SupplyCapProto | PlainMessage<SupplyCapProto> | undefined, b: SupplyCapProto | PlainMessage<SupplyCapProto> | undefined): boolean {
+    return proto3.util.equals(SupplyCapProto, a, b);
   }
 }
 
