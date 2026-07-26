@@ -8,6 +8,8 @@ import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
 import { formatBtc } from '../../services/bitcoinTap';
 import { useDpadNav } from '../../hooks/useDpadNav';
+import { TokenCreationDialog } from '../TokenCreationDialog';
+import { mintToken, burnToken } from '../../dsm/policies';
 
 type TokenSymbol = 'ERA' | string;
 type Tab = 'tokens' | 'faucet';
@@ -67,6 +69,21 @@ function formatTokens(tokensReceived: unknown, humanScaled?: boolean, decimals =
   return (n / denom).toFixed(decimals);
 }
 
+const SUPPLY_BTN: React.CSSProperties = {
+  flex: 1,
+  padding: '8px 10px',
+  fontSize: 9,
+  fontFamily: "'Martian Mono', monospace",
+  textTransform: 'uppercase',
+  letterSpacing: 0.6,
+  fontWeight: 700,
+  background: 'var(--bg)',
+  color: 'var(--text)',
+  border: '2px solid var(--border)',
+  borderRadius: 0,
+  cursor: 'pointer',
+};
+
 function formatCompactDbtc(sats: bigint): string {
   if (sats === 0n) return '0.00';
   if (sats >= 1000000n) {
@@ -86,6 +103,22 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedToken, setExpandedToken] = useState<string | null>(null);
   const faucetEnabled = !!isInitialized || !!(window as any).DsmBridge;
+
+  // Token creation and supply control. ERA and dBTC are protocol-defined, so
+  // they are described by CPTA_INFO and are not user-mintable; anything else in
+  // this list was created by this device and carries its own policy.
+  const [creating, setCreating] = useState(false);
+  const [supplyAction, setSupplyAction] = useState<{ tokenId: string; kind: 'mint' | 'burn' } | null>(null);
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const isProtocolToken = useCallback(
+    (b: TokenBalance) =>
+      Boolean(
+        CPTA_INFO[(b.tokenId || '').toUpperCase()] || CPTA_INFO[(b.symbol || '').toUpperCase()],
+      ),
+    [],
+  );
 
   const hasBalances = useMemo(() => balances.length > 0, [balances]);
 
@@ -170,23 +203,60 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     [loadBalances, refreshAll]
   );
 
+  /// Run a mint or burn and show whatever the policy decided, verbatim.
+  ///
+  /// The amount goes to Rust exactly as typed — no client-side rescaling — and
+  /// this never pre-judges whether the operation is permitted. Authority,
+  /// k-of-N threshold and the supply cap are the committed policy's call, and
+  /// its refusal is the message the user sees.
+  const runSupplyAction = useCallback(async () => {
+    if (!supplyAction || !amount.trim()) return;
+    setBusy(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const fn = supplyAction.kind === 'mint' ? mintToken : burnToken;
+      const res = await fn({ tokenId: supplyAction.tokenId, amount: amount.trim() });
+      if (res?.success) {
+        setSuccessMsg(`${supplyAction.kind === 'mint' ? 'Minted' : 'Burned'} ${amount.trim()} ${supplyAction.tokenId}.`);
+        setSupplyAction(null);
+        setAmount('');
+        await loadBalances();
+        try {
+          await refreshAll();
+        } catch {
+          /* non-fatal refresh miss */
+        }
+      } else {
+        setError(res?.message || `${supplyAction.kind} failed`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `${supplyAction.kind} failed`);
+    } finally {
+      setBusy(false);
+    }
+  }, [supplyAction, amount, loadBalances, refreshAll]);
+
   // --- D-pad navigation ---
-  // Items: [Balances tab, Faucet tab, ...content items]
+  // Items: [Balances tab, Faucet tab, Create token, ...content items]
   const contentItemCount = activeTab === 'tokens' ? balances.length : 1; // 1 = claim button
-  const navItemCount = 2 + contentItemCount; // 2 tabs + content
+  const createOffset = activeTab === 'tokens' ? 1 : 0; // the create button
+  const navItemCount = 2 + createOffset + contentItemCount;
 
   const { focusedIndex } = useDpadNav({
     itemCount: navItemCount,
     onSelect: (idx) => {
       if (idx === 0) { setActiveTab('tokens'); return; }
       if (idx === 1) { setActiveTab('faucet'); return; }
-      // Content items (idx >= 2)
+      if (activeTab === 'tokens' && idx === 2) { setCreating(true); return; }
+      // Content items
       if (activeTab === 'faucet') {
         void claimFromFaucet(balances[0]?.tokenId || 'era', 'ERA');
       }
       // Token items: toggle expand on select
-      if (activeTab === 'tokens' && balances[idx - 2]) {
-        const tid = balances[idx - 2].tokenId;
+      const tokenIdx = idx - 2 - createOffset;
+      if (activeTab === 'tokens' && balances[tokenIdx]) {
+        const tid = balances[tokenIdx].tokenId;
         setExpandedToken((prev) => (prev === tid ? null : tid));
       }
     },
@@ -293,6 +363,43 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
 
           {activeTab === 'tokens' ? (
             <div style={{ width: '100%' }}>
+              <button
+                type="button"
+                className={`wallet-style-button${fc(2)}`}
+                onClick={() => setCreating(true)}
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  marginBottom: 10,
+                  fontSize: 9,
+                  fontFamily: "'Martian Mono', monospace",
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.6,
+                  fontWeight: 700,
+                  background: 'transparent',
+                  color: 'var(--text-dark)',
+                  border: '2px solid var(--border)',
+                  borderRadius: 0,
+                  cursor: 'pointer',
+                }}
+              >
+                + Create Token
+              </button>
+              {successMsg && (
+                <div
+                  role="status"
+                  style={{
+                    fontSize: 8,
+                    color: 'var(--text-dark)',
+                    border: '1px solid var(--border)',
+                    padding: 8,
+                    marginBottom: 10,
+                    fontFamily: "'Martian Mono', monospace",
+                  }}
+                >
+                  {successMsg}
+                </div>
+              )}
               {!hasBalances ? (
                 <div style={{
                   textAlign: 'center',
@@ -312,7 +419,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                     const isBtc = sym.includes('btc') || sym.includes('dbtc');
                     const logoSrc = isBtc ? btcLogoSrc : eraTokenSrc;
                     const logoAlt = isBtc ? 'BTC' : 'ERA';
-                    const isFocused = focusedIndex === 2 + bIdx;
+                    const isFocused = focusedIndex === 2 + createOffset + bIdx;
                     const isExpanded = expandedToken === balance.tokenId;
                     const cpta = CPTA_INFO[(balance.tokenId || '').toUpperCase()] || CPTA_INFO[(balance.symbol || '').toUpperCase()];
                     const isZero = !balance.balance || balance.balance === '0' || balance.balance === '0.00000000';
@@ -442,6 +549,81 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           </div>
                         </div>
                       )}
+
+                      {/* Supply controls — only for tokens this device created.
+                          ERA and dBTC are protocol-defined and deliberately
+                          offer nothing here. */}
+                      {isExpanded && !isProtocolToken(balance) && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            padding: '8px 10px 10px',
+                            borderTop: '1px solid rgba(var(--bg-rgb),0.14)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                          }}
+                        >
+                          {supplyAction?.tokenId === balance.tokenId ? (
+                            <>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="0"
+                                value={amount}
+                                onChange={(e) => setAmount(e.target.value)}
+                                aria-label={`${supplyAction.kind} amount`}
+                                style={{
+                                  width: '100%',
+                                  boxSizing: 'border-box',
+                                  padding: '8px 10px',
+                                  fontSize: 10,
+                                  fontFamily: "'Martian Mono', monospace",
+                                  background: 'var(--bg)',
+                                  color: 'var(--text)',
+                                  border: '2px solid var(--border)',
+                                  borderRadius: 0,
+                                }}
+                              />
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  type="button"
+                                  disabled={busy || !amount.trim()}
+                                  onClick={() => void runSupplyAction()}
+                                  style={SUPPLY_BTN}
+                                >
+                                  {busy ? 'WORKING...' : 'CONFIRM'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => { setSupplyAction(null); setAmount(''); }}
+                                  style={SUPPLY_BTN}
+                                >
+                                  CANCEL
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              <button
+                                type="button"
+                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'mint' }); setAmount(''); }}
+                                style={SUPPLY_BTN}
+                              >
+                                MINT
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}
+                                style={SUPPLY_BTN}
+                              >
+                                BURN
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     );
                   })}
@@ -532,6 +714,15 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       <div className="navigation-hint" style={{ color: 'var(--text-dark)', marginTop: 'auto', paddingTop: 20, fontSize: 8 }}>
         Press B to go back
       </div>
+
+      {creating && (
+        <TokenCreationDialog
+          onClose={() => setCreating(false)}
+          onSuccess={() => {
+            void loadBalances();
+          }}
+        />
+      )}
     </div>
   );
 };

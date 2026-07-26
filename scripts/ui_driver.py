@@ -104,7 +104,10 @@ class Device:
         except ImportError as exc:  # pragma: no cover
             raise DriverError("pip install websocket-client") from exc
 
-        ws = create_connection(self._ws_url(), timeout=45)
+        # DevTools rejects a WebSocket carrying an Origin it was not launched
+        # to allow. We cannot pass --remote-allow-origins to an already-running
+        # app, so send no Origin at all.
+        ws = create_connection(self._ws_url(), timeout=45, suppress_origin=True)
         try:
             ws.send(json.dumps({"id": 1, "method": method, "params": params or {}}))
             while True:
@@ -133,26 +136,59 @@ class Device:
         Smallest wins because ancestors contain the same text; the button is
         the tightest box around it. Invisible and zero-area nodes are skipped
         so we never "click" something the user cannot see.
+
+        Matching is case-insensitive: this UI uppercases labels via CSS
+        `text-transform`, and `innerText` returns the TRANSFORMED text. A
+        case-sensitive search for "Create Token" misses the button rendered
+        from exactly that source string, which reads as a missing control
+        rather than as a matcher bug.
+
+        A located element is first scrolled into view, exactly as a person
+        would scroll to it. Without that, an element below the fold still has a
+        bounding rect, and tapping those coordinates hits whatever is actually
+        drawn there — which is how a perfectly good form field reads as
+        "covered by the footer".
         """
         match = "t === needle" if exact else "t.includes(needle)"
         return self.eval_js(
             f"""
             (() => {{
-              const needle = {json.dumps(text)};
-              let best = null;
+              const needle = {json.dumps(text)}.toLowerCase();
+              let best = null, bestEl = null;
               for (const el of document.querySelectorAll('button,a,input,[role="button"],div,span,li,label')) {{
-                const t = (el.innerText || el.value || '').trim();
+                const t = (el.innerText || el.value || '').trim().toLowerCase();
                 if (!t || !({match})) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width < 1 || r.height < 1) continue;
                 const s = getComputedStyle(el);
                 if (s.visibility === 'hidden' || s.display === 'none' || s.opacity === '0') continue;
                 const area = r.width * r.height;
-                if (!best || area < best.area)
-                  best = {{ x: r.left + r.width / 2, y: r.top + r.height / 2, area }};
+                if (!best || area < best.area) {{ best = {{ area }}; bestEl = el; }}
               }}
-              return best && {{ x: best.x, y: best.y }};
+              if (!bestEl) return null;
+              // 'instant' matters: with smooth scrolling the element keeps
+              // moving after this call returns, so a rect measured here is
+              // stale by the time a tap lands and the press hits whatever
+              // slid into that spot. Marker is read back on the next call.
+              bestEl.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }});
+              window.__dsmTapTarget = bestEl;
+              return {{ pending: true }};
             }})()
+            """
+        )
+
+    def _settled_point(self) -> dict[str, float] | None:
+        """Re-measure the element marked by the previous locate, once the
+        scroll has settled. Position is only trustworthy after motion stops."""
+        return self.eval_js(
+            """
+            (() => {
+              const el = window.__dsmTapTarget;
+              if (!el || !el.isConnected) return null;
+              const r = el.getBoundingClientRect();
+              if (r.width < 1 || r.height < 1) return null;
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            })()
             """
         )
 
@@ -165,22 +201,59 @@ class Device:
             time.sleep(0.5)
         raise DriverError(f"[{self.name}] never saw {text!r} within {timeout:.0f}s")
 
-    # ── acting: genuine input events only ──────────────────────────────────
+    # ── acting: real OS touch injection ────────────────────────────────────
+    #
+    # CSS pixels are not screen pixels. `adb input` works in device pixels, so
+    # every located point is scaled by the page's own devicePixelRatio and
+    # offset by the WebView's position on screen. Both are read from the page
+    # rather than assumed, because a wrong scale silently taps the wrong
+    # control and still "succeeds".
+    def _viewport(self) -> tuple[float, float, float]:
+        v = self.eval_js(
+            "({ r: window.devicePixelRatio,"
+            "   x: window.screenX ?? 0,"
+            "   y: (window.outerHeight - window.innerHeight) })"
+        )
+        return float(v["r"]), float(v["x"]), float(v["y"])
+
+    def _to_device_px(self, pt: dict[str, float]) -> tuple[int, int]:
+        ratio, _ox, _oy = self._viewport()
+        return int(round(pt["x"] * ratio)), int(round(pt["y"] * ratio))
+
+    def dismiss_keyboard(self) -> None:
+        """Close the soft keyboard if it is up.
+
+        `getBoundingClientRect` reports layout-viewport coordinates, but an open
+        IME shrinks the *visual* viewport — so a point measured while the
+        keyboard is showing can be under the keyboard, or shifted relative to
+        what is actually drawn. Typing one field then pressing the next put text
+        into the wrong input for exactly this reason.
+
+        Blur rather than a key event: ESCAPE and BACK both close the dialog
+        itself, which is how a half-filled wizard vanished mid-run. Blurring is
+        what happens anyway when a person taps away from a field, and it drops
+        the IME without touching navigation.
+        """
+        if "mInputShown=true" in self.shell("dumpsys input_method | grep -m1 mInputShown"):
+            self.eval_js("(()=>{const a=document.activeElement; if(a&&a.blur)a.blur(); return true;})()")
+            time.sleep(0.6)
+
     def tap(self, text: str, *, timeout: float = 45.0, exact: bool = False) -> None:
-        pt = self.wait_for(text, timeout=timeout, exact=exact)
-        for kind in ("mousePressed", "mouseReleased"):
-            self.cdp(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": kind,
-                    "x": pt["x"],
-                    "y": pt["y"],
-                    "button": "left",
-                    "clickCount": 1,
-                    "buttons": 1 if kind == "mousePressed" else 0,
-                },
-            )
-        time.sleep(0.35)
+        """Press a control the user can see, with a real touch event.
+
+        `adb shell input tap` goes through the same input pipeline as a finger,
+        so nothing here can succeed on a control that is off-screen, covered,
+        or not actually rendered.
+        """
+        self.dismiss_keyboard()
+        self.wait_for(text, timeout=timeout, exact=exact)
+        time.sleep(0.35)  # let any scrolling settle before measuring
+        pt = self._settled_point()
+        if not pt:
+            raise DriverError(f"[{self.name}] {text!r} vanished before it could be pressed")
+        x, y = self._to_device_px(pt)
+        self.shell(f"input tap {x} {y}")
+        time.sleep(0.6)
 
     def type_into(self, placeholder: str, value: str) -> None:
         """Focus a field by tapping it, then type character-by-character.
@@ -190,11 +263,14 @@ class Device:
         directly would bypass React's synthetic event and is precisely the
         shortcut this driver refuses to take.
         """
+        self.dismiss_keyboard()
         pt = self.eval_js(
             f"""
             (() => {{
               const el = document.querySelector({json.dumps(f'input[placeholder="{placeholder}"]')});
               if (!el) return null;
+              el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }});
+              window.__dsmTapTarget = el;
               const r = el.getBoundingClientRect();
               return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
             }})()
@@ -202,21 +278,15 @@ class Device:
         )
         if not pt:
             raise DriverError(f"[{self.name}] no input with placeholder {placeholder!r}")
-        for kind in ("mousePressed", "mouseReleased"):
-            self.cdp(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": kind,
-                    "x": pt["x"],
-                    "y": pt["y"],
-                    "button": "left",
-                    "clickCount": 1,
-                    "buttons": 1 if kind == "mousePressed" else 0,
-                },
-            )
-        time.sleep(0.2)
-        self.cdp("Input.insertText", {"text": value})
-        time.sleep(0.2)
+        time.sleep(0.35)  # let the scroll settle, then measure where it landed
+        pt = self._settled_point() or pt
+        x, y = self._to_device_px(pt)
+        self.shell(f"input tap {x} {y}")
+        time.sleep(0.8)
+        # `input text` is the soft keyboard's own path, so React's onChange
+        # fires exactly as it would for a person typing.
+        self.shell(f"input text {value}")
+        time.sleep(0.4)
 
     # ── observing ──────────────────────────────────────────────────────────
     def screen_text(self) -> str:

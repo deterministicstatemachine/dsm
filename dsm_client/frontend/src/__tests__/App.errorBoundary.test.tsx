@@ -159,11 +159,6 @@ jest.mock('../components/screens/StorageScreen', () => ({
   default: () => null,
 }));
 
-jest.mock('../components/screens/TokenManagementScreen', () => ({
-  __esModule: true,
-  default: () => null,
-}));
-
 jest.mock('../components/screens/MyContactInfoScreen', () => ({
   __esModule: true,
   default: () => null,
