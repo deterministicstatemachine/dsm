@@ -21,6 +21,11 @@ const PRIORITY_SOURCES = new Set([
   'reconcile.complete',
   'bilateral.reconcile_status',
   'native',
+  // Token lifecycle changes balances immediately and the user is watching the
+  // screen when they happen — the ~2s cooldown reads as the action not working.
+  'token.create',
+  'token.mint',
+  'token.burn',
 ]);
 
 export function useWalletRefreshListener(refresh: RefreshFn, deps: unknown[] = []): void {

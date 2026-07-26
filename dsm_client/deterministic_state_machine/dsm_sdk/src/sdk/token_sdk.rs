@@ -330,7 +330,11 @@ impl EraToken {
             symbol: "ERA".to_string(),
             description: Some("Resilient Oracle-Optimized Trustless token - the native token of the DSM ecosystem".to_string()),
             icon_url: None,
-            decimals: 18,
+            // ERA is whole-unit. The display path, the faucet and the fee
+            // schedule all treat it as 0 decimals; carrying 18 here was a
+            // second, contradicting answer that would mis-scale the fee
+            // display by 10^18 the moment anything read it.
+            decimals: 0,
             fields,
             token_id: "ERA".to_string(),
             token_type: TokenType::Native,
@@ -3006,10 +3010,19 @@ mod tests {
         let era = EraToken::new(1_000_000);
         assert_eq!(era.token_id, "ERA");
         assert_eq!(era.metadata.symbol, "ERA");
-        assert_eq!(era.metadata.decimals, 18);
+        // ERA is whole-unit everywhere that reads it — the display path, the
+        // faucet and the fee schedule. This pins the ONE answer.
+        assert_eq!(era.metadata.decimals, 0);
         assert_eq!(era.metadata.token_type, TokenType::Native);
         assert_eq!(era.total_supply.value(), 1_000_000);
-        assert!(era.fee_schedule.contains_key("token_creation"));
+        // The fee is the core constant, not a number this map may invent.
+        assert_eq!(
+            era.fee_schedule
+                .get("token_creation")
+                .expect("token_creation fee present")
+                .value(),
+            dsm::core::token::TOKEN_CREATION_FEE_ERA,
+        );
         assert!(era.fee_schedule.contains_key("smart_commitment"));
     }
 

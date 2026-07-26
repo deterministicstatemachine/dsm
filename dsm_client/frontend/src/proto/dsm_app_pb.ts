@@ -7394,6 +7394,47 @@ export class TokenBurnResponse extends Message<TokenBurnResponse> {
 }
 
 /**
+ * Authoritative fee schedule. The UI DISPLAYS these values; it never computes
+ * or assumes them, and it cannot change what is charged — the conservation
+ * guard validates the fee against a core constant.
+ *
+ * @generated from message dsm.TokenFeeScheduleResponse
+ */
+export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> {
+  /**
+   * @generated from field: uint64 token_creation_era = 1;
+   */
+  tokenCreationEra = protoInt64.zero;
+
+  constructor(data?: PartialMessage<TokenFeeScheduleResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenFeeScheduleResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_creation_era", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenFeeScheduleResponse {
+    return new TokenFeeScheduleResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenFeeScheduleResponse {
+    return new TokenFeeScheduleResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenFeeScheduleResponse {
+    return new TokenFeeScheduleResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenFeeScheduleResponse | PlainMessage<TokenFeeScheduleResponse> | undefined, b: TokenFeeScheduleResponse | PlainMessage<TokenFeeScheduleResponse> | undefined): boolean {
+    return proto3.util.equals(TokenFeeScheduleResponse, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.TokenCreateResponse
  */
 export class TokenCreateResponse extends Message<TokenCreateResponse> {
@@ -18821,6 +18862,12 @@ export class Envelope extends Message<Envelope> {
      */
     value: TokenBurnResponse;
     case: "tokenBurnResponse";
+  } | {
+    /**
+     * @generated from field: dsm.TokenFeeScheduleResponse token_fee_schedule_response = 117;
+     */
+    value: TokenFeeScheduleResponse;
+    case: "tokenFeeScheduleResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -18928,6 +18975,7 @@ export class Envelope extends Message<Envelope> {
     { no: 113, name: "offline_cash_response", kind: "message", T: OfflineCashResponse, oneof: "payload" },
     { no: 115, name: "token_mint_response", kind: "message", T: TokenMintResponse, oneof: "payload" },
     { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
+    { no: 117, name: "token_fee_schedule_response", kind: "message", T: TokenFeeScheduleResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {

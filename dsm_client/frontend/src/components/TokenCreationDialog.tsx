@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import './TokenCreationDialog.css';
 import { dsmClient } from '@/services/dsmClient';
+import { getTokenCreationFeeEra } from '@/dsm/policies';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Fungible is the only token kind the protocol enforces. NFT/SBT would need
@@ -303,12 +304,14 @@ function Step2({
 
 // ── Sub-component: Step 3 — Access + Review ──────────────────────────────────
 function Step3({
-  state, set, effectiveDecimals, effectiveTransferable,
+  state, set, effectiveDecimals, effectiveTransferable, creationFeeEra,
 }: {
   state: WizardState;
   set: (p: Partial<WizardState>) => void;
   effectiveDecimals: number;
   effectiveTransferable: boolean;
+  /** Authoritative fee from Rust; `undefined` until the query returns. */
+  creationFeeEra?: bigint;
 }) {
   const supplyLine = state.unlimitedSupply ? 'Unlimited' : Number(state.maxSupply || '0').toLocaleString();
   const allocLine  = state.unlimitedSupply ? '—' : Number(state.initialAlloc || '0').toLocaleString();
@@ -402,6 +405,12 @@ function Step3({
               : `Restricted (${state.allowlistData.trim().split('\n').filter(Boolean).length} entries)`}
           </span>
         </div>
+        <div className="tcd-review-row">
+          <span className="tcd-review-key">Creation fee</span>
+          <span className="tcd-review-val">
+            {creationFeeEra === undefined ? '…' : `${creationFeeEra} ERA (burned)`}
+          </span>
+        </div>
         {state.description.trim() && (
           <div className="tcd-review-row">
             <span className="tcd-review-key">Desc</span>
@@ -477,7 +486,20 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   const [creating, setCreating] = useState(false);
   const [error,    setError]    = useState<string | null>(null);
   const [created,  setCreated]  = useState<{ tokenId?: string; anchorBase32?: string } | null>(null);
+  // Authoritative creation fee, fetched from Rust. Never hardcoded here — the
+  // conservation guard validates the charged fee against a core constant, and a
+  // number invented in the UI could silently disagree with what is burned.
+  const [creationFeeEra, setCreationFeeEra] = useState<bigint | undefined>(undefined);
   const stateRef = useRef(state);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const fee = await getTokenCreationFeeEra();
+      if (!cancelled) setCreationFeeEra(fee);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const set = useCallback((patch: Partial<WizardState>) => {
     _setState(prev => {
@@ -538,10 +560,14 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
           ? Boolean((res as { success?: boolean }).success)
           : false;
       if (ok) {
-        const r = (typeof res === 'object' && res !== null && 'result' in res)
-          ? (res as { result?: { tokenId?: string; anchorBase32?: string } }).result
-          : undefined;
-        setCreated(r ?? {});
+        // `createToken` returns a FLAT result. The old code reached for a
+        // `.result` wrapper that only the (now deleted, unreachable) DsmClient
+        // method produced, so `created` was always {} and the success screen
+        // rendered neither the token id nor the anchor.
+        const r = (typeof res === 'object' && res !== null)
+          ? (res as { tokenId?: string; anchorBase32?: string })
+          : {};
+        setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
         if (onSuccess) onSuccess();
       } else {
         const msg = (typeof res === 'object' && res !== null && 'error' in res)
@@ -596,6 +622,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               set={set}
               effectiveDecimals={effectiveDecimals}
               effectiveTransferable={effectiveTransferable}
+              creationFeeEra={creationFeeEra}
             />
           )}
         </div>

@@ -4,6 +4,7 @@
 import * as pb from '../proto/dsm_app_pb';
 import {
   routerInvokeBin,
+  routerQueryBin,
   getTokenPolicyBytes as getTokenPolicyBytesBridge,
   listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
@@ -265,5 +266,25 @@ export async function burnToken(args: { tokenId: string; amount: string | number
   } catch (e) {
     console.warn('burnToken failed:', e);
     return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Authoritative token-creation fee, in ERA.
+ *
+ * DISPLAY ONLY. Rust reads the same core constant the conservation guard
+ * validates against, so the number shown can never disagree with the number
+ * charged. The UI must never hardcode this.
+ */
+export async function getTokenCreationFeeEra(): Promise<bigint | undefined> {
+  try {
+    const env = decodeFramedEnvelopeV3(
+      await routerQueryBin('tokens.getFeeSchedule', new Uint8Array()),
+    );
+    if (env.payload.case !== 'tokenFeeScheduleResponse') return undefined;
+    return env.payload.value.tokenCreationEra;
+  } catch (e) {
+    console.warn('getTokenCreationFeeEra failed:', e);
+    return undefined;
   }
 }

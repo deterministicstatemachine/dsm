@@ -709,6 +709,17 @@ impl AppRouterImpl {
                 pack_envelope_ok(generated::envelope::Payload::TokenPolicyListResponse(reply))
             }
 
+            "tokens.getFeeSchedule" => {
+                // Reads the same core constant the conservation guard
+                // validates against, so the displayed fee can never disagree
+                // with the fee actually charged.
+                pack_envelope_ok(generated::envelope::Payload::TokenFeeScheduleResponse(
+                    generated::TokenFeeScheduleResponse {
+                        token_creation_era: dsm::core::token::TOKEN_CREATION_FEE_ERA,
+                    },
+                ))
+            }
+
             other => err(format!("unknown token query path: {other}")),
         }
     }

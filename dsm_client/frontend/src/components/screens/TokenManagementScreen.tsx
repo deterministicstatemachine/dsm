@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCodeScannerPanel from '../qr/QRCodeScannerPanel';
 import EraFaucetScreen from './EraFaucetScreen';
 import { importTokenPolicyFromScanData } from '../../services/policy/policyScanService';
 import { mapPoliciesToDisplayEntries } from '../../services/policy/policyDisplayService';
 import { dsmClient } from '../../services/dsmClient';
+import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 
 // PRODUCTION-ONLY: No placeholders, no localStorage.
 // Token creation is handled exclusively via Settings > Policy Tools (DevPolicyScreen).
@@ -112,7 +113,15 @@ function usePolicies(): { policies: unknown; refresh: () => void } {
     return () => { cancelled = true; };
   }, [version]);
 
-  return { policies, refresh: () => setVersion(v => v + 1) };
+  const refresh = useCallback(() => setVersion(v => v + 1), []);
+
+  // Subscribe to the canonical wallet-refresh event. Creating, minting or
+  // burning a token changes what this screen shows, and until now nothing
+  // reloaded it — the only caller of `refresh` was the QR scan handler, so a
+  // token created in the wizard did not appear here without a manual reload.
+  useWalletRefreshListener(refresh, [refresh]);
+
+  return { policies, refresh };
 }
 
 // Label + value row used inside the expanded CPTA panel.

@@ -868,6 +868,13 @@ message TokenBurnResponse {
   string message   = 4;
 }
 
+// Authoritative fee schedule. The UI DISPLAYS these values; it never computes
+// or assumes them, and it cannot change what is charged — the conservation
+// guard validates the fee against a core constant.
+message TokenFeeScheduleResponse {
+  uint64 token_creation_era = 1;
+}
+
 message TokenCreateResponse {
   bool success = 1;
   string token_id = 2; // deterministic token id
@@ -2745,6 +2752,7 @@ message Envelope {
     // above the nodes' compiled-in payload allowlist without needing a redeploy.
     TokenMintResponse                 token_mint_response              = 115;
     TokenBurnResponse                 token_burn_response              = 116;
+    TokenFeeScheduleResponse          token_fee_schedule_response      = 117;
 
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
