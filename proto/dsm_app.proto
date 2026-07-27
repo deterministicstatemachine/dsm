@@ -842,6 +842,17 @@ message TokenCreateRequest {
 // Mint additional supply of an existing token. Authority and the supply cap
 // are enforced by the token's committed policy conditions; the client supplies
 // intent only and never an authorization it constructed itself.
+// Drop a token's IDENTITY from this device. Canonical balances are not
+// touched: forgetting is refused unless the balance is zero, because a device
+// must not be able to make an asset it holds unnameable.
+message TokenForgetRequest {
+  string token_id = 1;   // token id or ticker; either names one identity
+}
+message TokenForgetResponse {
+  bool   success  = 1;
+  string token_id = 2;
+  string message  = 3 [(dsm_max_len)=1024];
+}
 message TokenMintRequest {
   string token_id  = 1;
   uint64 amount    = 2;
@@ -2757,6 +2768,9 @@ message Envelope {
     TokenBurnResponse                 token_burn_response              = 116;
     TokenFeeScheduleResponse          token_fee_schedule_response      = 117;
 
+
+    // Reply to `token.forget`.
+    TokenForgetResponse token_forget_response = 118;
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
   // 114 was a §16.6 reply-window payload variant. Storage nodes validate transport

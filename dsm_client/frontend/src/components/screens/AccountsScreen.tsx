@@ -9,7 +9,7 @@ import { useWallet } from '../../contexts/WalletContext';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
-import { mintToken, burnToken, addTokenByAnchor } from '../../dsm/policies';
+import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
 
 type TokenSymbol = 'ERA' | string;
 type Tab = 'tokens' | 'faucet';
@@ -140,6 +140,35 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   // refreshes from persisted state whatever caused the change — including an
   // adoption that happened while this screen was already open.
   useWalletRefreshListener(loadBalances, [loadBalances]);
+
+  /// Forget a token's identity, after saying plainly what that means.
+  ///
+  /// It removes the NAMING only — canonical balances are untouched, and Rust
+  /// refuses outright while any balance is held. The token can be adopted
+  /// again from its anchor, so this is reversible while online.
+  const handleForget = useCallback(async (b: TokenBalance) => {
+    const label = b.symbol || b.tokenId;
+    if (!window.confirm(
+      `Forget ${label}?\n\nThis removes the token from this device so its ticker ` +
+      `can be used by another token. Your balance is not affected, and you can ` +
+      `add ${label} again from its CPTA anchor while online.`,
+    )) return;
+    setBusy(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const res = await forgetToken(b.tokenId);
+      if (!res.success) throw new Error(res.message || 'forget failed');
+      setSuccessMsg(res.message || `${label} forgotten`);
+      setExpandedToken(null);
+      await loadBalances();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to forget token');
+    } finally {
+      setBusy(false);
+    }
+  }, [loadBalances]);
+
 
   const claimFromFaucet = useCallback(
     async (tokenId: string, symbol: string) => {
@@ -742,6 +771,18 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                                 style={SUPPLY_BTN}
                               >
                                 BURN
+                              </button>
+                              {/* Dropping the identity, not the asset. A ticker
+                                  names one token, so a superseded token blocks
+                                  its own ticker until it is forgotten. Rust
+                                  refuses while a balance is held. */}
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => { void handleForget(balance); }}
+                                style={SUPPLY_BTN}
+                              >
+                                FORGET
                               </button>
                             </div>
                           )}

@@ -217,6 +217,36 @@ export async function publishTokenPolicy(input: {
  * enforced by the token's committed policy conditions in Rust; this layer
  * cannot approve or bypass any of them, and must never try to pre-judge them.
  */
+/// Drop a token's identity from this device.
+///
+/// A ticker names one token, so a device that has adopted one cannot adopt a
+/// different token with the same ticker. Without this there was no way out of
+/// that: a superseded token — one whose creator re-created it, producing a new
+/// policy anchor and therefore a new token id — blocked its own ticker
+/// forever.
+///
+/// The backend refuses while a balance is held, and refuses outright for
+/// protocol assets. Nothing recoverable is lost: the policy is
+/// content-addressed and adoption is online, so it can always be adopted again.
+export async function forgetToken(
+  tokenId: string,
+): Promise<{ success: boolean; message?: string }> {
+  const req = new pb.TokenForgetRequest({ tokenId: String(tokenId || '').trim() } as any);
+  const argPack = new pb.ArgPack({
+    codec: pb.Codec.PROTO as any,
+    body: new Uint8Array(req.toBinary()),
+  });
+  const env = decodeFramedEnvelopeV3(
+    await routerInvokeBin('token.forget', new Uint8Array(argPack.toBinary())),
+  );
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenForgetResponse') {
+    throw new Error(`Expected tokenForgetResponse, got ${env.payload.case}`);
+  }
+  const resp = env.payload.value;
+  return { success: resp.success, message: resp.message };
+}
+
 export async function mintToken(args: { tokenId: string; amount: string | number; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
   try {
     const req = new pb.TokenMintRequest({

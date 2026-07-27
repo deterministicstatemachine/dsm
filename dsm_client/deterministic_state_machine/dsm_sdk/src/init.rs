@@ -241,6 +241,9 @@ fn spawn_token_registry_rehydrate(router: std::sync::Arc<AppRouterImpl>, origin:
         // enforce, so a token added after this point is covered too.
         router.install_policy_resolver();
         router.rehydrate_token_registry().await;
+        // A token this device created is only adoptable while its policy is
+        // fetchable, so make sure the network can still serve it.
+        router.republish_owned_policies().await;
         log::debug!("[SDK] token registry rehydrate ({origin}) complete");
     });
 }

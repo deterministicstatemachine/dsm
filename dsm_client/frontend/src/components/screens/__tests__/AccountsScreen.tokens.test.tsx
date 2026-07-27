@@ -32,6 +32,7 @@ jest.mock('../../../dsm/policies', () => ({
   mintToken: jest.fn(),
   burnToken: jest.fn(),
   addTokenByAnchor: jest.fn(),
+  forgetToken: jest.fn(),
 }));
 
 jest.mock('../../../hooks/useWalletRefreshListener', () => ({
@@ -51,7 +52,7 @@ jest.mock('../../TokenCreationDialog', () => ({
 }));
 
 import AccountsScreen from '../AccountsScreen';
-import { mintToken, burnToken, addTokenByAnchor } from '../../../dsm/policies';
+import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../../dsm/policies';
 
 describe('AccountsScreen — the screen TOKENS actually opens', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -87,6 +88,32 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(screen.getByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
   });
 
+  /// A device that has adopted a token cannot adopt a different token with the
+  /// same ticker, so a superseded token blocks its own ticker. The only way out
+  /// is to drop the identity, and that has to be reachable from the screen the
+  /// user is already looking at — a route with no control is a dead end.
+  it('offers FORGET on a token this device holds, and calls it by token id', async () => {
+    (forgetToken as jest.Mock).mockResolvedValue({ success: true, message: 'MYTOK forgotten' });
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    fireEvent.click(await screen.findByRole('button', { name: /^FORGET$/ }));
+    await waitFor(() => expect(forgetToken).toHaveBeenCalledWith('MYTOK'));
+    confirmSpy.mockRestore();
+  });
+
+  /// Forgetting removes a token from this device, so it must not happen on a
+  /// stray tap.
+  it('does not forget when the confirmation is declined', async () => {
+    (forgetToken as jest.Mock).mockClear();
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    fireEvent.click(await screen.findByRole('button', { name: /^FORGET$/ }));
+    expect(forgetToken).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
   /// Protocol-defined assets are not user-mintable, so they must not offer the
   /// controls at all.
   it('offers no supply actions on protocol tokens', async () => {
@@ -94,6 +121,8 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     fireEvent.click(await screen.findByText('ERA'));
     expect(screen.queryByRole('button', { name: /^MINT$/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^BURN$/ })).toBeNull();
+    // Nor FORGET: a protocol asset is not an adopted identity to drop.
+    expect(screen.queryByRole('button', { name: /^FORGET$/ })).toBeNull();
   });
 
   /// The typed amount reaches Rust unchanged — no client-side rescaling.

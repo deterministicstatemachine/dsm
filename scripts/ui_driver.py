@@ -440,10 +440,16 @@ class Device:
         shortcut this driver refuses to take.
         """
         self.dismiss_keyboard()
+        # Match the way a person does: any text-entry field whose visible
+        # placeholder STARTS WITH what they read. Exact-matching `input` only
+        # missed a `textarea` whose placeholder trails off in a "…" — a field
+        # plainly on screen that the driver reported as absent.
         pt = self.eval_js(
             f"""
             (() => {{
-              const el = document.querySelector({json.dumps(f'input[placeholder="{placeholder}"]')});
+              const want = {json.dumps(placeholder)};
+              const el = [...document.querySelectorAll('input,textarea')]
+                .find(e => (e.placeholder || '').startsWith(want));
               if (!el) return null;
               el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }});
               window.__dsmTapTarget = el;

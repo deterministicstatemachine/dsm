@@ -2631,15 +2631,46 @@ impl CoreSDK {
         }
     }
 
-    pub(crate) fn resolve_policy_commit_strict(
-        &self,
-        token_id: &[u8],
-    ) -> Result<[u8; 32], DsmError> {
+    pub fn resolve_policy_commit_strict(&self, token_id: &[u8]) -> Result<[u8; 32], DsmError> {
         let token_id = std::str::from_utf8(token_id)
             .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
 
         if let Some(commit) = crate::policy::builtin_policy_commit(token_id) {
             return Ok(commit);
+        }
+
+        // The registry is authoritative for the persisted token IDENTITY
+        // mapping — ticker, token id, policy commitment, metadata — while
+        // canonical DeviceState stays authoritative for balances and
+        // transitions. Ask it before walking the archive.
+        //
+        // A device that ADOPTED a token by its CPTA anchor holds a registry
+        // row and the anchored policy bytes, and has no CreateToken of its own
+        // to find: adoption registers an identity, it is not a transition on
+        // this device's chain. So an archive-only lookup resolved on the
+        // CREATING device and could never resolve on the RECEIVING one, and
+        // every incoming transfer of an adopted token fail-closed with
+        // "Missing canonical policy anchor" after the sender had already
+        // debited.
+        //
+        // This is not trusting a mutable cache. `load_policy_verified`
+        // re-derives BLAKE3(TAG_DSM_POLICY, policy_bytes) and refuses bytes
+        // that do not hash to the commitment they are stored under, so a row
+        // that does not carry the real policy cannot resolve through here.
+        for row in [
+            crate::storage::client_db::token_registry::get_token(token_id),
+            crate::storage::client_db::token_registry::get_token_by_ticker(token_id),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        {
+            if matches!(
+                crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit),
+                Ok(Some(_))
+            ) {
+                return Ok(row.policy_commit);
+            }
         }
 
         // Per §4.3 there is no `state_number`. Walk the per-relationship

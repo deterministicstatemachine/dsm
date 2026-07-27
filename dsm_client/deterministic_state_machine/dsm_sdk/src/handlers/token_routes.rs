@@ -359,16 +359,28 @@ fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
 /// Returns `true` when at least one node stored the bytes and echoed the
 /// correct anchor. Publication is best-effort: `false` only means the policy
 /// is not yet mirrored, never that the anchor is in doubt.
-async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> bool {
+/// Why a publish did not happen. "No nodes are configured" and "the configured
+/// nodes refused" are different conditions and creation treats them
+/// differently: the first is a device that is not part of a network at all
+/// (host builds, tests), the second is a device that IS and could not reach it
+/// — which is the case that produces an unadoptable token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishOutcome {
+    Published,
+    NoNodesConfigured,
+    Failed,
+}
+
+async fn publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> PublishOutcome {
     let urls = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
         Ok(cfg) => cfg.node_urls,
         Err(e) => {
             log::warn!("[tokens.publishPolicy] No storage node config: {}", e);
-            return false;
+            return PublishOutcome::NoNodesConfigured;
         }
     };
     if urls.is_empty() {
-        return false;
+        return PublishOutcome::NoNodesConfigured;
     }
 
     let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
@@ -411,7 +423,16 @@ async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) 
     if let Some(msg) = last_err {
         log::warn!("[tokens.publishPolicy] Network publish issue: {}", msg);
     }
-    published
+    if published {
+        PublishOutcome::Published
+    } else {
+        PublishOutcome::Failed
+    }
+}
+
+/// Boolean view for callers that only care whether the bytes are out there.
+async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> bool {
+    publish_policy_to_network(body, expected_anchor).await == PublishOutcome::Published
 }
 
 async fn try_fetch_policy_from_network(anchor: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
@@ -575,6 +596,55 @@ impl AppRouterImpl {
                 ))
             },
         ));
+    }
+
+    /// Keep this device's OWN tokens fetchable by peers.
+    ///
+    /// Creation now refuses unless the policy reaches a storage node, but a
+    /// token created before that rule — or one whose node later lost it —
+    /// leaves the network unable to serve a policy this device still holds.
+    /// Nobody can adopt such a token, so nobody can receive it, and the
+    /// failure appears on the RECEIVER as POLICY_NOT_FOUND long after the
+    /// creating device stopped looking.
+    ///
+    /// So: for each token this device owns, if the network cannot serve the
+    /// policy and this device has the bytes, publish them. Content-addressed,
+    /// so republishing is idempotent and cannot assert anything false — the
+    /// node re-derives the anchor from the bytes, and a mismatch is discarded
+    /// by `try_publish_policy_to_network`.
+    pub async fn republish_owned_policies(&self) {
+        let Ok(tokens) = crate::storage::client_db::token_registry::all_tokens() else {
+            return;
+        };
+        let me = self.core_sdk.get_device_identity().device_id;
+        for row in tokens.into_iter().filter(|t| t.owner_device_id == me) {
+            // Only republish what the network genuinely cannot serve.
+            if matches!(
+                try_fetch_policy_from_network(&row.policy_commit).await,
+                Ok(Some(_))
+            ) {
+                continue;
+            }
+            let Ok(Some(bytes)) =
+                crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+            else {
+                continue;
+            };
+            let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+            if try_publish_policy_to_network(&bytes, &row.policy_commit).await {
+                log::info!(
+                    "[token] republished policy {anchor_b32} for owned token {} — peers can \
+                     adopt it again",
+                    row.ticker
+                );
+            } else {
+                log::warn!(
+                    "[token] policy {anchor_b32} for owned token {} is on NO storage node and \
+                     could not be republished; peers cannot adopt it until this succeeds",
+                    row.ticker
+                );
+            }
+        }
     }
 
     pub async fn rehydrate_token_registry(&self) {
@@ -1093,15 +1163,36 @@ impl AppRouterImpl {
 
                 let anchor_b32 = crate::util::text_id::encode_base32_crockford(&policy_anchor);
 
-                // Mirror the policy so other devices can fetch it, then cache
-                // locally. Mirroring is best-effort; the anchor is already
-                // authoritative because it is content-addressed.
-                let mirrored = try_publish_policy_to_network(&raw_proto, &policy_anchor).await;
-                if !mirrored {
-                    log::warn!(
-                        "[token.create] policy {anchor_b32} not mirrored to any storage node; \
-                         remote verifiers may not be able to fetch it yet"
-                    );
+                // Mirror the policy so peers can fetch it. Adoption is
+                // online-only by design — a peer fetches these bytes from a
+                // storage node and caches them, and that cache is what makes
+                // the token usable offline afterwards — so a policy no node
+                // holds is a token nobody can ever adopt or receive.
+                //
+                // Creation does NOT refuse when the mirror fails. DSM is
+                // offline-first, and a device with no reachable node is the
+                // ordinary case, not an error; refusing would make creating a
+                // token require connectivity that nothing else here requires.
+                // Convergence is handled instead: `republish_owned_policies`
+                // runs at every startup and publishes any owned policy the
+                // network cannot serve, so the token becomes adoptable as soon
+                // as this device is online. What is NOT acceptable is silence,
+                // because the failure otherwise surfaces only on a peer, as
+                // POLICY_NOT_FOUND, long afterwards.
+                match publish_policy_to_network(&raw_proto, &policy_anchor).await {
+                    PublishOutcome::Published => {}
+                    PublishOutcome::Failed => {
+                        log::warn!(
+                            "[token.create] policy {anchor_b32} reached NO storage node; peers \
+                             cannot adopt this token until a later startup republishes it"
+                        );
+                    }
+                    PublishOutcome::NoNodesConfigured => {
+                        log::warn!(
+                            "[token.create] no storage nodes configured; policy {anchor_b32} \
+                             is local-only until one is reachable"
+                        );
+                    }
                 }
                 self.cache_policy_bytes(policy_anchor, raw_proto.clone())
                     .await;
@@ -1482,10 +1573,96 @@ impl AppRouterImpl {
                 }
             }
 
+            "token.forget" => self.handle_token_forget(i).await,
             "token.mint" => self.handle_token_mint(i).await,
             "token.burn" => self.handle_token_burn(i).await,
 
             other => err(format!("unknown token invoke method: {other}")),
+        }
+    }
+
+    /// Forget a token's IDENTITY on this device.
+    ///
+    /// A ticker names one token, so adopting a token whose ticker is already
+    /// claimed by a DIFFERENT one is refused — otherwise "RIGB" would be
+    /// ambiguous and a transfer could credit the wrong asset. That guard is
+    /// right, but with no way to drop a superseded identity it was also a
+    /// dead end: a device that had adopted a token could never adopt any
+    /// other token with that ticker, ever, and the wallet offered no way out.
+    ///
+    /// Forgetting removes the NAMING only, and is refused while the balance is
+    /// non-zero — a device must not be able to make an asset it still holds
+    /// unnameable. Builtins are not forgettable at all: they are protocol
+    /// assets, not adopted ones.
+    ///
+    /// This loses nothing recoverable. The policy is content-addressed and
+    /// adoption is online, so the same token can be adopted again from its
+    /// anchor.
+    async fn handle_token_forget(&self, i: AppInvoke) -> AppResult {
+        let arg_pack = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p,
+            Err(e) => return err(format!("token.forget: decode ArgPack failed: {e}")),
+        };
+        let req = match generated::TokenForgetRequest::decode(&*arg_pack.body) {
+            Ok(r) => r,
+            Err(e) => return err(format!("token.forget: decode request failed: {e}")),
+        };
+        let key = req.token_id.trim();
+        if key.is_empty() {
+            return err("token.forget: token_id is required".into());
+        }
+
+        if crate::policy::builtin_policy_commit(key).is_some() {
+            return err(format!(
+                "token.forget: {key} is a protocol asset and cannot be forgotten"
+            ));
+        }
+
+        let row = match crate::storage::client_db::token_registry::get_token(key) {
+            Ok(Some(r)) => r,
+            Ok(None) => match crate::storage::client_db::token_registry::get_token_by_ticker(key) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return err(format!("token.forget: no token named {key} on this device"))
+                }
+                Err(e) => return err(format!("token.forget: registry read failed: {e}")),
+            },
+            Err(e) => return err(format!("token.forget: registry read failed: {e}")),
+        };
+
+        // Canonical state decides whether anything is held — not the registry.
+        let held = self
+            .core_sdk
+            .device_head()
+            .map(|h| h.balance(&row.policy_commit))
+            .unwrap_or(0);
+        if held != 0 {
+            return err(format!(
+                "token.forget: {} still holds {} base units; send or burn them first",
+                row.ticker, held
+            ));
+        }
+
+        match crate::storage::client_db::token_registry::delete_token(&row.token_id) {
+            Ok(Some(removed)) => {
+                log::info!(
+                    "[token.forget] dropped identity {} ({}) — its ticker is adoptable again",
+                    removed.ticker,
+                    removed.token_id
+                );
+                push_wallet_refresh();
+                pack_envelope_ok(generated::envelope::Payload::TokenForgetResponse(
+                    generated::TokenForgetResponse {
+                        success: true,
+                        token_id: removed.token_id,
+                        message: format!("{} forgotten", removed.ticker),
+                    },
+                ))
+            }
+            Ok(None) => err(format!(
+                "token.forget: {key} vanished before it was removed"
+            )),
+            Err(e) => err(format!("token.forget: could not remove {key}: {e}")),
         }
     }
 
