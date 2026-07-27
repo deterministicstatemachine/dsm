@@ -633,16 +633,31 @@ impl AppRouterImpl {
                 for item in &mut items {
                     enrich_balance_metadata(item);
                 }
+                // EVERY row carries its metadata, however it got here.
+                //
+                // Projection-backed rows were pushed straight into `items`, so
+                // only the zero-balance rows synthesised by
+                // ensure_default_visible_balances were ever enriched. A token
+                // you actually HELD therefore went out with decimals 0, and the
+                // wallet had nothing to format with: 100_000 base units of a
+                // 2-decimal token rendered as "100000 RIGB" instead of
+                // "1,000.00". Enrichment belongs at the encoding boundary,
+                // where it cannot be skipped by whichever path produced a row.
+                for item in items.iter_mut() {
+                    enrich_balance_metadata(item);
+                }
                 items.sort_by(|a, b| a.token_id.cmp(&b.token_id));
 
                 // Critical debug: log what we're actually returning
                 log::debug!("[balance.list] returning {} balance items", items.len());
                 for item in &items {
                     log::debug!(
-                        "[balance.list] item: token_id={} available={} locked={}",
+                        "[balance.list] item: token_id={} available={} locked={} decimals={} symbol={}",
                         item.token_id,
                         item.available,
-                        item.locked
+                        item.locked,
+                        item.decimals,
+                        item.symbol
                     );
                 }
 
