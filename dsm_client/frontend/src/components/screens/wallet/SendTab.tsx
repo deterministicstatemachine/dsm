@@ -212,6 +212,11 @@ function SendTabInner({
             <div className="empty-state"><p>No contacts found.</p><p>Add a contact on the Contacts screen to enable sending.</p></div>
           ) : (
             <select id="recipient" value={sendForm.selectedContactKey} onChange={(e) => setSendForm((p) => ({ ...p, selectedContactKey: e.target.value }))} className="form-input" required>
+              {/* An explicit empty option. Without it the select DISPLAYS the
+                  first contact while the form holds no selection at all, which
+                  on a send form reads as "this person is selected" when nobody
+                  is. */}
+              <option value="">— select recipient —</option>
               {contacts.map((c) => (
                 <option key={c.deviceId} value={c.deviceId}>{c.alias}</option>
               ))}
