@@ -88,14 +88,25 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
         }
-        // Custom token metadata enrichment formerly read `dsm.token.<id>` +
-        // `dsm.policy.<anchor>` from app_state.  Those writers are gone
-        // (plan Part E) and the readers were orphans.  The authoritative
-        // source is the in-memory TokenSDK metadata cache; a follow-up
-        // commit wires enrichment through a typed lookup on AppRouterImpl.
-        // For now the response carries its canonicalised token_id with
-        // default decimals; builtin ERA/dBTC paths above remain exact.
-        _ => {}
+        // Created and adopted tokens carry their own decimals, and the wire
+        // amount is BASE UNITS. Leaving decimals at the default meant a
+        // consumer had no way to render 100_000 base units as "1,000.00" —
+        // on device the wallet showed "100000 RIGB" for a token whose
+        // canonical allocation was correct. The registry is authoritative for
+        // this mapping, so read it rather than defaulting.
+        _ => {
+            if let Ok(Some(row)) =
+                crate::storage::client_db::token_registry::get_token_by_ticker(&reply.token_id)
+            {
+                reply.symbol = row.ticker.clone();
+                reply.token_name = if row.alias.is_empty() {
+                    row.ticker
+                } else {
+                    row.alias
+                };
+                reply.decimals = row.decimals;
+            }
+        }
     }
 }
 
