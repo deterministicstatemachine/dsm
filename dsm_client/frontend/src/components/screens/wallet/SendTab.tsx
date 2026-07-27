@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
-import { getTokenDecimals } from '../../../utils/tokenMeta';
 import ConfirmModal from '../../ConfirmModal';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
@@ -53,6 +52,12 @@ function SendTabInner({
     if (tokenOptions.length === 0) return null;
     return tokenOptions.find((b) => b.tokenId === sendForm.token) ?? tokenOptions[0];
   }, [tokenOptions, sendForm.token]);
+
+  // The selected token's decimals, as the wire reported them. They come from
+  // the registry in Rust, so a token created with 2 decimals accepts cents
+  // here. A hardcoded table used to answer this and knew only dBTC, which made
+  // every custom token look like it took whole units only.
+  const selectedDecimals = selectedSendBalance?.decimals ?? 0;
 
   const selectedContact = useMemo(
     () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
@@ -230,7 +235,7 @@ function SendTabInner({
             return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
           })()} Amount</label>
           <div className="amount-input-group">
-            <input id="amount" type="number" step={(() => { const d = getTokenDecimals(sendForm.token); return d > 0 ? `0.${'0'.repeat(d - 1)}1` : '1'; })()} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={(() => { const d = getTokenDecimals(sendForm.token); return d > 0 ? `0.${'0'.repeat(d)}` : '0'; })()} className="form-input" required />
+            <input id="amount" type="number" step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'} className="form-input" required />
             <select value={sendForm.token} onChange={(e) => setSendForm((p) => ({ ...p, token: e.target.value }))} className="token-selector">
               {tokenOptions.map((b) => (
                 <option key={b.tokenId} value={b.tokenId}>{b.symbol || b.tokenId}</option>

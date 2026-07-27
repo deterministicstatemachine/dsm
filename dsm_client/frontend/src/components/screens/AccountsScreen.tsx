@@ -6,7 +6,6 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import LoadingSpinner from '../common/LoadingSpinner';
 import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
-import { formatBtc } from '../../services/bitcoinTap';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
@@ -22,7 +21,6 @@ export interface TokenBalance {
   lastUpdated?: number;   // optional, backend-provided; not used for logic
 }
 
-const ATOMIC_DECIMALS_DEFAULT = 8; // used only if backend returns atomic amounts
 
 interface CptaInfo {
   cptaType: string;
@@ -52,24 +50,6 @@ const CPTA_INFO: Record<string, CptaInfo> = {
   },
 };
 
-function formatTokens(tokensReceived: unknown, humanScaled?: boolean, decimals = ATOMIC_DECIMALS_DEFAULT): string {
-  // Accept string | number | bigint; fall back to string echo.
-  if (humanScaled) return String(tokensReceived);
-
-  // Try numeric conversion
-  const n =
-    typeof tokensReceived === 'bigint'
-      ? Number(tokensReceived)
-      : typeof tokensReceived === 'number'
-      ? tokensReceived
-      : Number(tokensReceived as any);
-
-  if (!Number.isFinite(n)) return String(tokensReceived ?? '');
-
-  const denom = Math.pow(10, decimals >>> 0);
-  return (n / denom).toFixed(decimals);
-}
-
 const SUPPLY_BTN: React.CSSProperties = {
   flex: 1,
   padding: '8px 10px',
@@ -84,34 +64,6 @@ const SUPPLY_BTN: React.CSSProperties = {
   borderRadius: 0,
   cursor: 'pointer',
 };
-
-/// Render canonical base units as a display amount.
-///
-/// Pure integer/string arithmetic: splitting the digits rather than dividing
-/// keeps a large balance exact where a float would silently round it.
-function formatBaseUnits(raw: unknown, decimals: number): string {
-  let v: bigint;
-  try {
-    v = typeof raw === 'bigint' ? raw : BigInt(String(raw ?? '0'));
-  } catch {
-    return String(raw ?? '0');
-  }
-  if (decimals <= 0) return v.toString();
-  const neg = v < 0n;
-  const digits = (neg ? -v : v).toString().padStart(decimals + 1, '0');
-  const whole = digits.slice(0, digits.length - decimals);
-  const frac = digits.slice(digits.length - decimals);
-  return `${neg ? '-' : ''}${whole}.${frac}`;
-}
-
-function formatCompactDbtc(sats: bigint): string {
-  if (sats === 0n) return '0.00';
-  if (sats >= 1000000n) {
-    const [whole, frac = '00'] = formatBtc(sats).split('.');
-    return `${whole}.${frac.slice(0, 2)}`;
-  }
-  return formatBtc(sats).replace(/0+$/, '').replace(/\.$/, '');
-}
 
 const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = ({ eraTokenSrc = 'images/logos/era_token_gb.gif', btcLogoSrc = 'images/logos/btc-logo.gif' }) => {
   const { refreshAll, isInitialized } = useWallet();
@@ -162,17 +114,14 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       const list: TokenBalance[] = (raw as any[]).map((b: any) => ({
         tokenId: String(b.tokenId || ''),
         symbol: String(b.symbol || b.tokenName || b.tokenId || ''),
-        // THE INVERSE CONVERSION, APPLIED EXACTLY ONCE.
+        // Rust renders the display amount; this screen shows it.
         //
-        // The wire carries canonical BASE UNITS and the token's decimals.
-        // Rendering the base units raw showed "100000 RIGB" for a token whose
-        // canonical allocation of 100,000 base units is 1,000.00 — correct
-        // underneath, wrong on screen, and indistinguishable from the scaling
-        // bug it followed. Integer string maths, so no float ever rounds a
-        // balance.
-        balance: String(b.tokenId || '').toUpperCase() === 'DBTC'
-          ? formatCompactDbtc(typeof b.balance === 'bigint' ? b.balance : BigInt(b.balance || 0))
-          : formatBaseUnits(b.balance, typeof b.decimals === 'number' ? b.decimals : 0),
+        // Converting base units here would be a SECOND implementation of the
+        // unit rule, and two implementations disagree — which is precisely how
+        // a token holding 100,000 base units at 2 decimals came to be created
+        // as 1,000 and displayed as 100000. Amount conversion has one owner, in
+        // Rust, in both directions.
+        balance: String(b.displayAmount ?? b.balance ?? '0'),
       }));
       setBalances(list);
     } catch (e) {
@@ -217,7 +166,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // Some bridge paths may not include tokensReceived/humanScaled; keep UI deterministic.
         const rawTokens = (result as any)?.tokensReceived;
         const tokensHuman =
-          rawTokens == null ? '—' : formatTokens(rawTokens, (result as any)?.humanScaled, ATOMIC_DECIMALS_DEFAULT);
+          // ERA is a whole-unit token, so the claimed amount IS its display
+          // form. This used to divide by 10^8 in floating point, which is both
+          // the wrong scale and the wrong arithmetic for an amount.
+          rawTokens == null ? '—' : String(rawTokens);
         const nextAvail = result?.nextAvailable != null ? String(result.nextAvailable) : '—';
 
         await loadBalances();

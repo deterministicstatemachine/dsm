@@ -19,7 +19,6 @@ export interface TokenMetadata {
 }
 
 import { dsmClient } from '../dsm/index';
-import { getTokenDecimals } from '../utils/tokenMeta';
 
 function normalizeToSdkTokenId(id: string): string {
   if (!id) return id;
@@ -29,7 +28,12 @@ function normalizeToSdkTokenId(id: string): string {
 function presentSymbolFor(tokenId: string): string { return tokenId.toUpperCase() === 'ERA' ? 'ERA' : tokenId; }
 function presentNameFor(tokenId: string): string { return tokenId.toUpperCase() === 'ERA' ? 'ERA Token' : tokenId; }
 // Single source of truth — imported from tokenMeta.
-const decimalsFor = getTokenDecimals;
+/// The token's decimals as the wire reported them, from the registry in Rust.
+/// There is no local table to consult: one existed, knew only dBTC, and
+/// silently described every created token as whole-unit.
+function decimalsOf(row: { decimals?: unknown } | undefined): number {
+  return typeof row?.decimals === 'number' ? row.decimals : 0;
+}
 
 function toNumberClamped(intString: string): number {
   const bn = BigInt(String(intString ?? '0'));
@@ -44,13 +48,13 @@ export async function getTokenBalance(tokenId: string): Promise<TokenBalance> {
   const balances = await dsmClient.getAllBalances();
   const found = balances.find(b => String(b.tokenId).toUpperCase() === sdkId.toUpperCase());
   if (!found) {
-    return { tokenId, balance: 0, symbol: presentSymbolFor(tokenId), decimals: decimalsFor(sdkId) };
+    return { tokenId, balance: 0, symbol: presentSymbolFor(tokenId), decimals: 0 };
   }
   return {
     tokenId,
     balance: toNumberClamped(String(found.balance)),
     symbol: presentSymbolFor(String(found.tokenId)),
-    decimals: decimalsFor(String(found.tokenId)),
+    decimals: decimalsOf(found),
   };
 }
 
@@ -62,22 +66,28 @@ export async function getTokenMetadata(tokenId: string): Promise<TokenMetadata> 
     tokenId,
     name: presentNameFor(sdkId),
     symbol: presentSymbolFor(sdkId),
-    decimals: decimalsFor(sdkId),
+    decimals: decimalsOf(_onLedger),
   };
 }
 
 export async function listTokens(): Promise<TokenMetadata[]> {
   const balances = await dsmClient.getAllBalances();
-  const byId = new Map<string, { tokenId: string; symbol: string }>();
+  const byId = new Map<string, { tokenId: string; symbol: string; decimals: number }>();
   for (const b of balances) {
     const id = String(b.tokenId);
-    if (!byId.has(id)) byId.set(id, { tokenId: id, symbol: String(b.symbol ?? presentSymbolFor(id)) });
+    if (!byId.has(id)) {
+      byId.set(id, {
+        tokenId: id,
+        symbol: String(b.symbol ?? presentSymbolFor(id)),
+        decimals: decimalsOf(b),
+      });
+    }
   }
-  return Array.from(byId.values()).map(({ tokenId }) => ({
+  return Array.from(byId.values()).map(({ tokenId, decimals }) => ({
     tokenId: tokenId === 'ERA' ? 'ERA' : tokenId,
     name: presentNameFor(tokenId),
     symbol: presentSymbolFor(tokenId),
-    decimals: decimalsFor(tokenId),
+    decimals,
   }));
 }
 

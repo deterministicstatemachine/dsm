@@ -2100,6 +2100,9 @@ message BilateralEventNotification {
   string             message                = 8; // optional details
   optional string    sender_ble_address     = 9;  // BLE MAC address for response routing
   optional BilateralFailureReason failure_reason = 10;
+  // Display form of `amount`, rendered by Rust from the token's registry
+  // decimals. `amount` stays canonical base units.
+  optional string    display_amount         = 11;
 }
 
 // Read-only offline-bearer anchor status (signal (c)): the `anchor.status` query response.
@@ -3167,11 +3170,19 @@ message TokenPolicyListResponse { repeated TokenPolicyCacheEntry policies = 1; }
 // ======================= Query Result Messages ======================
 message BalanceGetResponse {
   string token_id = 1;
-  uint64 available = 2;
-  uint64 locked = 3;
+  uint64 available = 2;   // CANONICAL base units
+  uint64 locked = 3;      // CANONICAL base units
   string symbol = 4;
   uint32 decimals = 5;
   string token_name = 6;
+  // Display form of `available`, rendered by Rust.
+  //
+  // Rust owns amount conversion in BOTH directions: it parses display input to
+  // base units on the way in, and renders base units to display form on the way
+  // out. A client that computes this itself is a second implementation of the
+  // unit rule, and two implementations disagree — which is exactly how a token
+  // holding 100,000 base units at 2 decimals came to be shown as "100000".
+  string display_amount = 7;
 }
 // Multi-token enumeration (ordered lexicographically by token_id on server side)
 message BalancesListResponse { repeated BalanceGetResponse balances = 1; }
@@ -3192,6 +3203,9 @@ message TransactionInfo {
   uint64 created_at = 14; // DISPLAY-ONLY: unix wall-clock seconds for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
   string memo = 15; // optional memo/note
   bool   receipt_verified = 16; // true iff stitched_receipt passes cryptographic verification (SMT roots, tripwire, proofs)
+  // Display form of `amount_signed`, rendered by Rust from the token's
+  // registry decimals. `amount`/`amount_signed` stay canonical base units.
+  string display_amount = 17;
 }
 message WalletHistoryResponse { repeated TransactionInfo transactions = 1; }
 message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }

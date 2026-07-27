@@ -478,30 +478,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAllBalance
             let result = crate::bridge::get_all_balances_strict();
             match result {
                 Ok(balances) => {
-                    // Encode as the canonical BalancesListResponse payload
-                    let list = pb::BalancesListResponse {
-                        balances: balances
-                            .into_iter()
-                            .map(|e| pb::BalanceGetResponse {
-                                token_id: e.token_id,
-                                available: e
-                                    .amount
-                                    .and_then(|a| {
-                                        if a.le.len() != 16 {
-                                            return None;
-                                        }
-                                        let mut buf = [0u8; 16];
-                                        buf.copy_from_slice(&a.le);
-                                        Some(u128::from_le_bytes(buf))
-                                    })
-                                    .unwrap_or(0)
-                                    .try_into()
-                                    .unwrap_or(u64::MAX),
-                                locked: 0,
-                                ..Default::default()
-                            })
-                            .collect(),
-                    };
+                    // Canonical rows straight through — no re-inflation.
+                    // Rebuilding them here with ..Default::default() is what
+                    // blanked symbol/decimals on their way to the WebView.
+                    let list = pb::BalancesListResponse { balances };
                     respond_envelope(pb::envelope::Payload::BalancesListResponse(list), &mut env)
                 }
                 Err(e) => {

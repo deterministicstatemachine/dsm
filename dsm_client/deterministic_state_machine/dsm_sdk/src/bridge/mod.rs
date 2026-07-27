@@ -453,7 +453,18 @@ fn u64_to_u128_le(val: u64) -> crate::generated::U128 {
 /// 2. Ensures dBTC always appears (even with 0) so the token picker works
 ///
 /// Falls back to direct SQLite reads if the app router is not yet available.
-pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEntry>, String> {
+/// Returns the CANONICAL `BalanceGetResponse` rows, not a surrogate.
+///
+/// This used to narrow each row into `TokenBalanceEntry { token_id, amount }`
+/// and the JNI layer re-inflated it with `..Default::default()`, so `symbol`,
+/// `decimals`, `locked` and `token_name` were silently dropped and came back
+/// empty/zero. On device that meant a 2-decimal token with 100_000 base units
+/// rendered as "100000" — the wallet had no decimals to format with, because a
+/// two-field surrogate had thrown them away mid-flight.
+///
+/// One authoritative message end to end. A second representation only invites
+/// the two to drift again.
+pub fn get_all_balances_strict() -> Result<Vec<crate::generated::BalanceGetResponse>, String> {
     let device_id = crate::sdk::app_state::AppState::get_device_id()
         .ok_or_else(|| "No device_id available".to_string())?;
     let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
@@ -487,15 +498,9 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
                     for b in &resp.balances {
                         log::info!("[getAllBalancesStrict]   {}={}", b.token_id, b.available);
                     }
-                    // Convert BalanceGetResponse → TokenBalanceEntry
-                    return Ok(resp
-                        .balances
-                        .into_iter()
-                        .map(|b| crate::generated::TokenBalanceEntry {
-                            token_id: b.token_id,
-                            amount: Some(u64_to_u128_le(b.available)),
-                        })
-                        .collect());
+                    // The router already built the canonical rows, metadata
+                    // and all. Pass them straight through.
+                    return Ok(resp.balances);
                 }
             }
             log::warn!("[getAllBalancesStrict] app_router returned data but failed to decode");
@@ -553,14 +558,51 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
             .collect::<Vec<_>>()
     );
 
+    // The fallback builds the same canonical rows, enriched from the same
+    // registry the router uses, so a pre-genesis read is not a second shape.
     Ok(entries
         .into_iter()
-        .map(
-            |(token_id, available)| crate::generated::TokenBalanceEntry {
+        .map(|(token_id, available)| {
+            let mut row = crate::generated::BalanceGetResponse {
                 token_id,
-                amount: Some(u64_to_u128_le(available)),
-            },
-        )
+                available,
+                locked: 0,
+                ..Default::default()
+            };
+            // Same registry the router reads. (Note: this crate and
+            // dsm::types::proto each generate their own BalanceGetResponse from
+            // the one .proto, so the router's enrichment helper is not directly
+            // callable here — that duplication is worth collapsing separately.)
+            match row.token_id.trim().to_uppercase().as_str() {
+                "ERA" => {
+                    row.symbol = "ERA".into();
+                    row.token_name = "ERA".into();
+                    row.decimals = 0;
+                }
+                "DBTC" => {
+                    row.token_id = "dBTC".into();
+                    row.symbol = "dBTC".into();
+                    row.token_name = "dBTC".into();
+                    row.decimals = 8;
+                }
+                _ => {
+                    if let Ok(Some(t)) =
+                        crate::storage::client_db::token_registry::get_token_by_ticker(
+                            &row.token_id,
+                        )
+                    {
+                        row.symbol = t.ticker.clone();
+                        row.token_name = if t.alias.is_empty() {
+                            t.ticker
+                        } else {
+                            t.alias
+                        };
+                        row.decimals = t.decimals;
+                    }
+                }
+            }
+            row
+        })
         .collect())
 }
 

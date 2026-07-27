@@ -147,7 +147,12 @@ fn creation_burns_exactly_the_fee_and_credits_the_allocation() {
         .device_head()
         .map(|h| h.balance(&row.policy_commit))
         .unwrap_or(0);
-    assert_eq!(issued, 250, "initial allocation must be credited");
+    // Base units. The request carries DISPLAY units, and Rust scales once at
+    // the boundary, so 250 at decimals=2 is 25_000 canonical. This assertion
+    // read 250 until creation stopped crediting the display number raw — the
+    // mismatch that made a transfer of a token the wallet showed as 1000 fail
+    // with a balance underflow.
+    assert_eq!(issued, 25_000, "initial allocation must be credited");
 }
 
 /// FAILED CREATION BURNS NOTHING. With insufficient ERA the create must reject
@@ -201,12 +206,23 @@ fn duplicate_creation_charges_the_fee_once() {
     let after_first = era_balance(&r);
     assert_eq!(after_first, before - FEE);
 
+    // An IDENTICAL resubmission is the retry a user makes when the first
+    // attempt's reply was lost. It is answered from canonical state — the
+    // token id IS the creation commitment — so it reports success and pays
+    // nothing. Rejecting it, as this once asserted, made a committed creation
+    // present as two failures on hardware. A *different* creation claiming the
+    // same ticker is still a hard conflict; that is pinned in
+    // token_create_reconciliation.rs.
     let second = invoke(&r, "token.create", create_request("DUPE", 5));
-    assert!(!second.success, "duplicate creation must be rejected");
+    assert!(
+        second.success,
+        "an identical resubmission must reconcile, not fail: {:?}",
+        second.error_message
+    );
     assert_eq!(
         era_balance(&r),
         after_first,
-        "a rejected duplicate must not charge a second fee"
+        "and it must not charge a second fee"
     );
 }
 

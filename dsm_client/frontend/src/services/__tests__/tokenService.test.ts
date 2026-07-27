@@ -73,12 +73,22 @@ describe('getTokenBalance', () => {
     expect(result.balance).toBe(-Number.MAX_SAFE_INTEGER);
   });
 
-  it('returns correct decimals for dBTC token', async () => {
+  // Decimals come from the wire row, which Rust fills from the registry. A
+  // local table used to answer this and knew only dBTC, so every created token
+  // was described as whole-unit no matter what it was created with.
+  it('takes decimals from the wire, not from a local table', async () => {
     mockGetAllBalances.mockResolvedValue([
-      { tokenId: 'dBTC', balance: '100000000' },
+      { tokenId: 'dBTC', balance: '100000000', decimals: 8 },
     ]);
-    const result = await getTokenBalance('dBTC');
-    expect(result.decimals).toBe(8);
+    expect((await getTokenBalance('dBTC')).decimals).toBe(8);
+  });
+
+  it('reports a created token\'s own decimals', async () => {
+    mockGetAllBalances.mockResolvedValue([
+      { tokenId: 'RIGB', balance: '100000', decimals: 2 },
+    ]);
+    // The case the deleted table got wrong: not dBTC, so it answered 0.
+    expect((await getTokenBalance('RIGB')).decimals).toBe(2);
   });
 });
 

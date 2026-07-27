@@ -7,7 +7,7 @@ import { useTransactions, Transaction } from '../hooks/useTransactions';
 import { useWalletRefreshListener } from '@/hooks/useWalletRefreshListener';
 import ArrowIcon from './icons/ArrowIcon';
 import StitchedReceiptDetails from './receipts/StitchedReceiptDetails';
-import { formatSignedTokenAmount } from '../utils/tokenMeta';
+import { presentSignedDisplayAmount } from '../utils/tokenMeta';
 
 interface TransactionListProps {
   className?: string;
@@ -119,7 +119,7 @@ export const TransactionList: React.FC<TransactionListProps> = ({ className = ''
                     )}
                   </div>
                   <div className={`transaction-amount ${isOutgoing ? 'outgoing' : 'incoming'}`}>
-                    {formatSignedTokenAmount(transaction.amount, transaction.tokenId || 'ERA')} {transaction.tokenId || 'ERA'}
+                    {presentSignedDisplayAmount(transaction.displayAmount, transaction.amount)} {transaction.tokenId || 'ERA'}
                   </div>
                   <div className={`transaction-status ${getStatusColor(transaction.status)}`}>
                     {transaction.status}

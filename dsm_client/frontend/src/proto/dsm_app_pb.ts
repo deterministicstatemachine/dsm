@@ -13961,6 +13961,14 @@ export class BilateralEventNotification extends Message<BilateralEventNotificati
    */
   failureReason?: BilateralFailureReason;
 
+  /**
+   * Display form of `amount`, rendered by Rust from the token's registry
+   * decimals. `amount` stays canonical base units.
+   *
+   * @generated from field: optional string display_amount = 11;
+   */
+  displayAmount?: string;
+
   constructor(data?: PartialMessage<BilateralEventNotification>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13979,6 +13987,7 @@ export class BilateralEventNotification extends Message<BilateralEventNotificati
     { no: 8, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 9, name: "sender_ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
     { no: 10, name: "failure_reason", kind: "enum", T: proto3.getEnumType(BilateralFailureReason), opt: true },
+    { no: 11, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralEventNotification {
@@ -21981,11 +21990,15 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
   tokenId = "";
 
   /**
+   * CANONICAL base units
+   *
    * @generated from field: uint64 available = 2;
    */
   available = protoInt64.zero;
 
   /**
+   * CANONICAL base units
+   *
    * @generated from field: uint64 locked = 3;
    */
   locked = protoInt64.zero;
@@ -22005,6 +22018,19 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   tokenName = "";
 
+  /**
+   * Display form of `available`, rendered by Rust.
+   *
+   * Rust owns amount conversion in BOTH directions: it parses display input to
+   * base units on the way in, and renders base units to display form on the way
+   * out. A client that computes this itself is a second implementation of the
+   * unit rule, and two implementations disagree — which is exactly how a token
+   * holding 100,000 base units at 2 decimals came to be shown as "100000".
+   *
+   * @generated from field: string display_amount = 7;
+   */
+  displayAmount = "";
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22019,6 +22045,7 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 4, name: "symbol", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 6, name: "token_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {
@@ -22179,6 +22206,14 @@ export class TransactionInfo extends Message<TransactionInfo> {
    */
   receiptVerified = false;
 
+  /**
+   * Display form of `amount_signed`, rendered by Rust from the token's
+   * registry decimals. `amount`/`amount_signed` stay canonical base units.
+   *
+   * @generated from field: string display_amount = 17;
+   */
+  displayAmount = "";
+
   constructor(data?: PartialMessage<TransactionInfo>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22203,6 +22238,7 @@ export class TransactionInfo extends Message<TransactionInfo> {
     { no: 14, name: "created_at", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 15, name: "memo", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "receipt_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 17, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TransactionInfo {

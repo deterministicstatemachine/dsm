@@ -9,7 +9,7 @@ import { contactsStore } from '../stores/contactsStore';
 import '../styles/BilateralTransfer.css';
 import { emitWalletRefresh } from '../dsm/events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { formatTokenAmount } from '../utils/tokenMeta';
+import { presentDisplayAmount } from '../utils/tokenMeta';
 
 interface BilateralTransferDialogProps {
   /** Optional: limit to specific contact alias */
@@ -178,10 +178,13 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
                 <div className="bilateral-transfer-value">
                   {(() => {
                     const raw = incomingTransfer.amount;
-                    const rawTid = incomingTransfer.tokenId || 'ERA';
-                    const tid = rawTid.toUpperCase();
+                    const tid = (incomingTransfer.tokenId || 'ERA').toUpperCase();
                     const abs = typeof raw === 'bigint' ? raw : BigInt(String(raw));
-                    return `${formatTokenAmount(abs, rawTid)} ${tid}`;
+                    // What the sender's device says this amount is, rendered
+                    // from the token's own decimals. Accepting a transfer is a
+                    // decision about a quantity, so the quantity shown must be
+                    // the one the protocol moved.
+                    return `${presentDisplayAmount(incomingTransfer.displayAmount, abs)} ${tid}`;
                   })()}
                 </div>
               </div>

@@ -1997,6 +1997,7 @@ mod tests {
             created_at: 0,
             memo: String::new(),
             receipt_verified: false,
+            display_amount: "1".to_string(),
         };
 
         let msg = crate::generated::WalletHistoryResponse {

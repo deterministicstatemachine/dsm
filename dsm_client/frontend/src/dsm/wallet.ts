@@ -28,6 +28,8 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
     const out = (balancesResponse.balances ?? []).map((b: any) => ({
       tokenId: b.tokenId || 'ERA',
       ticker: b.symbol || b.tokenId || 'ERA',
+      // Rust's rendered display form. This layer never computes it.
+      displayAmount: String(b.displayAmount ?? ''),
       balance: (b.available ?? 0).toString(),
       baseUnits: typeof b.available === 'bigint' ? b.available : BigInt(b.available || 0),
       decimals: typeof b.decimals === 'number' ? b.decimals : 0,

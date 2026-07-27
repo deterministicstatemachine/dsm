@@ -27,6 +27,8 @@ export interface BilateralTransferEvent {
   commitmentHash: string; // base32
   transactionHash?: string; // base32
   amount?: bigint;
+  /** Display form of `amount`, rendered by Rust. Never computed here. */
+  displayAmount?: string;
   tokenId?: string;
   status: string;
   message: string;
@@ -47,6 +49,7 @@ export function decodeBilateralEvent(payload: Uint8Array): BilateralTransferEven
       commitmentHash: toB32(notification.commitmentHash),
       transactionHash: toB32(notification.transactionHash),
       amount: notification.amount,
+      displayAmount: notification.displayAmount,
       tokenId: notification.tokenId,
       status: notification.status,
       message: notification.message,

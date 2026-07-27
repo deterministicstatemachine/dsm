@@ -158,6 +158,11 @@ fn a_held_custom_token_carries_its_decimals_on_the_wire() {
          showed 100000 instead of 1,000.00"
     );
     assert_eq!(rigb.symbol, "RIGB");
+    // And the rendered form, because that is what the wallet displays. The
+    // frontend used to derive this itself; a second implementation of the unit
+    // rule is a second thing that can disagree with canonical state, so the
+    // conversion has one owner here in Rust and travels on the wire.
+    assert_eq!(rigb.display_amount, "1000.00");
 }
 
 /// A zero-balance adopted token is described too — it always was, which is why
@@ -185,6 +190,7 @@ fn a_zero_balance_registered_token_carries_its_decimals() {
     let adopt = row(&rows, "ADOPT");
     assert_eq!(adopt.available, 0);
     assert_eq!(adopt.decimals, 4);
+    assert_eq!(adopt.display_amount, "0.0000");
 }
 
 /// Metadata survives a restart, because it is resolved from the registry at
@@ -206,6 +212,7 @@ fn decimals_survive_a_restart_for_a_held_token() {
     let t = row(&rows, "PERSIS");
     assert_eq!(t.available, 50_000, "500 display at 2 decimals");
     assert_eq!(t.decimals, 2, "decimals must survive the restart");
+    assert_eq!(t.display_amount, "500.00", "and so must the rendering");
 }
 
 /// Builtins keep their existing, exact values — this change must not disturb
@@ -222,6 +229,11 @@ fn builtin_tokens_keep_their_metadata() {
     let era = row(&rows, "ERA");
     assert_eq!(era.decimals, 0, "ERA is whole units");
     assert_eq!(era.symbol, "ERA");
+    assert_eq!(
+        era.display_amount,
+        era.available.to_string(),
+        "at 0 decimals the display form is the base units, with no point"
+    );
 
     let dbtc = row(&rows, "dBTC");
     assert_eq!(dbtc.decimals, 8, "dBTC is satoshis");
@@ -243,4 +255,5 @@ fn a_zero_decimal_custom_token_is_unchanged() {
     let w = row(&rows, "WHOLE");
     assert_eq!(w.available, 750);
     assert_eq!(w.decimals, 0);
+    assert_eq!(w.display_amount, "750", "no spurious decimal point");
 }

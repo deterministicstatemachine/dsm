@@ -397,6 +397,19 @@ impl BilateralBleHandler {
     /// Emit a bilateral event notification to the frontend
     fn emit_event(&self, event: &generated::BilateralEventNotification) {
         if let Some(ref callback) = self.event_callback {
+            // Rendered here, at the one point every emitter passes through.
+            // Ten call sites construct these notifications; asking each to
+            // remember the display form is how the balance path ended up
+            // enriching only the rows that needed it least.
+            let mut event = event.clone();
+            if let Some(amount) = event.amount {
+                let decimals = crate::handlers::wallet_routes::decimals_for_token(
+                    event.token_id.as_deref().unwrap_or("ERA"),
+                );
+                event.display_amount = Some(
+                    crate::handlers::wallet_routes::format_base_units_for_display(amount, decimals),
+                );
+            }
             callback(&event.encode_to_vec());
         }
     }
@@ -427,6 +440,8 @@ impl BilateralBleHandler {
             // (If no callback is installed, this is a no-op.)
             let msg = option_string_or_default(reason.clone(), "rejected");
             self.emit_event(&generated::BilateralEventNotification {
+                // Rendered in emit_event, the one boundary all emitters cross.
+                display_amount: None,
                 event_type: generated::BilateralEventType::BilateralEventRejected.into(),
                 counterparty_device_id: counterparty_device_id.to_vec(),
                 commitment_hash: origin_commitment_hash.to_vec(),
@@ -868,6 +883,8 @@ impl BilateralBleHandler {
         self.clear_pending_confirm_delivery(&commitment_hash);
 
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventTransferComplete.into(),
             counterparty_device_id: session.counterparty_device_id.to_vec(),
             commitment_hash: commitment_hash.to_vec(),
@@ -1958,6 +1975,8 @@ impl BilateralBleHandler {
         }
 
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventFailed.into(),
             counterparty_device_id: session.counterparty_device_id.to_vec(),
             commitment_hash: commitment_hash.to_vec(),
@@ -2494,6 +2513,8 @@ impl BilateralBleHandler {
 
             // Emit rejection event with verification failure
             self.emit_event(&generated::BilateralEventNotification {
+                // Rendered in emit_event, the one boundary all emitters cross.
+                display_amount: None,
                 event_type: generated::BilateralEventType::BilateralEventRejected.into(),
                 counterparty_device_id: counterparty_device_id.to_vec(),
                 commitment_hash: origin_commitment_hash.to_vec(),
@@ -2642,6 +2663,8 @@ impl BilateralBleHandler {
             amount_opt
         );
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventPrepareReceived.into(),
             counterparty_device_id: counterparty_device_id.to_vec(),
             commitment_hash: origin_commitment_hash.to_vec(),
@@ -2782,6 +2805,8 @@ impl BilateralBleHandler {
 
         // Emit accept_sent event
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventAcceptSent.into(),
             counterparty_device_id: counterparty_device_id.to_vec(),
             commitment_hash: origin_commitment_hash.to_vec(),
@@ -2983,6 +3008,8 @@ impl BilateralBleHandler {
 
         // Emit rejection event
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventRejected.into(),
             counterparty_device_id: rejector_device_id.to_vec(),
             commitment_hash: commitment_hash.to_vec(),
@@ -3936,6 +3963,8 @@ impl BilateralBleHandler {
                                 // receiver UI can say "trusted anchor for <contact>". The message
                                 // carries the Base32 anchor id.
                                 self.emit_event(&generated::BilateralEventNotification {
+                                    // Rendered in emit_event, the one boundary all emitters cross.
+                                    display_amount: None,
                                     event_type:
                                         generated::BilateralEventType::BilateralEventAnchorPinned
                                             .into(),
@@ -3967,6 +3996,8 @@ impl BilateralBleHandler {
                             bytes_to_base32(&sender_device_id[..8])
                         );
                         self.emit_event(&generated::BilateralEventNotification {
+                            // Rendered in emit_event, the one boundary all emitters cross.
+                            display_amount: None,
                             event_type: generated::BilateralEventType::BilateralEventAnchorChanged
                                 .into(),
                             counterparty_device_id: sender_device_id.to_vec(),
@@ -5042,6 +5073,8 @@ impl BilateralBleHandler {
         // Emit transfer_complete event to frontend (receiver side).
         // amount / token_id already resolved via delegate.operation_metadata() above.
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventTransferComplete.into(),
             counterparty_device_id: session.counterparty_device_id.to_vec(),
             commitment_hash: commitment_hash.to_vec(),
@@ -5413,6 +5446,8 @@ impl BilateralBleHandler {
             None => {
                 error!("[BILATERAL] app_router not installed; cannot commit BLE bilateral advance");
                 self.emit_event(&generated::BilateralEventNotification {
+                    // Rendered in emit_event, the one boundary all emitters cross.
+                    display_amount: None,
                     event_type: generated::BilateralEventType::BilateralEventFailed.into(),
                     counterparty_device_id: counterparty_device_id.to_vec(),
                     commitment_hash: commitment_hash.to_vec(),
@@ -5508,6 +5543,8 @@ impl BilateralBleHandler {
                     advance_err
                 );
                 self.emit_event(&generated::BilateralEventNotification {
+                    // Rendered in emit_event, the one boundary all emitters cross.
+                    display_amount: None,
                     event_type: generated::BilateralEventType::BilateralEventFailed.into(),
                     counterparty_device_id: counterparty_device_id.to_vec(),
                     commitment_hash: commitment_hash.to_vec(),
@@ -5643,6 +5680,8 @@ impl BilateralBleHandler {
                     "[BILATERAL] Sender settlement FAILED after advance commit: {e}. Canonical head is advanced; projection + history may lag."
                 );
                 self.emit_event(&generated::BilateralEventNotification {
+                    // Rendered in emit_event, the one boundary all emitters cross.
+                    display_amount: None,
                     event_type: generated::BilateralEventType::BilateralEventFailed.into(),
                     counterparty_device_id: counterparty_device_id.to_vec(),
                     commitment_hash: commitment_hash.to_vec(),
@@ -5828,6 +5867,8 @@ impl BilateralBleHandler {
 
         // Emit transfer_complete event to frontend (sender side).
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventTransferComplete.into(),
             counterparty_device_id: counterparty_device_id.to_vec(),
             commitment_hash: commitment_hash.to_vec(),
@@ -5903,6 +5944,8 @@ impl BilateralBleHandler {
                 Err(e) => {
                     warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");
                     self.emit_event(&generated::BilateralEventNotification {
+                        // Rendered in emit_event, the one boundary all emitters cross.
+                        display_amount: None,
                         event_type: generated::BilateralEventType::BilateralEventFailed.into(),
                         counterparty_device_id: counterparty_device_id.to_vec(),
                         commitment_hash: commitment_hash.to_vec(),
@@ -5941,6 +5984,8 @@ impl BilateralBleHandler {
             .await;
 
         self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
             event_type: generated::BilateralEventType::BilateralEventTransferComplete.into(),
             counterparty_device_id: counterparty_device_id.to_vec(),
             commitment_hash: commitment_hash.to_vec(),

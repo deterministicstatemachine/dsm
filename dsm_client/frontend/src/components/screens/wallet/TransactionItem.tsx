@@ -21,7 +21,7 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
   const isOutgoing = amtBI < 0n;
   const token = (tx.tokenId?.length ?? 0) > 0 ? tx.tokenId! : 'ERA';
   const absAmt = isOutgoing ? -amtBI : amtBI;
-  const magnitude = formatTxAmount(absAmt, token);
+  const magnitude = formatTxAmount(tx, absAmt);
   const txTypeVal = txTypeNumber(tx);
   const createdAt = tx.createdAt ?? 0;
   const memo = (tx.memo?.length ?? 0) > 0 ? tx.memo : undefined;

@@ -119,7 +119,11 @@ fn create_writes_durable_registry_and_policy_rows() {
         .expect("token must be recorded durably at creation");
     assert_eq!(row.ticker, "PERSA");
     assert_eq!(row.decimals, 8);
-    assert_eq!(row.max_supply, 1_000_000);
+    // The registry records the BASE-UNIT cap. The request declares 1_000_000
+    // display units at decimals=8, so the enforced cap is 10^8 times that.
+    // Storing the display number would make the cap depend on how a UI chose
+    // to render it.
+    assert_eq!(row.max_supply, 100_000_000_000_000);
     assert_eq!(row.policy_commit.to_vec(), resp.policy_anchor);
 
     let policy = token_registry::load_policy_verified(&row.policy_commit)
@@ -186,7 +190,7 @@ fn token_survives_restart_and_resolves_from_the_database() {
 /// rather than silently producing a second registration of one identity.
 #[test]
 #[serial_test::serial]
-fn duplicate_creation_is_rejected_by_the_registry() {
+fn duplicate_creation_reconciles_to_one_registry_row() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
@@ -195,10 +199,15 @@ fn duplicate_creation_is_rejected_by_the_registry() {
     let first = create_token(&r, "PERSC");
     assert!(!first.token_id.is_empty());
 
+    // Resubmitting the IDENTICAL creation is reconciled against canonical
+    // state rather than refused: the token id is the creation commitment, so
+    // the same commitment names the same token. What must not happen is a
+    // second row or a second fee.
     let again = invoke(&r, "token.create", create_request("PERSC"));
     assert!(
-        !again.success,
-        "a second create for the same ticker must be rejected"
+        again.success,
+        "an identical resubmission must reconcile: {:?}",
+        again.error_message
     );
     assert_eq!(
         token_registry::all_tokens().expect("read").len(),

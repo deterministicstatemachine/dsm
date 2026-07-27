@@ -74,19 +74,69 @@ fn parse_cached_policy_metadata(policy_bytes: &[u8]) -> Option<CachedPolicyMetad
     }
 }
 
-fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
+/// The token's decimal places, from the authority for that token.
+///
+/// ERA and dBTC are protocol-defined; everything else is a created or adopted
+/// token whose decimals live in the registry. There is no hardcoded table:
+/// one existed in TypeScript, knew only dBTC, and silently rendered every
+/// custom token as whole units.
+pub fn decimals_for_token(token_id: &str) -> u32 {
+    match token_id.trim().to_uppercase().as_str() {
+        "ERA" => 0,
+        "DBTC" | "BTC" => 8,
+        other => crate::storage::client_db::token_registry::get_token_by_ticker(other)
+            .ok()
+            .flatten()
+            .map(|row| row.decimals)
+            .unwrap_or(0),
+    }
+}
+
+/// A signed amount rendered for display, sign included.
+///
+/// Transaction history shows outgoing amounts negative. The magnitude is
+/// converted by the same function that renders balances, so a transfer and the
+/// balance it moved can never disagree about what a unit is.
+pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> String {
+    let magnitude = amount.unsigned_abs();
+    let rendered = format_base_units_for_display(magnitude, decimals);
+    if amount < 0 {
+        format!("-{rendered}")
+    } else {
+        rendered
+    }
+}
+
+/// Render a transaction's amount for display, from the token's own decimals.
+///
+/// `amount` and `amount_signed` remain canonical base units; this only adds
+/// the string a UI prints. Amounts that predate signed accounting carry
+/// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
+/// rendering every historical row as zero.
+pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) {
+    let decimals = decimals_for_token(&tx.token_id);
+    tx.display_amount = if tx.amount_signed != 0 {
+        format_signed_base_units_for_display(tx.amount_signed, decimals)
+    } else {
+        format_base_units_for_display(tx.amount, decimals)
+    };
+}
+
+pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
     let token_id = reply.token_id.trim().to_uppercase();
     match token_id.as_str() {
         "ERA" => {
             reply.symbol = "ERA".to_string();
             reply.decimals = 0;
             reply.token_name = "ERA".to_string();
+            reply.display_amount = format_base_units_for_display(reply.available, 0);
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
             reply.symbol = "dBTC".to_string();
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
+            reply.display_amount = format_base_units_for_display(reply.available, 8);
         }
         // Created and adopted tokens carry their own decimals, and the wire
         // amount is BASE UNITS. Leaving decimals at the default meant a
@@ -106,6 +156,7 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
                 };
                 reply.decimals = row.decimals;
             }
+            reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
         }
     }
 }
@@ -175,6 +226,26 @@ pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
             .flatten()
             .map(|row| row.decimals)
             .unwrap_or(0),
+    }
+}
+
+/// Render canonical base units as a display amount. The inverse of
+/// [`parse_display_amount_to_base_units`], and deliberately its neighbour:
+/// amount conversion has ONE owner, in Rust, in both directions.
+///
+/// Integer/string arithmetic — the digits are split, never divided — so a large
+/// balance stays exact where floating point would round it.
+pub fn format_base_units_for_display(base_units: u64, decimals: u32) -> String {
+    if decimals == 0 {
+        return base_units.to_string();
+    }
+    let digits = base_units.to_string();
+    let d = decimals as usize;
+    if digits.len() <= d {
+        format!("0.{}", "0".repeat(d - digits.len()) + &digits)
+    } else {
+        let (whole, frac) = digits.split_at(digits.len() - d);
+        format!("{whole}.{frac}")
     }
 }
 
@@ -464,6 +535,8 @@ impl AppRouterImpl {
                         };
 
                         generated::TransactionInfo {
+                            // Filled at the encoding boundary by enrich_transaction_display.
+                            display_amount: String::new(),
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
@@ -523,6 +596,14 @@ impl AppRouterImpl {
                     })
                     .collect();
 
+                // Rendered at the encoding boundary, for the same reason
+                // balances are: a producer that builds a row without the
+                // display form is easy to add and impossible to notice, and
+                // the frontend has nothing to fall back on but a guess.
+                let mut txs = txs;
+                for tx in txs.iter_mut() {
+                    enrich_transaction_display(tx);
+                }
                 let reply = generated::WalletHistoryResponse { transactions: txs };
                 // NEW: Return as Envelope.walletHistoryResponse (field 38)
                 pack_envelope_ok(generated::envelope::Payload::WalletHistoryResponse(reply))

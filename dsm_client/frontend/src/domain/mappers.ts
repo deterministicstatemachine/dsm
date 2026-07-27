@@ -137,7 +137,9 @@ export function mapBalanceList(list: any[]): DomainBalance[] {
     const tokenName = String(b.tokenName ?? symbol ?? tokenId ?? 'UNKNOWN');
     const balance = toBigint(b.balance);
     const decimals = typeof b.decimals === 'number' ? b.decimals : 0;
-    return { tokenId, tokenName, balance, decimals, symbol };
+    // Rendered by Rust; carried, never recomputed.
+    const displayAmount = String(b.displayAmount ?? '');
+    return { tokenId, tokenName, balance, decimals, symbol, displayAmount };
   });
 }
 
@@ -276,6 +278,8 @@ export function mapTransactions(list: any[]): DomainTransaction[] {
       fromDeviceId: fromDevice,
       toDeviceId: toDevice,
       amountSigned: amount,
+      // Rendered by Rust from the token's registry decimals; carried as-is.
+      displayAmount: String((t as any).displayAmount ?? ''),
       stitchedReceipt,
       receiptVerified: !!t.receiptVerified,
       tokenId,

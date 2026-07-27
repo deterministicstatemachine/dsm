@@ -445,6 +445,10 @@ impl AppRouterImpl {
                         symbol: "dBTC".to_string(),
                         decimals: 8,
                         token_name: "dBTC".to_string(),
+                        display_amount:
+                            crate::handlers::wallet_routes::format_base_units_for_display(
+                                available, 8,
+                            ),
                     },
                 ))
             }
@@ -609,6 +613,10 @@ impl AppRouterImpl {
                         symbol: "BTC".to_string(),
                         decimals: 8,
                         token_name: "Bitcoin".to_string(),
+                        display_amount:
+                            crate::handlers::wallet_routes::format_base_units_for_display(
+                                available, 8,
+                            ),
                     },
                 ))
             }
