@@ -95,6 +95,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    // The form no longer pre-selects a recipient: pick one, as a user must.
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '1' } });
     fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });
@@ -140,6 +142,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    // The form no longer pre-selects a recipient: pick one, as a user must.
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
@@ -181,6 +185,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    // The form no longer pre-selects a recipient: pick one, as a user must.
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
     fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });

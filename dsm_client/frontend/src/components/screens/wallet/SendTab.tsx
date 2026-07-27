@@ -30,7 +30,10 @@ function SendTabInner({
   setError,
 }: Props): JSX.Element {
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
-    selectedContactKey: contacts.length > 0 ? contacts[0].deviceId : '',
+    // No default recipient. A money form that pre-selects whoever happens to
+    // be first sends to the wrong person the moment the list reorders — and it
+    // reorders on its own. The user picks, explicitly, every time.
+    selectedContactKey: '',
     amount: '',
     token: 'ERA',
     note: '',
@@ -68,8 +71,15 @@ function SendTabInner({
       setSendForm((prev) => ({ ...prev, selectedContactKey: '' }));
       return;
     }
-    if (!contacts.some((c) => c.deviceId === sendForm.selectedContactKey)) {
-      setSendForm((prev) => ({ ...prev, selectedContactKey: contacts[0].deviceId }));
+    // If the chosen contact is gone, CLEAR the selection. Substituting
+    // contacts[0] silently retargets a transfer at a different device, which
+    // is the one failure mode a send form must never have. Selection is keyed
+    // by deviceId, so reordering alone never disturbs it.
+    if (
+      sendForm.selectedContactKey &&
+      !contacts.some((c) => c.deviceId === sendForm.selectedContactKey)
+    ) {
+      setSendForm((prev) => ({ ...prev, selectedContactKey: '' }));
     }
   }, [contacts, sendForm.selectedContactKey]);
 
@@ -226,7 +236,22 @@ function SendTabInner({
         <div className="form-group"><label htmlFor="note">Note (Optional)</label><input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="Transaction note" className="form-input" /></div>
         <div className="form-actions">
           <button type="button" onClick={onCancel} className="cancel-button">Cancel</button>
-          <button type="submit" className="send-button button-brick" disabled={contacts.length === 0 || sendingTx}>{sendingTx ? 'Sending…' : 'Send'}</button>
+          {/* The recipient, spelled out immediately above the action that
+              commits it. A device id is the only unambiguous name for who is
+              about to receive this, and it belongs where the decision is made
+              rather than several fields further up. */}
+          <div className="send-recipient-confirm" data-testid="send-recipient-confirm">
+            {selectedContact
+              ? `To: ${selectedContact.deviceId.slice(0, 8)}`
+              : 'Select a recipient'}
+          </div>
+          <button
+            type="submit"
+            className="send-button button-brick"
+            disabled={!sendForm.selectedContactKey || contacts.length === 0 || sendingTx}
+          >
+            {sendingTx ? 'Sending…' : 'Send'}
+          </button>
         </div>
       </form>
       <ConfirmModal
