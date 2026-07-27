@@ -237,6 +237,9 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
 /// truth; this only rebuilds the derived in-memory view.
 fn spawn_token_registry_rehydrate(router: std::sync::Arc<AppRouterImpl>, origin: &'static str) {
     crate::runtime::get_runtime().spawn(async move {
+        // Lazy rehydration first: it must be in place before anything can
+        // enforce, so a token added after this point is covered too.
+        router.install_policy_resolver();
         router.rehydrate_token_registry().await;
         log::debug!("[SDK] token registry rehydrate ({origin}) complete");
     });

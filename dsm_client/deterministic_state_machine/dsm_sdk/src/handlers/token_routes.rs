@@ -526,6 +526,57 @@ impl AppRouterImpl {
     /// transferred, and `dlv.create` (which resolves the pair's policy commit
     /// and fails closed) could not build a vault for it. The durable tables are
     /// the source; this only rebuilds the derived in-memory view.
+    /// Install the durable-storage policy resolver used by the enforcer on a
+    /// cache miss.
+    ///
+    /// The enforcer's token→anchor map is process-local, so after a restart it
+    /// is empty and every created or adopted token looked policy-less: on
+    /// device that surfaced as "Token policy violation for RIGB: No policy
+    /// registered for token" while the committed policy sat in
+    /// `token_policies` the whole time. Startup warming alone does not fix
+    /// that — any row added later, or any warm-up that skipped a row,
+    /// reproduces it exactly. So the miss itself consults durable storage.
+    ///
+    /// Resolution uses the SAME pieces as creation and adoption:
+    /// `load_policy_verified` (which re-derives BLAKE3(TAG_DSM_POLICY, bytes)
+    /// and treats a mismatch as absent), the one strict `parse_token_policy`,
+    /// and the one `derive_policy_file` constructor. There is no second parser
+    /// and no second notion of what a policy is.
+    pub fn install_policy_resolver(&self) {
+        self.core_sdk.set_policy_resolver(std::sync::Arc::new(
+            |identifier: &str| -> Option<(
+                dsm::types::policy_types::PolicyFile,
+                dsm::types::policy_types::PolicyAnchor,
+            )> {
+                // Accept the canonical id or a registered ticker, same as the
+                // resolver the send path uses.
+                let row = crate::storage::client_db::token_registry::get_token(identifier)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        crate::storage::client_db::token_registry::get_token_by_ticker(identifier)
+                            .ok()
+                            .flatten()
+                    })?;
+
+                // Anchor equality is enforced inside load_policy_verified: a
+                // row whose bytes do not hash to their recorded commitment is
+                // reported ABSENT rather than returned.
+                let raw = crate::storage::client_db::token_registry::load_policy_verified(
+                    &row.policy_commit,
+                )
+                .ok()
+                .flatten()?;
+
+                let parsed = parse_token_policy(&raw)?;
+                Some((
+                    derive_policy_file(&row.ticker, &parsed),
+                    dsm::types::policy_types::PolicyAnchor::from_bytes(row.policy_commit),
+                ))
+            },
+        ));
+    }
+
     pub async fn rehydrate_token_registry(&self) {
         let tokens = match crate::storage::client_db::token_registry::all_tokens() {
             Ok(t) => t,

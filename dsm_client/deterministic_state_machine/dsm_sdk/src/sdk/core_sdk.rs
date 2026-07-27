@@ -610,6 +610,20 @@ impl CoreSDK {
 
     /// Register policy bytes while preserving an externally-authoritative
     /// policy anchor (for example, a storage-layer `DSM/policy` commitment).
+    /// Read access to the policy system, for tests that need to ask the
+    /// enforcer directly whether it can see a token's policy.
+    pub fn policy_system_ref(&self) -> &dsm::core::token::policy::TokenPolicySystem {
+        &self.policy_system
+    }
+
+    /// Install the durable-storage resolver the policy enforcer consults when
+    /// its process-local index misses. See
+    /// `AppRouterImpl::install_policy_resolver` for why a miss must not be
+    /// read as absence.
+    pub fn set_policy_resolver(&self, resolver: dsm::core::token::policy::PolicyResolver) {
+        self.policy_system.set_policy_resolver(resolver);
+    }
+
     pub async fn register_token_policy_with_anchor(
         &self,
         token_id: &str,
