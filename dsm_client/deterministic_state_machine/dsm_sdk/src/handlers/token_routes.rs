@@ -960,8 +960,49 @@ impl AppRouterImpl {
                     }
                     v
                 };
-                let max_supply = be_u128(&req.max_supply_u128);
-                let initial_alloc = be_u128(&req.initial_alloc_u128);
+                // Canonical amounts are integer BASE UNITS; the wizard speaks
+                // display units. Conversion happens exactly once, here, before
+                // anything commits to a number: policy serialization and anchor
+                // derivation, CreateToken, conservation validation, registry
+                // persistence, and the supply cap all take the converted value.
+                //
+                // Creation used to skip this while the send path applied it, so
+                // a token created with "1,000" at decimals=2 held 1_000 base
+                // units (10.00) while a send of "250" correctly debited 25_000
+                // — and the transfer failed with a balance underflow on a
+                // balance the UI displayed as 1000. The two sides disagreed
+                // about what a unit was.
+                //
+                // The CPTA anchor therefore commits the base-unit cap. A policy
+                // that committed a display number would mean the cap enforced
+                // depends on how a UI chose to render it.
+                let scale = 10u128
+                    .checked_pow(req.decimals)
+                    .ok_or_else(|| "token.create: decimals too large to scale".to_string());
+                let scale = match scale {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let to_base = |display: u128, what: &str| -> Result<u128, String> {
+                    display.checked_mul(scale).ok_or_else(|| {
+                        format!(
+                            "token.create: {what} overflows at {} decimals",
+                            req.decimals
+                        )
+                    })
+                };
+                let max_supply = match to_base(be_u128(&req.max_supply_u128), "max supply") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let initial_alloc =
+                    match to_base(be_u128(&req.initial_alloc_u128), "initial allocation") {
+                        Ok(v) => v,
+                        Err(e) => return err(e),
+                    };
+                if !req.unlimited_supply && initial_alloc > max_supply {
+                    return err("token.create: initial allocation exceeds max supply".to_string());
+                }
 
                 let mut allowlist_device_ids: Vec<[u8; 32]> = Vec::new();
                 for id in &req.allowlist_device_ids {

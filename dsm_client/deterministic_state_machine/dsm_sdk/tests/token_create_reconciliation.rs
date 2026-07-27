@@ -171,10 +171,12 @@ fn a_repeated_identical_creation_reports_success_and_charges_one_fee() {
         after_first,
         "a resubmission must not burn a second fee: {msg2}"
     );
+    // Base units: the request carries display units and Rust scales once at
+    // the boundary, so 1,000 at decimals=2 is 100,000 canonical.
     assert_eq!(
         balance_of(&r, &id1),
-        1_000,
-        "supply must be credited exactly once"
+        100_000,
+        "supply must be credited exactly once, in base units"
     );
 }
 
@@ -202,7 +204,11 @@ fn one_token_one_policy_one_fee_across_repeated_attempts() {
         "one identity throughout"
     );
     assert_eq!(before - era(&r), 10, "exactly one fee across four attempts");
-    assert_eq!(balance_of(&r, &ids[0]), 250, "one allocation");
+    assert_eq!(
+        balance_of(&r, &ids[0]),
+        25_000,
+        "one allocation, in base units (250 display at 2 decimals)"
+    );
     assert_eq!(
         token_registry::all_tokens().expect("registry").len(),
         1,
