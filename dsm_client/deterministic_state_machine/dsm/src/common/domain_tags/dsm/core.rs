@@ -30,6 +30,17 @@ pub const TAG_OFFLINE_ALLOCATION_LEAF: &str = "DSM/offline-allocation/v1";
 /// Value of the offline-cash allocation leaf: `H(tag ‖ amount_be ‖ sequence_be)`. The
 /// sequence advances on every load/unload/spend so a repeated amount still changes the leaf.
 pub const TAG_OFFLINE_ALLOCATION_STATE: &str = "DSM/offline-allocation-state/v1";
+/// SMT key of the per-(vault, asset) reserve leaf:
+/// `H(tag ‖ genesis_id ‖ device_id ‖ vault_id ‖ policy_commit)`. Accounts for value the
+/// owner has ENCUMBERED into a specific vault. Deliberately not a `balances` entry: a
+/// vault-scoped key in that map would be folded into `balance_witness` and change the chain
+/// tip a counterparty derives on every unrelated transfer.
+pub const TAG_VAULT_RESERVE_LEAF: &str = "DSM/vault-reserve/v1";
+/// Value of a vault reserve leaf: `H(tag ‖ amount_be ‖ vault_sequence_be)`. The sequence is
+/// the VAULT's own `current_sequence`, not a per-leaf counter, so this leaf and the
+/// vault-state leaf carry the same sequence and a verifier holding both proofs against one
+/// root can cross-check them without a third record.
+pub const TAG_VAULT_RESERVE_STATE: &str = "DSM/vault-reserve-state/v1";
 pub const TAG_COMMITMENT: &str = "DSM/commitment";
 pub const TAG_COMMITMENT_OPEN: &str = "DSM/commitment-open";
 pub const TAG_COMMITMENT_FIELDS: &str = "DSM/commitment-fields";
@@ -62,6 +73,8 @@ pub(super) const TAGS: &[&str] = &[
     TAG_FUSED_ANCHOR_STATE_LEAF,
     TAG_OFFLINE_ALLOCATION_LEAF,
     TAG_OFFLINE_ALLOCATION_STATE,
+    TAG_VAULT_RESERVE_LEAF,
+    TAG_VAULT_RESERVE_STATE,
     TAG_COMMITMENT,
     TAG_COMMITMENT_OPEN,
     TAG_COMMITMENT_FIELDS,

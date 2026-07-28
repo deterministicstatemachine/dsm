@@ -7,5 +7,6 @@
 
 pub mod controller_rotation;
 pub mod vault_pending_pointer;
+pub mod vault_reserve_leaf;
 pub mod vault_smt_leaf;
 pub mod vault_state_anchor;
