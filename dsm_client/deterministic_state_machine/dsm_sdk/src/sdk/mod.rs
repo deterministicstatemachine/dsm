@@ -92,8 +92,6 @@ pub mod storage_node_sdk;
 // bilateral_transaction_manager + contacts store.
 
 // Smart contract and commitment functionality
-#[cfg(feature = "demos")]
-pub mod amm_demo;
 pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
