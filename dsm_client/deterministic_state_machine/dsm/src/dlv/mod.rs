@@ -6,6 +6,7 @@
 //! state; each submodule is a self-contained crypto primitive.
 
 pub mod controller_rotation;
+pub mod settlement_receipt_leaf;
 pub mod vault_pending_pointer;
 pub mod vault_reserve_leaf;
 pub mod vault_smt_leaf;

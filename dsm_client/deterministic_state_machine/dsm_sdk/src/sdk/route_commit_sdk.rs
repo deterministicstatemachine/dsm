@@ -383,6 +383,15 @@ pub(crate) enum PublishPointerError {
     SignFailed { hop_index: usize, msg: String },
     /// Underlying storage write failed.
     StorageFailed { hop_index: usize, msg: String },
+    /// The hop names its pair by a label rather than by 32-byte policy commits,
+    /// so the settled trade cannot be stated in the terms a settlement receipt
+    /// commits to.
+    ///
+    /// FAILS CLOSED rather than publishing a pointer with a commitment no
+    /// receipt could ever match. Such a pointer would be permanently inert —
+    /// harmless to reserves, but it would silently claim the `(parent_seq, X)`
+    /// slot forever. Refusing to publish says so instead of hiding it.
+    HopPairIsNotPolicyCommits { hop_index: usize },
 }
 
 impl std::fmt::Display for PublishPointerError {
@@ -399,6 +408,12 @@ impl std::fmt::Display for PublishPointerError {
             }
             PublishPointerError::SignFailed { hop_index, msg } => {
                 write!(f, "hop {hop_index}: sphincs sign failed: {msg}")
+            }
+            PublishPointerError::HopPairIsNotPolicyCommits { hop_index } => {
+                write!(
+                    f,
+                    "hop {hop_index}: pair identity is not 32-byte policy commits; a settlement receipt cannot be named"
+                )
             }
             PublishPointerError::StorageFailed { hop_index, msg } => {
                 write!(f, "hop {hop_index}: storage put failed: {msg}")
@@ -513,6 +528,48 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             *h.finalize().as_bytes()
         };
 
+        // Name the ONE receipt that may later activate this pointer.
+        //
+        // Derived from the hop's own settled quantities, so the trader cannot
+        // publish a pointer for one trade and satisfy it with a receipt for a
+        // cheaper one — and derived from `x`, so the id matches what the
+        // settling advance will independently derive.
+        let (Some(input_policy_commit), Some(output_policy_commit)) = (
+            <[u8; 32]>::try_from(hop.token_in.as_slice()).ok(),
+            <[u8; 32]>::try_from(hop.token_out.as_slice()).ok(),
+        ) else {
+            errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
+            continue;
+        };
+        // 16-byte big-endian on the wire, u64 base units in the receipt. The
+        // narrowing is checked here, once: an amount that does not fit is a
+        // malformed hop, never a value to truncate.
+        let (Ok(hop_input_amount), Ok(hop_output_amount)) = (
+            <[u8; 16]>::try_from(hop.input_amount_u128.as_slice())
+                .map_err(|_| ())
+                .and_then(|b| u64::try_from(u128::from_be_bytes(b)).map_err(|_| ())),
+            <[u8; 16]>::try_from(hop.expected_output_amount_u128.as_slice())
+                .map_err(|_| ())
+                .and_then(|b| u64::try_from(u128::from_be_bytes(b)).map_err(|_| ())),
+        ) else {
+            errors.push(PublishPointerError::HopReSimulationFailed { hop_index });
+            continue;
+        };
+        let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id_arr, x);
+        let expected_receipt_hash = dsm::dlv::settlement_receipt_leaf::receipt_commitment(
+            &vault_id_arr,
+            &receipt_id,
+            &dsm::dlv::settlement_receipt_leaf::SettledTrade {
+                x: *x,
+                parent_sequence,
+                new_sequence,
+                input_policy_commit,
+                input_amount: hop_input_amount,
+                output_policy_commit,
+                output_amount: hop_output_amount,
+            },
+        );
+
         // Sign the pointer.
         let signed = match dsm::dlv::vault_pending_pointer::sign_vault_pending_pointer(
             &vault_id_arr,
@@ -520,6 +577,7 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             new_sequence,
             x,
             &marker_digest,
+            &expected_receipt_hash,
             publisher_pk,
             publisher_sk,
         ) {
@@ -545,6 +603,7 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             new_sequence: signed.new_sequence,
             x: signed.x.to_vec(),
             new_reserves_digest: signed.new_reserves_digest.to_vec(),
+            expected_receipt_hash: signed.expected_receipt_hash.to_vec(),
             publisher_public_key: signed.publisher_public_key.clone(),
             publisher_signature: signed.publisher_signature.clone(),
         };

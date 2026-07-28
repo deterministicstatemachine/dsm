@@ -38,6 +38,13 @@ pub struct SignedVaultPendingPointer {
     pub new_sequence: u64,
     pub x: [u8; 32],
     pub new_reserves_digest: [u8; 32],
+    /// Hash of the ONE settlement receipt that can activate this pointer.
+    ///
+    /// Until a receipt hashing to exactly this value is fetched and verified,
+    /// the pointer is inert: it changes no one's effective reserves. Signed
+    /// over, so it cannot be swapped for a cheaper trade's receipt after the
+    /// fact.
+    pub expected_receipt_hash: [u8; 32],
     pub publisher_public_key: Vec<u8>,
     pub publisher_signature: Vec<u8>,
 }
@@ -94,7 +101,8 @@ fn expected_next_sequence(parent_sequence: u64) -> Result<u64, PointerError> {
 /// Canonical signing payload for a vault pending pointer.
 ///
 /// `BLAKE3(DOMAIN_POINTER || vault_id || parent_sequence_be ||
-///         new_sequence_be || x || new_reserves_digest)`
+///         new_sequence_be || x || new_reserves_digest ||
+///         expected_receipt_hash)`
 ///
 /// Stable across endianness because all integer fields are big-endian
 /// encoded; stable across implementations because the order is fixed
@@ -105,6 +113,7 @@ fn pointer_sign_payload(
     new_sequence: u64,
     x: &[u8; 32],
     new_reserves_digest: &[u8; 32],
+    expected_receipt_hash: &[u8; 32],
 ) -> [u8; 32] {
     let mut h = Hasher::new();
     h.update(DOMAIN_POINTER);
@@ -113,6 +122,7 @@ fn pointer_sign_payload(
     h.update(&new_sequence.to_be_bytes());
     h.update(x);
     h.update(new_reserves_digest);
+    h.update(expected_receipt_hash);
     *h.finalize().as_bytes()
 }
 
@@ -122,12 +132,14 @@ fn pointer_sign_payload(
 /// Enforces `new_sequence == parent_sequence + 1`; multi-step pointers
 /// are rejected to keep composition strictly chain-additive (each
 /// pointer extends the cursor by exactly one sequence step).
+#[allow(clippy::too_many_arguments)]
 pub fn sign_vault_pending_pointer(
     vault_id: &[u8; 32],
     parent_sequence: u64,
     new_sequence: u64,
     x: &[u8; 32],
     new_reserves_digest: &[u8; 32],
+    expected_receipt_hash: &[u8; 32],
     publisher_public_key: &[u8],
     publisher_secret_key: &[u8],
 ) -> Result<SignedVaultPendingPointer, PointerError> {
@@ -144,6 +156,7 @@ pub fn sign_vault_pending_pointer(
         new_sequence,
         x,
         new_reserves_digest,
+        expected_receipt_hash,
     );
     let signature = crate::crypto::sphincs::sign(
         crate::crypto::sphincs::SphincsVariant::SPX256f,
@@ -157,6 +170,7 @@ pub fn sign_vault_pending_pointer(
         new_sequence,
         x: *x,
         new_reserves_digest: *new_reserves_digest,
+        expected_receipt_hash: *expected_receipt_hash,
         publisher_public_key: publisher_public_key.to_vec(),
         publisher_signature: signature,
     })
@@ -184,6 +198,7 @@ pub fn verify_vault_pending_pointer(
         pointer.new_sequence,
         &pointer.x,
         &pointer.new_reserves_digest,
+        &pointer.expected_receipt_hash,
     );
     let ok = crate::crypto::sphincs::sphincs_verify(
         &pointer.publisher_public_key,
@@ -203,7 +218,7 @@ mod tests {
     use super::*;
     use crate::crypto::sphincs::{generate_keypair, SphincsVariant};
 
-    fn sample_inputs() -> ([u8; 32], [u8; 32], [u8; 32]) {
+    fn sample_inputs() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
         let mut vault_id = [0u8; 32];
         vault_id[0] = 0xDE;
         vault_id[1] = 0x70;
@@ -214,12 +229,15 @@ mod tests {
         let mut digest = [0u8; 32];
         digest[0] = 0xD1;
         digest[31] = 0xFE;
-        (vault_id, x, digest)
+        let mut receipt_hash = [0u8; 32];
+        receipt_hash[0] = 0x7C;
+        receipt_hash[31] = 0x9C;
+        (vault_id, x, digest, receipt_hash)
     }
 
     #[test]
     fn sign_and_verify_round_trip() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
         let signed = sign_vault_pending_pointer(
             &vault_id,
@@ -227,6 +245,7 @@ mod tests {
             6,
             &x,
             &digest,
+            &receipt_hash,
             &kp.public_key,
             &kp.secret_key,
         )
@@ -236,7 +255,7 @@ mod tests {
 
     #[test]
     fn rejects_tampered_new_sequence() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
         let mut signed = sign_vault_pending_pointer(
             &vault_id,
@@ -244,6 +263,7 @@ mod tests {
             6,
             &x,
             &digest,
+            &receipt_hash,
             &kp.public_key,
             &kp.secret_key,
         )
@@ -260,7 +280,7 @@ mod tests {
 
     #[test]
     fn rejects_non_unit_step_at_sign_time() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
         let err = sign_vault_pending_pointer(
             &vault_id,
@@ -268,6 +288,7 @@ mod tests {
             7, // skips seq=6
             &x,
             &digest,
+            &receipt_hash,
             &kp.public_key,
             &kp.secret_key,
         )
@@ -281,7 +302,7 @@ mod tests {
         // the in-memory struct so new_sequence skips. Even though the
         // SPHINCS+ verification would happen against the wrong payload
         // and fail, the unit-step invariant check should fire first.
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
         let mut signed = sign_vault_pending_pointer(
             &vault_id,
@@ -289,6 +310,7 @@ mod tests {
             6,
             &x,
             &digest,
+            &receipt_hash,
             &kp.public_key,
             &kp.secret_key,
         )
@@ -301,7 +323,7 @@ mod tests {
 
     #[test]
     fn rejects_sequence_overflow_at_sign_time() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
         let err = sign_vault_pending_pointer(
             &vault_id,
@@ -309,6 +331,7 @@ mod tests {
             u64::MAX,
             &x,
             &digest,
+            &receipt_hash,
             &kp.public_key,
             &kp.secret_key,
         )
@@ -318,13 +341,14 @@ mod tests {
 
     #[test]
     fn rejects_sequence_overflow_at_verify_time() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let pointer = SignedVaultPendingPointer {
             vault_id,
             parent_sequence: u64::MAX,
             new_sequence: u64::MAX,
             x,
             new_reserves_digest: digest,
+            expected_receipt_hash: receipt_hash,
             publisher_public_key: vec![],
             publisher_signature: vec![],
         };
@@ -334,7 +358,7 @@ mod tests {
 
     #[test]
     fn rejects_tampered_reserves_digest() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
         let mut signed = sign_vault_pending_pointer(
             &vault_id,
@@ -342,6 +366,7 @@ mod tests {
             6,
             &x,
             &digest,
+            &receipt_hash,
             &kp.public_key,
             &kp.secret_key,
         )
@@ -353,9 +378,35 @@ mod tests {
         ));
     }
 
+    /// The receipt commitment is signed over. If it were not, a trader could
+    /// publish a pointer for a large trade and then swap in the hash of a tiny
+    /// receipt it could actually produce — activating the pointer while paying
+    /// almost nothing.
+    #[test]
+    fn rejects_tampered_receipt_commitment() {
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
+        let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
+        let mut signed = sign_vault_pending_pointer(
+            &vault_id,
+            5,
+            6,
+            &x,
+            &digest,
+            &receipt_hash,
+            &kp.public_key,
+            &kp.secret_key,
+        )
+        .expect("sign succeeds");
+        signed.expected_receipt_hash[0] ^= 0xff;
+        assert!(matches!(
+            verify_vault_pending_pointer(&signed),
+            Err(PointerError::SignatureInvalid),
+        ));
+    }
+
     #[test]
     fn rejects_wrong_pk() {
-        let (vault_id, x, digest) = sample_inputs();
+        let (vault_id, x, digest, receipt_hash) = sample_inputs();
         let kp1 = generate_keypair(SphincsVariant::SPX256f).expect("kp1");
         let kp2 = generate_keypair(SphincsVariant::SPX256f).expect("kp2");
         let mut signed = sign_vault_pending_pointer(
@@ -364,6 +415,7 @@ mod tests {
             6,
             &x,
             &digest,
+            &receipt_hash,
             &kp1.public_key,
             &kp1.secret_key,
         )

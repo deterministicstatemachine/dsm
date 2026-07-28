@@ -41,6 +41,26 @@ pub const TAG_VAULT_RESERVE_LEAF: &str = "DSM/vault-reserve/v1";
 /// vault-state leaf carry the same sequence and a verifier holding both proofs against one
 /// root can cross-check them without a third record.
 pub const TAG_VAULT_RESERVE_STATE: &str = "DSM/vault-reserve-state/v1";
+/// Key of a settlement receipt leaf: `H(tag ‖ genesis ‖ devid ‖ vault_id ‖ receipt_id)`.
+/// Witnesses that a trader's own `DlvSettle` advance COMMITTED. A pending pointer states an
+/// intent and costs nothing to publish; folding one into effective reserves without this
+/// witness let a trader drain a vault's quotable liquidity for free.
+pub const TAG_SETTLEMENT_RECEIPT_LEAF: &str = "DSM/settlement-receipt/v1";
+/// Value of a settlement receipt leaf: the whole settled trade (X, sequence step, both
+/// policy commits, both amounts). Keyed by receipt id, so replay writes the identical value
+/// at the identical slot while a different trade under the same id is a visible mismatch.
+pub const TAG_SETTLEMENT_RECEIPT_STATE: &str = "DSM/settlement-receipt-state/v1";
+/// Signing payload binding a receipt to the trader's post-advance root. Folds the leaf
+/// VALUE rather than restating the trade, so the signature and the SMT path are checked
+/// against the same bytes and cannot describe different settlements.
+pub const TAG_SETTLEMENT_RECEIPT_SIGN: &str = "DSM/settlement-receipt-sign";
+/// What a pending pointer commits to so it names exactly ONE receipt:
+/// `H(tag ‖ vault_id ‖ receipt_id ‖ leaf_value)`. Excludes the trader's post-advance
+/// root, because the pointer is published BEFORE the advance that produces it.
+pub const TAG_SETTLEMENT_RECEIPT_COMMIT: &str = "DSM/settlement-receipt-commit/v1";
+/// Deterministic receipt id: `H(tag ‖ vault_id ‖ x)`. Derived, not chosen, so the pointer
+/// publisher and the settling advance agree on it without coordinating.
+pub const TAG_SETTLEMENT_RECEIPT_ID: &str = "DSM/settlement-receipt-id/v1";
 pub const TAG_COMMITMENT: &str = "DSM/commitment";
 pub const TAG_COMMITMENT_OPEN: &str = "DSM/commitment-open";
 pub const TAG_COMMITMENT_FIELDS: &str = "DSM/commitment-fields";
@@ -75,6 +95,11 @@ pub(super) const TAGS: &[&str] = &[
     TAG_OFFLINE_ALLOCATION_STATE,
     TAG_VAULT_RESERVE_LEAF,
     TAG_VAULT_RESERVE_STATE,
+    TAG_SETTLEMENT_RECEIPT_LEAF,
+    TAG_SETTLEMENT_RECEIPT_STATE,
+    TAG_SETTLEMENT_RECEIPT_SIGN,
+    TAG_SETTLEMENT_RECEIPT_COMMIT,
+    TAG_SETTLEMENT_RECEIPT_ID,
     TAG_COMMITMENT,
     TAG_COMMITMENT_OPEN,
     TAG_COMMITMENT_FIELDS,

@@ -101,6 +101,7 @@ pub mod posted_dlv_sdk;
 pub mod route_commit_sdk;
 pub mod routing_path_sdk;
 pub mod routing_sdk;
+pub mod settlement_receipt_codec;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
 pub mod vault_smt_inclusion_codec;

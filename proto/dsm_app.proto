@@ -1280,6 +1280,62 @@ message VaultPendingPointerV1 {
   bytes  new_reserves_digest   = 5 [(dsm_fixed_len)=32];
   bytes  publisher_public_key  = 6 [(dsm_max_len)=65535];
   bytes  publisher_signature   = 7 [(dsm_max_len)=65535];
+  // The ONE receipt that can activate this pointer, as
+  // dsm::dlv::settlement_receipt_leaf::receipt_hash. Covered by
+  // publisher_signature.
+  //
+  // A pointer is INERT until a TraderSettlementReceiptV1 hashing to exactly
+  // this value is fetched and verified. Publishing a pointer is cheap and
+  // proves only intent; without this binding a trader could publish one,
+  // abandon its own advance, pay nothing, take nothing, and still remove the
+  // quoted amount from every other trader's view of the vault for as long as
+  // it liked. Binding it to a specific receipt means activating a pointer
+  // requires having actually settled.
+  //
+  // Naming the specific receipt (not merely "some receipt") stops the other
+  // half: a pointer for a large trade satisfied by a receipt for a tiny one.
+  bytes  expected_receipt_hash = 8 [(dsm_fixed_len)=32];
+}
+
+// Proof that a trader's own DlvSettle advance COMMITTED — the witness a
+// pending pointer needs before it may consume anyone's liquidity.
+//
+// Storage key: defi/vault-receipt/{vault_id_b32}/{x_b32}
+//
+// The settlement is bound into a leaf of the trader's own device SMT
+// (dsm::dlv::settlement_receipt_leaf), written BY the settling advance and
+// derived from the operation's own authorization — so it cannot be minted
+// separately, and cannot describe a different trade than the balances that
+// actually moved. This message carries that leaf's 256-sibling inclusion path
+// against the trader's post-advance root, signed by the trader.
+//
+// Anyone can verify, with no access to the trader's device. What it
+// establishes is that the input was paid and the output taken on a chain the
+// trader signed. What it deliberately does NOT establish is that post_root is
+// the trader's CURRENT root — it need not be, because a committed settlement
+// stays committed and no later advance can un-pay the input.
+message TraderSettlementReceiptV1 {
+  bytes  vault_id             = 1 [(dsm_fixed_len)=32];
+  bytes  receipt_id           = 2 [(dsm_fixed_len)=32];
+  // The settled trade, in full. The owner folds these numbers straight into
+  // its reserves, so anything omitted would be something the owner had to
+  // take on trust from elsewhere.
+  bytes  x                    = 3 [(dsm_fixed_len)=32];
+  uint64 parent_sequence      = 4;
+  uint64 new_sequence         = 5;
+  bytes  input_policy_commit  = 6 [(dsm_fixed_len)=32];
+  uint64 input_amount         = 7;
+  bytes  output_policy_commit = 8 [(dsm_fixed_len)=32];
+  uint64 output_amount        = 9;
+  // Whose chain this witnesses.
+  bytes  trader_genesis       = 10 [(dsm_fixed_len)=32];
+  bytes  trader_devid         = 11 [(dsm_fixed_len)=32];
+  // The trader's device SMT root after the settling advance committed, and
+  // the 256-sibling path proving the receipt leaf sits under it.
+  bytes  post_root            = 12 [(dsm_fixed_len)=32];
+  repeated bytes smt_siblings = 13 [(dsm_fixed_len)=32];
+  bytes  trader_public_key    = 14 [(dsm_max_len)=65535];
+  bytes  trader_signature     = 15 [(dsm_max_len)=65535];
 }
 
 // SoFi spec §4.1.2 / §8.4 step 2: vault state committed in Per-Device

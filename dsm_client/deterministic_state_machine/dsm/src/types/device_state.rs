@@ -1157,6 +1157,56 @@ impl DeviceState {
             }
         }
 
+        // A settling advance WRITES ITS OWN RECEIPT, derived from the operation's
+        // fields rather than from anything the caller passes alongside.
+        //
+        // That derivation is the security property. If recording a receipt were
+        // a separate entry point, a trader could write a receipt leaf for a
+        // settlement it never paid for, and the leaf would verify — which is the
+        // forgery the receipt exists to make impossible. Deriving it here means
+        // a receipt can only come into existence through an advance that already
+        // satisfied the positional conservation arm, so the leaf cannot describe
+        // a different trade than the deltas that moved.
+        let settlement_leaf: Option<([u8; 32], [u8; 32])> = match &operation {
+            Operation::DlvSettle {
+                vault_id,
+                settlement_receipt_id,
+                external_commitment_x,
+                parent_sequence,
+                input_policy_commit,
+                output_policy_commit,
+                input_amount,
+                output_amount,
+                ..
+            } => {
+                let vid: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
+                    DsmError::invalid_operation("DlvSettle: vault_id must be 32 bytes")
+                })?;
+                let new_sequence = parent_sequence.checked_add(1).ok_or_else(|| {
+                    DsmError::invalid_operation("DlvSettle: parent sequence cannot advance")
+                })?;
+                let trade = crate::dlv::settlement_receipt_leaf::SettledTrade {
+                    x: *external_commitment_x,
+                    parent_sequence: *parent_sequence,
+                    new_sequence,
+                    input_policy_commit: *input_policy_commit,
+                    input_amount: *input_amount,
+                    output_policy_commit: *output_policy_commit,
+                    output_amount: *output_amount,
+                };
+                Some((
+                    crate::dlv::settlement_receipt_leaf::settlement_receipt_key(
+                        &self.genesis,
+                        &self.devid,
+                        &vid,
+                        settlement_receipt_id,
+                    ),
+                    crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade),
+                ))
+            }
+            _ => None,
+        };
+
         // Build the successor chain state with the updated witness.
         let new_chain_state = RelationshipChainState {
             rel_key,
@@ -1198,14 +1248,45 @@ impl DeviceState {
         // per-device anchor-state leaf as ONE atomic root update — all four inclusion proofs are
         // taken against the true pre/post roots (never an intermediate root), so both the
         // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
-        let (smt_proofs, anchor_proofs) = match &anchor_leaf {
-            None => {
+        let (smt_proofs, anchor_proofs) = match (&anchor_leaf, &settlement_leaf) {
+            (None, None) => {
                 let p = new_smt
                     .smt_replace(&rel_key, &child_chain_tip)
                     .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
                 (p, None)
             }
-            Some(al) => {
+            // A settling advance with no anchor leaf: the receipt leaf rides the
+            // SAME batch as the relationship leaf, so the settlement and its
+            // witness share one device root. `smt_replace` cannot express this —
+            // its child proof binds a root taken before the receipt leaf lands —
+            // so the pre/post roots and both proofs are taken by hand, exactly as
+            // the anchor-leaf branch below does.
+            (None, Some((rk, rv))) => {
+                let pre_root = *new_smt.root();
+                let rel_parent = new_smt
+                    .get_inclusion_proof(&rel_key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
+                new_smt
+                    .update_leaf(&rel_key, &child_chain_tip)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
+                new_smt.update_leaf(rk, rv).map_err(|e| {
+                    DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
+                })?;
+                let post_root = *new_smt.root();
+                let rel_child = new_smt
+                    .get_inclusion_proof(&rel_key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
+                (
+                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
+                        pre_root,
+                        post_root,
+                        parent_proof: rel_parent,
+                        child_proof: rel_child,
+                    },
+                    None,
+                )
+            }
+            (Some(al), _) => {
                 let pre_root = *new_smt.root();
                 let rel_parent = new_smt
                     .get_inclusion_proof(&rel_key, 256)
@@ -1227,6 +1308,11 @@ impl DeviceState {
                 if let Some((k, v, _, _)) = &allocation_update {
                     new_smt.update_leaf(k, v).map_err(|e| {
                         DsmError::invalid_operation(format!("offline-allocation leaf replace: {e}"))
+                    })?;
+                }
+                if let Some((rk, rv)) = &settlement_leaf {
+                    new_smt.update_leaf(rk, rv).map_err(|e| {
+                        DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
                     })?;
                 }
                 let post_root = *new_smt.root();
@@ -1282,6 +1368,9 @@ impl DeviceState {
         let mut new_extra_leaves = self.extra_leaves.clone();
         if let Some(al) = &anchor_leaf {
             new_extra_leaves.insert(al.key, al.new_value);
+        }
+        if let Some((rk, rv)) = settlement_leaf {
+            new_extra_leaves.insert(rk, rv);
         }
         let mut new_offline_allocations = self.offline_allocations.clone();
         if let Some((k, v, amount, sequence)) = allocation_update {
@@ -2379,6 +2468,148 @@ mod tests {
             after.vault_reserves_snapshot(),
             before_reserves,
             "a trader-side settlement must not touch the trader's own reserve leaves"
+        );
+    }
+
+    /// END TO END: a settling advance writes its own receipt leaf, and a
+    /// receipt built from that advance's post-root verifies for a third party.
+    ///
+    /// This is the join between the two halves. The conservation arm proves the
+    /// right balances moved; the receipt is what lets the VAULT OWNER — who
+    /// never saw this advance — know that they did. Without the leaf landing in
+    /// the same root, the owner would be back to trusting a published claim.
+    #[test]
+    fn a_settling_advance_emits_a_verifiable_receipt() {
+        use crate::dlv::settlement_receipt_leaf::{
+            settlement_receipt_key, sign_trader_settlement_receipt,
+            verify_trader_settlement_receipt, SettledTrade,
+        };
+
+        let mut trader = fresh_device(0xB7);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        trader.balances.insert(era, 50_000);
+        trader.balances.insert(rigb, 0);
+
+        let vault = [0x77u8; 32];
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &trader.devid,
+            &trader.devid,
+        );
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &trader.devid,
+            &trader.devid,
+        );
+        let op = settle_op(vault, era, 1_000, rigb, 970);
+        let (receipt_id, x, parent_seq) = match &op {
+            Operation::DlvSettle {
+                settlement_receipt_id,
+                external_commitment_x,
+                parent_sequence,
+                ..
+            } => (
+                *settlement_receipt_id,
+                *external_commitment_x,
+                *parent_sequence,
+            ),
+            _ => unreachable!(),
+        };
+
+        let out = trader
+            .advance(
+                rk,
+                trader.devid,
+                op,
+                entropy(21),
+                None,
+                &[
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 970),
+                ],
+                Some(tip),
+                None,
+                None,
+            )
+            .expect("settlement advances");
+        let after = &out.new_device_state;
+
+        // The receipt leaf is in the post-advance root, under the SAME root the
+        // relationship leaf binds — one batch, not two.
+        let trade = SettledTrade {
+            x,
+            parent_sequence: parent_seq,
+            new_sequence: parent_seq + 1,
+            input_policy_commit: era,
+            input_amount: 1_000,
+            output_policy_commit: rigb,
+            output_amount: 970,
+        };
+        let key = settlement_receipt_key(&after.genesis, &after.devid, &vault, &receipt_id);
+        let post_root = *after.smt.root();
+        let siblings = after
+            .smt
+            .get_inclusion_proof(&key, 256)
+            .expect("receipt proof")
+            .siblings;
+
+        let (tpk, tsk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let receipt = sign_trader_settlement_receipt(
+            &vault,
+            &receipt_id,
+            trade,
+            &after.genesis,
+            &after.devid,
+            &post_root,
+            siblings,
+            &tpk,
+            &tsk,
+        )
+        .expect("sign the receipt");
+
+        verify_trader_settlement_receipt(&receipt)
+            .expect("a third party must be able to verify a settlement that really happened");
+
+        // And the leaf replays on restore, or a reloaded device would root-mismatch.
+        assert_eq!(
+            after.extra_leaves_snapshot().get(&key).copied(),
+            Some(crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade)),
+            "the receipt leaf must replay through extra_leaves"
+        );
+    }
+
+    /// A settlement the trader never made has no leaf, so no receipt over it can
+    /// be produced from that device's root. This is what stops a published
+    /// pointer from consuming liquidity for free.
+    #[test]
+    fn a_device_that_did_not_settle_has_no_receipt_leaf_to_prove() {
+        use crate::dlv::settlement_receipt_leaf::{
+            settlement_receipt_key, settlement_receipt_value, SettledTrade,
+        };
+
+        let mut griefer = fresh_device(0xB8);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        griefer.balances.insert(era, 50_000);
+        let vault = [0x77u8; 32];
+        let receipt_id = [0x77u8; 32];
+
+        // No settling advance — just a device holding funds.
+        let key = settlement_receipt_key(&griefer.genesis, &griefer.devid, &vault, &receipt_id);
+        let trade = SettledTrade {
+            x: [0x55; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            input_policy_commit: era,
+            input_amount: 1_000,
+            output_policy_commit: rigb,
+            output_amount: 970,
+        };
+        let proof = griefer
+            .smt
+            .get_inclusion_proof(&key, 256)
+            .expect("a proof is always producible");
+        assert_ne!(
+            proof.value,
+            Some(settlement_receipt_value(&trade)),
+            "an unsettled device cannot present the settled value at that slot"
         );
     }
 
