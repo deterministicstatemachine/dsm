@@ -9,6 +9,7 @@ import { useWallet } from '../../contexts/WalletContext';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
+import TokenIdentityPanel from '../TokenIdentityPanel';
 import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
 
 type TokenSymbol = 'ERA' | string;
@@ -19,6 +20,12 @@ export interface TokenBalance {
   balance: string;        // human-readable (already scaled by backend)
   symbol: TokenSymbol;
   lastUpdated?: number;   // optional, backend-provided; not used for logic
+  /** The token's canonical id — `tokenId` here is the ticker, not an identity. */
+  canonicalTokenId?: string;
+  /** CPTA policy anchor, Base32 Crockford, rendered by Rust. */
+  policyAnchorB32?: string;
+  /** Short head of the anchor, for reading against a peer's screen. */
+  anchorFingerprint?: string;
 }
 
 
@@ -122,8 +129,13 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // as 1,000 and displayed as 100000. Amount conversion has one owner, in
         // Rust, in both directions.
         balance: String(b.displayAmount ?? b.balance ?? '0'),
+        // The anchor a peer needs to adopt this token, carried from Rust.
+        canonicalTokenId: String(b.canonicalTokenId ?? ''),
+        policyAnchorB32: String(b.policyAnchorB32 ?? ''),
+        anchorFingerprint: String(b.anchorFingerprint ?? ''),
       }));
       setBalances(list);
+      return list;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to load balances';
       setError(msg);
@@ -275,11 +287,18 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // route's reply says what Rust did; the list must show what Rust
         // KEPT. Rendering an optimistic row would claim a token is holdable
         // on the strength of a response rather than of stored state.
-        await loadBalances();
+        const rows = await loadBalances();
+        // Show the anchor RUST holds, not the text the user pasted. A scanned
+        // payload is a `dsm:token/v1:` URI, and echoing it under the label
+        // "Policy Anchor (CPTA)" tells the reader that a URI is an anchor —
+        // then they hand that to the next person and it resolves to nothing.
+        const adopted = (rows || []).find(
+          (b) => b.canonicalTokenId === res.tokenId || b.tokenId === res.tokenId,
+        );
         setAddedToken({
           ticker: res.ticker || '',
           tokenId: res.tokenId || '',
-          anchorBase32: anchor,
+          anchorBase32: adopted?.policyAnchorB32 || '',
         });
         setAddingAnchor(null);
       } else {
@@ -474,7 +493,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                     placeholder="CPTA policy anchor"
                     aria-label="CPTA policy anchor"
                     value={addingAnchor}
-                    onChange={(e) => setAddingAnchor(e.target.value.trim().toUpperCase())}
+                    onChange={(e) => setAddingAnchor(e.target.value)}
                     style={{
                       width: '100%',
                       boxSizing: 'border-box',
@@ -700,6 +719,20 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                             {cpta.anchor}
                           </div>
                         </div>
+                      )}
+
+                      {/* Identity — for EVERY token, not just the two in the
+                          hardcoded CPTA table. A creator needs the anchor to
+                          hand this token to a peer, and had no way to see it. */}
+                      {isExpanded && (
+                        <TokenIdentityPanel
+                          tokenId={balance.tokenId}
+                          canonicalTokenId={balance.canonicalTokenId}
+                          symbol={String(balance.symbol || '')}
+                          policyAnchorB32={balance.policyAnchorB32}
+                          anchorFingerprint={balance.anchorFingerprint}
+                          isProtocolToken={isProtocolToken(balance)}
+                        />
                       )}
 
                       {/* Supply controls — only for tokens this device created.

@@ -117,27 +117,63 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
  * balances are keyed by policy commitment, so a device that has not added the
  * CPTA has nowhere to put the token and no rules to enforce on it.
  */
+/// Adopt a token from whatever the user supplied.
+///
+/// The TEXT is handed to Rust verbatim — a bare Base32 anchor or a
+/// `dsm:token/v1:` payload from a scan. This layer used to decode the Base32
+/// itself and pass 32 bytes, which made it a second decoder for a value whose
+/// encoding has one canonical implementation. Rust decides what a pasted string
+/// means, and rejects a scanned payload whose ticker disagrees with the policy
+/// it actually fetches.
 export async function addTokenByAnchor(
   args: string | { anchorBase32: string },
 ): Promise<{ success: boolean; tokenId?: string; ticker?: string; error?: string }> {
   try {
-    const b32 = String(typeof args === 'string' ? args : args.anchorBase32 || '').trim();
-    if (!b32) throw new Error('addTokenByAnchor: anchor required');
-    const anchorBytes = new Uint8Array(decodeBase32Crockford(b32));
-    if (anchorBytes.length !== 32) throw new Error('addTokenByAnchor: anchor must be 32 bytes');
+    const text = String(typeof args === 'string' ? args : args.anchorBase32 || '').trim();
+    if (!text) throw new Error('addTokenByAnchor: anchor required');
 
-    const raw = await addTokenByAnchorBridge(anchorBytes);
+    const raw = await addTokenByAnchorBridge(new TextEncoder().encode(text));
     const env = decodeFramedEnvelopeV3(raw);
     const p: any = env.payload;
     if (p?.case === 'error') throw new Error(p.value?.message || 'add token failed');
     const r = p?.case === 'tokenCreateResponse' ? p.value : null;
     if (!r?.success) throw new Error(r?.message || 'add token failed');
 
-    emitWalletRefresh({ source: 'tokens.addByAnchor', tokenId: r.tokenId, anchorBase32: b32 });
+    emitWalletRefresh({ source: 'tokens.addByAnchor', tokenId: r.tokenId, anchorBase32: text });
     return { success: true, tokenId: r.tokenId, ticker: r.message?.replace(/^Added\s*/, '') };
   } catch (e: any) {
     return { success: false, error: e?.message || String(e) };
   }
+}
+
+/// The scannable adoption payload for a token this device holds.
+///
+/// Rust assembles the complete `dsm:token/v1:` URI so the framing has one
+/// implementation; this fetches it and the fields shown beside it.
+export async function tokenAdoptionQr(tokenIdOrTicker: string): Promise<{
+  uri: string;
+  ticker: string;
+  tokenId: string;
+  policyAnchorB32: string;
+  anchorFingerprint: string;
+}> {
+  const raw = await routerQueryBin(
+    'token.adoptionQr',
+    new TextEncoder().encode(String(tokenIdOrTicker || '').trim()),
+  );
+  const env = decodeFramedEnvelopeV3(raw);
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenAdoptionQrResponse') {
+    throw new Error(`Expected tokenAdoptionQrResponse, got ${env.payload.case}`);
+  }
+  const r = env.payload.value;
+  return {
+    uri: r.uri,
+    ticker: r.ticker,
+    tokenId: r.tokenId,
+    policyAnchorB32: r.policyAnchorB32,
+    anchorFingerprint: r.anchorFingerprint,
+  };
 }
 
 export async function listPolicies(): Promise<Array<{

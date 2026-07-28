@@ -130,6 +130,9 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
             reply.decimals = 0;
             reply.token_name = "ERA".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 0);
+            if let Some(c) = crate::policy::builtin_policy_commit("ERA") {
+                set_anchor(reply, &c);
+            }
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
@@ -137,6 +140,9 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
+            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+                set_anchor(reply, &c);
+            }
         }
         // Created and adopted tokens carry their own decimals, and the wire
         // amount is BASE UNITS. Leaving decimals at the default meant a
@@ -155,10 +161,32 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
                     row.alias
                 };
                 reply.decimals = row.decimals;
+                reply.canonical_token_id = row.token_id.clone();
+                set_anchor(reply, &row.policy_commit);
             }
             reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
         }
     }
+}
+
+/// How much of an anchor is enough to compare by eye.
+///
+/// Long enough that two anchors are not going to agree on it by accident, short
+/// enough to actually read off a screen. It is a comparison aid and never an
+/// identifier: nothing resolves a token by fingerprint.
+const ANCHOR_FINGERPRINT_LEN: usize = 8;
+
+/// Render a token's CPTA policy anchor onto the wire record.
+///
+/// A creator could not see the anchor of a token it had created — the adoption
+/// card showed one, the creator's screen showed nothing — so handing it to a
+/// peer meant deriving it by hand, off-device. Base32 Crockford, encoded by the
+/// canonical encoder, because a second encoder gets the trailing-group padding
+/// wrong and produces a plausible string that resolves to nothing.
+fn set_anchor(reply: &mut generated::BalanceGetResponse, policy_commit: &[u8; 32]) {
+    let b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
+    reply.anchor_fingerprint = b32.chars().take(ANCHOR_FINGERPRINT_LEN).collect();
+    reply.policy_anchor_b32 = b32;
 }
 
 fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {

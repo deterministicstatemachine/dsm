@@ -1322,6 +1322,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         // SDK-owned `token.forget` response; the core bridge never
         // constructs or consumes it.
         | Some(gp::envelope::Payload::TokenForgetResponse(_))
+        // SDK-owned `token.adoptionQr` response; same.
+        | Some(gp::envelope::Payload::TokenAdoptionQrResponse(_))
         // Outbound-only push envelopes — never arrive as inbound requests
         | Some(gp::envelope::Payload::NfcRecoveryCapsule(_))
         | Some(gp::envelope::Payload::GenesisLifecycle(_))

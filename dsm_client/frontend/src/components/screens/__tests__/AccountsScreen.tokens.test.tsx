@@ -13,17 +13,27 @@
 //! mounts.
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom';
+import { dsmClient } from '../../../services/dsmClient';
+
+const MYTOK_ANCHOR = 'KYGP1FMF3X0QV4DXYQ4E5NZ1JVT9C9CW549NNZPXGC4SDD3MDHDG';
 
 const balances = [
-  { tokenId: 'ERA', symbol: 'ERA', balance: '264' },
-  { tokenId: 'MYTOK', symbol: 'MYTOK', balance: '500' },
+  { tokenId: 'ERA', symbol: 'ERA', balance: '264', policyAnchorB32: 'ERAANCHOR0000', anchorFingerprint: 'ERAANCHO' },
+  {
+    tokenId: 'MYTOK',
+    symbol: 'MYTOK',
+    balance: '500',
+    canonicalTokenId: 'QMK5SY91DSJDY8KHAP6CCTWW80X7GHTVKFZ0KXTHAGQSTMFGV3GG',
+    policyAnchorB32: MYTOK_ANCHOR,
+    anchorFingerprint: MYTOK_ANCHOR.slice(0, 8),
+  },
 ];
 
 jest.mock('../../../services/dsmClient', () => ({
   dsmClient: {
-    getAllBalances: jest.fn().mockResolvedValue(balances),
+    getAllBalances: jest.fn(() => Promise.resolve(balances)),
     claimFaucet: jest.fn(),
   },
 }));
@@ -33,6 +43,25 @@ jest.mock('../../../dsm/policies', () => ({
   burnToken: jest.fn(),
   addTokenByAnchor: jest.fn(),
   forgetToken: jest.fn(),
+  tokenAdoptionQr: jest.fn().mockResolvedValue({
+    uri: 'dsm:token/v1:PAYLOAD',
+    ticker: 'MYTOK',
+    tokenId: 'MYTOK',
+    policyAnchorB32: MYTOK_ANCHOR,
+    anchorFingerprint: MYTOK_ANCHOR.slice(0, 8),
+  }),
+}));
+
+jest.mock('qrcode', () => ({
+  __esModule: true,
+  default: { toDataURL: jest.fn().mockResolvedValue('data:image/png;base64,QR') },
+}));
+
+const mockCopyText = jest.fn().mockResolvedValue(true);
+jest.mock('../../../utils/anchorDisplay', () => ({
+  copyText: (...a: unknown[]) => mockCopyText(...a),
+  shortId: () => '',
+  prettyAnchor: () => '',
 }));
 
 jest.mock('../../../hooks/useWalletRefreshListener', () => ({
@@ -52,7 +81,7 @@ jest.mock('../../TokenCreationDialog', () => ({
 }));
 
 import AccountsScreen from '../AccountsScreen';
-import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../../dsm/policies';
+import { mintToken, burnToken, addTokenByAnchor, forgetToken, tokenAdoptionQr } from '../../../dsm/policies';
 
 describe('AccountsScreen — the screen TOKENS actually opens', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -86,6 +115,58 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     fireEvent.click(await screen.findByText('MYTOK'));
     expect(await screen.findByRole('button', { name: /^MINT$/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
+  });
+
+  /// THE GAP THIS CLOSES. A device that ADOPTS a token is shown its anchor on
+  /// the confirmation card; the device that CREATED it was shown nothing,
+  /// anywhere. Handing the token to a peer therefore meant reading the registry
+  /// off-device and encoding the commit by hand — and a hand-rolled Base32 pads
+  /// the wrong group, yielding an anchor that resolves to nothing.
+  it('shows a created token\'s CPTA anchor, id and fingerprint', async () => {
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    const panel = await screen.findByTestId('token-identity');
+    expect(within(panel).getByText(MYTOK_ANCHOR)).toBeInTheDocument();
+    expect(within(panel).getByText(MYTOK_ANCHOR.slice(0, 8))).toBeInTheDocument();
+    expect(within(panel).getByText('Token ID')).toBeInTheDocument();
+    expect(within(panel).getByText('Policy Anchor (CPTA)')).toBeInTheDocument();
+    // Scoped to the panel on purpose: the adoption success card renders the
+    // same 'Token ID' label, so an unscoped query is ambiguous once both are
+    // on screen.
+    // The real token id, not the ticker: a ticker is not an identity, and two
+    // different tokens can claim the same one.
+    expect(
+      within(panel).getByText('QMK5SY91DSJDY8KHAP6CCTWW80X7GHTVKFZ0KXTHAGQSTMFGV3GG'),
+    ).toBeInTheDocument();
+  });
+
+  /// The anchor is 52 characters. Retyping it is how transcription errors get
+  /// in, so it has to be copyable.
+  it('copies the anchor rather than making the user retype it', async () => {
+    mockCopyText.mockClear();
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    fireEvent.click(await screen.findByRole('button', { name: /copy anchor/i }));
+    await waitFor(() => expect(mockCopyText).toHaveBeenCalledWith(MYTOK_ANCHOR));
+  });
+
+  /// Rust assembles the adoption URI; this screen renders whatever it returns
+  /// and never builds a payload of its own.
+  it('renders a scannable code built by Rust', async () => {
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    const img = await screen.findByAltText(/adoption code for MYTOK/i);
+    expect(img).toHaveAttribute('src', 'data:image/png;base64,QR');
+    expect(tokenAdoptionQr).toHaveBeenCalledWith('MYTOK');
+  });
+
+  /// A protocol asset already exists on every device, so there is nothing to
+  /// hand over and no code to scan.
+  it('offers no adoption code for a protocol token', async () => {
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('ERA'));
+    expect(screen.queryByRole('button', { name: /copy anchor/i })).toBeNull();
+    expect(screen.queryByAltText(/adoption code/i)).toBeNull();
   });
 
   /// A device that has adopted a token cannot adopt a different token with the
@@ -199,21 +280,42 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
 
   /// The acknowledgement must be durable and carry the identifiers a user needs
   /// to check against the creating device.
-  it('shows a durable success panel with ticker, token id and anchor', async () => {
-    const ANCHOR = '6PW31E7DEMNDVC11F88XTR9J9X90M90MF6M02JPV5BFRQE773BJ0';
+  /// The card shows the anchor RUST holds, not the text the user supplied.
+  ///
+  /// A scanned payload is a `dsm:token/v1:` URI. Echoing that back under the
+  /// label "Policy Anchor (CPTA)" teaches the reader that a URI is an anchor —
+  /// and the next person they hand it to gets something that resolves to
+  /// nothing. So the panel reads the value back off the reloaded registry row.
+  it('shows a durable success panel with the anchor from the registry, not the input', async () => {
+    const REAL_ANCHOR = '6PW31E7DEMNDVC11F88XTR9J9X90M90MF6M02JPV5BFRQE773BJ0';
+    const PASTED_URI = 'dsm:token/v1:SOMEPAYLOADBYTES';
     (addTokenByAnchor as jest.Mock).mockResolvedValue({
       success: true, ticker: 'RIGB', tokenId: 'Z68HWMYSPT9B',
     });
+    (dsmClient.getAllBalances as jest.Mock).mockResolvedValue([
+      ...balances,
+      {
+        tokenId: 'RIGB',
+        symbol: 'RIGB',
+        balance: '0.00',
+        canonicalTokenId: 'Z68HWMYSPT9B',
+        policyAnchorB32: REAL_ANCHOR,
+        anchorFingerprint: REAL_ANCHOR.slice(0, 8),
+      },
+    ]);
+
     render(<AccountsScreen />);
     fireEvent.click(await screen.findByRole('button', { name: /add token/i }));
     fireEvent.change(screen.getByPlaceholderText('CPTA policy anchor'), {
-      target: { value: ANCHOR },
+      target: { value: PASTED_URI },
     });
     fireEvent.click(screen.getByRole('button', { name: /^ADD$/ }));
 
-    expect(await screen.findByText(/RIGB added/)).toBeInTheDocument();
-    expect(screen.getByText('Z68HWMYSPT9B')).toBeInTheDocument();
-    expect(screen.getByText(ANCHOR)).toBeInTheDocument();
+    const panel = await screen.findByRole('status');
+    expect(within(panel).getByText(/RIGB added/)).toBeInTheDocument();
+    expect(within(panel).getByText('Z68HWMYSPT9B')).toBeInTheDocument();
+    expect(within(panel).getByText(REAL_ANCHOR)).toBeInTheDocument();
+    expect(within(panel).queryByText(PASTED_URI)).toBeNull();
   });
 
   /// Typed refusals reach the user as written by Rust.

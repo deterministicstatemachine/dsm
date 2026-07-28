@@ -437,20 +437,20 @@ impl AppRouterImpl {
                     raw_locked
                 };
 
-                pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(
-                    generated::BalanceGetResponse {
-                        token_id: token_id.to_string(),
-                        available,
-                        locked,
-                        symbol: "dBTC".to_string(),
-                        decimals: 8,
-                        token_name: "dBTC".to_string(),
-                        display_amount:
-                            crate::handlers::wallet_routes::format_base_units_for_display(
-                                available, 8,
-                            ),
-                    },
-                ))
+                // Enriched, not hand-built. A record assembled here is a second
+                // place that decides what a balance row says, and the last one
+                // drifted: symbol, decimals and the display amount were right
+                // only on the paths that remembered to set them. dBTC is a
+                // protocol asset, so enrichment supplies its metadata and its
+                // builtin policy anchor from one place.
+                let mut reply = generated::BalanceGetResponse {
+                    token_id: token_id.to_string(),
+                    available,
+                    locked,
+                    ..Default::default()
+                };
+                crate::handlers::wallet_routes::enrich_balance_metadata(&mut reply);
+                pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(reply))
             }
 
             "bitcoin.wallet.list" => {
@@ -617,6 +617,15 @@ impl AppRouterImpl {
                             crate::handlers::wallet_routes::format_base_units_for_display(
                                 available, 8,
                             ),
+                        // Native on-chain BTC is not a CPTA token. It has no
+                        // DSM policy and therefore no anchor to show, and it is
+                        // deliberately NOT run through enrich_balance_metadata,
+                        // which would look for a registry row that cannot exist
+                        // and reset its decimals to zero.
+                        policy_anchor_b32: String::new(),
+                        anchor_fingerprint: String::new(),
+                        // Native BTC has no CPTA identity either.
+                        canonical_token_id: String::new(),
                     },
                 ))
             }

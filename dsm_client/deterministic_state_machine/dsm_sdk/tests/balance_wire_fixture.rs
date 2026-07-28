@@ -31,6 +31,17 @@ fn emit_balances_list_fixture() {
         // Rendered by Rust. The frontend prints this string and computes
         // nothing: 100_000 base units at 2 decimals is 1000.00.
         display_amount: crate_format(100_000, 2),
+        // The CPTA anchor the creator hands to a peer, encoded by the canonical
+        // encoder. A client that re-derives this from raw bytes gets the
+        // trailing-group padding wrong.
+        // The real token id. `token_id` above is the TICKER, which is not an
+        // identity — two different tokens can claim the same one.
+        canonical_token_id: "QMK5SY91DSJDY8KHAP6CCTWW80X7GHTVKFZ0KXTHAGQSTMFGV3GG".to_string(),
+        policy_anchor_b32: dsm_sdk::util::text_id::encode_base32_crockford(&[0x5Au8; 32]),
+        anchor_fingerprint: dsm_sdk::util::text_id::encode_base32_crockford(&[0x5Au8; 32])
+            .chars()
+            .take(8)
+            .collect(),
     };
     let list = dsm_sdk::generated::BalancesListResponse {
         balances: vec![row],

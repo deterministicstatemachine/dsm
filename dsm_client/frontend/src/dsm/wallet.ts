@@ -30,6 +30,12 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
       ticker: b.symbol || b.tokenId || 'ERA',
       // Rust's rendered display form. This layer never computes it.
       displayAmount: String(b.displayAmount ?? ''),
+      // The token's CPTA anchor, rendered by Rust. Carried, never derived: a
+      // second Base32 encoder pads the wrong group and yields an anchor that
+      // resolves to nothing.
+      canonicalTokenId: String(b.canonicalTokenId ?? ''),
+      policyAnchorB32: String(b.policyAnchorB32 ?? ''),
+      anchorFingerprint: String(b.anchorFingerprint ?? ''),
       balance: (b.available ?? 0).toString(),
       baseUnits: typeof b.available === 'bigint' ? b.available : BigInt(b.available || 0),
       decimals: typeof b.decimals === 'number' ? b.decimals : 0,

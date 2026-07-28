@@ -38,6 +38,12 @@ describe('balance wire contract (Rust -> TypeScript)', () => {
     // same message. This is what the wallet prints; nothing downstream
     // recomputes it, so if these two ever disagree it is one bug in one place.
     expect(row.displayAmount).toBe('1000.00');
+    // The CPTA anchor, encoded by the CANONICAL encoder in Rust. A client that
+    // re-derives this pads the trailing group differently and produces an
+    // anchor that resolves to nothing — which is what happened by hand during
+    // the transfer proof, and looked exactly like an unpublished policy.
+    expect(row.policyAnchorB32).toBe('B9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D0');
+    expect(row.policyAnchorB32.startsWith(row.anchorFingerprint)).toBe(true);
   });
 
   /// decimals must arrive as a real number, since the mapper's guard is

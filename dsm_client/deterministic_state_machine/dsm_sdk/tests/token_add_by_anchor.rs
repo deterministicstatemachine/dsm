@@ -66,6 +66,19 @@ fn invoke(r: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::Ap
     })
 }
 
+/// Adopt from the TEXT a user supplied — a bare Base32 anchor or a scanned
+/// `dsm:token/v1:` payload. The route takes text, not 32 raw bytes, because
+/// decoding it is Rust's job: a client that decodes Base32 itself is a second
+/// implementation of an encoding whose trailing-group padding is easy to get
+/// wrong, and a wrong anchor is indistinguishable from an unpublished policy.
+fn adopt(r: &AppRouterImpl, text: &str) -> dsm_sdk::bridge::AppResult {
+    query(r, "tokens.addByAnchor", text.as_bytes().to_vec())
+}
+
+fn anchor_text(anchor: &[u8; 32]) -> String {
+    dsm_sdk::util::text_id::encode_base32_crockford(anchor)
+}
+
 /// Query routes take raw bytes, not an ArgPack body.
 fn query(r: &AppRouterImpl, path: &str, params: Vec<u8>) -> dsm_sdk::bridge::AppResult {
     runtime::get_runtime().block_on(async {
@@ -124,6 +137,37 @@ fn create_token(r: &AppRouterImpl, ticker: &str) -> [u8; 32] {
     }
 }
 
+/// EVERY token query route must be reachable through the production dispatcher.
+///
+/// This exact failure has now happened twice: the handler arm exists inside
+/// `token_routes.rs` while `app_router_impl`'s query match does not name it, so
+/// on device the call returns "unknown query path" and the feature is dead
+/// while every unit test passes. Adding a route without adding it here is the
+/// mistake; this enumerates them so the omission fails in CI instead of on a
+/// handset.
+#[test]
+#[serial_test::serial]
+fn every_token_query_route_is_reachable_through_the_dispatcher() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+
+    for path in [
+        "tokens.getPolicy",
+        "tokens.listCachedPolicies",
+        "tokens.getFeeSchedule",
+        "tokens.addByAnchor",
+        "token.adoptionQr",
+    ] {
+        let res = query(&r, path, Vec::new());
+        let msg = res.error_message.clone().unwrap_or_default();
+        assert!(
+            !msg.contains("unknown query path"),
+            "{path} is not registered in the production dispatch table: {msg}"
+        );
+    }
+}
+
 /// (1) THE ROUTE MUST BE DISPATCHABLE.
 ///
 /// The handler arm existed in token_routes.rs while app_router_impl's query
@@ -139,7 +183,7 @@ fn the_route_is_reachable_through_the_production_dispatcher() {
 
     // Deliberately wrong length: we want the ROUTE's own rejection, which
     // proves dispatch reached it, not the dispatcher's unknown-path error.
-    let res = query(&r, "tokens.addByAnchor", vec![0u8; 4]);
+    let res = adopt(&r, "ZZZZ");
     let msg = res.error_message.clone().unwrap_or_default();
     assert!(
         !msg.contains("unknown query path"),
@@ -164,7 +208,7 @@ fn adoption_costs_no_era_and_does_not_advance_device_state() {
     let era_before = era(&r);
     let root_before = r.core_sdk.device_head().map(|h| h.root());
 
-    let res = query(&r, "tokens.addByAnchor", anchor.to_vec());
+    let res = adopt(&r, &anchor_text(&anchor));
     assert!(res.success, "adopt: {:?}", res.error_message);
 
     assert_eq!(era(&r), era_before, "adoption must not burn any ERA");
@@ -186,7 +230,7 @@ fn adopting_the_same_token_twice_is_idempotent() {
     let anchor = create_token(&r, "TWICE");
 
     for attempt in 1..=3 {
-        let res = query(&r, "tokens.addByAnchor", anchor.to_vec());
+        let res = adopt(&r, &anchor_text(&anchor));
         assert!(
             res.success,
             "adoption attempt {attempt} must succeed: {:?}",
@@ -217,7 +261,7 @@ fn an_anchor_that_resolves_to_nothing_fails_closed() {
     init_test_storage();
     let r = new_router();
 
-    let res = query(&r, "tokens.addByAnchor", vec![0x5A; 32]);
+    let res = adopt(&r, &anchor_text(&[0x5A; 32]));
     assert!(!res.success, "an unknown anchor must not adopt anything");
     assert_eq!(
         token_registry::all_tokens().expect("registry").len(),
@@ -236,7 +280,7 @@ fn an_adopted_token_survives_a_restart() {
     let r = new_router();
     fund_era(&r);
     let anchor = create_token(&r, "PERSIST");
-    assert!(query(&r, "tokens.addByAnchor", anchor.to_vec()).success);
+    assert!(adopt(&r, &anchor_text(&anchor)).success);
 
     let before = token_registry::get_token_by_ticker("PERSIST")
         .expect("registry")
@@ -256,4 +300,87 @@ fn an_adopted_token_survives_a_restart() {
     );
     assert_eq!(before.decimals, after.decimals);
     let _ = r2;
+}
+
+/// The token id an anchor and ticker derive, exactly as the route derives it.
+fn derive_token_id(anchor: &[u8; 32], ticker: &str) -> String {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_TOKEN_ID);
+    h.update(anchor);
+    h.update(ticker.as_bytes());
+    dsm_sdk::util::text_id::encode_base32_crockford(h.finalize().as_bytes())
+}
+
+/// A SCANNED payload resolves to the same token a typed anchor does.
+///
+/// The QR carries the canonical raw anchor plus the ticker and token id it is
+/// expected to resolve to. Those are claims, not authority — the anchor still
+/// has to hash the fetched policy — but they let a scanner refuse a code whose
+/// visible name disagrees with what it would actually add.
+#[test]
+#[serial_test::serial]
+fn a_scanned_payload_adopts_the_same_token_as_the_bare_anchor() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    fund_era(&r);
+    let anchor = create_token(&r, "SCANME");
+    let token_id = derive_token_id(&anchor, "SCANME");
+
+    let uri = dsm_sdk::handlers::token_routes::build_adoption_uri(&anchor, "SCANME", &token_id);
+    let res = adopt(&r, &uri);
+    assert!(res.success, "scanned adopt: {:?}", res.error_message);
+
+    let row = token_registry::get_token_by_ticker("SCANME")
+        .expect("registry")
+        .expect("token");
+    assert_eq!(row.policy_commit, anchor, "same anchor, same token");
+    assert_eq!(row.token_id, token_id);
+}
+
+/// A payload whose claimed ticker disagrees with the published policy is
+/// REFUSED, not silently corrected. The anchor decides which token is adopted,
+/// so a mismatch cannot substitute an asset — but it means the user is being
+/// shown a different name than the policy carries, and adopting under a name
+/// they did not read is not something to do quietly.
+#[test]
+#[serial_test::serial]
+fn a_payload_that_lies_about_its_ticker_is_refused() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    fund_era(&r);
+    let anchor = create_token(&r, "HONEST");
+    let token_id = derive_token_id(&anchor, "HONEST");
+
+    let lying = dsm_sdk::handlers::token_routes::build_adoption_uri(&anchor, "NOTREAL", &token_id);
+    let res = adopt(&r, &lying);
+    assert!(!res.success, "a mismatched ticker must be refused");
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        msg.contains("NOTREAL") && msg.contains("HONEST"),
+        "the refusal should name both what was claimed and what is published, got: {msg}"
+    );
+    assert!(
+        token_registry::get_token_by_ticker("NOTREAL")
+            .expect("registry")
+            .is_none(),
+        "and must not have registered the name it claimed"
+    );
+}
+
+/// Likewise a payload whose token id is not the one its own anchor derives.
+#[test]
+#[serial_test::serial]
+fn a_payload_that_lies_about_its_token_id_is_refused() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    fund_era(&r);
+    let anchor = create_token(&r, "IDCHK");
+
+    let lying = dsm_sdk::handlers::token_routes::build_adoption_uri(&anchor, "IDCHK", "WRONGID");
+    assert!(
+        !adopt(&r, &lying).success,
+        "a mismatched token id must be refused"
+    );
 }

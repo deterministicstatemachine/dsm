@@ -3069,7 +3069,8 @@ impl AppRouter for AppRouterImpl {
             "tokens.getPolicy"
             | "tokens.listCachedPolicies"
             | "tokens.getFeeSchedule"
-            | "tokens.addByAnchor" => self.handle_token_query(q).await,
+            | "tokens.addByAnchor"
+            | "token.adoptionQr" => self.handle_token_query(q).await,
             // Debug routes
             "debug.dump_state" | "debug.trigger_genesis" => self.handle_debug_query(q).await,
             // Session routes

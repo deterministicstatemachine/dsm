@@ -539,6 +539,95 @@ fn push_wallet_refresh() {
     // No-op on host builds; there is no WebView to notify.
 }
 
+/// Scheme prefix for a token-adoption payload.
+///
+/// Versioned like the contact payload (`dsm:contact/v3:`) so a future shape is a
+/// different scheme rather than a guess about what the bytes mean.
+const TOKEN_ADOPTION_URI_PREFIX: &str = "dsm:token/v1:";
+
+/// What a user pasted into the adopt field, resolved to an anchor.
+///
+/// Two forms are accepted because both exist in the wild: the bare Base32
+/// anchor a person reads off a screen, and the versioned payload a camera
+/// scans. Parsing lives here, in Rust, so there is one decoder — the last time
+/// an anchor was encoded outside this module the padding was wrong and the
+/// result was a plausible 52-character string that resolved to nothing.
+#[derive(Debug)]
+pub struct ParsedAdoptionInput {
+    pub anchor: [u8; 32],
+    /// Present only for the versioned payload: what the payload CLAIMS this
+    /// anchor resolves to. Checked against the fetched policy, never trusted.
+    pub claimed_ticker: Option<String>,
+    pub claimed_token_id: Option<String>,
+}
+
+pub fn parse_adoption_input(text: &str) -> Result<ParsedAdoptionInput, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("adopt: nothing to read — paste an anchor or scan a code".into());
+    }
+
+    // Case is normalised HERE, not by the field. Crockford Base32 is
+    // case-insensitive and canonically uppercase, so the adopt input used to
+    // uppercase what the user typed — which silently destroyed the lowercase
+    // `dsm:token/v1:` prefix and made every scanned payload parse as a bare
+    // anchor, then fail as invalid Base32. Transforming input is the decoder's
+    // job, and the decoder is here.
+    let lowered = text.to_ascii_lowercase();
+    let stripped = lowered.strip_prefix(TOKEN_ADOPTION_URI_PREFIX).map(|_| {
+        text[TOKEN_ADOPTION_URI_PREFIX.len()..]
+            .trim()
+            .to_ascii_uppercase()
+    });
+
+    let Some(body) = stripped else {
+        // Bare anchor.
+        let upper = text.to_ascii_uppercase();
+        let bytes = crate::util::text_id::decode_base32_crockford(&upper)
+            .ok_or_else(|| "adopt: not valid Base32 Crockford".to_string())?;
+        let anchor: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            format!(
+                "adopt: an anchor is 32 bytes, this decoded to {}",
+                bytes.len()
+            )
+        })?;
+        return Ok(ParsedAdoptionInput {
+            anchor,
+            claimed_ticker: None,
+            claimed_token_id: None,
+        });
+    };
+
+    let payload = crate::util::text_id::decode_base32_crockford(&body)
+        .ok_or_else(|| "adopt: the code's payload is not valid Base32 Crockford".to_string())?;
+    let qr = generated::TokenAdoptionQrV1::decode(&*payload)
+        .map_err(|e| format!("adopt: the code is not a v1 token payload: {e}"))?;
+    let anchor: [u8; 32] = qr
+        .policy_anchor
+        .as_slice()
+        .try_into()
+        .map_err(|_| "adopt: the code carries a malformed anchor".to_string())?;
+    Ok(ParsedAdoptionInput {
+        anchor,
+        claimed_ticker: Some(qr.ticker),
+        claimed_token_id: Some(qr.token_id),
+    })
+}
+
+/// Assemble the complete adoption URI. Rust owns the framing.
+pub fn build_adoption_uri(anchor: &[u8; 32], ticker: &str, token_id: &str) -> String {
+    let payload = generated::TokenAdoptionQrV1 {
+        policy_anchor: anchor.to_vec(),
+        ticker: ticker.to_string(),
+        token_id: token_id.to_string(),
+    }
+    .encode_to_vec();
+    format!(
+        "{TOKEN_ADOPTION_URI_PREFIX}{}",
+        crate::util::text_id::encode_base32_crockford(&payload)
+    )
+}
+
 impl AppRouterImpl {
     /// Re-register every persisted token's policy after a restart.
     ///
@@ -783,6 +872,46 @@ impl AppRouterImpl {
     // ── Token Queries ────────────────────────────────────────────────────────
     pub(crate) async fn handle_token_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
+            // The anchor a creator hands to a peer, as a scannable payload.
+            //
+            // Params are the ticker or token id, UTF-8. The reply carries the
+            // complete URI plus the fields a screen shows beside it, so the
+            // frontend renders strings and derives nothing.
+            "token.adoptionQr" => {
+                let key = String::from_utf8_lossy(&q.params).trim().to_string();
+                if key.is_empty() {
+                    return err("token.adoptionQr: params must name a ticker or token id".into());
+                }
+                if crate::policy::builtin_policy_commit(&key).is_some() {
+                    return err(format!(
+                        "token.adoptionQr: {key} is a protocol asset — every device already has it"
+                    ));
+                }
+                let row = match crate::storage::client_db::token_registry::get_token(&key) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        match crate::storage::client_db::token_registry::get_token_by_ticker(&key) {
+                            Ok(Some(r)) => r,
+                            Ok(None) => {
+                                return err(format!("token.adoptionQr: no token named {key} here"))
+                            }
+                            Err(e) => return err(format!("token.adoptionQr: registry read: {e}")),
+                        }
+                    }
+                    Err(e) => return err(format!("token.adoptionQr: registry read: {e}")),
+                };
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+                pack_envelope_ok(generated::envelope::Payload::TokenAdoptionQrResponse(
+                    generated::TokenAdoptionQrResponse {
+                        uri: build_adoption_uri(&row.policy_commit, &row.ticker, &row.token_id),
+                        ticker: row.ticker,
+                        token_id: row.token_id,
+                        anchor_fingerprint: anchor_b32.chars().take(8).collect(),
+                        policy_anchor_b32: anchor_b32,
+                    },
+                ))
+            }
+
             "tokens.getPolicy" => {
                 if q.params.len() != 32 {
                     return err(
@@ -824,15 +953,15 @@ impl AppRouterImpl {
             // arbitrary bytes under a requested anchor would be defining the
             // policy this device then enforces.
             "tokens.addByAnchor" => {
-                if q.params.len() != 32 {
-                    return err(
-                        "tokens.addByAnchor: params must be exactly 32 bytes (policy anchor)"
-                            .into(),
-                    );
-                }
-                let Ok(anchor) = <[u8; 32]>::try_from(&q.params[..]) else {
-                    return err("tokens.addByAnchor: invalid anchor length".into());
+                // Params are the TEXT the user supplied — a bare Base32 anchor
+                // or a `dsm:token/v1:` payload from a scan. Both are decoded
+                // here rather than in the client, so there is one decoder and
+                // one place that decides what a pasted string means.
+                let input = match parse_adoption_input(&String::from_utf8_lossy(&q.params)) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("tokens.addByAnchor: {e}")),
                 };
+                let anchor = input.anchor;
 
                 let policy_bytes = match self.load_policy_bytes(anchor).await {
                     Ok(Some(b)) if !b.is_empty() => b,
@@ -869,6 +998,32 @@ impl AppRouterImpl {
                 id_hasher.update(parsed.ticker.as_bytes());
                 let token_id =
                     crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
+
+                // A scanned payload CLAIMS what it resolves to. The anchor
+                // already had to hash the fetched policy, so the claims cannot
+                // change which token is adopted — but a payload that names a
+                // different ticker than the policy carries is either corrupt or
+                // is trying to get a user to accept something other than what
+                // they were shown. Refuse rather than silently adopt the real
+                // one under a name the user did not read.
+                if let Some(claimed) = input.claimed_ticker.as_deref() {
+                    if !claimed.eq_ignore_ascii_case(&parsed.ticker) {
+                        return err(format!(
+                            "tokens.addByAnchor: the code says {claimed} but the published policy \
+                             is {}. Refusing — check the anchor with whoever sent it.",
+                            parsed.ticker
+                        ));
+                    }
+                }
+                if let Some(claimed) = input.claimed_token_id.as_deref() {
+                    if claimed != token_id {
+                        return err(
+                            "tokens.addByAnchor: the code's token id does not match the one its \
+                             own anchor derives. Refusing."
+                                .into(),
+                        );
+                    }
+                }
 
                 // Adding the same token twice is a no-op, not an error — a user
                 // who taps twice, or adds a token they already hold, has done

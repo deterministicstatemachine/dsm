@@ -59,9 +59,12 @@ describe('wallet.ts', () => {
       const result = await getAllBalances();
       expect(result).toHaveLength(2);
       expect(result[0]).toEqual({
-        // Rendered by Rust; this layer only carries it. Absent in this
-        // hand-built fixture, so it arrives as the empty string.
+        // Rendered by Rust; this layer only carries them. Absent in this
+        // hand-built fixture, so they arrive as empty strings.
         displayAmount: '',
+        canonicalTokenId: '',
+        policyAnchorB32: '',
+        anchorFingerprint: '',
         tokenId: 'ERA',
         ticker: 'ERA',
         balance: '1000',

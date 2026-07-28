@@ -158,6 +158,28 @@ fn a_held_custom_token_carries_its_decimals_on_the_wire() {
          showed 100000 instead of 1,000.00"
     );
     assert_eq!(rigb.symbol, "RIGB");
+    // The anchor a creator needs in order to hand this token to a peer. It was
+    // shown on the ADOPTING device and nowhere on the CREATING one, so getting
+    // it off-device meant deriving it by hand — and a hand-rolled Base32 pads
+    // the wrong group, yielding a plausible string that resolves to nothing.
+    let row = token_registry::get_token_by_ticker("RIGB")
+        .expect("registry")
+        .expect("row");
+    assert_eq!(
+        rigb.policy_anchor_b32,
+        dsm_sdk::util::text_id::encode_base32_crockford(&row.policy_commit),
+        "the wire anchor must be the canonical encoding of the registry's commit"
+    );
+    assert_eq!(
+        dsm_sdk::util::text_id::decode_base32_crockford(&rigb.policy_anchor_b32)
+            .expect("anchor decodes"),
+        row.policy_commit.to_vec(),
+        "and it must round-trip to the exact 32 bytes"
+    );
+    assert!(
+        rigb.policy_anchor_b32.starts_with(&rigb.anchor_fingerprint),
+        "the fingerprint is a head of the anchor, not a separate value"
+    );
     // And the rendered form, because that is what the wallet displays. The
     // frontend used to derive this itself; a second implementation of the unit
     // rule is a second thing that can disagree with canonical state, so the
@@ -190,6 +212,12 @@ fn a_zero_balance_registered_token_carries_its_decimals() {
     let adopt = row(&rows, "ADOPT");
     assert_eq!(adopt.available, 0);
     assert_eq!(adopt.decimals, 4);
+    // Holding none of a token does not make its identity unknowable.
+    assert_eq!(
+        dsm_sdk::util::text_id::decode_base32_crockford(&adopt.policy_anchor_b32)
+            .expect("anchor decodes"),
+        vec![0x3Cu8; 32],
+    );
     assert_eq!(adopt.display_amount, "0.0000");
 }
 
@@ -238,6 +266,19 @@ fn builtin_tokens_keep_their_metadata() {
     let dbtc = row(&rows, "dBTC");
     assert_eq!(dbtc.decimals, 8, "dBTC is satoshis");
     assert_eq!(dbtc.symbol, "dBTC");
+
+    // Protocol assets carry their builtin commit, so every token on the screen
+    // can show where its rules come from — not just the user-created ones.
+    for (ticker, r) in [("ERA", era), ("dBTC", dbtc)] {
+        let want = dsm::core::token::builtin_policy_commit_for_token(ticker)
+            .unwrap_or_else(|| panic!("{ticker} is builtin"));
+        assert_eq!(
+            dsm_sdk::util::text_id::decode_base32_crockford(&r.policy_anchor_b32)
+                .unwrap_or_else(|| panic!("{ticker} anchor decodes")),
+            want.to_vec(),
+            "{ticker} must carry its protocol-defined anchor"
+        );
+    }
 }
 
 /// A token with 0 decimals is unaffected: base units and display coincide.

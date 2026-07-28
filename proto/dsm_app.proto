@@ -886,6 +886,29 @@ message TokenFeeScheduleResponse {
   uint64 token_creation_era = 1;
 }
 
+// The payload inside a token-adoption QR, and the reply that carries it.
+//
+// A peer adopting a token needs the canonical raw anchor. Encoding the anchor
+// alone leaves the scanner nothing to check it against, so the payload also
+// names the ticker and token id the anchor is expected to resolve to, and the
+// adopting device refuses a payload whose claims disagree with the policy it
+// actually fetches. The QR is a convenience; the anchor remains the authority.
+message TokenAdoptionQrV1 {
+  bytes  policy_anchor = 1 [(dsm_fixed_len)=32];
+  string ticker        = 2;
+  string token_id      = 3;
+}
+
+// Reply to `token.adoptionQr`. `uri` is the complete `dsm:token/v1:{base32}`
+// string, assembled in Rust so the framing has exactly one implementation.
+message TokenAdoptionQrResponse {
+  string uri                = 1;
+  string ticker             = 2;
+  string token_id           = 3;
+  string policy_anchor_b32  = 4;
+  string anchor_fingerprint = 5;
+}
+
 message TokenCreateResponse {
   bool success = 1;
   string token_id = 2; // deterministic token id
@@ -2771,6 +2794,9 @@ message Envelope {
 
     // Reply to `token.forget`.
     TokenForgetResponse token_forget_response = 118;
+
+    // Reply to `token.adoptionQr`.
+    TokenAdoptionQrResponse token_adoption_qr_response = 119;
   }
   reserved 110, 111; // removed v1 counter-era bearer round-trip (BilateralBearerPrepared/Proceed)
   // 114 was a §16.6 reply-window payload variant. Storage nodes validate transport
@@ -3197,6 +3223,25 @@ message BalanceGetResponse {
   // unit rule, and two implementations disagree — which is exactly how a token
   // holding 100,000 base units at 2 decimals came to be shown as "100000".
   string display_amount = 7;
+  // The token's CPTA policy anchor, Base32 Crockford, rendered by Rust.
+  //
+  // A device that ADOPTS a token is shown its anchor; a device that CREATED one
+  // had no way to see it at all, so a creator could not hand a peer the value a
+  // peer needs. Carrying it here rather than joining a policy list by ticker
+  // keeps ONE identity mapping: the registry's, resolved server-side. A ticker
+  // join would be a second one, and two tokens can share a ticker.
+  string policy_anchor_b32 = 8;
+  // Short head of `policy_anchor_b32`, for visual comparison against the value
+  // a peer is about to adopt. Never an identifier on its own.
+  string anchor_fingerprint = 9;
+  // The token's canonical id, BLAKE3(TAG_DSM_TOKEN_ID, anchor ‖ ticker).
+  //
+  // `token_id` (field 1) is the TICKER on this message — the key balances are
+  // projected under — and a ticker is not an identity: two different tokens can
+  // claim the same one, which is why adoption refuses a ticker collision. A
+  // screen that labels the ticker "token id" is telling the user something
+  // false, so carry the real value.
+  string canonical_token_id = 10;
 }
 // Multi-token enumeration (ordered lexicographically by token_id on server side)
 message BalancesListResponse { repeated BalanceGetResponse balances = 1; }

@@ -7526,6 +7526,127 @@ export class TokenFeeScheduleResponse extends Message<TokenFeeScheduleResponse> 
 }
 
 /**
+ * The payload inside a token-adoption QR, and the reply that carries it.
+ *
+ * A peer adopting a token needs the canonical raw anchor. Encoding the anchor
+ * alone leaves the scanner nothing to check it against, so the payload also
+ * names the ticker and token id the anchor is expected to resolve to, and the
+ * adopting device refuses a payload whose claims disagree with the policy it
+ * actually fetches. The QR is a convenience; the anchor remains the authority.
+ *
+ * @generated from message dsm.TokenAdoptionQrV1
+ */
+export class TokenAdoptionQrV1 extends Message<TokenAdoptionQrV1> {
+  /**
+   * @generated from field: bytes policy_anchor = 1;
+   */
+  policyAnchor = new Uint8Array(0);
+
+  /**
+   * @generated from field: string ticker = 2;
+   */
+  ticker = "";
+
+  /**
+   * @generated from field: string token_id = 3;
+   */
+  tokenId = "";
+
+  constructor(data?: PartialMessage<TokenAdoptionQrV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenAdoptionQrV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_anchor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenAdoptionQrV1 {
+    return new TokenAdoptionQrV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenAdoptionQrV1 {
+    return new TokenAdoptionQrV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenAdoptionQrV1 {
+    return new TokenAdoptionQrV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenAdoptionQrV1 | PlainMessage<TokenAdoptionQrV1> | undefined, b: TokenAdoptionQrV1 | PlainMessage<TokenAdoptionQrV1> | undefined): boolean {
+    return proto3.util.equals(TokenAdoptionQrV1, a, b);
+  }
+}
+
+/**
+ * Reply to `token.adoptionQr`. `uri` is the complete `dsm:token/v1:{base32}`
+ * string, assembled in Rust so the framing has exactly one implementation.
+ *
+ * @generated from message dsm.TokenAdoptionQrResponse
+ */
+export class TokenAdoptionQrResponse extends Message<TokenAdoptionQrResponse> {
+  /**
+   * @generated from field: string uri = 1;
+   */
+  uri = "";
+
+  /**
+   * @generated from field: string ticker = 2;
+   */
+  ticker = "";
+
+  /**
+   * @generated from field: string token_id = 3;
+   */
+  tokenId = "";
+
+  /**
+   * @generated from field: string policy_anchor_b32 = 4;
+   */
+  policyAnchorB32 = "";
+
+  /**
+   * @generated from field: string anchor_fingerprint = 5;
+   */
+  anchorFingerprint = "";
+
+  constructor(data?: PartialMessage<TokenAdoptionQrResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TokenAdoptionQrResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "uri", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "policy_anchor_b32", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "anchor_fingerprint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenAdoptionQrResponse {
+    return new TokenAdoptionQrResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenAdoptionQrResponse {
+    return new TokenAdoptionQrResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenAdoptionQrResponse {
+    return new TokenAdoptionQrResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TokenAdoptionQrResponse | PlainMessage<TokenAdoptionQrResponse> | undefined, b: TokenAdoptionQrResponse | PlainMessage<TokenAdoptionQrResponse> | undefined): boolean {
+    return proto3.util.equals(TokenAdoptionQrResponse, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.TokenCreateResponse
  */
 export class TokenCreateResponse extends Message<TokenCreateResponse> {
@@ -18976,6 +19097,14 @@ export class Envelope extends Message<Envelope> {
      */
     value: TokenForgetResponse;
     case: "tokenForgetResponse";
+  } | {
+    /**
+     * Reply to `token.adoptionQr`.
+     *
+     * @generated from field: dsm.TokenAdoptionQrResponse token_adoption_qr_response = 119;
+     */
+    value: TokenAdoptionQrResponse;
+    case: "tokenAdoptionQrResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -19085,6 +19214,7 @@ export class Envelope extends Message<Envelope> {
     { no: 116, name: "token_burn_response", kind: "message", T: TokenBurnResponse, oneof: "payload" },
     { no: 117, name: "token_fee_schedule_response", kind: "message", T: TokenFeeScheduleResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
+    { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
@@ -22131,6 +22261,40 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   displayAmount = "";
 
+  /**
+   * The token's CPTA policy anchor, Base32 Crockford, rendered by Rust.
+   *
+   * A device that ADOPTS a token is shown its anchor; a device that CREATED one
+   * had no way to see it at all, so a creator could not hand a peer the value a
+   * peer needs. Carrying it here rather than joining a policy list by ticker
+   * keeps ONE identity mapping: the registry's, resolved server-side. A ticker
+   * join would be a second one, and two tokens can share a ticker.
+   *
+   * @generated from field: string policy_anchor_b32 = 8;
+   */
+  policyAnchorB32 = "";
+
+  /**
+   * Short head of `policy_anchor_b32`, for visual comparison against the value
+   * a peer is about to adopt. Never an identifier on its own.
+   *
+   * @generated from field: string anchor_fingerprint = 9;
+   */
+  anchorFingerprint = "";
+
+  /**
+   * The token's canonical id, BLAKE3(TAG_DSM_TOKEN_ID, anchor ‖ ticker).
+   *
+   * `token_id` (field 1) is the TICKER on this message — the key balances are
+   * projected under — and a ticker is not an identity: two different tokens can
+   * claim the same one, which is why adoption refuses a ticker collision. A
+   * screen that labels the ticker "token id" is telling the user something
+   * false, so carry the real value.
+   *
+   * @generated from field: string canonical_token_id = 10;
+   */
+  canonicalTokenId = "";
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22146,6 +22310,9 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 5, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 6, name: "token_name", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 7, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 8, name: "policy_anchor_b32", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "anchor_fingerprint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "canonical_token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {
