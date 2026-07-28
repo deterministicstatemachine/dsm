@@ -484,6 +484,9 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
   const [animKey, setAnimKey] = useState(0);
   const [state, _setState]    = useState<WizardState>(DEFAULT);
   const [creating, setCreating] = useState(false);
+  /// Set while an ambiguous outcome is being settled against canonical state,
+  /// so the button says what is happening rather than implying a fresh attempt.
+  const [resolving, setResolving] = useState(false);
   const [error,    setError]    = useState<string | null>(null);
   const [created,  setCreated]  = useState<{ tokenId?: string; anchorBase32?: string } | null>(null);
   // Authoritative creation fee, fetched from Rust. Never hardcoded here — the
@@ -577,8 +580,59 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
         setCreating(false);
       }
     } catch (e) {
-      setError(String(e));
-      setCreating(false);
+      // An error HERE means the call did not come back — a timeout, a dropped
+      // bridge, a malformed reply. It does NOT mean the creation failed. On
+      // device the transition committed (fee burned, supply credited) while
+      // this path ran, and reporting failure sent the user to retry an
+      // operation that had already succeeded.
+      //
+      // So ask once more instead of guessing. `token.create` is keyed by the
+      // creation commitment — token_id is derived from the policy anchor and
+      // ticker — so resubmitting the identical request is answered from
+      // canonical state: success if this exact creation already exists (no
+      // second advance, no second fee), a conflict if the ticker is held by a
+      // different creation, a retryable error if nothing was committed. The
+      // verdict is Rust's; this only renders it.
+      setResolving(true);
+      try {
+        const s = stateRef.current;
+        const again = await dsmClient.createToken({
+          ticker:             s.ticker.trim().toUpperCase(),
+          alias:              s.alias.trim(),
+          decimals:           effectiveDecimals,
+          maxSupply:          s.unlimitedSupply ? '0' : s.maxSupply,
+          kind:               s.kind,
+          description:        s.description.trim() || undefined,
+          iconUrl:            s.iconUrl.trim()      || undefined,
+          unlimitedSupply:    s.unlimitedSupply,
+          initialAlloc:       s.initialAlloc || '0',
+          mintBurnEnabled:    s.mintBurnEnabled,
+          mintBurnThreshold:  s.mintBurnThreshold,
+          transferable:       effectiveTransferable,
+          allowlistKind:      s.allowlistKind,
+          allowlistData:      s.allowlistKind === 'INLINE' ? s.allowlistData : undefined,
+        });
+        const r = (typeof again === 'object' && again !== null)
+          ? (again as { success?: boolean; tokenId?: string; anchorBase32?: string; error?: unknown })
+          : {};
+        if (r.success) {
+          setCreated({ tokenId: r.tokenId, anchorBase32: r.anchorBase32 });
+          if (onSuccess) onSuccess();
+        } else {
+          setError(r.error ? String(r.error) : String(e));
+          setCreating(false);
+        }
+      } catch (e2) {
+        // Still no answer. Say so honestly — this is unresolved, not failed,
+        // and the token may exist.
+        setError(
+          `Could not confirm the outcome (${String(e2)}). If the token was created it will ` +
+          `appear in your token list; creating it again will not charge a second fee.`,
+        );
+        setCreating(false);
+      } finally {
+        setResolving(false);
+      }
     }
   }, [effectiveDecimals, effectiveTransferable, onSuccess]);
 
@@ -651,7 +705,7 @@ export const TokenCreationDialog: React.FC<{ onClose: () => void; onSuccess?: ()
               onClick={handleCreate}
               disabled={creating}
             >
-              {creating ? 'Publishing policy\u2026' : 'Publish'}
+              {resolving ? 'Confirming outcome\u2026' : creating ? 'Publishing policy\u2026' : 'Publish'}
             </button>
           )}
         </div>

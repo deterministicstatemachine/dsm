@@ -37,7 +37,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     // getAllBalances: first empty, then updated
     (dsmClient.getAllBalances as any) = jest.fn()
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ tokenId: 'ERA', symbol: 'ERA', balance: '100' }]);
+      .mockResolvedValueOnce([{ tokenId: 'ERA', symbol: 'ERA', balance: '100', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
 
     // getWalletHistory: first empty, then returns 1 transaction on second invocation
     (dsmClient.getWalletHistory as any) = jest.fn()
@@ -84,7 +84,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [contact] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', balance: '100', decimals: 2 }]);
+      .mockResolvedValue([{ tokenId: 'ROOT', symbol: 'ERA', balance: '100', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockResolvedValue({ success: true });
@@ -95,6 +95,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    // The form no longer pre-selects a recipient: pick one, as a user must.
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '1' } });
     fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });
@@ -123,13 +125,13 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     installStandardWalletMocks([contact]);
 
-    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '100', decimals: 0 }];
+    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '100', baseUnits: 100n, displayAmount: '100', decimals: 0 }];
     let historyState: any[] = [];
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
     (dsmClient.sendOnlineTransferSmart as any) = jest.fn().mockImplementation(async () => {
-      balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '75', decimals: 0 }];
+      balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '75', baseUnits: 75n, displayAmount: '75', decimals: 0 }];
       historyState = [{ txId: 'tx-online-sender', type: 'online', amount: '25', recipient: 'Receiver', status: 'confirmed' }];
       return { success: true, message: 'ok', newBalance: 75n };
     });
@@ -140,6 +142,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    // The form no longer pre-selects a recipient: pick one, as a user must.
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
@@ -163,14 +167,14 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     installStandardWalletMocks([contact]);
 
-    let balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '80', decimals: 2 }];
+    let balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '80', baseUnits: 80n, displayAmount: '80', decimals: 0 }];
     let historyState: any[] = [];
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
     (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
     (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
     (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
-      balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '55', decimals: 2 }];
+      balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '55', baseUnits: 55n, displayAmount: '55', decimals: 0 }];
       historyState = [{ txId: 'tx-offline-sender', type: 'offline', amount: '25', recipient: 'Receiver', status: 'confirmed' }];
       return { success: true };
     });
@@ -181,6 +185,8 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    // The form no longer pre-selects a recipient: pick one, as a user must.
+    fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
     fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });
@@ -206,7 +212,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
   test('online receiver refresh updates visible balance and history in the UI', async () => {
     installStandardWalletMocks([]);
 
-    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '40', decimals: 0 }];
+    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '40', baseUnits: 40n, displayAmount: '40', decimals: 0 }];
     let historyState: any[] = [];
 
     (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
@@ -216,7 +222,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     await waitFor(() => expect(screen.getByText('40')).toBeInTheDocument());
 
-    balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '65', decimals: 0 }];
+    balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '65', baseUnits: 65n, displayAmount: '65', decimals: 0 }];
     historyState = [{ txId: 'tx-online-receiver', type: 'online', amount: '25', recipient: 'Self', status: 'confirmed' }];
 
     await act(async () => {
@@ -238,7 +244,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', balance: '100' }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', balance: '100', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.syncWithStorage as any) = jest.fn().mockResolvedValue({ success: true, processed: 1 });
     (dsmClient.listB0xMessages as any) = jest.fn().mockResolvedValue([
@@ -266,7 +272,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
     (dsmClient.getAllBalances as any) = jest
       .fn()
-      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', balance: '100' }]);
+      .mockResolvedValue([{ tokenId: 'ERA', symbol: 'ERA', balance: '100', baseUnits: 100n, displayAmount: '100', decimals: 0 }]);
     (dsmClient.getWalletHistory as any) = jest.fn().mockResolvedValue({ transactions: [] });
     (dsmClient.listB0xMessages as any) = jest.fn().mockResolvedValue([]);
 

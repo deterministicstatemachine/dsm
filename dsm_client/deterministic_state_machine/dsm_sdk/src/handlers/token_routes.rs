@@ -359,16 +359,28 @@ fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
 /// Returns `true` when at least one node stored the bytes and echoed the
 /// correct anchor. Publication is best-effort: `false` only means the policy
 /// is not yet mirrored, never that the anchor is in doubt.
-async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> bool {
+/// Why a publish did not happen. "No nodes are configured" and "the configured
+/// nodes refused" are different conditions and creation treats them
+/// differently: the first is a device that is not part of a network at all
+/// (host builds, tests), the second is a device that IS and could not reach it
+/// — which is the case that produces an unadoptable token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishOutcome {
+    Published,
+    NoNodesConfigured,
+    Failed,
+}
+
+async fn publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> PublishOutcome {
     let urls = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
         Ok(cfg) => cfg.node_urls,
         Err(e) => {
             log::warn!("[tokens.publishPolicy] No storage node config: {}", e);
-            return false;
+            return PublishOutcome::NoNodesConfigured;
         }
     };
     if urls.is_empty() {
-        return false;
+        return PublishOutcome::NoNodesConfigured;
     }
 
     let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
@@ -411,7 +423,16 @@ async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) 
     if let Some(msg) = last_err {
         log::warn!("[tokens.publishPolicy] Network publish issue: {}", msg);
     }
-    published
+    if published {
+        PublishOutcome::Published
+    } else {
+        PublishOutcome::Failed
+    }
+}
+
+/// Boolean view for callers that only care whether the bytes are out there.
+async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) -> bool {
+    publish_policy_to_network(body, expected_anchor).await == PublishOutcome::Published
 }
 
 async fn try_fetch_policy_from_network(anchor: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
@@ -502,6 +523,111 @@ fn derive_policy_file(
     pf
 }
 
+/// Tell the WebView its token set changed.
+///
+/// Emitted from Rust beside the registry write, because the write is what made
+/// it true. The screen reloads from the persisted registry rather than trusting
+/// optimistic frontend state — an adopted token that exists only in React is a
+/// token this device cannot actually hold.
+#[cfg(all(target_os = "android", feature = "jni"))]
+fn push_wallet_refresh() {
+    let _ = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]);
+}
+
+#[cfg(not(all(target_os = "android", feature = "jni")))]
+fn push_wallet_refresh() {
+    // No-op on host builds; there is no WebView to notify.
+}
+
+/// Scheme prefix for a token-adoption payload.
+///
+/// Versioned like the contact payload (`dsm:contact/v3:`) so a future shape is a
+/// different scheme rather than a guess about what the bytes mean.
+const TOKEN_ADOPTION_URI_PREFIX: &str = "dsm:token/v1:";
+
+/// What a user pasted into the adopt field, resolved to an anchor.
+///
+/// Two forms are accepted because both exist in the wild: the bare Base32
+/// anchor a person reads off a screen, and the versioned payload a camera
+/// scans. Parsing lives here, in Rust, so there is one decoder — the last time
+/// an anchor was encoded outside this module the padding was wrong and the
+/// result was a plausible 52-character string that resolved to nothing.
+#[derive(Debug)]
+pub struct ParsedAdoptionInput {
+    pub anchor: [u8; 32],
+    /// Present only for the versioned payload: what the payload CLAIMS this
+    /// anchor resolves to. Checked against the fetched policy, never trusted.
+    pub claimed_ticker: Option<String>,
+    pub claimed_token_id: Option<String>,
+}
+
+pub fn parse_adoption_input(text: &str) -> Result<ParsedAdoptionInput, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("adopt: nothing to read — paste an anchor or scan a code".into());
+    }
+
+    // Case is normalised HERE, not by the field. Crockford Base32 is
+    // case-insensitive and canonically uppercase, so the adopt input used to
+    // uppercase what the user typed — which silently destroyed the lowercase
+    // `dsm:token/v1:` prefix and made every scanned payload parse as a bare
+    // anchor, then fail as invalid Base32. Transforming input is the decoder's
+    // job, and the decoder is here.
+    let lowered = text.to_ascii_lowercase();
+    let stripped = lowered.strip_prefix(TOKEN_ADOPTION_URI_PREFIX).map(|_| {
+        text[TOKEN_ADOPTION_URI_PREFIX.len()..]
+            .trim()
+            .to_ascii_uppercase()
+    });
+
+    let Some(body) = stripped else {
+        // Bare anchor.
+        let upper = text.to_ascii_uppercase();
+        let bytes = crate::util::text_id::decode_base32_crockford(&upper)
+            .ok_or_else(|| "adopt: not valid Base32 Crockford".to_string())?;
+        let anchor: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            format!(
+                "adopt: an anchor is 32 bytes, this decoded to {}",
+                bytes.len()
+            )
+        })?;
+        return Ok(ParsedAdoptionInput {
+            anchor,
+            claimed_ticker: None,
+            claimed_token_id: None,
+        });
+    };
+
+    let payload = crate::util::text_id::decode_base32_crockford(&body)
+        .ok_or_else(|| "adopt: the code's payload is not valid Base32 Crockford".to_string())?;
+    let qr = generated::TokenAdoptionQrV1::decode(&*payload)
+        .map_err(|e| format!("adopt: the code is not a v1 token payload: {e}"))?;
+    let anchor: [u8; 32] = qr
+        .policy_anchor
+        .as_slice()
+        .try_into()
+        .map_err(|_| "adopt: the code carries a malformed anchor".to_string())?;
+    Ok(ParsedAdoptionInput {
+        anchor,
+        claimed_ticker: Some(qr.ticker),
+        claimed_token_id: Some(qr.token_id),
+    })
+}
+
+/// Assemble the complete adoption URI. Rust owns the framing.
+pub fn build_adoption_uri(anchor: &[u8; 32], ticker: &str, token_id: &str) -> String {
+    let payload = generated::TokenAdoptionQrV1 {
+        policy_anchor: anchor.to_vec(),
+        ticker: ticker.to_string(),
+        token_id: token_id.to_string(),
+    }
+    .encode_to_vec();
+    format!(
+        "{TOKEN_ADOPTION_URI_PREFIX}{}",
+        crate::util::text_id::encode_base32_crockford(&payload)
+    )
+}
+
 impl AppRouterImpl {
     /// Re-register every persisted token's policy after a restart.
     ///
@@ -510,6 +636,106 @@ impl AppRouterImpl {
     /// transferred, and `dlv.create` (which resolves the pair's policy commit
     /// and fails closed) could not build a vault for it. The durable tables are
     /// the source; this only rebuilds the derived in-memory view.
+    /// Install the durable-storage policy resolver used by the enforcer on a
+    /// cache miss.
+    ///
+    /// The enforcer's token→anchor map is process-local, so after a restart it
+    /// is empty and every created or adopted token looked policy-less: on
+    /// device that surfaced as "Token policy violation for RIGB: No policy
+    /// registered for token" while the committed policy sat in
+    /// `token_policies` the whole time. Startup warming alone does not fix
+    /// that — any row added later, or any warm-up that skipped a row,
+    /// reproduces it exactly. So the miss itself consults durable storage.
+    ///
+    /// Resolution uses the SAME pieces as creation and adoption:
+    /// `load_policy_verified` (which re-derives BLAKE3(TAG_DSM_POLICY, bytes)
+    /// and treats a mismatch as absent), the one strict `parse_token_policy`,
+    /// and the one `derive_policy_file` constructor. There is no second parser
+    /// and no second notion of what a policy is.
+    pub fn install_policy_resolver(&self) {
+        self.core_sdk.set_policy_resolver(std::sync::Arc::new(
+            |identifier: &str| -> Option<(
+                dsm::types::policy_types::PolicyFile,
+                dsm::types::policy_types::PolicyAnchor,
+            )> {
+                // Accept the canonical id or a registered ticker, same as the
+                // resolver the send path uses.
+                let row = crate::storage::client_db::token_registry::get_token(identifier)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        crate::storage::client_db::token_registry::get_token_by_ticker(identifier)
+                            .ok()
+                            .flatten()
+                    })?;
+
+                // Anchor equality is enforced inside load_policy_verified: a
+                // row whose bytes do not hash to their recorded commitment is
+                // reported ABSENT rather than returned.
+                let raw = crate::storage::client_db::token_registry::load_policy_verified(
+                    &row.policy_commit,
+                )
+                .ok()
+                .flatten()?;
+
+                let parsed = parse_token_policy(&raw)?;
+                Some((
+                    derive_policy_file(&row.ticker, &parsed),
+                    dsm::types::policy_types::PolicyAnchor::from_bytes(row.policy_commit),
+                ))
+            },
+        ));
+    }
+
+    /// Keep this device's OWN tokens fetchable by peers.
+    ///
+    /// Creation now refuses unless the policy reaches a storage node, but a
+    /// token created before that rule — or one whose node later lost it —
+    /// leaves the network unable to serve a policy this device still holds.
+    /// Nobody can adopt such a token, so nobody can receive it, and the
+    /// failure appears on the RECEIVER as POLICY_NOT_FOUND long after the
+    /// creating device stopped looking.
+    ///
+    /// So: for each token this device owns, if the network cannot serve the
+    /// policy and this device has the bytes, publish them. Content-addressed,
+    /// so republishing is idempotent and cannot assert anything false — the
+    /// node re-derives the anchor from the bytes, and a mismatch is discarded
+    /// by `try_publish_policy_to_network`.
+    pub async fn republish_owned_policies(&self) {
+        let Ok(tokens) = crate::storage::client_db::token_registry::all_tokens() else {
+            return;
+        };
+        let me = self.core_sdk.get_device_identity().device_id;
+        for row in tokens.into_iter().filter(|t| t.owner_device_id == me) {
+            // Only republish what the network genuinely cannot serve.
+            if matches!(
+                try_fetch_policy_from_network(&row.policy_commit).await,
+                Ok(Some(_))
+            ) {
+                continue;
+            }
+            let Ok(Some(bytes)) =
+                crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+            else {
+                continue;
+            };
+            let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+            if try_publish_policy_to_network(&bytes, &row.policy_commit).await {
+                log::info!(
+                    "[token] republished policy {anchor_b32} for owned token {} — peers can \
+                     adopt it again",
+                    row.ticker
+                );
+            } else {
+                log::warn!(
+                    "[token] policy {anchor_b32} for owned token {} is on NO storage node and \
+                     could not be republished; peers cannot adopt it until this succeeds",
+                    row.ticker
+                );
+            }
+        }
+    }
+
     pub async fn rehydrate_token_registry(&self) {
         let tokens = match crate::storage::client_db::token_registry::all_tokens() {
             Ok(t) => t,
@@ -646,6 +872,46 @@ impl AppRouterImpl {
     // ── Token Queries ────────────────────────────────────────────────────────
     pub(crate) async fn handle_token_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
+            // The anchor a creator hands to a peer, as a scannable payload.
+            //
+            // Params are the ticker or token id, UTF-8. The reply carries the
+            // complete URI plus the fields a screen shows beside it, so the
+            // frontend renders strings and derives nothing.
+            "token.adoptionQr" => {
+                let key = String::from_utf8_lossy(&q.params).trim().to_string();
+                if key.is_empty() {
+                    return err("token.adoptionQr: params must name a ticker or token id".into());
+                }
+                if crate::policy::builtin_policy_commit(&key).is_some() {
+                    return err(format!(
+                        "token.adoptionQr: {key} is a protocol asset — every device already has it"
+                    ));
+                }
+                let row = match crate::storage::client_db::token_registry::get_token(&key) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        match crate::storage::client_db::token_registry::get_token_by_ticker(&key) {
+                            Ok(Some(r)) => r,
+                            Ok(None) => {
+                                return err(format!("token.adoptionQr: no token named {key} here"))
+                            }
+                            Err(e) => return err(format!("token.adoptionQr: registry read: {e}")),
+                        }
+                    }
+                    Err(e) => return err(format!("token.adoptionQr: registry read: {e}")),
+                };
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(&row.policy_commit);
+                pack_envelope_ok(generated::envelope::Payload::TokenAdoptionQrResponse(
+                    generated::TokenAdoptionQrResponse {
+                        uri: build_adoption_uri(&row.policy_commit, &row.ticker, &row.token_id),
+                        ticker: row.ticker,
+                        token_id: row.token_id,
+                        anchor_fingerprint: anchor_b32.chars().take(8).collect(),
+                        policy_anchor_b32: anchor_b32,
+                    },
+                ))
+            }
+
             "tokens.getPolicy" => {
                 if q.params.len() != 32 {
                     return err(
@@ -666,6 +932,159 @@ impl AppRouterImpl {
                     Ok(None) => err("tokens.getPolicy: policy not found".into()),
                     Err(e) => err(format!("tokens.getPolicy failed: {e}")),
                 }
+            }
+
+            // Adopt a token created by someone else, by its CPTA anchor.
+            //
+            // A device cannot hold or move a token whose policy it does not
+            // have: balances are keyed by policy commitment, and the enforcer
+            // needs the committed rules to decide anything. Creating a token
+            // registers it on the creator's device only — every other device
+            // has to ADD it, which is this route. Without it a freshly created
+            // token can never be received, which is exactly how a transfer to
+            // a second device fails with nothing obviously wrong.
+            //
+            // This is a local registration, not a state transition: no advance,
+            // no balance change, and no fee. Only the creator burns the fee.
+            //
+            // The anchor is re-derived from the fetched bytes and must match
+            // what was asked for. That is the same rule creation enforces, and
+            // for the same reason: a storage node that could hand back
+            // arbitrary bytes under a requested anchor would be defining the
+            // policy this device then enforces.
+            "tokens.addByAnchor" => {
+                // Params are the TEXT the user supplied — a bare Base32 anchor
+                // or a `dsm:token/v1:` payload from a scan. Both are decoded
+                // here rather than in the client, so there is one decoder and
+                // one place that decides what a pasted string means.
+                let input = match parse_adoption_input(&String::from_utf8_lossy(&q.params)) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("tokens.addByAnchor: {e}")),
+                };
+                let anchor = input.anchor;
+
+                let policy_bytes = match self.load_policy_bytes(anchor).await {
+                    Ok(Some(b)) if !b.is_empty() => b,
+                    Ok(_) => {
+                        return err(
+                            "POLICY_NOT_FOUND: no policy is published under that anchor".into()
+                        )
+                    }
+                    Err(e) => return err(format!("tokens.addByAnchor: {e}")),
+                };
+
+                let mut ah = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_POLICY,
+                );
+                ah.update(&policy_bytes);
+                let derived: [u8; 32] = *ah.finalize().as_bytes();
+                if derived != anchor {
+                    return err(
+                        "tokens.addByAnchor: fetched policy does not hash to the requested anchor"
+                            .into(),
+                    );
+                }
+
+                let Some(parsed) = parse_token_policy(&policy_bytes) else {
+                    return err(
+                        "tokens.addByAnchor: policy is not a readable v3 token policy".into(),
+                    );
+                };
+
+                let mut id_hasher = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_TOKEN_ID,
+                );
+                id_hasher.update(&anchor);
+                id_hasher.update(parsed.ticker.as_bytes());
+                let token_id =
+                    crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
+
+                // A scanned payload CLAIMS what it resolves to. The anchor
+                // already had to hash the fetched policy, so the claims cannot
+                // change which token is adopted — but a payload that names a
+                // different ticker than the policy carries is either corrupt or
+                // is trying to get a user to accept something other than what
+                // they were shown. Refuse rather than silently adopt the real
+                // one under a name the user did not read.
+                if let Some(claimed) = input.claimed_ticker.as_deref() {
+                    if !claimed.eq_ignore_ascii_case(&parsed.ticker) {
+                        return err(format!(
+                            "tokens.addByAnchor: the code says {claimed} but the published policy \
+                             is {}. Refusing — check the anchor with whoever sent it.",
+                            parsed.ticker
+                        ));
+                    }
+                }
+                if let Some(claimed) = input.claimed_token_id.as_deref() {
+                    if claimed != token_id {
+                        return err(
+                            "tokens.addByAnchor: the code's token id does not match the one its \
+                             own anchor derives. Refusing."
+                                .into(),
+                        );
+                    }
+                }
+
+                // Adding the same token twice is a no-op, not an error — a user
+                // who taps twice, or adds a token they already hold, has done
+                // nothing wrong. A DIFFERENT token claiming the ticker is a
+                // conflict and is refused.
+                match crate::storage::client_db::token_registry::get_token_by_ticker(&parsed.ticker)
+                {
+                    Ok(Some(row)) if row.token_id != token_id => {
+                        return err(format!(
+                            "TICKER_CONFLICT: {} is already held by a different token on this \
+                             device; adopting this one would make the ticker ambiguous",
+                            parsed.ticker
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => return err(format!("tokens.addByAnchor: registry read failed: {e}")),
+                }
+
+                if let Err(e) =
+                    crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
+                {
+                    return err(format!("tokens.addByAnchor: could not store policy: {e}"));
+                }
+                let row = crate::storage::client_db::token_registry::TokenRegistryRow {
+                    token_id: token_id.clone(),
+                    policy_commit: anchor,
+                    ticker: parsed.ticker.clone(),
+                    alias: parsed.alias.clone(),
+                    decimals: parsed.decimals,
+                    max_supply: parsed.max_supply,
+                    owner_device_id: [0u8; 32], // not ours; ownership lives in the policy
+                };
+                if let Err(e) = crate::storage::client_db::token_registry::insert_token(&row) {
+                    // Already present is the idempotent case, not a failure.
+                    if crate::storage::client_db::token_registry::get_token(&token_id)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
+                        return err(format!("tokens.addByAnchor: could not register token: {e}"));
+                    }
+                }
+
+                dsm::core::token::register_policy_commit_ticker(anchor, &parsed.ticker);
+
+                // Tell the wallet its token set changed, from HERE — the
+                // registry write is what made it true, so the notification
+                // belongs beside it. The screen then reloads from the
+                // persisted registry rather than trusting anything the caller
+                // believes; an adopted token that is only in frontend state is
+                // a token this device cannot actually hold.
+                push_wallet_refresh();
+
+                pack_envelope_ok(generated::envelope::Payload::TokenCreateResponse(
+                    generated::TokenCreateResponse {
+                        success: true,
+                        token_id,
+                        policy_anchor: anchor.to_vec(),
+                        message: format!("Added {}", parsed.ticker),
+                    },
+                ))
             }
 
             "tokens.listCachedPolicies" => {
@@ -766,8 +1185,49 @@ impl AppRouterImpl {
                     }
                     v
                 };
-                let max_supply = be_u128(&req.max_supply_u128);
-                let initial_alloc = be_u128(&req.initial_alloc_u128);
+                // Canonical amounts are integer BASE UNITS; the wizard speaks
+                // display units. Conversion happens exactly once, here, before
+                // anything commits to a number: policy serialization and anchor
+                // derivation, CreateToken, conservation validation, registry
+                // persistence, and the supply cap all take the converted value.
+                //
+                // Creation used to skip this while the send path applied it, so
+                // a token created with "1,000" at decimals=2 held 1_000 base
+                // units (10.00) while a send of "250" correctly debited 25_000
+                // — and the transfer failed with a balance underflow on a
+                // balance the UI displayed as 1000. The two sides disagreed
+                // about what a unit was.
+                //
+                // The CPTA anchor therefore commits the base-unit cap. A policy
+                // that committed a display number would mean the cap enforced
+                // depends on how a UI chose to render it.
+                let scale = 10u128
+                    .checked_pow(req.decimals)
+                    .ok_or_else(|| "token.create: decimals too large to scale".to_string());
+                let scale = match scale {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let to_base = |display: u128, what: &str| -> Result<u128, String> {
+                    display.checked_mul(scale).ok_or_else(|| {
+                        format!(
+                            "token.create: {what} overflows at {} decimals",
+                            req.decimals
+                        )
+                    })
+                };
+                let max_supply = match to_base(be_u128(&req.max_supply_u128), "max supply") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let initial_alloc =
+                    match to_base(be_u128(&req.initial_alloc_u128), "initial allocation") {
+                        Ok(v) => v,
+                        Err(e) => return err(e),
+                    };
+                if !req.unlimited_supply && initial_alloc > max_supply {
+                    return err("token.create: initial allocation exceeds max supply".to_string());
+                }
 
                 let mut allowlist_device_ids: Vec<[u8; 32]> = Vec::new();
                 for id in &req.allowlist_device_ids {
@@ -858,15 +1318,36 @@ impl AppRouterImpl {
 
                 let anchor_b32 = crate::util::text_id::encode_base32_crockford(&policy_anchor);
 
-                // Mirror the policy so other devices can fetch it, then cache
-                // locally. Mirroring is best-effort; the anchor is already
-                // authoritative because it is content-addressed.
-                let mirrored = try_publish_policy_to_network(&raw_proto, &policy_anchor).await;
-                if !mirrored {
-                    log::warn!(
-                        "[token.create] policy {anchor_b32} not mirrored to any storage node; \
-                         remote verifiers may not be able to fetch it yet"
-                    );
+                // Mirror the policy so peers can fetch it. Adoption is
+                // online-only by design — a peer fetches these bytes from a
+                // storage node and caches them, and that cache is what makes
+                // the token usable offline afterwards — so a policy no node
+                // holds is a token nobody can ever adopt or receive.
+                //
+                // Creation does NOT refuse when the mirror fails. DSM is
+                // offline-first, and a device with no reachable node is the
+                // ordinary case, not an error; refusing would make creating a
+                // token require connectivity that nothing else here requires.
+                // Convergence is handled instead: `republish_owned_policies`
+                // runs at every startup and publishes any owned policy the
+                // network cannot serve, so the token becomes adoptable as soon
+                // as this device is online. What is NOT acceptable is silence,
+                // because the failure otherwise surfaces only on a peer, as
+                // POLICY_NOT_FOUND, long afterwards.
+                match publish_policy_to_network(&raw_proto, &policy_anchor).await {
+                    PublishOutcome::Published => {}
+                    PublishOutcome::Failed => {
+                        log::warn!(
+                            "[token.create] policy {anchor_b32} reached NO storage node; peers \
+                             cannot adopt this token until a later startup republishes it"
+                        );
+                    }
+                    PublishOutcome::NoNodesConfigured => {
+                        log::warn!(
+                            "[token.create] no storage nodes configured; policy {anchor_b32} \
+                             is local-only until one is reachable"
+                        );
+                    }
                 }
                 self.cache_policy_bytes(policy_anchor, raw_proto.clone())
                     .await;
@@ -878,6 +1359,66 @@ impl AppRouterImpl {
                 id_hasher.update(ticker.as_bytes());
                 let token_id =
                     crate::util::text_id::encode_base32_crockford(id_hasher.finalize().as_bytes());
+
+                // ── Canonical reconciliation, before anything is spent ──────
+                //
+                // `token_id` is BLAKE3(TAG_DSM_TOKEN_ID, policy_anchor ‖ ticker)
+                // and `policy_anchor` is the content address of the whole
+                // policy, so this id IS the creation commitment: identical
+                // inputs can only produce it, and any changed field produces a
+                // different one. That makes "has this exact creation already
+                // happened?" a lookup rather than a guess.
+                //
+                // It has to be a lookup, because a caller cannot tell a
+                // creation that failed from one that succeeded with its reply
+                // lost. On device the first attempt committed — fee burned,
+                // supply credited — while the reply never arrived, and the
+                // wizard reported "Token creation failed". Retrying then hit
+                // the registry's UNIQUE constraint and failed again, so a
+                // successful creation looked like two failures.
+                //
+                // A repeated submission of the SAME commitment is therefore
+                // answered from canonical state: success, no second advance,
+                // and no second fee. A different commitment claiming a taken
+                // ticker is a hard conflict, never silently accepted.
+                match crate::storage::client_db::token_registry::get_token(&token_id) {
+                    Ok(Some(row)) if row.policy_commit == policy_anchor => {
+                        log::info!(
+                            "[token.create] {ticker} already exists with this exact commitment; \
+                             reporting the existing token rather than creating a second one"
+                        );
+                        return pack_envelope_ok(
+                            generated::envelope::Payload::TokenCreateResponse(
+                                generated::TokenCreateResponse {
+                                    success: true,
+                                    token_id,
+                                    policy_anchor: policy_anchor.to_vec(),
+                                    message: "Token already created".to_string(),
+                                },
+                            ),
+                        );
+                    }
+                    Ok(Some(_)) => {
+                        // Same derived id, different committed policy. The hash
+                        // makes this unreachable without a collision; refuse
+                        // rather than pretend it is the caller's token.
+                        return err(format!(
+                            "token.create: {ticker} exists under a different committed policy"
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return err(format!("token.create: registry read failed: {e}")),
+                }
+                match crate::storage::client_db::token_registry::get_token_by_ticker(&ticker) {
+                    Ok(Some(row)) if row.token_id != token_id => {
+                        return err(format!(
+                            "token.create: ticker {ticker} is already held by a different token \
+                             created with different parameters"
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => return err(format!("token.create: registry read failed: {e}")),
+                }
 
                 let mut fields = HashMap::new();
                 fields.insert("max_supply".to_string(), parsed.max_supply.to_string());
@@ -1187,10 +1728,96 @@ impl AppRouterImpl {
                 }
             }
 
+            "token.forget" => self.handle_token_forget(i).await,
             "token.mint" => self.handle_token_mint(i).await,
             "token.burn" => self.handle_token_burn(i).await,
 
             other => err(format!("unknown token invoke method: {other}")),
+        }
+    }
+
+    /// Forget a token's IDENTITY on this device.
+    ///
+    /// A ticker names one token, so adopting a token whose ticker is already
+    /// claimed by a DIFFERENT one is refused — otherwise "RIGB" would be
+    /// ambiguous and a transfer could credit the wrong asset. That guard is
+    /// right, but with no way to drop a superseded identity it was also a
+    /// dead end: a device that had adopted a token could never adopt any
+    /// other token with that ticker, ever, and the wallet offered no way out.
+    ///
+    /// Forgetting removes the NAMING only, and is refused while the balance is
+    /// non-zero — a device must not be able to make an asset it still holds
+    /// unnameable. Builtins are not forgettable at all: they are protocol
+    /// assets, not adopted ones.
+    ///
+    /// This loses nothing recoverable. The policy is content-addressed and
+    /// adoption is online, so the same token can be adopted again from its
+    /// anchor.
+    async fn handle_token_forget(&self, i: AppInvoke) -> AppResult {
+        let arg_pack = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p,
+            Err(e) => return err(format!("token.forget: decode ArgPack failed: {e}")),
+        };
+        let req = match generated::TokenForgetRequest::decode(&*arg_pack.body) {
+            Ok(r) => r,
+            Err(e) => return err(format!("token.forget: decode request failed: {e}")),
+        };
+        let key = req.token_id.trim();
+        if key.is_empty() {
+            return err("token.forget: token_id is required".into());
+        }
+
+        if crate::policy::builtin_policy_commit(key).is_some() {
+            return err(format!(
+                "token.forget: {key} is a protocol asset and cannot be forgotten"
+            ));
+        }
+
+        let row = match crate::storage::client_db::token_registry::get_token(key) {
+            Ok(Some(r)) => r,
+            Ok(None) => match crate::storage::client_db::token_registry::get_token_by_ticker(key) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return err(format!("token.forget: no token named {key} on this device"))
+                }
+                Err(e) => return err(format!("token.forget: registry read failed: {e}")),
+            },
+            Err(e) => return err(format!("token.forget: registry read failed: {e}")),
+        };
+
+        // Canonical state decides whether anything is held — not the registry.
+        let held = self
+            .core_sdk
+            .device_head()
+            .map(|h| h.balance(&row.policy_commit))
+            .unwrap_or(0);
+        if held != 0 {
+            return err(format!(
+                "token.forget: {} still holds {} base units; send or burn them first",
+                row.ticker, held
+            ));
+        }
+
+        match crate::storage::client_db::token_registry::delete_token(&row.token_id) {
+            Ok(Some(removed)) => {
+                log::info!(
+                    "[token.forget] dropped identity {} ({}) — its ticker is adoptable again",
+                    removed.ticker,
+                    removed.token_id
+                );
+                push_wallet_refresh();
+                pack_envelope_ok(generated::envelope::Payload::TokenForgetResponse(
+                    generated::TokenForgetResponse {
+                        success: true,
+                        token_id: removed.token_id,
+                        message: format!("{} forgotten", removed.ticker),
+                    },
+                ))
+            }
+            Ok(None) => err(format!(
+                "token.forget: {key} vanished before it was removed"
+            )),
+            Err(e) => err(format!("token.forget: could not remove {key}: {e}")),
         }
     }
 

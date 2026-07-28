@@ -5,6 +5,7 @@ import * as pb from '../proto/dsm_app_pb';
 import {
   routerInvokeBin,
   routerQueryBin,
+  addTokenByAnchor as addTokenByAnchorBridge,
   getTokenPolicyBytes as getTokenPolicyBytesBridge,
   listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
@@ -105,24 +106,74 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
   }
 }
 
-export async function importTokenPolicy(args: string | { anchorBase32: string }): Promise<{ success: boolean; error?: string }> {
+/**
+ * Add a token created on another device, by its CPTA anchor.
+ *
+ * PURE TRANSPORT. Rust fetches the published policy, re-derives the anchor
+ * from the bytes and requires it to match what was asked for, parses it, and
+ * registers the token locally. Nothing here interprets the policy.
+ *
+ * This is the step between "someone created a token" and "I can receive it":
+ * balances are keyed by policy commitment, so a device that has not added the
+ * CPTA has nowhere to put the token and no rules to enforce on it.
+ */
+/// Adopt a token from whatever the user supplied.
+///
+/// The TEXT is handed to Rust verbatim — a bare Base32 anchor or a
+/// `dsm:token/v1:` payload from a scan. This layer used to decode the Base32
+/// itself and pass 32 bytes, which made it a second decoder for a value whose
+/// encoding has one canonical implementation. Rust decides what a pasted string
+/// means, and rejects a scanned payload whose ticker disagrees with the policy
+/// it actually fetches.
+export async function addTokenByAnchor(
+  args: string | { anchorBase32: string },
+): Promise<{ success: boolean; tokenId?: string; ticker?: string; error?: string }> {
   try {
-    const policyId = typeof args === 'string' ? args : args.anchorBase32;
-    const b32 = String(policyId || '').trim();
-    if (!b32) throw new Error('importTokenPolicy: anchor required');
-    const anchorBytes = new Uint8Array(decodeBase32Crockford(b32));
-    if (anchorBytes.length !== 32) throw new Error('importTokenPolicy: anchor must be 32 bytes');
+    const text = String(typeof args === 'string' ? args : args.anchorBase32 || '').trim();
+    if (!text) throw new Error('addTokenByAnchor: anchor required');
 
-    const policyBytes = await getTokenPolicyBytes(anchorBytes);
-    if (!policyBytes || policyBytes.length === 0) {
-      throw new Error('importTokenPolicy: empty policy bytes');
-    }
+    const raw = await addTokenByAnchorBridge(new TextEncoder().encode(text));
+    const env = decodeFramedEnvelopeV3(raw);
+    const p: any = env.payload;
+    if (p?.case === 'error') throw new Error(p.value?.message || 'add token failed');
+    const r = p?.case === 'tokenCreateResponse' ? p.value : null;
+    if (!r?.success) throw new Error(r?.message || 'add token failed');
 
-    return { success: true };
+    emitWalletRefresh({ source: 'tokens.addByAnchor', tokenId: r.tokenId, anchorBase32: text });
+    return { success: true, tokenId: r.tokenId, ticker: r.message?.replace(/^Added\s*/, '') };
   } catch (e: any) {
-    console.warn('importTokenPolicy failed:', e);
-    return { success: false, error: e.message || String(e) };
+    return { success: false, error: e?.message || String(e) };
   }
+}
+
+/// The scannable adoption payload for a token this device holds.
+///
+/// Rust assembles the complete `dsm:token/v1:` URI so the framing has one
+/// implementation; this fetches it and the fields shown beside it.
+export async function tokenAdoptionQr(tokenIdOrTicker: string): Promise<{
+  uri: string;
+  ticker: string;
+  tokenId: string;
+  policyAnchorB32: string;
+  anchorFingerprint: string;
+}> {
+  const raw = await routerQueryBin(
+    'token.adoptionQr',
+    new TextEncoder().encode(String(tokenIdOrTicker || '').trim()),
+  );
+  const env = decodeFramedEnvelopeV3(raw);
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenAdoptionQrResponse') {
+    throw new Error(`Expected tokenAdoptionQrResponse, got ${env.payload.case}`);
+  }
+  const r = env.payload.value;
+  return {
+    uri: r.uri,
+    ticker: r.ticker,
+    tokenId: r.tokenId,
+    policyAnchorB32: r.policyAnchorB32,
+    anchorFingerprint: r.anchorFingerprint,
+  };
 }
 
 export async function listPolicies(): Promise<Array<{
@@ -202,6 +253,36 @@ export async function publishTokenPolicy(input: {
  * enforced by the token's committed policy conditions in Rust; this layer
  * cannot approve or bypass any of them, and must never try to pre-judge them.
  */
+/// Drop a token's identity from this device.
+///
+/// A ticker names one token, so a device that has adopted one cannot adopt a
+/// different token with the same ticker. Without this there was no way out of
+/// that: a superseded token — one whose creator re-created it, producing a new
+/// policy anchor and therefore a new token id — blocked its own ticker
+/// forever.
+///
+/// The backend refuses while a balance is held, and refuses outright for
+/// protocol assets. Nothing recoverable is lost: the policy is
+/// content-addressed and adoption is online, so it can always be adopted again.
+export async function forgetToken(
+  tokenId: string,
+): Promise<{ success: boolean; message?: string }> {
+  const req = new pb.TokenForgetRequest({ tokenId: String(tokenId || '').trim() } as any);
+  const argPack = new pb.ArgPack({
+    codec: pb.Codec.PROTO as any,
+    body: new Uint8Array(req.toBinary()),
+  });
+  const env = decodeFramedEnvelopeV3(
+    await routerInvokeBin('token.forget', new Uint8Array(argPack.toBinary())),
+  );
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenForgetResponse') {
+    throw new Error(`Expected tokenForgetResponse, got ${env.payload.case}`);
+  }
+  const resp = env.payload.value;
+  return { success: resp.success, message: resp.message };
+}
+
 export async function mintToken(args: { tokenId: string; amount: string | number; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
   try {
     const req = new pb.TokenMintRequest({

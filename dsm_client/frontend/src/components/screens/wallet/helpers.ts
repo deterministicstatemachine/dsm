@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared helpers and types for the wallet screen components.
 import { encodeBase32Crockford } from '../../../utils/textId';
-import { formatTokenAmount } from '../../../utils/tokenMeta';
+import { presentSignedDisplayAmount } from '../../../utils/tokenMeta';
 import type { DomainContact, DomainTransaction } from '../../../domain/types';
 
 // Local UI types
@@ -55,8 +55,14 @@ export function txTypeNumber(tx: DomainTransaction): number {
   }
 }
 
-export function formatTxAmount(abs: bigint, tokenId: string): string {
-  return formatTokenAmount(abs, tokenId);
+/// The rendered magnitude of a transaction.
+///
+/// Rust renders the signed form; a transaction row shows the sign separately
+/// as an arrow and a colour, so drop the leading '-'. That is a presentational
+/// split of a finished string, not a second conversion.
+export function formatTxAmount(tx: DomainTransaction, abs: bigint): string {
+  const signed = presentSignedDisplayAmount(tx.displayAmount, abs);
+  return signed.startsWith('-') ? signed.slice(1) : signed;
 }
 
 export function shortStr(s: string, head = 8, tail = 8): string {

@@ -11,6 +11,7 @@ import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { mapBalanceList, mapContactList, mapIdentity } from '../domain/mappers';
 import type { DomainBalance, DomainContact, DomainIdentity, DomainTransaction } from '../domain/types';
 import { fromBase32Crockford } from '../dsm/decoding';
+import { addTokenByAnchor } from '../dsm/policies';
 import * as dsm from '../dsm/index';
 import { decodeBase32Crockford } from '../utils/textId';
 import { TokenPolicyV3 } from '../proto/dsm_app_pb';
@@ -395,24 +396,23 @@ export class DsmClient {
     }
   }
 
-  async importTokenPolicy(input: { anchorBase32: string }): Promise<{ success: boolean; error?: string }> {
+  /// Add a token by its CPTA anchor so this device can hold it.
+  ///
+  /// This used to just call getTokenPolicyBytes and return success, on the
+  /// assumption that "fetching it will cache it locally". Fetching caches
+  /// nothing that matters: balances are keyed by policy commitment and the
+  /// registry row is what makes a token holdable, so a device that "imported"
+  /// a token still could not receive any of it. Rust now fetches, re-derives
+  /// the anchor from the bytes, parses, and registers.
+  async addTokenByAnchor(
+    input: { anchorBase32: string },
+  ): Promise<{ success: boolean; tokenId?: string; ticker?: string; error?: string }> {
     if (!(await this.isReady())) {
       return { success: false, error: 'Identity not initialized' };
     }
-    const hasB32 = typeof input?.anchorBase32 === 'string' && input.anchorBase32.trim().length > 0;
-    if (!hasB32) return { success: false, error: 'anchor id required' };
-    
-
-    try {
-      const anchor = decodeBase32Crockford(input.anchorBase32.trim());
-      if (anchor.length !== 32) return { success: false, error: 'Invalid anchor length' };
-      
-      // Just fetching it will cache it locally, making it available to usePolicies etc.
-      await dsm.getTokenPolicyBytes(anchor);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e?.message || 'Policy import failed' };
-    }
+    const b32 = String(input?.anchorBase32 || '').trim();
+    if (!b32) return { success: false, error: 'anchor id required' };
+    return addTokenByAnchor({ anchorBase32: b32 });
   }
 
   // `createToken` intentionally does not exist on this class. The exported

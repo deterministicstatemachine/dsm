@@ -9,6 +9,17 @@
 //!
 //! These tests simulate a restart by building a SECOND router against the same
 //! database — the in-memory caches are fresh, exactly as after a relaunch.
+//!
+//! What the registry IS authoritative for is the persisted token IDENTITY
+//! mapping: ticker, token id, policy commitment, metadata. Balances and
+//! transitions remain canonical DeviceState's, so the quantities asserted here
+//! are read from the head, and the registry is only asked what a token is.
+//!
+//! Quantities are BASE UNITS. `TokenCreateRequest` carries display units
+//! because a person typed them, and Rust scales once at that boundary, so the
+//! stored cap is `10^decimals` times the declared one. Storing the display
+//! number would make an enforced supply cap depend on how a UI chose to render
+//! it.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -44,13 +55,20 @@ fn new_router() -> AppRouterImpl {
     AppRouterImpl::new(cfg).expect("AppRouterImpl::new should succeed in test")
 }
 
+/// The request carries DISPLAY units; canonical state and the registry hold
+/// base units. Everything asserted below is scaled by `SCALE`.
+const DECIMALS: u32 = 8;
+const SCALE: u64 = 100_000_000; // 10^DECIMALS
+const DISPLAY_MAX_SUPPLY: u128 = 1_000_000;
+const DISPLAY_ALLOC: u128 = 1_000;
+
 fn create_request(ticker: &str) -> Vec<u8> {
     let req = generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
-        decimals: 8,
-        max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-        initial_alloc_u128: 1_000u128.to_be_bytes().to_vec(),
+        decimals: DECIMALS,
+        max_supply_u128: DISPLAY_MAX_SUPPLY.to_be_bytes().to_vec(),
+        initial_alloc_u128: DISPLAY_ALLOC.to_be_bytes().to_vec(),
         mint_burn_enabled: true,
         transferable: true,
         unlimited_supply: false,
@@ -118,8 +136,14 @@ fn create_writes_durable_registry_and_policy_rows() {
         .expect("registry read")
         .expect("token must be recorded durably at creation");
     assert_eq!(row.ticker, "PERSA");
-    assert_eq!(row.decimals, 8);
-    assert_eq!(row.max_supply, 1_000_000);
+    assert_eq!(row.decimals, DECIMALS);
+    // The BASE-UNIT cap, derived rather than written out, so this states the
+    // rule instead of restating one arithmetic result.
+    assert_eq!(
+        row.max_supply,
+        DISPLAY_MAX_SUPPLY * SCALE as u128,
+        "the registry records the scaled cap, not the declared display number"
+    );
     assert_eq!(row.policy_commit.to_vec(), resp.policy_anchor);
 
     let policy = token_registry::load_policy_verified(&row.policy_commit)
@@ -182,11 +206,16 @@ fn token_survives_restart_and_resolves_from_the_database() {
     );
 }
 
-/// Creating the same token twice must fail on the durable unique constraints
-/// rather than silently producing a second registration of one identity.
+/// ONE IDENTITY, ONE ROW. Resubmitting the identical creation must not produce
+/// a second registration — and, because the token id is the creation
+/// commitment, must not be refused either. The same commitment names the same
+/// token, so it is answered from what is already recorded.
+///
+/// This is the registry's half of the property; the canonical half — one fee,
+/// one advance — is pinned in `token_create_fee_atomicity.rs`.
 #[test]
 #[serial_test::serial]
-fn duplicate_creation_is_rejected_by_the_registry() {
+fn an_identical_resubmission_leaves_one_registry_row() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
@@ -197,13 +226,44 @@ fn duplicate_creation_is_rejected_by_the_registry() {
 
     let again = invoke(&r, "token.create", create_request("PERSC"));
     assert!(
-        !again.success,
-        "a second create for the same ticker must be rejected"
+        again.success,
+        "an identical resubmission must reconcile: {:?}",
+        again.error_message
+    );
+    let again_id = match generated::Envelope::decode(&again.data[1..])
+        .expect("envelope")
+        .payload
+    {
+        Some(generated::envelope::Payload::TokenCreateResponse(t)) => t.token_id,
+        other => panic!("expected TokenCreateResponse, got {other:?}"),
+    };
+    assert_eq!(
+        again_id, first.token_id,
+        "the same commitment must resolve to the same token id"
     );
     assert_eq!(
         token_registry::all_tokens().expect("read").len(),
         1,
         "exactly one row must exist for one token identity"
+    );
+    assert_eq!(
+        token_registry::all_policies().expect("read").len(),
+        1,
+        "and exactly one anchored policy"
+    );
+
+    // Balances are DeviceState's, not the registry's: the allocation must have
+    // been credited once, in base units.
+    let row = token_registry::get_token(&first.token_id)
+        .expect("registry read")
+        .expect("token recorded");
+    assert_eq!(
+        r.core_sdk
+            .device_head()
+            .map(|h| h.balance(&row.policy_commit))
+            .unwrap_or(0),
+        u64::try_from(DISPLAY_ALLOC).expect("fits") * SCALE,
+        "one allocation, in base units"
     );
 }
 

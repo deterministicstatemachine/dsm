@@ -5,7 +5,6 @@ import type { ScreenType } from '../types/app';
 import EnhancedWalletScreen from './screens/EnhancedWalletScreen';
 import ContactsScreen from './screens/ContactsTabScreen';
 import StorageScreen from './screens/StorageScreen';
-import TokenManagementScreen from './screens/TokenManagementScreen';
 import SettingsMainScreen from './screens/SettingsMainScreen';
 import DevDlvScreen from './screens/DevDlvScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
@@ -25,7 +24,6 @@ import AdditionalDeviceScreen from './screens/AdditionalDeviceScreen';
 const MemoWallet = React.memo(EnhancedWalletScreen);
 const MemoContacts = React.memo(ContactsScreen);
 const MemoStorage = React.memo(StorageScreen);
-const MemoTokens = React.memo(TokenManagementScreen);
 const MemoSettings = React.memo(SettingsMainScreen);
 const MemoDevDlv = React.memo(DevDlvScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
@@ -72,8 +70,6 @@ export default function AppScreenRouter({
       return <MemoContacts onNavigate={onNavigate} eraTokenSrc={eraTokenSrc} />;
     case 'storage':
       return <MemoStorage />;
-    case 'tokens':
-      return <MemoTokens />;
     case 'settings':
       return <MemoSettings onNavigate={onNavigate} />;
     case 'dev_dlv':

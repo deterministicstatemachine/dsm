@@ -37,14 +37,37 @@ use crate::types::{
     token_types::TokenMetadata,
 };
 
+/// Loads a token's committed policy from durable storage on a cache miss.
+///
+/// Installed by the SDK, which owns both the durable `token_policies` store and
+/// the single policy parser. Core keeps enforcement; it does not learn to read
+/// the client database or to parse policy bytes a second way.
+///
+/// The implementation is required to re-derive the CPTA anchor from the loaded
+/// bytes and reject anything that does not match, so a miss can never be
+/// satisfied by bytes the storage layer merely *claims* belong to this token.
+pub type PolicyResolver =
+    Arc<dyn Fn(&str) -> Option<(PolicyFile, PolicyAnchor)> + Send + Sync + 'static>;
+
 /// Central token policy system for DSM
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TokenPolicySystem {
     policy_cache: Arc<PolicyCache>,
     enforcer: Arc<PolicyEnforcer>,
     manager: Arc<PolicyManager>,
     validator: Arc<PolicyValidator>,
+    /// In-memory index ONLY. Authority for persisted policy bytes is the
+    /// durable store behind `resolver`; this is a cache in front of it.
     token_policies: Arc<RwLock<HashMap<String, PolicyAnchor>>>,
+    resolver: Arc<RwLock<Option<PolicyResolver>>>,
+}
+
+impl std::fmt::Debug for TokenPolicySystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenPolicySystem")
+            .field("indexed_tokens", &self.token_policies.read().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TokenPolicySystem {
@@ -64,7 +87,13 @@ impl TokenPolicySystem {
             manager,
             validator,
             token_policies: Arc::new(RwLock::new(HashMap::new())),
+            resolver: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Install the durable-storage resolver used on a cache miss.
+    pub fn set_policy_resolver(&self, resolver: PolicyResolver) {
+        *self.resolver.write() = Some(resolver);
     }
 
     pub async fn register_token_policy(
@@ -122,10 +151,35 @@ impl TokenPolicySystem {
     pub async fn get_token_policy(&self, token_id: &str) -> Result<Option<TokenPolicy>, DsmError> {
         let anchor = { self.token_policies.read().get(token_id).cloned() };
         if let Some(anchor) = anchor {
-            self.policy_cache.get_policy(&anchor).await
-        } else {
-            Ok(None)
+            return self.policy_cache.get_policy(&anchor).await;
         }
+
+        // Cache miss is NOT absence. This map lives only as long as the
+        // process, so after a restart every created and adopted token looked
+        // policy-less and enforcement denied them — on device that surfaced as
+        // "Token policy violation for RIGB: No policy registered for token"
+        // while the committed policy sat in durable storage the whole time.
+        //
+        // So a miss consults the durable store rather than concluding. The
+        // resolver re-derives the CPTA anchor from the loaded bytes and returns
+        // None unless it matches exactly, so this can only ever install the
+        // policy the token actually committed to. Genuinely absent, malformed,
+        // or mismatched bytes still yield None and the caller still denies.
+        let resolver = { self.resolver.read().clone() };
+        if let Some(resolver) = resolver {
+            if let Some((policy_file, anchor)) = resolver(token_id) {
+                let policy = TokenPolicy::new_with_anchor(policy_file, anchor.clone());
+                self.policy_cache.store_policy(anchor.clone(), policy);
+                self.policy_cache
+                    .index_token_policy(token_id.to_string(), anchor.clone());
+                self.token_policies
+                    .write()
+                    .insert(token_id.to_string(), anchor.clone());
+                log::info!("[policy] rehydrated {token_id} from durable storage on cache miss");
+                return self.policy_cache.get_policy(&anchor).await;
+            }
+        }
+        Ok(None)
     }
 
     pub async fn enforce_policy(
@@ -287,6 +341,7 @@ impl Default for TokenPolicySystem {
                 manager: Arc::new(PolicyManager::new(PolicyManagerConfig::default())),
                 validator: Arc::new(PolicyValidator::new()),
                 token_policies: Arc::new(RwLock::new(HashMap::new())),
+                resolver: Arc::new(RwLock::new(None)),
             }
         })
     }

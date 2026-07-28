@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
-import { getTokenDecimals } from '../../../utils/tokenMeta';
 import ConfirmModal from '../../ConfirmModal';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
@@ -30,7 +29,10 @@ function SendTabInner({
   setError,
 }: Props): JSX.Element {
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
-    selectedContactKey: contacts.length > 0 ? contacts[0].deviceId : '',
+    // No default recipient. A money form that pre-selects whoever happens to
+    // be first sends to the wrong person the moment the list reorders — and it
+    // reorders on its own. The user picks, explicitly, every time.
+    selectedContactKey: '',
     amount: '',
     token: 'ERA',
     note: '',
@@ -51,6 +53,12 @@ function SendTabInner({
     return tokenOptions.find((b) => b.tokenId === sendForm.token) ?? tokenOptions[0];
   }, [tokenOptions, sendForm.token]);
 
+  // The selected token's decimals, as the wire reported them. They come from
+  // the registry in Rust, so a token created with 2 decimals accepts cents
+  // here. A hardcoded table used to answer this and knew only dBTC, which made
+  // every custom token look like it took whole units only.
+  const selectedDecimals = selectedSendBalance?.decimals ?? 0;
+
   const selectedContact = useMemo(
     () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
     [contacts, sendForm.selectedContactKey],
@@ -68,8 +76,15 @@ function SendTabInner({
       setSendForm((prev) => ({ ...prev, selectedContactKey: '' }));
       return;
     }
-    if (!contacts.some((c) => c.deviceId === sendForm.selectedContactKey)) {
-      setSendForm((prev) => ({ ...prev, selectedContactKey: contacts[0].deviceId }));
+    // If the chosen contact is gone, CLEAR the selection. Substituting
+    // contacts[0] silently retargets a transfer at a different device, which
+    // is the one failure mode a send form must never have. Selection is keyed
+    // by deviceId, so reordering alone never disturbs it.
+    if (
+      sendForm.selectedContactKey &&
+      !contacts.some((c) => c.deviceId === sendForm.selectedContactKey)
+    ) {
+      setSendForm((prev) => ({ ...prev, selectedContactKey: '' }));
     }
   }, [contacts, sendForm.selectedContactKey]);
 
@@ -202,6 +217,11 @@ function SendTabInner({
             <div className="empty-state"><p>No contacts found.</p><p>Add a contact on the Contacts screen to enable sending.</p></div>
           ) : (
             <select id="recipient" value={sendForm.selectedContactKey} onChange={(e) => setSendForm((p) => ({ ...p, selectedContactKey: e.target.value }))} className="form-input" required>
+              {/* An explicit empty option. Without it the select DISPLAYS the
+                  first contact while the form holds no selection at all, which
+                  on a send form reads as "this person is selected" when nobody
+                  is. */}
+              <option value="">— select recipient —</option>
               {contacts.map((c) => (
                 <option key={c.deviceId} value={c.deviceId}>{c.alias}</option>
               ))}
@@ -215,7 +235,7 @@ function SendTabInner({
             return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
           })()} Amount</label>
           <div className="amount-input-group">
-            <input id="amount" type="number" step={(() => { const d = getTokenDecimals(sendForm.token); return d > 0 ? `0.${'0'.repeat(d - 1)}1` : '1'; })()} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={(() => { const d = getTokenDecimals(sendForm.token); return d > 0 ? `0.${'0'.repeat(d)}` : '0'; })()} className="form-input" required />
+            <input id="amount" type="number" step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'} className="form-input" required />
             <select value={sendForm.token} onChange={(e) => setSendForm((p) => ({ ...p, token: e.target.value }))} className="token-selector">
               {tokenOptions.map((b) => (
                 <option key={b.tokenId} value={b.tokenId}>{b.symbol || b.tokenId}</option>
@@ -226,7 +246,22 @@ function SendTabInner({
         <div className="form-group"><label htmlFor="note">Note (Optional)</label><input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="Transaction note" className="form-input" /></div>
         <div className="form-actions">
           <button type="button" onClick={onCancel} className="cancel-button">Cancel</button>
-          <button type="submit" className="send-button button-brick" disabled={contacts.length === 0 || sendingTx}>{sendingTx ? 'Sending…' : 'Send'}</button>
+          {/* The recipient, spelled out immediately above the action that
+              commits it. A device id is the only unambiguous name for who is
+              about to receive this, and it belongs where the decision is made
+              rather than several fields further up. */}
+          <div className="send-recipient-confirm" data-testid="send-recipient-confirm">
+            {selectedContact
+              ? `To: ${selectedContact.deviceId.slice(0, 8)}`
+              : 'Select a recipient'}
+          </div>
+          <button
+            type="submit"
+            className="send-button button-brick"
+            disabled={!sendForm.selectedContactKey || contacts.length === 0 || sendingTx}
+          >
+            {sendingTx ? 'Sending…' : 'Send'}
+          </button>
         </div>
       </form>
       <ConfirmModal

@@ -5,11 +5,25 @@
 //! one SMT root, one CAS. Either the token exists and the fee was paid, or
 //! neither happened. There is no compensating step to get wrong.
 //!
+//! Two properties of the surrounding design shape what these tests assert.
+//!
+//! UNITS. `TokenCreateRequest` carries DISPLAY units, because a person typed
+//! them. Rust scales to base units exactly once, at this boundary, and
+//! everything downstream — the policy bytes, the CPTA anchor, CreateToken,
+//! conservation, the registry cap — is base units. So a request for 250 at
+//! decimals=2 credits 25_000, and the assertions here are in base units.
+//!
+//! IDENTITY. `token_id = BLAKE3(TAG_DSM_TOKEN_ID, policy_anchor ‖ ticker)`,
+//! so the id IS the creation commitment. Resubmitting the same commitment
+//! names the same token and is answered from canonical state; it is not a
+//! second creation to be refused. What must never happen is a second fee, a
+//! second advance, or a second row.
+//!
 //! The properties pinned here:
 //!   * the fee is charged, and burned (no counterparty is credited);
 //!   * insufficient ERA rejects BEFORE anything commits — a failed creation
 //!     burns nothing and advances nothing;
-//!   * a duplicate creation charges once;
+//!   * an identical resubmission reconciles: one fee, one advance, one row;
 //!   * creation still advances canonical state when the allocation is zero,
 //!     so the token exists on the chain either way.
 
@@ -60,13 +74,18 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
     })
 }
 
-fn create_request(ticker: &str, initial_alloc: u128) -> Vec<u8> {
+/// A creation request in DISPLAY units, exactly as the wizard sends them.
+/// `DECIMALS` is what turns those into the base units canonical state holds.
+const DECIMALS: u32 = 2;
+const SCALE: u64 = 100; // 10^DECIMALS
+
+fn create_request(ticker: &str, display_alloc: u128) -> Vec<u8> {
     let req = generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
-        decimals: 2,
+        decimals: DECIMALS,
         max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-        initial_alloc_u128: initial_alloc.to_be_bytes().to_vec(),
+        initial_alloc_u128: display_alloc.to_be_bytes().to_vec(),
         mint_burn_enabled: true,
         transferable: true,
         unlimited_supply: false,
@@ -96,6 +115,16 @@ fn fund_era(router: &AppRouterImpl) {
     .encode_to_vec();
     let res = invoke(router, "faucet.claim", args);
     assert!(res.success, "faucet claim failed: {:?}", res.error_message);
+}
+
+/// The token id from a successful `token.create` reply — the creation
+/// commitment the caller is told it committed to.
+fn token_id_of(res: &dsm_sdk::bridge::AppResult) -> String {
+    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
+    match env.payload {
+        Some(generated::envelope::Payload::TokenCreateResponse(t)) => t.token_id,
+        other => panic!("expected TokenCreateResponse, got {other:?}"),
+    }
 }
 
 fn era_balance(router: &AppRouterImpl) -> u64 {
@@ -147,7 +176,15 @@ fn creation_burns_exactly_the_fee_and_credits_the_allocation() {
         .device_head()
         .map(|h| h.balance(&row.policy_commit))
         .unwrap_or(0);
-    assert_eq!(issued, 250, "initial allocation must be credited");
+    // In BASE UNITS: the request asked for 250 display at DECIMALS, and the
+    // boundary scaled it once. Asserting the display number here would pin the
+    // very disagreement that made a send fail with a balance underflow against
+    // a balance the wallet showed as sufficient.
+    assert_eq!(
+        issued,
+        250 * SCALE,
+        "the initial allocation must be credited in base units"
+    );
 }
 
 /// FAILED CREATION BURNS NOTHING. With insufficient ERA the create must reject
@@ -186,27 +223,77 @@ fn insufficient_era_rejects_and_burns_nothing() {
     );
 }
 
-/// A duplicate creation must charge the fee ONCE. The registry's unique
-/// constraints reject the second attempt before any advance.
+/// AN IDENTICAL RESUBMISSION RECONCILES. It is the retry a caller makes when
+/// the first attempt's reply was lost, and on hardware that is exactly what
+/// happened: the creation committed — fee burned, supply credited, registry
+/// written — while the wizard sat on "Publishing policy…" and then reported
+/// failure.
+///
+/// Because the token id is the creation commitment, the same request names the
+/// same token, so it is answered from canonical state rather than treated as a
+/// second creation. The fee, the advance and the row must each happen once.
+/// Refusing the resubmission instead (which this once asserted) presented one
+/// successful creation as two failures.
+///
+/// A DIFFERENT creation claiming a taken ticker is a hard conflict, not a
+/// reconciliation; that is pinned in `token_create_reconciliation.rs`.
 #[test]
 #[serial_test::serial]
-fn duplicate_creation_charges_the_fee_once() {
+fn an_identical_resubmission_charges_one_fee_and_advances_once() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
     fund_era(&r);
 
     let before = era_balance(&r);
-    assert!(invoke(&r, "token.create", create_request("DUPE", 5)).success);
+    let first = invoke(&r, "token.create", create_request("DUPE", 5));
+    assert!(first.success, "create failed: {:?}", first.error_message);
+    let first_id = token_id_of(&first);
     let after_first = era_balance(&r);
-    assert_eq!(after_first, before - FEE);
+    let root_after_first = head_root(&r);
+    assert_eq!(after_first, before - FEE, "the first creation pays the fee");
 
     let second = invoke(&r, "token.create", create_request("DUPE", 5));
-    assert!(!second.success, "duplicate creation must be rejected");
+    assert!(
+        second.success,
+        "an identical resubmission must reconcile, not fail: {:?}",
+        second.error_message
+    );
+    assert_eq!(
+        token_id_of(&second),
+        first_id,
+        "one commitment names one token"
+    );
     assert_eq!(
         era_balance(&r),
         after_first,
-        "a rejected duplicate must not charge a second fee"
+        "and must not pay a second fee"
+    );
+    // The stronger statement, and the one that actually rules out a duplicate
+    // issuance: canonical state did not move at all. A second advance that
+    // happened to net to the same balances would still be a second creation.
+    assert_eq!(
+        head_root(&r),
+        root_after_first,
+        "a reconciled resubmission must not advance canonical state"
+    );
+    assert_eq!(
+        token_registry::all_tokens().expect("registry read").len(),
+        1,
+        "exactly one registry row for one identity"
+    );
+    assert_eq!(
+        r.core_sdk
+            .device_head()
+            .map(|h| h.balance(
+                &token_registry::get_token_by_ticker("DUPE")
+                    .expect("registry read")
+                    .expect("token recorded")
+                    .policy_commit
+            ))
+            .unwrap_or(0),
+        5 * SCALE,
+        "and the allocation is credited exactly once, in base units"
     );
 }
 

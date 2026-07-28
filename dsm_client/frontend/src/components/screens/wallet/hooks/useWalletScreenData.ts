@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
+import { presentDisplayAmount } from '../../../../utils/tokenMeta';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
-import { formatBtc } from '../../../../services/bitcoinTap';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
 import { bridgeEvents } from '../../../../bridge/bridgeEvents';
 import { buildAliasLookup } from '../helpers';
@@ -94,9 +94,11 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
           .map((b) => ({
             tokenId: b.tokenId,
             symbol: b.symbol || b.ticker || b.tokenId,
-            balance: b.tokenId.toUpperCase() === 'DBTC'
-              ? formatBtc(b.baseUnits)
-              : b.balance,
+            // Rust renders every token from its own decimals, so there is no
+            // special case here any more. dBTC used to be the ONLY token this
+            // scaled, which is exactly why a created token showed its base
+            // units: 100000 where the protocol held 1,000.00.
+            balance: presentDisplayAmount(b.displayAmount, BigInt(b.baseUnits ?? b.balance ?? 0)),
             decimals: b.decimals,
           }));
         setBalances(eraTokens);

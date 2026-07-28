@@ -8,6 +8,8 @@ export type DomainIdentity = {
 };
 
 export type DomainBalance = {
+  /** Display form rendered by Rust. Never computed in this layer. */
+  displayAmount?: string;
   tokenId: string;
   tokenName: string;
   balance: bigint;
@@ -62,6 +64,8 @@ export type DomainTransaction = {
   fromDeviceId?: string;
   toDeviceId?: string;
   amountSigned?: bigint;
+  /** Signed display form rendered by Rust. Never computed in this layer. */
+  displayAmount?: string;
   stitchedReceipt?: Uint8Array;
   receiptVerified?: boolean;
   tokenId?: string;

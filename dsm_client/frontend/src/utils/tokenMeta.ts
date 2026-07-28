@@ -1,51 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
-// Single source of truth for token decimal metadata and amount formatting.
-// ALL components MUST import from here — do not duplicate this logic elsewhere.
+// Amount rendering does NOT live here.
+//
+// This file used to hold a hardcoded decimals table (dBTC and BTC at 8,
+// everything else 0) and bigint conversion helpers. The table could not know
+// about created or adopted CPTA tokens, so a token declared with 2 decimals
+// rendered as whole units everywhere it appeared — the transfer dialog,
+// transaction lists, contact history. That is the same defect that displayed a
+// balance of 100_000 base units as "100000" rather than "1,000.00", reached by
+// a different route.
+//
+// The token's decimals are registry data and the conversion is protocol
+// arithmetic, so both belong to Rust. Every wire message that carries an
+// amount now carries its rendered display form beside it
+// (BalanceGetResponse.display_amount, TransactionInfo.display_amount), and
+// this layer prints that string.
 
 /**
- * Canonical decimal places per token (keyed by uppercased token ID).
- * Tokens not listed here default to 0 (whole-unit tokens like ERA).
+ * Present a display amount that arrived from Rust.
  *
- * dBTC: 8 decimals (1 dBTC = 100_000_000 satoshi base units)
- * ERA:  0 decimals (whole units — confirmed design intent)
+ * The fallback exists only for records written before the field did; it prints
+ * base units rather than inventing a scale, because a wrong number is worse
+ * than an unscaled one.
  */
-const TOKEN_DECIMALS: Record<string, number> = {
-  DBTC: 8,
-  BTC: 8,
-};
-
-/**
- * Returns the number of decimal places for a token.
- * Case-insensitive. Unknown/undefined tokens return 0.
- */
-export function getTokenDecimals(tokenId: string | undefined): number {
-  if (!tokenId) return 0;
-  return TOKEN_DECIMALS[tokenId.trim().toUpperCase()] ?? 0;
+export function presentDisplayAmount(
+  displayAmount: string | undefined,
+  baseUnits: bigint,
+): string {
+  return displayAmount && displayAmount.length > 0
+    ? displayAmount
+    : baseUnits.toString();
 }
 
 /**
- * Format an absolute (unsigned) bigint base-unit amount as a human-readable decimal string.
- * Uses pure bigint arithmetic — no Number() cast, no precision loss.
- *
- * @param abs     Absolute base-unit magnitude (must be ≥ 0n)
- * @param tokenId Token identifier (determines decimal places)
+ * Present a signed display amount that arrived from Rust.
  */
-export function formatTokenAmount(abs: bigint, tokenId: string): string {
-  const decimals = getTokenDecimals(tokenId);
-  if (decimals === 0) return abs.toString();
-  const scale = BigInt(10 ** decimals);
-  const whole = abs / scale;
-  const frac = abs % scale;
-  const fracStr = frac.toString().padStart(decimals, '0').replace(/0+$/, '') || '0';
-  return `${whole}.${fracStr}`;
-}
-
-/**
- * Format a signed bigint amount (positive = incoming, negative = outgoing).
- * Returns the formatted decimal string including the sign prefix.
- */
-export function formatSignedTokenAmount(amount: bigint, tokenId: string): string {
-  const isOutgoing = amount < 0n;
-  const abs = isOutgoing ? -amount : amount;
-  return `${isOutgoing ? '-' : ''}${formatTokenAmount(abs, tokenId)}`;
+export function presentSignedDisplayAmount(
+  displayAmount: string | undefined,
+  baseUnitsSigned: bigint,
+): string {
+  if (displayAmount && displayAmount.length > 0) return displayAmount;
+  const negative = baseUnitsSigned < 0n;
+  const abs = negative ? -baseUnitsSigned : baseUnitsSigned;
+  return `${negative ? '-' : ''}${abs.toString()}`;
 }

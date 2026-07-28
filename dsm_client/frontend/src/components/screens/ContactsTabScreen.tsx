@@ -12,7 +12,7 @@ import { useTransactions } from '../../hooks/useTransactions';
 import { startPairingAll, stopPairingAll } from '../../dsm/WebViewBridge';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
 import StitchedReceiptDetails from '../receipts/StitchedReceiptDetails';
-import { formatSignedTokenAmount } from '../../utils/tokenMeta';
+import { presentSignedDisplayAmount } from '../../utils/tokenMeta';
 import { useDpadNav } from '../../hooks/useDpadNav';
 
 interface Props { onNavigate?: (screen: string) => void; eraTokenSrc?: string }
@@ -598,7 +598,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                                 const direction = tx.amount < 0n ? 'Sent' : 'Received';
                                 const rawTokenId = (tx as { tokenId?: string }).tokenId || 'ERA';
                                 const tokenId = rawTokenId.toUpperCase();
-                                const amountLabel = `${formatSignedTokenAmount(tx.amount, rawTokenId)} ${tokenId}`;
+                                const amountLabel = `${presentSignedDisplayAmount(tx.displayAmount, tx.amount)} ${tokenId}`;
                                 const summary = `#${idx + 1} · ${direction} ${amountLabel}`;
                                 return (
                                   <details key={`${tx.txId}-${idx}`}>

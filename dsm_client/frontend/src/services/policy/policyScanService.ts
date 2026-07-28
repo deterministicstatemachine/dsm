@@ -27,7 +27,7 @@ export async function importTokenPolicyFromScanData(scanData: string): Promise<{
     }
 
     const canonicalB32 = encodeBase32Crockford(bytes);
-    const res = await dsmClient.importTokenPolicy({ anchorBase32: canonicalB32 });
+    const res = await dsmClient.addTokenByAnchor({ anchorBase32: canonicalB32 });
     if (!res.success) {
       return { ok: false, message: res.error || 'Import failed' };
     }

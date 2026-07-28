@@ -6,8 +6,11 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import LoadingSpinner from '../common/LoadingSpinner';
 import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
-import { formatBtc } from '../../services/bitcoinTap';
 import { useDpadNav } from '../../hooks/useDpadNav';
+import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
+import { TokenCreationDialog } from '../TokenCreationDialog';
+import TokenIdentityPanel from '../TokenIdentityPanel';
+import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
 
 type TokenSymbol = 'ERA' | string;
 type Tab = 'tokens' | 'faucet';
@@ -17,9 +20,14 @@ export interface TokenBalance {
   balance: string;        // human-readable (already scaled by backend)
   symbol: TokenSymbol;
   lastUpdated?: number;   // optional, backend-provided; not used for logic
+  /** The token's canonical id — `tokenId` here is the ticker, not an identity. */
+  canonicalTokenId?: string;
+  /** CPTA policy anchor, Base32 Crockford, rendered by Rust. */
+  policyAnchorB32?: string;
+  /** Short head of the anchor, for reading against a peer's screen. */
+  anchorFingerprint?: string;
 }
 
-const ATOMIC_DECIMALS_DEFAULT = 8; // used only if backend returns atomic amounts
 
 interface CptaInfo {
   cptaType: string;
@@ -49,32 +57,20 @@ const CPTA_INFO: Record<string, CptaInfo> = {
   },
 };
 
-function formatTokens(tokensReceived: unknown, humanScaled?: boolean, decimals = ATOMIC_DECIMALS_DEFAULT): string {
-  // Accept string | number | bigint; fall back to string echo.
-  if (humanScaled) return String(tokensReceived);
-
-  // Try numeric conversion
-  const n =
-    typeof tokensReceived === 'bigint'
-      ? Number(tokensReceived)
-      : typeof tokensReceived === 'number'
-      ? tokensReceived
-      : Number(tokensReceived as any);
-
-  if (!Number.isFinite(n)) return String(tokensReceived ?? '');
-
-  const denom = Math.pow(10, decimals >>> 0);
-  return (n / denom).toFixed(decimals);
-}
-
-function formatCompactDbtc(sats: bigint): string {
-  if (sats === 0n) return '0.00';
-  if (sats >= 1000000n) {
-    const [whole, frac = '00'] = formatBtc(sats).split('.');
-    return `${whole}.${frac.slice(0, 2)}`;
-  }
-  return formatBtc(sats).replace(/0+$/, '').replace(/\.$/, '');
-}
+const SUPPLY_BTN: React.CSSProperties = {
+  flex: 1,
+  padding: '8px 10px',
+  fontSize: 9,
+  fontFamily: "'Martian Mono', monospace",
+  textTransform: 'uppercase',
+  letterSpacing: 0.6,
+  fontWeight: 700,
+  background: 'var(--bg)',
+  color: 'var(--text)',
+  border: '2px solid var(--border)',
+  borderRadius: 0,
+  cursor: 'pointer',
+};
 
 const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = ({ eraTokenSrc = 'images/logos/era_token_gb.gif', btcLogoSrc = 'images/logos/btc-logo.gif' }) => {
   const { refreshAll, isInitialized } = useWallet();
@@ -86,6 +82,32 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedToken, setExpandedToken] = useState<string | null>(null);
   const faucetEnabled = !!isInitialized || !!(window as any).DsmBridge;
+
+  // Token creation and supply control. ERA and dBTC are protocol-defined, so
+  // they are described by CPTA_INFO and are not user-mintable; anything else in
+  // this list was created by this device and carries its own policy.
+  const [creating, setCreating] = useState(false);
+  /// Adding a token created elsewhere, by its CPTA anchor. A device cannot
+  /// hold a token whose policy it does not have, so this is the step between
+  /// someone creating a token and this device being able to receive any.
+  const [addingAnchor, setAddingAnchor] = useState<string | null>(null);
+  /// The adopted token's identifiers, kept on screen until dismissed. A
+  /// snackbar that fades is not an acknowledgement for something the user may
+  /// need to write down or check against the creating device.
+  const [addedToken, setAddedToken] = useState<
+    { ticker: string; tokenId: string; anchorBase32: string } | null
+  >(null);
+  const [supplyAction, setSupplyAction] = useState<{ tokenId: string; kind: 'mint' | 'burn' } | null>(null);
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const isProtocolToken = useCallback(
+    (b: TokenBalance) =>
+      Boolean(
+        CPTA_INFO[(b.tokenId || '').toUpperCase()] || CPTA_INFO[(b.symbol || '').toUpperCase()],
+      ),
+    [],
+  );
 
   const hasBalances = useMemo(() => balances.length > 0, [balances]);
 
@@ -99,11 +121,21 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       const list: TokenBalance[] = (raw as any[]).map((b: any) => ({
         tokenId: String(b.tokenId || ''),
         symbol: String(b.symbol || b.tokenName || b.tokenId || ''),
-        balance: String(b.tokenId || '').toUpperCase() === 'DBTC'
-          ? formatCompactDbtc(typeof b.balance === 'bigint' ? b.balance : BigInt(b.balance || 0))
-          : String(b.balance ?? '0'),
+        // Rust renders the display amount; this screen shows it.
+        //
+        // Converting base units here would be a SECOND implementation of the
+        // unit rule, and two implementations disagree — which is precisely how
+        // a token holding 100,000 base units at 2 decimals came to be created
+        // as 1,000 and displayed as 100000. Amount conversion has one owner, in
+        // Rust, in both directions.
+        balance: String(b.displayAmount ?? b.balance ?? '0'),
+        // The anchor a peer needs to adopt this token, carried from Rust.
+        canonicalTokenId: String(b.canonicalTokenId ?? ''),
+        policyAnchorB32: String(b.policyAnchorB32 ?? ''),
+        anchorFingerprint: String(b.anchorFingerprint ?? ''),
       }));
       setBalances(list);
+      return list;
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to load balances';
       setError(msg);
@@ -115,6 +147,40 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   useEffect(() => {
     void loadBalances();
   }, [loadBalances]);
+
+  // Rust emits dsm-wallet-refresh beside the registry write, so the list
+  // refreshes from persisted state whatever caused the change — including an
+  // adoption that happened while this screen was already open.
+  useWalletRefreshListener(loadBalances, [loadBalances]);
+
+  /// Forget a token's identity, after saying plainly what that means.
+  ///
+  /// It removes the NAMING only — canonical balances are untouched, and Rust
+  /// refuses outright while any balance is held. The token can be adopted
+  /// again from its anchor, so this is reversible while online.
+  const handleForget = useCallback(async (b: TokenBalance) => {
+    const label = b.symbol || b.tokenId;
+    if (!window.confirm(
+      `Forget ${label}?\n\nThis removes the token from this device so its ticker ` +
+      `can be used by another token. Your balance is not affected, and you can ` +
+      `add ${label} again from its CPTA anchor while online.`,
+    )) return;
+    setBusy(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const res = await forgetToken(b.tokenId);
+      if (!res.success) throw new Error(res.message || 'forget failed');
+      setSuccessMsg(res.message || `${label} forgotten`);
+      setExpandedToken(null);
+      await loadBalances();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to forget token');
+    } finally {
+      setBusy(false);
+    }
+  }, [loadBalances]);
+
 
   const claimFromFaucet = useCallback(
     async (tokenId: string, symbol: string) => {
@@ -141,7 +207,10 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         // Some bridge paths may not include tokensReceived/humanScaled; keep UI deterministic.
         const rawTokens = (result as any)?.tokensReceived;
         const tokensHuman =
-          rawTokens == null ? '—' : formatTokens(rawTokens, (result as any)?.humanScaled, ATOMIC_DECIMALS_DEFAULT);
+          // ERA is a whole-unit token, so the claimed amount IS its display
+          // form. This used to divide by 10^8 in floating point, which is both
+          // the wrong scale and the wrong arithmetic for an amount.
+          rawTokens == null ? '—' : String(rawTokens);
         const nextAvail = result?.nextAvailable != null ? String(result.nextAvailable) : '—';
 
         await loadBalances();
@@ -170,23 +239,98 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     [loadBalances, refreshAll]
   );
 
+  /// Run a mint or burn and show whatever the policy decided, verbatim.
+  ///
+  /// The amount goes to Rust exactly as typed — no client-side rescaling — and
+  /// this never pre-judges whether the operation is permitted. Authority,
+  /// k-of-N threshold and the supply cap are the committed policy's call, and
+  /// its refusal is the message the user sees.
+  const runSupplyAction = useCallback(async () => {
+    if (!supplyAction || !amount.trim()) return;
+    setBusy(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const fn = supplyAction.kind === 'mint' ? mintToken : burnToken;
+      const res = await fn({ tokenId: supplyAction.tokenId, amount: amount.trim() });
+      if (res?.success) {
+        setSuccessMsg(`${supplyAction.kind === 'mint' ? 'Minted' : 'Burned'} ${amount.trim()} ${supplyAction.tokenId}.`);
+        setSupplyAction(null);
+        setAmount('');
+        await loadBalances();
+        try {
+          await refreshAll();
+        } catch {
+          /* non-fatal refresh miss */
+        }
+      } else {
+        setError(res?.message || `${supplyAction.kind} failed`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `${supplyAction.kind} failed`);
+    } finally {
+      setBusy(false);
+    }
+  }, [supplyAction, amount, loadBalances, refreshAll]);
+
+  /// Add a token by CPTA anchor and show whatever Rust decided.
+  const runAddToken = useCallback(async () => {
+    const anchor = (addingAnchor || '').trim();
+    if (!anchor) return;
+    setBusy(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const res = await addTokenByAnchor({ anchorBase32: anchor });
+      if (res?.success) {
+        // Reload from the persisted registry before announcing anything. The
+        // route's reply says what Rust did; the list must show what Rust
+        // KEPT. Rendering an optimistic row would claim a token is holdable
+        // on the strength of a response rather than of stored state.
+        const rows = await loadBalances();
+        // Show the anchor RUST holds, not the text the user pasted. A scanned
+        // payload is a `dsm:token/v1:` URI, and echoing it under the label
+        // "Policy Anchor (CPTA)" tells the reader that a URI is an anchor —
+        // then they hand that to the next person and it resolves to nothing.
+        const adopted = (rows || []).find(
+          (b) => b.canonicalTokenId === res.tokenId || b.tokenId === res.tokenId,
+        );
+        setAddedToken({
+          ticker: res.ticker || '',
+          tokenId: res.tokenId || '',
+          anchorBase32: adopted?.policyAnchorB32 || '',
+        });
+        setAddingAnchor(null);
+      } else {
+        setError(res?.error || 'Could not add that token');
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not add that token');
+    } finally {
+      setBusy(false);
+    }
+  }, [addingAnchor, loadBalances]);
+
   // --- D-pad navigation ---
-  // Items: [Balances tab, Faucet tab, ...content items]
+  // Items: [Balances tab, Faucet tab, Create token, ...content items]
   const contentItemCount = activeTab === 'tokens' ? balances.length : 1; // 1 = claim button
-  const navItemCount = 2 + contentItemCount; // 2 tabs + content
+  const createOffset = activeTab === 'tokens' ? 1 : 0; // the create button
+  const navItemCount = 2 + createOffset + contentItemCount;
 
   const { focusedIndex } = useDpadNav({
     itemCount: navItemCount,
     onSelect: (idx) => {
       if (idx === 0) { setActiveTab('tokens'); return; }
       if (idx === 1) { setActiveTab('faucet'); return; }
-      // Content items (idx >= 2)
+      if (activeTab === 'tokens' && idx === 2) { setCreating(true); return; }
+      // Content items
       if (activeTab === 'faucet') {
         void claimFromFaucet(balances[0]?.tokenId || 'era', 'ERA');
       }
       // Token items: toggle expand on select
-      if (activeTab === 'tokens' && balances[idx - 2]) {
-        const tid = balances[idx - 2].tokenId;
+      const tokenIdx = idx - 2 - createOffset;
+      if (activeTab === 'tokens' && balances[tokenIdx]) {
+        const tid = balances[tokenIdx].tokenId;
         setExpandedToken((prev) => (prev === tid ? null : tid));
       }
     },
@@ -293,6 +437,140 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
 
           {activeTab === 'tokens' ? (
             <div style={{ width: '100%' }}>
+              <button
+                type="button"
+                className={`wallet-style-button${fc(2)}`}
+                onClick={() => setCreating(true)}
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  marginBottom: 10,
+                  fontSize: 9,
+                  fontFamily: "'Martian Mono', monospace",
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.6,
+                  fontWeight: 700,
+                  background: 'transparent',
+                  color: 'var(--text-dark)',
+                  border: '2px solid var(--border)',
+                  borderRadius: 0,
+                  cursor: 'pointer',
+                }}
+              >
+                + Create Token
+              </button>
+
+              {/* Adopting someone else's token. Separate from creation because
+                  it is a different act: no policy is authored, no fee is
+                  burned, nothing is issued — this device is only learning the
+                  rules of a token that already exists so it can hold it. */}
+              {addingAnchor === null ? (
+                <button
+                  type="button"
+                  onClick={() => { setAddingAnchor(''); setError(null); setSuccessMsg(null); }}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    marginBottom: 10,
+                    fontSize: 9,
+                    fontFamily: "'Martian Mono', monospace",
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.6,
+                    fontWeight: 700,
+                    background: 'transparent',
+                    color: 'var(--text-dark)',
+                    border: '2px solid var(--border)',
+                    borderRadius: 0,
+                    cursor: 'pointer',
+                  }}
+                >
+                  + Add Token (CPTA)
+                </button>
+              ) : (
+                <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <input
+                    type="text"
+                    placeholder="CPTA policy anchor"
+                    aria-label="CPTA policy anchor"
+                    value={addingAnchor}
+                    onChange={(e) => setAddingAnchor(e.target.value)}
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '8px 10px',
+                      fontSize: 9,
+                      fontFamily: "'Martian Mono', monospace",
+                      background: 'var(--bg)',
+                      color: 'var(--text)',
+                      border: '2px solid var(--border)',
+                      borderRadius: 0,
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      type="button"
+                      disabled={busy || !addingAnchor.trim()}
+                      onClick={() => void runAddToken()}
+                      style={SUPPLY_BTN}
+                    >
+                      {busy ? 'ADDING...' : 'ADD'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setAddingAnchor(null)}
+                      style={SUPPLY_BTN}
+                    >
+                      CANCEL
+                    </button>
+                  </div>
+                </div>
+              )}
+              {addedToken && (
+                <div
+                  role="status"
+                  style={{
+                    marginBottom: 10,
+                    padding: 10,
+                    border: '2px solid var(--border)',
+                    background: 'var(--text-dark)',
+                    color: 'var(--bg)',
+                    fontFamily: "'Martian Mono', monospace",
+                    fontSize: 8,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  <div style={{ fontWeight: 700, fontSize: 9, marginBottom: 6 }}>
+                    {addedToken.ticker ? `${addedToken.ticker} added` : 'Token added'}
+                  </div>
+                  <div style={{ opacity: 0.7, fontSize: 6, textTransform: 'uppercase' }}>Token ID</div>
+                  <div style={{ wordBreak: 'break-all', marginBottom: 4 }}>{addedToken.tokenId}</div>
+                  <div style={{ opacity: 0.7, fontSize: 6, textTransform: 'uppercase' }}>
+                    Policy Anchor (CPTA)
+                  </div>
+                  <div style={{ wordBreak: 'break-all', marginBottom: 8 }}>
+                    {addedToken.anchorBase32}
+                  </div>
+                  <button type="button" onClick={() => setAddedToken(null)} style={SUPPLY_BTN}>
+                    OK
+                  </button>
+                </div>
+              )}
+              {successMsg && (
+                <div
+                  role="status"
+                  style={{
+                    fontSize: 8,
+                    color: 'var(--text-dark)',
+                    border: '1px solid var(--border)',
+                    padding: 8,
+                    marginBottom: 10,
+                    fontFamily: "'Martian Mono', monospace",
+                  }}
+                >
+                  {successMsg}
+                </div>
+              )}
               {!hasBalances ? (
                 <div style={{
                   textAlign: 'center',
@@ -312,7 +590,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                     const isBtc = sym.includes('btc') || sym.includes('dbtc');
                     const logoSrc = isBtc ? btcLogoSrc : eraTokenSrc;
                     const logoAlt = isBtc ? 'BTC' : 'ERA';
-                    const isFocused = focusedIndex === 2 + bIdx;
+                    const isFocused = focusedIndex === 2 + createOffset + bIdx;
                     const isExpanded = expandedToken === balance.tokenId;
                     const cpta = CPTA_INFO[(balance.tokenId || '').toUpperCase()] || CPTA_INFO[(balance.symbol || '').toUpperCase()];
                     const isZero = !balance.balance || balance.balance === '0' || balance.balance === '0.00000000';
@@ -442,6 +720,107 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           </div>
                         </div>
                       )}
+
+                      {/* Identity — for EVERY token, not just the two in the
+                          hardcoded CPTA table. A creator needs the anchor to
+                          hand this token to a peer, and had no way to see it. */}
+                      {isExpanded && (
+                        <TokenIdentityPanel
+                          tokenId={balance.tokenId}
+                          canonicalTokenId={balance.canonicalTokenId}
+                          symbol={String(balance.symbol || '')}
+                          policyAnchorB32={balance.policyAnchorB32}
+                          anchorFingerprint={balance.anchorFingerprint}
+                          isProtocolToken={isProtocolToken(balance)}
+                        />
+                      )}
+
+                      {/* Supply controls — only for tokens this device created.
+                          ERA and dBTC are protocol-defined and deliberately
+                          offer nothing here. */}
+                      {isExpanded && !isProtocolToken(balance) && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            padding: '8px 10px 10px',
+                            borderTop: '1px solid rgba(var(--bg-rgb),0.14)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                          }}
+                        >
+                          {supplyAction?.tokenId === balance.tokenId ? (
+                            <>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="0"
+                                value={amount}
+                                onChange={(e) => setAmount(e.target.value)}
+                                aria-label={`${supplyAction.kind} amount`}
+                                style={{
+                                  width: '100%',
+                                  boxSizing: 'border-box',
+                                  padding: '8px 10px',
+                                  fontSize: 10,
+                                  fontFamily: "'Martian Mono', monospace",
+                                  background: 'var(--bg)',
+                                  color: 'var(--text)',
+                                  border: '2px solid var(--border)',
+                                  borderRadius: 0,
+                                }}
+                              />
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                  type="button"
+                                  disabled={busy || !amount.trim()}
+                                  onClick={() => void runSupplyAction()}
+                                  style={SUPPLY_BTN}
+                                >
+                                  {busy ? 'WORKING...' : 'CONFIRM'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => { setSupplyAction(null); setAmount(''); }}
+                                  style={SUPPLY_BTN}
+                                >
+                                  CANCEL
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              <button
+                                type="button"
+                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'mint' }); setAmount(''); }}
+                                style={SUPPLY_BTN}
+                              >
+                                MINT
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setSupplyAction({ tokenId: balance.tokenId, kind: 'burn' }); setAmount(''); }}
+                                style={SUPPLY_BTN}
+                              >
+                                BURN
+                              </button>
+                              {/* Dropping the identity, not the asset. A ticker
+                                  names one token, so a superseded token blocks
+                                  its own ticker until it is forgotten. Rust
+                                  refuses while a balance is held. */}
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => { void handleForget(balance); }}
+                                style={SUPPLY_BTN}
+                              >
+                                FORGET
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     );
                   })}
@@ -532,6 +911,15 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       <div className="navigation-hint" style={{ color: 'var(--text-dark)', marginTop: 'auto', paddingTop: 20, fontSize: 8 }}>
         Press B to go back
       </div>
+
+      {creating && (
+        <TokenCreationDialog
+          onClose={() => setCreating(false)}
+          onSuccess={() => {
+            void loadBalances();
+          }}
+        />
+      )}
     </div>
   );
 };

@@ -304,6 +304,14 @@ export interface TokenBalanceView {
   decimals: number;
   symbol: string;
   tokenName?: string;
+  /** Display form of `baseUnits`, rendered by Rust. Never computed here. */
+  displayAmount?: string;
+  /** The token's canonical id. `tokenId` on the wire is the TICKER, which is not an identity. */
+  canonicalTokenId?: string;
+  /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */
+  policyAnchorB32?: string;
+  /** Short head of the anchor, for visual comparison before adopting. */
+  anchorFingerprint?: string;
 }
 
 /**

@@ -196,6 +196,29 @@ pub fn insert_token(row: &TokenRegistryRow) -> Result<()> {
     insert_token_with_conn(&conn, row)
 }
 
+/// Drop a token's identity row and its anchored policy.
+///
+/// The CALLER is responsible for refusing when the token is still held —
+/// canonical state, not this table, knows the balance. This only removes the
+/// naming, which is exactly what makes a superseded ticker adoptable again.
+/// The policy is content-addressed, so it can always be re-fetched.
+pub fn delete_token(token_id: &str) -> Result<Option<TokenRegistryRow>> {
+    let Some(row) = get_token(token_id)? else {
+        return Ok(None);
+    };
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.execute(
+        "DELETE FROM token_registry WHERE token_id = ?1",
+        params![row.token_id],
+    )?;
+    conn.execute(
+        "DELETE FROM token_policies WHERE policy_commit = ?1",
+        params![row.policy_commit.as_slice()],
+    )?;
+    Ok(Some(row))
+}
+
 pub fn get_token(token_id: &str) -> Result<Option<TokenRegistryRow>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());

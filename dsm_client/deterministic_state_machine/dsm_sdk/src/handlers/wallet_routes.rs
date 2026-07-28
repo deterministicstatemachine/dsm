@@ -74,40 +74,129 @@ fn parse_cached_policy_metadata(policy_bytes: &[u8]) -> Option<CachedPolicyMetad
     }
 }
 
-fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
+/// The token's decimal places, from the authority for that token.
+///
+/// ERA and dBTC are protocol-defined; everything else is a created or adopted
+/// token whose decimals live in the registry. There is no hardcoded table:
+/// one existed in TypeScript, knew only dBTC, and silently rendered every
+/// custom token as whole units.
+pub fn decimals_for_token(token_id: &str) -> u32 {
+    match token_id.trim().to_uppercase().as_str() {
+        "ERA" => 0,
+        "DBTC" | "BTC" => 8,
+        other => crate::storage::client_db::token_registry::get_token_by_ticker(other)
+            .ok()
+            .flatten()
+            .map(|row| row.decimals)
+            .unwrap_or(0),
+    }
+}
+
+/// A signed amount rendered for display, sign included.
+///
+/// Transaction history shows outgoing amounts negative. The magnitude is
+/// converted by the same function that renders balances, so a transfer and the
+/// balance it moved can never disagree about what a unit is.
+pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> String {
+    let magnitude = amount.unsigned_abs();
+    let rendered = format_base_units_for_display(magnitude, decimals);
+    if amount < 0 {
+        format!("-{rendered}")
+    } else {
+        rendered
+    }
+}
+
+/// Render a transaction's amount for display, from the token's own decimals.
+///
+/// `amount` and `amount_signed` remain canonical base units; this only adds
+/// the string a UI prints. Amounts that predate signed accounting carry
+/// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
+/// rendering every historical row as zero.
+pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) {
+    let decimals = decimals_for_token(&tx.token_id);
+    tx.display_amount = if tx.amount_signed != 0 {
+        format_signed_base_units_for_display(tx.amount_signed, decimals)
+    } else {
+        format_base_units_for_display(tx.amount, decimals)
+    };
+}
+
+pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
     let token_id = reply.token_id.trim().to_uppercase();
     match token_id.as_str() {
         "ERA" => {
             reply.symbol = "ERA".to_string();
             reply.decimals = 0;
             reply.token_name = "ERA".to_string();
+            reply.display_amount = format_base_units_for_display(reply.available, 0);
+            if let Some(c) = crate::policy::builtin_policy_commit("ERA") {
+                set_anchor(reply, &c);
+            }
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
             reply.symbol = "dBTC".to_string();
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
+            reply.display_amount = format_base_units_for_display(reply.available, 8);
+            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+                set_anchor(reply, &c);
+            }
         }
-        // Custom token metadata enrichment formerly read `dsm.token.<id>` +
-        // `dsm.policy.<anchor>` from app_state.  Those writers are gone
-        // (plan Part E) and the readers were orphans.  The authoritative
-        // source is the in-memory TokenSDK metadata cache; a follow-up
-        // commit wires enrichment through a typed lookup on AppRouterImpl.
-        // For now the response carries its canonicalised token_id with
-        // default decimals; builtin ERA/dBTC paths above remain exact.
-        _ => {}
+        // Created and adopted tokens carry their own decimals, and the wire
+        // amount is BASE UNITS. Leaving decimals at the default meant a
+        // consumer had no way to render 100_000 base units as "1,000.00" —
+        // on device the wallet showed "100000 RIGB" for a token whose
+        // canonical allocation was correct. The registry is authoritative for
+        // this mapping, so read it rather than defaulting.
+        _ => {
+            if let Ok(Some(row)) =
+                crate::storage::client_db::token_registry::get_token_by_ticker(&reply.token_id)
+            {
+                reply.symbol = row.ticker.clone();
+                reply.token_name = if row.alias.is_empty() {
+                    row.ticker
+                } else {
+                    row.alias
+                };
+                reply.decimals = row.decimals;
+                reply.canonical_token_id = row.token_id.clone();
+                set_anchor(reply, &row.policy_commit);
+            }
+            reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
+        }
     }
 }
 
+/// How much of an anchor is enough to compare by eye.
+///
+/// Long enough that two anchors are not going to agree on it by accident, short
+/// enough to actually read off a screen. It is a comparison aid and never an
+/// identifier: nothing resolves a token by fingerprint.
+const ANCHOR_FINGERPRINT_LEN: usize = 8;
+
+/// Render a token's CPTA policy anchor onto the wire record.
+///
+/// A creator could not see the anchor of a token it had created — the adoption
+/// card showed one, the creator's screen showed nothing — so handing it to a
+/// peer meant deriving it by hand, off-device. Base32 Crockford, encoded by the
+/// canonical encoder, because a second encoder gets the trailing-group padding
+/// wrong and produces a plausible string that resolves to nothing.
+fn set_anchor(reply: &mut generated::BalanceGetResponse, policy_commit: &[u8; 32]) {
+    let b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
+    reply.anchor_fingerprint = b32.chars().take(ANCHOR_FINGERPRINT_LEN).collect();
+    reply.policy_anchor_b32 = b32;
+}
+
 fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
-    for token_id in ["ERA", "dBTC"] {
+    let push_zero = |items: &mut Vec<generated::BalanceGetResponse>, token_id: &str| {
         if items
             .iter()
             .any(|item| item.token_id.eq_ignore_ascii_case(token_id))
         {
-            continue;
+            return;
         }
-
         let mut reply = generated::BalanceGetResponse {
             token_id: token_id.to_string(),
             available: 0,
@@ -116,6 +205,26 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
         };
         enrich_balance_metadata(&mut reply);
         items.push(reply);
+    };
+
+    for token_id in ["ERA", "dBTC"] {
+        push_zero(items, token_id);
+    }
+
+    // Every token in the registry is visible, held or not.
+    //
+    // The list was built purely from balance projections, so a token this
+    // device had ADOPTED but held none of did not appear at all. On D3 the
+    // CPTA add succeeded — registry row written, policy stored — and the
+    // Tokens screen still showed only ERA and dBTC, which is indistinguishable
+    // from the add having failed. Worse, it hides the token you must be able
+    // to see in order to receive any of it.
+    //
+    // Registry membership, not balance, is what makes a token yours to hold.
+    if let Ok(rows) = crate::storage::client_db::token_registry::all_tokens() {
+        for row in rows {
+            push_zero(items, &row.ticker);
+        }
     }
 }
 
@@ -145,6 +254,26 @@ pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
             .flatten()
             .map(|row| row.decimals)
             .unwrap_or(0),
+    }
+}
+
+/// Render canonical base units as a display amount. The inverse of
+/// [`parse_display_amount_to_base_units`], and deliberately its neighbour:
+/// amount conversion has ONE owner, in Rust, in both directions.
+///
+/// Integer/string arithmetic — the digits are split, never divided — so a large
+/// balance stays exact where floating point would round it.
+pub fn format_base_units_for_display(base_units: u64, decimals: u32) -> String {
+    if decimals == 0 {
+        return base_units.to_string();
+    }
+    let digits = base_units.to_string();
+    let d = decimals as usize;
+    if digits.len() <= d {
+        format!("0.{}", "0".repeat(d - digits.len()) + &digits)
+    } else {
+        let (whole, frac) = digits.split_at(digits.len() - d);
+        format!("{whole}.{frac}")
     }
 }
 
@@ -434,6 +563,8 @@ impl AppRouterImpl {
                         };
 
                         generated::TransactionInfo {
+                            // Filled at the encoding boundary by enrich_transaction_display.
+                            display_amount: String::new(),
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
@@ -493,6 +624,14 @@ impl AppRouterImpl {
                     })
                     .collect();
 
+                // Rendered at the encoding boundary, for the same reason
+                // balances are: a producer that builds a row without the
+                // display form is easy to add and impossible to notice, and
+                // the frontend has nothing to fall back on but a guess.
+                let mut txs = txs;
+                for tx in txs.iter_mut() {
+                    enrich_transaction_display(tx);
+                }
                 let reply = generated::WalletHistoryResponse { transactions: txs };
                 // NEW: Return as Envelope.walletHistoryResponse (field 38)
                 pack_envelope_ok(generated::envelope::Payload::WalletHistoryResponse(reply))
@@ -603,16 +742,31 @@ impl AppRouterImpl {
                 for item in &mut items {
                     enrich_balance_metadata(item);
                 }
+                // EVERY row carries its metadata, however it got here.
+                //
+                // Projection-backed rows were pushed straight into `items`, so
+                // only the zero-balance rows synthesised by
+                // ensure_default_visible_balances were ever enriched. A token
+                // you actually HELD therefore went out with decimals 0, and the
+                // wallet had nothing to format with: 100_000 base units of a
+                // 2-decimal token rendered as "100000 RIGB" instead of
+                // "1,000.00". Enrichment belongs at the encoding boundary,
+                // where it cannot be skipped by whichever path produced a row.
+                for item in items.iter_mut() {
+                    enrich_balance_metadata(item);
+                }
                 items.sort_by(|a, b| a.token_id.cmp(&b.token_id));
 
                 // Critical debug: log what we're actually returning
                 log::debug!("[balance.list] returning {} balance items", items.len());
                 for item in &items {
                     log::debug!(
-                        "[balance.list] item: token_id={} available={} locked={}",
+                        "[balance.list] item: token_id={} available={} locked={} decimals={} symbol={}",
                         item.token_id,
                         item.available,
-                        item.locked
+                        item.locked,
+                        item.decimals,
+                        item.symbol
                     );
                 }
 

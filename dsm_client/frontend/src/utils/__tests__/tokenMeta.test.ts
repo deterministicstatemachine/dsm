@@ -1,86 +1,46 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
-// eslint-env jest
-declare const describe: any;
-declare const test: any;
-declare const expect: any;
-declare const it: any;
+//! Display amounts are carried, not computed.
+//!
+//! This file used to test a hardcoded decimals table and bigint conversion
+//! helpers living in TypeScript. Both are deleted. The table listed dBTC and
+//! BTC at 8 decimals and answered 0 for everything else, so a CPTA token
+//! created with 2 decimals rendered as whole units in the transfer dialog, the
+//! transaction list and contact history — 25000 where the protocol moved
+//! 250.00. It could not have been otherwise: the table could not know about
+//! tokens created after it was written.
+//!
+//! Rust owns the conversion in both directions and every amount-bearing wire
+//! message now carries its rendered form. What is left here is presentation.
 
-import { getTokenDecimals, formatTokenAmount, formatSignedTokenAmount } from '../tokenMeta';
+import { presentDisplayAmount, presentSignedDisplayAmount } from '../tokenMeta';
 
-describe('getTokenDecimals', () => {
-  test('returns 8 for dBTC (case-insensitive)', () => {
-    expect(getTokenDecimals('DBTC')).toBe(8);
-    expect(getTokenDecimals('dbtc')).toBe(8);
-    expect(getTokenDecimals('Dbtc')).toBe(8);
+describe('presentDisplayAmount', () => {
+  it('prints what Rust rendered', () => {
+    expect(presentDisplayAmount('1000.00', 100000n)).toBe('1000.00');
   });
 
-  test('returns 8 for BTC', () => {
-    expect(getTokenDecimals('BTC')).toBe(8);
-    expect(getTokenDecimals('btc')).toBe(8);
+  it('does not second-guess a rendering it disagrees with', () => {
+    // The base units are the authority for VALUE; the string is the authority
+    // for DISPLAY. If they ever diverge that is a Rust bug to fix at the
+    // source, not something to paper over by recomputing here.
+    expect(presentDisplayAmount('0.50', 100000n)).toBe('0.50');
   });
 
-  test('returns 0 for unknown tokens', () => {
-    expect(getTokenDecimals('ERA')).toBe(0);
-    expect(getTokenDecimals('UNKNOWN')).toBe(0);
-    expect(getTokenDecimals('foo')).toBe(0);
-  });
-
-  test('returns 0 for undefined/empty input', () => {
-    expect(getTokenDecimals(undefined)).toBe(0);
-    expect(getTokenDecimals('')).toBe(0);
-  });
-
-  test('trims whitespace from token id', () => {
-    expect(getTokenDecimals('  DBTC  ')).toBe(8);
-    expect(getTokenDecimals(' btc ')).toBe(8);
+  it('falls back to base units rather than inventing a scale', () => {
+    expect(presentDisplayAmount(undefined, 100000n)).toBe('100000');
+    expect(presentDisplayAmount('', 42n)).toBe('42');
   });
 });
 
-describe('formatTokenAmount', () => {
-  test('formats whole-unit tokens (0 decimals)', () => {
-    expect(formatTokenAmount(0n, 'ERA')).toBe('0');
-    expect(formatTokenAmount(1n, 'ERA')).toBe('1');
-    expect(formatTokenAmount(123456n, 'ERA')).toBe('123456');
+describe('presentSignedDisplayAmount', () => {
+  it('prints the signed string Rust rendered', () => {
+    expect(presentSignedDisplayAmount('-250.00', -25000n)).toBe('-250.00');
+    expect(presentSignedDisplayAmount('250.00', 25000n)).toBe('250.00');
   });
 
-  test('formats dBTC with 8 decimals', () => {
-    expect(formatTokenAmount(100000000n, 'DBTC')).toBe('1.0');
-    expect(formatTokenAmount(0n, 'DBTC')).toBe('0.0');
-    expect(formatTokenAmount(1n, 'DBTC')).toBe('0.00000001');
-    expect(formatTokenAmount(50000000n, 'DBTC')).toBe('0.5');
-    expect(formatTokenAmount(123456789n, 'DBTC')).toBe('1.23456789');
-  });
-
-  test('strips trailing zeros but keeps at least one decimal digit', () => {
-    expect(formatTokenAmount(100000000n, 'BTC')).toBe('1.0');
-    expect(formatTokenAmount(110000000n, 'BTC')).toBe('1.1');
-    expect(formatTokenAmount(100100000n, 'BTC')).toBe('1.001');
-  });
-
-  test('handles large values without precision loss', () => {
-    const tenBtc = 1000000000n;
-    expect(formatTokenAmount(tenBtc, 'BTC')).toBe('10.0');
-
-    const huge = 2100000000000000n;
-    expect(formatTokenAmount(huge, 'BTC')).toBe('21000000.0');
-  });
-});
-
-describe('formatSignedTokenAmount', () => {
-  test('positive amounts have no prefix', () => {
-    expect(formatSignedTokenAmount(100000000n, 'DBTC')).toBe('1.0');
-    expect(formatSignedTokenAmount(1n, 'ERA')).toBe('1');
-  });
-
-  test('negative amounts have minus prefix', () => {
-    expect(formatSignedTokenAmount(-100000000n, 'DBTC')).toBe('-1.0');
-    expect(formatSignedTokenAmount(-1n, 'ERA')).toBe('-1');
-    expect(formatSignedTokenAmount(-50000000n, 'BTC')).toBe('-0.5');
-  });
-
-  test('zero has no prefix', () => {
-    expect(formatSignedTokenAmount(0n, 'DBTC')).toBe('0.0');
-    expect(formatSignedTokenAmount(0n, 'ERA')).toBe('0');
+  it('keeps the sign when falling back', () => {
+    expect(presentSignedDisplayAmount(undefined, -25000n)).toBe('-25000');
+    expect(presentSignedDisplayAmount(undefined, 25000n)).toBe('25000');
+    expect(presentSignedDisplayAmount(undefined, 0n)).toBe('0');
   });
 });
