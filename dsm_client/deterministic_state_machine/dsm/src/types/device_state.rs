@@ -102,6 +102,41 @@ pub struct DeviceState {
     /// load/unload/spend chokepoints, never by the online per-token spend path. `BTreeMap` for
     /// deterministic iteration during persistence.
     offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
+
+    /// Vault reserves: value the owner has ENCUMBERED into a specific SoFi vault. Keyed by
+    /// `vault_reserve_key(genesis, devid, vault_id, policy_commit)`; the value is the
+    /// extractable `(amount, sequence)` behind the committed reserve leaf (whose hash lives
+    /// in [`Self::extra_leaves`]). The leaf hash is not reversible to the amount, so this map
+    /// is the enumerable, persisted record.
+    ///
+    /// Deliberately NOT an entry in [`Self::balances`]. That map is folded whole into
+    /// `balance_witness` by [`RelationshipChainState::compute_chain_tip`], so a vault-scoped
+    /// key there would change the chain tip a counterparty derives on every unrelated
+    /// transfer. Keeping reserves out of it is also what makes the encumbrance real:
+    /// `BalanceDelta` can only reach `balances`, so no transfer, mint or burn can spend a
+    /// reserve — only the vault chokepoints can. `BTreeMap` for deterministic iteration.
+    vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
+}
+
+/// Extractable state of one vault reserve leg (see [`DeviceState::vault_reserves`]).
+/// The committed leaf value is `vault_reserve_value(amount, sequence)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VaultReserve {
+    /// Encumbered balance for this `(vault, asset)`, in the asset's base units.
+    pub amount: u64,
+    /// The VAULT's sequence at the point this reserve was written — not a per-leaf counter.
+    /// Sharing the vault's sequence lets a verifier cross-check this leaf against the
+    /// vault-state leaf at the same root.
+    pub sequence: u64,
+}
+
+/// Result of a vault funding or withdrawal: the advanced state, its root, and one inclusion
+/// proof per leg in the order the legs were supplied.
+#[derive(Clone, Debug)]
+pub struct VaultReserveOutcome {
+    pub new_device_state: DeviceState,
+    pub new_root: [u8; 32],
+    pub proofs: Vec<Vec<u8>>,
 }
 
 /// Extractable state of one offline-cash allocation (see [`DeviceState::offline_allocations`]).
@@ -623,6 +658,23 @@ fn validate_conservation(
             }
             Ok(())
         }
+        // Funding a vault is a RESERVE move, not a balance delta. The value leaves
+        // `balances` and lands in a vault-reserve leaf, and both halves are computed from
+        // one amount inside `fund_vault_reserves` — so a delta accompanying this operation
+        // would be a second, unconserved movement riding along with it.
+        //
+        // Stated explicitly rather than left to the catch-all because this operation used
+        // to build a Debit delta and be rejected by that catch-all: the value-bearing DLV
+        // path has never worked, for any vault type, and nothing noticed because the DLV
+        // suite asserted on the text of the handler rather than its behaviour.
+        Operation::DlvCreate { .. } => {
+            if !deltas.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvCreate funds a vault through reserve leaves, not balance deltas",
+                ));
+            }
+            Ok(())
+        }
         _ => {
             if !deltas.is_empty() {
                 return Err(DsmError::invalid_operation(
@@ -712,6 +764,7 @@ impl DeviceState {
             offline_bearer_attestation: OfflineBearerAttestation::NotAttested,
             extra_leaves: BTreeMap::new(),
             offline_allocations: BTreeMap::new(),
+            vault_reserves: BTreeMap::new(),
         }
     }
 
@@ -1169,6 +1222,7 @@ impl DeviceState {
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
+            vault_reserves: self.vault_reserves.clone(),
         };
 
         Ok(AdvanceOutcome {
@@ -1208,6 +1262,7 @@ impl DeviceState {
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
             offline_allocations: self.offline_allocations.clone(),
+            vault_reserves: self.vault_reserves.clone(),
         })
     }
 
@@ -1269,6 +1324,7 @@ impl DeviceState {
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
             offline_allocations: self.offline_allocations.clone(),
+            vault_reserves: self.vault_reserves.clone(),
         };
 
         Ok(VaultLeafOutcome {
@@ -1348,6 +1404,7 @@ impl DeviceState {
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
+            vault_reserves: self.vault_reserves.clone(),
         };
         Ok(OfflineAllocationOutcome {
             new_device_state,
@@ -1356,6 +1413,195 @@ impl DeviceState {
             amount: new_amount,
             sequence: new_sequence,
         })
+    }
+
+    /// Move value between the online balance and a vault's encumbered reserves.
+    ///
+    /// THE SOLE CHOKEPOINT for reserve movement, and the reason a vault's advertised
+    /// liquidity means anything. Funding debits `balances` and credits the per-`(vault,
+    /// asset)` reserve leaf by the same amount; withdrawal is the exact inverse. Both legs
+    /// of an AMM vault move in ONE call, so a two-asset vault is funded in one advance
+    /// against one root rather than two states where the vault is half-funded.
+    ///
+    /// `vault_sequence` is supplied by the caller because the VAULT owns it, not this leaf:
+    /// funding writes at the vault's genesis sequence 0, and a later withdrawal writes at
+    /// whatever sequence the vault has reached. Sharing that number with the vault-state
+    /// leaf is what lets a verifier tie reserves to a specific vault state.
+    ///
+    /// Pure: on `Err` nothing is mutated and the caller's state is untouched.
+    fn move_vault_reserves(
+        &self,
+        vault_id: &[u8; 32],
+        legs: &[([u8; 32], u64)],
+        vault_sequence: u64,
+        fund: bool,
+    ) -> Result<VaultReserveOutcome, DsmError> {
+        let op = if fund { "fund" } else { "withdraw" };
+        if legs.is_empty() {
+            return Err(DsmError::invalid_operation(format!(
+                "{op}_vault_reserves: at least one leg is required"
+            )));
+        }
+        // Two legs naming the same asset would let one silently overwrite the other's
+        // leaf, so the pair would be funded with less than the caller asked for.
+        for (i, (pc, _)) in legs.iter().enumerate() {
+            if legs[..i].iter().any(|(prev, _)| prev == pc) {
+                return Err(DsmError::invalid_operation(format!(
+                    "{op}_vault_reserves: the same asset appears twice"
+                )));
+            }
+        }
+
+        let mut new_balances = self.balances.clone();
+        let mut new_smt = self.smt.clone();
+        let mut new_extra_leaves = self.extra_leaves.clone();
+        let mut new_vault_reserves = self.vault_reserves.clone();
+        let mut keys = Vec::with_capacity(legs.len());
+
+        for (policy_commit, amount) in legs {
+            if *amount == 0 {
+                return Err(DsmError::invalid_operation(format!(
+                    "{op}_vault_reserves: amount must be > 0"
+                )));
+            }
+            let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                &self.genesis,
+                &self.devid,
+                vault_id,
+                policy_commit,
+            );
+            let cur = new_vault_reserves.get(&key).copied().unwrap_or_default();
+            let cur_bal = new_balances.get(policy_commit).copied().unwrap_or(0);
+
+            let (new_bal, new_amount) = if fund {
+                (
+                    cur_bal.checked_sub(*amount).ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "fund_vault_reserves: insufficient balance to encumber",
+                        )
+                    })?,
+                    cur.amount.checked_add(*amount).ok_or_else(|| {
+                        DsmError::invalid_operation("fund_vault_reserves: reserve overflow")
+                    })?,
+                )
+            } else {
+                (
+                    cur_bal.checked_add(*amount).ok_or_else(|| {
+                        DsmError::invalid_operation("withdraw_vault_reserves: balance overflow")
+                    })?,
+                    cur.amount.checked_sub(*amount).ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "withdraw_vault_reserves: the vault does not hold that much",
+                        )
+                    })?,
+                )
+            };
+
+            if new_bal == 0 {
+                new_balances.remove(policy_commit);
+            } else {
+                new_balances.insert(*policy_commit, new_bal);
+            }
+
+            let leaf_value =
+                crate::dlv::vault_reserve_leaf::vault_reserve_value(new_amount, vault_sequence);
+            new_smt.update_leaf(&key, &leaf_value).map_err(|e| {
+                DsmError::invalid_operation(format!("vault-reserve leaf update: {e}"))
+            })?;
+            new_extra_leaves.insert(key, leaf_value);
+            // Kept even at amount 0 so the sequence stays monotone and an emptied
+            // reserve cannot be replayed from an older leaf.
+            new_vault_reserves.insert(
+                key,
+                VaultReserve {
+                    amount: new_amount,
+                    sequence: vault_sequence,
+                },
+            );
+            keys.push(key);
+        }
+
+        // Every proof is taken against the FINAL root, after all legs are written, so no
+        // proof binds an intermediate state in which the vault was half-funded.
+        let new_root = *new_smt.root();
+        let mut proofs = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let proof = new_smt
+                .get_inclusion_proof(key, 256)
+                .map_err(|e| DsmError::merkle(format!("vault-reserve proof: {e}")))?;
+            proofs.push(proof.to_bytes());
+        }
+
+        Ok(VaultReserveOutcome {
+            new_device_state: Self {
+                genesis: self.genesis,
+                devid: self.devid,
+                public_key: self.public_key.clone(),
+                smt: new_smt,
+                balances: new_balances,
+                tips: self.tips.clone(),
+                legacy_anchor: self.legacy_anchor,
+                offline_bearer_attestation: self.offline_bearer_attestation,
+                extra_leaves: new_extra_leaves,
+                offline_allocations: self.offline_allocations.clone(),
+                vault_reserves: new_vault_reserves,
+            },
+            new_root,
+            proofs,
+        })
+    }
+
+    /// Encumber `legs` into `vault_id`, debiting the online balance. Fails closed on
+    /// insufficient funds, leaving this state untouched.
+    pub fn fund_vault_reserves(
+        &self,
+        vault_id: &[u8; 32],
+        legs: &[([u8; 32], u64)],
+        vault_sequence: u64,
+    ) -> Result<VaultReserveOutcome, DsmError> {
+        self.move_vault_reserves(vault_id, legs, vault_sequence, true)
+    }
+
+    /// Release `legs` from `vault_id` back to the online balance. Required so encumbrance
+    /// is reversible — without it, funding a vault is a one-way door.
+    pub fn withdraw_vault_reserves(
+        &self,
+        vault_id: &[u8; 32],
+        legs: &[([u8; 32], u64)],
+        vault_sequence: u64,
+    ) -> Result<VaultReserveOutcome, DsmError> {
+        self.move_vault_reserves(vault_id, legs, vault_sequence, false)
+    }
+
+    /// Encumbered balance for one `(vault, asset)`, in base units.
+    pub fn vault_reserve(&self, vault_id: &[u8; 32], policy_commit: &[u8; 32]) -> u64 {
+        let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+            &self.genesis,
+            &self.devid,
+            vault_id,
+            policy_commit,
+        );
+        self.vault_reserves.get(&key).map(|r| r.amount).unwrap_or(0)
+    }
+
+    /// The full reserve record for one `(vault, asset)`, including its sequence.
+    pub fn vault_reserve_entry(
+        &self,
+        vault_id: &[u8; 32],
+        policy_commit: &[u8; 32],
+    ) -> Option<VaultReserve> {
+        let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+            &self.genesis,
+            &self.devid,
+            vault_id,
+            policy_commit,
+        );
+        self.vault_reserves.get(&key).copied()
+    }
+
+    /// Every reserve leaf this device holds, for persistence.
+    pub fn vault_reserves_snapshot(&self) -> BTreeMap<[u8; 32], VaultReserve> {
+        self.vault_reserves.clone()
     }
 
     /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation
@@ -1516,6 +1762,313 @@ mod tests {
     }
     fn pc(b: u8) -> [u8; 32] {
         [b; 32]
+    }
+
+    // ── vault reserves ─────────────────────────────────────────────────────
+    //
+    // A SoFi vault's advertised liquidity was a number inside its fulfillment
+    // condition: the owner asserted it, nothing held it, and a settled swap
+    // moved no value. These pin the accounting that makes the claim real.
+
+    /// THE REPRODUCTION: funding moves value OUT of `balances` and into the
+    /// vault's reserve leaves, conserved per asset, in one advance.
+    #[test]
+    fn funding_a_vault_conserves_value_per_asset() {
+        let mut dev = fresh_device(0xA1);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 50_000);
+        dev.balances.insert(rigb, 20_000);
+        let vault = [0x77u8; 32];
+
+        let out = dev
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
+            .expect("funding");
+        let after = &out.new_device_state;
+
+        assert_eq!(
+            after.balance(&era),
+            40_000,
+            "spendable ERA falls by the leg"
+        );
+        assert_eq!(after.balance(&rigb), 15_000);
+        assert_eq!(
+            after.vault_reserve(&vault, &era),
+            10_000,
+            "and lands in the vault"
+        );
+        assert_eq!(after.vault_reserve(&vault, &rigb), 5_000);
+
+        // Per asset: spendable + encumbered is unchanged.
+        assert_eq!(
+            after.balance(&era) + after.vault_reserve(&vault, &era),
+            50_000
+        );
+        assert_eq!(
+            after.balance(&rigb) + after.vault_reserve(&vault, &rigb),
+            20_000
+        );
+        assert_eq!(out.proofs.len(), 2, "one proof per leg");
+    }
+
+    /// Both legs land under ONE root. A half-funded intermediate state must not
+    /// be observable, or a trader could quote against a vault holding one side.
+    #[test]
+    fn both_legs_are_committed_under_one_root() {
+        let mut dev = fresh_device(0xA2);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 50_000);
+        dev.balances.insert(rigb, 20_000);
+        let vault = [0x77u8; 32];
+
+        let out = dev
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
+            .expect("funding");
+
+        // Every proof verifies against the SAME final root — none was taken
+        // part-way through the batch.
+        for (i, (asset, amount)) in [(era, 10_000u64), (rigb, 5_000u64)].iter().enumerate() {
+            assert!(
+                crate::dlv::vault_reserve_leaf::verify_vault_reserve_leaf(
+                    &out.new_root,
+                    &out.new_device_state.genesis,
+                    &out.new_device_state.devid,
+                    &vault,
+                    asset,
+                    *amount,
+                    0,
+                    &out.proofs[i],
+                ),
+                "leg {i} must verify against the final root"
+            );
+        }
+        assert_eq!(out.new_root, *out.new_device_state.smt.root());
+    }
+
+    /// Insufficient funds reject BEFORE anything moves, and the caller's state
+    /// is byte-identical afterwards.
+    #[test]
+    fn insufficient_balance_at_funding_leaves_the_head_untouched() {
+        let mut dev = fresh_device(0xA3);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 50_000);
+        dev.balances.insert(rigb, 1_000);
+        let vault = [0x77u8; 32];
+        let root_before = *dev.smt.root();
+
+        // The SECOND leg is short: the first must not have moved either.
+        let err = dev
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
+            .expect_err("must refuse");
+        assert!(format!("{err}").contains("insufficient"), "got: {err}");
+
+        assert_eq!(*dev.smt.root(), root_before, "root unchanged");
+        assert_eq!(dev.balance(&era), 50_000, "the affordable leg did not move");
+        assert_eq!(dev.balance(&rigb), 1_000);
+        assert_eq!(dev.vault_reserve(&vault, &era), 0);
+    }
+
+    /// THE ENCUMBRANCE. Once funded, the value is unreachable through the
+    /// ordinary spend path — `BalanceDelta` can only reach `balances`.
+    #[test]
+    fn funded_reserves_are_unspendable_by_transfer() {
+        let mut dev = fresh_device(0xA4);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 10_000);
+        let vault = [0x77u8; 32];
+
+        let funded = dev
+            .fund_vault_reserves(&vault, &[(era, 10_000)], 0)
+            .expect("funding")
+            .new_device_state;
+        assert_eq!(funded.balance(&era), 0, "all of it is encumbered");
+        assert_eq!(funded.vault_reserve(&vault, &era), 10_000);
+
+        // Spending even one base unit must now fail: the reserve is not spendable.
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &funded.devid,
+            &funded.devid,
+        );
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &funded.devid,
+            &funded.devid,
+        );
+        let outcome = funded.advance(
+            rk,
+            funded.devid,
+            Operation::Transfer {
+                to_device_id: devid(0xBB).to_vec(),
+                amount: crate::types::token_types::Balance::from_state(1, [0u8; 32]),
+                token_id: b"ERA".to_vec(),
+                policy_commit: era,
+                mode: crate::types::operations::TransactionMode::Unilateral,
+                nonce: vec![],
+                verification: crate::types::operations::VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+                authority_policy: None,
+            },
+            entropy(9),
+            None,
+            &[BalanceDelta {
+                policy_commit: era,
+                direction: BalanceDirection::Debit,
+                amount: 1,
+            }],
+            Some(tip),
+            None,
+            None,
+        );
+        // Fail for the RIGHT reason. A test that merely asserts `is_err()` passes
+        // just as happily on an unrelated error, which is how a guard gets
+        // credited for work it is not doing.
+        let err = format!(
+            "{}",
+            outcome.expect_err("an encumbered reserve must not be spendable")
+        );
+        assert!(
+            err.contains("underflow") || err.to_lowercase().contains("insufficient"),
+            "must fail as a balance shortfall, got: {err}"
+        );
+    }
+
+    /// Encumbrance is reversible, or funding a vault is a one-way door.
+    #[test]
+    fn withdrawal_returns_the_exact_reserve_to_spendable() {
+        let mut dev = fresh_device(0xA5);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 10_000);
+        let vault = [0x77u8; 32];
+
+        let funded = dev
+            .fund_vault_reserves(&vault, &[(era, 10_000)], 0)
+            .expect("fund")
+            .new_device_state;
+        let back = funded
+            .withdraw_vault_reserves(&vault, &[(era, 10_000)], 7)
+            .expect("withdraw")
+            .new_device_state;
+
+        assert_eq!(back.balance(&era), 10_000, "exactly what went in comes out");
+        assert_eq!(back.vault_reserve(&vault, &era), 0);
+        // The emptied leaf keeps its entry so the sequence stays monotone and an
+        // older proof cannot be replayed against it.
+        assert_eq!(
+            back.vault_reserve_entry(&vault, &era).map(|r| r.sequence),
+            Some(7)
+        );
+    }
+
+    /// Withdrawing more than the vault holds is refused rather than clamped.
+    #[test]
+    fn over_withdrawal_is_refused() {
+        let mut dev = fresh_device(0xA6);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 10_000);
+        let vault = [0x77u8; 32];
+        let funded = dev
+            .fund_vault_reserves(&vault, &[(era, 4_000)], 0)
+            .expect("fund")
+            .new_device_state;
+
+        assert!(funded
+            .withdraw_vault_reserves(&vault, &[(era, 4_001)], 1)
+            .is_err());
+        assert_eq!(funded.vault_reserve(&vault, &era), 4_000, "unchanged");
+    }
+
+    /// Two vaults over the same asset keep separate reserves — otherwise an
+    /// owner could not attribute a settlement to the vault that produced it.
+    #[test]
+    fn two_vaults_over_one_asset_do_not_share_a_reserve() {
+        let mut dev = fresh_device(0xA7);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 10_000);
+        let (v1, v2) = ([0x11u8; 32], [0x22u8; 32]);
+
+        let s = dev
+            .fund_vault_reserves(&v1, &[(era, 3_000)], 0)
+            .expect("v1")
+            .new_device_state;
+        let s = s
+            .fund_vault_reserves(&v2, &[(era, 2_000)], 0)
+            .expect("v2")
+            .new_device_state;
+
+        assert_eq!(s.vault_reserve(&v1, &era), 3_000);
+        assert_eq!(s.vault_reserve(&v2, &era), 2_000);
+        assert_eq!(s.balance(&era), 5_000);
+    }
+
+    /// A leg list naming one asset twice would let the second write clobber the
+    /// first, funding the vault with less than the caller asked for.
+    #[test]
+    fn a_duplicated_asset_in_the_legs_is_refused() {
+        let mut dev = fresh_device(0xA8);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 10_000);
+        assert!(dev
+            .fund_vault_reserves(&[0x77u8; 32], &[(era, 1_000), (era, 2_000)], 0)
+            .is_err());
+    }
+
+    /// Zero-amount and empty leg lists are refused rather than producing a
+    /// no-op advance that looks like a funded vault.
+    #[test]
+    fn degenerate_leg_lists_are_refused() {
+        let mut dev = fresh_device(0xA9);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 10_000);
+        let vault = [0x77u8; 32];
+        assert!(dev.fund_vault_reserves(&vault, &[], 0).is_err());
+        assert!(dev.fund_vault_reserves(&vault, &[(era, 0)], 0).is_err());
+    }
+
+    /// Funding is a RESERVE move, so `DlvCreate` must carry no balance delta.
+    ///
+    /// This arm exists because the operation previously fell to the catch-all,
+    /// which rejects ANY delta — so the single-asset lock the handler built
+    /// could never commit. The value-bearing DLV path has never worked, for any
+    /// vault type, and the DLV suite did not notice because it asserted on the
+    /// text of the handler rather than its behaviour.
+    #[test]
+    fn dlv_create_rejects_any_balance_delta() {
+        let me = devid(0xC1);
+        let era = pc(0xE0);
+        let op = Operation::DlvCreate {
+            vault_id: vec![0x77; 32],
+            creator_public_key: vec![0xAA; 32],
+            parameters_hash: vec![0x11; 32],
+            fulfillment_condition: Vec::new(),
+            intended_recipient: None,
+            token_id: None,
+            locked_amount: None,
+            signature: Vec::new(),
+            mode: crate::types::operations::TransactionMode::Unilateral,
+        };
+        assert!(
+            validate_conservation(&me, &op, &[], None).is_ok(),
+            "no deltas is the shape funding uses"
+        );
+        for d in [BalanceDirection::Credit, BalanceDirection::Debit] {
+            let err = validate_conservation(
+                &me,
+                &op,
+                &[BalanceDelta {
+                    policy_commit: era,
+                    direction: d,
+                    amount: 1,
+                }],
+                None,
+            )
+            .expect_err("a delta riding along with DlvCreate must be refused");
+            assert!(
+                format!("{err}").contains("reserve leaves"),
+                "the refusal should say where funding actually goes, got: {err}"
+            );
+        }
     }
 
     fn fresh_device(b: u8) -> DeviceState {
