@@ -534,10 +534,22 @@ pub(crate) async fn publish_route_anchor_with_pointers(
         // publish a pointer for one trade and satisfy it with a receipt for a
         // cheaper one — and derived from `x`, so the id matches what the
         // settling advance will independently derive.
-        let (Some(input_policy_commit), Some(output_policy_commit)) = (
-            <[u8; 32]>::try_from(hop.token_in.as_slice()).ok(),
-            <[u8; 32]>::try_from(hop.token_out.as_slice()).ok(),
-        ) else {
+        // Through the one pair parser, so the identity a pointer commits to and
+        // the identity a composer derives cannot disagree.
+        let Ok(hop_pair) =
+            dsm::dlv::pair_identity::CanonicalPair::parse(&hop.token_in, &hop.token_out)
+        else {
+            errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
+            continue;
+        };
+        let input_policy_commit = match <[u8; 32]>::try_from(hop.token_in.as_slice()) {
+            Ok(pc) if hop_pair.contains(&pc) => pc,
+            _ => {
+                errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
+                continue;
+            }
+        };
+        let Some(output_policy_commit) = hop_pair.counterpart(&input_policy_commit) else {
             errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
             continue;
         };

@@ -2470,14 +2470,19 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
  */
 export class AmmConstantProduct extends Message<AmmConstantProduct> {
   /**
-   * lex-lower token id
+   * 32-byte CPTA policy commits, lex-sorted. A ticker is NOT an identity —
+   * two distinct tokens have shared the ticker RIGB in this repo — so a pair
+   * named by label is a pair that can match the wrong asset while every
+   * signature on the path still verifies.
+   *
+   * lex-lower policy commit
    *
    * @generated from field: bytes token_a = 1;
    */
   tokenA = new Uint8Array(0);
 
   /**
-   * lex-higher token id
+   * lex-higher policy commit
    *
    * @generated from field: bytes token_b = 2;
    */
@@ -7788,9 +7793,18 @@ export class DlvSpecV1 extends Message<DlvSpecV1> {
  */
 export class DlvFundingLegV1 extends Message<DlvFundingLegV1> {
   /**
-   * @generated from field: bytes token_id = 1;
+   * 32-byte CPTA policy commit — the asset's IDENTITY, not its ticker.
+   *
+   * This carried a UTF-8 ticker that `dlv.create` resolved to a commit via the
+   * local registry. That resolution is the ambiguity: a ticker can name more
+   * than one token (two distinct RIGB tokens have existed here), so the lookup
+   * could encumber a different asset than the caller meant while every
+   * downstream signature still verified. There is no fallback — a caller that
+   * does not know the commit does not know which asset it is funding.
+   *
+   * @generated from field: bytes policy_commit = 1;
    */
-  tokenId = new Uint8Array(0);
+  policyCommit = new Uint8Array(0);
 
   /**
    * @generated from field: uint64 amount = 2;
@@ -7805,7 +7819,7 @@ export class DlvFundingLegV1 extends Message<DlvFundingLegV1> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.DlvFundingLegV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "token_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
@@ -8113,6 +8127,8 @@ export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAd
   vaultId = new Uint8Array(0);
 
   /**
+   * 32-byte policy commits, lex-sorted. See AmmConstantProduct.
+   *
    * @generated from field: bytes token_a = 2;
    */
   tokenA = new Uint8Array(0);
@@ -8191,6 +8207,9 @@ export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAd
  */
 export class RoutingPairRequest extends Message<RoutingPairRequest> {
   /**
+   * 32-byte policy commits. Discovery is keyed by identity, so a ticker here
+   * would list vaults over a different asset that merely shares the name.
+   *
    * @generated from field: bytes token_a = 1;
    */
   tokenA = new Uint8Array(0);
@@ -8310,6 +8329,8 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
   vaultId = new Uint8Array(0);
 
   /**
+   * 32-byte policy commits, lex-sorted.
+   *
    * @generated from field: bytes token_a = 2;
    */
   tokenA = new Uint8Array(0);
@@ -8530,6 +8551,10 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
   vaultId = new Uint8Array(0);
 
   /**
+   * 32-byte policy commits naming the exact assets traded. A reserve
+   * inclusion proof is keyed by policy commit, so a hop named by label could
+   * be matched against a proof for a different same-ticker asset.
+   *
    * @generated from field: bytes token_in = 2;
    */
   tokenIn = new Uint8Array(0);
@@ -9308,14 +9333,17 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
   vaultId = new Uint8Array(0);
 
   /**
-   * lexicographically lower
+   * 32-byte policy commits. The storage prefix is built from these, so pair
+   * identity IS the discovery index — a label here would collide two markets.
+   *
+   * lex-lower policy commit
    *
    * @generated from field: bytes token_a = 3;
    */
   tokenA = new Uint8Array(0);
 
   /**
-   * lexicographically higher
+   * lex-higher policy commit
    *
    * @generated from field: bytes token_b = 4;
    */

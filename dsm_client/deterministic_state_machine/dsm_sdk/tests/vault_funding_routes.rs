@@ -170,30 +170,134 @@ fn routed_settlement_refuses_until_reserve_proofs_exist() {
     assert!(!res.success, "settlement must not proceed");
 }
 
-/// A funding leg naming a token this device cannot resolve fails closed rather
-/// than encumbering an asset it cannot name.
+/// Canonical AMM predicate bytes for a pair. Reserve-free: a condition carries
+/// a rule, never a balance.
+fn amm_fulfillment_bytes(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let fm = generated::FulfillmentMechanism {
+        kind: Some(generated::fulfillment_mechanism::Kind::AmmConstantProduct(
+            generated::AmmConstantProduct {
+                token_a: lo.to_vec(),
+                token_b: hi.to_vec(),
+                fee_bps,
+            },
+        )),
+    };
+    fm.encode_to_vec()
+}
+
+/// A funding leg that does not name a 32-byte policy commit is refused, and
+/// refused BEFORE any balance is read or any signature is built.
+///
+/// This replaces a ticker-resolution failure. The leg used to carry a ticker
+/// that `dlv.create` looked up in the local registry — and that lookup is the
+/// ambiguity: a ticker can name more than one token, so it could encumber a
+/// different asset than the caller meant while every downstream signature still
+/// verified. There is no fallback now; identity is either present or the call
+/// dies.
 #[test]
 #[serial_test::serial]
-fn a_funding_leg_for_an_unknown_token_fails_closed() {
+fn a_funding_leg_that_is_not_a_policy_commit_fails_closed() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
 
+    // A ticker, an empty identity, and near-miss lengths.
+    for bad in [
+        b"NEVERSEEN".to_vec(),
+        Vec::new(),
+        vec![0u8; 31],
+        vec![0u8; 33],
+    ] {
+        // A well-formed AMM predicate, so the refusal below is the LEG identity
+        // and not an earlier gate. A test that passes on an unrelated error
+        // credits a guard for work it is not doing.
+        let spec = generated::DlvSpecV1 {
+            policy_digest: vec![0x11u8; 32],
+            fulfillment_bytes: amm_fulfillment_bytes(&[0x11u8; 32], &[0x22u8; 32], 30),
+            ..Default::default()
+        };
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(spec),
+            creator_public_key: vec![0xABu8; 64],
+            signature: Vec::new(),
+            funding_legs: vec![generated::DlvFundingLegV1 {
+                policy_commit: bad.clone(),
+                amount: 1_000,
+            }],
+        };
+        let res = invoke(&r, "dlv.create", pack(req.encode_to_vec()));
+        assert!(
+            !res.success,
+            "a {}-byte leg identity must be refused",
+            bad.len()
+        );
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("32-byte policy commit"),
+            "must fail as an identity error, not incidentally: {msg}"
+        );
+        assert!(
+            msg.contains("never resolved"),
+            "the error must say the ticker is not resolved, so nobody re-adds the lookup: {msg}"
+        );
+    }
+}
+
+/// The same ticker on two distinct assets stays distinguishable through the
+/// live route: funding one vault cannot be satisfied by the other's commit.
+#[test]
+#[serial_test::serial]
+fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+
+    // Two tokens a user would both call "RIGB".
+    let rigb_one = [0x11u8; 32];
+    let rigb_two = [0x22u8; 32];
+    assert_ne!(rigb_one, rigb_two);
+
+    // A pair over one of them does not admit the other, at the identity layer
+    // the route depends on.
+    let era = [0x33u8; 32];
+    let pair =
+        dsm::dlv::pair_identity::CanonicalPair::parse(&era, &rigb_one).expect("canonical pair");
+    assert!(pair.contains(&rigb_one));
+    assert!(
+        !pair.contains(&rigb_two),
+        "a same-ticker asset must not satisfy this vault's pair"
+    );
+
+    // And the route refuses legs that are not the vault's own pair. Driven here
+    // with a well-formed but unfunded pair so the refusal is the pair check, not
+    // a balance shortfall.
+    // The vault's predicate declares ERA / RIGB-one.
     let spec = generated::DlvSpecV1 {
         policy_digest: vec![0x11u8; 32],
+        fulfillment_bytes: amm_fulfillment_bytes(&era, &rigb_one, 30),
         ..Default::default()
     };
     let req = generated::DlvInstantiateV1 {
         spec: Some(spec),
         creator_public_key: vec![0xABu8; 64],
         signature: Vec::new(),
-        funding_legs: vec![generated::DlvFundingLegV1 {
-            token_id: b"NEVERSEEN".to_vec(),
-            amount: 1_000,
-        }],
+        funding_legs: vec![
+            generated::DlvFundingLegV1 {
+                policy_commit: rigb_one.to_vec(),
+                amount: 1_000,
+            },
+            generated::DlvFundingLegV1 {
+                policy_commit: rigb_two.to_vec(),
+                amount: 1_000,
+            },
+        ],
     };
     let res = invoke(&r, "dlv.create", pack(req.encode_to_vec()));
-    assert!(!res.success, "an unresolvable funding leg must be refused");
+    assert!(
+        !res.success,
+        "two same-ticker assets are two assets; this must not silently create a vault"
+    );
 }
 
 /// The routes this file exercises must be reachable through the production

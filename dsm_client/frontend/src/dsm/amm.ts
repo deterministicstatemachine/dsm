@@ -136,11 +136,11 @@ export async function createAmmVault(input: {
       // AMM vaults were created holding nothing.
       fundingLegs: [
         new pb.DlvFundingLegV1({
-          tokenId: input.tokenA as any,
+          policyCommit: input.tokenA as any,
           amount: input.reserveA,
         }),
         new pb.DlvFundingLegV1({
-          tokenId: input.tokenB as any,
+          policyCommit: input.tokenB as any,
           amount: input.reserveB,
         }),
       ],

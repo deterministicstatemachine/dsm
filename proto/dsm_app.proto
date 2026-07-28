@@ -215,8 +215,12 @@ message FulfillmentMechanism {
 // now encumbered in the owner's device SMT (`DSM/vault-reserve/v1`) and PROVED
 // to a trader, so a condition no longer carries the quantities it governs.
 message AmmConstantProduct {
-  bytes  token_a            = 1 [(dsm_max_len)=64];   // lex-lower token id
-  bytes  token_b            = 2 [(dsm_max_len)=64];   // lex-higher token id
+  // 32-byte CPTA policy commits, lex-sorted. A ticker is NOT an identity —
+  // two distinct tokens have shared the ticker RIGB in this repo — so a pair
+  // named by label is a pair that can match the wrong asset while every
+  // signature on the path still verifies.
+  bytes  token_a            = 1 [(dsm_fixed_len)=32];  // lex-lower policy commit
+  bytes  token_b            = 2 [(dsm_fixed_len)=32];  // lex-higher policy commit
   reserved 3, 4;                                      // reserve_a_u128 / reserve_b_u128
   reserved "reserve_a_u128", "reserve_b_u128";
   uint32 fee_bps            = 5;                      // basis points (e.g. 30 = 0.30 %)
@@ -967,8 +971,16 @@ message DlvSpecV1 {
 // `DeviceState::balances` — a u128 here would put a narrowing conversion at the
 // settlement boundary, which is where a silent truncation mints money.
 message DlvFundingLegV1 {
-  bytes  token_id = 1 [(dsm_max_len)=64];
-  uint64 amount   = 2;
+  // 32-byte CPTA policy commit — the asset's IDENTITY, not its ticker.
+  //
+  // This carried a UTF-8 ticker that `dlv.create` resolved to a commit via the
+  // local registry. That resolution is the ambiguity: a ticker can name more
+  // than one token (two distinct RIGB tokens have existed here), so the lookup
+  // could encumber a different asset than the caller meant while every
+  // downstream signature still verified. There is no fallback — a caller that
+  // does not know the commit does not know which asset it is funding.
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  uint64 amount        = 2;
 }
 
 message DlvInstantiateV1 {
@@ -1027,8 +1039,9 @@ message DlvOpenV3 {
 // search — it only frames typed inputs.
 message PublishRoutingAdvertisementRequest {
   bytes  vault_id              = 1 [(dsm_fixed_len)=32];
-  bytes  token_a               = 2 [(dsm_max_len)=64];
-  bytes  token_b               = 3 [(dsm_max_len)=64];
+  // 32-byte policy commits, lex-sorted. See AmmConstantProduct.
+  bytes  token_a               = 2 [(dsm_fixed_len)=32];
+  bytes  token_b               = 3 [(dsm_fixed_len)=32];
   // Reserves are NOT accepted from the caller: the handler reads them from the
   // owner's encumbered reserve leaves. A client that could state its own
   // liquidity could advertise a vault it had not funded.
@@ -1045,8 +1058,10 @@ message PublishRoutingAdvertisementRequest {
 }
 
 message RoutingPairRequest {
-  bytes token_a = 1 [(dsm_max_len)=64];
-  bytes token_b = 2 [(dsm_max_len)=64];
+  // 32-byte policy commits. Discovery is keyed by identity, so a ticker here
+  // would list vaults over a different asset that merely shares the name.
+  bytes token_a = 1 [(dsm_fixed_len)=32];
+  bytes token_b = 2 [(dsm_fixed_len)=32];
 }
 
 message FindAndBindRouteRequest {
@@ -1075,8 +1090,9 @@ message FindAndBindRouteRequest {
 // `creator_public_key` matches the local wallet's signing pk).
 message AmmVaultSummaryV1 {
   bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
-  bytes  token_a                   = 2 [(dsm_max_len)=64];
-  bytes  token_b                   = 3 [(dsm_max_len)=64];
+  // 32-byte policy commits, lex-sorted.
+  bytes  token_a                   = 2 [(dsm_fixed_len)=32];
+  bytes  token_b                   = 3 [(dsm_fixed_len)=32];
   reserved 4, 5;
   reserved "reserve_a_u128", "reserve_b_u128";
   uint32 fee_bps                   = 6;
@@ -1141,8 +1157,11 @@ message VaultStateAnchorV1 {
 // the vault's state has moved on (SoFi spec §3.3 step 5).
 message RouteCommitHopV1 {
   bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
-  bytes  token_in                  = 2 [(dsm_max_len)=64];
-  bytes  token_out                 = 3 [(dsm_max_len)=64];
+  // 32-byte policy commits naming the exact assets traded. A reserve
+  // inclusion proof is keyed by policy commit, so a hop named by label could
+  // be matched against a proof for a different same-ticker asset.
+  bytes  token_in                  = 2 [(dsm_fixed_len)=32];
+  bytes  token_out                 = 3 [(dsm_fixed_len)=32];
   bytes  input_amount_u128         = 4 [(dsm_fixed_len)=16];
   bytes  expected_output_amount_u128 = 5 [(dsm_fixed_len)=16];
   uint32 fee_bps                   = 6;
@@ -1409,8 +1428,10 @@ message VaultStateInclusionProofV1 {
 message RoutingVaultAdvertisementV1 {
   uint32 version                 = 1;
   bytes  vault_id                = 2 [(dsm_fixed_len)=32];
-  bytes  token_a                 = 3 [(dsm_max_len)=64];   // lexicographically lower
-  bytes  token_b                 = 4 [(dsm_max_len)=64];   // lexicographically higher
+  // 32-byte policy commits. The storage prefix is built from these, so pair
+  // identity IS the discovery index — a label here would collide two markets.
+  bytes  token_a                 = 3 [(dsm_fixed_len)=32];  // lex-lower policy commit
+  bytes  token_b                 = 4 [(dsm_fixed_len)=32];  // lex-higher policy commit
   reserved 5, 6;                                          // were big-endian u128 reserves
   reserved "reserve_a_u128", "reserve_b_u128";
   // Advertised reserves in u64 base units, sourced from the owner's encumbered

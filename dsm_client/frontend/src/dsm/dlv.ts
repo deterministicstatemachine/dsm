@@ -44,7 +44,8 @@ export interface BuildDlvInstantiateInput {
   /** SPHINCS+ pk of the creator. */
   creatorPublicKey: Uint8Array;
   /** Optional token_id for a balance-locked vault.  Empty = content-only. */
-  tokenId?: string;
+  /** 32-byte CPTA policy commit of the asset to encumber. Identity, not name. */
+  policyCommit?: Uint8Array;
   /** Optional locked amount (u128, big-endian).  Pass `0n` / omit for no lock. */
   lockedAmount?: bigint;
   /** SPHINCS+ signature over the canonical `Operation::DlvCreate` bytes. */
@@ -52,9 +53,14 @@ export interface BuildDlvInstantiateInput {
 }
 
 /**
- * Build the vault's funding legs from the single-asset `(tokenId, amount)`
- * shape this API exposes. Zero or absent → no legs, which is a content-only
- * vault.
+ * Build the vault's funding legs from a single `(policyCommit, amount)` pair.
+ * Zero or absent → no legs, which is a content-only vault.
+ *
+ * The asset is named by its 32-byte CPTA policy commit, never by ticker. A
+ * ticker can name more than one token — two distinct RIGB tokens have existed
+ * here — so a name would let a caller encumber a different asset than it meant
+ * while every downstream signature still verified. Rust does not resolve names
+ * to identities, and neither does this.
  *
  * These legs ENCUMBER real balances: `dlv.create` debits them from the
  * owner's canonical state and refuses the creation if the balance is short.
@@ -63,13 +69,16 @@ export interface BuildDlvInstantiateInput {
  * number than the caller named.
  */
 function buildFundingLegs(
-  tokenId: string | undefined,
+  policyCommit: Uint8Array | undefined,
   amount: bigint | undefined,
 ): pb.DlvFundingLegV1[] {
-  const hasToken = tokenId !== undefined && tokenId.length > 0;
+  const hasToken = policyCommit !== undefined && policyCommit.length > 0;
   const hasAmount = amount !== undefined && amount !== 0n;
   if (!hasToken && !hasAmount) return [];
-  if (!hasToken) throw new Error('a funding leg needs a tokenId');
+  if (!hasToken) throw new Error('a funding leg needs a policyCommit');
+  if (policyCommit!.length !== 32) {
+    throw new Error('a funding leg policyCommit must be 32 bytes');
+  }
   if (!hasAmount) throw new Error('a funding leg needs a non-zero amount');
   if (amount! < 0n) throw new Error('lockedAmount must be non-negative');
   if (amount! > 0xffffffffffffffffn) {
@@ -77,7 +86,7 @@ function buildFundingLegs(
   }
   return [
     new pb.DlvFundingLegV1({
-      tokenId: new TextEncoder().encode(tokenId!) as any,
+      policyCommit: policyCommit! as any,
       amount: amount!,
     }),
   ];
@@ -130,7 +139,7 @@ export function buildDlvInstantiateBytes(input: BuildDlvInstantiateInput): Uint8
   const req = new pb.DlvInstantiateV1({
     spec,
     creatorPublicKey: input.creatorPublicKey as any,
-    fundingLegs: buildFundingLegs(input.tokenId, input.lockedAmount),
+    fundingLegs: buildFundingLegs(input.policyCommit, input.lockedAmount),
     signature: input.signature as any,
   });
 
@@ -175,7 +184,8 @@ export async function createPostedDlv(input: {
   /** 32-byte CPTA anchor of the policy governing the locked token. */
   policyDigest: Uint8Array;
   /** Optional locked token id (empty for content-only vault). */
-  tokenId?: string;
+  /** 32-byte CPTA policy commit of the asset to encumber. Identity, not name. */
+  policyCommit?: Uint8Array;
   /** Optional locked amount (u128, big-endian).  0 / omit = no lock. */
   lockedAmount?: bigint;
   /** Optional content bytes (default: small placeholder). */
@@ -203,7 +213,7 @@ export async function createPostedDlv(input: {
     const content = input.content ?? new TextEncoder().encode('Posted DLV');
     const fulfillmentBytes =
       input.fulfillmentBytes ?? new Uint8Array();
-    const fundingLegs = buildFundingLegs(input.tokenId, input.lockedAmount);
+    const fundingLegs = buildFundingLegs(input.policyCommit, input.lockedAmount);
 
     const spec = new pb.DlvSpecV1({
       policyDigest: input.policyDigest as any,

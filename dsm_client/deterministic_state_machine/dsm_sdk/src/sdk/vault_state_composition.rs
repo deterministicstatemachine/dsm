@@ -279,10 +279,13 @@ pub(crate) async fn compose_vault_state(
     // Match proven legs to the sides of the pair. A leg is keyed by 32-byte
     // policy commit, so a vault naming its pair by label cannot be matched and
     // fails closed rather than being guessed at.
-    let (Ok(pc_a), Ok(pc_b)) = (<[u8; 32]>::try_from(token_a), <[u8; 32]>::try_from(token_b))
-    else {
+    // Through the ONE pair parser, so the identity a vault was funded under, the
+    // identity a pointer commits to, and the identity a quote is bound to are
+    // derived by the same code and cannot disagree.
+    let Ok(pair) = dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) else {
         return Err(CompositionError::PairIsNotPolicyCommits);
     };
+    let (pc_a, pc_b) = (pair.a(), pair.b());
     let (Some(proven_a), Some(proven_b)) = (
         dsm::dlv::vault_reserve_inclusion::proven_amount(&reserve_proof, &pc_a),
         dsm::dlv::vault_reserve_inclusion::proven_amount(&reserve_proof, &pc_b),

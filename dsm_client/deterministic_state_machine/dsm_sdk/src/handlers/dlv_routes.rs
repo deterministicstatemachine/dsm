@@ -25,6 +25,19 @@ fn unwrap_argpack(args: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Human-readable name for an asset, resolved FROM its identity.
+///
+/// Deliberately one-directional. `policy_commit → ticker` is one-to-one, so it
+/// cannot pick the wrong asset; `ticker → policy_commit` is one-to-many and is
+/// exactly the ambiguity removed from the vault path. Falls back to the Base32
+/// anchor, which is never ambiguous, rather than to a guess.
+fn display_name_for(policy_commit: &[u8; 32]) -> String {
+    match crate::storage::client_db::token_registry::get_token_by_policy_commit(policy_commit) {
+        Ok(Some(row)) => row.token_id,
+        _ => crate::util::text_id::encode_base32_crockford(policy_commit),
+    }
+}
+
 impl AppRouterImpl {
     /// Dispatch handler for `dlv.*` query (read-only) routes.
     pub(crate) async fn handle_dlv_query(&self, q: crate::bridge::AppQuery) -> AppResult {
@@ -426,6 +439,66 @@ impl AppRouterImpl {
         // draft is consumed by finalize_vault below so we snapshot here.
         let vault_id: [u8; 32] = draft.id;
 
+        // IDENTITY FIRST — before any signature is produced.
+        //
+        // The accept-or-sign block below spends a SPHINCS+ signature. A leg that
+        // does not name a real asset can be rejected from its own bytes alone,
+        // so rejecting it after signing would mean paying for crypto to
+        // authorise a call that was never admissible.
+        let mut funding: Vec<([u8; 32], u64)> = Vec::with_capacity(req.funding_legs.len());
+        for leg in &req.funding_legs {
+            if leg.amount == 0 {
+                return err("dlv.create: a funding leg must carry a non-zero amount".into());
+            }
+            // The leg names the asset by its 32-byte policy commit. It used to
+            // carry a ticker that was resolved through the local registry — and
+            // that resolution is precisely the ambiguity being removed: a ticker
+            // can name more than one token, so the lookup could encumber a
+            // different asset than the caller meant with every downstream
+            // signature still verifying. No fallback; a malformed identity dies
+            // here, before any balance is touched.
+            let Ok(pc) = <[u8; 32]>::try_from(leg.policy_commit.as_slice()) else {
+                return err(format!(
+                    "dlv.create: a funding leg must name a 32-byte policy commit, got {} bytes — \
+                     a ticker is not an identity and is never resolved to one",
+                    leg.policy_commit.len()
+                ));
+            };
+            if funding.iter().any(|(prev, _)| *prev == pc) {
+                return err("dlv.create: an asset appears twice in the funding legs".into());
+            }
+            funding.push((pc, leg.amount));
+        }
+
+        // An AMM vault's legs must BE its pair, in the canonical order the
+        // predicate declares. Otherwise the reserves a trader quotes against
+        // would describe different assets than the curve governs.
+        //
+        // Both sides go through the one pair parser, so the ordering here and
+        // the ordering a trader derives at quote time cannot disagree.
+        if let Some((token_a, token_b)) = amm_pair.as_ref() {
+            let pair = match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
+                Ok(p) => p,
+                Err(e) => return err(format!("dlv.create: vault pair is not canonical: {e}")),
+            };
+            if funding.len() != 2 {
+                return err(
+                    "dlv.create: an AMM vault must be funded with exactly two legs — its own pair"
+                        .into(),
+                );
+            }
+            let mut legs_sorted = [funding[0].0, funding[1].0];
+            legs_sorted.sort();
+            if legs_sorted != [pair.a(), pair.b()] {
+                return err("dlv.create: the funding legs must be the vault's own pair".into());
+            }
+            // Store the legs in canonical order so the reserve leaves, the
+            // advertisement and the predicate all agree on which side is which.
+            if funding[0].0 != pair.a() {
+                funding.swap(0, 1);
+            }
+        }
+
         // Accept-or-sign (Track C.4) — when the trader-supplied signature
         // was empty, sign the draft's `parameters_hash` with the wallet's
         // SPHINCS+ secret key.  `parameters_hash` is the same value
@@ -472,71 +545,29 @@ impl AppRouterImpl {
         // express a two-sided vault at all, which is why AMM vaults were
         // created holding nothing and advertised reserves nobody held. Zero
         // legs is a content-only vault; an AMM vault must carry exactly two.
-        let mut funding: Vec<([u8; 32], u64)> = Vec::with_capacity(req.funding_legs.len());
-        let mut funded_token_ids: Vec<String> = Vec::with_capacity(req.funding_legs.len());
-        for leg in &req.funding_legs {
-            if leg.amount == 0 {
-                return err("dlv.create: a funding leg must carry a non-zero amount".into());
-            }
-            let Ok(tid) = std::str::from_utf8(&leg.token_id) else {
-                return err("dlv.create: funding leg token_id is not valid UTF-8".into());
-            };
-            // Fails closed on an unregistered token: a vault cannot encumber
-            // an asset this device cannot name.
-            let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
-                Ok(c) => c,
-                Err(e) => {
-                    return err(format!(
-                        "dlv.create: resolve policy_commit for {tid} failed: {e}"
-                    ));
-                }
-            };
-            if funding.iter().any(|(prev, _)| *prev == pc) {
-                return err(format!(
-                    "dlv.create: {tid} appears twice in the funding legs"
-                ));
-            }
-            funding.push((pc, leg.amount));
-            funded_token_ids.push(tid.to_string());
-        }
-
-        // An AMM vault's legs must BE its pair, in the canonical order the
-        // predicate declares. Otherwise the reserves a trader quotes against
-        // would describe different assets than the curve governs.
-        if let Some((token_a, token_b)) = amm_pair.as_ref() {
-            if funding.len() != 2 {
-                return err(
-                    "dlv.create: an AMM vault must be funded with exactly two legs — its own pair"
-                        .into(),
-                );
-            }
-            let leg_a = funded_token_ids[0].as_bytes();
-            let leg_b = funded_token_ids[1].as_bytes();
-            if leg_a != token_a.as_slice() || leg_b != token_b.as_slice() {
-                return err(
-                    "dlv.create: the funding legs must be the vault's own pair, in lex order"
-                        .into(),
-                );
-            }
-        }
-
         // Reject insufficiency BEFORE anything is built or signed, with a
         // message naming the shortfall. The chokepoint checks again — this is
         // the readable failure, that is the structural one.
         if let Some(head) = self.core_sdk.device_head() {
-            for ((pc, amount), tid) in funding.iter().zip(funded_token_ids.iter()) {
+            for (pc, amount) in funding.iter() {
                 let have = head.balance(pc);
                 if have < *amount {
+                    // DISPLAY metadata, resolved from the identity — never the
+                    // other way round. commit → ticker is one-to-one and safe;
+                    // ticker → commit is the ambiguous direction that was
+                    // removed. If the name is unknown the anchor still names the
+                    // asset exactly.
+                    let named = display_name_for(pc);
                     return err(format!(
-                        "dlv.create: insufficient {tid} to encumber (need {amount}, have {have})"
+                        "dlv.create: insufficient {named} to encumber (need {amount}, have {have})"
                     ));
                 }
             }
         }
 
         // Kept for the posted-mode advertisement further down, which describes
-        // a single locked asset.
-        let token_id_str_opt: Option<String> = funded_token_ids.first().cloned();
+        // a single locked asset. Display only.
+        let token_id_str_opt: Option<String> = funding.first().map(|(pc, _)| display_name_for(pc));
         let locked_u64: u64 = funding.first().map(|(_, a)| *a).unwrap_or(0);
         let policy_commit_opt: Option<[u8; 32]> = funding.first().map(|(pc, _)| *pc);
 
