@@ -796,12 +796,18 @@ impl DeviceState {
         tips_in_order: Vec<([u8; 32], RelChainTip)>,
         extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
         offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
+        vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
         max_relationships: usize,
     ) -> Result<Self, DsmError> {
         let mut state = Self::new(genesis, devid, public_key, max_relationships);
         state.legacy_anchor = legacy_anchor;
         state.balances = balances;
         state.offline_allocations = offline_allocations;
+        // The reserve LEAVES replay through `extra_leaves` below, which is what
+        // rebuilds the root; this map carries the amounts behind them, which the
+        // leaf hash cannot yield. A funded vault that reloaded without it would
+        // recompute a root that does not match the stored one.
+        state.vault_reserves = vault_reserves;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
             state
