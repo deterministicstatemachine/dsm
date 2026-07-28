@@ -889,7 +889,6 @@ fn dlv_list_owned_amm_vaults_is_dispatched_and_delegates() {
 // `tests/vault_funding_routes.rs::routed_settlement_refuses_until_reserve_proofs_exist`
 // states behaviourally. The republish property returns with the settlement work.
 
-
 /// Track C.5 invariant — both storage publishers MUST honour the
 /// accept-or-stamp pattern on the publisher / owner pk field.
 /// Frontend dev-tools screens (and any future routing-service
@@ -1054,7 +1053,6 @@ fn no_policy_commit_derived_from_metadata_cache() {
 // The publish half needs a live-router funded-creation test and is part of the
 // work NOT yet claimed complete.
 
-
 /// Tier 2 Foundation invariant — the `dlv.unlockRouted` anchor gate
 /// must compare against the vault's *internal* sequence and reserves
 /// digest (local truth), reject Required vaults that lack the
@@ -1092,7 +1090,6 @@ fn dlv_unlock_routed_enforces_anchor_against_local_vault_state() {
 // republish above. There is no settle to advance a sequence on while settlement
 // is fail-closed, and asserting on the text of a code path that no longer runs
 // is precisely the coverage illusion this suite is being replaced to remove.
-
 
 /// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 invariant.
 ///

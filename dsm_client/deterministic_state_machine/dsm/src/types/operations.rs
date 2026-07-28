@@ -579,6 +579,90 @@ pub enum Operation {
         /// Execution mode (typically Unilateral for vault creation).
         mode: TransactionMode,
     },
+    /// A trader settling a routed swap against a funded vault.
+    ///
+    /// The two balance deltas this operation carries are the ONLY value movement
+    /// on the trader's chain, and `DeviceState::advance` is the sole guard against
+    /// value creation *regardless of caller* — so everything needed to judge them
+    /// travels here, inside the signed operation, rather than being checked by a
+    /// handler an alternate caller could skip. Two correctly-shaped deltas must not
+    /// be sufficient to mint the output.
+    ///
+    /// The authorization is self-contained by construction: every field is either
+    /// re-derivable from published bytes or a signature over them, so the chokepoint
+    /// can verify it with no network and no local vault.
+    DlvSettle {
+        /// 32-byte vault being settled against, and whose funds are moving.
+        vault_id: Vec<u8>,
+        /// SPHINCS+ public key of the vault owner, and the device id its reserve
+        /// leaves are keyed under.
+        owner_public_key: Vec<u8>,
+        owner_devid: [u8; 32],
+        owner_genesis: [u8; 32],
+        /// The pair, as canonical policy commits — a ticker is not an identity and
+        /// cannot name a reserve leaf.
+        input_policy_commit: [u8; 32],
+        output_policy_commit: [u8; 32],
+        /// The exact vault state consumed: sequence, the digest over its reserves,
+        /// and the SMT root those reserves were proved against.
+        parent_sequence: u64,
+        parent_reserves_digest: [u8; 32],
+        reserve_proof_root: [u8; 32],
+        /// Digest of the owner-published predicate, so a substituted condition
+        /// cannot be pointed at.
+        predicate_digest: [u8; 32],
+        /// The signed quote and the external commitment it derives.
+        route_commit_bytes: Vec<u8>,
+        external_commitment_x: [u8; 32],
+        /// Exact amounts, base units. The deltas must realize precisely these.
+        input_amount: u64,
+        output_amount: u64,
+        /// Fee in basis points, and the DLV unlock proof σ.
+        fee_bps: u32,
+        sigma: [u8; 32],
+        /// Who is being credited.
+        settler_public_key: Vec<u8>,
+        settler_devid: [u8; 32],
+        /// Identity of the canonical settlement receipt this advance produces —
+        /// the value a pending pointer commits to, and the thing that makes the
+        /// settlement visible to everyone else.
+        settlement_receipt_id: [u8; 32],
+        /// SPHINCS+ signature by the settler over the canonical operation bytes.
+        signature: Vec<u8>,
+        mode: TransactionMode,
+    },
+    /// An owner recording a settlement it has already verified.
+    ///
+    /// Authorizes NO value movement. The trader's credit was final at the trader's
+    /// own advance, authorized by the owner's pre-commitment rather than by owner
+    /// liveness; this operation is the owner learning what already happened and
+    /// folding it into its own composed state.
+    ///
+    /// Carries empty balance deltas by construction — the fee accrues inside the
+    /// reserves as LP yield, so the owner's spendable balance is untouched — and
+    /// moves only the vault's reserve leaves. Replaying the same receipt is a
+    /// no-op; a different receipt claiming the same pointer is a conflict.
+    DlvOwnerApply {
+        /// 32-byte vault whose reserves are being reconciled.
+        vault_id: Vec<u8>,
+        /// The receipt being recorded, and the pointer that committed to it.
+        settlement_receipt_id: [u8; 32],
+        pending_pointer_x: [u8; 32],
+        /// The sequence this advances from, and to. Exactly one step.
+        parent_sequence: u64,
+        new_sequence: u64,
+        /// Reserve digests before and after, so the recorded state is pinned.
+        parent_reserves_digest: [u8; 32],
+        new_reserves_digest: [u8; 32],
+        /// The pair whose leaves move, and by how much.
+        input_policy_commit: [u8; 32],
+        output_policy_commit: [u8; 32],
+        input_amount: u64,
+        output_amount: u64,
+        /// SPHINCS+ signature by the owner over the canonical operation bytes.
+        signature: Vec<u8>,
+        mode: TransactionMode,
+    },
     /// Attempt to unlock a vault by providing a fulfillment proof.
     DlvUnlock {
         /// 32-byte vault identifier.
@@ -671,6 +755,13 @@ impl Operation {
             | DlvUnlock { .. }
             | DlvClaim { .. }
             | DlvInvalidate { .. }
+            // A settling trader pays its input out. Egress despite also
+            // receiving the output: value leaves this device's control.
+            | DlvSettle { .. }
+            // The owner's apply moves the OUTPUT leg out of its vault reserves,
+            // so it is egress too — even though the owner's spendable balance
+            // is untouched and the operation authorizes no balance delta.
+            | DlvOwnerApply { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
             // new asset. Classifying it as ingress (as it was while nothing
@@ -782,6 +873,28 @@ impl Operation {
             DlvCreate { token_id: None, .. } => EgressAsset::Unidentified,
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
             DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
+            // Settlement names its asset exactly: the trader's INPUT leg is what
+            // leaves. Unlike the vault-keyed ops above, this is not
+            // `Unidentified` — the authorization carries the policy commit and
+            // the amount, so the recovery egress gate can see precisely what
+            // moved.
+            DlvSettle {
+                input_policy_commit,
+                input_amount,
+                ..
+            } => EgressAsset::Asset {
+                token_id: input_policy_commit.to_vec(),
+                amount: *input_amount,
+            },
+            // The owner's OUTPUT leg leaves its reserves.
+            DlvOwnerApply {
+                output_policy_commit,
+                output_amount,
+                ..
+            } => EgressAsset::Asset {
+                token_id: output_policy_commit.to_vec(),
+                amount: *output_amount,
+            },
 
             // Token creation: the asset that LEAVES is ERA (the burned fee) —
             // NOT the new token, which is issued, not spent. Naming the new
@@ -1337,6 +1450,85 @@ impl Operation {
                 put_bytes(&mut out, vault_id);
                 put_str(&mut out, reason);
                 put_bytes(&mut out, creator_public_key);
+                put_bytes(&mut out, signature);
+                put_mode(&mut out, mode);
+            }
+            // Every authorization field is in the canonical bytes, so the
+            // settler's signature covers all of it and none can be swapped
+            // after signing.
+            DlvSettle {
+                vault_id,
+                owner_public_key,
+                owner_devid,
+                owner_genesis,
+                input_policy_commit,
+                output_policy_commit,
+                parent_sequence,
+                parent_reserves_digest,
+                reserve_proof_root,
+                predicate_digest,
+                route_commit_bytes,
+                external_commitment_x,
+                input_amount,
+                output_amount,
+                fee_bps,
+                sigma,
+                settler_public_key,
+                settler_devid,
+                settlement_receipt_id,
+                signature,
+                mode,
+            } => {
+                put_u8(&mut out, 26);
+                put_bytes(&mut out, vault_id);
+                put_bytes(&mut out, owner_public_key);
+                put_bytes(&mut out, owner_devid);
+                put_bytes(&mut out, owner_genesis);
+                put_bytes(&mut out, input_policy_commit);
+                put_bytes(&mut out, output_policy_commit);
+                put_u64(&mut out, *parent_sequence);
+                put_bytes(&mut out, parent_reserves_digest);
+                put_bytes(&mut out, reserve_proof_root);
+                put_bytes(&mut out, predicate_digest);
+                put_bytes(&mut out, route_commit_bytes);
+                put_bytes(&mut out, external_commitment_x);
+                put_u64(&mut out, *input_amount);
+                put_u64(&mut out, *output_amount);
+                put_u32(&mut out, *fee_bps);
+                put_bytes(&mut out, sigma);
+                put_bytes(&mut out, settler_public_key);
+                put_bytes(&mut out, settler_devid);
+                put_bytes(&mut out, settlement_receipt_id);
+                put_bytes(&mut out, signature);
+                put_mode(&mut out, mode);
+            }
+            DlvOwnerApply {
+                vault_id,
+                settlement_receipt_id,
+                pending_pointer_x,
+                parent_sequence,
+                new_sequence,
+                parent_reserves_digest,
+                new_reserves_digest,
+                input_policy_commit,
+                output_policy_commit,
+                input_amount,
+                output_amount,
+                signature,
+                mode,
+            } => {
+                put_u8(&mut out, 27);
+                put_bytes(&mut out, vault_id);
+                put_bytes(&mut out, settlement_receipt_id);
+                put_bytes(&mut out, pending_pointer_x);
+                put_u64(&mut out, *parent_sequence);
+                put_u64(&mut out, *new_sequence);
+                put_bytes(&mut out, parent_reserves_digest);
+                put_bytes(&mut out, new_reserves_digest);
+                put_bytes(&mut out, input_policy_commit);
+                put_bytes(&mut out, output_policy_commit);
+                put_u64(&mut out, *input_amount);
+                put_u64(&mut out, *output_amount);
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
@@ -2126,6 +2318,8 @@ impl Operation {
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
+            Operation::DlvSettle { .. } => "dlv_settle",
+            Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
         }
     }
@@ -2273,6 +2467,8 @@ impl Ops for Operation {
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
+            Operation::DlvSettle { .. } => "dlv_settle",
+            Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
         }
     }

@@ -658,6 +658,77 @@ fn validate_conservation(
             }
             Ok(())
         }
+        // SETTLEMENT: two POSITIONAL deltas, each cross-checked against the
+        // signed authorization.
+        //
+        // Positional and exact, in the shape `CreateToken` already uses — never
+        // set-membership. A rule that merely required "a debit of x and a credit
+        // of y somewhere in the vector" would accept them reordered, duplicated,
+        // or accompanied by a third delta; this accepts exactly one arrangement.
+        //
+        // And they are checked against the AUTHORIZATION, not merely against
+        // each other. Generic zero-sum arithmetic would let a caller move a
+        // different pair, or different amounts, as long as the two sides
+        // balanced — the deltas must realize the trade that was actually
+        // authorized, not merely *a* trade.
+        Operation::DlvSettle {
+            input_policy_commit,
+            output_policy_commit,
+            input_amount,
+            output_amount,
+            ..
+        } => {
+            if input_policy_commit == output_policy_commit {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvSettle input and output name the same asset",
+                ));
+            }
+            if *input_amount == 0 || *output_amount == 0 {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvSettle amounts must both be non-zero",
+                ));
+            }
+            if deltas.len() != 2 {
+                return Err(DsmError::invalid_operation(format!(
+                    "conservation: DlvSettle must carry exactly 2 deltas, got {}",
+                    deltas.len()
+                )));
+            }
+            let d_in = &deltas[0];
+            let d_out = &deltas[1];
+            if d_in.policy_commit != *input_policy_commit
+                || d_in.direction != BalanceDirection::Debit
+                || d_in.amount != *input_amount
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvSettle delta[0] must debit the authorized input exactly",
+                ));
+            }
+            if d_out.policy_commit != *output_policy_commit
+                || d_out.direction != BalanceDirection::Credit
+                || d_out.amount != *output_amount
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvSettle delta[1] must credit the authorized output exactly",
+                ));
+            }
+            Ok(())
+        }
+
+        // The owner RECORDS a settlement it has already verified. It authorizes
+        // no value movement of its own: the trader's credit was final at the
+        // trader's advance, and the fee accrues inside the reserves as LP yield,
+        // so the owner's spendable balance is untouched. Only reserve leaves
+        // move, and those are checked by `validate_vault_reserve_conservation`.
+        Operation::DlvOwnerApply { .. } => {
+            if !deltas.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvOwnerApply records a verified receipt and must not move balances",
+                ));
+            }
+            Ok(())
+        }
+
         // Funding a vault is a RESERVE move, not a balance delta. The value leaves
         // `balances` and lands in a vault-reserve leaf, and both halves are computed from
         // one amount inside `fund_vault_reserves` — so a delta accompanying this operation
@@ -1557,6 +1628,125 @@ impl DeviceState {
         })
     }
 
+    /// Apply a settlement to a vault's reserves: input leg in, output leg out.
+    ///
+    /// The THIRD reserve chokepoint, and deliberately distinct from the other
+    /// two. Funding moves value from `balances` into a vault; withdrawal moves
+    /// it back. This moves value only WITHIN the vault — the input the trader
+    /// paid arrives, the output it took leaves — and touches `balances` not at
+    /// all, because the fee accrues inside the reserves as LP yield and the
+    /// owner's spendable balance is not part of a settlement.
+    ///
+    /// That is why it exists rather than being expressed as a fund+withdraw
+    /// pair: those would each move the owner's spendable balance through an
+    /// intermediate state that never actually occurs.
+    ///
+    /// Pure: on `Err` nothing is mutated. Fails closed when the vault cannot pay
+    /// the output.
+    pub fn apply_settlement_to_reserves(
+        &self,
+        vault_id: &[u8; 32],
+        input_policy_commit: &[u8; 32],
+        input_amount: u64,
+        output_policy_commit: &[u8; 32],
+        output_amount: u64,
+        new_sequence: u64,
+    ) -> Result<VaultReserveOutcome, DsmError> {
+        if input_policy_commit == output_policy_commit {
+            return Err(DsmError::invalid_operation(
+                "apply_settlement_to_reserves: input and output name the same asset",
+            ));
+        }
+        if input_amount == 0 || output_amount == 0 {
+            return Err(DsmError::invalid_operation(
+                "apply_settlement_to_reserves: amounts must both be > 0",
+            ));
+        }
+
+        let key_in = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+            &self.genesis,
+            &self.devid,
+            vault_id,
+            input_policy_commit,
+        );
+        let key_out = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+            &self.genesis,
+            &self.devid,
+            vault_id,
+            output_policy_commit,
+        );
+
+        let cur_in = self
+            .vault_reserves
+            .get(&key_in)
+            .copied()
+            .unwrap_or_default();
+        let cur_out = self
+            .vault_reserves
+            .get(&key_out)
+            .copied()
+            .unwrap_or_default();
+
+        let new_in = cur_in.amount.checked_add(input_amount).ok_or_else(|| {
+            DsmError::invalid_operation("apply_settlement_to_reserves: input reserve overflow")
+        })?;
+        let new_out = cur_out.amount.checked_sub(output_amount).ok_or_else(|| {
+            DsmError::invalid_operation(
+                "apply_settlement_to_reserves: the vault cannot pay that output",
+            )
+        })?;
+
+        let mut new_smt = self.smt.clone();
+        let mut new_extra_leaves = self.extra_leaves.clone();
+        let mut new_vault_reserves = self.vault_reserves.clone();
+
+        for (key, amount) in [(key_in, new_in), (key_out, new_out)] {
+            let leaf_value =
+                crate::dlv::vault_reserve_leaf::vault_reserve_value(amount, new_sequence);
+            new_smt.update_leaf(&key, &leaf_value).map_err(|e| {
+                DsmError::invalid_operation(format!("vault-reserve leaf update: {e}"))
+            })?;
+            new_extra_leaves.insert(key, leaf_value);
+            new_vault_reserves.insert(
+                key,
+                VaultReserve {
+                    amount,
+                    sequence: new_sequence,
+                },
+            );
+        }
+
+        // Proofs against the FINAL root, so neither binds a state in which only
+        // one side of the swap had landed.
+        let new_root = *new_smt.root();
+        let mut proofs = Vec::with_capacity(2);
+        for key in [key_in, key_out] {
+            let proof = new_smt
+                .get_inclusion_proof(&key, 256)
+                .map_err(|e| DsmError::merkle(format!("vault-reserve proof: {e}")))?;
+            proofs.push(proof.to_bytes());
+        }
+
+        Ok(VaultReserveOutcome {
+            new_device_state: Self {
+                genesis: self.genesis,
+                devid: self.devid,
+                public_key: self.public_key.clone(),
+                smt: new_smt,
+                // Untouched: a settlement moves nothing spendable.
+                balances: self.balances.clone(),
+                tips: self.tips.clone(),
+                legacy_anchor: self.legacy_anchor,
+                offline_bearer_attestation: self.offline_bearer_attestation,
+                extra_leaves: new_extra_leaves,
+                offline_allocations: self.offline_allocations.clone(),
+                vault_reserves: new_vault_reserves,
+            },
+            new_root,
+            proofs,
+        })
+    }
+
     /// Encumber `legs` into `vault_id`, debiting the online balance. Fails closed on
     /// insufficient funds, leaving this state untouched.
     pub fn fund_vault_reserves(
@@ -1938,6 +2128,433 @@ mod tests {
             err.contains("underflow") || err.to_lowercase().contains("insufficient"),
             "must fail as a balance shortfall, got: {err}"
         );
+    }
+
+    // ── settlement: positional movement ────────────────────────────────────
+
+    /// A settlement authorization naming `x` of `in` for `y` of `out`.
+    fn settle_op(
+        vault: [u8; 32],
+        input_pc: [u8; 32],
+        input_amount: u64,
+        output_pc: [u8; 32],
+        output_amount: u64,
+    ) -> Operation {
+        Operation::DlvSettle {
+            vault_id: vault.to_vec(),
+            owner_public_key: vec![0xAA; 64],
+            owner_devid: devid(0xA1),
+            owner_genesis: [0u8; 32],
+            input_policy_commit: input_pc,
+            output_policy_commit: output_pc,
+            parent_sequence: 0,
+            parent_reserves_digest: [0x11; 32],
+            reserve_proof_root: [0x22; 32],
+            predicate_digest: [0x33; 32],
+            route_commit_bytes: vec![0x44; 8],
+            external_commitment_x: [0x55; 32],
+            input_amount,
+            output_amount,
+            fee_bps: 30,
+            sigma: [0x66; 32],
+            settler_public_key: vec![0xBB; 64],
+            settler_devid: devid(0xB1),
+            settlement_receipt_id: [0x77; 32],
+            signature: vec![0xCC; 64],
+            mode: TransactionMode::Bilateral,
+        }
+    }
+
+    fn delta(policy_commit: [u8; 32], direction: BalanceDirection, amount: u64) -> BalanceDelta {
+        BalanceDelta {
+            policy_commit,
+            direction,
+            amount,
+        }
+    }
+
+    /// The deltas must realize THE TRADE THAT WAS AUTHORIZED — not merely a
+    /// balanced pair of moves.
+    ///
+    /// Generic zero-sum arithmetic ("something out, something in, the books
+    /// balance") is satisfied by a completely different trade: another asset,
+    /// another amount, the two sides swapped. Each case below balances in that
+    /// weaker sense and must still reject, because it does not match the signed
+    /// authorization sitting in the same operation.
+    #[test]
+    fn dlv_settle_deltas_must_match_the_authorization_positionally() {
+        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
+        let vault = [0x77u8; 32];
+        let op = settle_op(vault, era, 1_000, rigb, 970);
+
+        // The one arrangement that is accepted.
+        let ok = [
+            delta(era, BalanceDirection::Debit, 1_000),
+            delta(rigb, BalanceDirection::Credit, 970),
+        ];
+        validate_conservation(&devid(0xB1), &op, &ok, None)
+            .expect("the authorized trade must pass");
+
+        for (why, deltas) in [
+            ("no deltas at all", vec![]),
+            (
+                "only the credit — the output without paying the input",
+                vec![delta(rigb, BalanceDirection::Credit, 970)],
+            ),
+            (
+                "only the debit",
+                vec![delta(era, BalanceDirection::Debit, 1_000)],
+            ),
+            (
+                "a third delta riding along",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 970),
+                    delta(dbtc, BalanceDirection::Credit, 1),
+                ],
+            ),
+            (
+                "REORDERED — set-membership would accept this",
+                vec![
+                    delta(rigb, BalanceDirection::Credit, 970),
+                    delta(era, BalanceDirection::Debit, 1_000),
+                ],
+            ),
+            (
+                "directions inverted: paid in the output, took the input",
+                vec![
+                    delta(era, BalanceDirection::Credit, 1_000),
+                    delta(rigb, BalanceDirection::Debit, 970),
+                ],
+            ),
+            (
+                "a different asset credited than the one authorized",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(dbtc, BalanceDirection::Credit, 970),
+                ],
+            ),
+            (
+                "a different asset debited",
+                vec![
+                    delta(dbtc, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 970),
+                ],
+            ),
+            (
+                "paying LESS than the authorized input",
+                vec![
+                    delta(era, BalanceDirection::Debit, 999),
+                    delta(rigb, BalanceDirection::Credit, 970),
+                ],
+            ),
+            (
+                "taking MORE than the authorized output",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 971),
+                ],
+            ),
+            (
+                "both sides scaled up — still zero-sum in the weak sense",
+                vec![
+                    delta(era, BalanceDirection::Debit, 10_000),
+                    delta(rigb, BalanceDirection::Credit, 9_700),
+                ],
+            ),
+            (
+                "duplicated debit",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(era, BalanceDirection::Debit, 1_000),
+                ],
+            ),
+        ] {
+            assert!(
+                validate_conservation(&devid(0xB1), &op, &deltas, None).is_err(),
+                "must reject: {why}"
+            );
+        }
+    }
+
+    /// An authorization that names one asset on both legs, or a zero amount, is
+    /// rejected on its own terms — before any delta is considered.
+    #[test]
+    fn dlv_settle_authorization_must_name_two_assets_and_non_zero_amounts() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let vault = [0x77u8; 32];
+
+        let same_asset = settle_op(vault, era, 1_000, era, 970);
+        assert!(validate_conservation(
+            &devid(0xB1),
+            &same_asset,
+            &[
+                delta(era, BalanceDirection::Debit, 1_000),
+                delta(era, BalanceDirection::Credit, 970),
+            ],
+            None,
+        )
+        .is_err());
+
+        for (x, y) in [(0u64, 970u64), (1_000, 0), (0, 0)] {
+            let op = settle_op(vault, era, x, rigb, y);
+            assert!(
+                validate_conservation(
+                    &devid(0xB1),
+                    &op,
+                    &[
+                        delta(era, BalanceDirection::Debit, x),
+                        delta(rigb, BalanceDirection::Credit, y),
+                    ],
+                    None,
+                )
+                .is_err(),
+                "zero-amount authorization ({x}, {y}) must reject"
+            );
+        }
+    }
+
+    /// AT THE ADVANCE, not just at the guard: exactly two balances move, by
+    /// exactly the authorized amounts, and every unrelated balance and reserve
+    /// leaf is byte-identical afterwards.
+    ///
+    /// `validate_conservation` sees only the delta vector — it cannot observe
+    /// what the advance did to the rest of the map. This is the assertion the
+    /// user's conservation rule actually asks for, and it needs a real advance.
+    #[test]
+    fn dlv_settle_advance_moves_two_balances_and_leaves_everything_else_identical() {
+        let mut trader = fresh_device(0xB1);
+        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
+        trader.balances.insert(era, 50_000);
+        trader.balances.insert(rigb, 2_000);
+        trader.balances.insert(dbtc, 7_777);
+
+        // The trader also runs a vault of its own. A settlement it performs as a
+        // TRADER must not touch reserves it holds as an OWNER.
+        let own_vault = [0x99u8; 32];
+        let trader = trader
+            .fund_vault_reserves(&own_vault, &[(era, 10_000), (dbtc, 1_000)], 0)
+            .expect("trader funds its own vault")
+            .new_device_state;
+
+        let before_dbtc = trader.balance(&dbtc);
+        let before_reserves = trader.vault_reserves_snapshot();
+
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &trader.devid,
+            &trader.devid,
+        );
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &trader.devid,
+            &trader.devid,
+        );
+        let vault = [0x77u8; 32];
+        let out = trader
+            .advance(
+                rk,
+                trader.devid,
+                settle_op(vault, era, 1_000, rigb, 970),
+                entropy(11),
+                None,
+                &[
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 970),
+                ],
+                Some(tip),
+                None,
+                None,
+            )
+            .expect("the authorized settlement must advance");
+        let after = &out.new_device_state;
+
+        // 50_000 held, 10_000 already encumbered in the trader's own vault.
+        assert_eq!(after.balance(&era), 39_000, "input debited exactly");
+        assert_eq!(after.balance(&rigb), 2_970, "output credited exactly");
+        assert_eq!(
+            after.balance(&dbtc),
+            before_dbtc,
+            "an unrelated balance must not move"
+        );
+        assert_eq!(
+            after.vault_reserves_snapshot(),
+            before_reserves,
+            "a trader-side settlement must not touch the trader's own reserve leaves"
+        );
+    }
+
+    /// The owner RECORDS a settlement it verified. It authorizes no value
+    /// movement of its own, so any balance delta rejects.
+    #[test]
+    fn dlv_owner_apply_authorizes_no_balance_movement() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let op = Operation::DlvOwnerApply {
+            vault_id: vec![0x77; 32],
+            settlement_receipt_id: [0x77; 32],
+            pending_pointer_x: [0x55; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_reserves_digest: [0x11; 32],
+            new_reserves_digest: [0x12; 32],
+            input_policy_commit: era,
+            output_policy_commit: rigb,
+            input_amount: 1_000,
+            output_amount: 970,
+            signature: vec![0xCC; 64],
+            mode: TransactionMode::Bilateral,
+        };
+
+        validate_conservation(&devid(0xB1), &op, &[], None)
+            .expect("empty deltas are the only accepted shape");
+
+        for deltas in [
+            vec![delta(era, BalanceDirection::Credit, 1_000)],
+            vec![delta(rigb, BalanceDirection::Debit, 970)],
+            vec![
+                delta(era, BalanceDirection::Credit, 1_000),
+                delta(rigb, BalanceDirection::Debit, 970),
+            ],
+            // Even a self-cancelling pair: the owner's spendable balance is not
+            // part of a settlement at all.
+            vec![
+                delta(era, BalanceDirection::Credit, 1),
+                delta(era, BalanceDirection::Debit, 1),
+            ],
+        ] {
+            assert!(
+                validate_conservation(&devid(0xB1), &op, &deltas, None).is_err(),
+                "owner-apply must not carry balance deltas"
+            );
+        }
+    }
+
+    /// The owner's reserve legs move positionally: the input the trader paid
+    /// arrives, the output it took leaves, and NOTHING else changes — not the
+    /// owner's spendable balances, not another vault's leaves, not the other
+    /// assets in the same vault.
+    #[test]
+    fn owner_apply_moves_two_reserve_legs_and_leaves_everything_else_identical() {
+        let mut owner = fresh_device(0xA1);
+        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
+        owner.balances.insert(era, 50_000);
+        owner.balances.insert(rigb, 20_000);
+        owner.balances.insert(dbtc, 9_000);
+
+        let vault = [0x77u8; 32];
+        let other_vault = [0x88u8; 32];
+        let owner = owner
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 0)
+            .expect("fund the traded vault")
+            .new_device_state;
+        let owner = owner
+            .fund_vault_reserves(&other_vault, &[(era, 1_000), (dbtc, 500)], 0)
+            .expect("fund an unrelated vault")
+            .new_device_state;
+
+        let balances_before = owner.balances.clone();
+
+        let after = owner
+            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 970, 1)
+            .expect("apply the settlement")
+            .new_device_state;
+
+        assert_eq!(
+            after.vault_reserve(&vault, &era),
+            11_000,
+            "the input the trader paid arrives in the reserve"
+        );
+        assert_eq!(
+            after.vault_reserve(&vault, &rigb),
+            4_030,
+            "the output the trader took leaves the reserve"
+        );
+        assert_eq!(
+            after.balances, balances_before,
+            "the owner's SPENDABLE balances are untouched — the fee accrues as LP yield inside the reserves"
+        );
+        assert_eq!(
+            after.vault_reserve(&other_vault, &era),
+            1_000,
+            "an unrelated vault over the same asset is untouched"
+        );
+        assert_eq!(after.vault_reserve(&other_vault, &dbtc), 500);
+
+        // The sequence steps on BOTH moved legs, so a proof of either at the old
+        // sequence no longer verifies.
+        assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 1);
+        assert_eq!(
+            after.vault_reserve_entry(&vault, &rigb).unwrap().sequence,
+            1
+        );
+        assert_eq!(
+            after
+                .vault_reserve_entry(&other_vault, &era)
+                .unwrap()
+                .sequence,
+            0,
+            "the untraded vault keeps its own sequence"
+        );
+    }
+
+    /// A vault that cannot pay the output fails closed with ZERO mutation —
+    /// the alternative is a reserve that wraps to a near-u64::MAX balance.
+    #[test]
+    fn a_vault_that_cannot_pay_the_output_rejects_with_zero_mutation() {
+        let mut owner = fresh_device(0xA6);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        owner.balances.insert(era, 50_000);
+        owner.balances.insert(rigb, 1_000);
+        let vault = [0x77u8; 32];
+        let owner = owner
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 1_000)], 0)
+            .expect("funding")
+            .new_device_state;
+
+        let root_before = *owner.smt.root();
+        let reserves_before = owner.vault_reserves_snapshot();
+
+        let err = owner
+            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 1_001, 1)
+            .expect_err("the vault holds 1_000 RIGB and cannot pay 1_001");
+        assert!(
+            format!("{err}").contains("cannot pay"),
+            "must fail as an unpayable output, got: {err}"
+        );
+
+        assert_eq!(*owner.smt.root(), root_before, "zero mutation on the root");
+        assert_eq!(owner.vault_reserves_snapshot(), reserves_before);
+
+        // Exactly the reserve is payable — the boundary is not off by one.
+        owner
+            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 1_000, 1)
+            .expect("draining the leg to zero is legitimate");
+    }
+
+    /// The settlement move refuses degenerate authorizations at the chokepoint
+    /// itself, not only at the guard above it.
+    #[test]
+    fn settlement_reserve_move_refuses_same_asset_and_zero_amounts() {
+        let mut owner = fresh_device(0xA7);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        owner.balances.insert(era, 50_000);
+        owner.balances.insert(rigb, 50_000);
+        let vault = [0x77u8; 32];
+        let owner = owner
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 10_000)], 0)
+            .expect("funding")
+            .new_device_state;
+
+        assert!(
+            owner
+                .apply_settlement_to_reserves(&vault, &era, 1_000, &era, 970, 1)
+                .is_err(),
+            "one asset on both legs is not a trade"
+        );
+        assert!(owner
+            .apply_settlement_to_reserves(&vault, &era, 0, &rigb, 970, 1)
+            .is_err());
+        assert!(owner
+            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 0, 1)
+            .is_err());
     }
 
     /// Encumbrance is reversible, or funding a vault is a one-way door.

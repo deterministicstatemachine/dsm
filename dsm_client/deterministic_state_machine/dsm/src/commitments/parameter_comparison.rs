@@ -544,6 +544,69 @@ pub fn extract_operation_parameters(
             params.insert("vault_id".to_string(), vault_id.clone());
             Ok(params)
         }
+        // Settlement's fixed parameters name the exact trade, not just the
+        // vault: a comparison that saw only the vault id could not tell two
+        // different settlements against it apart.
+        Operation::DlvSettle {
+            vault_id,
+            input_policy_commit,
+            output_policy_commit,
+            input_amount,
+            output_amount,
+            external_commitment_x,
+            settlement_receipt_id,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"dlv_settle".to_vec());
+            params.insert("vault_id".to_string(), vault_id.clone());
+            params.insert(
+                "input_policy_commit".to_string(),
+                input_policy_commit.to_vec(),
+            );
+            params.insert(
+                "output_policy_commit".to_string(),
+                output_policy_commit.to_vec(),
+            );
+            params.insert(
+                "input_amount".to_string(),
+                input_amount.to_be_bytes().to_vec(),
+            );
+            params.insert(
+                "output_amount".to_string(),
+                output_amount.to_be_bytes().to_vec(),
+            );
+            params.insert(
+                "external_commitment_x".to_string(),
+                external_commitment_x.to_vec(),
+            );
+            params.insert(
+                "settlement_receipt_id".to_string(),
+                settlement_receipt_id.to_vec(),
+            );
+            Ok(params)
+        }
+        Operation::DlvOwnerApply {
+            vault_id,
+            settlement_receipt_id,
+            pending_pointer_x,
+            new_sequence,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"dlv_owner_apply".to_vec());
+            params.insert("vault_id".to_string(), vault_id.clone());
+            params.insert(
+                "settlement_receipt_id".to_string(),
+                settlement_receipt_id.to_vec(),
+            );
+            params.insert("pending_pointer_x".to_string(), pending_pointer_x.to_vec());
+            params.insert(
+                "new_sequence".to_string(),
+                new_sequence.to_be_bytes().to_vec(),
+            );
+            Ok(params)
+        }
     }
 }
 
