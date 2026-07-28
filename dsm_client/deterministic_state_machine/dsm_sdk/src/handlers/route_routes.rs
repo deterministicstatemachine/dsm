@@ -848,6 +848,29 @@ impl AppRouterImpl {
                             composed.sequence,
                         );
                     }
+                    // A validly-signed pointer sits on the exact sequence this
+                    // composition ended on and nothing witnesses it, so some
+                    // trade may already have consumed the state a quote would be
+                    // built against. Drop the vault rather than quote it.
+                    //
+                    // This is not the safety gate — the first-writer claim
+                    // refuses a contested slot before any advance, so a quote
+                    // built here could not settle twice. It is refusing EARLY,
+                    // so the trader does not sign a RouteCommit and publish X
+                    // against a parent in flight only to be refused at the claim.
+                    //
+                    // Keyed on the narrow signal, never on `pending_chain_skipped`:
+                    // that counter sums malformed, stale and depth-exceeded
+                    // pointers too, and refusing on it would let one junk pointer
+                    // un-quotable a vault forever.
+                    if composed.blocked_by_unreceipted_pointer_at_parent {
+                        log::info!(
+                            "[route.findAndBindBestPath] vault {} dropped from candidates: an unreceipted pending trade holds seq={}",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                            composed.sequence,
+                        );
+                        continue;
+                    }
                     if composed.pending_chain_len
                         >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
                     {

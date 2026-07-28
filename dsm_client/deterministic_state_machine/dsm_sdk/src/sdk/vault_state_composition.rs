@@ -97,7 +97,28 @@ pub(crate) struct ComposedVaultState {
     /// Number of pending pointers skipped (signature invalid, X missing,
     /// out-of-sequence, beyond MAX_PENDING_CHAIN_DEPTH).  Useful for
     /// telemetry / regression tests.
+    ///
+    /// DIAGNOSTIC AGGREGATION, never a safety predicate. It sums causes that
+    /// mean entirely different things, so a caller that refused on
+    /// `pending_chain_skipped > 0` would let anyone un-quotable a vault forever
+    /// by publishing one malformed pointer — reintroducing the free-griefing
+    /// property the receipt gate exists to remove. Use the narrow signal below.
     pub pending_chain_skipped: usize,
+    /// A pointer that is structurally sound and validly signed sits at exactly
+    /// the sequence this composition ended on, and no verified receipt witnesses
+    /// it.
+    ///
+    /// Some trade may already have consumed the state a quote would be built
+    /// against. It cannot actually double-settle — the first-writer claim
+    /// refuses a contested slot before any advance — so this is not a safety
+    /// signal. It spares the trader from quoting, signing a RouteCommit and
+    /// publishing X against a parent that is in flight, only to be refused at
+    /// the claim.
+    ///
+    /// Deliberately narrow. A malformed, stale, cryptographically invalid or
+    /// depth-exceeded pointer does NOT set this: none of them witness a trade in
+    /// flight, and treating them as if they did is precisely the griefing vector.
+    pub blocked_by_unreceipted_pointer_at_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +434,13 @@ pub(crate) async fn compose_vault_state(
     let mut cursor_reserve_b = baseline_reserves.1;
     let mut chain_len: usize = 0;
     let mut chain_skipped: usize = 0;
+    // Parents observed to carry a valid-but-unwitnessed pointer. Recorded per
+    // parent rather than as a running flag because the cursor can advance past
+    // an earlier block: two pointers may share a parent, and if the second is
+    // receipted it folds, which makes the first no longer describe the sequence
+    // being quoted. Only a block AT THE FINAL cursor matters.
+    let mut unreceipted_parents: std::collections::BTreeSet<u64> =
+        std::collections::BTreeSet::new();
     for ptr in pointers.into_iter() {
         if chain_len >= MAX_PENDING_CHAIN_DEPTH {
             chain_skipped += 1;
@@ -454,6 +482,13 @@ pub(crate) async fn compose_vault_state(
                     // and its settlement may land a moment from now. Skipping leaves
                     // effective reserves exactly as if it had never been published,
                     // which is the whole point.
+                    //
+                    // But it IS a validly-signed claim on this exact parent, so a
+                    // quote built here would be built against a state that may
+                    // already be in flight. Recorded — every earlier `continue`
+                    // in this loop is a pointer that witnesses nothing at all and
+                    // must not block anyone.
+                    unreceipted_parents.insert(ptr.parent_sequence);
                     chain_skipped += 1;
                     continue;
                 }
@@ -461,6 +496,9 @@ pub(crate) async fn compose_vault_state(
         if dsm::dlv::settlement_receipt_leaf::receipt_commitment_of(&receipt)
             != ptr.expected_receipt_hash
         {
+            // A receipt exists but does not witness THIS trade, so this pointer
+            // is as unwitnessed as one with no receipt at all.
+            unreceipted_parents.insert(ptr.parent_sequence);
             chain_skipped += 1;
             continue;
         }
@@ -471,6 +509,7 @@ pub(crate) async fn compose_vault_state(
         if receipt.trade.parent_sequence != ptr.parent_sequence
             || receipt.trade.new_sequence != ptr.new_sequence
         {
+            unreceipted_parents.insert(ptr.parent_sequence);
             chain_skipped += 1;
             continue;
         }
@@ -604,6 +643,9 @@ pub(crate) async fn compose_vault_state(
         reserves_b: cursor_reserve_b,
         pending_chain_len: chain_len,
         pending_chain_skipped: chain_skipped,
+        // Only a block at the sequence actually reached. A pointer that blocked
+        // an earlier parent is irrelevant once the cursor has moved past it.
+        blocked_by_unreceipted_pointer_at_parent: unreceipted_parents.contains(&cursor_seq),
     })
 }
 
@@ -1399,6 +1441,246 @@ mod tests {
             .await
             .expect_err("a label pair must fail closed");
         assert!(matches!(err, CompositionError::PairIsNotPolicyCommits));
+    }
+
+    // ── the quote block ────────────────────────────────────────────────────
+    //
+    // A vault carrying a valid-but-unwitnessed pointer at the sequence being
+    // quoted is dropped from the candidate set. Narrow on purpose: the signal
+    // must fire for a trade in flight and for nothing else, or one junk pointer
+    // would un-quotable a vault forever.
+
+    /// LOAD-BEARING: a malformed pointer must NOT block quoting.
+    ///
+    /// Publishing junk under the slot prefix costs nothing. If that were enough
+    /// to stop a vault being quoted, the free-griefing property the receipt gate
+    /// removed would be back through a different door.
+    #[tokio::test]
+    async fn a_malformed_pointer_does_not_block_quoting() {
+        let vault_id = vid_seed(0x70);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+
+        // Undecodable bytes sitting exactly where a pointer for parent 0 lives.
+        let key =
+            crate::sdk::route_commit_sdk::vault_pending_pointer_key(&vault_id, 1, &x_seed(0x71));
+        BitcoinTapSdk::storage_put_bytes(&key, b"not a pointer at all")
+            .await
+            .expect("publish junk");
+
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
+        assert!(
+            !composed.blocked_by_unreceipted_pointer_at_parent,
+            "junk witnesses no trade and must not stop anyone quoting"
+        );
+        assert_eq!(composed.sequence, 0);
+        assert_eq!(
+            (composed.reserves_a, composed.reserves_b),
+            (1_000_000, 500_000)
+        );
+    }
+
+    /// LOAD-BEARING: a valid but unreceipted pointer at the quoted parent DOES
+    /// block. Some trade may already have consumed that state.
+    #[tokio::test]
+    async fn a_valid_unreceipted_pointer_at_the_quoted_parent_blocks() {
+        let vault_id = vid_seed(0x72);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        publish_trade(
+            &vault_id,
+            &x_seed(0x73),
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            0,
+            true,
+            1_000,
+            &trader.public_key,
+            &trader.secret_key,
+            false, // published, never settled
+        )
+        .await;
+
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
+        assert!(
+            composed.blocked_by_unreceipted_pointer_at_parent,
+            "a trade in flight on the quoted sequence must stop the quote"
+        );
+        // And the reserves are still untouched — the pointer consumed nothing.
+        // Blocking is about not quoting a state in flight, not about the pointer
+        // having moved anything.
+        assert_eq!(
+            (composed.reserves_a, composed.reserves_b),
+            (1_000_000, 500_000)
+        );
+        assert_eq!(composed.sequence, 0);
+    }
+
+    /// An unreceipted pointer at a DIFFERENT parent is irrelevant to this quote.
+    ///
+    /// Pins that the signal tracks the sequence actually reached, not merely
+    /// "some pointer somewhere is unwitnessed".
+    #[tokio::test]
+    async fn an_unreceipted_pointer_at_another_parent_does_not_block() {
+        let vault_id = vid_seed(0x74);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+
+        // Unwitnessed, but claiming parent 7 while this vault is at 0.
+        publish_trade(
+            &vault_id,
+            &x_seed(0x75),
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            7,
+            true,
+            1_000,
+            &trader.public_key,
+            &trader.secret_key,
+            false,
+        )
+        .await;
+
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
+        assert!(
+            !composed.blocked_by_unreceipted_pointer_at_parent,
+            "a pointer on a sequence this vault is not at must not block it"
+        );
+        assert_eq!(composed.sequence, 0);
+    }
+
+    /// Once the receipt appears the vault is quotable again — and from the
+    /// FOLDED state, not the stale parent it was blocked at.
+    ///
+    /// The block must be a pause, not a trapdoor: a vault that stayed
+    /// un-quotable after its trade settled would be permanently removed from
+    /// routing by its own successful use.
+    #[tokio::test]
+    async fn the_receipt_unblocks_the_vault_at_the_folded_state() {
+        let vault_id = vid_seed(0x76);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        let x = x_seed(0x77);
+        let (folded_a, folded_b) = publish_trade(
+            &vault_id,
+            &x,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            0,
+            true,
+            1_000,
+            &trader.public_key,
+            &trader.secret_key,
+            false,
+        )
+        .await;
+
+        let blocked = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
+        assert!(blocked.blocked_by_unreceipted_pointer_at_parent);
+
+        // The trader settles and publishes its receipt.
+        let trade = settled_trade(
+            &publish_rc_for_swap(
+                &x,
+                &vault_id,
+                &TOKEN_A,
+                &TOKEN_B,
+                1_000_000,
+                500_000,
+                30,
+                0,
+                true,
+                1_000,
+                &trader.public_key,
+                &trader.secret_key,
+            )
+            .await
+            .2,
+            0,
+            &TOKEN_A,
+            1_000,
+            &TOKEN_B,
+            500_000 - folded_b,
+        );
+        publish_receipt(&vault_id, &trade, &trader.public_key, &trader.secret_key).await;
+
+        let unblocked = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
+        assert!(
+            !unblocked.blocked_by_unreceipted_pointer_at_parent,
+            "a witnessed trade must not keep the vault out of routing"
+        );
+        assert_eq!(unblocked.sequence, 1, "quotable from the folded sequence");
+        assert_eq!(
+            (unblocked.reserves_a, unblocked.reserves_b),
+            (folded_a, folded_b),
+            "and from the folded reserves, not the stale parent's"
+        );
     }
 
     // ── the receipt gate ───────────────────────────────────────────────────
