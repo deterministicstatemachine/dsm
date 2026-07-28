@@ -470,12 +470,18 @@ impl AppRouterImpl {
         };
         let reserve_a = head.vault_reserve(&vault_id, &pc_a);
         let reserve_b = head.vault_reserve(&vault_id, &pc_b);
-        if reserve_a == 0 && reserve_b == 0 {
-            return err(
-                "route.publishRoutingAdvertisement: this vault holds no encumbered reserves — \
-                 fund it before advertising it"
-                    .into(),
-            );
+        // BOTH sides, not either. `&&` here accepted a vault with one funded leg
+        // and one empty one — which happens exactly when the advertised pair
+        // names a different asset than the one funded, e.g. an impostor sharing
+        // a ticker with the real one. The half-funded advertisement would then
+        // publish with a zero on that side and describe a market that cannot
+        // trade.
+        if reserve_a == 0 || reserve_b == 0 {
+            return err(format!(
+                "route.publishRoutingAdvertisement: this vault does not hold both advertised \
+                 assets (a={reserve_a}, b={reserve_b}) — fund it, and check the pair names the \
+                 assets actually encumbered"
+            ));
         }
         // Derive vault_proto_bytes from the local DLVManager when the
         // caller passes empty.  This is the path the SoFi test +

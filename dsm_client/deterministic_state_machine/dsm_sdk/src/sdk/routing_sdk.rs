@@ -382,6 +382,7 @@ pub(crate) async fn delete_routing_advertisement(
 
 #[cfg(test)]
 mod tests {
+
     //! SoFi routing-vault discovery tests.
     //!
     //! Exercises publish → list → verify → terminal-state → delete on
@@ -393,6 +394,124 @@ mod tests {
     //!
     //! Each test uses unique token-id / vault-id pairs so suites do
     //! not poison each other.
+
+    /// REQUIRED PROOF: the advertisement encodes the EXACT policy commits the
+    /// vault was funded under, and the exact amounts sitting in its reserve
+    /// leaves.
+    ///
+    /// Everything upstream shares one pair parser, which makes agreement very
+    /// likely — but "likely by construction" is not a test. This reads the
+    /// funded leaves, publishes through the real builder, fetches the emitted
+    /// bytes back out of storage, and compares them field by field.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_advertisement_encodes_the_exact_funded_identities_and_amounts() {
+        use prost::Message;
+
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+
+        // Read reserves the way the publish handler does: out of the leaves,
+        // keyed by the funded commits.
+        let reserve_a = v.head.vault_reserve(&v.vault_id, &v.pc_a);
+        let reserve_b = v.head.vault_reserve(&v.vault_id, &v.pc_b);
+        assert_eq!((reserve_a, reserve_b), (10_000, 5_000));
+
+        publish_active_advertisement(PublishRoutingAdInput {
+            vault_id: &v.vault_id,
+            token_a: &v.pc_a,
+            token_b: &v.pc_b,
+            reserve_a,
+            reserve_b,
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: [0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: &[0xABu8; 64],
+            vault_proto_bytes: b"vault-proto",
+        })
+        .await
+        .expect("publish");
+
+        let key = advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let bytes = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key)
+            .await
+            .expect("fetch the advertisement that was actually written");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(bytes.as_slice()).expect("decode");
+
+        // The identities on the wire are the funded ones, byte for byte.
+        assert_eq!(ad.token_a, v.pc_a.to_vec(), "advertised A is the funded A");
+        assert_eq!(ad.token_b, v.pc_b.to_vec(), "advertised B is the funded B");
+        assert_eq!(ad.token_a.len(), 32);
+        assert_eq!(ad.token_b.len(), 32);
+        assert_eq!(ad.vault_id, v.vault_id.to_vec());
+
+        // And the amounts are the leaf amounts, on the side that holds them.
+        assert_eq!(ad.reserve_a, reserve_a);
+        assert_eq!(ad.reserve_b, reserve_b);
+        assert_eq!(ad.fee_bps, v.fee_bps);
+
+        // A same-ticker impostor is NOT what got advertised, and holds nothing
+        // in this vault — so it could not have been.
+        let impostor = {
+            let mut pc = v.pc_a;
+            pc[0] ^= 0xff;
+            pc
+        };
+        assert_ne!(ad.token_a, impostor.to_vec());
+        assert_eq!(
+            v.head.vault_reserve(&v.vault_id, &impostor),
+            0,
+            "an asset this vault never funded must hold nothing in it"
+        );
+    }
+
+    /// Publishing in the reverse order yields the SAME advertisement: same key,
+    /// same canonical sides, and the reserves follow their assets rather than
+    /// their argument position.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reversed_publication_produces_the_same_advertisement() {
+        use prost::Message;
+
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        let reserve_a = v.head.vault_reserve(&v.vault_id, &v.pc_a);
+        let reserve_b = v.head.vault_reserve(&v.vault_id, &v.pc_b);
+
+        // Deliberately backwards: higher commit first, with ITS reserve first.
+        publish_active_advertisement(PublishRoutingAdInput {
+            vault_id: &v.vault_id,
+            token_a: &v.pc_b,
+            token_b: &v.pc_a,
+            reserve_a: reserve_b,
+            reserve_b: reserve_a,
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: [0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: &[0xABu8; 64],
+            vault_proto_bytes: b"vault-proto",
+        })
+        .await
+        .expect("publish");
+
+        // Same key either way — pair identity, not argument order, indexes it.
+        let key = advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        assert_eq!(key, advertisement_key(&v.pc_b, &v.pc_a, &v.vault_id));
+
+        let bytes = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key)
+            .await
+            .expect("fetch");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(
+            ad.token_a,
+            v.pc_a.to_vec(),
+            "A is still the lex-lower commit"
+        );
+        assert_eq!(ad.token_b, v.pc_b.to_vec());
+        assert_eq!(
+            (ad.reserve_a, ad.reserve_b),
+            (reserve_a, reserve_b),
+            "each reserve followed its own asset across the swap"
+        );
+    }
 
     use super::*;
     use prost::Message;
