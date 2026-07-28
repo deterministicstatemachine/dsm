@@ -879,29 +879,16 @@ fn dlv_list_owned_amm_vaults_is_dispatched_and_delegates() {
     );
 }
 
-/// Republish-on-settled invariant — `dlv.unlockRouted` MUST call
-/// `routing_sdk::republish_active_advertisement_with_reserves` after
-/// the post-trade vault reserve update so the next trader's quote
-/// reflects post-trade liquidity.  Without this, every subsequent
-/// trader hits a chunk-#7 `OutputMismatch` rejection until somebody
-/// manually republishes — terrible UX.  The republish is best-
-/// effort (failure logs but doesn't fail the trade); the regression
-/// guard just enforces the call still happens.
-#[test]
-fn dlv_unlock_routed_republishes_advertisement_after_settled_swap() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    let routed_start = src
-        .find("async fn dlv_unlock_routed")
-        .expect("dlv_unlock_routed handler present");
-    let routed_body = &src[routed_start..];
-    assert!(
-        routed_body
-            .contains("crate::sdk::routing_sdk::republish_active_advertisement_with_reserves"),
-        "regression: dlv.unlockRouted no longer republishes the routing-vault \
-         advertisement after a settled swap — every subsequent trader will hit \
-         OutputMismatch on a stale quote"
-    );
-}
+// RETIRED with the declared-reserves removal.
+//
+// This asserted that `dlv.unlockRouted` republishes the routing advertisement
+// after a settled swap. Both the republish and the settle are gone: reserves are
+// now encumbered leaves in the OWNER's device SMT, and a settling device has no
+// authenticated reserves to verify a hop against until
+// `VaultReserveInclusionProofV1` exists. The route fails closed, which
+// `tests/vault_funding_routes.rs::routed_settlement_refuses_until_reserve_proofs_exist`
+// states behaviourally. The republish property returns with the settlement work.
+
 
 /// Track C.5 invariant — both storage publishers MUST honour the
 /// accept-or-stamp pattern on the publisher / owner pk field.
@@ -1054,29 +1041,19 @@ fn no_policy_commit_derived_from_metadata_cache() {
     }
 }
 
-/// Tier 2 Foundation invariant — `dlv.create` must publish the
-/// genesis vault state anchor for AMM (Required / Optional) vaults
-/// via the `vault_state_anchor` module.  The guard fails if the
-/// publish call, the reserves-digest derivation, or the enforcement
-/// dispatch are removed.
-#[test]
-fn dlv_create_invokes_genesis_anchor_publish_for_required_amm_vault() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    // The genesis-anchor publish path uses these symbols in dlv_create:
-    assert!(
-        src.contains("publish_vault_state_anchor"),
-        "dlv_routes.rs must call publish_vault_state_anchor for Tier 2 Foundation"
-    );
-    assert!(
-        src.contains("compute_reserves_digest")
-            || src.contains("vault_state_anchor::compute_reserves_digest"),
-        "dlv_routes.rs must derive reserves_digest via the anchor module"
-    );
-    assert!(
-        src.contains("AnchorEnforcement::Required") || src.contains("AnchorEnforcement::Optional"),
-        "dlv_routes.rs must dispatch on anchor_enforcement"
-    );
-}
+// RETIRED: the PROPERTY survives, the string does not.
+//
+// `dlv.create` still publishes a genesis `VaultStateAnchorV1` for a REQUIRED AMM
+// vault, but the digest now comes from `vault.reserves_digest_for(ra, rb)` over
+// the amounts just encumbered, rather than from a `compute_reserves_digest` call
+// named in this file. Grepping for the symbol therefore failed while the
+// behaviour was intact — which is the failure mode of a source-text test.
+//
+// The digest half is pinned behaviourally in
+// `dsm/src/vault/dlv_manager.rs::vault_reserves_digest_is_over_the_reserves_it_is_given`.
+// The publish half needs a live-router funded-creation test and is part of the
+// work NOT yet claimed complete.
+
 
 /// Tier 2 Foundation invariant — the `dlv.unlockRouted` anchor gate
 /// must compare against the vault's *internal* sequence and reserves
@@ -1111,28 +1088,11 @@ fn dlv_unlock_routed_enforces_anchor_against_local_vault_state() {
     );
 }
 
-/// Tier 2 Foundation invariant — after an accepted routed unlock, the
-/// vault's internal `current_sequence` must advance by exactly one and
-/// a fresh `VaultStateAnchorV1` must be republished for the post-trade
-/// state.  The guard fails if either step regresses.
-#[test]
-fn dlv_unlock_routed_advances_sequence_and_republishes_anchor_on_settle() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    // After accepted unlock, sequence must advance.
-    assert!(
-        src.contains("current_sequence.saturating_add(1)") || src.contains("current_sequence += 1"),
-        "settle path must advance vault.current_sequence"
-    );
-    // A second call to `publish_vault_state_anchor` must exist —
-    // one in `dlv_create` for genesis, one in `dlv_unlock_routed`
-    // for settle.  If only one (or zero) calls exist, either the
-    // genesis or the post-settle republish has regressed.
-    let count = src.matches("publish_vault_state_anchor").count();
-    assert!(
-        count >= 2,
-        "publish_vault_state_anchor must be called from both dlv_create and dlv_unlock_routed (found {count})"
-    );
-}
+// RETIRED with the declared-reserves removal — same reason as the advertisement
+// republish above. There is no settle to advance a sequence on while settlement
+// is fail-closed, and asserting on the text of a code path that no longer runs
+// is precisely the coverage illusion this suite is being replaced to remove.
+
 
 /// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 invariant.
 ///

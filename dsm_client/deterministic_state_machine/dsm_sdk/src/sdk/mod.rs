@@ -33,6 +33,8 @@
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
 pub mod bootstrap;
+#[cfg(test)]
+pub(crate) mod funded_vault_fixture;
 pub mod kv;
 pub mod runtime_config;
 pub mod sdk_context;

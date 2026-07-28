@@ -90,8 +90,8 @@ pub(crate) struct ComposedVaultState {
     /// quote-time AMM math; the chunks-#7 gate verifies against the
     /// vault's local DLVManager at unlock time so the chain is
     /// authoritative for the actual settlement.
-    pub reserves_a: u128,
-    pub reserves_b: u128,
+    pub reserves_a: u64,
+    pub reserves_b: u64,
     /// Number of pending pointers successfully verified + chained.
     pub pending_chain_len: usize,
     /// Number of pending pointers skipped (signature invalid, X missing,
@@ -173,7 +173,7 @@ impl std::error::Error for CompositionError {}
 pub(crate) async fn compose_vault_state(
     vault_id: &[u8; 32],
     baseline: &SignedVaultStateAnchor,
-    baseline_reserves: (u128, u128),
+    baseline_reserves: (u64, u64),
     token_a: &[u8],
     token_b: &[u8],
     fee_bps: u32,
@@ -402,8 +402,16 @@ pub(crate) async fn compose_vault_state(
         in_buf.copy_from_slice(&hop.input_amount_u128);
         let mut out_buf = [0u8; 16];
         out_buf.copy_from_slice(&hop.expected_output_amount_u128);
-        let input_amount = u128::from_be_bytes(in_buf);
-        let expected_output = u128::from_be_bytes(out_buf);
+        // The wire carries 16-byte big-endian amounts; base units are u64. The
+        // narrowing happens HERE, once, checked — an amount that does not fit
+        // is a malformed hop, not a value to truncate.
+        let (Ok(input_amount), Ok(expected_output)) = (
+            u64::try_from(u128::from_be_bytes(in_buf)),
+            u64::try_from(u128::from_be_bytes(out_buf)),
+        ) else {
+            chain_skipped += 1;
+            continue;
+        };
         // Determine trade direction against the lex-canonical vault pair.
         let input_is_a = hop.token_in.as_slice() == token_a && hop.token_out.as_slice() == token_b;
         let input_is_b = hop.token_in.as_slice() == token_b && hop.token_out.as_slice() == token_a;
@@ -478,8 +486,8 @@ mod tests {
         seq: u64,
         token_a: &[u8],
         token_b: &[u8],
-        reserve_a: u128,
-        reserve_b: u128,
+        reserve_a: u64,
+        reserve_b: u64,
         fee_bps: u32,
         owner_pk: &[u8],
         owner_sk: &[u8],
@@ -499,8 +507,8 @@ mod tests {
         seq: u64,
         token_a: &[u8],
         token_b: &[u8],
-        reserve_a: u128,
-        reserve_b: u128,
+        reserve_a: u64,
+        reserve_b: u64,
         fee_bps: u32,
         owner_pk: &[u8],
         owner_sk: &[u8],
@@ -527,8 +535,8 @@ mod tests {
         sequence: u64,
         token_a: &[u8],
         token_b: &[u8],
-        reserve_a: u128,
-        reserve_b: u128,
+        reserve_a: u64,
+        reserve_b: u64,
         fee_bps: u32,
         owner_pk: &[u8],
         owner_sk: &[u8],
@@ -621,15 +629,15 @@ mod tests {
         vault_id: &[u8; 32],
         token_a: &[u8],
         token_b: &[u8],
-        parent_reserve_a: u128,
-        parent_reserve_b: u128,
+        parent_reserve_a: u64,
+        parent_reserve_b: u64,
         fee_bps: u32,
         parent_sequence: u64,
         input_is_a: bool,
-        input_amount: u128,
+        input_amount: u64,
         trader_pk: &[u8],
         trader_sk: &[u8],
-    ) -> (u128, u128, [u8; 32]) {
+    ) -> (u64, u64, [u8; 32]) {
         // Reserves cursor logic mirrors compose_vault_state.
         let (reserve_in, reserve_out) = if input_is_a {
             (parent_reserve_a, parent_reserve_b)
@@ -674,8 +682,8 @@ mod tests {
             vault_id: vault_id.to_vec(),
             token_in: hop_token_in,
             token_out: hop_token_out,
-            input_amount_u128: input_amount.to_be_bytes().to_vec(),
-            expected_output_amount_u128: simulated.to_be_bytes().to_vec(),
+            input_amount_u128: u128::from(input_amount).to_be_bytes().to_vec(),
+            expected_output_amount_u128: u128::from(simulated).to_be_bytes().to_vec(),
             fee_bps,
             advertisement_digest: vec![0u8; 32],
             state_number: parent_sequence,
@@ -690,8 +698,8 @@ mod tests {
             nonce: nonce_seed.to_vec(),
             input_token: token_a.to_vec(),
             output_token: token_b.to_vec(),
-            input_amount_u128: input_amount.to_be_bytes().to_vec(),
-            expected_final_output_amount_u128: simulated.to_be_bytes().to_vec(),
+            input_amount_u128: u128::from(input_amount).to_be_bytes().to_vec(),
+            expected_final_output_amount_u128: u128::from(simulated).to_be_bytes().to_vec(),
             total_fee_bps: fee_bps as u64,
             hops: vec![hop],
             initiator_public_key: trader_pk.to_vec(),
@@ -753,15 +761,15 @@ mod tests {
         nonce_seed: &[u8; 32],
         token_a: &[u8],
         token_b: &[u8],
-        parent_reserve_a: u128,
-        parent_reserve_b: u128,
+        parent_reserve_a: u64,
+        parent_reserve_b: u64,
         fee_bps: u32,
         parent_sequence: u64,
         input_is_a: bool,
-        input_amount: u128,
+        input_amount: u64,
         trader_pk: &[u8],
         trader_sk: &[u8],
-    ) -> (u128, u128) {
+    ) -> (u64, u64) {
         let (new_a, new_b, x) = publish_rc_for_swap(
             nonce_seed,
             vault_id,
@@ -902,12 +910,12 @@ mod tests {
         .await;
         // Three sequential trades.  Each picks up where the previous
         // left off so the composer sees a coherent chain.
-        let mut cur_a: u128 = 1_000_000;
-        let mut cur_b: u128 = 500_000;
+        let mut cur_a: u64 = 1_000_000;
+        let mut cur_b: u64 = 500_000;
         let mut expected_final_a = cur_a;
         let mut expected_final_b = cur_b;
         for (parent_seq, seed_byte, input_is_a, input_amount) in [
-            (0u64, 0x31u8, true, 1_000u128),
+            (0u64, 0x31u8, true, 1_000u64),
             (1, 0x32, false, 500),
             (2, 0x33, true, 2_000),
         ]

@@ -22,8 +22,8 @@ const DOMAIN_ANCHOR: &[u8] = b"DSM/vault-state-anchor\0";
 pub fn compute_reserves_digest(
     token_a: &[u8],
     token_b: &[u8],
-    reserve_a: u128,
-    reserve_b: u128,
+    reserve_a: u64,
+    reserve_b: u64,
     fee_bps: u32,
 ) -> [u8; 32] {
     let mut h = Hasher::new();

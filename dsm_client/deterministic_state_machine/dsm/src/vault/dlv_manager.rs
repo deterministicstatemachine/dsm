@@ -327,53 +327,47 @@ impl Default for DLVManager {
 /// and `vault_state_reserves_digest` against the LOCAL vault — storage anchors
 /// are advertisement-and-discovery only, never the verification source.
 impl LimboVault {
-    /// Returns the canonical reserves digest for this vault if it
-    /// uses an AMM constant-product fulfillment.  Returns `None` for
-    /// other fulfillment kinds — Tier 2 Foundation is AMM-only.
-    pub fn current_reserves_digest(&self) -> Option<[u8; 32]> {
+    /// The canonical reserves digest for this vault, over reserves the CALLER
+    /// supplies.
+    ///
+    /// The vault no longer stores reserves — they are encumbered leaves in the
+    /// owner's device SMT, and a digest computed from a number inside the
+    /// condition would describe liquidity nobody holds. The caller reads the
+    /// authoritative amounts (from its own reserve leaves, or from a verified
+    /// `VaultReserveInclusionProofV1`) and passes them here.
+    ///
+    /// Returns `None` for non-AMM fulfillments — Tier 2 Foundation is AMM-only.
+    pub fn reserves_digest_for(&self, reserve_a: u64, reserve_b: u64) -> Option<[u8; 32]> {
         if let crate::vault::FulfillmentMechanism::AmmConstantProduct {
             token_a,
             token_b,
-            reserve_a,
-            reserve_b,
             fee_bps,
         } = &self.fulfillment_condition
         {
             Some(crate::dlv::vault_state_anchor::compute_reserves_digest(
-                token_a, token_b, *reserve_a, *reserve_b, *fee_bps,
+                token_a, token_b, reserve_a, reserve_b, *fee_bps,
             ))
         } else {
             None
         }
     }
 
-    /// Update the AMM constant-product reserves in-place + bump
-    /// `current_sequence`.  Returns the vault's `token_a` so callers
-    /// can match the advertisement's canonical pair order against
-    /// the vault's storage order before writing.  Returns `None` if
-    /// this vault is not an AMM constant-product (other fulfillment
-    /// kinds don't carry reserves).
+    /// Advance this vault's sequence by one, returning its `token_a` so the
+    /// caller can match the advertisement's canonical pair order against the
+    /// vault's storage order.
     ///
-    /// Used by `route.syncVaultsForPair` to mirror post-trade
-    /// reserves from the latest `RoutingVaultAdvertisementV1` into
-    /// the local DLVManager — this is how the OWNER observes a
-    /// remote trader's `dlv.unlockRouted` settle on a vault the
-    /// owner created.  Without this, the owner's local DLVManager
-    /// stays frozen at the initial reserves the owner created at
-    /// vault-creation time, and the cross-device SoFi test orchestrator's
-    /// "owner observes trader's settle" assertion can never fire.
-    pub fn update_amm_reserves(&mut self, new_a: u128, new_b: u128) -> Option<Vec<u8>> {
-        if let crate::vault::FulfillmentMechanism::AmmConstantProduct {
-            token_a,
-            reserve_a,
-            reserve_b,
-            ..
-        } = &mut self.fulfillment_condition
+    /// This replaces `update_amm_reserves`, which mutated reserves inside the
+    /// fulfillment condition. There are no reserves there to mutate: a
+    /// settlement moves real value between the trader's balances and the
+    /// owner's reserve leaves, and the sequence is the only thing about the
+    /// vault struct that still advances.
+    pub fn bump_sequence(&mut self) -> Option<Vec<u8>> {
+        if let crate::vault::FulfillmentMechanism::AmmConstantProduct { token_a, .. } =
+            &self.fulfillment_condition
         {
-            *reserve_a = new_a;
-            *reserve_b = new_b;
+            let t = token_a.clone();
             self.current_sequence = self.current_sequence.saturating_add(1);
-            Some(token_a.clone())
+            Some(t)
         } else {
             None
         }
@@ -579,17 +573,10 @@ mod tests {
 
     // ── Tier 2 Foundation accessors ────────────────────────────────
 
-    /// Build a minimal AMM-fulfilment `LimboVault` directly on the stack
-    /// for accessor tests. The chunks #7 gate consumes `current_sequence`
-    /// and `current_reserves_digest()` directly off the vault — no
-    /// `DLVManager` traversal needed for these unit tests.
-    fn amm_vault(
-        token_a: &[u8],
-        token_b: &[u8],
-        reserve_a: u128,
-        reserve_b: u128,
-        fee_bps: u32,
-    ) -> LimboVault {
+    /// Build a minimal AMM-PREDICATE `LimboVault` on the stack for accessor
+    /// tests. Reserves are deliberately absent: they are encumbered leaves in
+    /// the owner's device SMT, and the digest helper takes them as arguments.
+    fn amm_vault(token_a: &[u8], token_b: &[u8], fee_bps: u32) -> LimboVault {
         let commitment = {
             let mut h = crate::crypto::blake3::dsm_domain_hasher(
                 crate::common::domain_tags::TAG_DSM_DLV_CONTENT_COMMIT,
@@ -605,8 +592,6 @@ mod tests {
             fulfillment_condition: FulfillmentMechanism::AmmConstantProduct {
                 token_a: token_a.to_vec(),
                 token_b: token_b.to_vec(),
-                reserve_a,
-                reserve_b,
                 fee_bps,
             },
             intended_recipient: None,
@@ -634,7 +619,7 @@ mod tests {
     async fn vault_current_sequence_starts_at_zero() {
         // Through DLVManager: construct, insert, fetch, observe seq=0.
         let mgr = DLVManager::new();
-        let v = amm_vault(b"AAA", b"BBB", 1_000, 2_000, 30);
+        let v = amm_vault(b"AAA", b"BBB", 30);
         let id = mgr.add_vault(v).await.unwrap();
         let lock = mgr.get_vault(&id).await.unwrap();
         let v = lock.lock().await;
@@ -642,19 +627,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_current_reserves_digest_matches_amm_helper() {
+    async fn vault_reserves_digest_is_over_the_reserves_it_is_given() {
         use crate::dlv::vault_state_anchor::compute_reserves_digest;
-        let v = amm_vault(b"AAA", b"BBB", 1_000, 2_000, 30);
+        let v = amm_vault(b"AAA", b"BBB", 30);
+        // The digest is a function of SUPPLIED reserves — the vault no longer
+        // stores any, so it cannot digest a quantity nobody holds.
         assert_eq!(
-            v.current_reserves_digest(),
+            v.reserves_digest_for(1_000, 2_000),
             Some(compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30)),
+        );
+        assert_ne!(
+            v.reserves_digest_for(1_000, 2_000),
+            v.reserves_digest_for(1_000, 2_001),
+            "a different reserve must yield a different digest"
         );
     }
 
     #[tokio::test]
-    async fn vault_current_reserves_digest_returns_none_for_non_amm() {
+    async fn vault_reserves_digest_returns_none_for_non_amm() {
         // Non-AMM fulfilment (CryptoCondition) — Tier 2 Foundation is AMM-only.
         let v = dummy_vault(vid(1), VS::Limbo);
-        assert_eq!(v.current_reserves_digest(), None);
+        assert_eq!(v.reserves_digest_for(1, 2), None);
     }
 }

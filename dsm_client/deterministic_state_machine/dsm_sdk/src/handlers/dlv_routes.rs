@@ -84,23 +84,34 @@ impl AppRouterImpl {
                 if vault.creator_public_key.as_slice() != wallet_pk.as_slice() {
                     continue;
                 }
-                let (token_a, token_b, reserve_a, reserve_b, fee_bps) =
-                    match &vault.fulfillment_condition {
-                        dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                            token_a,
-                            token_b,
-                            reserve_a,
-                            reserve_b,
-                            fee_bps,
-                        } => (
-                            token_a.clone(),
-                            token_b.clone(),
-                            *reserve_a,
-                            *reserve_b,
-                            *fee_bps,
-                        ),
-                        _ => continue,
+                let (token_a, token_b, fee_bps) = match &vault.fulfillment_condition {
+                    dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                        token_a,
+                        token_b,
+                        fee_bps,
+                    } => (token_a.clone(), token_b.clone(), *fee_bps),
+                    _ => continue,
+                };
+                // Reserves come from THIS DEVICE'S encumbered leaves, not from
+                // the condition and not from an advertisement. The owner's
+                // screen must show what the owner actually holds.
+                let (reserve_a, reserve_b) = {
+                    let resolve = |t: &[u8]| -> Option<[u8; 32]> {
+                        let tid = std::str::from_utf8(t).ok()?;
+                        self.wallet.token_sdk.resolve_policy_commit_strict(tid).ok()
                     };
+                    match (
+                        self.core_sdk.device_head(),
+                        resolve(&token_a),
+                        resolve(&token_b),
+                    ) {
+                        (Some(head), Some(pc_a), Some(pc_b)) => (
+                            head.vault_reserve(&vid, &pc_a),
+                            head.vault_reserve(&vid, &pc_b),
+                        ),
+                        _ => (0, 0),
+                    }
+                };
                 let anchor_sequence = vault.current_sequence;
                 let anchor_enforcement = vault.anchor_enforcement;
                 // Phase 13 follow-up: pull the persisted `policy_digest`
@@ -148,8 +159,11 @@ impl AppRouterImpl {
                     vault_id: vid.to_vec(),
                     token_a,
                     token_b,
-                    reserve_a_u128: reserve_a.to_be_bytes().to_vec(),
-                    reserve_b_u128: reserve_b.to_be_bytes().to_vec(),
+                    reserve_a,
+                    reserve_b,
+                    // Reconciliation is not wired yet; the owner sees a real
+                    // zero rather than an invented number.
+                    pending_unapplied: 0,
                     fee_bps,
                     advertised_state_number: state_number,
                     routing_advertised: advertised,
@@ -328,9 +342,6 @@ impl AppRouterImpl {
                 }
             }
         }
-        if req.locked_amount_u128.len() != 16 {
-            return err("dlv.create: locked_amount_u128 must be 16 bytes (big-endian u128)".into());
-        }
         // Accept-or-sign: the actual SPHINCS+ signature must cover the
         // LimboVault's `parameters_hash` (the same value `vault.verify()`
         // re-derives in `finalize_vault`). We don't know that hash until
@@ -356,6 +367,14 @@ impl AppRouterImpl {
                     "dlv.create: FulfillmentMechanism conversion failed: {e}"
                 ))
             }
+        };
+        // Captured before `fulfillment` is moved into the draft, so the
+        // funding-leg check below can still see the pair the predicate declares.
+        let amm_pair: Option<(Vec<u8>, Vec<u8>)> = match &fulfillment {
+            dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                token_a, token_b, ..
+            } => Some((token_a.clone(), token_b.clone())),
+            _ => None,
         };
 
         // Reference state (current device head).
@@ -447,59 +466,79 @@ impl AppRouterImpl {
             req.signature = sig;
         }
 
-        // Locked amount + token (both optional — empty token_id = content-only vault).
-        let token_id_str_opt: Option<String> = if req.token_id.is_empty() {
-            None
-        } else {
-            match std::str::from_utf8(&req.token_id) {
-                Ok(s) => Some(s.to_string()),
-                Err(_) => return err("dlv.create: token_id is not valid UTF-8".into()),
+        // FUNDING LEGS — the assets this vault actually encumbers.
+        //
+        // Replaces a single `(token_id, locked_amount)` pair that could not
+        // express a two-sided vault at all, which is why AMM vaults were
+        // created holding nothing and advertised reserves nobody held. Zero
+        // legs is a content-only vault; an AMM vault must carry exactly two.
+        let mut funding: Vec<([u8; 32], u64)> = Vec::with_capacity(req.funding_legs.len());
+        let mut funded_token_ids: Vec<String> = Vec::with_capacity(req.funding_legs.len());
+        for leg in &req.funding_legs {
+            if leg.amount == 0 {
+                return err("dlv.create: a funding leg must carry a non-zero amount".into());
             }
-        };
-        let locked_u64: u64 = {
-            let mut acc: u128 = 0;
-            for b in &req.locked_amount_u128 {
-                acc = (acc << 8) | (*b as u128);
-            }
-            if acc == 0 {
-                0
-            } else {
-                match u64::try_from(acc) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return err(
-                            "dlv.create: locked_amount exceeds u64::MAX (Balance is u64)".into(),
-                        );
-                    }
-                }
-            }
-        };
-
-        // Resolve the locked token's policy_commit once — reused for the
-        // BalanceDelta below and for the posted-mode advertisement further
-        // down.  A strict-fail on unregistered tokens here matches the
-        // invariant landed in commit 3 (resolve_policy_commit fails closed).
-        let policy_commit_opt: Option<[u8; 32]> =
-            if let (Some(tid), true) = (token_id_str_opt.as_deref(), locked_u64 > 0) {
-                match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        return err(format!(
-                            "dlv.create: resolve policy_commit for {tid} failed: {e}"
-                        ));
-                    }
-                }
-            } else {
-                None
+            let Ok(tid) = std::str::from_utf8(&leg.token_id) else {
+                return err("dlv.create: funding leg token_id is not valid UTF-8".into());
             };
-        let deltas: Vec<dsm::types::device_state::BalanceDelta> = match policy_commit_opt {
-            Some(pc) => vec![dsm::types::device_state::BalanceDelta {
-                policy_commit: pc,
-                direction: dsm::types::device_state::BalanceDirection::Debit,
-                amount: locked_u64,
-            }],
-            None => Vec::new(),
-        };
+            // Fails closed on an unregistered token: a vault cannot encumber
+            // an asset this device cannot name.
+            let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
+                Ok(c) => c,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: resolve policy_commit for {tid} failed: {e}"
+                    ));
+                }
+            };
+            if funding.iter().any(|(prev, _)| *prev == pc) {
+                return err(format!(
+                    "dlv.create: {tid} appears twice in the funding legs"
+                ));
+            }
+            funding.push((pc, leg.amount));
+            funded_token_ids.push(tid.to_string());
+        }
+
+        // An AMM vault's legs must BE its pair, in the canonical order the
+        // predicate declares. Otherwise the reserves a trader quotes against
+        // would describe different assets than the curve governs.
+        if let Some((token_a, token_b)) = amm_pair.as_ref() {
+            if funding.len() != 2 {
+                return err(
+                    "dlv.create: an AMM vault must be funded with exactly two legs — its own pair"
+                        .into(),
+                );
+            }
+            let leg_a = funded_token_ids[0].as_bytes();
+            let leg_b = funded_token_ids[1].as_bytes();
+            if leg_a != token_a.as_slice() || leg_b != token_b.as_slice() {
+                return err(
+                    "dlv.create: the funding legs must be the vault's own pair, in lex order"
+                        .into(),
+                );
+            }
+        }
+
+        // Reject insufficiency BEFORE anything is built or signed, with a
+        // message naming the shortfall. The chokepoint checks again — this is
+        // the readable failure, that is the structural one.
+        if let Some(head) = self.core_sdk.device_head() {
+            for ((pc, amount), tid) in funding.iter().zip(funded_token_ids.iter()) {
+                let have = head.balance(pc);
+                if have < *amount {
+                    return err(format!(
+                        "dlv.create: insufficient {tid} to encumber (need {amount}, have {have})"
+                    ));
+                }
+            }
+        }
+
+        // Kept for the posted-mode advertisement further down, which describes
+        // a single locked asset.
+        let token_id_str_opt: Option<String> = funded_token_ids.first().cloned();
+        let locked_u64: u64 = funding.first().map(|(_, a)| *a).unwrap_or(0);
+        let policy_commit_opt: Option<[u8; 32]> = funding.first().map(|(pc, _)| *pc);
 
         // Build Operation::DlvCreate.
         let locked_balance_opt = if locked_u64 > 0 {
@@ -530,7 +569,7 @@ impl AppRouterImpl {
         );
         if let Err(e) =
             self.core_sdk
-                .execute_on_relationship(rel_key, actor, op, &deltas, Some(init_tip))
+                .execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
         {
             return err(format!("dlv.create: execute_on_relationship failed: {e}"));
         }
@@ -647,7 +686,25 @@ impl AppRouterImpl {
                 match dlv_manager.get_vault(&vault_id).await {
                     Ok(vault_lock) => {
                         let vault = vault_lock.lock().await;
-                        let reserves_digest_opt = vault.current_reserves_digest();
+                        // Digest over the reserves this device just encumbered,
+                        // read from its own leaves — the condition no longer
+                        // carries quantities to hash.
+                        let reserves_digest_opt = match self.core_sdk.device_head() {
+                            Some(head) => {
+                                let (ra, rb) = funding
+                                    .first()
+                                    .zip(funding.get(1))
+                                    .map(|((pc_a, _), (pc_b, _))| {
+                                        (
+                                            head.vault_reserve(&vault_id, pc_a),
+                                            head.vault_reserve(&vault_id, pc_b),
+                                        )
+                                    })
+                                    .unwrap_or((0, 0));
+                                vault.reserves_digest_for(ra, rb)
+                            }
+                            None => None,
+                        };
                         drop(vault);
                         if let Some(reserves_digest) = reserves_digest_opt {
                             let pk_res = crate::sdk::signing_authority::current_public_key();
@@ -1124,11 +1181,15 @@ impl AppRouterImpl {
         // callers can audit identity-binding posture.  The literal
         // sentinel string `anchor_enforcement_bypassed_optional_vault`
         // appears verbatim in this path so the regression guard finds it.
+        // Unused while the unlock fails closed; the posture logging it feeds
+        // returns with the settlement work.
+        #[allow(unused_mut, unused_variables)]
         let mut anchor_bypassed_optional: bool = false;
         // Stage post-trade reserves in canonical (a, b) ordering.  When
         // the on-chain DlvUnlock succeeds below we re-acquire the vault
         // lock and write these into `fulfillment_condition`.
-        let amm_post_trade_reserves: Option<(u128, u128)> = {
+        #[allow(unused_variables)]
+        let amm_post_trade_reserves: Option<(u64, u64)> = {
             let vault_lock = match dlv_manager.get_vault(&vault_id).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1168,12 +1229,30 @@ impl AppRouterImpl {
                 // LOCAL current state per policy.  A mismatch means the
                 // vault advanced since the RouteCommit was bound (stale
                 // state).  Pure + storage-free — never re-reads storage.
+                // FAIL CLOSED. The anchor gate compares the hop's binding against
+                // the vault's reserves, and a settling device no longer has them:
+                // reserves are encumbered leaves in the OWNER's device SMT, proved
+                // to a trader by `VaultReserveInclusionProofV1`. That proof is not
+                // wired yet, so there is nothing authoritative to compare against.
+                //
+                // Refusing is the honest state. Comparing against a fabricated zero
+                // would let a hop bind to reserves nobody holds — which is exactly
+                // the condition this whole change exists to end. Settlement moved no
+                // value before this, so nothing that worked has been taken away.
+                let _ = (policy, &hop, &vault_id);
+                return err(
+                    "dlv.unlockRouted: settlement is fail-closed until reserve proofs are \
+                     wired — a hop cannot be verified against reserves this device does not \
+                     hold"
+                        .into(),
+                );
+                #[allow(unreachable_code)]
                 match crate::sdk::route_commit_sdk::enforce_anchor_binding(
                     policy,
                     &hop,
                     &vault_id,
                     vault.current_sequence,
-                    vault.current_reserves_digest(),
+                    None,
                 ) {
                     Ok(AnchorPosture::Enforced) => {}
                     Ok(AnchorPosture::BypassedOptional)
@@ -1219,6 +1298,8 @@ impl AppRouterImpl {
             match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
                 &hop,
                 &vault.fulfillment_condition,
+                0,
+                0,
             ) {
                 Ok(Some(outcome)) => Some((outcome.new_reserve_a, outcome.new_reserve_b)),
                 Ok(None) => None,
@@ -1298,69 +1379,23 @@ impl AppRouterImpl {
             // diverges from the advanced chain by one swap.  The chain
             // is authoritative; the vault state will resync at next
             // restart from the proto stored on chain.  Log + continue.
-            match dlv_manager.get_vault(&vault_id).await {
-                Ok(vault_lock) => {
-                    let mut vault = vault_lock.lock().await;
-                    if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                        token_a,
-                        token_b,
-                        reserve_a,
-                        reserve_b,
-                        fee_bps,
-                    } = &mut vault.fulfillment_condition
-                    {
-                        *reserve_a = new_a;
-                        *reserve_b = new_b;
-                        let token_a_clone = token_a.clone();
-                        let token_b_clone = token_b.clone();
-                        let fee_bps_val: u32 = *fee_bps;
-                        canonical_pair = Some((token_a_clone.clone(), token_b_clone.clone()));
-                        // Advance vault internal sequence.  Use
-                        // `current_sequence.saturating_add(1)` so a
-                        // pathological u64::MAX doesn't wrap silently;
-                        // saturation is correct fail-closed because the
-                        // chunks #7 gate binds equality and any further
-                        // routes against a saturated vault would simply
-                        // mismatch and reject (preferable to silent wrap).
-                        vault.current_sequence = vault.current_sequence.saturating_add(1);
-                        let new_seq = vault.current_sequence;
-                        let new_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
-                            &token_a_clone,
-                            &token_b_clone,
-                            new_a,
-                            new_b,
-                            fee_bps_val,
-                        );
-                        post_settle_anchor = Some((new_seq, new_digest));
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[dlv.unlockRouted] post-advance reserve update for {} failed: {e}",
-                        crate::util::text_id::encode_base32_crockford(&vault_id)
-                    );
-                }
-            }
+            // The post-advance in-memory reserve mutation is GONE.
+            //
+            // It rewrote `reserve_a` / `reserve_b` inside the vault's own
+            // fulfillment condition, which is where reserves used to live. They
+            // are now encumbered leaves in the OWNER's device SMT, and a
+            // settling trader has no business rewriting the owner's liquidity
+            // in its local copy: the owner learns of a settlement by
+            // reconciling a receipt it has verified, not by another device
+            // editing a struct.
+            //
+            // What replaces it — trader-side value movement and owner-side
+            // reconciliation — lands with the settlement work. Until then the
+            // unlock above fails closed, so nothing reaches here.
 
-            // Republish the routing-vault advertisement with the new
-            // reserves + bumped state_number so the next trader's
-            // quote reflects post-trade liquidity.  Best-effort: a
-            // failure (e.g. vault never advertised) leaves the vault
-            // local-only and traders won't discover it for further
-            // routes — correct fail-closed semantics.
-            if let Some((token_a, token_b)) = canonical_pair {
-                if let Err(e) =
-                    crate::sdk::routing_sdk::republish_active_advertisement_with_reserves(
-                        &token_a, &token_b, &vault_id, new_a, new_b,
-                    )
-                    .await
-                {
-                    log::warn!(
-                        "[dlv.unlockRouted] post-advance routing-ad republish for {} failed (vault may not be advertised): {e}",
-                        crate::util::text_id::encode_base32_crockford(&vault_id)
-                    );
-                }
-            }
+            // Advertisement republish also goes with the settlement work: an ad
+            // must describe encumbered reserves, and there is no settled state
+            // to describe until the unlock above stops failing closed.
 
             // Tier 2 Foundation: republish the vault state anchor for
             // the post-settle (sequence, reserves_digest) so off-device

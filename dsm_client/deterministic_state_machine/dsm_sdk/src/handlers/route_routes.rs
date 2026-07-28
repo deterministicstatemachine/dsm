@@ -431,15 +431,50 @@ impl AppRouterImpl {
         if req.vault_id.len() != 32 {
             return err("route.publishRoutingAdvertisement: vault_id must be 32 bytes".into());
         }
-        if req.reserve_a_u128.len() != 16 || req.reserve_b_u128.len() != 16 {
+        // Reserves are NOT taken from the request — the fields are reserved in
+        // the proto. An advertisement must describe funds the owner has
+        // actually encumbered, so they are read from this device's reserve
+        // leaves below. A caller that could state its own liquidity could
+        // advertise a vault it never funded, which is precisely the condition
+        // that made every published reserve meaningless.
+        if req.token_a.len() != 32 || req.token_b.len() != 32 {
             return err(
-                "route.publishRoutingAdvertisement: reserves must be 16-byte big-endian u128"
+                "route.publishRoutingAdvertisement: token_a/token_b must be 32-byte policy \
+                 commits — a ticker is not an identity and cannot name a reserve leaf"
                     .into(),
             );
         }
         if req.unlock_spec_digest.len() != 32 {
             return err(
                 "route.publishRoutingAdvertisement: unlock_spec_digest must be 32 bytes".into(),
+            );
+        }
+
+        // ENCUMBRANCE FIRST. An advertisement must describe funds the owner has
+        // actually locked into this vault, so that question is settled before
+        // any proto derivation or storage work — both because it is the cheaper
+        // check and because a vault holding nothing should be refused ON THAT
+        // BASIS, not incidentally by whichever later gate happens to trip.
+        //
+        // Reserves are read from this device's own leaves; the request's reserve
+        // fields are reserved in the proto so a caller cannot state its own
+        // liquidity and advertise a vault it never funded.
+        let mut pc_a = [0u8; 32];
+        pc_a.copy_from_slice(&req.token_a);
+        let mut pc_b = [0u8; 32];
+        pc_b.copy_from_slice(&req.token_b);
+        let mut vault_id = [0u8; 32];
+        vault_id.copy_from_slice(&req.vault_id);
+        let Some(head) = self.core_sdk.device_head() else {
+            return err("route.publishRoutingAdvertisement: no device head".into());
+        };
+        let reserve_a = head.vault_reserve(&vault_id, &pc_a);
+        let reserve_b = head.vault_reserve(&vault_id, &pc_b);
+        if reserve_a == 0 && reserve_b == 0 {
+            return err(
+                "route.publishRoutingAdvertisement: this vault holds no encumbered reserves — \
+                 fund it before advertising it"
+                    .into(),
             );
         }
         // Derive vault_proto_bytes from the local DLVManager when the
@@ -492,12 +527,6 @@ impl AppRouterImpl {
             }
         }
 
-        let mut vault_id = [0u8; 32];
-        vault_id.copy_from_slice(&req.vault_id);
-        let mut reserve_a = [0u8; 16];
-        reserve_a.copy_from_slice(&req.reserve_a_u128);
-        let mut reserve_b = [0u8; 16];
-        reserve_b.copy_from_slice(&req.reserve_b_u128);
         let mut unlock_digest = [0u8; 32];
         unlock_digest.copy_from_slice(&req.unlock_spec_digest);
 
@@ -505,8 +534,8 @@ impl AppRouterImpl {
             vault_id: &vault_id,
             token_a: &req.token_a,
             token_b: &req.token_b,
-            reserve_a_u128: reserve_a,
-            reserve_b_u128: reserve_b,
+            reserve_a,
+            reserve_b,
             fee_bps: req.fee_bps,
             unlock_spec_digest: unlock_digest,
             unlock_spec_key: req.unlock_spec_key,
@@ -606,59 +635,16 @@ impl AppRouterImpl {
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            // Already-mirrored vaults: refresh their reserves from
-            // the latest advertisement.  The advertisement carries
-            // reserves in canonical (lex-lower, lex-higher) pair
-            // order; map back to the vault's storage order before
-            // applying.  This is how the OWNER observes a remote
-            // trader's `dlv.unlockRouted` settle on a vault the
-            // owner created — without this refresh, the owner's
-            // local DLVManager stays frozen at vault-creation-time
-            // reserves and the cross-device SoFi orchestrator's
-            // "owner observes trader's settle" assertion can never
-            // fire.  Trader's post-settle path already publishes the
-            // updated advertisement via
-            // `republish_active_advertisement_with_reserves`; this
-            // closes the loop on the owner side.
-            if let Ok(vault_lock) = dlv_manager.get_vault(&vid).await {
-                if ad.reserve_a_u128.len() == 16 && ad.reserve_b_u128.len() == 16 {
-                    let mut canon_a = [0u8; 16];
-                    canon_a.copy_from_slice(&ad.reserve_a_u128);
-                    let mut canon_b = [0u8; 16];
-                    canon_b.copy_from_slice(&ad.reserve_b_u128);
-                    let ad_canon_a = u128::from_be_bytes(canon_a);
-                    let ad_canon_b = u128::from_be_bytes(canon_b);
-                    // Match the ad's canonical pair order against the
-                    // vault's storage order.  If vault.token_a equals
-                    // ad.token_a, reserves are already in vault order;
-                    // otherwise swap.
-                    let mut vault = vault_lock.lock().await;
-                    let vault_token_a = vault.amm_token_a().map(|s| s.to_vec());
-                    if let Some(vt_a) = vault_token_a {
-                        let (new_a, new_b) = if vt_a.as_slice() == ad.token_a.as_slice() {
-                            (ad_canon_a, ad_canon_b)
-                        } else {
-                            (ad_canon_b, ad_canon_a)
-                        };
-                        if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                            reserve_a,
-                            reserve_b,
-                            ..
-                        } = &vault.fulfillment_condition
-                        {
-                            if *reserve_a != new_a || *reserve_b != new_b {
-                                let _ = vault.update_amm_reserves(new_a, new_b);
-                                log::info!(
-                                    "[route.syncVaultsForPair] refreshed reserves for vault {} from ad: a={} b={} updated_state_number={}",
-                                    crate::util::text_id::encode_base32_crockford(&vid),
-                                    new_a,
-                                    new_b,
-                                    ad.updated_state_number
-                                );
-                            }
-                        }
-                    }
-                }
+            // Already-mirrored vaults are skipped, and their reserves are NOT
+            // refreshed from the advertisement.
+            //
+            // This block used to copy an ad's reserves into the local vault so
+            // the owner could "observe" a trader's settle. That made a
+            // discovery hint the authority for the owner's own liquidity —
+            // anyone who could publish an ad could restate what the owner held.
+            // The owner's reserves are its own encumbered leaves, advanced only
+            // by reconciling settlements it has verified.
+            if dlv_manager.get_vault(&vid).await.is_ok() {
                 continue;
             }
             let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad).await
@@ -749,7 +735,12 @@ impl AppRouterImpl {
         }
         let mut amount_buf = [0u8; 16];
         amount_buf.copy_from_slice(&req.input_amount_u128);
-        let input_amount = u128::from_be_bytes(amount_buf);
+        // Narrow ONCE, here, checked. Base units are u64; a request naming more
+        // than that is malformed, not something to truncate at the boundary
+        // where the difference would be minted.
+        let Ok(input_amount) = u64::try_from(u128::from_be_bytes(amount_buf)) else {
+            return err("route.findAndBindBestPath: input_amount exceeds u64 base units".into());
+        };
         let max_hops = if req.max_hops == 0 {
             crate::sdk::routing_path_sdk::DEFAULT_MAX_HOPS
         } else {
@@ -799,21 +790,14 @@ impl AppRouterImpl {
             crate::sdk::route_commit_sdk::HopAnchorBinding,
         > = std::collections::HashMap::new();
         for mut ad in ads.into_iter() {
-            if ad.vault_id.len() != 32
-                || ad.reserve_a_u128.len() != 16
-                || ad.reserve_b_u128.len() != 16
-            {
+            if ad.vault_id.len() != 32 {
                 ads_after_composition.push(ad);
                 continue;
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            let mut a_buf = [0u8; 16];
-            a_buf.copy_from_slice(&ad.reserve_a_u128);
-            let mut b_buf = [0u8; 16];
-            b_buf.copy_from_slice(&ad.reserve_b_u128);
-            let baseline_reserve_a = u128::from_be_bytes(a_buf);
-            let baseline_reserve_b = u128::from_be_bytes(b_buf);
+            let baseline_reserve_a = ad.reserve_a;
+            let baseline_reserve_b = ad.reserve_b;
 
             // Fetch the latest vault state anchor.  If absent, the ad
             // pre-dates the anchor flow — fall through and use the ad
@@ -865,8 +849,8 @@ impl AppRouterImpl {
                     // Replace the ad's reserves with the composed values
                     // so the downstream path search builds AMM edges
                     // against the canonical current state.
-                    ad.reserve_a_u128 = composed.reserves_a.to_be_bytes().to_vec();
-                    ad.reserve_b_u128 = composed.reserves_b.to_be_bytes().to_vec();
+                    ad.reserve_a = composed.reserves_a;
+                    ad.reserve_b = composed.reserves_b;
                     ad.updated_state_number = composed.sequence;
                     // Record this vault's anchor-state binding over the
                     // SAME composed values the vault-side unlock gate will
