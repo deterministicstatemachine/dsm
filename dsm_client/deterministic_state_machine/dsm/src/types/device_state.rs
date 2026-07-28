@@ -962,6 +962,57 @@ impl DeviceState {
         self.devid
     }
 
+    /// Genesis identifier. A key-derivation input for every device-scoped leaf,
+    /// so a verifier that must recompute a leaf position needs it alongside
+    /// [`Self::devid`].
+    pub fn genesis(&self) -> [u8; 32] {
+        self.genesis
+    }
+
+    /// Build the per-leg inclusion proofs that let a third party VERIFY this
+    /// vault's encumbered reserves, rather than take the owner's word for them.
+    ///
+    /// The amounts come out of the leaves, never from an argument. A caller that
+    /// could pass the magnitudes in would be signing its own claim — which is
+    /// exactly the self-declared-reserve shape the vault-reserve leaf replaced.
+    ///
+    /// Legs come back lex-sorted by `policy_commit`, the canonical order the
+    /// proof's signature payload is built over.
+    ///
+    /// Fails closed on an asset this vault does not hold: an absent leg would
+    /// otherwise be indistinguishable from a proven zero.
+    pub fn vault_reserve_leg_proofs(
+        &self,
+        vault_id: &[u8; 32],
+        policy_commits: &[[u8; 32]],
+    ) -> Result<Vec<crate::dlv::vault_reserve_inclusion::ReserveLegProof>, DsmError> {
+        let mut legs = Vec::with_capacity(policy_commits.len());
+        for policy_commit in policy_commits {
+            let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                &self.genesis,
+                &self.devid,
+                vault_id,
+                policy_commit,
+            );
+            let entry = self.vault_reserves.get(&key).ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "vault_reserve_leg_proofs: this vault holds no reserve for that asset",
+                )
+            })?;
+            let proof = self
+                .smt
+                .get_inclusion_proof(&key, 256)
+                .map_err(|e| DsmError::merkle(format!("vault-reserve leg proof: {e}")))?;
+            legs.push(crate::dlv::vault_reserve_inclusion::ReserveLegProof {
+                policy_commit: *policy_commit,
+                amount: entry.amount,
+                smt_siblings: proof.siblings,
+            });
+        }
+        legs.sort_by_key(|l| l.policy_commit);
+        Ok(legs)
+    }
+
     /// Device SPHINCS+ public key.
     pub fn public_key(&self) -> &[u8] {
         &self.public_key
@@ -2216,6 +2267,119 @@ mod tests {
         assert!(
             err.contains("underflow") || err.to_lowercase().contains("insufficient"),
             "must fail as a balance shortfall, got: {err}"
+        );
+    }
+
+    /// END TO END: a really-funded vault produces a proof a stranger can check,
+    /// and the amounts come OUT of the leaves rather than from an argument.
+    ///
+    /// This is the join the primitive's own unit tests cannot make — they build
+    /// their tree by hand. If `fund_vault_reserves` and the proof format ever
+    /// drift, this is what fails.
+    #[test]
+    fn a_funded_vault_proves_its_reserves_to_a_stranger() {
+        use crate::dlv::vault_reserve_inclusion::{
+            proven_amount, sign_vault_reserve_inclusion_proof, verify_vault_reserve_inclusion_proof,
+        };
+
+        let mut owner = fresh_device(0xA9);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        owner.balances.insert(era, 50_000);
+        owner.balances.insert(rigb, 20_000);
+        let vault = [0x77u8; 32];
+        let owner = owner
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 3)
+            .expect("funding")
+            .new_device_state;
+
+        let legs = owner
+            .vault_reserve_leg_proofs(&vault, &[era, rigb])
+            .expect("the owner can prove what it encumbered");
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let proof = sign_vault_reserve_inclusion_proof(
+            &vault,
+            3,
+            &owner.smt.root().to_owned(),
+            &owner.genesis(),
+            &owner.devid(),
+            legs,
+            &pk,
+            &sk,
+        )
+        .expect("sign");
+
+        verify_vault_reserve_inclusion_proof(&proof)
+            .expect("a stranger must be able to verify real encumbrance");
+        assert_eq!(proven_amount(&proof, &era), Some(10_000));
+        assert_eq!(proven_amount(&proof, &rigb), Some(5_000));
+
+        // The owner cannot prove an asset this vault does not hold — an absent
+        // leg would otherwise be indistinguishable from a proven zero.
+        let err = owner
+            .vault_reserve_leg_proofs(&vault, &[era, pc(0xD0)])
+            .expect_err("an unheld asset must not yield a leg");
+        assert!(format!("{err}").contains("no reserve for that asset"));
+    }
+
+    /// After a settlement the proof tracks the NEW amounts at the NEW sequence,
+    /// so a trader cannot be shown pre-trade reserves against a post-trade state.
+    #[test]
+    fn a_settled_vault_proves_its_new_reserves_and_not_the_old_ones() {
+        use crate::dlv::vault_reserve_inclusion::{
+            proven_amount, sign_vault_reserve_inclusion_proof, verify_vault_reserve_inclusion_proof,
+        };
+
+        let mut owner = fresh_device(0xAA);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        owner.balances.insert(era, 50_000);
+        owner.balances.insert(rigb, 20_000);
+        let vault = [0x77u8; 32];
+        let owner = owner
+            .fund_vault_reserves(&vault, &[(era, 10_000), (rigb, 5_000)], 3)
+            .expect("funding")
+            .new_device_state;
+        let owner = owner
+            .apply_settlement_to_reserves(&vault, &era, 1_000, &rigb, 970, 4)
+            .expect("settle")
+            .new_device_state;
+
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let legs = owner
+            .vault_reserve_leg_proofs(&vault, &[era, rigb])
+            .expect("legs");
+        let proof = sign_vault_reserve_inclusion_proof(
+            &vault,
+            4,
+            &owner.smt.root().to_owned(),
+            &owner.genesis(),
+            &owner.devid(),
+            legs,
+            &pk,
+            &sk,
+        )
+        .expect("sign");
+        verify_vault_reserve_inclusion_proof(&proof).expect("post-settlement proof verifies");
+        assert_eq!(proven_amount(&proof, &era), Some(11_000));
+        assert_eq!(proven_amount(&proof, &rigb), Some(4_030));
+
+        // The same legs cannot be presented at the pre-settlement sequence.
+        let stale_legs = owner
+            .vault_reserve_leg_proofs(&vault, &[era, rigb])
+            .expect("legs");
+        let stale = sign_vault_reserve_inclusion_proof(
+            &vault,
+            3,
+            &owner.smt.root().to_owned(),
+            &owner.genesis(),
+            &owner.devid(),
+            stale_legs,
+            &pk,
+            &sk,
+        )
+        .expect("sign");
+        assert!(
+            verify_vault_reserve_inclusion_proof(&stale).is_err(),
+            "reserves at sequence 4 must not verify as sequence 3"
         );
     }
 

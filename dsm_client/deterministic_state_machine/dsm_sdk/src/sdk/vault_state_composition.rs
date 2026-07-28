@@ -125,6 +125,29 @@ pub(crate) enum CompositionError {
     /// individual pointer is skipped; this variant fires only if the
     /// whole list page failed.
     PointerDecodeFailed(String),
+    /// No verified `VaultReserveInclusionProofV1` exists for the baseline
+    /// sequence. The vault's liquidity is therefore unproven, and a quote
+    /// against unproven liquidity is a quote against a number.
+    ///
+    /// The owner's signed reserves digest is NOT a substitute: it is one-way, so
+    /// checking it can only confirm that numbers someone already supplied hash
+    /// to what the owner signed. The owner signing a digest of its own claim
+    /// establishes authorship, not solvency.
+    MissingReserveProof,
+    /// A reserve proof exists but does not agree with the vault-state inclusion
+    /// proof on `(vault_id, sequence, smt_root)`, or its own verification fails.
+    /// Either the owner equivocated or a record was tampered with; a vault that
+    /// can show reserves at one state and vault-state at another could show
+    /// funded reserves beside a drained state.
+    InvalidReserveProof,
+    /// The vault names its pair by label rather than by 32-byte policy commits,
+    /// so a proven reserve leg cannot be matched to a side of the pair.
+    ///
+    /// FAILS CLOSED. Guessing the mapping would defeat the proof: the whole
+    /// point is that the magnitudes come out of authenticated leaves keyed by
+    /// asset identity, and a label is not an identity — this session had two
+    /// distinct tokens sharing the ticker RIGB.
+    PairIsNotPolicyCommits,
 }
 
 impl std::fmt::Display for CompositionError {
@@ -148,6 +171,18 @@ impl std::fmt::Display for CompositionError {
             CompositionError::PointerDecodeFailed(msg) => {
                 write!(f, "pointer decode failed: {msg}")
             }
+            CompositionError::MissingReserveProof => write!(
+                f,
+                "vault has no verified VaultReserveInclusionProofV1 at its baseline sequence — its liquidity is unproven"
+            ),
+            CompositionError::InvalidReserveProof => write!(
+                f,
+                "reserve proof disagrees with the vault-state inclusion proof, or failed verification"
+            ),
+            CompositionError::PairIsNotPolicyCommits => write!(
+                f,
+                "vault pair must be 32-byte policy commits so proven reserve legs can be matched to a side"
+            ),
         }
     }
 }
@@ -173,7 +208,6 @@ impl std::error::Error for CompositionError {}
 pub(crate) async fn compose_vault_state(
     vault_id: &[u8; 32],
     baseline: &SignedVaultStateAnchor,
-    baseline_reserves: (u64, u64),
     token_a: &[u8],
     token_b: &[u8],
     fee_bps: u32,
@@ -181,20 +215,6 @@ pub(crate) async fn compose_vault_state(
     // Verify the baseline anchor's signature.  No further composition
     // is meaningful without this.
     verify_vault_state_anchor(baseline).map_err(|_| CompositionError::InvalidBaselineAnchor)?;
-    // And cross-check the supplied reserves match the baseline digest.
-    let expected_digest = compute_reserves_digest(
-        token_a,
-        token_b,
-        baseline_reserves.0,
-        baseline_reserves.1,
-        fee_bps,
-    );
-    if expected_digest != baseline.reserves_digest {
-        // Caller bug — they supplied reserves that don't match the
-        // signed baseline.  Surface as InvalidBaselineAnchor: the
-        // baseline cannot be trusted for composition.
-        return Err(CompositionError::InvalidBaselineAnchor);
-    }
 
     // SoFi spec §4.1.2 / §8.4 step 2 — STRICT MODE.  Verify the
     // owner's PD-SMT inclusion proof for the baseline vault state.
@@ -229,6 +249,64 @@ pub(crate) async fn compose_vault_state(
     // Verify the inclusion proof end-to-end (signature + SMT path).
     dsm::dlv::vault_smt_leaf::verify_vault_state_inclusion_proof(&inclusion)
         .map_err(|_| CompositionError::InvalidInclusionProof)?;
+
+    // GATE 1 — the reserves are PROVEN, not supplied.
+    //
+    // This function used to take the baseline reserves as arguments and check
+    // them against the owner's signed digest. A digest is one-way, so that check
+    // could only confirm that numbers the caller already held hash to the value
+    // the owner signed: whoever chose the numbers chose what the vault appeared
+    // to hold, and in production they came straight out of a published
+    // advertisement. The magnitudes now come OUT of an authenticated proof.
+    let reserve_proof = crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(
+        vault_id,
+        baseline.sequence,
+    )
+    .await
+    .ok_or(CompositionError::MissingReserveProof)?;
+
+    // Bind it to the state proof. Reserve leaves carry the VAULT's own sequence
+    // rather than a per-leaf counter precisely so both proofs meet at one root;
+    // an owner able to present reserves at one state and vault-state at another
+    // could show funded reserves beside a later, drained state.
+    if reserve_proof.smt_root != inclusion.smt_root
+        || reserve_proof.sequence != inclusion.sequence
+        || reserve_proof.vault_id != inclusion.vault_id
+    {
+        return Err(CompositionError::InvalidReserveProof);
+    }
+
+    // Match proven legs to the sides of the pair. A leg is keyed by 32-byte
+    // policy commit, so a vault naming its pair by label cannot be matched and
+    // fails closed rather than being guessed at.
+    let (Ok(pc_a), Ok(pc_b)) = (<[u8; 32]>::try_from(token_a), <[u8; 32]>::try_from(token_b))
+    else {
+        return Err(CompositionError::PairIsNotPolicyCommits);
+    };
+    let (Some(proven_a), Some(proven_b)) = (
+        dsm::dlv::vault_reserve_inclusion::proven_amount(&reserve_proof, &pc_a),
+        dsm::dlv::vault_reserve_inclusion::proven_amount(&reserve_proof, &pc_b),
+    ) else {
+        // A proof that omits a side has not shown that side holds nothing — it
+        // has shown nothing about it. Treating an absent leg as zero would let a
+        // half-funded vault quote as if it were empty on one side.
+        return Err(CompositionError::InvalidReserveProof);
+    };
+    let baseline_reserves = (proven_a, proven_b);
+
+    // The owner's signed digest must agree with what its own leaves prove. Both
+    // are the owner's, so disagreement means the two records were produced from
+    // different states — the vault is not safe to quote either way.
+    let expected_digest = compute_reserves_digest(
+        token_a,
+        token_b,
+        baseline_reserves.0,
+        baseline_reserves.1,
+        fee_bps,
+    );
+    if expected_digest != baseline.reserves_digest {
+        return Err(CompositionError::InvalidReserveProof);
+    }
 
     let prefix = vault_pending_prefix(vault_id);
     let mut cursor: Option<String> = None;
@@ -530,6 +608,16 @@ pub(crate) async fn compose_vault_state(
 mod tests {
     use super::*;
     use dsm::crypto::sphincs::{generate_keypair, SphincsVariant};
+
+    /// The pair, as 32-byte policy commits. Labels are no longer admissible:
+    /// a proven reserve leg is keyed by asset identity, and a ticker is not one
+    /// — this repo has had two distinct tokens sharing the ticker RIGB.
+    /// TOKEN_A is lex-lower, matching the canonical pair order.
+    const TOKEN_A: [u8; 32] = [0x11; 32];
+    const TOKEN_B: [u8; 32] = [0x22; 32];
+    /// Owner identity the reserve leaves are keyed under.
+    const OWNER_GENESIS: [u8; 32] = [0xA0; 32];
+    const OWNER_DEVID: [u8; 32] = [0xB0; 32];
     use dsm::dlv::settlement_receipt_leaf::{
         derive_receipt_id, receipt_commitment, settlement_receipt_key, settlement_receipt_value,
         sign_trader_settlement_receipt, SettledTrade,
@@ -601,6 +689,8 @@ mod tests {
         owner_pk: &[u8],
         owner_sk: &[u8],
     ) {
+        use dsm::dlv::vault_reserve_inclusion::{sign_vault_reserve_inclusion_proof, ReserveLegProof};
+        use dsm::dlv::vault_reserve_leaf::{vault_reserve_key, vault_reserve_value};
         use dsm::dlv::vault_smt_leaf::{
             compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
         };
@@ -608,11 +698,28 @@ mod tests {
 
         let reserves_digest =
             compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
+
+        // ONE tree carrying the vault-state leaf AND both reserve leaves, which
+        // is what a real owner's device SMT looks like. Two separate trees would
+        // produce two roots, and the composer requires the state proof and the
+        // reserve proof to meet at one — a fixture that could not satisfy that
+        // would be testing a shape production never produces.
         let mut tree = SparseMerkleTree::new(64);
         let leaf_key = compute_vault_smt_key(vault_id);
         let leaf_value = compute_vault_smt_value(sequence, &reserves_digest);
         tree.update_leaf(&leaf_key, &leaf_value)
             .expect("update_leaf");
+
+        let pair: [(&[u8], u64); 2] = [(token_a, reserve_a), (token_b, reserve_b)];
+        for (token, amount) in pair {
+            let pc = <[u8; 32]>::try_from(token).expect("pair must be policy commits");
+            tree.update_leaf(
+                &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
+                &vault_reserve_value(amount, sequence),
+            )
+            .expect("reserve leaf");
+        }
+
         let smt_root = *tree.root();
         let proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
 
@@ -636,6 +743,40 @@ mod tests {
         )
         .await
         .expect("publish inclusion proof");
+
+        // The reserve proof, against the SAME root and sequence.
+        let mut legs: Vec<ReserveLegProof> = pair
+            .iter()
+            .map(|(token, amount)| {
+                let pc = <[u8; 32]>::try_from(*token).expect("pair must be policy commits");
+                ReserveLegProof {
+                    policy_commit: pc,
+                    amount: *amount,
+                    smt_siblings: tree
+                        .get_inclusion_proof(
+                            &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
+                            256,
+                        )
+                        .expect("reserve proof")
+                        .siblings,
+                }
+            })
+            .collect();
+        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        let reserve_proof = sign_vault_reserve_inclusion_proof(
+            vault_id,
+            sequence,
+            &smt_root,
+            &OWNER_GENESIS,
+            &OWNER_DEVID,
+            legs,
+            owner_pk,
+            owner_sk,
+        )
+        .expect("sign reserve proof");
+        crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&reserve_proof)
+            .await
+            .expect("publish reserve proof");
     }
 
     fn marker_digest(x: &[u8; 32], hop_index: u32) -> [u8; 32] {
@@ -779,7 +920,7 @@ mod tests {
     }
 
     /// Deterministic 32-byte stand-in for a token's policy commit. These
-    /// fixtures name their pair by label (`b"AAA"`); a settled trade is stated
+    /// fixtures name their pair by label (`&TOKEN_A`); a settled trade is stated
     /// in policy commits, so the two are bridged here rather than in production
     /// code.
     fn pc_of(label: &[u8]) -> [u8; 32] {
@@ -789,18 +930,18 @@ mod tests {
     fn settled_trade(
         x: &[u8; 32],
         parent_seq: u64,
-        input_label: &[u8],
+        input_policy_commit: &[u8; 32],
         input_amount: u64,
-        output_label: &[u8],
+        output_policy_commit: &[u8; 32],
         output_amount: u64,
     ) -> SettledTrade {
         SettledTrade {
             x: *x,
             parent_sequence: parent_seq,
             new_sequence: parent_seq + 1,
-            input_policy_commit: pc_of(input_label),
+            input_policy_commit: *input_policy_commit,
             input_amount,
-            output_policy_commit: pc_of(output_label),
+            output_policy_commit: *output_policy_commit,
             output_amount,
         }
     }
@@ -841,6 +982,165 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Publish a standalone reserve proof at `sequence` proving `(a, b)`, under
+    /// a root of its own. Used to state a reserve proof that disagrees with what
+    /// the owner signed.
+    /// Publish only the vault-state inclusion proof, withholding the reserve
+    /// proof — the "state known, holdings unproven" case.
+    async fn publish_state_inclusion_proof_only(
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserve_a: u64,
+        reserve_b: u64,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) {
+        use dsm::dlv::vault_smt_leaf::{
+            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
+        };
+        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        let digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, reserve_a, reserve_b, 30);
+        let mut tree = SparseMerkleTree::new(64);
+        let key = compute_vault_smt_key(vault_id);
+        tree.update_leaf(&key, &compute_vault_smt_value(sequence, &digest))
+            .expect("state leaf");
+        let root = *tree.root();
+        let proof = tree.get_inclusion_proof(&key, 256).expect("proof");
+        let signed = sign_vault_state_inclusion_proof(
+            vault_id,
+            sequence,
+            &digest,
+            &root,
+            proof.siblings,
+            owner_pk,
+            owner_sk,
+        )
+        .expect("sign");
+        let bytes = crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
+        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(vault_id, sequence, &bytes)
+            .await
+            .expect("publish");
+    }
+
+    /// A reserve proof that verifies against its OWN root but not the root the
+    /// vault-state proof committed to.
+    async fn publish_reserve_proof_with_foreign_root(
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserve_a: u64,
+        reserve_b: u64,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) {
+        use dsm::dlv::vault_reserve_inclusion::{sign_vault_reserve_inclusion_proof, ReserveLegProof};
+        use dsm::dlv::vault_reserve_leaf::{vault_reserve_key, vault_reserve_value};
+        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        // No vault-state leaf in this tree, so its root differs from the one the
+        // state proof binds while every leg still verifies internally.
+        let mut tree = SparseMerkleTree::new(64);
+        for (pc, amount) in [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)] {
+            tree.update_leaf(
+                &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
+                &vault_reserve_value(amount, sequence),
+            )
+            .expect("reserve leaf");
+        }
+        let root = *tree.root();
+        let mut legs: Vec<ReserveLegProof> = [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)]
+            .iter()
+            .map(|(pc, amount)| ReserveLegProof {
+                policy_commit: *pc,
+                amount: *amount,
+                smt_siblings: tree
+                    .get_inclusion_proof(
+                        &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, pc),
+                        256,
+                    )
+                    .expect("proof")
+                    .siblings,
+            })
+            .collect();
+        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        let proof = sign_vault_reserve_inclusion_proof(
+            vault_id,
+            sequence,
+            &root,
+            &OWNER_GENESIS,
+            &OWNER_DEVID,
+            legs,
+            owner_pk,
+            owner_sk,
+        )
+        .expect("sign");
+        crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&proof)
+            .await
+            .expect("publish");
+    }
+
+    async fn publish_reserve_proof_for(
+        vault_id: &[u8; 32],
+        sequence: u64,
+        reserve_a: u64,
+        reserve_b: u64,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) {
+        use dsm::dlv::vault_reserve_inclusion::{sign_vault_reserve_inclusion_proof, ReserveLegProof};
+        use dsm::dlv::vault_reserve_leaf::{vault_reserve_key, vault_reserve_value};
+        use dsm::dlv::vault_smt_leaf::{compute_vault_smt_key, compute_vault_smt_value};
+        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+
+        // Include the vault-state leaf at the SAME digest the baseline was
+        // signed over, so the root still matches the published state proof and
+        // the ONLY disagreement under test is the reserve magnitudes.
+        let digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
+        let mut tree = SparseMerkleTree::new(64);
+        tree.update_leaf(
+            &compute_vault_smt_key(vault_id),
+            &compute_vault_smt_value(sequence, &digest),
+        )
+        .expect("state leaf");
+        for (pc, amount) in [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)] {
+            tree.update_leaf(
+                &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
+                &vault_reserve_value(amount, sequence),
+            )
+            .expect("reserve leaf");
+        }
+        let root = *tree.root();
+        let mut legs: Vec<ReserveLegProof> = [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)]
+            .iter()
+            .map(|(pc, amount)| ReserveLegProof {
+                policy_commit: *pc,
+                amount: *amount,
+                smt_siblings: tree
+                    .get_inclusion_proof(
+                        &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, pc),
+                        256,
+                    )
+                    .expect("proof")
+                    .siblings,
+            })
+            .collect();
+        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        let proof = sign_vault_reserve_inclusion_proof(
+            vault_id,
+            sequence,
+            &root,
+            &OWNER_GENESIS,
+            &OWNER_DEVID,
+            legs,
+            owner_pk,
+            owner_sk,
+        )
+        .expect("sign");
+        crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&proof)
+            .await
+            .expect("publish");
+    }
+
     async fn publish_pointer(
         vault_id: &[u8; 32],
         parent_seq: u64,
@@ -915,17 +1215,17 @@ mod tests {
         )
         .await;
         publish_extcommit(&x, trader_pk).await;
-        let (input_label, output_label, output_amount) = if input_is_a {
-            (token_a, token_b, parent_reserve_b - new_b)
+        let (input_pc, output_pc, output_amount) = if input_is_a {
+            (&TOKEN_A, &TOKEN_B, parent_reserve_b - new_b)
         } else {
-            (token_b, token_a, parent_reserve_a - new_a)
+            (&TOKEN_B, &TOKEN_A, parent_reserve_a - new_a)
         };
         let trade = settled_trade(
             &x,
             parent_sequence,
-            input_label,
+            input_pc,
             input_amount,
-            output_label,
+            output_pc,
             output_amount,
         );
         publish_pointer(
@@ -955,8 +1255,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             5,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -964,21 +1264,138 @@ mod tests {
             &owner.secret_key,
         )
         .await;
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 5);
         assert_eq!(composed.reserves_a, 1_000_000);
         assert_eq!(composed.reserves_b, 500_000);
         assert_eq!(composed.pending_chain_len, 0);
         assert_eq!(composed.pending_chain_skipped, 0);
+    }
+
+    // ── the reserve-proof gate ─────────────────────────────────────────────
+    //
+    // The reserves a trader quotes against must come out of an authenticated
+    // proof, not out of an argument or an advertisement.
+
+    /// A vault whose owner published no reserve proof cannot be quoted, even
+    /// with a perfectly good signed anchor and state inclusion proof.
+    ///
+    /// Those two establish WHICH state the vault is in; neither establishes what
+    /// it HOLDS. Composing without the third would be quoting against a number.
+    #[tokio::test]
+    async fn a_vault_with_no_reserve_proof_cannot_be_quoted() {
+        let vault_id = vid_seed(0x50);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        // Anchor + state inclusion proof, deliberately without the reserve proof.
+        let anchor = make_baseline_anchor_only(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        );
+        publish_state_inclusion_proof_only(
+            &vault_id,
+            0,
+            1_000_000,
+            500_000,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+
+        let err = compose_vault_state(&vault_id, &anchor, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("unproven liquidity must not be quotable");
+        assert!(matches!(err, CompositionError::MissingReserveProof));
+    }
+
+    /// A reserve proof for a DIFFERENT state must not be accepted for this one.
+    ///
+    /// Reserve leaves carry the vault's own sequence so both proofs meet at one
+    /// root. Without that binding an owner could present funded reserves beside
+    /// a later, drained vault state.
+    #[tokio::test]
+    async fn a_reserve_proof_from_another_state_is_refused() {
+        let vault_id = vid_seed(0x51);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+
+        // Overwrite the sequence-0 proof with one whose root is its own, so the
+        // amounts still verify internally but the root no longer matches the
+        // state proof.
+        publish_reserve_proof_for(
+            &vault_id,
+            0,
+            1_000_000,
+            500_000,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        // That helper reproduces the same digest, so it must still compose —
+        // this establishes the negative case below is about the ROOT, not the
+        // amounts.
+        compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("a consistent re-publish still composes");
+
+        // Now a proof carrying a foreign root.
+        publish_reserve_proof_with_foreign_root(
+            &vault_id,
+            0,
+            1_000_000,
+            500_000,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("a reserve proof must meet the state proof at one root");
+        assert!(matches!(err, CompositionError::InvalidReserveProof));
+    }
+
+    /// A vault naming its pair by label fails CLOSED. A proven leg is keyed by
+    /// asset identity, and a ticker is not one — guessing the mapping would
+    /// defeat the proof it is being matched against.
+    #[tokio::test]
+    async fn a_label_pair_cannot_be_matched_to_proven_legs() {
+        let vault_id = vid_seed(0x52);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let baseline = make_baseline(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        let err = compose_vault_state(&vault_id, &baseline, b"AAA", b"BBB", 30)
+            .await
+            .expect_err("a label pair must fail closed");
+        assert!(matches!(err, CompositionError::PairIsNotPolicyCommits));
     }
 
     // ── the receipt gate ───────────────────────────────────────────────────
@@ -1004,8 +1421,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1018,8 +1435,8 @@ mod tests {
         publish_trade(
             &vault_id,
             &x_seed(0x41),
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1032,16 +1449,9 @@ mod tests {
         )
         .await;
 
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
 
         assert_eq!(
             (composed.reserves_a, composed.reserves_b),
@@ -1072,8 +1482,8 @@ mod tests {
             let baseline = make_baseline(
                 &vault_id,
                 0,
-                b"AAA",
-                b"BBB",
+                &TOKEN_A,
+                &TOKEN_B,
                 1_000_000,
                 500_000,
                 30,
@@ -1084,8 +1494,8 @@ mod tests {
             publish_trade(
                 &vault_id,
                 &x_seed(x),
-                b"AAA",
-                b"BBB",
+                &TOKEN_A,
+                &TOKEN_B,
                 1_000_000,
                 500_000,
                 30,
@@ -1097,16 +1507,9 @@ mod tests {
                 with_receipt,
             )
             .await;
-            compose_vault_state(
-                &vault_id,
-                &baseline,
-                (1_000_000, 500_000),
-                b"AAA",
-                b"BBB",
-                30,
-            )
-            .await
-            .expect("compose succeeds")
+            compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+                .await
+                .expect("compose succeeds")
         }
 
         let inert = run(0x42, 0x43, false).await;
@@ -1134,8 +1537,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1147,8 +1550,8 @@ mod tests {
         publish_trade(
             &vault_id,
             &x,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1166,8 +1569,8 @@ mod tests {
         let (_, _, canonical_x) = publish_rc_for_swap(
             &x,
             &vault_id,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1178,19 +1581,12 @@ mod tests {
             &trader.secret_key,
         )
         .await;
-        let cheap = settled_trade(&canonical_x, 0, b"AAA", 1, b"BBB", 1);
+        let cheap = settled_trade(&canonical_x, 0, &TOKEN_A, 1, &TOKEN_B, 1);
         publish_receipt(&vault_id, &cheap, &trader.public_key, &trader.secret_key).await;
 
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(
             (composed.reserves_a, composed.reserves_b),
             (1_000_000, 500_000),
@@ -1212,8 +1608,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1224,8 +1620,8 @@ mod tests {
         publish_trade(
             &vault_id,
             &x_seed(0x49),
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1238,26 +1634,12 @@ mod tests {
         )
         .await;
 
-        let first = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
-        let second = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let first = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
+        let second = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
 
         assert_eq!(first.sequence, second.sequence);
         assert_eq!(first.reserves_a, second.reserves_a);
@@ -1282,8 +1664,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1294,8 +1676,8 @@ mod tests {
         publish_trade(
             &vault_id,
             &x_seed(0x4B),
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1330,16 +1712,9 @@ mod tests {
             .await
             .expect("overwrite receipt");
 
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(
             (composed.reserves_a, composed.reserves_b),
             (1_000_000, 500_000),
@@ -1356,8 +1731,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1369,8 +1744,8 @@ mod tests {
         let (expected_a, expected_b) = publish_trade(
             &vault_id,
             &x,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1383,16 +1758,9 @@ mod tests {
         )
         .await;
 
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 1);
         assert_eq!(
             composed.reserves_a, expected_a,
@@ -1416,8 +1784,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1442,8 +1810,8 @@ mod tests {
             let (new_a, new_b) = publish_trade(
                 &vault_id,
                 &x,
-                b"AAA",
-                b"BBB",
+                &TOKEN_A,
+                &TOKEN_B,
                 cur_a,
                 cur_b,
                 30,
@@ -1460,16 +1828,9 @@ mod tests {
             expected_final_a = new_a;
             expected_final_b = new_b;
         }
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 3);
         assert_eq!(composed.reserves_a, expected_final_a);
         assert_eq!(composed.reserves_b, expected_final_b);
@@ -1485,8 +1846,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1502,21 +1863,14 @@ mod tests {
             1,
             &x,
             &marker_digest(&x, 0),
-            &settled_trade(&x, 0, b"AAA", 1, b"BBB", 1),
+            &settled_trade(&x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
             &trader.public_key,
             &trader.secret_key,
         )
         .await;
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 0, "cursor stays at baseline");
         assert_eq!(composed.reserves_a, 1_000_000);
         assert_eq!(composed.reserves_b, 500_000);
@@ -1537,8 +1891,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1555,21 +1909,14 @@ mod tests {
             1,
             &x,
             &marker_digest(&x, 0),
-            &settled_trade(&x, 0, b"AAA", 1, b"BBB", 1),
+            &settled_trade(&x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
             &trader.public_key,
             &trader.secret_key,
         )
         .await;
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 0);
         assert_eq!(composed.reserves_a, 1_000_000);
         assert_eq!(composed.reserves_b, 500_000);
@@ -1585,8 +1932,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1600,8 +1947,8 @@ mod tests {
         let (after_first_a, after_first_b) = publish_trade(
             &vault_id,
             &x_seed(0x51),
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1618,8 +1965,8 @@ mod tests {
         publish_trade(
             &vault_id,
             &orphan_x,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             after_first_a,
             after_first_b,
             30,
@@ -1631,16 +1978,9 @@ mod tests {
             true,
         )
         .await;
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 1, "advances through seq=1 then stops");
         assert_eq!(composed.reserves_a, after_first_a);
         assert_eq!(composed.reserves_b, after_first_b);
@@ -1662,8 +2002,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1677,8 +2017,8 @@ mod tests {
         let (_, _, x) = publish_rc_for_swap(
             &nonce_seed,
             &vault_id,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             777, // wrong parent_reserve_a
             888, // wrong parent_reserve_b
             30,
@@ -1696,21 +2036,14 @@ mod tests {
             1,
             &x,
             &marker_digest(&x, 0),
-            &settled_trade(&x, 0, b"AAA", 1, b"BBB", 1),
+            &settled_trade(&x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
             &trader.public_key,
             &trader.secret_key,
         )
         .await;
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 0);
         assert_eq!(composed.reserves_a, 1_000_000);
         assert_eq!(composed.reserves_b, 500_000);
@@ -1727,8 +2060,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1742,8 +2075,8 @@ mod tests {
         let (_, _, canonical_x) = publish_rc_for_swap(
             &nonce_seed,
             &vault_id,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1777,22 +2110,15 @@ mod tests {
             1,
             &spoofed_x,
             &marker_digest(&spoofed_x, 0),
-            &settled_trade(&spoofed_x, 0, b"AAA", 1, b"BBB", 1),
+            &settled_trade(&spoofed_x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
             &trader.public_key,
             &trader.secret_key,
         )
         .await;
 
-        let composed = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect("compose succeeds");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds");
         assert_eq!(composed.sequence, 0);
         assert_eq!(composed.reserves_a, 1_000_000);
         assert_eq!(composed.reserves_b, 500_000);
@@ -1819,8 +2145,8 @@ mod tests {
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             10_000,
             10_000,
             30,
@@ -1836,8 +2162,8 @@ mod tests {
         let (after_bob_a, after_bob_b) = publish_trade(
             &vault_id,
             &bob_x,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             10_000,
             10_000,
             30,
@@ -1854,10 +2180,9 @@ mod tests {
         // pending pointer + Bob's RC = composed cursor at seq=1 with
         // reserves reflecting Bob's exact trade.  Concurrent
         // serialization without Alice's involvement.
-        let composed =
-            compose_vault_state(&vault_id, &baseline, (10_000, 10_000), b"AAA", b"BBB", 30)
-                .await
-                .expect("compose succeeds for Carol");
+        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("compose succeeds for Carol");
         assert_eq!(
             composed.sequence, 1,
             "Carol should see Bob's pending advance even though Alice is offline",
@@ -1877,14 +2202,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_baseline_with_tampered_reserves_supplied() {
+    async fn rejects_reserve_proof_disagreeing_with_the_signed_digest() {
         let vault_id = vid_seed(0x15);
         let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
         let baseline = make_baseline(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1892,11 +2217,24 @@ mod tests {
             &owner.secret_key,
         )
         .await;
-        // Supply DIFFERENT reserves than the baseline was signed over.
-        let err = compose_vault_state(&vault_id, &baseline, (777_777, 888_888), b"AAA", b"BBB", 30)
+        // The proven reserves and the owner's signed digest are BOTH the
+        // owner's. Disagreement means the two records came from different
+        // states, so the vault is unsafe to quote either way. Overwrite the
+        // published reserve proof with one proving different amounts under a
+        // consistent root of its own.
+        publish_reserve_proof_for(
+            &vault_id,
+            0,
+            777_777,
+            888_888,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
             .await
-            .expect_err("composition rejects mismatched baseline_reserves");
-        assert!(matches!(err, CompositionError::InvalidBaselineAnchor));
+            .expect_err("proven reserves disagreeing with the signed digest must reject");
+        assert!(matches!(err, CompositionError::InvalidReserveProof));
     }
 
     // ───────────────────────────────────────────────────────────
@@ -1918,24 +2256,17 @@ mod tests {
         let baseline = make_baseline_anchor_only(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
             &owner.public_key,
             &owner.secret_key,
         );
-        let err = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect_err("strict mode must refuse vault without inclusion proof");
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("strict mode must refuse vault without inclusion proof");
         assert!(matches!(err, CompositionError::MissingInclusionProof));
     }
 
@@ -1956,8 +2287,8 @@ mod tests {
         let baseline = make_baseline_anchor_only(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -1967,7 +2298,8 @@ mod tests {
 
         // Publish an inclusion proof at sequence=5 — disagreeing with
         // the baseline's sequence=0.
-        let bogus_reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000_000, 500_000, 30);
+        let bogus_reserves_digest =
+            compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
         let mut tree = SparseMerkleTree::new(64);
         let leaf_key = compute_vault_smt_key(&vault_id);
         let leaf_value = compute_vault_smt_value(5, &bogus_reserves_digest);
@@ -1991,16 +2323,9 @@ mod tests {
             .await
             .expect("publish");
 
-        let err = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect_err("strict mode must reject disagreeing inclusion proof");
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("strict mode must reject disagreeing inclusion proof");
         assert!(matches!(err, CompositionError::InvalidInclusionProof));
     }
 
@@ -2022,8 +2347,8 @@ mod tests {
         let baseline = make_baseline_anchor_only(
             &vault_id,
             0,
-            b"AAA",
-            b"BBB",
+            &TOKEN_A,
+            &TOKEN_B,
             1_000_000,
             500_000,
             30,
@@ -2034,7 +2359,7 @@ mod tests {
         // Build a real SMT, then corrupt one sibling before signing —
         // the signed payload (which excludes siblings, by design)
         // still verifies, but the inclusion check rejects.
-        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000_000, 500_000, 30);
+        let reserves_digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
         let mut tree = SparseMerkleTree::new(64);
         let leaf_key = compute_vault_smt_key(&vault_id);
         let leaf_value = compute_vault_smt_value(0, &reserves_digest);
@@ -2061,16 +2386,9 @@ mod tests {
             .await
             .expect("publish");
 
-        let err = compose_vault_state(
-            &vault_id,
-            &baseline,
-            (1_000_000, 500_000),
-            b"AAA",
-            b"BBB",
-            30,
-        )
-        .await
-        .expect_err("strict mode must reject tampered SMT path");
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("strict mode must reject tampered SMT path");
         assert!(matches!(err, CompositionError::InvalidInclusionProof));
     }
 }

@@ -61,6 +61,10 @@ pub const TAG_SETTLEMENT_RECEIPT_COMMIT: &str = "DSM/settlement-receipt-commit/v
 /// Deterministic receipt id: `H(tag ‖ vault_id ‖ x)`. Derived, not chosen, so the pointer
 /// publisher and the settling advance agree on it without coordinating.
 pub const TAG_SETTLEMENT_RECEIPT_ID: &str = "DSM/settlement-receipt-id/v1";
+/// Reserve inclusion proof signing payload: `H(tag ‖ vault_id ‖ seq_be ‖ smt_root ‖
+/// owner_genesis ‖ owner_devid ‖ (policy_commit ‖ amount_be)*)`. Turns "the owner says the
+/// vault holds 10,000 ERA" into "the owner's device root commits it".
+pub const TAG_VAULT_RESERVE_INCLUSION: &str = "DSM/vault-reserve-inclusion/v1";
 pub const TAG_COMMITMENT: &str = "DSM/commitment";
 pub const TAG_COMMITMENT_OPEN: &str = "DSM/commitment-open";
 pub const TAG_COMMITMENT_FIELDS: &str = "DSM/commitment-fields";
@@ -100,6 +104,7 @@ pub(super) const TAGS: &[&str] = &[
     TAG_SETTLEMENT_RECEIPT_SIGN,
     TAG_SETTLEMENT_RECEIPT_COMMIT,
     TAG_SETTLEMENT_RECEIPT_ID,
+    TAG_VAULT_RESERVE_INCLUSION,
     TAG_COMMITMENT,
     TAG_COMMITMENT_OPEN,
     TAG_COMMITMENT_FIELDS,

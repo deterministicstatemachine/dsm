@@ -796,8 +796,14 @@ impl AppRouterImpl {
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            let baseline_reserve_a = ad.reserve_a;
-            let baseline_reserve_b = ad.reserve_b;
+            // The advertisement's reserves are a HINT for logging only. They
+            // used to seed composition, which meant a trader quoted against
+            // numbers it read out of a published record — the same
+            // advertisement-as-authority shape deleted from syncVaultsForPair.
+            // `compose_vault_state` now takes them out of the owner's verified
+            // reserve inclusion proof instead.
+            let advertised_reserve_a = ad.reserve_a;
+            let advertised_reserve_b = ad.reserve_b;
 
             // Fetch the latest vault state anchor.  If absent, the ad
             // pre-dates the anchor flow — fall through and use the ad
@@ -816,7 +822,6 @@ impl AppRouterImpl {
             match crate::sdk::vault_state_composition::compose_vault_state(
                 &vid,
                 &anchor,
-                (baseline_reserve_a, baseline_reserve_b),
                 &ad.token_a,
                 &ad.token_b,
                 ad.fee_bps,
@@ -826,10 +831,10 @@ impl AppRouterImpl {
                 Ok(composed) => {
                     if composed.pending_chain_len > 0 || composed.pending_chain_skipped > 0 {
                         log::info!(
-                            "[route.findAndBindBestPath] vault {} composed: baseline=({},{}) composed=({},{}) chain_len={} skipped={} seq={}",
+                            "[route.findAndBindBestPath] vault {} composed: advertised=({},{}) proven+composed=({},{}) chain_len={} skipped={} seq={}",
                             crate::util::text_id::encode_base32_crockford(&vid),
-                            baseline_reserve_a,
-                            baseline_reserve_b,
+                            advertised_reserve_a,
+                            advertised_reserve_b,
                             composed.reserves_a,
                             composed.reserves_b,
                             composed.pending_chain_len,

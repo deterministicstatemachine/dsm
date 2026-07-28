@@ -104,6 +104,7 @@ pub mod routing_sdk;
 pub mod settlement_receipt_codec;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
+pub mod vault_reserve_proof_codec;
 pub mod vault_smt_inclusion_codec;
 pub mod vault_state_anchor_codec;
 pub mod vault_state_composition;
