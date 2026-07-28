@@ -51,16 +51,36 @@ export interface BuildDlvInstantiateInput {
   signature: Uint8Array;
 }
 
-function lockedAmountU128BigEndian(n: bigint): Uint8Array {
-  if (n < 0n) throw new Error('lockedAmount must be non-negative');
-  const out = new Uint8Array(16);
-  let v = n;
-  for (let i = 15; i >= 0; i--) {
-    out[i] = Number(v & 0xffn);
-    v >>= 8n;
+/**
+ * Build the vault's funding legs from the single-asset `(tokenId, amount)`
+ * shape this API exposes. Zero or absent → no legs, which is a content-only
+ * vault.
+ *
+ * These legs ENCUMBER real balances: `dlv.create` debits them from the
+ * owner's canonical state and refuses the creation if the balance is short.
+ * So an amount that does not fit u64 base units is rejected rather than
+ * wrapped — a silent truncation here would ask Rust to lock a different
+ * number than the caller named.
+ */
+function buildFundingLegs(
+  tokenId: string | undefined,
+  amount: bigint | undefined,
+): pb.DlvFundingLegV1[] {
+  const hasToken = tokenId !== undefined && tokenId.length > 0;
+  const hasAmount = amount !== undefined && amount !== 0n;
+  if (!hasToken && !hasAmount) return [];
+  if (!hasToken) throw new Error('a funding leg needs a tokenId');
+  if (!hasAmount) throw new Error('a funding leg needs a non-zero amount');
+  if (amount! < 0n) throw new Error('lockedAmount must be non-negative');
+  if (amount! > 0xffffffffffffffffn) {
+    throw new Error('lockedAmount exceeds u64 base units');
   }
-  if (v !== 0n) throw new Error('lockedAmount exceeds u128');
-  return out;
+  return [
+    new pb.DlvFundingLegV1({
+      tokenId: new TextEncoder().encode(tokenId!) as any,
+      amount: amount!,
+    }),
+  ];
 }
 
 /**
@@ -107,18 +127,10 @@ export function buildDlvInstantiateBytes(input: BuildDlvInstantiateInput): Uint8
     content: input.content as any,
   });
 
-  const lockedBytes =
-    input.lockedAmount !== undefined
-      ? lockedAmountU128BigEndian(input.lockedAmount)
-      : new Uint8Array(16);
-
   const req = new pb.DlvInstantiateV1({
     spec,
     creatorPublicKey: input.creatorPublicKey as any,
-    tokenId: (input.tokenId
-      ? new TextEncoder().encode(input.tokenId)
-      : new Uint8Array()) as any,
-    lockedAmountU128: lockedBytes as any,
+    fundingLegs: buildFundingLegs(input.tokenId, input.lockedAmount),
     signature: input.signature as any,
   });
 
@@ -191,7 +203,7 @@ export async function createPostedDlv(input: {
     const content = input.content ?? new TextEncoder().encode('Posted DLV');
     const fulfillmentBytes =
       input.fulfillmentBytes ?? new Uint8Array();
-    const lockedBytes = lockedAmountU128BigEndian(input.lockedAmount ?? 0n);
+    const fundingLegs = buildFundingLegs(input.tokenId, input.lockedAmount);
 
     const spec = new pb.DlvSpecV1({
       policyDigest: input.policyDigest as any,
@@ -207,10 +219,7 @@ export async function createPostedDlv(input: {
       // Empty pk + signature → Rust stamps wallet pk + signs (Track
       // C.4 accept-or-stamp).
       creatorPublicKey: new Uint8Array() as any,
-      tokenId: (input.tokenId
-        ? new TextEncoder().encode(input.tokenId)
-        : new Uint8Array()) as any,
-      lockedAmountU128: lockedBytes as any,
+      fundingLegs,
       signature: new Uint8Array() as any,
     });
     const lockBase32 = encodeBase32Crockford(new Uint8Array(req.toBinary()));

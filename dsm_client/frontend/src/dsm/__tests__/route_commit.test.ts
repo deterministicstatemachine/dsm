@@ -342,7 +342,13 @@ describe('route_commit.ts', () => {
       const req = pb.PublishRoutingAdvertisementRequest.fromBinary(argPack.body);
       expect(Array.from(req.vaultId)).toEqual(Array.from(validInput.vaultId));
       expect(req.feeBps).toBe(30);
-      expect(req.reserveAU128.length).toBe(16);
+      // Reserves are NOT in the request, under any spelling. A client that
+      // could state its own liquidity could advertise a vault it had never
+      // funded; the handler reads the owner's encumbered reserve leaves.
+      const asRecord = req as unknown as Record<string, unknown>;
+      for (const key of Object.keys(asRecord)) {
+        expect(key.toLowerCase()).not.toContain('reserve');
+      }
     });
 
     test('rejects wrong-length vaultId', async () => {
