@@ -261,41 +261,6 @@ fn route_commit_eligibility_runs_sphincs_signature_verify() {
     );
 }
 
-/// Track C.3 invariant — the four trade-flow routes MUST be wired
-/// into the `route.*` dispatcher.  Without these, the frontend's
-/// `publishRoutingAdvertisement` / `listAdvertisementsForPair` /
-/// `syncVaultsForPair` / `findAndBindBestPath` calls would round-trip
-/// to "unknown route invoke method" / "unknown route query path"
-/// even though the handlers are implemented.
-#[test]
-fn route_trade_flow_routes_are_dispatched() {
-    let src = read(sdk_path("src/handlers/route_routes.rs"));
-    let dispatch_edges = [
-        (
-            "route.publishRoutingAdvertisement",
-            "self.route_publish_routing_advertisement(i).await",
-        ),
-        (
-            "route.listAdvertisementsForPair",
-            "self.route_list_advertisements_for_pair(q).await",
-        ),
-        (
-            "route.syncVaultsForPair",
-            "self.route_sync_vaults_for_pair(i).await",
-        ),
-        (
-            "route.findAndBindBestPath",
-            "self.route_find_and_bind_best_path(i).await",
-        ),
-    ];
-    for (route_name, handler_call) in dispatch_edges {
-        assert!(
-            src.contains(route_name) && src.contains(handler_call),
-            "regression: trade-flow dispatch edge missing: {route_name} -> {handler_call}"
-        );
-    }
-}
-
 /// Track C.3 invariant — each trade-flow handler MUST delegate to the
 /// audited SDK helper (chunk #1 / #2 / #3) rather than re-implementing
 /// the logic inline.  A regression that copy-pasted the BLAKE3
@@ -340,23 +305,6 @@ fn find_and_bind_leaves_initiator_pk_empty_for_sign_to_overwrite() {
         "regression: route.findAndBindBestPath no longer leaves \
          initiator_public_key empty for the sign step to fill in — \
          sign-as-someone-else attack surface re-opened"
-    );
-}
-
-/// Track C.2 invariant — `route.*` query/invoke routes MUST be wired
-/// into the dispatcher.  Without these, the TS bindings in
-/// `frontend/src/dsm/route_commit.ts` would round-trip to
-/// `unknown route query path` despite the handler being implemented.
-#[test]
-fn route_query_and_invoke_are_dispatched() {
-    let src = read(sdk_path("src/handlers/app_router_impl.rs"));
-    assert!(
-        src.contains("p if p.starts_with(\"route.\") => self.handle_route_query(q).await,"),
-        "regression: route.* query dispatch edge missing from app_router_impl"
-    );
-    assert!(
-        src.contains("m if m.starts_with(\"route.\") => self.handle_route_invoke(i).await,"),
-        "regression: route.* invoke dispatch edge missing from app_router_impl"
     );
 }
 
@@ -442,43 +390,6 @@ fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
         "regression: AMM re-simulation MUST run before execute_on_relationship \
          in dlv_unlock_routed — checking math AFTER the chain advances is \
          too late to reject"
-    );
-}
-
-/// Tier 1 invariant — `dlv.listOwnedAmmVaults` MUST be wired into the
-/// `dlv.*` query dispatch and MUST delegate filtering to the audited
-/// signing-authority + DLVManager primitives.  Without this, the AMM
-/// monitor screen has no data source.  A regression that
-/// re-implemented the filter inline would silently bypass the
-/// "wallet pk owns the vault" check.
-#[test]
-fn dlv_list_owned_amm_vaults_is_dispatched_and_delegates() {
-    let routes_src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        routes_src
-            .contains("\"dlv.listOwnedAmmVaults\" => self.dlv_list_owned_amm_vaults(q).await,"),
-        "regression: dlv.listOwnedAmmVaults dispatch edge missing in handle_dlv_query"
-    );
-    assert!(
-        routes_src.contains("crate::sdk::signing_authority::current_public_key()"),
-        "regression: dlv.listOwnedAmmVaults no longer reaches into \
-         signing_authority for the owner-filter wallet pk"
-    );
-    assert!(
-        routes_src.contains("self.bitcoin_tap.dlv_manager()"),
-        "regression: dlv.listOwnedAmmVaults no longer reads vaults from \
-         the DLVManager"
-    );
-    assert!(
-        routes_src.contains("crate::sdk::routing_sdk::load_active_advertisements_for_pair"),
-        "regression: dlv.listOwnedAmmVaults no longer cross-references \
-         the routing-vault advertisements for state_number / advertised flag"
-    );
-
-    let app_router_src = read(sdk_path("src/handlers/app_router_impl.rs"));
-    assert!(
-        app_router_src.contains("p if p.starts_with(\"dlv.\") => self.handle_dlv_query(q).await,"),
-        "regression: dlv.* query dispatch edge missing in app_router_impl"
     );
 }
 

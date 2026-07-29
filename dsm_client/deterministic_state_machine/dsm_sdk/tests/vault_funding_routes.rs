@@ -305,31 +305,95 @@ fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
 /// that every unit test still passes.
 #[test]
 #[serial_test::serial]
-fn the_vault_routes_are_reachable_through_the_dispatcher() {
+fn every_sofi_route_is_reachable_through_the_dispatcher() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
 
+    // ENUMERATED, not sampled. A handler arm and the router's match are two
+    // different tables, and adding to one without the other produces a route
+    // that is fully implemented, fully unit-tested and dead — every call
+    // answering "unknown method". That has shipped twice in this repo
+    // (`tokens.addByAnchor`, then `token.adoptionQr`), the second time past a
+    // guard that named only the route which broke the first time.
+    //
+    // The assertion is deliberately weak on purpose: it requires only that the
+    // route be KNOWN. An empty argument list legitimately fails validation, and
+    // demanding success would mean constructing valid inputs for every route —
+    // which is what makes an exhaustive list too expensive to keep exhaustive.
     for method in [
         "dlv.create",
+        "dlv.invalidate",
+        "dlv.claim",
+        "dlv.unlock",
         "dlv.unlockRouted",
+        "route.findAndBindBestPath",
+        "route.publishExternalCommitment",
         "route.publishRoutingAdvertisement",
+        "route.signRouteCommit",
+        "route.syncVaultsForPair",
     ] {
         let msg = invoke(&r, method, Vec::new())
             .error_message
             .unwrap_or_default();
         assert!(
-            !msg.contains("unknown invoke method"),
+            !is_unknown_route(&msg),
             "{method} is not registered in the production dispatch table: {msg}"
         );
     }
-    for path in ["dlv.listOwnedAmmVaults", "dlv.getVaultStateAnchor"] {
+    for path in [
+        "dlv.listOwnedAmmVaults",
+        "dlv.getVaultStateAnchor",
+        "route.computeExternalCommitment",
+        "route.isExternalCommitmentVisible",
+        "route.listAdvertisementsForPair",
+    ] {
         let msg = query(&r, path, Vec::new())
             .error_message
             .unwrap_or_default();
         assert!(
-            !msg.contains("unknown query path"),
+            !is_unknown_route(&msg),
             "{path} is not registered in the production dispatch table: {msg}"
         );
     }
+
+    // NON-VACUITY, per namespace. Each dispatch table words its refusal
+    // differently ("unknown dlv invoke method", "unknown route invoke method",
+    // "unknown query path", "unknown invoke method"), so a matcher tuned to one
+    // wording silently passes every route in the others. The first version of
+    // this test looked for "unknown invoke method" and could therefore never
+    // fail for any `route.*` route, whose table says "unknown route invoke
+    // method" — the assertion was dead in exactly the namespace it was added to
+    // protect.
+    for bogus in [
+        "dlv.noSuchMethod",
+        "route.noSuchMethod",
+        "sofi.noSuchMethod",
+    ] {
+        let msg = invoke(&r, bogus, Vec::new())
+            .error_message
+            .unwrap_or_default();
+        assert!(
+            is_unknown_route(&msg),
+            "an unknown route in this namespace must be recognisable, or the loop above passes on silence: {msg}"
+        );
+    }
+    let msg = query(&r, "dlv.noSuchQuery", Vec::new())
+        .error_message
+        .unwrap_or_default();
+    assert!(
+        is_unknown_route(&msg),
+        "an unknown query path must be recognisable: {msg}"
+    );
+}
+
+/// Every dispatch table's way of saying "I do not know this route".
+///
+/// Matching one wording is how the guard this replaces went blind: the phrasing
+/// differs per namespace, so a single literal covers one table and silently
+/// accepts every route in the rest.
+fn is_unknown_route(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("unknown")
+        && (m.contains("invoke") || m.contains("query path") || m.contains("route"))
 }
