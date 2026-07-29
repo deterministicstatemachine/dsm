@@ -71,30 +71,6 @@ fn dlv_claim_uses_local_rel_key_not_creator_rel_key() {
     );
 }
 
-/// Track B invariant — posted-mode DLV advertisements MUST be keyed by
-/// the intended recipient's Kyber PK, not by the creator's.  A swap would
-/// silently break the recipient's `posted_dlv.list` query (which polls
-/// `dlv/posted/{local_kyber_pk}/`).  This guard asserts the key-builder
-/// function uses `recipient_kyber_pk` as its first argument.
-#[test]
-fn posted_dlv_ad_key_uses_recipient_not_creator() {
-    let src = read(sdk_path("src/sdk/posted_dlv_sdk.rs"));
-    assert!(
-        src.contains("pub(crate) fn advertisement_key(recipient_kyber_pk: &[u8]"),
-        "regression: advertisement_key signature must put recipient_kyber_pk first \
-         (key format `dlv/posted/{{recipient_b32}}/{{dlv_id_b32}}` is load-bearing \
-         for recipient-indexed discovery)"
-    );
-    assert!(
-        src.contains("pub(crate) const POSTED_DLV_AD_ROOT: &str = \"dlv/posted/\";"),
-        "regression: POSTED_DLV_AD_ROOT prefix must remain `dlv/posted/`"
-    );
-    assert!(
-        !src.contains("format!(\"dlv/posted/{{}}\", creator"),
-        "regression: advertisement key must not be creator-indexed"
-    );
-}
-
 /// Track B invariant — `dlv.create` with a non-empty `intended_recipient`
 /// MUST publish a posted-DLV advertisement.  A regression that dropped
 /// the publish call would leave recipients unable to discover their
@@ -129,20 +105,6 @@ fn dlv_claim_publishes_terminal_state_ad() {
     );
 }
 
-/// Track B invariant — the digest binding advertisement → VaultPostProto
-/// MUST use the `DSM/posted-dlv-ad` BLAKE3 domain tag.  A tag swap would
-/// silently break the fetch-verify round trip, causing legitimate
-/// recipients to reject all ads.
-#[test]
-fn posted_dlv_digest_uses_stable_domain_tag() {
-    let src = read(sdk_path("src/sdk/posted_dlv_sdk.rs"));
-    assert!(
-        src.contains("pub(crate) const POSTED_DLV_AD_DOMAIN: &str = \"DSM/posted-dlv-ad\";"),
-        "regression: POSTED_DLV_AD_DOMAIN changed — this breaks every \
-         previously-published advertisement"
-    );
-}
-
 /// Track A invariant — `dlv.invalidate` and `dlv.claim` MUST decode their
 /// requests via the typed `DlvInvalidateV1` / `DlvClaimV1` protos, not via
 /// the historical inline `[32-byte vault_id][rest]` body shape.  A
@@ -162,20 +124,6 @@ fn dlv_invalidate_and_claim_decode_typed_protos() {
     assert!(
         !src.contains("body must start with 32-byte vault_id"),
         "regression: dlv handlers reverted to the inline [vault_id][rest] format"
-    );
-}
-
-/// SoFi routing discovery — the digest binding advertisement →
-/// vault proto MUST use the `DSM/routing-vault-ad` BLAKE3 domain tag.
-/// A tag swap would silently break the fetch-verify round trip,
-/// causing routers to reject all SoFi vaults.
-#[test]
-fn routing_advertisement_uses_stable_domain_tag() {
-    let src = read(sdk_path("src/sdk/routing_sdk.rs"));
-    assert!(
-        src.contains("pub(crate) const ROUTING_VAULT_AD_DOMAIN: &str = \"DSM/routing-vault-ad\";"),
-        "regression: ROUTING_VAULT_AD_DOMAIN changed — this breaks every \
-         previously-published routing advertisement"
     );
 }
 

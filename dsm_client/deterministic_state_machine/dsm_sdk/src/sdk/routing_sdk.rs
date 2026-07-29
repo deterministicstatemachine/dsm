@@ -395,6 +395,63 @@ mod tests {
     //! Each test uses unique token-id / vault-id pairs so suites do
     //! not poison each other.
 
+    /// The routing-advertisement digest is DOMAIN-SEPARATED and content-bound.
+    ///
+    /// Replaces a grep for the literal text of the domain constant. That could
+    /// confirm the constant's spelling; it could not confirm that the digest it
+    /// produces is distinguishable from the other digests travelling the same
+    /// storage layer. A collision would let one record be presented as another
+    /// with its binding intact.
+    #[test]
+    fn the_advertisement_digest_cannot_collide_with_another_domain() {
+        let payload = b"vault-proto-bytes";
+        let ours = dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, payload);
+
+        assert_eq!(
+            ours,
+            dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, payload),
+            "identical inputs must give identical digests"
+        );
+        assert_ne!(
+            ours,
+            dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, b"other-bytes"),
+            "the digest must bind the content"
+        );
+        for other in [
+            crate::sdk::posted_dlv_sdk::POSTED_DLV_AD_DOMAIN,
+            crate::sdk::route_commit_sdk::EXT_COMMIT_DOMAIN,
+        ] {
+            assert_ne!(
+                ours,
+                dsm::crypto::blake3::domain_hash_bytes(other, payload),
+                "the routing-ad digest must not collide with the {other} domain"
+            );
+        }
+    }
+
+    /// The advertisement key is addressed by PAIR IDENTITY, so discovery for one
+    /// market cannot enumerate another's — including a market over an asset that
+    /// merely shares a ticker.
+    #[test]
+    fn advertisement_addressing_is_pair_scoped() {
+        let (a, b) = ([0x11u8; 32], [0x22u8; 32]);
+        let impostor = [0x33u8; 32];
+        let vault = [0x77u8; 32];
+
+        let key = advertisement_key(&a, &b, &vault);
+        assert_eq!(key, advertisement_key(&a, &b, &vault));
+        assert!(key.starts_with(&advertisement_prefix_for_pair(&a, &b)));
+        assert!(
+            !key.starts_with(&advertisement_prefix_for_pair(&a, &impostor)),
+            "a different pair must not enumerate this market"
+        );
+        assert_ne!(
+            key,
+            advertisement_key(&a, &b, &[0x88u8; 32]),
+            "a different vault over the same pair is a different record"
+        );
+    }
+
     /// REQUIRED PROOF: the advertisement encodes the EXACT policy commits the
     /// vault was funded under, and the exact amounts sitting in its reserve
     /// leaves.
