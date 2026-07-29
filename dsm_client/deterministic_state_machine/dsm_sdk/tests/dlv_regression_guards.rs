@@ -238,24 +238,6 @@ fn trade_flow_handlers_delegate_to_audited_sdks() {
     }
 }
 
-/// Track C.3 invariant — `route.findAndBindBestPath` MUST leave
-/// `initiator_public_key` empty in the unsigned RouteCommit it
-/// returns.  The subsequent `route.signRouteCommit` invoke
-/// overrides that field with the wallet's pk per chunk #6.  If the
-/// bind step stamped any other pk, sign-as-someone-else attacks
-/// would re-open: a caller could ask the wallet to sign a route
-/// they pre-attributed to anyone else.
-#[test]
-fn find_and_bind_leaves_initiator_pk_empty_for_sign_to_overwrite() {
-    let src = read(sdk_path("src/handlers/route_routes.rs"));
-    assert!(
-        src.contains("initiator_public_key: &[],"),
-        "regression: route.findAndBindBestPath no longer leaves \
-         initiator_public_key empty for the sign step to fill in — \
-         sign-as-someone-else attack surface re-opened"
-    );
-}
-
 /// Chunk #6 invariant — `dlv.create` MUST accept-or-compute the
 /// content + fulfillment digests.  Frontend calls that omit them
 /// (the canonical shape per "all business logic stays in Rust")
@@ -276,22 +258,6 @@ fn dlv_create_accepts_empty_or_strict_verifies_supplied_digests() {
         src.contains("must be 0 or 32 bytes"),
         "regression: dlv.create must reject digest lengths other than 0 \
          or 32 bytes — empty (Rust computes) or full (Rust verifies)"
-    );
-}
-
-/// Chunk #6 invariant — `route.signRouteCommit` MUST sign with the
-/// wallet's CURRENT signing key, not whatever the caller stamped on
-/// `initiator_public_key`.  Otherwise an attacker could ask the
-/// wallet to sign-as-someone-else by submitting a RouteCommit with
-/// a forged initiator pk.  The handler must overwrite the field.
-#[test]
-fn route_sign_route_commit_overwrites_initiator_public_key() {
-    let src = read(sdk_path("src/handlers/route_routes.rs"));
-    assert!(
-        src.contains("rc.initiator_public_key = pk;"),
-        "regression: route.signRouteCommit no longer stamps the wallet \
-         pk on initiator_public_key — caller-supplied pk would be honoured \
-         and sign-as-someone-else attacks become possible"
     );
 }
 
@@ -438,20 +404,6 @@ fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
         src.contains("&draft.parameters_hash"),
         "regression: dlv.create no longer signs over draft.parameters_hash — \
          finalize_vault's vault.verify() would reject every newly-signed vault"
-    );
-}
-
-/// Chunk #6 invariant — `route.signRouteCommit` MUST canonicalise
-/// via the SAME helper that the X-derivation and the eligibility
-/// verifier use.  Any divergence in canonicalisation between
-/// signing and verification breaks sign-and-commit.
-#[test]
-fn route_sign_route_commit_uses_canonicalise_for_commitment() {
-    let src = read(sdk_path("src/handlers/route_routes.rs"));
-    assert!(
-        src.contains("canonicalise_for_commitment(&rc)"),
-        "regression: route.signRouteCommit no longer uses the shared \
-         canonicalise_for_commitment helper — sign and verify could drift"
     );
 }
 

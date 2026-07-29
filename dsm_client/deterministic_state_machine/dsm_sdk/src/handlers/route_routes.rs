@@ -975,3 +975,232 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 }
+
+#[cfg(test)]
+mod stamping_tests {
+    //! Accept-or-stamp and stamp-always, proven on the ARTIFACT.
+    //!
+    //! Replaces greps that matched a field assignment in this file's source.
+    //! An assignment being present says nothing about whether the cryptographic
+    //! operation consumed the assigned value — a handler that stamped the
+    //! identity AFTER signing would produce output that looks correct in every
+    //! field while its signature covers the unstamped form. Only recomputing
+    //! the commitment from the returned artifact and verifying against the
+    //! stamped key can tell those apart.
+    //!
+    //! TWO DISTINCT CONTRACTS live here, and conflating them would test the
+    //! wrong thing:
+    //!
+    //! * `route.signRouteCommit` is STAMP-ALWAYS. A caller-supplied initiator
+    //!   key is discarded, deliberately: signing as this device is the whole
+    //!   point, and honouring a supplied key would let anyone claim to sign as
+    //!   anyone.
+    //! * the publish routes are ACCEPT-OR-STAMP. Empty means "stamp me";
+    //!   non-empty is honoured verbatim, because routing-service integrations
+    //!   publish under their own key. That is safe because an advertisement is
+    //!   a discovery hint — authority comes from the reserve inclusion proof,
+    //!   which is signed by the owner and bound to the owner's device root, so
+    //!   a forged owner key on an ad grants nothing.
+    //!
+    //! Neither route REJECTS a conflicting identity, and testing for that would
+    //! assert a contract this system does not have.
+
+    use super::*;
+    use serial_test::serial;
+
+    use crate::bridge::AppRouter;
+    use crate::init::SdkConfig;
+
+    fn install_identity() -> Vec<u8> {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+            std::env::remove_var("DSM_ENV_CONFIG_PATH");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
+            "./.dsm_testdata_route_stamping",
+        ));
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (device_id, genesis_hash, binding_key) =
+            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key.clone(),
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        let _ = crate::storage::client_db::init_database();
+        public_key
+    }
+
+    fn router() -> AppRouterImpl {
+        AppRouterImpl::new(SdkConfig {
+            node_id: "route-stamping-test".to_string(),
+            storage_endpoints: vec![],
+            enable_offline: true,
+        })
+        .expect("router init")
+    }
+
+    fn pack(body: Vec<u8>) -> Vec<u8> {
+        generated::ArgPack {
+            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            codec: generated::Codec::Proto as i32,
+            body,
+        }
+        .encode_to_vec()
+    }
+
+    fn rc_fixture() -> generated::RouteCommitV1 {
+        generated::RouteCommitV1 {
+            version: 1,
+            nonce: vec![0x11; 32],
+            total_fee_bps: 30,
+            initiator_public_key: Vec::new(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vec![0x77; 32],
+                token_in: vec![0x11; 32],
+                token_out: vec![0x22; 32],
+                input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+                expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
+                vault_state_anchor_seq: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn sign_through_router(
+        r: &AppRouterImpl,
+        rc: &generated::RouteCommitV1,
+    ) -> generated::RouteCommitV1 {
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.signRouteCommit".to_string(),
+                args: pack(rc.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "sign failed: {:?}", res.error_message);
+        // Envelope v3: a 1-byte framing prefix, then the message.
+        let env = generated::Envelope::decode(&res.data[1..]).expect("decode envelope");
+        let generated::envelope::Payload::AppStateResponse(resp) = env.payload.expect("payload")
+        else {
+            panic!("unexpected payload")
+        };
+        let bytes = crate::util::text_id::decode_base32_crockford(&resp.value.expect("value"))
+            .expect("decode base32");
+        generated::RouteCommitV1::decode(bytes.as_slice()).expect("decode rc")
+    }
+
+    /// THE ARTIFACT, not the presentation.
+    ///
+    /// An empty initiator key comes back stamped with the wallet's, and the
+    /// returned SIGNATURE verifies against that stamped key over the returned
+    /// message's own canonical bytes. Then the stamped key is altered and
+    /// verification must break — which is what distinguishes "signed over the
+    /// stamped identity" from "stamped after signing".
+    #[test]
+    #[serial]
+    fn signing_stamps_the_wallet_identity_and_signs_over_it() {
+        let wallet_pk = install_identity();
+        let r = router();
+
+        let signed = sign_through_router(&r, &rc_fixture());
+
+        assert_eq!(
+            signed.initiator_public_key, wallet_pk,
+            "an empty initiator key must come back stamped with the wallet's"
+        );
+        assert!(!signed.initiator_signature.is_empty());
+
+        // Recompute the canonical form FROM THE RETURNED ARTIFACT and verify
+        // the returned signature against the stamped key.
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&signed).encode_to_vec();
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(
+                &signed.initiator_public_key,
+                &canonical,
+                &signed.initiator_signature
+            )
+            .expect("verify"),
+            "the signature must verify over the artifact that was returned"
+        );
+
+        // MUTATION SENSITIVITY. Had the handler stamped after signing, the
+        // signature would cover the unstamped form and this alteration would
+        // not be detectable.
+        let mut tampered = signed.clone();
+        tampered.initiator_public_key[0] ^= 0xff;
+        let tampered_canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&tampered).encode_to_vec();
+        assert!(
+            !dsm::crypto::sphincs::sphincs_verify(
+                &tampered.initiator_public_key,
+                &tampered_canonical,
+                &tampered.initiator_signature
+            )
+            .unwrap_or(false),
+            "altering the stamped identity must break verification"
+        );
+
+        // And X derived from the returned artifact is the canonical one, so the
+        // trade's name and its signature describe the same message.
+        assert_eq!(
+            crate::sdk::route_commit_sdk::compute_external_commitment(&signed),
+            dsm::crypto::blake3::domain_hash_bytes(
+                crate::sdk::route_commit_sdk::EXT_COMMIT_DOMAIN,
+                &canonical
+            ),
+        );
+    }
+
+    /// STAMP-ALWAYS: a caller-supplied initiator key is discarded, not honoured
+    /// and not rejected.
+    ///
+    /// Honouring it would let a caller obtain a signature attributed to someone
+    /// else's key; the signature would then fail verification against that key,
+    /// but only after a verifier had been handed a plausible-looking artifact.
+    /// Overwriting keeps "the initiator key is who signed" true by construction.
+    #[test]
+    #[serial]
+    fn signing_discards_a_caller_supplied_identity() {
+        let wallet_pk = install_identity();
+        let r = router();
+
+        let mut impostor = rc_fixture();
+        impostor.initiator_public_key = vec![0xEEu8; 64];
+        let signed = sign_through_router(&r, &impostor);
+
+        assert_eq!(
+            signed.initiator_public_key, wallet_pk,
+            "a supplied initiator key must be overwritten by the signer's own"
+        );
+        assert_ne!(signed.initiator_public_key, vec![0xEEu8; 64]);
+
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&signed).encode_to_vec();
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(
+                &signed.initiator_public_key,
+                &canonical,
+                &signed.initiator_signature
+            )
+            .expect("verify"),
+            "and the signature covers the identity that replaced it"
+        );
+    }
+}
