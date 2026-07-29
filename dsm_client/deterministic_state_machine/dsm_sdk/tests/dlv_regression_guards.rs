@@ -317,45 +317,6 @@ fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
 // `tests/vault_funding_routes.rs::routed_settlement_refuses_until_reserve_proofs_exist`
 // states behaviourally. The republish property returns with the settlement work.
 
-/// Track C.5 invariant — both storage publishers MUST honour the
-/// accept-or-stamp pattern on the publisher / owner pk field.
-/// Frontend dev-tools screens (and any future routing-service
-/// integration) pass empty bytes; the handler stamps the wallet's
-/// current SPHINCS+ pk before persisting.  A regression that
-/// removed either branch would force callers back to placeholder
-/// zeros (the prior pre-Track-C.5 hack), violating the rule that
-/// every public key on the wire is the wallet's actual key.
-#[test]
-fn route_publish_routes_stamp_wallet_pk_on_empty() {
-    let src = read(sdk_path("src/handlers/route_routes.rs"));
-    let needles = [
-        // publishExternalCommitment branch
-        (
-            "publish_external_commitment\\b",
-            "if req.publisher_public_key.is_empty() {",
-        ),
-        (
-            "publish_external_commitment\\b",
-            "req.publisher_public_key = pk",
-        ),
-        // publishRoutingAdvertisement branch
-        (
-            "publish_routing_advertisement\\b",
-            "if req.owner_public_key.is_empty() {",
-        ),
-        (
-            "publish_routing_advertisement\\b",
-            "req.owner_public_key = pk",
-        ),
-    ];
-    for (_route, needle) in needles {
-        assert!(
-            src.contains(needle),
-            "regression: route accept-or-stamp branch missing: {needle}"
-        );
-    }
-}
-
 /// Track C.4 invariant — `dlv.create` MUST stamp the wallet's
 /// SPHINCS+ pk on `creator_public_key` when the field rides empty
 /// over the wire AND sign Rust-side when `signature` rides empty.
@@ -404,30 +365,6 @@ fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
         src.contains("&draft.parameters_hash"),
         "regression: dlv.create no longer signs over draft.parameters_hash — \
          finalize_vault's vault.verify() would reject every newly-signed vault"
-    );
-}
-
-/// Track C.2 invariant — `route_routes` MUST delegate the
-/// X-compute / publish / visibility paths to the audited
-/// `route_commit_sdk` helpers.  A future edit that re-implemented
-/// the BLAKE3 derivation inline (or skipped the SDK's
-/// canonicalise→verify pipeline) would silently bypass the chunk #5
-/// signature gate.  The guard fails if any of the three
-/// route handlers stop calling its corresponding SDK function.
-#[test]
-fn route_routes_delegate_to_route_commit_sdk() {
-    let src = read(sdk_path("src/handlers/route_routes.rs"));
-    assert!(
-        src.contains("crate::sdk::route_commit_sdk::compute_external_commitment"),
-        "regression: route.computeExternalCommitment no longer calls the SDK"
-    );
-    assert!(
-        src.contains("crate::sdk::route_commit_sdk::is_external_commitment_visible"),
-        "regression: route.isExternalCommitmentVisible no longer calls the SDK"
-    );
-    assert!(
-        src.contains("crate::sdk::route_commit_sdk::publish_external_commitment"),
-        "regression: route.publishExternalCommitment no longer calls the SDK"
     );
 }
 

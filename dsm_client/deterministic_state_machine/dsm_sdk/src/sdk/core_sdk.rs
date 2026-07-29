@@ -1473,6 +1473,19 @@ impl CoreSDK {
         self.state_machine.lock().device_head().cloned()
     }
 
+    /// Install a device head directly. TEST ONLY — compiled out of production
+    /// builds, so no shipping path can bypass the advance that normally
+    /// produces a head.
+    ///
+    /// Exists because a handler that reads reserves out of the head cannot be
+    /// exercised without one, and constructing a funded head through real
+    /// advances would mean minting and funding through several routes before
+    /// reaching the behaviour under test.
+    #[cfg(test)]
+    pub(crate) fn set_device_head_for_testing(&self, head: dsm::types::device_state::DeviceState) {
+        self.state_machine.lock().set_device_head(head);
+    }
+
     /// Prepare-only view of the canonical [`AdvanceOutcome`] for an advance
     /// that hasn't committed yet.
     ///

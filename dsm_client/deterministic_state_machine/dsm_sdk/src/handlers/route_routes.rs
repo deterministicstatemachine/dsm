@@ -1168,6 +1168,139 @@ mod stamping_tests {
         );
     }
 
+    /// CROSS-LAYER AGREEMENT: the advertisement that was stored and the address
+    /// it was stored under must describe the same market.
+    ///
+    /// Each is verifiable in isolation — a well-formed advertisement, a
+    /// well-formed key — while together they say different things. A trader
+    /// discovering by prefix would fetch bytes describing a market it did not
+    /// ask about, with every signature and digest intact.
+    ///
+    /// Also pins the publish contract, which is ACCEPT-OR-STAMP rather than the
+    /// stamp-always rule signing uses: empty owner key is filled from the
+    /// wallet, a supplied one is honoured verbatim.
+    #[test]
+    #[serial]
+    fn a_published_advertisement_and_its_address_describe_the_same_market() {
+        use prost::Message as _;
+
+        let wallet_pk = install_identity();
+        let r = router();
+
+        // A genuinely funded vault: publication reads the reserve leaves, so an
+        // unfunded head is refused before any stamping happens.
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(), // empty → stamp me
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // Fetch what was actually STORED, at the address the pair and vault
+        // derive, and require the record to name that same pair and vault.
+        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let stored = crate::runtime::get_runtime()
+            .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+            .expect("the advertisement must be readable at its derived address");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(stored.as_slice())
+            .expect("stored bytes must decode as the advertisement");
+
+        assert_eq!(ad.vault_id, v.vault_id.to_vec());
+        assert_eq!(ad.token_a, v.pc_a.to_vec());
+        assert_eq!(ad.token_b, v.pc_b.to_vec());
+        assert_eq!(
+            crate::sdk::routing_sdk::advertisement_key(&ad.token_a, &ad.token_b, &v.vault_id),
+            key,
+            "the address must be re-derivable from the record it stores"
+        );
+
+        // ACCEPT-OR-STAMP, the empty half: the wallet key was filled in.
+        assert_eq!(
+            ad.owner_public_key, wallet_pk,
+            "an empty owner key must be stamped from the active wallet"
+        );
+
+        // Changing the market changes the address, so a record cannot be
+        // discovered under a pair it does not name.
+        let mut impostor = v.pc_b;
+        impostor[0] ^= 0xff;
+        assert_ne!(
+            crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &impostor, &v.vault_id),
+            key,
+        );
+        assert_ne!(
+            crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &[0x99u8; 32]),
+            key,
+        );
+    }
+
+    /// ACCEPT-OR-STAMP, the non-empty half: a supplied publisher key is
+    /// honoured verbatim rather than overwritten.
+    ///
+    /// This is the opposite of the signing rule, and correct for a different
+    /// reason: an advertisement is discovery metadata. Authority comes from the
+    /// owner-signed reserve inclusion proof bound to the owner's device root, so
+    /// publishing under an integration's own key grants no custody and no
+    /// reserve authority.
+    #[test]
+    #[serial]
+    fn a_supplied_publisher_identity_is_honoured_not_overwritten() {
+        use prost::Message as _;
+
+        let wallet_pk = install_identity();
+        let r = router();
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+
+        let integration_pk = vec![0xC3u8; 64];
+        assert_ne!(integration_pk, wallet_pk);
+
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: integration_pk.clone(),
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let stored = crate::runtime::get_runtime()
+            .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+            .expect("stored");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(stored.as_slice()).expect("decode");
+
+        assert_eq!(
+            ad.owner_public_key, integration_pk,
+            "a supplied publisher key must be preserved, not replaced by the wallet's"
+        );
+    }
+
     /// STAMP-ALWAYS: a caller-supplied initiator key is discarded, not honoured
     /// and not rejected.
     ///
