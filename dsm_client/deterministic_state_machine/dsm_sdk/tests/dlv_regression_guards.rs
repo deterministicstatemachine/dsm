@@ -179,25 +179,6 @@ fn routing_advertisement_uses_stable_domain_tag() {
     );
 }
 
-/// SoFi routing discovery — the proto schema MUST carry
-/// `RoutingVaultAdvertisementV1` so the SDK's encode/decode path
-/// continues to compile.  Removing it is a wire-format break.
-#[test]
-fn proto_schema_carries_routing_vault_advertisement() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("resolve repo root");
-    let proto = repo_root.join("proto").join("dsm_app.proto");
-    let proto_src = read(proto);
-    assert!(
-        proto_src.contains("message RoutingVaultAdvertisementV1 {"),
-        "regression: proto/dsm_app.proto is missing RoutingVaultAdvertisementV1"
-    );
-}
-
 /// SoFi routing path search — the cost function MUST select on
 /// `final_output_amount`, not on summed `fee_bps`.  A pure-fee
 /// Dijkstra silently mis-routes when a multi-hop path through deep
@@ -210,33 +191,6 @@ fn routing_path_search_compares_on_final_output() {
         src.contains("final_output_amount > current.final_output_amount"),
         "regression: routing_path_sdk replaced output-maximisation with \
          a different cost rule — verify intent before proceeding"
-    );
-}
-
-/// SoFi chunk #3 invariant — the proto schema MUST carry both
-/// `RouteCommitV1` and `ExternalCommitmentV1` so the SDK encode/decode
-/// path stays usable.  Removing either is a wire-format break.
-#[test]
-fn proto_schema_carries_route_commit_messages() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("resolve repo root");
-    let proto = repo_root.join("proto").join("dsm_app.proto");
-    let proto_src = read(proto);
-    assert!(
-        proto_src.contains("message RouteCommitV1 {"),
-        "regression: proto/dsm_app.proto is missing RouteCommitV1"
-    );
-    assert!(
-        proto_src.contains("message RouteCommitHopV1 {"),
-        "regression: proto/dsm_app.proto is missing RouteCommitHopV1"
-    );
-    assert!(
-        proto_src.contains("message ExternalCommitmentV1 {"),
-        "regression: proto/dsm_app.proto is missing ExternalCommitmentV1"
     );
 }
 
@@ -274,24 +228,6 @@ fn dlv_unlock_routed_runs_eligibility_check_before_state_advance() {
         found_after,
         "regression: dlv.unlockRouted is calling execute_on_relationship \
          BEFORE the eligibility verifier — gate must come first"
-    );
-}
-
-/// SoFi chunk #4 invariant — the proto schema MUST carry
-/// `DlvUnlockRoutedV1` so the handler decoder continues to compile.
-#[test]
-fn proto_schema_carries_dlv_unlock_routed() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("resolve repo root");
-    let proto = repo_root.join("proto").join("dsm_app.proto");
-    let proto_src = read(proto);
-    assert!(
-        proto_src.contains("message DlvUnlockRoutedV1 {"),
-        "regression: proto/dsm_app.proto is missing DlvUnlockRoutedV1"
     );
 }
 
@@ -506,37 +442,6 @@ fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
         "regression: AMM re-simulation MUST run before execute_on_relationship \
          in dlv_unlock_routed — checking math AFTER the chain advances is \
          too late to reject"
-    );
-}
-
-/// Chunk #7 invariant — the re-simulation MUST use the SAME
-/// `constant_product_output` function that chunk #2's path search
-/// uses.  Any divergence between path-time and unlock-time
-/// computation means the trader's signed `expected_output` will
-/// systematically fail re-simulation, breaking every routed unlock.
-#[test]
-fn amm_re_simulation_uses_path_search_simulator() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    assert!(
-        src.contains("crate::sdk::routing_path_sdk::constant_product_output"),
-        "regression: route_commit_sdk no longer delegates to the path-search \
-         simulator — sign-time and unlock-time math could drift"
-    );
-}
-
-/// Chunk #7 invariant — the post-trade reserve update MUST use the
-/// FULL `input_amount` (Uniswap V2 invariant: fee accrues to the
-/// vault as LP yield).  A regression that subtracted the fee from
-/// the input before adding to the reserve would leak fees out of
-/// the vault, breaking the constant-product invariant the simulator
-/// relies on.
-#[test]
-fn amm_reserve_update_uses_full_input_amount() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    assert!(
-        src.contains("reserve_in\n        .checked_add(input_amount)"),
-        "regression: AMM post-trade reserve update no longer uses the full \
-         input_amount — fees would leak out of the vault"
     );
 }
 

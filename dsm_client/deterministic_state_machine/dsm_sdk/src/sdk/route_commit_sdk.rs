@@ -979,6 +979,84 @@ mod tests {
     //! cycle plus the determinism + signature-exclusion guarantees
     //! that make X safe to use as an atomic-visibility trigger.
 
+    /// ONE SIMULATOR, and both callers agree on it.
+    ///
+    /// Replaces two greps: one asserting this file mentions
+    /// `routing_path_sdk::constant_product_output`, another asserting a
+    /// particular `reserve_in.checked_add(input_amount)` line exists. Both
+    /// confirmed a call site; neither confirmed the two paths agree. If the
+    /// quote-time simulator and the settle-time verifier ever diverged, a trade
+    /// would be quoted at one price and settled at another, with every signature
+    /// on the path still valid.
+    #[test]
+    fn the_quote_simulator_and_the_swap_verifier_agree() {
+        let (pc_a, pc_b) = ([0x11u8; 32], [0x22u8; 32]);
+        let fee_bps = 30u32;
+        let fulfillment = dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps,
+        };
+
+        // A spread of reserves and inputs, including a 1-unit trade against a
+        // lopsided pool where floor division bites hardest.
+        for (reserve_a, reserve_b, input) in [
+            (1_000_000u64, 500_000u64, 1_000u64),
+            (1_000_000, 500_000, 250_000),
+            (10, 1_000_000, 1),
+            (1_000_000, 10, 1),
+            (u32::MAX as u64, u32::MAX as u64, 7),
+        ] {
+            let expected = crate::sdk::routing_path_sdk::constant_product_output(
+                input, reserve_a, reserve_b, fee_bps,
+            );
+            let Some(expected) = expected else { continue };
+
+            let hop = generated::RouteCommitHopV1 {
+                vault_id: vec![0x77; 32],
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected as u128).to_be_bytes().to_vec(),
+                ..Default::default()
+            };
+            let outcome =
+                verify_amm_swap_against_reserves(&hop, &fulfillment, reserve_a, reserve_b)
+                    .unwrap_or_else(|e| {
+                        panic!("verifier rejected its own simulator's output: {e:?}")
+                    })
+                    .unwrap_or_else(|| panic!("verifier produced no outcome for a valid AMM hop"));
+
+            // The verifier accepted the simulator's number and moved the
+            // reserves by exactly it. Strict equality, no band: a slippage
+            // tolerance here is a licence to settle at a price nobody quoted.
+            assert_eq!(
+                (outcome.new_reserve_a, outcome.new_reserve_b),
+                (reserve_a + input, reserve_b - expected),
+                "verifier and simulator disagree at reserves=({reserve_a},{reserve_b}) input={input}"
+            );
+
+            // And a hop claiming one unit more than the curve allows is refused,
+            // which is what makes the agreement load-bearing rather than
+            // incidental.
+            let greedy = generated::RouteCommitHopV1 {
+                expected_output_amount_u128: (expected as u128 + 1).to_be_bytes().to_vec(),
+                ..hop.clone()
+            };
+            let greedy_outcome =
+                verify_amm_swap_against_reserves(&greedy, &fulfillment, reserve_a, reserve_b);
+            match greedy_outcome {
+                Err(_) => {}
+                Ok(Some(o)) => assert_ne!(
+                    (o.new_reserve_a, o.new_reserve_b),
+                    (reserve_a + input, reserve_b - (expected + 1)),
+                    "a hop taking more than the curve allows must not verify"
+                ),
+                Ok(None) => {}
+            }
+        }
+    }
+
     // ── canonical forms ────────────────────────────────────────────────────
     //
     // These replace grep guards that asserted the SHAPE of this file's source
