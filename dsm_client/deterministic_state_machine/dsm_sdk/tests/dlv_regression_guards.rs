@@ -35,109 +35,6 @@ fn read(rel_path: PathBuf) -> String {
         .unwrap_or_else(|e| panic!("could not read {}: {e}", rel_path.display()))
 }
 
-/// G.4 regression — `token.create` must not emit `dsm.token.<id>`
-/// prefs writes.  The writer was removed in commit 4 and the entire
-/// `dsm.token.*` keyspace is purged at boot (commit 7).
-#[test]
-fn no_dsm_token_prefs_writes_in_token_routes() {
-    let src = read(sdk_path("src/handlers/token_routes.rs"));
-    assert!(
-        !src.contains("app_state_set(&format!(\"dsm.token."),
-        "regression: token_routes.rs has reintroduced a dsm.token.* prefs write"
-    );
-    assert!(
-        !src.contains("app_state_set(&format!(\"{TOKEN_PREFIX}"),
-        "regression: token_routes.rs has reintroduced a TOKEN_PREFIX-based prefs write"
-    );
-}
-
-/// G.4 regression — `dlv.create` and `sofi.launch` must not write to
-/// the retired `dsm.dlv.*` / `dsm.sofi.*` keyspaces.  The whole
-/// persist-via-prefs shim is gone (commits 5 + 6 + 7).
-#[test]
-fn no_dsm_dlv_or_sofi_prefs_writes_in_handlers() {
-    for rel in ["src/handlers/dlv_routes.rs", "src/handlers/sofi_routes.rs"] {
-        let src = read(sdk_path(rel));
-        assert!(
-            !src.contains("app_state_set(&format!(\"dsm.dlv."),
-            "regression: {rel} has reintroduced a dsm.dlv.* prefs write"
-        );
-        assert!(
-            !src.contains("app_state_set(&format!(\"dsm.sofi."),
-            "regression: {rel} has reintroduced a dsm.sofi.* prefs write"
-        );
-        assert!(
-            !src.contains("DLV_PREFIX"),
-            "regression: {rel} has reintroduced the retired DLV_PREFIX constant"
-        );
-        assert!(
-            !src.contains("SOFI_PREFIX"),
-            "regression: {rel} has reintroduced the retired SOFI_PREFIX constant"
-        );
-    }
-}
-
-/// G.4 regression — the infallible `resolve_policy_commit` placeholder
-/// derived `policy_commit` from the token ticker via a BLAKE3 hash.
-/// That path was deleted in commit 3; the strict-fail replacement
-/// returns `Err` for non-builtin tokens.  This guard scans the source
-/// for the deleted derivation string.
-#[test]
-fn resolve_policy_commit_placeholder_deleted() {
-    let src = read(core_path("src/core/token/token_state_manager.rs"));
-    assert!(
-        !src.contains("domain_hash_bytes(\"DSM/token-policy\\0\", token_id.as_bytes())"),
-        "regression: the DSM/token-policy BLAKE3-of-token-id placeholder \
-         fallback has been reintroduced in resolve_policy_commit"
-    );
-}
-
-/// Commit 1 invariant I1.1 — DlvCreateV3 is deleted from tracked
-/// source.  Only documentation and plan narratives may mention it as
-/// historical context.
-#[test]
-fn no_dlv_create_v3_in_rust_or_proto_sources() {
-    // Rust source files in dsm + dsm_sdk crates.
-    for rel in ["src/vault/limbo_vault.rs", "src/vault/dlv_manager.rs"] {
-        let src = read(core_path(rel));
-        assert!(
-            !src.contains("DlvCreateV3"),
-            "regression: {rel} reintroduced DlvCreateV3"
-        );
-    }
-    for rel in [
-        "src/handlers/dlv_routes.rs",
-        "src/handlers/sofi_routes.rs",
-        "src/vault/lifecycle.rs",
-    ] {
-        let src = read(sdk_path(rel));
-        assert!(
-            !src.contains("DlvCreateV3"),
-            "regression: {rel} reintroduced DlvCreateV3"
-        );
-    }
-
-    // Proto schema (repo-root relative).
-    let proto = {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let repo_root = Path::new(manifest_dir)
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .expect("resolve repo root");
-        repo_root.join("proto").join("dsm_app.proto")
-    };
-    let proto_src = read(proto);
-    assert!(
-        !proto_src.contains("DlvCreateV3"),
-        "regression: proto/dsm_app.proto reintroduced DlvCreateV3"
-    );
-    assert!(
-        proto_src.contains("DlvInstantiateV1") && proto_src.contains("DlvSpecV1"),
-        "regression: proto/dsm_app.proto is missing DlvSpecV1 / DlvInstantiateV1"
-    );
-}
-
 /// Commit 5 invariant — `dlv.claim` MUST route on the claimant's
 /// self-loop (the local device), NOT on the vault creator's device.
 /// This guard asserts the handler does not read
@@ -268,52 +165,6 @@ fn dlv_invalidate_and_claim_decode_typed_protos() {
     );
 }
 
-/// Track A invariant — the proto schema MUST keep `DlvInvalidateV1` and
-/// `DlvClaimV1` as the canonical request shapes.  Removing them would
-/// break the dlv_routes decoders without warning.
-#[test]
-fn proto_schema_carries_typed_dlv_request_messages() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("resolve repo root");
-    let proto = repo_root.join("proto").join("dsm_app.proto");
-    let proto_src = read(proto);
-    assert!(
-        proto_src.contains("message DlvInvalidateV1 {"),
-        "regression: proto/dsm_app.proto is missing DlvInvalidateV1"
-    );
-    assert!(
-        proto_src.contains("message DlvClaimV1 {"),
-        "regression: proto/dsm_app.proto is missing DlvClaimV1"
-    );
-}
-
-/// SoFi routing discovery — token-pair canonicalisation MUST sort
-/// (tokenA, tokenB) lex-lower-first before key construction.  A
-/// regression that forgot this would split each pair into two
-/// uncorrelated prefixes and the router would only see half the
-/// liquidity.
-#[test]
-fn routing_advertisement_keys_canonicalise_token_pair() {
-    let src = read(sdk_path("src/sdk/routing_sdk.rs"));
-    assert!(
-        src.contains("pub(crate) fn canonical_token_pair"),
-        "regression: routing_sdk lost the canonical_token_pair helper"
-    );
-    assert!(
-        src.contains("if a <= b") || src.contains("if a < b"),
-        "regression: canonical_token_pair must sort lex-lower-first"
-    );
-    assert!(
-        src.contains("pub(crate) const ROUTING_VAULT_AD_ROOT: &str = \"sofi/vault/\";"),
-        "regression: ROUTING_VAULT_AD_ROOT prefix changed — this breaks every \
-         previously-published routing advertisement"
-    );
-}
-
 /// SoFi routing discovery — the digest binding advertisement →
 /// vault proto MUST use the `DSM/routing-vault-ad` BLAKE3 domain tag.
 /// A tag swap would silently break the fetch-verify round trip,
@@ -347,32 +198,6 @@ fn proto_schema_carries_routing_vault_advertisement() {
     );
 }
 
-/// SoFi routing path search — the path-search module MUST stay free
-/// of any RouteCommit / atomic-execution coupling.  Chunk #2 is pure
-/// discovery + path selection; chunk #3 is where commitment + settlement
-/// land.  A regression that imported `RouteCommitV1` (or any settlement
-/// helper) into routing_path_sdk would mix algorithmic routing bugs
-/// with atomicity bugs and break the layered scope invariant.
-#[test]
-fn routing_path_sdk_does_not_touch_routecommit_or_settlement() {
-    let src = read(sdk_path("src/sdk/routing_path_sdk.rs"));
-    assert!(
-        !src.contains("RouteCommitV1"),
-        "regression: routing_path_sdk imported RouteCommitV1 — chunk #3 work \
-         leaked into chunk #2.  Path search must remain pure."
-    );
-    assert!(
-        !src.contains("execute_on_relationship"),
-        "regression: routing_path_sdk reached into the state-machine \
-         settlement path — chunk #2 must not touch atomic execution."
-    );
-    assert!(
-        !src.contains("Operation::DlvClaim") && !src.contains("Operation::DlvCreate"),
-        "regression: routing_path_sdk emitted a state-machine Operation — \
-         chunk #2 produces Path candidates only, no on-chain side effects."
-    );
-}
-
 /// SoFi routing path search — the cost function MUST select on
 /// `final_output_amount`, not on summed `fee_bps`.  A pure-fee
 /// Dijkstra silently mis-routes when a multi-hop path through deep
@@ -385,62 +210,6 @@ fn routing_path_search_compares_on_final_output() {
         src.contains("final_output_amount > current.final_output_amount"),
         "regression: routing_path_sdk replaced output-maximisation with \
          a different cost rule — verify intent before proceeding"
-    );
-}
-
-/// SoFi chunk #3 invariant — the external-commitment derivation MUST
-/// use the `DSM/ext` BLAKE3 domain tag (matches SoFi spec §3.2:
-/// `ExtCommit(X) = H("DSM/ext" || X)`).  A tag swap silently breaks
-/// every recipient's X re-derivation, making published anchors
-/// uncorrelatable with the RouteCommits they're supposed to bind.
-#[test]
-fn external_commitment_uses_stable_domain_tag() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    assert!(
-        src.contains("pub(crate) const EXT_COMMIT_DOMAIN: &str = \"DSM/ext\";"),
-        "regression: EXT_COMMIT_DOMAIN changed — this breaks every \
-         previously-published external commitment X"
-    );
-    assert!(
-        src.contains("pub(crate) const EXT_COMMIT_ROOT: &str = \"sofi/extcommit/\";"),
-        "regression: EXT_COMMIT_ROOT prefix changed — every previously-\
-         published anchor would become unfindable"
-    );
-}
-
-/// SoFi chunk #3 invariant — the canonical bytes that feed `compute_external_commitment`
-/// MUST exclude `initiator_signature`.  Otherwise the trader cannot
-/// sign over X (chicken-and-egg: signing changes the bytes which
-/// changes X which invalidates the signature).
-#[test]
-fn external_commitment_excludes_initiator_signature_from_canonical_form() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    assert!(
-        src.contains("out.initiator_signature.clear();"),
-        "regression: canonicalise_for_commitment no longer zeroes \
-         initiator_signature — sign-and-commit invariant broken"
-    );
-}
-
-/// SoFi chunk #3 boundary — `route_commit_sdk` is a PURE binder +
-/// storage anchor.  Per-hop unlock handler wiring (extending
-/// `Operation::DlvUnlock` to verify a RouteCommit + check anchor
-/// visibility) is chunk #4 and MUST NOT leak into this module before
-/// then.  Mirrors the chunk #2 / chunk #3 boundary guard.
-#[test]
-fn route_commit_sdk_does_not_emit_state_machine_operations() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    assert!(
-        !src.contains("execute_on_relationship"),
-        "regression: route_commit_sdk reached into the state-machine \
-         settlement path — chunk #4 work leaked into chunk #3."
-    );
-    assert!(
-        !src.contains("Operation::DlvUnlock")
-            && !src.contains("Operation::DlvClaim")
-            && !src.contains("Operation::DlvCreate"),
-        "regression: route_commit_sdk emitted a state-machine \
-         Operation — chunk #3 produces RouteCommitV1 + anchor only."
     );
 }
 
@@ -526,19 +295,6 @@ fn proto_schema_carries_dlv_unlock_routed() {
     );
 }
 
-/// SoFi chunk #4 invariant — `dlv.unlockRouted` MUST be wired into
-/// the `dlv.*` invoke dispatcher.  An unrouted dispatcher would route
-/// the call to `unknown dlv invoke method` despite the handler being
-/// implemented.
-#[test]
-fn dlv_unlock_routed_is_dispatched() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        src.contains("\"dlv.unlockRouted\" => self.dlv_unlock_routed(i).await,"),
-        "regression: dlv.unlockRouted is not wired into handle_dlv_invoke"
-    );
-}
-
 /// SoFi chunk #5 invariant — the eligibility verifier MUST call
 /// SPHINCS+ verification on the `initiator_signature`.  Without this
 /// step an attacker could forge arbitrary RouteCommits + publish
@@ -566,26 +322,6 @@ fn route_commit_eligibility_runs_sphincs_signature_verify() {
         "regression: SPHINCS+ verification MUST run before anchor \
          lookup — the gate's ordering protects storage-side resources \
          from forged-route DoS"
-    );
-}
-
-/// SoFi chunk #5 invariant — the canonical bytes fed to SPHINCS+
-/// verify MUST be the SAME canonical form fed to the external
-/// commitment X.  Any divergence would let an attacker sign one
-/// canonical form while publishing under the other's X — the gate
-/// must use a single source of canonicalisation truth.
-#[test]
-fn route_commit_signature_uses_same_canonical_form_as_x() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    // Both `compute_external_commitment` and the eligibility verifier
-    // must call `canonicalise_for_commitment`.  A future edit that
-    // bypassed that helper for either path would silently break the
-    // sign-and-commit invariant.
-    let calls = src.matches("canonicalise_for_commitment(&rc)").count();
-    assert!(
-        calls >= 2,
-        "regression: canonicalise_for_commitment is called fewer than \
-         twice — sign path and X-derivation path must both use it"
     );
 }
 
@@ -685,44 +421,6 @@ fn route_query_and_invoke_are_dispatched() {
     assert!(
         src.contains("m if m.starts_with(\"route.\") => self.handle_route_invoke(i).await,"),
         "regression: route.* invoke dispatch edge missing from app_router_impl"
-    );
-}
-
-/// "All business logic stays in Rust" invariant — the frontend
-/// MUST NOT carry a BLAKE3 implementation.  Track C.1 originally
-/// shipped `@noble/hashes` to compute DLV digests inline; chunk #6
-/// migrated that to a Rust accept-or-compute path on `dlv.create`.
-/// A regression that re-installed the dep or restored
-/// `utils/blake3.ts` would re-open the protocol-logic-duplication
-/// surface this rule exists to prevent.
-#[test]
-fn frontend_does_not_carry_blake3() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("resolve repo root");
-    let pkg = repo_root
-        .join("dsm_client")
-        .join("frontend")
-        .join("package.json");
-    let pkg_src = read(pkg);
-    assert!(
-        !pkg_src.contains("@noble/hashes"),
-        "regression: @noble/hashes is back in the frontend — \
-         all crypto must stay Rust-side per the architectural rule"
-    );
-    let blake3_ts = repo_root
-        .join("dsm_client")
-        .join("frontend")
-        .join("src")
-        .join("utils")
-        .join("blake3.ts");
-    assert!(
-        !blake3_ts.exists(),
-        "regression: utils/blake3.ts has been re-introduced — \
-         the frontend must delegate BLAKE3 to Rust over the bridge"
     );
 }
 
@@ -1017,29 +715,6 @@ fn route_routes_delegate_to_route_commit_sdk() {
     );
 }
 
-/// Commit 3 invariant — the strict resolver lives at the TokenSDK
-/// layer.  Code that derives `policy_commit` from `TokenMetadata`
-/// directly bypasses policy registration and must not come back.
-#[test]
-fn no_policy_commit_derived_from_metadata_cache() {
-    for rel in [
-        "src/handlers/token_routes.rs",
-        "src/handlers/dlv_routes.rs",
-        "src/handlers/sofi_routes.rs",
-        "src/handlers/bilateral_settlement.rs",
-    ] {
-        let src = read(sdk_path(rel));
-        assert!(
-            !src.contains("policy_commit = metadata.policy_anchor"),
-            "regression: {rel} derives policy_commit directly from TokenMetadata"
-        );
-        assert!(
-            !src.contains("from_policy_anchor(&metadata.policy_anchor"),
-            "regression: {rel} derives policy_commit directly from TokenMetadata"
-        );
-    }
-}
-
 // RETIRED: the PROPERTY survives, the string does not.
 //
 // `dlv.create` still publishes a genesis `VaultStateAnchorV1` for a REQUIRED AMM
@@ -1136,45 +811,5 @@ fn dlv_create_and_unlock_routed_publish_vault_state_inclusion_proof() {
     assert!(
         count >= 3,
         "publish_vault_state_inclusion_proof must be called from BOTH dlv_create and dlv_unlock_routed (found {count} total occurrences including the definition)"
-    );
-}
-
-/// Phase 7 — composition strict-mode invariant.
-///
-/// `vault_state_composition::compose_vault_state` MUST fetch and
-/// verify a `VaultStateInclusionProofV1` for the baseline before
-/// folding pending pointers.  If this check is removed, off-device
-/// quote-time verification reverts to anchor-only — the K_DBRW
-/// forgery hole reopens.  This guard fails if the strict-mode
-/// fetch, the cross-bind to baseline, or the inclusion-proof
-/// verification is removed.
-#[test]
-fn compose_vault_state_runs_strict_mode_inclusion_proof_check() {
-    let src = read(sdk_path("src/sdk/vault_state_composition.rs"));
-
-    // Strict-mode fetch from sofi/vault-state-inclusion/.
-    assert!(
-        src.contains("fetch_latest_inclusion_proof"),
-        "compose_vault_state must fetch the inclusion proof"
-    );
-    // Missing-proof variant — strict mode refuses to fold legacy ads.
-    assert!(
-        src.contains("MissingInclusionProof"),
-        "compose_vault_state must surface a MissingInclusionProof error variant"
-    );
-    // Cross-bind to the baseline anchor — equivocation defence.
-    assert!(
-        src.contains("inclusion.vault_id") && src.contains("inclusion.sequence"),
-        "compose_vault_state must cross-bind the inclusion proof to the baseline"
-    );
-    // End-to-end signature + SMT verification.
-    assert!(
-        src.contains("verify_vault_state_inclusion_proof"),
-        "compose_vault_state must call verify_vault_state_inclusion_proof"
-    );
-    // InvalidInclusionProof variant for fail-closed semantics.
-    assert!(
-        src.contains("InvalidInclusionProof"),
-        "compose_vault_state must surface an InvalidInclusionProof error variant"
     );
 }

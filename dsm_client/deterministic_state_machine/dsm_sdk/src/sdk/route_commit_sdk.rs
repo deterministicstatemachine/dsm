@@ -972,11 +972,174 @@ pub(crate) async fn verify_route_commit_unlock_eligibility(
 
 #[cfg(test)]
 mod tests {
+
     //! Chunk #3 tests.
     //!
     //! Cover the full bind → compute X → publish → fetch → verify
     //! cycle plus the determinism + signature-exclusion guarantees
     //! that make X safe to use as an atomic-visibility trigger.
+
+    // ── canonical forms ────────────────────────────────────────────────────
+    //
+    // These replace grep guards that asserted the SHAPE of this file's source
+    // text (`src.contains("out.initiator_signature.clear();")`). Text matching
+    // could only confirm a line existed; it could not tell whether the value it
+    // produced had the property the protocol depends on. These run the real
+    // functions and check the property.
+
+    fn rc_fixture() -> generated::RouteCommitV1 {
+        generated::RouteCommitV1 {
+            version: 1,
+            nonce: vec![0x11; 32],
+            total_fee_bps: 30,
+            initiator_public_key: vec![0xAA; 64],
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vec![0x77; 32],
+                token_in: vec![0x11; 32],
+                token_out: vec![0x22; 32],
+                input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+                expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
+                vault_state_anchor_seq: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// X MUST NOT depend on the initiator signature.
+    ///
+    /// It cannot: the signature is over X's own preimage, so if X covered it
+    /// the derivation would be circular and no signature could ever be produced.
+    /// Signing changes the message, and X must be the same before and after.
+    #[test]
+    fn the_external_commitment_is_unchanged_by_signing() {
+        let unsigned = rc_fixture();
+        let x_before = compute_external_commitment(&unsigned);
+
+        let mut signed = unsigned.clone();
+        signed.initiator_signature = vec![0xEE; 128];
+        assert_eq!(
+            compute_external_commitment(&signed),
+            x_before,
+            "signing must not move X, or the commitment could never be signed"
+        );
+
+        // A different signature over the same commitment is still the same X —
+        // which is what makes X a name for the TRADE rather than for one signing.
+        let mut resigned = unsigned.clone();
+        resigned.initiator_signature = vec![0x11; 96];
+        assert_eq!(compute_external_commitment(&resigned), x_before);
+    }
+
+    /// EVERYTHING ELSE is covered. The signature is the only exemption; if any
+    /// other field could move without moving X, two different trades would share
+    /// one commitment and one slot.
+    #[test]
+    fn every_other_field_moves_the_external_commitment() {
+        let base = rc_fixture();
+        let x = compute_external_commitment(&base);
+
+        let mutations: Vec<(&str, Box<dyn Fn(&mut generated::RouteCommitV1)>)> = vec![
+            (
+                "nonce",
+                Box::new(|r: &mut generated::RouteCommitV1| r.nonce[0] ^= 0xff),
+            ),
+            (
+                "fee",
+                Box::new(|r: &mut generated::RouteCommitV1| r.total_fee_bps += 1),
+            ),
+            (
+                "initiator pk",
+                Box::new(|r: &mut generated::RouteCommitV1| r.initiator_public_key[0] ^= 0xff),
+            ),
+            (
+                "hop vault",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].vault_id[0] ^= 0xff),
+            ),
+            (
+                "hop token_in",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].token_in[0] ^= 0xff),
+            ),
+            (
+                "hop token_out",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].token_out[0] ^= 0xff),
+            ),
+            (
+                "input amount",
+                Box::new(|r: &mut generated::RouteCommitV1| {
+                    r.hops[0].input_amount_u128 = 1_001u128.to_be_bytes().to_vec()
+                }),
+            ),
+            (
+                "expected output",
+                Box::new(|r: &mut generated::RouteCommitV1| {
+                    r.hops[0].expected_output_amount_u128 = 971u128.to_be_bytes().to_vec()
+                }),
+            ),
+            (
+                "anchor seq",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].vault_state_anchor_seq += 1),
+            ),
+        ];
+        for (what, mutate) in mutations {
+            let mut m = base.clone();
+            mutate(&mut m);
+            assert_ne!(
+                compute_external_commitment(&m),
+                x,
+                "changing the {what} must move X"
+            );
+        }
+    }
+
+    /// The bytes signed and the bytes committed to are the SAME bytes.
+    ///
+    /// If they diverged, a signature could validate over one trade while X named
+    /// another — the initiator would be bound to something it never agreed to.
+    #[test]
+    fn the_signature_and_the_commitment_cover_the_same_bytes() {
+        use prost::Message;
+        let rc = rc_fixture();
+        let canonical = canonicalise_for_commitment(&rc);
+        let canonical_bytes = canonical.encode_to_vec();
+
+        // X is derived from exactly these bytes.
+        assert_eq!(
+            compute_external_commitment(&rc),
+            dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes),
+        );
+
+        // And a signature produced over them verifies, then still verifies once
+        // stamped onto the message — because stamping does not change the
+        // canonical form.
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let sig = dsm::crypto::sphincs::sphincs_sign(&sk, &canonical_bytes).expect("sign");
+        let mut signed = rc.clone();
+        signed.initiator_signature = sig.clone();
+        let recanonical = canonicalise_for_commitment(&signed).encode_to_vec();
+        assert_eq!(
+            recanonical, canonical_bytes,
+            "stamping must not alter the message"
+        );
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(&pk, &recanonical, &sig).expect("verify"),
+            "the signature must verify over the same bytes X names"
+        );
+    }
+
+    /// The commitment is domain-separated: the same bytes under another domain
+    /// must not collide with an external commitment.
+    #[test]
+    fn the_external_commitment_is_domain_separated() {
+        use prost::Message;
+        let rc = rc_fixture();
+        let bytes = canonicalise_for_commitment(&rc).encode_to_vec();
+        assert_ne!(
+            compute_external_commitment(&rc),
+            dsm::crypto::blake3::domain_hash_bytes("DSM/some-other-domain", &bytes),
+        );
+    }
 
     use super::*;
     use crate::sdk::routing_path_sdk::{Path, VaultHop};
