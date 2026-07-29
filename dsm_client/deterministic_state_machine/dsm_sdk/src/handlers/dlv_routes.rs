@@ -383,12 +383,20 @@ impl AppRouterImpl {
         };
         // Captured before `fulfillment` is moved into the draft, so the
         // funding-leg check below can still see the pair the predicate declares.
-        let amm_pair: Option<(Vec<u8>, Vec<u8>)> = match &fulfillment {
+        // Pair AND fee together: both are needed for the persisted vault record,
+        // and reading them from one match keeps them describing one predicate.
+        let amm_predicate: Option<(Vec<u8>, Vec<u8>, u32)> = match &fulfillment {
             dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                token_a, token_b, ..
-            } => Some((token_a.clone(), token_b.clone())),
+                token_a,
+                token_b,
+                fee_bps,
+            } => Some((token_a.clone(), token_b.clone(), *fee_bps)),
             _ => None,
         };
+        let amm_pair: Option<(Vec<u8>, Vec<u8>)> = amm_predicate
+            .as_ref()
+            .map(|(a, b, _)| (a.clone(), b.clone()));
+        let amm_fee_bps: u32 = amm_predicate.as_ref().map(|(_, _, f)| *f).unwrap_or(0);
 
         // Reference state (current device head).
         let reference_state = match self.core_sdk.get_current_state() {
@@ -696,6 +704,55 @@ impl AppRouterImpl {
                     "[dlv.create] anchor_enforcement stamp: get_vault for {} failed: {e}",
                     crate::util::text_id::encode_base32_crockford(&vault_id),
                 );
+            }
+        }
+
+        // Persist the canonical vault record — the reconstruction inputs a
+        // restart cannot re-derive.
+        //
+        // `current_sequence` and `anchor_enforcement` were stamped on the
+        // in-memory vault above and nowhere else, so a reloaded wallet had a
+        // vault at sequence 0 enforcing nothing: every `Required` anchor gate
+        // mismatched, and the reserve proof at the baseline sequence became
+        // unfindable. The vault was silently untradable and looked fine.
+        //
+        // Reserves and sequence are deliberately NOT stored here. They live in
+        // the reserve leaves, authenticated by the device root, and a second
+        // copy would be a second answer with nothing to say which was right.
+        if let Some((token_a, token_b)) = amm_pair.as_ref() {
+            match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
+                Ok(pair) => {
+                    let owner = self.core_sdk.device_head();
+                    let rec = crate::storage::client_db::amm_vault_records::AmmVaultRecord {
+                        vault_id,
+                        owner_genesis: owner.as_ref().map(|h| h.genesis()).unwrap_or_default(),
+                        owner_devid: owner.as_ref().map(|h| h.devid()).unwrap_or_default(),
+                        policy_commit_a: pair.a(),
+                        policy_commit_b: pair.b(),
+                        fee_bps: amm_fee_bps,
+                        anchor_enforcement: spec.anchor_enforcement,
+                        policy_digest: {
+                            let mut pd = [0u8; 32];
+                            pd.copy_from_slice(&spec.policy_digest);
+                            pd
+                        },
+                    };
+                    if let Err(e) =
+                        crate::storage::client_db::amm_vault_records::put_amm_vault_record(&rec)
+                    {
+                        // Loud, because the vault will not come back after a
+                        // restart. It is not rolled back: the encumbrance is
+                        // already canonical, and the record can be rewritten.
+                        log::error!(
+                            "[dlv.create] vault {} created but its record did not persist — it will not survive a restart: {e}",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                        );
+                    }
+                }
+                Err(e) => log::error!(
+                    "[dlv.create] vault {} pair is not canonical, no record written: {e}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                ),
             }
         }
 

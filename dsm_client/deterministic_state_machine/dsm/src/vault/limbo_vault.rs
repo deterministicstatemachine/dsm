@@ -476,15 +476,24 @@ pub struct LimboVault {
     /// routed unlock.  The chunks #7 gate verifies a trader's
     /// `RouteCommitHop.vault_state_anchor_seq` matches this value.  This
     /// is the LOCAL authoritative truth — never read from storage.
-    /// Domain-only: not persisted in `LimboVaultProto`.
+    ///
+    /// Not in `LimboVaultProto`, and deliberately not: it is recovered after a
+    /// restart from the vault's own reserve leaves, which stamp this sequence
+    /// into every leaf value. Storing it here as well would be a second copy of
+    /// a fact the device root already authenticates, and the two would
+    /// eventually disagree with nothing to say which was right. See
+    /// `dsm_sdk::sdk::vault_rehydration`.
     pub current_sequence: u64,
     /// Tier 2 Foundation: anchor-enforcement policy carried over from the
     /// vault's `DlvSpecV1.anchor_enforcement` at creation time.  Stored as
     /// `i32` to match the proto-generated `AnchorEnforcement` enum (0 =
     /// `Unspecified`, 1 = `Optional`, 2 = `Required`).  The chunks #7 gate
     /// uses this to decide whether `RouteCommitHop` anchor binding fields
-    /// are mandatory, accepted-if-present, or grandfathered.  Domain-only:
-    /// not persisted in `LimboVaultProto`.
+    /// are mandatory, accepted-if-present, or grandfathered.
+    ///
+    /// Not in `LimboVaultProto`; persisted in the canonical vault record
+    /// (`amm_vault_records`) and restored by `vault_rehydration`, which refuses
+    /// an unrecognised value rather than falling back to a permissive default.
     pub anchor_enforcement: i32,
     /// Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
     /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the

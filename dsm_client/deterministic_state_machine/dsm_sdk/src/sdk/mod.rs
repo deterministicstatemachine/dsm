@@ -105,6 +105,7 @@ pub mod settlement_receipt_codec;
 pub mod settlement_slot;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
+pub mod vault_rehydration;
 pub mod vault_reserve_proof_codec;
 pub mod vault_smt_inclusion_codec;
 pub mod vault_state_anchor_codec;
