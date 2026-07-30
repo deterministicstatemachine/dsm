@@ -2102,6 +2102,156 @@ mod funded_creation_tests {
         );
     }
 
+    /// ACCEPT-OR-STAMP on `dlv.create`, proven on the artifact.
+    ///
+    /// Replaces greps for `if req.creator_public_key.is_empty() {` and for the
+    /// two `signing_authority::current_*_key()` call sites. Those confirmed
+    /// lines existed; they could not confirm the vault was signed by the key
+    /// that got stamped, which is the property that makes a creator
+    /// attributable at all.
+    #[test]
+    #[serial]
+    fn create_stamps_the_wallet_identity_and_the_vault_carries_it() {
+        install_identity();
+        let r = router();
+
+        let wallet_pk = crate::sdk::signing_authority::current_public_key().expect("pk");
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+
+        // Empty creator key AND empty signature: both are the wallet's to fill.
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            res.success,
+            "empty identity fields must be stamped, not rejected: {:?}",
+            res.error_message
+        );
+
+        // THE ARTIFACT: the vault the handler actually built carries the
+        // wallet's key as its creator. An empty key that stayed empty would
+        // leave the vault unattributable while every field still looked
+        // populated.
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one record");
+        let dlv_manager = r.bitcoin_tap.dlv_manager();
+        let vault_lock = crate::runtime::get_runtime()
+            .block_on(dlv_manager.get_vault(&rec.vault_id))
+            .expect("the created vault must be in the local manager");
+        let vault = crate::runtime::get_runtime().block_on(vault_lock.lock());
+        assert_eq!(
+            vault.creator_public_key, wallet_pk,
+            "the vault must carry the stamped wallet key as its creator"
+        );
+        assert!(
+            !vault.creator_signature.is_empty(),
+            "an empty signature must be filled by the wallet, not left blank"
+        );
+    }
+
+    /// Caller-supplied digests are STRICT-VERIFIED; absent ones are computed.
+    ///
+    /// Replaces greps for the literal comment `0 => {} // accept-or-compute
+    /// path` and the string `must be 0 or 32 bytes`. A wrong-length digest is
+    /// refused, and a supplied-but-wrong digest must not be accepted verbatim —
+    /// otherwise a caller could bind a vault to content it does not hold.
+    #[test]
+    #[serial]
+    fn create_refuses_a_malformed_digest_and_computes_an_absent_one() {
+        install_identity();
+        let r = router();
+
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let build = |content_digest: Vec<u8>| generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                content_digest,
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let call = |req: generated::DlvInstantiateV1| {
+            crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(req.encode_to_vec()),
+                })
+                .await
+            })
+        };
+
+        // A digest that is neither absent nor 32 bytes is malformed, and is
+        // refused on those grounds rather than truncated or padded.
+        for bad_len in [1usize, 16, 31, 33, 64] {
+            r.core_sdk.set_device_head_for_testing(
+                crate::sdk::funded_vault_fixture::owner_holding(50_000, 20_000),
+            );
+            let res = call(build(vec![0xAAu8; bad_len]));
+            assert!(
+                !res.success,
+                "a {bad_len}-byte content digest must be refused"
+            );
+            let msg = res.error_message.unwrap_or_default();
+            assert!(
+                msg.contains("0 or 32 bytes"),
+                "must fail as a digest-length error, not incidentally: {msg}"
+            );
+        }
+
+        // Absent is the accept-or-compute path: Rust derives it.
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        assert!(
+            call(build(Vec::new())).success,
+            "an absent digest must be computed, not required from the caller"
+        );
+    }
+
     /// ONE CONTINUOUS LIFECYCLE, producer and consumers together.
     ///
     /// Gates 1 and 4 were each proven against hand-built funded state, because

@@ -201,29 +201,6 @@ fn trade_flow_handlers_delegate_to_audited_sdks() {
     }
 }
 
-/// Chunk #6 invariant — `dlv.create` MUST accept-or-compute the
-/// content + fulfillment digests.  Frontend calls that omit them
-/// (the canonical shape per "all business logic stays in Rust")
-/// MUST succeed; frontend calls that supply 32-byte digests MUST
-/// be strict-verified against the Rust-computed canonical values.
-/// A regression that re-required pre-supplied digests would force
-/// the frontend to compute them locally, re-opening the BLAKE3-in-
-/// the-wrong-layer hole.
-#[test]
-fn dlv_create_accepts_empty_or_strict_verifies_supplied_digests() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        src.contains("0 => {} // accept-or-compute path"),
-        "regression: dlv.create no longer accepts empty content_digest \
-         (forces frontend BLAKE3 computation)"
-    );
-    assert!(
-        src.contains("must be 0 or 32 bytes"),
-        "regression: dlv.create must reject digest lengths other than 0 \
-         or 32 bytes — empty (Rust computes) or full (Rust verifies)"
-    );
-}
-
 /// Chunk #7 invariant — `dlv.unlockRouted` MUST run the AMM
 /// re-simulation gate against the VAULT'S CURRENT reserves (not the
 /// advertisement's, which may be stale).  This is the difference
@@ -279,57 +256,6 @@ fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
 // `VaultReserveInclusionProofV1` exists. The route fails closed, which
 // `tests/vault_funding_routes.rs::routed_settlement_refuses_until_reserve_proofs_exist`
 // states behaviourally. The republish property returns with the settlement work.
-
-/// Track C.4 invariant — `dlv.create` MUST stamp the wallet's
-/// SPHINCS+ pk on `creator_public_key` when the field rides empty
-/// over the wire AND sign Rust-side when `signature` rides empty.
-/// This is the same accept-or-stamp pattern chunk #6 used for
-/// `route.signRouteCommit`; without it the AMM owner UI couldn't
-/// create vaults without exposing wallet keys to TS.
-///
-/// The signature is over `LimboVaultDraft::parameters_hash` (the
-/// same value `LimboVault::verify()` re-derives at finalize_vault
-/// time) — NOT over the DlvInstantiateV1 envelope canonical form.
-/// An earlier implementation signed over the envelope, which the
-/// chunks-#7 verifier rejected on every accept-or-sign path; that
-/// bug was caught only when the first end-to-end real-hardware
-/// SoFi trade test ran.
-///
-/// Three regressions this guard catches:
-///   * Empty-pk handling removed → frontend gets a hard error
-///     "creator_public_key is required" and the UI breaks.
-///   * Empty-sig handling removed → same.
-///   * Signing message changed away from `draft.parameters_hash` →
-///     finalize_vault would reject all newly-signed vaults.
-#[test]
-fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        src.contains("if req.creator_public_key.is_empty() {"),
-        "regression: dlv.create no longer checks for empty creator_public_key \
-         (Track C.4 accept-or-stamp surface broken)"
-    );
-    assert!(
-        src.contains("crate::sdk::signing_authority::current_public_key()"),
-        "regression: dlv.create accept-or-stamp no longer reaches into \
-         signing_authority for the wallet pk"
-    );
-    assert!(
-        src.contains("needs_wallet_sign = req.signature.is_empty()"),
-        "regression: dlv.create no longer flags empty signature for wallet-side \
-         signing (Track C.4 accept-or-sign surface broken)"
-    );
-    assert!(
-        src.contains("crate::sdk::signing_authority::current_secret_key()"),
-        "regression: dlv.create accept-or-sign no longer reaches into \
-         signing_authority for the wallet sk"
-    );
-    assert!(
-        src.contains("&draft.parameters_hash"),
-        "regression: dlv.create no longer signs over draft.parameters_hash — \
-         finalize_vault's vault.verify() would reject every newly-signed vault"
-    );
-}
 
 // RETIRED: the PROPERTY survives, the string does not.
 //
