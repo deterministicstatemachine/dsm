@@ -300,6 +300,62 @@ fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
     );
 }
 
+/// ELIGIBILITY IS CHECKED BEFORE THE SETTLE PATH TERMINATES.
+///
+/// This was filed as "blocked until the live settle path exists", and tracing
+/// the handler showed that was wrong: `verify_route_commit_unlock_eligibility`
+/// runs ~100 lines BEFORE the fail-closed return, so a RouteCommit that fails
+/// eligibility is refused on those grounds and never reaches it. The AMM
+/// re-simulation and anchor-enforcement guards genuinely do sit after the
+/// return; this one never did.
+///
+/// The distinction matters because it is the ordering the guard exists to
+/// protect: eligibility must be established before anything advances state, and
+/// an implementation that checked it afterwards would still refuse this input —
+/// just with a different message, and with the work already done.
+#[test]
+#[serial_test::serial]
+fn eligibility_is_rejected_before_the_settle_path_fails_closed() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+
+    // A structurally valid request whose RouteCommit cannot pass eligibility:
+    // the initiator signature is absent, so nothing about this route is
+    // attributable.
+    let rc = generated::RouteCommitV1 {
+        version: 1,
+        nonce: vec![0x11; 32],
+        total_fee_bps: 30,
+        initiator_public_key: vec![0xAA; 64],
+        initiator_signature: Vec::new(),
+        hops: vec![generated::RouteCommitHopV1 {
+            vault_id: vec![0x77; 32],
+            token_in: vec![0x11; 32],
+            token_out: vec![0x22; 32],
+            input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+            expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
+            vault_state_anchor_seq: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let req = generated::DlvUnlockRoutedV1 {
+        vault_id: vec![0x77u8; 32],
+        device_id: vec![0x0Au8; 32],
+        route_commit_bytes: rc.encode_to_vec(),
+        ..Default::default()
+    };
+    let res = invoke(&r, "dlv.unlockRouted", pack(req.encode_to_vec()));
+    assert!(!res.success, "an ineligible route must not settle");
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        !msg.contains("fail-closed until reserve proofs"),
+        "eligibility must be refused on its own terms, BEFORE the settle path's \
+         fail-closed return — got: {msg}"
+    );
+}
+
 /// The routes this file exercises must be reachable through the production
 /// dispatcher. A handler arm that the router does not name is a dead feature
 /// that every unit test still passes.

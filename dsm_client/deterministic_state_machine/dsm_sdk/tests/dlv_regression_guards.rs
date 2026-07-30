@@ -142,43 +142,6 @@ fn routing_path_search_compares_on_final_output() {
     );
 }
 
-/// SoFi chunk #4 invariant — the routed-unlock handler MUST run the
-/// SDK eligibility check (vault_id ∈ RouteCommit AND X visible)
-/// BEFORE emitting `Operation::DlvUnlock`.  Without the gate, any
-/// caller could trigger an unlock by handing the device an arbitrary
-/// RouteCommit, defeating the atomic-visibility guarantee.
-#[test]
-fn dlv_unlock_routed_runs_eligibility_check_before_state_advance() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        src.contains("verify_route_commit_unlock_eligibility"),
-        "regression: dlv.unlockRouted no longer calls the eligibility \
-         verifier — atomic-visibility gate is missing"
-    );
-    // The verifier call must come BEFORE `execute_on_relationship` in
-    // the source order — eyeball the handler if this guard fails.
-    let verify_pos = src
-        .find("verify_route_commit_unlock_eligibility")
-        .expect("verifier must be present (asserted above)");
-    let mut search_from = 0;
-    let mut found_after = false;
-    while let Some(pos) = src[search_from..].find("execute_on_relationship") {
-        let abs = search_from + pos;
-        if abs > verify_pos {
-            // Found an `execute_on_relationship` call AFTER the
-            // verifier — that's the routed-unlock handler.  Done.
-            found_after = true;
-            break;
-        }
-        search_from = abs + "execute_on_relationship".len();
-    }
-    assert!(
-        found_after,
-        "regression: dlv.unlockRouted is calling execute_on_relationship \
-         BEFORE the eligibility verifier — gate must come first"
-    );
-}
-
 /// SoFi chunk #5 invariant — the eligibility verifier MUST call
 /// SPHINCS+ verification on the `initiator_signature`.  Without this
 /// step an attacker could forge arbitrary RouteCommits + publish
@@ -418,51 +381,3 @@ fn dlv_unlock_routed_enforces_anchor_against_local_vault_state() {
 // republish above. There is no settle to advance a sequence on while settlement
 // is fail-closed, and asserting on the text of a code path that no longer runs
 // is precisely the coverage illusion this suite is being replaced to remove.
-
-/// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 invariant.
-///
-/// Every `dlv.create` and `dlv.unlockRouted` settle path on a
-/// vault the local wallet owns MUST also publish a
-/// `VaultStateInclusionProofV1`, not just the legacy anchor.  The
-/// inclusion proof is what makes vault state forgery-resistant
-/// against K_DBRW compromise — without it, an attacker with the
-/// owner's key can fabricate a signed anchor against arbitrary
-/// (sequence, reserves_digest).  This guard fails if either of the
-/// two call sites is removed or stops calling the inclusion-proof
-/// publisher.
-#[test]
-fn dlv_create_and_unlock_routed_publish_vault_state_inclusion_proof() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-
-    // The shared helper that wires CoreSDK::install_vault_state_leaf +
-    // sign_vault_state_inclusion_proof + publish_inclusion_proof
-    // together MUST exist.
-    assert!(
-        src.contains("fn publish_vault_state_inclusion_proof"),
-        "dlv_routes.rs must define publish_vault_state_inclusion_proof helper"
-    );
-    // And it must consult the canonical SDK install + sign +
-    // publish primitives — not roll its own.
-    assert!(
-        src.contains("install_vault_state_leaf"),
-        "publish helper must mutate the PD-SMT via CoreSDK::install_vault_state_leaf"
-    );
-    assert!(
-        src.contains("sign_vault_state_inclusion_proof"),
-        "publish helper must sign via dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof"
-    );
-    assert!(
-        src.contains("publish_inclusion_proof"),
-        "publish helper must publish via vault_smt_inclusion_codec::publish_inclusion_proof"
-    );
-
-    // Both dlv.create and dlv.unlockRouted MUST call the helper.
-    // We expect at least 3 occurrences: the function definition + at
-    // least one call from dlv_create + at least one call from
-    // dlv_unlock_routed.
-    let count = src.matches("publish_vault_state_inclusion_proof").count();
-    assert!(
-        count >= 3,
-        "publish_vault_state_inclusion_proof must be called from BOTH dlv_create and dlv_unlock_routed (found {count} total occurrences including the definition)"
-    );
-}
