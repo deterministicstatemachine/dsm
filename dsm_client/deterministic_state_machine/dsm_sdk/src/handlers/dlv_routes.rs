@@ -949,6 +949,35 @@ impl AppRouterImpl {
                                         &sk,
                                     )
                                     .await;
+
+                                    // And the RESERVE inclusion proof, which is
+                                    // what turns "the owner says this vault holds
+                                    // 10,000 ERA" into "the owner's own device
+                                    // root commits it". Without it a trader has
+                                    // no authenticated liquidity to quote
+                                    // against and `compose_vault_state` refuses
+                                    // the vault outright.
+                                    //
+                                    // Published AFTER the vault-state leaf, and
+                                    // that ordering is load-bearing:
+                                    // `install_vault_state_leaf` performs its own
+                                    // head mutation, so the root moves. Both
+                                    // proofs must be built from the SAME final
+                                    // head, because the composer requires them to
+                                    // agree on `smt_root` — building the reserve
+                                    // proof first would bind the pre-install root
+                                    // and every quote would fail closed.
+                                    let funded_commits: Vec<[u8; 32]> =
+                                        funding.iter().map(|(pc, _)| *pc).collect();
+                                    publish_reserve_inclusion_proof(
+                                        self.core_sdk.as_ref(),
+                                        &vault_id,
+                                        0,
+                                        &funded_commits,
+                                        &pk,
+                                        &sk,
+                                    )
+                                    .await;
                                 }
                                 _ => {
                                     log::warn!(
@@ -1729,6 +1758,69 @@ async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> 
 /// owner).  Failure logs a warning and returns — the on-chain operation
 /// has already succeeded; the inclusion proof is an advertisement and
 /// can be republished later.
+/// Publish the reserve inclusion proof for a vault's legs.
+///
+/// This is the artifact that converts an owner's claim about its liquidity into
+/// something a stranger can check: each leg carries a 256-sibling path from the
+/// owner's own vault-reserve leaf up to the published device root. Without it
+/// `compose_vault_state` returns `MissingReserveProof` and the vault cannot be
+/// quoted at all — a signed reserves digest is not a substitute, because a
+/// one-way digest can only confirm that numbers the caller already held hash to
+/// what the owner signed.
+///
+/// Best-effort like its vault-state sibling: a publication failure leaves the
+/// vault unquotable rather than mis-quoted, which is the safe direction.
+async fn publish_reserve_inclusion_proof(
+    core_sdk: &crate::sdk::core_sdk::CoreSDK,
+    vault_id: &[u8; 32],
+    sequence: u64,
+    policy_commits: &[[u8; 32]],
+    owner_pk: &[u8],
+    owner_sk: &[u8],
+) {
+    // Read the legs from the CURRENT head — after the vault-state leaf install,
+    // so the path binds the same root the state proof was signed over.
+    let Some(head) = core_sdk.device_head() else {
+        log::warn!("[dlv] reserve proof: no device head");
+        return;
+    };
+    let legs = match head.vault_reserve_leg_proofs(vault_id, policy_commits) {
+        Ok(l) => l,
+        Err(e) => {
+            log::warn!(
+                "[dlv] reserve proof: cannot prove legs for {}: {e}",
+                crate::util::text_id::encode_base32_crockford(vault_id),
+            );
+            return;
+        }
+    };
+    let signed = match dsm::dlv::vault_reserve_inclusion::sign_vault_reserve_inclusion_proof(
+        vault_id,
+        sequence,
+        &head.root(),
+        &head.genesis(),
+        &head.devid(),
+        legs,
+        owner_pk,
+        owner_sk,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "[dlv] reserve proof: sign failed for {}: {e}",
+                crate::util::text_id::encode_base32_crockford(vault_id),
+            );
+            return;
+        }
+    };
+    if let Err(e) = crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&signed).await {
+        log::warn!(
+            "[dlv] reserve proof: publish failed for {} — the vault will not be quotable: {e}",
+            crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+    }
+}
+
 async fn publish_vault_state_inclusion_proof(
     core_sdk: &crate::sdk::core_sdk::CoreSDK,
     vault_id: &[u8; 32],
@@ -2007,6 +2099,185 @@ mod funded_creation_tests {
             (v.reserve_a, v.reserve_b),
             (10_000, 5_000),
             "reserves come back from the leaves, not from the record"
+        );
+    }
+
+    /// ONE CONTINUOUS LIFECYCLE, producer and consumers together.
+    ///
+    /// Gates 1 and 4 were each proven against hand-built funded state, because
+    /// until funded creation encumbered, hand-built was the only funded state
+    /// there was. Every layer could therefore be correct against a shape nothing
+    /// produced. This runs the producer and both consumers in one pass over one
+    /// head: create → read leaves → prove them → check the proof root is the
+    /// root a quote would use → restart → rehydrate → compare everything.
+    #[test]
+    #[serial]
+    fn a_dispatcher_created_vault_proves_and_rehydrates_end_to_end() {
+        use dsm::dlv::vault_reserve_inclusion::{
+            proven_amount, sign_vault_reserve_inclusion_proof, verify_vault_reserve_inclusion_proof,
+        };
+
+        install_identity();
+        let r = router();
+
+        // (1) CREATE through the real dispatcher.
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one record");
+        let head = r.core_sdk.device_head().expect("head");
+
+        // (2) READ the leaves the dispatcher actually wrote.
+        assert_eq!(head.vault_reserve(&rec.vault_id, &pc_a), 10_000);
+        assert_eq!(head.vault_reserve(&rec.vault_id, &pc_b), 5_000);
+
+        // (3) PROVE them from that exact head, and verify as a stranger would.
+        let legs = head
+            .vault_reserve_leg_proofs(&rec.vault_id, &[pc_a, pc_b])
+            .expect("legs");
+        let (pk, sk) = (
+            crate::sdk::signing_authority::current_public_key().expect("pk"),
+            crate::sdk::signing_authority::current_secret_key().expect("sk"),
+        );
+        let proof = sign_vault_reserve_inclusion_proof(
+            &rec.vault_id,
+            0,
+            &head.root(),
+            &head.genesis(),
+            &head.devid(),
+            legs,
+            &pk,
+            &sk,
+        )
+        .expect("sign reserve proof");
+        verify_vault_reserve_inclusion_proof(&proof)
+            .expect("a dispatcher-created vault must prove its own reserves");
+        assert_eq!(proven_amount(&proof, &pc_a), Some(10_000));
+        assert_eq!(proven_amount(&proof, &pc_b), Some(5_000));
+
+        // (4) THE ROOT A QUOTE WOULD USE. `install_vault_state_leaf` performs
+        // its own head mutation, so the root moves after funding. Both proofs
+        // must bind the SAME final root or `compose_vault_state` refuses the
+        // vault — this is the ordering dependency that would otherwise only
+        // surface as every quote failing closed.
+        let state_leaf_key = dsm::dlv::vault_smt_leaf::compute_vault_smt_key(&rec.vault_id);
+        assert!(
+            head.extra_leaves_snapshot().contains_key(&state_leaf_key),
+            "the vault-state leaf must be in the same head as the reserve leaves"
+        );
+        assert_eq!(
+            proof.smt_root,
+            head.root(),
+            "the reserve proof must bind the head's current root, which is what \
+             the vault-state proof was signed over"
+        );
+
+        // (5) RESTART.
+        let encoded = crate::storage::client_db::bcr::encode_device_state(&head);
+        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded)
+            .expect("head survives the codec");
+        assert_eq!(
+            reloaded.root(),
+            head.root(),
+            "the codec must preserve the root"
+        );
+
+        // (6) REHYDRATE from the persisted record plus the decoded leaves.
+        let rebuilt = crate::sdk::vault_rehydration::rehydrate_all_amm_vaults(&reloaded);
+        assert_eq!(rebuilt.len(), 1, "the vault must come back");
+        let v = &rebuilt[0];
+
+        // (7) EVERYTHING MATCHES the pre-restart vault.
+        assert_eq!(v.vault_id, rec.vault_id);
+        assert_eq!((v.pair.a(), v.pair.b()), (pc_a, pc_b));
+        assert_eq!(v.fee_bps, 30);
+        assert_eq!(
+            v.anchor_enforcement,
+            generated::AnchorEnforcement::Required as i32,
+            "a restart must not relax enforcement"
+        );
+        assert_eq!(v.policy_digest.to_vec(), vec![0x5Au8; 32]);
+        assert_eq!((v.reserve_a, v.reserve_b), (10_000, 5_000));
+        assert_eq!(v.current_sequence, 0, "sequence comes from the leaves");
+        // Owner is checked DURING rehydration, so a rebuilt vault is
+        // necessarily this device's — proven load-bearing by moving it.
+        let foreign = crate::storage::client_db::amm_vault_records::AmmVaultRecord {
+            owner_devid: {
+                let mut d = rec.owner_devid;
+                d[0] ^= 0xff;
+                d
+            },
+            ..rec.clone()
+        };
+        assert_eq!(
+            crate::sdk::vault_rehydration::rehydrate_amm_vault(&foreign, &reloaded),
+            Err(crate::sdk::vault_rehydration::RehydrationError::OwnerMismatch),
+        );
+
+        // (8) THE REHYDRATED VAULT IS QUOTABLE: its reserves re-prove against
+        // the reloaded head, which is what a trader's composition consumes.
+        let legs_after = reloaded
+            .vault_reserve_leg_proofs(&rec.vault_id, &[pc_a, pc_b])
+            .expect("legs after restart");
+        let proof_after = sign_vault_reserve_inclusion_proof(
+            &rec.vault_id,
+            0,
+            &reloaded.root(),
+            &reloaded.genesis(),
+            &reloaded.devid(),
+            legs_after,
+            &pk,
+            &sk,
+        )
+        .expect("sign after restart");
+        verify_vault_reserve_inclusion_proof(&proof_after)
+            .expect("the rehydrated vault must still prove its reserves");
+        assert_eq!(
+            (
+                proven_amount(&proof_after, &pc_a),
+                proven_amount(&proof_after, &pc_b)
+            ),
+            (Some(v.reserve_a), Some(v.reserve_b)),
+            "the proof after restart must agree with the rehydrated vault"
+        );
+        assert_eq!(
+            proof_after.smt_root, proof.smt_root,
+            "and bind the same root, so a quote built before the restart and one \
+             built after describe the same vault state"
         );
     }
 
