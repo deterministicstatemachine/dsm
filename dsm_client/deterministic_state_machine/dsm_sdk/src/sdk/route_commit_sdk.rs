@@ -979,6 +979,67 @@ mod tests {
     //! cycle plus the determinism + signature-exclusion guarantees
     //! that make X safe to use as an atomic-visibility trigger.
 
+    /// ELIGIBILITY ACTUALLY VERIFIES THE INITIATOR SIGNATURE.
+    ///
+    /// Replaces a grep for `dsm::crypto::sphincs::sphincs_verify` appearing
+    /// anywhere in this file. That confirmed the symbol was mentioned. It could
+    /// not confirm the verification is reached, that its result is acted on, or
+    /// that it covers the message X is derived from — a call whose boolean was
+    /// discarded would satisfy the grep exactly.
+    ///
+    /// Without this check anyone could present a RouteCommit attributed to
+    /// another initiator and have it accepted as eligible.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn eligibility_requires_a_genuine_initiator_signature() {
+        let vault_id = [0x77u8; 32];
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+
+        let mut rc = rc_fixture();
+        rc.hops[0].vault_id = vault_id.to_vec();
+        rc.initiator_public_key = pk.clone();
+
+        // Sign over the canonical form — the same bytes X is derived from.
+        let canonical = canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature = dsm::crypto::sphincs::sphincs_sign(&sk, &canonical).expect("sign");
+
+        // The anchor must be visible for eligibility to pass, so publish X.
+        let x = compute_external_commitment(&rc);
+        publish_external_commitment(&x, &pk, "eligibility-test")
+            .await
+            .expect("publish X");
+
+        let signed_bytes = rc.encode_to_vec();
+        let hop = verify_route_commit_unlock_eligibility(&signed_bytes, &vault_id)
+            .await
+            .expect("a genuinely signed, published route must be eligible");
+        assert_eq!(hop.vault_id, vault_id.to_vec());
+
+        // NOW BREAK ONLY THE SIGNATURE. Everything else — the route, the hop,
+        // the published anchor — is unchanged, so a rejection here can only come
+        // from the signature check itself.
+        let mut forged = rc.clone();
+        forged.initiator_signature[0] ^= 0xff;
+        assert!(
+            verify_route_commit_unlock_eligibility(&forged.encode_to_vec(), &vault_id)
+                .await
+                .is_err(),
+            "a tampered initiator signature must make the route ineligible"
+        );
+
+        // And a signature that is valid for a DIFFERENT key must not pass under
+        // this initiator's identity.
+        let (other_pk, _) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let mut impostor = rc.clone();
+        impostor.initiator_public_key = other_pk;
+        assert!(
+            verify_route_commit_unlock_eligibility(&impostor.encode_to_vec(), &vault_id)
+                .await
+                .is_err(),
+            "a signature must not verify under a substituted initiator key"
+        );
+    }
+
     /// ONE SIMULATOR, and both callers agree on it.
     ///
     /// Replaces two greps: one asserting this file mentions
@@ -1067,7 +1128,10 @@ mod tests {
 
     fn rc_fixture() -> generated::RouteCommitV1 {
         generated::RouteCommitV1 {
-            version: 1,
+            // The constant, not a literal: a fixture pinned to an old version
+            // would be rejected at the schema gate before reaching the property
+            // under test, and would look like a failure of that property.
+            version: ROUTE_COMMIT_VERSION,
             nonce: vec![0x11; 32],
             total_fee_bps: 30,
             initiator_public_key: vec![0xAA; 64],

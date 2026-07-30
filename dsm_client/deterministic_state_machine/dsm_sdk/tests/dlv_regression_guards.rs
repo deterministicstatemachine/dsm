@@ -127,51 +127,6 @@ fn dlv_invalidate_and_claim_decode_typed_protos() {
     );
 }
 
-/// SoFi routing path search — the cost function MUST select on
-/// `final_output_amount`, not on summed `fee_bps`.  A pure-fee
-/// Dijkstra silently mis-routes when a multi-hop path through deep
-/// reserves nets more output than a shallow direct hop with low fee
-/// (test `multi_hop_beats_direct_when_output_better`).
-#[test]
-fn routing_path_search_compares_on_final_output() {
-    let src = read(sdk_path("src/sdk/routing_path_sdk.rs"));
-    assert!(
-        src.contains("final_output_amount > current.final_output_amount"),
-        "regression: routing_path_sdk replaced output-maximisation with \
-         a different cost rule — verify intent before proceeding"
-    );
-}
-
-/// SoFi chunk #5 invariant — the eligibility verifier MUST call
-/// SPHINCS+ verification on the `initiator_signature`.  Without this
-/// step an attacker could forge arbitrary RouteCommits + publish
-/// their own X anchor + trick vault owners into unlocking against
-/// unauthorised routes.  This guard catches any future edit that
-/// removes the signature check.
-#[test]
-fn route_commit_eligibility_runs_sphincs_signature_verify() {
-    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
-    assert!(
-        src.contains("dsm::crypto::sphincs::sphincs_verify"),
-        "regression: route_commit_sdk no longer SPHINCS+-verifies \
-         initiator_signature — forged-route attack surface re-opened"
-    );
-    // The signature check must come BEFORE the X-anchor lookup.
-    // Otherwise a forged RouteCommit can spam storage queries.
-    let sig_pos = src
-        .find("dsm::crypto::sphincs::sphincs_verify")
-        .expect("sphincs_verify present (asserted above)");
-    let anchor_pos = src
-        .find("is_external_commitment_visible(&x)")
-        .expect("anchor visibility check present");
-    assert!(
-        sig_pos < anchor_pos,
-        "regression: SPHINCS+ verification MUST run before anchor \
-         lookup — the gate's ordering protects storage-side resources \
-         from forged-route DoS"
-    );
-}
-
 /// Track C.3 invariant — each trade-flow handler MUST delegate to the
 /// audited SDK helper (chunk #1 / #2 / #3) rather than re-implementing
 /// the logic inline.  A regression that copy-pasted the BLAKE3

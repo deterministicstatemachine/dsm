@@ -502,6 +502,74 @@ mod tests {
     //! checklist exercised here, plus a constant-product unit test
     //! that nails the simulation math.
 
+    /// PATH SEARCH PICKS ON FINAL OUTPUT, not on hop count, not on fee, not on
+    /// the order advertisements happened to arrive in.
+    ///
+    /// Replaces a grep for the literal comparison
+    /// `final_output_amount > current.final_output_amount`. That confirmed one
+    /// expression existed; it could not confirm the search actually returns the
+    /// better route when a worse one is cheaper-looking by some other measure.
+    ///
+    /// A trader takes what the route delivers, so anything else being decisive —
+    /// a shorter path, a lower advertised fee — would systematically hand
+    /// traders less than the best available.
+    #[test]
+    fn the_best_path_is_the_one_delivering_the_most_output() {
+        let (a, b) = ([0x11u8; 32], [0x22u8; 32]);
+
+        // Two vaults over the same pair. The DEEPER pool pays more for the same
+        // input despite charging a higher fee — so a search keying on fee, or on
+        // the first acceptable route, picks the worse one.
+        let shallow = generated::RoutingVaultAdvertisementV1 {
+            version: 1,
+            vault_id: vec![0x01; 32],
+            token_a: a.to_vec(),
+            token_b: b.to_vec(),
+            reserve_a: 100_000,
+            reserve_b: 100_000,
+            fee_bps: 5,
+            lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
+            vault_proto_digest: vec![0xD1; 32],
+            unlock_spec_digest: vec![0xD2; 32],
+            ..Default::default()
+        };
+        let deep = generated::RoutingVaultAdvertisementV1 {
+            version: 1,
+            vault_id: vec![0x02; 32],
+            token_a: a.to_vec(),
+            token_b: b.to_vec(),
+            reserve_a: 100_000_000,
+            reserve_b: 100_000_000,
+            fee_bps: 30,
+            lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
+            vault_proto_digest: vec![0xD3; 32],
+            unlock_spec_digest: vec![0xD4; 32],
+            ..Default::default()
+        };
+
+        // Order must not decide it: search both arrangements.
+        for ads in [
+            vec![shallow.clone(), deep.clone()],
+            vec![deep.clone(), shallow.clone()],
+        ] {
+            let path = find_best_path(&ads, &a, &b, 10_000, 4).expect("a path exists");
+            assert_eq!(
+                path.hops[0].vault_id.to_vec(),
+                deep.vault_id,
+                "the deeper pool delivers more output and must win despite the higher fee"
+            );
+
+            // And the winner genuinely is the larger output, recomputed here
+            // rather than taken on trust from the search.
+            let shallow_out =
+                constant_product_output(10_000, 100_000, 100_000, 5).expect("shallow sim");
+            let deep_out =
+                constant_product_output(10_000, 100_000_000, 100_000_000, 30).expect("deep sim");
+            assert!(deep_out > shallow_out);
+            assert_eq!(path.final_output_amount, deep_out);
+        }
+    }
+
     use super::*;
     use crate::sdk::routing_sdk::{
         publish_active_advertisement, PublishRoutingAdInput, ROUTING_VAULT_AD_DOMAIN,
