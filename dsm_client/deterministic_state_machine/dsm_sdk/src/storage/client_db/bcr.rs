@@ -782,6 +782,7 @@ mod tests {
                 Some([0x55; 32]),
                 None,
                 None,
+                None,
             )
             .expect("advance relationship");
 
@@ -1149,6 +1150,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("second advance");
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
@@ -1193,6 +1195,7 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 11,
                 }],
+                None,
                 None,
                 None,
                 None,

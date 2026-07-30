@@ -330,6 +330,7 @@ mod tests {
                 Some(init),
                 None,
                 None,
+                None,
             )
             .expect("mint advance");
         (devid, outcome.new_device_state)

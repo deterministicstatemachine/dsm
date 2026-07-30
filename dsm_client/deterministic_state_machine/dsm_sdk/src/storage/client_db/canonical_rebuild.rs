@@ -153,6 +153,7 @@ pub fn rebuild_head_from_checkpoint(
             Some(state.embedded_parent),
             None,
             None,
+            None,
         ) {
             Ok(o) => o,
             Err(e) => {
@@ -413,6 +414,7 @@ mod tests {
             None,
             &[],
             Some([0x33u8; 32]),
+            None,
             None,
             None,
         );

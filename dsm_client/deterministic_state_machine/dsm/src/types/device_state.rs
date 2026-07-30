@@ -774,6 +774,31 @@ pub struct AnchorLeafUpdate {
     pub new_value: [u8; 32],
 }
 
+/// Assets to ENCUMBER into a vault as part of a `DlvCreate` transition.
+///
+/// Rides the same [`DeviceState::advance`] as the transition, so the debit, the
+/// reserve leaves and the state transition share one device root. A separate
+/// advance would leave a window in which the vault exists, is discoverable and
+/// holds nothing — and would give the reserve proof and the vault-state proof
+/// two different roots, which `compose_vault_state` requires to be equal, so
+/// every quote against that vault would fail closed forever.
+///
+/// Carries AMOUNTS, never leaf values. The caller is spending its own balance so
+/// the amounts are its to state, but each leaf value is derived here from
+/// `(amount, vault_sequence)`. Accepting a precomputed leaf would be the same
+/// "magnitudes supplied rather than proven" shape that was removed from reserve
+/// composition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultReserveFunding {
+    pub vault_id: [u8; 32],
+    /// `(policy_commit, amount)` in canonical pair order, distinct assets, every
+    /// amount non-zero. Checked here rather than trusted.
+    pub legs: Vec<([u8; 32], u64)>,
+    /// The vault's sequence at creation. `0` is a real genesis sequence, not an
+    /// absence.
+    pub vault_sequence: u64,
+}
+
 /// Inclusion proofs for the anchor-state leaf across a bearer advance (`Π_i`/`Π_{i+1}`): `parent`
 /// proves the OLD leaf under the pre-advance device root `R_i`, `child` proves the SUCCESSOR leaf
 /// under the post-advance device root `R_{i+1}` (`child_r_a`). Both are
@@ -1113,6 +1138,9 @@ impl DeviceState {
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<AnchorLeafUpdate>,
         offline_spend: Option<OfflineSpend>,
+        // Assets to encumber into a vault as part of THIS transition. `Some`
+        // only for `DlvCreate`; every other advance passes `None`.
+        reserve_funding: Option<VaultReserveFunding>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -1208,6 +1236,96 @@ impl DeviceState {
             }
         }
 
+        // FUNDING: value leaves `balances` and enters this vault's reserve
+        // leaves, in the SAME advance as the transition that creates the vault.
+        //
+        // Only `DlvCreate` may fund. Every other operation carrying funding is a
+        // caller mistake serious enough to refuse rather than ignore: an advance
+        // that silently dropped the legs would report success on a vault holding
+        // nothing, which is the exact failure this whole path exists to end.
+        //
+        // Not expressed as `BalanceDelta`s, deliberately. A delta can only reach
+        // `balances`, and that is what makes an encumbered reserve unspendable by
+        // any transfer, mint or burn — only the vault chokepoints can move it.
+        // Routing funding through deltas would give it back.
+        let mut new_vault_reserves = self.vault_reserves.clone();
+        let mut funding_leaves: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        if let Some(funding) = &reserve_funding {
+            if !matches!(operation, Operation::DlvCreate { .. }) {
+                return Err(DsmError::invalid_operation(
+                    "advance: only DlvCreate may encumber reserves",
+                ));
+            }
+            if funding.legs.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "advance: reserve funding carries no legs",
+                ));
+            }
+            for (i, (policy_commit, amount)) in funding.legs.iter().enumerate() {
+                if *amount == 0 {
+                    return Err(DsmError::invalid_operation(
+                        "advance: a funding leg must carry a non-zero amount",
+                    ));
+                }
+                // Canonical order and distinctness, checked rather than trusted:
+                // a repeated asset would debit twice into one leaf, and an
+                // unordered pair would disagree with the order the reserve proof
+                // and the advertisement are built in.
+                if i > 0 && funding.legs[i - 1].0 >= *policy_commit {
+                    return Err(DsmError::invalid_operation(
+                        "advance: funding legs must be lex-ascending by policy_commit and distinct",
+                    ));
+                }
+
+                let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                    &self.genesis,
+                    &self.devid,
+                    &funding.vault_id,
+                    policy_commit,
+                );
+                // ORPHANED ENCUMBRANCE. A leaf already here means a prior
+                // creation for this vault got as far as encumbering. Refuse:
+                // completing someone else's half-finished creation from inside a
+                // value-moving constructor would be a repair, and a repair
+                // belongs in an explicit recovery operation where it can be
+                // audited.
+                if self.vault_reserves.contains_key(&key) {
+                    return Err(DsmError::invalid_operation(
+                        "advance: this vault already holds a reserve for that asset — \
+                         refusing to encumber again",
+                    ));
+                }
+
+                // The debit. `checked_sub` is the structural guarantee; a
+                // handler-side balance check is only there to name the shortfall
+                // more readably.
+                let cur = new_balances.get(policy_commit).copied().unwrap_or(0);
+                let next = cur.checked_sub(*amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: insufficient balance to encumber (funding leg exceeds holdings)",
+                    )
+                })?;
+                if next == 0 {
+                    new_balances.remove(policy_commit);
+                } else {
+                    new_balances.insert(*policy_commit, next);
+                }
+
+                let leaf_value = crate::dlv::vault_reserve_leaf::vault_reserve_value(
+                    *amount,
+                    funding.vault_sequence,
+                );
+                funding_leaves.push((key, leaf_value));
+                new_vault_reserves.insert(
+                    key,
+                    VaultReserve {
+                        amount: *amount,
+                        sequence: funding.vault_sequence,
+                    },
+                );
+            }
+        }
+
         // A settling advance WRITES ITS OWN RECEIPT, derived from the operation's
         // fields rather than from anything the caller passes alongside.
         //
@@ -1300,11 +1418,46 @@ impl DeviceState {
         // taken against the true pre/post roots (never an intermediate root), so both the
         // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
         let (smt_proofs, anchor_proofs) = match (&anchor_leaf, &settlement_leaf) {
-            (None, None) => {
+            // The ordinary path, and the only one that keeps `smt_replace`: no
+            // anchor leaf, no receipt leaf, no funding. Every transfer.
+            (None, None) if funding_leaves.is_empty() => {
                 let p = new_smt
                     .smt_replace(&rel_key, &child_chain_tip)
                     .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
                 (p, None)
+            }
+            // A FUNDING advance: the reserve leaves ride the SAME batch as the
+            // relationship leaf, so the encumbrance and the DlvCreate transition
+            // share one device root. `smt_replace` cannot express this — its
+            // child proof binds a root taken before the reserve leaves land — and
+            // two roots would put the reserve proof and the vault-state proof
+            // permanently out of agreement, which `compose_vault_state` requires.
+            (None, None) => {
+                let pre_root = *new_smt.root();
+                let rel_parent = new_smt
+                    .get_inclusion_proof(&rel_key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel parent proof: {e}")))?;
+                new_smt
+                    .update_leaf(&rel_key, &child_chain_tip)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
+                for (k, v) in &funding_leaves {
+                    new_smt.update_leaf(k, v).map_err(|e| {
+                        DsmError::invalid_operation(format!("vault reserve funding leaf: {e}"))
+                    })?;
+                }
+                let post_root = *new_smt.root();
+                let rel_child = new_smt
+                    .get_inclusion_proof(&rel_key, 256)
+                    .map_err(|e| DsmError::invalid_operation(format!("rel child proof: {e}")))?;
+                (
+                    crate::merkle::sparse_merkle_tree::SmtReplaceResult {
+                        pre_root,
+                        post_root,
+                        parent_proof: rel_parent,
+                        child_proof: rel_child,
+                    },
+                    None,
+                )
             }
             // A settling advance with no anchor leaf: the receipt leaf rides the
             // SAME batch as the relationship leaf, so the settlement and its
@@ -1323,6 +1476,11 @@ impl DeviceState {
                 new_smt.update_leaf(rk, rv).map_err(|e| {
                     DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
                 })?;
+                for (k, v) in &funding_leaves {
+                    new_smt.update_leaf(k, v).map_err(|e| {
+                        DsmError::invalid_operation(format!("vault reserve funding leaf: {e}"))
+                    })?;
+                }
                 let post_root = *new_smt.root();
                 let rel_child = new_smt
                     .get_inclusion_proof(&rel_key, 256)
@@ -1364,6 +1522,11 @@ impl DeviceState {
                 if let Some((rk, rv)) = &settlement_leaf {
                     new_smt.update_leaf(rk, rv).map_err(|e| {
                         DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
+                    })?;
+                }
+                for (k, v) in &funding_leaves {
+                    new_smt.update_leaf(k, v).map_err(|e| {
+                        DsmError::invalid_operation(format!("vault reserve funding leaf: {e}"))
                     })?;
                 }
                 let post_root = *new_smt.root();
@@ -1423,6 +1586,11 @@ impl DeviceState {
         if let Some((rk, rv)) = settlement_leaf {
             new_extra_leaves.insert(rk, rv);
         }
+        // Funding leaves replay through `extra_leaves` too, or a reloaded device
+        // recomputes a root missing them and refuses to start.
+        for (k, v) in &funding_leaves {
+            new_extra_leaves.insert(*k, *v);
+        }
         let mut new_offline_allocations = self.offline_allocations.clone();
         if let Some((k, v, amount, sequence)) = allocation_update {
             new_extra_leaves.insert(k, v);
@@ -1439,7 +1607,7 @@ impl DeviceState {
             offline_bearer_attestation: self.offline_bearer_attestation,
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
-            vault_reserves: self.vault_reserves.clone(),
+            vault_reserves: new_vault_reserves,
         };
 
         Ok(AdvanceOutcome {
@@ -2256,6 +2424,7 @@ mod tests {
             Some(tip),
             None,
             None,
+            None,
         );
         // Fail for the RIGHT reason. A test that merely asserts `is_err()` passes
         // just as happily on an unrelated error, which is how a guard gets
@@ -2616,6 +2785,7 @@ mod tests {
                 Some(tip),
                 None,
                 None,
+                None,
             )
             .expect("the authorized settlement must advance");
         let after = &out.new_device_state;
@@ -2690,6 +2860,7 @@ mod tests {
                     delta(rigb, BalanceDirection::Credit, 970),
                 ],
                 Some(tip),
+                None,
                 None,
                 None,
             )
@@ -3137,6 +3308,7 @@ mod tests {
                 Some(init_tip),
                 None,
                 None,
+                None,
             )
             .expect("advance");
         assert_eq!(
@@ -3389,6 +3561,7 @@ mod tests {
                 Some(init_tip),
                 None,
                 None,
+                None,
             )
             .expect("credit advance succeeds");
 
@@ -3435,6 +3608,7 @@ mod tests {
                     amount: 100,
                 }],
                 Some(init_tip),
+                None,
                 None,
                 None,
             )
@@ -3587,6 +3761,7 @@ mod tests {
                     new_value: commit1,
                 }),
                 None,
+                None,
             )
             .expect("bearer advance");
         let ap = out
@@ -3650,6 +3825,7 @@ mod tests {
                 Some(init2),
                 None,
                 None,
+                None,
             )
             .expect("plain advance");
         assert!(plain.anchor_proofs.is_none());
@@ -3675,6 +3851,7 @@ mod tests {
                     key,
                     new_value: commit1,
                 }),
+                None,
                 None,
             )
             .expect("bearer advance after a plain one");
@@ -3718,6 +3895,7 @@ mod tests {
                     amount: 100,
                 }],
                 Some(init_self),
+                None,
                 None,
                 None,
             )
@@ -3778,6 +3956,7 @@ mod tests {
                 Some(init),
                 Some(anchor_leaf.clone()),
                 spend(25),
+                None,
             )
             .expect("bearer advance from allocation")
             .new_device_state;
@@ -3808,6 +3987,7 @@ mod tests {
                 Some(init),
                 Some(anchor_leaf.clone()),
                 spend(25),
+                None,
             )
             .expect("re-run bearer advance from allocation")
             .new_device_state;
@@ -3834,6 +4014,7 @@ mod tests {
                     Some(init),
                     Some(anchor_leaf.clone()),
                     spend(25),
+                    None,
                 )
                 .is_err(),
             "bearer advance must reject an online delta alongside a allocation spend"
@@ -3852,6 +4033,7 @@ mod tests {
                     Some(init),
                     Some(anchor_leaf.clone()),
                     spend(100),
+                    None,
                 )
                 .is_err(),
             "bearer advance must reject a allocation underflow"
@@ -3869,7 +4051,8 @@ mod tests {
                     &[],
                     Some(init),
                     None,
-                    spend(10)
+                    spend(10),
+                    None,
                 )
                 .is_err(),
             "offline-bearer spend requires the anchor-state advance"
@@ -3910,6 +4093,7 @@ mod tests {
                 }],
                 Some(init),
                 Some(AnchorLeafUpdate { key, new_value }),
+                None,
                 None,
             )
             .expect("bearer advance")
@@ -3982,6 +4166,7 @@ mod tests {
                 Some(init),
                 None,
                 None,
+                None,
             )
             .expect("value advance");
         assert_eq!(
@@ -3996,7 +4181,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None, None, None)
+            .advance(rk, cp, op(), entropy(2), None, &[], None, None, None, None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -4019,6 +4204,7 @@ mod tests {
                 None,
                 &[],
                 Some(init2),
+                None,
                 None,
                 None,
             )
@@ -4073,6 +4259,7 @@ mod tests {
                 Some(init_bob),
                 None,
                 None,
+                None,
             )
             .expect("advance Bob");
         assert_eq!(
@@ -4096,6 +4283,7 @@ mod tests {
                     amount: 50,
                 }],
                 Some(init_chrl),
+                None,
                 None,
                 None,
             )
@@ -4157,6 +4345,7 @@ mod tests {
                 Some(init_bob),
                 None,
                 None,
+                None,
             )
             .expect("advance A");
         let b = dev
@@ -4172,6 +4361,7 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init_chrl),
+                None,
                 None,
                 None,
             )
@@ -4226,6 +4416,7 @@ mod tests {
                 Some(init),
                 None,
                 None,
+                None,
             )
             .expect("advance A");
         let b = dev
@@ -4241,6 +4432,7 @@ mod tests {
                     amount: 20,
                 }],
                 Some(init),
+                None,
                 None,
                 None,
             )
@@ -4289,6 +4481,7 @@ mod tests {
             Some(init),
             None,
             None,
+            None,
         );
         assert!(
             r.is_err(),
@@ -4321,6 +4514,7 @@ mod tests {
                 amount: 1,
             }],
             Some(init),
+            None,
             None,
             None,
         );
@@ -4371,6 +4565,7 @@ mod tests {
                         amount: amt,
                     }],
                     Some(init),
+                    None,
                     None,
                     None,
                 )
@@ -4461,6 +4656,7 @@ mod tests {
                 None,
                 &[],
                 Some(init_tip),
+                None,
                 None,
                 None,
             )

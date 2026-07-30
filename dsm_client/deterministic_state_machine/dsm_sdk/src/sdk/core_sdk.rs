@@ -1082,6 +1082,52 @@ impl CoreSDK {
     /// same `anchor_leaf` its `simulate_advance_for_confirm` used, so the committed device root
     /// matches the on-wire proofs (both-or-neither); ordinary advances pass `None`.
     #[allow(clippy::too_many_arguments)]
+    /// Advance a relationship AND encumber vault reserves in the same batch.
+    ///
+    /// The only entry point that funds a vault. `DlvCreate` uses it so the
+    /// debit, the reserve leaves and the transition share one device root and one
+    /// prepare/write/commit: either all of it lands or none of it does. Funding
+    /// through a second advance would leave a window in which the vault exists,
+    /// is discoverable and holds nothing, and would give the reserve proof and
+    /// the vault-state proof two different roots — which `compose_vault_state`
+    /// requires to be equal, so the vault could never be quoted.
+    ///
+    /// `in_tx_extra` runs INSIDE the same SQLite transaction as the head write,
+    /// which is where the vault's persistence record belongs: a record written
+    /// afterwards could be lost to a crash, leaving reserves encumbered under no
+    /// record — and rehydration correctly refuses a record-less vault, so the
+    /// value would be stranded with no route to withdraw it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_on_relationship_with_reserve_funding(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        reserve_funding: Option<dsm::types::device_state::VaultReserveFunding>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            None,
+            None,
+            in_tx_extra,
+            None,
+            reserve_funding,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_on_relationship_with_anchor_leaf(
         &self,
         rel_key: [u8; 32],
@@ -1100,6 +1146,7 @@ impl CoreSDK {
             initial_chain_tip,
             anchor_leaf,
             offline_spend,
+            None,
             None,
             None,
         )
@@ -1203,6 +1250,7 @@ impl CoreSDK {
             None,
             Some(&write),
             Some(&pre),
+            None,
         )?;
 
         let artifacts = built.borrow_mut().take().ok_or_else(|| {
@@ -1239,6 +1287,7 @@ impl CoreSDK {
             None,
             in_tx_extra,
             None,
+            None,
         )
     }
 
@@ -1267,6 +1316,10 @@ impl CoreSDK {
         pre_write: Option<
             &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
         >,
+        // Assets to encumber into a vault as part of this transition. `Some` only
+        // for `DlvCreate`; the encumbrance rides the SAME prepare/write/commit as
+        // the transition, so either both land or neither does.
+        reserve_funding: Option<dsm::types::device_state::VaultReserveFunding>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
@@ -1333,6 +1386,7 @@ impl CoreSDK {
             initial_chain_tip,
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
+            reserve_funding, // Some(..) encumbers vault reserves in the same batch (DlvCreate only)
         )?;
         // The sender's signed A-side pair is deliberately NOT compared against
         // this device's own lineage here — see the doc comment on
@@ -1516,6 +1570,7 @@ impl CoreSDK {
             initial_chain_tip,
             anchor_leaf,
             offline_spend,
+            None,
         )
     }
 
@@ -1808,6 +1863,7 @@ impl CoreSDK {
             Some(init_tip),
             None, // anchor_leaf — dev-seed mint is an ordinary ingress transition
             None, // offline_spend — online mint, no allocation draw
+            None,
         )?;
         // Dev-seed Mint is ingress (no capsule bump needed): bump_capsule = false.
         Self::dual_write_advance_outcome(&outcome, false)?;
@@ -4281,6 +4337,7 @@ mod tests {
                         new_value: staged.anchor_leaf.new_value,
                     }),
                     None,
+                    None,
                 )
                 .expect("bearer advance");
             let proofs = out
@@ -4474,6 +4531,7 @@ mod tests {
                     deltas,
                     Some(init),
                     Some(leaf.clone()),
+                    None,
                     None,
                 )
                 .expect("canonical prepare with anchor_leaf");

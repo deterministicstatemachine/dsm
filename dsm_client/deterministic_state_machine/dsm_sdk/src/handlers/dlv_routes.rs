@@ -606,11 +606,157 @@ impl AppRouterImpl {
         let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &actor, &actor,
         );
-        if let Err(e) =
-            self.core_sdk
-                .execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
-        {
-            return err(format!("dlv.create: execute_on_relationship failed: {e}"));
+        // REFUSE A SECOND CREATION. `dlv.create` moves value, so a repeated
+        // request is never permission to encumber again.
+        //
+        // Both persistence domains are inspected, because they can disagree
+        // after a crash or a historical bug, and each disagreement is its own
+        // refusal rather than something to quietly complete. Completing a partial
+        // prior creation from inside a value-moving constructor would be a
+        // repair; repairs belong in an explicit recovery operation where they can
+        // be audited.
+        //
+        // This is the READABLE check. The race-proof ones are inside the atomic
+        // boundary: `advance` refuses an existing reserve leaf under the `sm`
+        // lock, and the record is re-checked inside the write transaction below.
+        // A check here alone would leave a window between inspection and write
+        // for a second concurrent creator.
+        let existing_record =
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .unwrap_or(None);
+        let existing_leaf = self.core_sdk.device_head().is_some_and(|h| {
+            funding
+                .iter()
+                .any(|(pc, _)| h.vault_reserve_entry(&vault_id, pc).is_some())
+        });
+        match (existing_record.is_some(), existing_leaf) {
+            (true, true) => {
+                return err(
+                    "dlv.create: this vault already exists and is funded — refusing to create it \
+                     again"
+                        .into(),
+                )
+            }
+            (true, false) => {
+                return err(
+                    "dlv.create: a record for this vault exists but it holds no reserves — \
+                     inconsistent state, refusing; this needs recovery, not creation"
+                        .into(),
+                )
+            }
+            (false, true) => {
+                return err(
+                    "dlv.create: this vault already holds encumbered reserves but has no record — \
+                     orphaned encumbrance, refusing; this needs recovery, not creation"
+                        .into(),
+                )
+            }
+            (false, false) => {}
+        }
+
+        // The encumbrance rides THIS advance, and the vault's record is written
+        // inside the same SQLite transaction as the head. Either the transition,
+        // both reserve leaves and the record all land, or none of them do.
+        let reserve_funding =
+            amm_pair
+                .as_ref()
+                .map(|_| dsm::types::device_state::VaultReserveFunding {
+                    vault_id,
+                    legs: funding.clone(),
+                    vault_sequence: 0,
+                });
+        let record_to_persist = match amm_pair.as_ref() {
+            Some((token_a, token_b)) => {
+                match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
+                    Ok(pair) => {
+                        let owner = self.core_sdk.device_head();
+                        let mut pd = [0u8; 32];
+                        pd.copy_from_slice(&spec.policy_digest);
+                        Some(
+                            crate::storage::client_db::amm_vault_records::AmmVaultRecord {
+                                vault_id,
+                                owner_genesis: owner
+                                    .as_ref()
+                                    .map(|h| h.genesis())
+                                    .unwrap_or_default(),
+                                owner_devid: owner.as_ref().map(|h| h.devid()).unwrap_or_default(),
+                                policy_commit_a: pair.a(),
+                                policy_commit_b: pair.b(),
+                                fee_bps: amm_fee_bps,
+                                anchor_enforcement: spec.anchor_enforcement,
+                                policy_digest: pd,
+                            },
+                        )
+                    }
+                    Err(e) => {
+                        return err(format!("dlv.create: vault pair is not canonical: {e}"));
+                    }
+                }
+            }
+            None => None,
+        };
+
+        let in_tx = |tx: &rusqlite::Transaction<'_>,
+                     _o: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), dsm::types::error::DsmError> {
+            let Some(rec) = record_to_persist.as_ref() else {
+                return Ok(());
+            };
+            // Re-check inside the transaction. Two concurrent creators could both
+            // pass the readable check above; only one can hold this transaction.
+            let already: i64 = tx
+                .query_row(
+                    "SELECT COUNT(1) FROM amm_vault_records WHERE vault_id = ?1",
+                    rusqlite::params![rec.vault_id.as_slice()],
+                    |r| r.get(0),
+                )
+                .map_err(|e| {
+                    dsm::types::error::DsmError::storage(
+                        format!("dlv.create: vault record pre-check: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            if already > 0 {
+                return Err(dsm::types::error::DsmError::invalid_operation(
+                    "dlv.create: a record for this vault appeared concurrently — refusing",
+                ));
+            }
+            tx.execute(
+                "INSERT INTO amm_vault_records(
+                    vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
+                    fee_bps, anchor_enforcement, policy_digest, created_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    rec.vault_id.as_slice(),
+                    rec.owner_genesis.as_slice(),
+                    rec.owner_devid.as_slice(),
+                    rec.policy_commit_a.as_slice(),
+                    rec.policy_commit_b.as_slice(),
+                    rec.fee_bps,
+                    rec.anchor_enforcement,
+                    rec.policy_digest.as_slice(),
+                    crate::util::deterministic_time::tick() as i64,
+                ],
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("dlv.create: persist vault record: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            Ok(())
+        };
+
+        if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_funding(
+            rel_key,
+            actor,
+            op,
+            &[],
+            Some(init_tip),
+            reserve_funding,
+            Some(&in_tx),
+        ) {
+            return err(format!("dlv.create: funded creation failed: {e}"));
         }
 
         // Persist vault state in the DLV manager.
@@ -707,54 +853,9 @@ impl AppRouterImpl {
             }
         }
 
-        // Persist the canonical vault record — the reconstruction inputs a
-        // restart cannot re-derive.
-        //
-        // `current_sequence` and `anchor_enforcement` were stamped on the
-        // in-memory vault above and nowhere else, so a reloaded wallet had a
-        // vault at sequence 0 enforcing nothing: every `Required` anchor gate
-        // mismatched, and the reserve proof at the baseline sequence became
-        // unfindable. The vault was silently untradable and looked fine.
-        //
-        // Reserves and sequence are deliberately NOT stored here. They live in
-        // the reserve leaves, authenticated by the device root, and a second
-        // copy would be a second answer with nothing to say which was right.
-        if let Some((token_a, token_b)) = amm_pair.as_ref() {
-            match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
-                Ok(pair) => {
-                    let owner = self.core_sdk.device_head();
-                    let rec = crate::storage::client_db::amm_vault_records::AmmVaultRecord {
-                        vault_id,
-                        owner_genesis: owner.as_ref().map(|h| h.genesis()).unwrap_or_default(),
-                        owner_devid: owner.as_ref().map(|h| h.devid()).unwrap_or_default(),
-                        policy_commit_a: pair.a(),
-                        policy_commit_b: pair.b(),
-                        fee_bps: amm_fee_bps,
-                        anchor_enforcement: spec.anchor_enforcement,
-                        policy_digest: {
-                            let mut pd = [0u8; 32];
-                            pd.copy_from_slice(&spec.policy_digest);
-                            pd
-                        },
-                    };
-                    if let Err(e) =
-                        crate::storage::client_db::amm_vault_records::put_amm_vault_record(&rec)
-                    {
-                        // Loud, because the vault will not come back after a
-                        // restart. It is not rolled back: the encumbrance is
-                        // already canonical, and the record can be rewritten.
-                        log::error!(
-                            "[dlv.create] vault {} created but its record did not persist — it will not survive a restart: {e}",
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                        );
-                    }
-                }
-                Err(e) => log::error!(
-                    "[dlv.create] vault {} pair is not canonical, no record written: {e}",
-                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                ),
-            }
-        }
+        // The vault's record was persisted INSIDE the advance transaction above,
+        // so it cannot outlive a rolled-back creation or be lost to a crash that
+        // leaves the reserves encumbered.
 
         // Tier 2 Foundation: publish genesis vault state anchor
         // (sequence=0) for AMM vaults whose spec declares
@@ -1691,6 +1792,419 @@ async fn publish_vault_state_inclusion_proof(
             "[dlv] inclusion proof published seq={} vault={}",
             sequence,
             crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+    }
+}
+
+#[cfg(test)]
+mod funded_creation_tests {
+    //! Funded creation as ONE lifecycle proof, across four persistence
+    //! boundaries.
+    //!
+    //! The interesting claim is not "funded creation happened". It is that
+    //! funded creation produced a PERSISTENT IDENTITY that survives a restart.
+    //! Asserted separately, four passing checks could each be true while the
+    //! chain between them is broken — a vault returned under one owner, stored
+    //! under another, with leaves belonging to a third. Asserted as a chain,
+    //! any disagreement is either an ownership bug or a persistence bug, and the
+    //! test says which link broke.
+
+    use super::*;
+    use serial_test::serial;
+
+    use crate::bridge::AppRouter;
+    use crate::init::SdkConfig;
+
+    fn install_identity() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+            std::env::remove_var("DSM_ENV_CONFIG_PATH");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
+            "./.dsm_testdata_funded_creation",
+        ));
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (device_id, genesis_hash, binding_key) =
+            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn router() -> AppRouterImpl {
+        AppRouterImpl::new(SdkConfig {
+            node_id: "funded-creation-test".to_string(),
+            storage_endpoints: vec![],
+            enable_offline: true,
+        })
+        .expect("router init")
+    }
+
+    fn pack(body: Vec<u8>) -> Vec<u8> {
+        generated::ArgPack {
+            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            codec: generated::Codec::Proto as i32,
+            body,
+        }
+        .encode_to_vec()
+    }
+
+    fn amm_fulfillment_bytes(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        generated::FulfillmentMechanism {
+            kind: Some(generated::fulfillment_mechanism::Kind::AmmConstantProduct(
+                generated::AmmConstantProduct {
+                    token_a: lo.to_vec(),
+                    token_b: hi.to_vec(),
+                    fee_bps,
+                },
+            )),
+        }
+        .encode_to_vec()
+    }
+
+    /// THE CHAIN: response owner → persisted record owner → reserve leaves under
+    /// that vault and pair → the same owner after a restart.
+    #[test]
+    #[serial]
+    fn funded_creation_produces_an_identity_that_survives_a_restart() {
+        install_identity();
+        let r = router();
+
+        // A head holding spendable balance and nothing encumbered — creation is
+        // what encumbers it.
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let spendable = crate::sdk::funded_vault_fixture::owner_holding(50_000, 20_000);
+        let (owner_genesis, owner_devid) = (spendable.genesis(), spendable.devid());
+        r.core_sdk.set_device_head_for_testing(spendable);
+
+        let policy_digest = vec![0x5Au8; 32];
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: policy_digest.clone(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            res.success,
+            "funded creation failed: {:?}",
+            res.error_message
+        );
+
+        // BOUNDARY 1 — the head the route committed. Spendable fell by exactly
+        // the legs, and the reserves hold them.
+        let head = r.core_sdk.device_head().expect("a head after creation");
+        assert_eq!(head.balance(&pc_a), 40_000, "leg A left spendable balance");
+        assert_eq!(head.balance(&pc_b), 15_000, "leg B left spendable balance");
+
+        // BOUNDARY 2 — the persisted record. Exactly one vault, owned by the
+        // device that created it.
+        let records = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list records");
+        assert_eq!(records.len(), 1, "creation must persist exactly one record");
+        let rec = &records[0];
+        assert_eq!(
+            (rec.owner_genesis, rec.owner_devid),
+            (owner_genesis, owner_devid),
+            "the persisted owner must be the device that created the vault"
+        );
+        assert_eq!((rec.policy_commit_a, rec.policy_commit_b), (pc_a, pc_b));
+        assert_eq!(rec.fee_bps, 30);
+        assert_eq!(
+            rec.anchor_enforcement,
+            generated::AnchorEnforcement::Required as i32,
+            "enforcement must persist, or a restart silently downgrades the gate"
+        );
+        assert_eq!(rec.policy_digest.to_vec(), policy_digest);
+
+        // BOUNDARY 3 — the reserve leaves belong to THAT vault and THAT pair,
+        // under that owner's key derivation. A leaf under a different vault or
+        // owner would be unattributable to this record.
+        assert_eq!(head.vault_reserve(&rec.vault_id, &pc_a), 10_000);
+        assert_eq!(head.vault_reserve(&rec.vault_id, &pc_b), 5_000);
+        assert_eq!(
+            head.vault_reserve(&[0x99u8; 32], &pc_a),
+            0,
+            "no other vault may hold this encumbrance"
+        );
+
+        // BOUNDARY 4 — RESTART. The head round-trips through the persistence
+        // codec, and the vault is rebuilt from the record plus those leaves.
+        // This is what makes the identity authoritative rather than a decoration
+        // on the create response.
+        let encoded = crate::storage::client_db::bcr::encode_device_state(&head);
+        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded)
+            .expect("the head must survive the codec");
+        let rebuilt = crate::sdk::vault_rehydration::rehydrate_all_amm_vaults(&reloaded);
+
+        assert_eq!(rebuilt.len(), 1, "the vault must come back after a restart");
+        let v = &rebuilt[0];
+        assert_eq!(v.vault_id, rec.vault_id);
+        assert_eq!((v.pair.a(), v.pair.b()), (pc_a, pc_b));
+
+        // The owner is not carried OUT of rehydration — it is checked DURING
+        // it, so a rebuilt vault is necessarily this device's. That the check is
+        // load-bearing rather than decorative is proven by moving the record's
+        // owner and requiring the rebuild to refuse: a foreign owner's reserve
+        // leaves live under a different key space, so accepting the record would
+        // produce a vault holding nothing while looking valid.
+        let foreign = crate::storage::client_db::amm_vault_records::AmmVaultRecord {
+            owner_devid: {
+                let mut d = rec.owner_devid;
+                d[0] ^= 0xff;
+                d
+            },
+            ..rec.clone()
+        };
+        assert_eq!(
+            crate::sdk::vault_rehydration::rehydrate_amm_vault(&foreign, &reloaded),
+            Err(crate::sdk::vault_rehydration::RehydrationError::OwnerMismatch),
+            "a record naming another owner must not rebuild against this device's leaves"
+        );
+        assert_eq!(
+            v.anchor_enforcement,
+            generated::AnchorEnforcement::Required as i32,
+            "a restart must not relax enforcement"
+        );
+        assert_eq!(
+            (v.reserve_a, v.reserve_b),
+            (10_000, 5_000),
+            "reserves come back from the leaves, not from the record"
+        );
+    }
+
+    /// A second creation over the same pair is a DIFFERENT vault, and that is
+    /// correct — an owner may run several vaults over one pair, which is exactly
+    /// why the reserve leaf is keyed by `vault_id` and not by asset alone.
+    ///
+    /// This pins the boundary of the duplicate guard, which is easy to
+    /// misunderstand. `vault_id` IS deterministic for identical inputs, but
+    /// `reference_state_hash` is one of those inputs and necessarily moves after
+    /// any successful advance. So the guard does not — and must not — make
+    /// `dlv.create` idempotent at the request level. It is a backstop against
+    /// INCONSISTENT STATE: a record or a reserve leaf already sitting under the
+    /// vault id a creation is about to target, which is what a crash between the
+    /// advance and its record write once produced.
+    ///
+    /// Each vault gets its own encumbrance, and the second draws from what the
+    /// first left.
+    #[test]
+    #[serial]
+    fn a_second_vault_over_the_same_pair_is_distinct_and_separately_funded() {
+        install_identity();
+        let r = router();
+
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+
+        let req = || generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let call = || {
+            crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(req().encode_to_vec()),
+                })
+                .await
+            })
+        };
+
+        assert!(call().success, "first creation");
+        assert!(
+            call().success,
+            "a second vault over the same pair is allowed"
+        );
+
+        let records =
+            crate::storage::client_db::amm_vault_records::list_amm_vault_records().expect("list");
+        assert_eq!(records.len(), 2, "two vaults, two records");
+        assert_ne!(
+            records[0].vault_id, records[1].vault_id,
+            "the second creation must be a DIFFERENT vault, not a re-funding of the first"
+        );
+
+        // Each vault holds its own encumbrance, and the owner paid twice.
+        let head = r.core_sdk.device_head().expect("head");
+        for rec in &records {
+            assert_eq!(head.vault_reserve(&rec.vault_id, &pc_a), 10_000);
+            assert_eq!(head.vault_reserve(&rec.vault_id, &pc_b), 5_000);
+        }
+        assert_eq!(head.balance(&pc_a), 30_000, "50_000 less two 10_000 legs");
+        assert_eq!(head.balance(&pc_b), 10_000, "20_000 less two 5_000 legs");
+    }
+
+    /// An ORPHANED ENCUMBRANCE refuses: reserve leaves exist with no record.
+    ///
+    /// Creation must not quietly adopt them. Completing a partial prior creation
+    /// from inside a value-moving constructor is a repair, and a repair belongs
+    /// in an explicit recovery operation where it can be audited.
+    #[test]
+    #[serial]
+    fn an_orphaned_encumbrance_refuses_rather_than_being_adopted() {
+        install_identity();
+        let r = router();
+
+        // A head already holding reserves for the vault a creation would target,
+        // with no record anywhere — the shape a crash between advance and record
+        // write would once have left.
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        let (pc_a, pc_b) = (v.pc_a, v.pc_b);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        assert!(
+            crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+                .expect("list")
+                .is_empty(),
+            "precondition: no record"
+        );
+
+        // Both legs orphaned, then just one — a single stray leg is equally a
+        // refusal, because half an encumbrance is not a fundable vault.
+        for legs in [
+            vec![(pc_a, 10_000u64), (pc_b, 5_000u64)],
+            vec![(pc_a, 10_000u64)],
+        ] {
+            let req = generated::DlvInstantiateV1 {
+                spec: Some(generated::DlvSpecV1 {
+                    policy_digest: vec![0x5Au8; 32],
+                    fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                    anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                    ..Default::default()
+                }),
+                creator_public_key: Vec::new(),
+                signature: Vec::new(),
+                funding_legs: legs
+                    .iter()
+                    .map(|(pc, amt)| generated::DlvFundingLegV1 {
+                        policy_commit: pc.to_vec(),
+                        amount: *amt,
+                    })
+                    .collect(),
+            };
+            let res = crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(req.encode_to_vec()),
+                })
+                .await
+            });
+            assert!(
+                !res.success,
+                "creation over an orphaned encumbrance must be refused"
+            );
+        }
+    }
+
+    /// Creation that cannot be paid for changes nothing — no balance moves, and
+    /// no record is left behind for a restart to resurrect a vault from.
+    #[test]
+    #[serial]
+    fn an_unaffordable_creation_leaves_no_record_and_no_encumbrance() {
+        install_identity();
+        let r = router();
+
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let spendable = crate::sdk::funded_vault_fixture::owner_holding(100, 100);
+        let root_before = spendable.root();
+        r.core_sdk.set_device_head_for_testing(spendable);
+
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(!res.success, "an unaffordable creation must be refused");
+
+        assert_eq!(
+            r.core_sdk.device_head().expect("head").root(),
+            root_before,
+            "a refused creation must leave the device root untouched"
+        );
+        assert!(
+            crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+                .expect("list")
+                .is_empty(),
+            "a refused creation must persist no record — otherwise a restart \
+             rebuilds a vault that was never funded"
         );
     }
 }
