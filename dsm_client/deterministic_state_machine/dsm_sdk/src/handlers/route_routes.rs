@@ -1249,6 +1249,101 @@ mod stamping_tests {
         );
     }
 
+    /// THE HANDLER AND THE SDK AGREE, on write and on read.
+    ///
+    /// Replaces positive greps asserting that this file MENTIONS
+    /// `routing_sdk::publish_active_advertisement` and
+    /// `routing_sdk::load_active_advertisements_for_pair`. A call site existing
+    /// says nothing about whether the handler's result matches the SDK's — a
+    /// handler that called the SDK and then post-processed the result, or that
+    /// wrote through the SDK but read through its own query, would satisfy both
+    /// greps while producing two different answers.
+    ///
+    /// So: publish through the route, then read the same pair BOTH ways, and
+    /// require the records to be identical.
+    #[test]
+    #[serial]
+    fn the_route_and_the_sdk_return_the_same_advertisements() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(publish.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // Read via the SDK the handler is supposed to delegate to.
+        let via_sdk = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::routing_sdk::load_active_advertisements_for_pair(&v.pc_a, &v.pc_b),
+            )
+            .expect("sdk load");
+        assert_eq!(
+            via_sdk.len(),
+            1,
+            "the advertisement published through the route must be visible to the SDK"
+        );
+
+        // Read via the production query route.
+        let pair = generated::RoutingPairRequest {
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+        };
+        let q = crate::runtime::get_runtime().block_on(async {
+            r.query(crate::bridge::AppQuery {
+                path: "route.listAdvertisementsForPair".to_string(),
+                params: pack(pair.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(q.success, "list failed: {:?}", q.error_message);
+
+        // The route's answer must carry the SAME advertisement the SDK returned
+        // — same vault, same pair, same reserves, same fee. A route that
+        // re-derived any of these would diverge here.
+        let listed = q.data;
+        let sdk_ad = &via_sdk[0].advertisement;
+        let encoded = sdk_ad.encode_to_vec();
+        let b32 = crate::util::text_id::encode_base32_crockford(&encoded);
+        let body = String::from_utf8_lossy(&listed);
+        assert!(
+            body.contains(&b32),
+            "the route's listing must contain exactly the advertisement the SDK \
+             returns; a re-derived record would differ byte for byte"
+        );
+
+        // And the shared facts are the funded ones, so agreement is not two
+        // copies of the same mistake.
+        assert_eq!(sdk_ad.vault_id, v.vault_id.to_vec());
+        assert_eq!(sdk_ad.token_a, v.pc_a.to_vec());
+        assert_eq!(sdk_ad.token_b, v.pc_b.to_vec());
+        assert_eq!(
+            (sdk_ad.reserve_a, sdk_ad.reserve_b),
+            (
+                v.head.vault_reserve(&v.vault_id, &v.pc_a),
+                v.head.vault_reserve(&v.vault_id, &v.pc_b)
+            ),
+        );
+    }
+
     /// ACCEPT-OR-STAMP, the non-empty half: a supplied publisher key is
     /// honoured verbatim rather than overwritten.
     ///

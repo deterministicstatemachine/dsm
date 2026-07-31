@@ -114,11 +114,16 @@ fn dlv_claim_publishes_terminal_state_ad() {
 #[test]
 fn trade_flow_handlers_delegate_to_audited_sdks() {
     let src = read(sdk_path("src/handlers/route_routes.rs"));
+    // The publish and list halves are proven behaviourally by
+    // `route_routes::stamping_tests::the_route_and_the_sdk_return_the_same_advertisements`,
+    // which publishes through the route and requires the route's listing to
+    // carry byte-for-byte the advertisement the SDK returns for the same pair.
+    // A call site existing proves nothing about agreement; that test does.
+    //
+    // These three ride the quote path, which does not execute end to end yet.
+    // Their behavioural replacement is output agreement between handler and SDK,
+    // and it lands when the quote path is exercised.
     let needles = [
-        // publish_routing_advertisement → routing_sdk::publish_active_advertisement
-        "crate::sdk::routing_sdk::publish_active_advertisement",
-        // list_advertisements_for_pair → routing_sdk::load_active_advertisements_for_pair
-        "crate::sdk::routing_sdk::load_active_advertisements_for_pair",
         // sync_vaults_for_pair → routing_sdk::fetch_and_verify_vault_proto
         "crate::sdk::routing_sdk::fetch_and_verify_vault_proto",
         // find_and_bind_best_path → routing_path_sdk::find_and_verify_best_path
