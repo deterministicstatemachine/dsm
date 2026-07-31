@@ -1573,6 +1573,17 @@ impl Operation {
             let len = get_u32(inp)? as usize;
             take(inp, len)
         }
+        /// A length-prefixed field that must be exactly 32 bytes.
+        ///
+        /// The encoder writes these through `put_bytes`, so the wire carries a
+        /// length. Requiring 32 on the way back keeps a short field from
+        /// silently becoming a zero-padded commit that names a different asset.
+        fn get_arr32(inp: &mut &[u8]) -> Result<[u8; 32], DsmError> {
+            let v = get_bytes(inp)?;
+            <[u8; 32]>::try_from(v.as_slice())
+                .map_err(|_| DsmError::invalid_operation("expected a 32-byte field"))
+        }
+
         fn get_bytes(inp: &mut &[u8]) -> Result<Vec<u8>, DsmError> {
             Ok(get_len_bytes(inp)?.to_vec())
         }
@@ -2203,6 +2214,85 @@ impl Operation {
                     vault_id,
                     reason,
                     creator_public_key,
+                    signature,
+                    mode,
+                }
+            }
+            // Mirrors the encode order exactly. A decoder that drifted from its
+            // encoder by one field would produce an operation that reads as
+            // valid and describes a different trade.
+            26 => {
+                let vault_id = get_bytes(&mut input)?;
+                let owner_public_key = get_bytes(&mut input)?;
+                let owner_devid = get_arr32(&mut input)?;
+                let owner_genesis = get_arr32(&mut input)?;
+                let input_policy_commit = get_arr32(&mut input)?;
+                let output_policy_commit = get_arr32(&mut input)?;
+                let parent_sequence = get_u64(&mut input)?;
+                let parent_reserves_digest = get_arr32(&mut input)?;
+                let reserve_proof_root = get_arr32(&mut input)?;
+                let predicate_digest = get_arr32(&mut input)?;
+                let route_commit_bytes = get_bytes(&mut input)?;
+                let external_commitment_x = get_arr32(&mut input)?;
+                let input_amount = get_u64(&mut input)?;
+                let output_amount = get_u64(&mut input)?;
+                let fee_bps = get_u32(&mut input)?;
+                let sigma = get_arr32(&mut input)?;
+                let settler_public_key = get_bytes(&mut input)?;
+                let settler_devid = get_arr32(&mut input)?;
+                let settlement_receipt_id = get_arr32(&mut input)?;
+                let signature = get_bytes(&mut input)?;
+                let mode = dec_mode(&mut input)?;
+                DlvSettle {
+                    vault_id,
+                    owner_public_key,
+                    owner_devid,
+                    owner_genesis,
+                    input_policy_commit,
+                    output_policy_commit,
+                    parent_sequence,
+                    parent_reserves_digest,
+                    reserve_proof_root,
+                    predicate_digest,
+                    route_commit_bytes,
+                    external_commitment_x,
+                    input_amount,
+                    output_amount,
+                    fee_bps,
+                    sigma,
+                    settler_public_key,
+                    settler_devid,
+                    settlement_receipt_id,
+                    signature,
+                    mode,
+                }
+            }
+            27 => {
+                let vault_id = get_bytes(&mut input)?;
+                let settlement_receipt_id = get_arr32(&mut input)?;
+                let pending_pointer_x = get_arr32(&mut input)?;
+                let parent_sequence = get_u64(&mut input)?;
+                let new_sequence = get_u64(&mut input)?;
+                let parent_reserves_digest = get_arr32(&mut input)?;
+                let new_reserves_digest = get_arr32(&mut input)?;
+                let input_policy_commit = get_arr32(&mut input)?;
+                let output_policy_commit = get_arr32(&mut input)?;
+                let input_amount = get_u64(&mut input)?;
+                let output_amount = get_u64(&mut input)?;
+                let signature = get_bytes(&mut input)?;
+                let mode = dec_mode(&mut input)?;
+                DlvOwnerApply {
+                    vault_id,
+                    settlement_receipt_id,
+                    pending_pointer_x,
+                    parent_sequence,
+                    new_sequence,
+                    parent_reserves_digest,
+                    new_reserves_digest,
+                    input_policy_commit,
+                    output_policy_commit,
+                    input_amount,
+                    output_amount,
                     signature,
                     mode,
                 }

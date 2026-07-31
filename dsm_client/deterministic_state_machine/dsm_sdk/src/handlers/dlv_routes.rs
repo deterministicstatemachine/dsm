@@ -1441,63 +1441,6 @@ impl AppRouterImpl {
             //
             // The (seq + reserves_digest) match is sufficient because
             // owner_signature on the storage anchor couples them.
-            {
-                use crate::sdk::route_commit_sdk::{AnchorGateReject, AnchorPosture};
-                use dsm::types::proto::AnchorEnforcement;
-                let policy = AnchorEnforcement::try_from(vault.anchor_enforcement)
-                    .unwrap_or(AnchorEnforcement::Unspecified);
-                // Fail-closed anchor gate: the hop's bound (seq,
-                // reserves_digest, anchor_digest) must match the vault's
-                // LOCAL current state per policy.  A mismatch means the
-                // vault advanced since the RouteCommit was bound (stale
-                // state).  Pure + storage-free — never re-reads storage.
-                match crate::sdk::route_commit_sdk::enforce_anchor_binding(
-                    policy,
-                    &hop,
-                    &vault_id,
-                    vault.current_sequence,
-                    None,
-                ) {
-                    Ok(AnchorPosture::Enforced) => {}
-                    Ok(AnchorPosture::BypassedOptional)
-                    | Ok(AnchorPosture::BypassedUnspecified) => {
-                        log::info!(
-                            "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
-                             vault={} policy={:?}",
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                            policy,
-                        );
-                    }
-                    Err(AnchorGateReject::MissingFields) => {
-                        return err("dlv.unlockRouted: vault requires anchor binding but \
-                             RouteCommit hop omits one or more fields \
-                             (vault_state_reserves_digest / vault_state_anchor_digest)"
-                            .to_string());
-                    }
-                    Err(AnchorGateReject::SequenceMismatch { route, vault }) => {
-                        return err(format!(
-                            "dlv.unlockRouted: vault state anchor sequence mismatch \
-                             (route={route}, vault={vault})"
-                        ));
-                    }
-                    Err(AnchorGateReject::ReservesDigestMismatch) => {
-                        return err(
-                            "dlv.unlockRouted: vault state reserves digest mismatch".to_string()
-                        );
-                    }
-                    Err(AnchorGateReject::AnchorDigestMismatch) => {
-                        return err(
-                            "dlv.unlockRouted: vault state anchor digest mismatch".to_string()
-                        );
-                    }
-                    Err(AnchorGateReject::ReservesDigestUnavailable) => {
-                        return err("dlv.unlockRouted: AMM reserves digest unavailable \
-                             for non-AMM vault"
-                            .to_string());
-                    }
-                }
-            }
-
             // RESERVES COME FROM THE OWNER'S PROOF, never from this device.
             //
             // A settling trader does not hold the owner's reserves — they are
@@ -1509,6 +1452,9 @@ impl AppRouterImpl {
             // Filled by the proof block below; the settle terms are only built
             // on the path where that block succeeded.
             let amm_fee_bps;
+            let pair_a_for_digest;
+            let pair_b_for_digest;
+            let fee_bps_for_digest;
             let reserve_owner_devid;
             let reserve_owner_genesis;
             let reserve_root;
@@ -1556,11 +1502,82 @@ impl AppRouterImpl {
                     );
                 };
                 amm_fee_bps = vault_fee_bps;
+                pair_a_for_digest = vt_a.clone();
+                pair_b_for_digest = vt_b.clone();
+                fee_bps_for_digest = vault_fee_bps;
                 reserve_owner_devid = proof.owner_devid;
                 reserve_owner_genesis = proof.owner_genesis;
                 reserve_root = proof.smt_root;
                 (a, b)
             };
+            {
+                use crate::sdk::route_commit_sdk::{AnchorGateReject, AnchorPosture};
+                use dsm::types::proto::AnchorEnforcement;
+                let policy = AnchorEnforcement::try_from(vault.anchor_enforcement)
+                    .unwrap_or(AnchorEnforcement::Unspecified);
+                // Fail-closed anchor gate: the hop's bound (seq,
+                // reserves_digest, anchor_digest) must match the vault's
+                // LOCAL current state per policy.  A mismatch means the
+                // vault advanced since the RouteCommit was bound (stale
+                // state).  Pure + storage-free — never re-reads storage.
+                // The digest the gate compares against is derived from the
+                // PROVEN reserves, not from local state and not from `None`.
+                // Passing `None` made `ReservesDigestUnavailable` the outcome for
+                // every Required vault — the gate could never pass, because the
+                // one thing it needs was never supplied.
+                let proven_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
+                    &pair_a_for_digest,
+                    &pair_b_for_digest,
+                    proven_a,
+                    proven_b,
+                    fee_bps_for_digest,
+                );
+                match crate::sdk::route_commit_sdk::enforce_anchor_binding(
+                    policy,
+                    &hop,
+                    &vault_id,
+                    vault.current_sequence,
+                    Some(proven_digest),
+                ) {
+                    Ok(AnchorPosture::Enforced) => {}
+                    Ok(AnchorPosture::BypassedOptional)
+                    | Ok(AnchorPosture::BypassedUnspecified) => {
+                        log::info!(
+                            "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
+                             vault={} policy={:?}",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                            policy,
+                        );
+                    }
+                    Err(AnchorGateReject::MissingFields) => {
+                        return err("dlv.unlockRouted: vault requires anchor binding but \
+                             RouteCommit hop omits one or more fields \
+                             (vault_state_reserves_digest / vault_state_anchor_digest)"
+                            .to_string());
+                    }
+                    Err(AnchorGateReject::SequenceMismatch { route, vault }) => {
+                        return err(format!(
+                            "dlv.unlockRouted: vault state anchor sequence mismatch \
+                             (route={route}, vault={vault})"
+                        ));
+                    }
+                    Err(AnchorGateReject::ReservesDigestMismatch) => {
+                        return err(
+                            "dlv.unlockRouted: vault state reserves digest mismatch".to_string()
+                        );
+                    }
+                    Err(AnchorGateReject::AnchorDigestMismatch) => {
+                        return err(
+                            "dlv.unlockRouted: vault state anchor digest mismatch".to_string()
+                        );
+                    }
+                    Err(AnchorGateReject::ReservesDigestUnavailable) => {
+                        return err("dlv.unlockRouted: AMM reserves digest unavailable \
+                             for non-AMM vault"
+                            .to_string());
+                    }
+                }
+            }
 
             match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
                 &hop,
@@ -2376,6 +2393,198 @@ mod funded_creation_tests {
         assert!(
             call(build(Vec::new())).success,
             "an absent digest must be computed, not required from the caller"
+        );
+    }
+
+    /// THE FULL SETTLEMENT LIFECYCLE, driven through the production dispatcher.
+    ///
+    /// Every piece has been proven separately; this is the first time they run
+    /// as one execution. Settlement is `implemented` and `route-proven` until
+    /// this passes — it becomes `wired` only when a settlement completes and the
+    /// resulting state is asserted.
+    ///
+    /// Single device acting as both owner and trader. That is a real limitation
+    /// and it is stated rather than hidden: the cross-device split is exercised
+    /// by the artifacts, not by the process boundary. Every authority check
+    /// still runs for real — the settling path reads the owner's PUBLISHED
+    /// reserve proof back out of storage and verifies its signature and SMT
+    /// paths, exactly as a separate device would, because it has no privileged
+    /// access to the owner's leaves either way.
+    #[test]
+    #[serial]
+    fn a_settlement_completes_and_the_resulting_state_is_asserted() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+
+        // (1) FUND a vault through the dispatcher.
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault");
+        let vault_id = rec.vault_id;
+        let before = r.core_sdk.device_head().expect("head");
+        let (bal_a_before, bal_b_before) = (before.balance(&pc_a), before.balance(&pc_b));
+        assert_eq!((bal_a_before, bal_b_before), (40_000, 15_000));
+        assert_eq!(before.vault_reserve(&vault_id, &pc_a), 10_000);
+        assert_eq!(before.vault_reserve(&vault_id, &pc_b), 5_000);
+
+        // (2) The proof the settling path will read back. Its existence is the
+        // precondition the reserve gate enforces.
+        let proof = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(&vault_id, 0),
+            )
+            .expect("dlv.create must publish a verifiable reserve proof");
+        assert_eq!(
+            dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_a),
+            Some(10_000)
+        );
+
+        // (3) Build and sign the RouteCommit the trader settles with. The hop's
+        // bindings must match what the anchor gate re-derives from the PROVEN
+        // reserves, so they are computed the same way rather than guessed.
+        let input = 1_000u64;
+        let expected_out =
+            crate::sdk::routing_path_sdk::constant_product_output(input, 10_000, 5_000, 30)
+                .expect("curve output");
+        let reserves_digest =
+            dsm::dlv::vault_state_anchor::compute_reserves_digest(&pc_a, &pc_b, 10_000, 5_000, 30);
+        let anchor_digest =
+            dsm::dlv::vault_state_anchor::compute_anchor_digest(&vault_id, 0, &reserves_digest);
+        let (pk, sk) = (
+            crate::sdk::signing_authority::current_public_key().expect("pk"),
+            crate::sdk::signing_authority::current_secret_key().expect("sk"),
+        );
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x11; 32],
+            total_fee_bps: 30,
+            initiator_public_key: pk.clone(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
+                vault_state_anchor_seq: 0,
+                vault_state_reserves_digest: reserves_digest.to_vec(),
+                vault_state_anchor_digest: anchor_digest.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            dsm::crypto::sphincs::sphincs_sign(&sk, &canonical).expect("sign rc");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+
+        // (4) Publish X, and the pointer that CLAIMS the settlement slot.
+        crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    &pk,
+                    &sk,
+                    "lifecycle",
+                ),
+            )
+            .expect("publish anchor + pointers");
+
+        // (5) SETTLE through the dispatcher.
+        let settle = generated::DlvUnlockRoutedV1 {
+            vault_id: vault_id.to_vec(),
+            device_id: before.devid().to_vec(),
+            route_commit_bytes: rc.encode_to_vec(),
+            unlocker_public_key: pk.clone(),
+            signature: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.unlockRouted".to_string(),
+                args: pack(settle.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "settlement failed: {:?}", res.error_message);
+
+        // (6) BALANCES MOVED, by exactly the authorized amounts.
+        let after = r.core_sdk.device_head().expect("head");
+        assert_eq!(
+            after.balance(&pc_a),
+            bal_a_before - input,
+            "the input must be debited exactly"
+        );
+        assert_eq!(
+            after.balance(&pc_b),
+            bal_b_before + expected_out,
+            "the output must be credited exactly"
+        );
+
+        // (7) THE RECEIPT was published, and verifies.
+        let receipt = crate::runtime::get_runtime()
+            .block_on(crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x))
+            .expect("the settlement must publish a verifiable receipt");
+        assert_eq!(receipt.trade.input_amount, input);
+        assert_eq!(receipt.trade.output_amount, expected_out);
+        assert_eq!(receipt.trade.parent_sequence, 0);
+        assert_eq!(receipt.trade.new_sequence, 1);
+        assert_eq!(receipt.trade.input_policy_commit, pc_a);
+        assert_eq!(receipt.trade.output_policy_commit, pc_b);
+
+        // (8) RESTART: the post-trade state survives the codec.
+        let encoded = crate::storage::client_db::bcr::encode_device_state(&after);
+        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded)
+            .expect("head survives the codec");
+        assert_eq!(reloaded.root(), after.root());
+        assert_eq!(reloaded.balance(&pc_a), after.balance(&pc_a));
+        assert_eq!(reloaded.balance(&pc_b), after.balance(&pc_b));
+
+        // (9) And the vault rebuilds with its post-trade identity intact.
+        let rebuilt = crate::sdk::vault_rehydration::rehydrate_all_amm_vaults(&reloaded);
+        assert_eq!(rebuilt.len(), 1, "the vault must survive the restart");
+        assert_eq!(rebuilt[0].vault_id, vault_id);
+        assert_eq!(
+            rebuilt[0].anchor_enforcement,
+            generated::AnchorEnforcement::Required as i32,
         );
     }
 
