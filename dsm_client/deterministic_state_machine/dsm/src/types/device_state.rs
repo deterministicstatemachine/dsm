@@ -994,6 +994,19 @@ impl DeviceState {
         self.genesis
     }
 
+    /// Sibling path for any leaf in this device's SMT.
+    ///
+    /// Needed to sign a settlement receipt: the receipt leaf is written by the
+    /// settling advance, and proving it to a third party means carrying its path
+    /// against the post-advance root.
+    pub fn inclusion_siblings(&self, key: &[u8; 32]) -> Result<Vec<[u8; 32]>, DsmError> {
+        Ok(self
+            .smt
+            .get_inclusion_proof(key, 256)
+            .map_err(|e| DsmError::merkle(format!("inclusion path: {e}")))?
+            .siblings)
+    }
+
     /// Build the per-leg inclusion proofs that let a third party VERIFY this
     /// vault's encumbered reserves, rather than take the owner's word for them.
     ///

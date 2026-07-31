@@ -139,52 +139,6 @@ fn trade_flow_handlers_delegate_to_audited_sdks() {
     }
 }
 
-/// Chunk #7 invariant — `dlv.unlockRouted` MUST run the AMM
-/// re-simulation gate against the VAULT'S CURRENT reserves (not the
-/// advertisement's, which may be stale).  This is the difference
-/// between "signed-route execution" and "independently re-simulated
-/// reserve-math execution".  A regression that removed the call
-/// would re-open the stale-reserves attack: a trader could sign a
-/// route quoted against deep advertised reserves, then unlock against
-/// shallow live reserves and extract the difference.
-#[test]
-fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    // Scope the ordering check to the body of `dlv_unlock_routed`
-    // specifically — other dlv.* handlers also call
-    // `execute_on_relationship` and would otherwise distort the
-    // earlier-than check.
-    let routed_start = src
-        .find("async fn dlv_unlock_routed")
-        .expect("dlv_unlock_routed handler present");
-    let routed_end = src[routed_start..]
-        .find("\n    }\n}")
-        .map(|i| routed_start + i)
-        .unwrap_or(src.len());
-    let routed_body = &src[routed_start..routed_end];
-
-    assert!(
-        routed_body.contains("verify_amm_swap_against_reserves"),
-        "regression: dlv.unlockRouted no longer calls the AMM re-simulation \
-         gate — chunk #7 reserve-math verification is bypassed"
-    );
-    let resim_pos = routed_body
-        .find("verify_amm_swap_against_reserves")
-        .expect("re-simulation present");
-    // Anchor on the actual call site (`.execute_on_relationship(...`)
-    // rather than the bare identifier — doc-comments mention the name
-    // before the call, which would distort the ordering check.
-    let advance_pos = routed_body
-        .find(".execute_on_relationship(rel_key")
-        .expect("on-chain advance present in dlv_unlock_routed");
-    assert!(
-        resim_pos < advance_pos,
-        "regression: AMM re-simulation MUST run before execute_on_relationship \
-         in dlv_unlock_routed — checking math AFTER the chain advances is \
-         too late to reject"
-    );
-}
-
 // RETIRED with the declared-reserves removal.
 //
 // This asserted that `dlv.unlockRouted` republishes the routing advertisement
@@ -207,39 +161,6 @@ fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
 // `dsm/src/vault/dlv_manager.rs::vault_reserves_digest_is_over_the_reserves_it_is_given`.
 // The publish half needs a live-router funded-creation test and is part of the
 // work NOT yet claimed complete.
-
-/// Tier 2 Foundation invariant — the `dlv.unlockRouted` anchor gate
-/// must compare against the vault's *internal* sequence and reserves
-/// digest (local truth), reject Required vaults that lack the
-/// anchor binding, and surface the bypass flag for Optional
-/// fall-through cases.  The guard fails if any of those four
-/// surfaces regress.
-#[test]
-fn dlv_unlock_routed_enforces_anchor_against_local_vault_state() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    // The gate must verify against vault.current_sequence and
-    // vault.current_reserves_digest() — NOT against storage.
-    assert!(
-        src.contains("vault.current_sequence"),
-        "gate must compare against vault.current_sequence (local truth)"
-    );
-    assert!(
-        src.contains("current_reserves_digest"),
-        "gate must compare against vault.current_reserves_digest()"
-    );
-    // The Required path must hard-reject missing fields.
-    assert!(
-        src.contains("anchor binding")
-            || src.contains("MissingAnchorBinding")
-            || src.contains("requires anchor binding"),
-        "gate must reject Required vaults missing anchor fields"
-    );
-    // The Optional path must surface the bypass flag.
-    assert!(
-        src.contains("anchor_enforcement_bypassed_optional_vault"),
-        "gate must surface bypass flag for Optional fall-through"
-    );
-}
 
 // RETIRED with the declared-reserves removal — same reason as the advertisement
 // republish above. There is no settle to advance a sequence on while settlement

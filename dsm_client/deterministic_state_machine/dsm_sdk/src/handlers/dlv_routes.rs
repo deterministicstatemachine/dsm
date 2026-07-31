@@ -1402,12 +1402,16 @@ impl AppRouterImpl {
         // Unused while the unlock fails closed; the posture logging it feeds
         // returns with the settlement work.
         #[allow(unused_mut, unused_variables)]
-        let mut anchor_bypassed_optional: bool = false;
+        // Populated by the AMM re-simulation arm below, from values live there.
+        let mut settle_terms: Option<SettleTerms> = None;
         // Stage post-trade reserves in canonical (a, b) ordering.  When
         // the on-chain DlvUnlock succeeds below we re-acquire the vault
         // lock and write these into `fulfillment_condition`.
         #[allow(unused_variables)]
-        let amm_post_trade_reserves: Option<(u64, u64)> = {
+        // The AMM gate runs for its REFUSALS. Its post-trade reserve figures are
+        // deliberately not kept: a settling trader does not hold the owner's
+        // liquidity, and the owner learns of the move by verifying the receipt.
+        {
             let vault_lock = match dlv_manager.get_vault(&vault_id).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1447,24 +1451,6 @@ impl AppRouterImpl {
                 // LOCAL current state per policy.  A mismatch means the
                 // vault advanced since the RouteCommit was bound (stale
                 // state).  Pure + storage-free — never re-reads storage.
-                // FAIL CLOSED. The anchor gate compares the hop's binding against
-                // the vault's reserves, and a settling device no longer has them:
-                // reserves are encumbered leaves in the OWNER's device SMT, proved
-                // to a trader by `VaultReserveInclusionProofV1`. That proof is not
-                // wired yet, so there is nothing authoritative to compare against.
-                //
-                // Refusing is the honest state. Comparing against a fabricated zero
-                // would let a hop bind to reserves nobody holds — which is exactly
-                // the condition this whole change exists to end. Settlement moved no
-                // value before this, so nothing that worked has been taken away.
-                let _ = (policy, &hop, &vault_id);
-                return err(
-                    "dlv.unlockRouted: settlement is fail-closed until reserve proofs are \
-                     wired — a hop cannot be verified against reserves this device does not \
-                     hold"
-                        .into(),
-                );
-                #[allow(unreachable_code)]
                 match crate::sdk::route_commit_sdk::enforce_anchor_binding(
                     policy,
                     &hop,
@@ -1475,7 +1461,6 @@ impl AppRouterImpl {
                     Ok(AnchorPosture::Enforced) => {}
                     Ok(AnchorPosture::BypassedOptional)
                     | Ok(AnchorPosture::BypassedUnspecified) => {
-                        anchor_bypassed_optional = true;
                         log::info!(
                             "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
                              vault={} policy={:?}",
@@ -1513,14 +1498,134 @@ impl AppRouterImpl {
                 }
             }
 
+            // RESERVES COME FROM THE OWNER'S PROOF, never from this device.
+            //
+            // A settling trader does not hold the owner's reserves — they are
+            // encumbered leaves in the OWNER's device SMT. The authoritative
+            // source is `VaultReserveInclusionProofV1`, published by the owner
+            // and verified here against its own signature and SMT paths. Passing
+            // zeros, as this once did, would let a hop bind to reserves nobody
+            // holds.
+            // Filled by the proof block below; the settle terms are only built
+            // on the path where that block succeeded.
+            let amm_fee_bps;
+            let reserve_owner_devid;
+            let reserve_owner_genesis;
+            let reserve_root;
+            let (proven_a, proven_b) = {
+                let Some(proof) =
+                    crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(
+                        &vault_id,
+                        hop.vault_state_anchor_seq,
+                    )
+                    .await
+                else {
+                    return err(format!(
+                        "dlv.unlockRouted: no verified reserve proof for vault {} at sequence {} \
+                         — its liquidity is unproven and cannot be settled against",
+                        crate::util::text_id::encode_base32_crockford(&vault_id),
+                        hop.vault_state_anchor_seq,
+                    ));
+                };
+                // The pair comes from the vault's OWN condition, so the legs the
+                // proof is read for are the ones the curve governs.
+                let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                    token_a: ref vt_a,
+                    token_b: ref vt_b,
+                    fee_bps: vault_fee_bps,
+                } = vault.fulfillment_condition
+                else {
+                    return err("dlv.unlockRouted: routed settlement requires an AMM vault".into());
+                };
+                let (Some(pc_a), Some(pc_b)) = (
+                    <[u8; 32]>::try_from(vt_a.as_slice()).ok(),
+                    <[u8; 32]>::try_from(vt_b.as_slice()).ok(),
+                ) else {
+                    return err("dlv.unlockRouted: vault pair is not 32-byte policy commits".into());
+                };
+                let (Some(a), Some(b)) = (
+                    dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_a),
+                    dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_b),
+                ) else {
+                    // An absent leg is UNPROVEN, never zero: a half-proved vault
+                    // must not be settled against as if it were empty on one side.
+                    return err(
+                        "dlv.unlockRouted: the reserve proof does not cover both sides of the \
+                         vault's pair"
+                            .into(),
+                    );
+                };
+                amm_fee_bps = vault_fee_bps;
+                reserve_owner_devid = proof.owner_devid;
+                reserve_owner_genesis = proof.owner_genesis;
+                reserve_root = proof.smt_root;
+                (a, b)
+            };
+
             match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
                 &hop,
                 &vault.fulfillment_condition,
-                0,
-                0,
+                proven_a,
+                proven_b,
             ) {
-                Ok(Some(outcome)) => Some((outcome.new_reserve_a, outcome.new_reserve_b)),
-                Ok(None) => None,
+                Ok(Some(outcome)) => {
+                    // Everything the settlement authorization needs, taken from
+                    // the hop that was just verified against the owner's PROVEN
+                    // reserves. Reading any of it from a second source would let
+                    // the deltas describe a trade the re-simulation never
+                    // accepted.
+                    let (Some(in_pc), Some(out_pc)) = (
+                        <[u8; 32]>::try_from(hop.token_in.as_slice()).ok(),
+                        <[u8; 32]>::try_from(hop.token_out.as_slice()).ok(),
+                    ) else {
+                        return err(
+                            "dlv.unlockRouted: hop assets are not 32-byte policy commits".into(),
+                        );
+                    };
+                    let (Ok(in_amt), Ok(out_amt)) = (
+                        <[u8; 16]>::try_from(hop.input_amount_u128.as_slice())
+                            .map_err(|_| ())
+                            .and_then(|b| u64::try_from(u128::from_be_bytes(b)).map_err(|_| ())),
+                        <[u8; 16]>::try_from(hop.expected_output_amount_u128.as_slice())
+                            .map_err(|_| ())
+                            .and_then(|b| u64::try_from(u128::from_be_bytes(b)).map_err(|_| ())),
+                    ) else {
+                        return err(
+                            "dlv.unlockRouted: hop amounts do not fit u64 base units".into()
+                        );
+                    };
+                    let mut parent_digest = [0u8; 32];
+                    if hop.vault_state_reserves_digest.len() == 32 {
+                        parent_digest.copy_from_slice(&hop.vault_state_reserves_digest);
+                    }
+                    let mut anchor_digest = [0u8; 32];
+                    if hop.vault_state_anchor_digest.len() == 32 {
+                        anchor_digest.copy_from_slice(&hop.vault_state_anchor_digest);
+                    }
+                    settle_terms = Some(SettleTerms {
+                        owner_public_key: vault.creator_public_key.clone(),
+                        owner_devid: reserve_owner_devid,
+                        owner_genesis: reserve_owner_genesis,
+                        input_policy_commit: in_pc,
+                        output_policy_commit: out_pc,
+                        input_amount: in_amt,
+                        output_amount: out_amt,
+                        parent_reserves_digest: parent_digest,
+                        reserve_proof_root: reserve_root,
+                        predicate_digest: anchor_digest,
+                        fee_bps: amm_fee_bps,
+                        sigma: [0u8; 32],
+                        settler_devid: {
+                            let mut d = [0u8; 32];
+                            if req.device_id.len() == 32 {
+                                d.copy_from_slice(&req.device_id);
+                            }
+                            d
+                        },
+                    });
+                    let _ = outcome;
+                }
+                Ok(None) => {}
                 Err(e) => {
                     return err(format!(
                         "dlv.unlockRouted: AMM re-simulation rejected: {e:?}"
@@ -1528,28 +1633,79 @@ impl AppRouterImpl {
                 }
             }
         };
-        // Suppress unused-warning for the anchor-enforcement bypass
-        // tracker when the function path doesn't otherwise consume it
-        // (today the response path doesn't surface it).  Reading the
-        // local keeps it visible to future response-shape changes
-        // without flagging dead-code.
-        let _ = anchor_bypassed_optional;
-
-        // Past the gate.  Emit the standard DlvUnlock on the unlocker's
-        // self-loop — same operation the non-routed `dlv.unlock` path
-        // produces.  Atomicity is the X-visibility we just verified.
+        // Past the gates. This is a SETTLEMENT: value moves.
         let unlocker_pk = if req.unlocker_public_key.is_empty() {
             req.device_id.clone()
         } else {
             req.unlocker_public_key.clone()
         };
-        let op = dsm::types::operations::Operation::DlvUnlock {
+
+        // The trade, in the terms the conservation chokepoint checks. Taken from
+        // the hop that was just verified against the owner's proven reserves, so
+        // the deltas below cannot describe a different trade than the one the
+        // AMM re-simulation accepted.
+        let Some(settle) = settle_terms.as_ref() else {
+            return err("dlv.unlockRouted: routed settlement requires a verified AMM hop".into());
+        };
+
+        // FIRST-WRITER CLAIM, immediately before the advance. Everything after
+        // this moves value; everything before it is reversible by stopping. A
+        // contested slot means another trade already holds this parent sequence,
+        // and losing here costs nothing because nothing has moved.
+        let Ok(rc_for_x) = generated::RouteCommitV1::decode(&*req.route_commit_bytes) else {
+            return err("dlv.unlockRouted: route_commit_bytes did not decode".into());
+        };
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc_for_x);
+        if let Err(e) = crate::sdk::settlement_slot::claim_settlement_slot(
+            &vault_id,
+            hop.vault_state_anchor_seq,
+            &x,
+        )
+        .await
+        {
+            return err(format!("dlv.unlockRouted: settlement slot not held: {e}"));
+        }
+
+        let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, &x);
+        let op = dsm::types::operations::Operation::DlvSettle {
             vault_id: vault_id.to_vec(),
-            fulfillment_proof: req.route_commit_bytes.clone(),
-            requester_public_key: unlocker_pk,
+            owner_public_key: settle.owner_public_key.clone(),
+            owner_devid: settle.owner_devid,
+            owner_genesis: settle.owner_genesis,
+            input_policy_commit: settle.input_policy_commit,
+            output_policy_commit: settle.output_policy_commit,
+            parent_sequence: hop.vault_state_anchor_seq,
+            parent_reserves_digest: settle.parent_reserves_digest,
+            reserve_proof_root: settle.reserve_proof_root,
+            predicate_digest: settle.predicate_digest,
+            route_commit_bytes: req.route_commit_bytes.clone(),
+            external_commitment_x: x,
+            input_amount: settle.input_amount,
+            output_amount: settle.output_amount,
+            fee_bps: settle.fee_bps,
+            sigma: settle.sigma,
+            settler_public_key: unlocker_pk,
+            settler_devid: settle.settler_devid,
+            settlement_receipt_id: receipt_id,
             signature: req.signature.clone(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
         };
+
+        // The two POSITIONAL deltas the conservation arm requires: the input the
+        // trader pays, then the output it takes. Order and exactness are checked
+        // against the operation's own authorization inside `advance`.
+        let deltas = vec![
+            dsm::types::device_state::BalanceDelta {
+                policy_commit: settle.input_policy_commit,
+                direction: dsm::types::device_state::BalanceDirection::Debit,
+                amount: settle.input_amount,
+            },
+            dsm::types::device_state::BalanceDelta {
+                policy_commit: settle.output_policy_commit,
+                direction: dsm::types::device_state::BalanceDirection::Credit,
+                amount: settle.output_amount,
+            },
+        ];
 
         let reference_state = match self.core_sdk.get_current_state() {
             Ok(s) => s,
@@ -1564,7 +1720,7 @@ impl AppRouterImpl {
         );
         if let Err(e) =
             self.core_sdk
-                .execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
+                .execute_on_relationship(rel_key, actor, op, &deltas, Some(init_tip))
         {
             return err(format!(
                 "dlv.unlockRouted: execute_on_relationship failed: {e}"
@@ -1580,144 +1736,93 @@ impl AppRouterImpl {
         // advertisement on storage (republish-on-settled) so the next
         // trader's quote reflects the post-trade reserves rather than
         // hitting OutputMismatch on every attempt.
-        if let Some((new_a, new_b)) = amm_post_trade_reserves {
-            // Capture the canonical token pair from the vault's AMM
-            // fulfillment so we can address the routing advertisement
-            // for republish without reconstructing it from the route.
-            let mut canonical_pair: Option<(Vec<u8>, Vec<u8>)> = None;
-            // Tier 2 Foundation: capture the post-settle (sequence,
-            // reserves_digest) cloned out of the lock so we can sign +
-            // republish a fresh `VaultStateAnchorV1` after the lock is
-            // released.  The local sequence is the LOCAL authoritative
-            // truth — the chunks #7 gate binds against it.  The storage
-            // anchor is republished best-effort as a discovery
-            // advertisement only.
-            let mut post_settle_anchor: Option<(u64, [u8; 32])> = None;
-            // Best-effort: a failure here means the vault's local state
-            // diverges from the advanced chain by one swap.  The chain
-            // is authoritative; the vault state will resync at next
-            // restart from the proto stored on chain.  Log + continue.
-            // The post-advance in-memory reserve mutation is GONE.
-            //
-            // It rewrote `reserve_a` / `reserve_b` inside the vault's own
-            // fulfillment condition, which is where reserves used to live. They
-            // are now encumbered leaves in the OWNER's device SMT, and a
-            // settling trader has no business rewriting the owner's liquidity
-            // in its local copy: the owner learns of a settlement by
-            // reconciling a receipt it has verified, not by another device
-            // editing a struct.
-            //
-            // What replaces it — trader-side value movement and owner-side
-            // reconciliation — lands with the settlement work. Until then the
-            // unlock above fails closed, so nothing reaches here.
-
-            // Advertisement republish also goes with the settlement work: an ad
-            // must describe encumbered reserves, and there is no settled state
-            // to describe until the unlock above stops failing closed.
-
-            // Tier 2 Foundation: republish the vault state anchor for
-            // the post-settle (sequence, reserves_digest) so off-device
-            // traders quoting the next swap stamp the matching
-            // `RouteCommitHop` binding fields.  This is an
-            // advertisement-only write — vault internal state is the
-            // authoritative truth and the chunks #7 gate already
-            // verified the prior anchor against the local vault.
-            // Best-effort: failure logs a warning, never rolls back
-            // the on-chain unlock.
-            if let Some((new_seq, new_digest)) = post_settle_anchor {
-                if let (Ok(pk), Ok(sk)) = (
-                    crate::sdk::signing_authority::current_public_key(),
-                    crate::sdk::signing_authority::current_secret_key(),
-                ) {
-                    if !pk.is_empty() && !sk.is_empty() {
-                        // Phase 6 fix: only republish the anchor when the
-                        // LOCAL wallet is the vault owner.  Trader-side
-                        // routed unlocks (cross-device) MUST NOT sign a new
-                        // anchor with the trader's key — verifiers expect
-                        // the owner's key, and a trader-signed anchor
-                        // would fail `verify_vault_state_anchor`.  The
-                        // vault-keyed pending pointer (published as part
-                        // of `route.publishExternalCommitment` when the
-                        // signed RouteCommit bytes are supplied) is the
-                        // cross-device-safe discovery aid; anchor refresh
-                        // remains the owner's responsibility.
-                        let local_is_owner = match dlv_manager.get_vault(&vault_id).await {
-                            Ok(vault_lock) => {
-                                let vault = vault_lock.lock().await;
-                                vault.creator_public_key.as_slice() == pk.as_slice()
-                            }
-                            Err(_) => false,
-                        };
-                        if local_is_owner {
-                            match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
+        // THE RECEIPT. The trader's settlement is final at the advance above; this
+        // is what makes it visible to everyone else.
+        //
+        // Without it the pending pointer stays inert, so the owner never
+        // reconciles and later traders keep quoting the pre-trade reserves. The
+        // leaf is already in the trader's own root — written by the DlvSettle
+        // advance — so this only signs the inclusion path over it and publishes.
+        //
+        // Best-effort: the credit is already committed and cannot be withdrawn
+        // by a publication failure. A missing receipt costs visibility, not
+        // value, and republishing later is safe because the leaf does not move.
+        if let Some(settle) = settle_terms.as_ref() {
+            let head = match self.core_sdk.device_head() {
+                Some(h) => h,
+                None => {
+                    log::warn!("[dlv.unlockRouted] no device head; receipt not published");
+                    return pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                        generated::AppStateResponse {
+                            key: "dlv.unlockRouted".to_string(),
+                            value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
+                        },
+                    ));
+                }
+            };
+            let trade = dsm::dlv::settlement_receipt_leaf::SettledTrade {
+                x,
+                parent_sequence: hop.vault_state_anchor_seq,
+                new_sequence: hop.vault_state_anchor_seq.saturating_add(1),
+                input_policy_commit: settle.input_policy_commit,
+                input_amount: settle.input_amount,
+                output_policy_commit: settle.output_policy_commit,
+                output_amount: settle.output_amount,
+            };
+            let key = dsm::dlv::settlement_receipt_leaf::settlement_receipt_key(
+                &head.genesis(),
+                &head.devid(),
+                &vault_id,
+                &receipt_id,
+            );
+            match head.inclusion_siblings(&key) {
+                Ok(siblings) => {
+                    match (
+                        crate::sdk::signing_authority::current_public_key(),
+                        crate::sdk::signing_authority::current_secret_key(),
+                    ) {
+                        (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => {
+                            match dsm::dlv::settlement_receipt_leaf::sign_trader_settlement_receipt(
                                 &vault_id,
-                                new_seq,
-                                &new_digest,
+                                &receipt_id,
+                                trade,
+                                &head.genesis(),
+                                &head.devid(),
+                                &head.root(),
+                                siblings,
                                 &pk,
                                 &sk,
                             ) {
-                                Ok(signed) => {
-                                    let proto_bytes =
-                                        crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
-                                            &signed,
-                                        );
+                                Ok(receipt) => {
                                     if let Err(e) =
-                                        publish_vault_state_anchor(&vault_id, &proto_bytes).await
+                                        crate::sdk::settlement_receipt_codec::publish_settlement_receipt(
+                                            &receipt,
+                                        )
+                                        .await
                                     {
                                         log::warn!(
-                                            "[dlv.unlockRouted] anchor republish (seq={}) failed for {}: {e}",
-                                            new_seq,
+                                            "[dlv.unlockRouted] receipt publish failed for {}: {e} \
+                                             — the settlement is committed but stays invisible \
+                                             until republished",
                                             crate::util::text_id::encode_base32_crockford(&vault_id),
                                         );
                                     }
                                 }
-                                Err(e) => {
-                                    log::warn!(
-                                        "[dlv.unlockRouted] anchor sign failed for seq={} vault={}: {e:?}",
-                                        new_seq,
-                                        crate::util::text_id::encode_base32_crockford(&vault_id),
-                                    );
-                                }
+                                Err(e) => log::warn!(
+                                    "[dlv.unlockRouted] receipt sign failed for {}: {e}",
+                                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                                ),
                             }
-
-                            // Phase 7 — SoFi spec §4.1.2: also commit
-                            // the post-trade vault state into the
-                            // PD-SMT and publish a
-                            // VaultStateInclusionProofV1.  This is the
-                            // spec-strict strengthening that closes
-                            // the signing-key-forgery hole on the unlock
-                            // path.  Same owner-key gate as the anchor
-                            // republish above.
-                            publish_vault_state_inclusion_proof(
-                                self.core_sdk.as_ref(),
-                                &vault_id,
-                                new_seq,
-                                &new_digest,
-                                &pk,
-                                &sk,
-                            )
-                            .await;
-                        } else {
-                            log::info!(
-                                "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: local wallet is not the vault owner — composition path will reflect this trade via VaultPendingPointerV1 instead",
-                                new_seq,
-                                crate::util::text_id::encode_base32_crockford(&vault_id),
-                            );
                         }
-                    } else {
-                        log::warn!(
-                            "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: signing authority empty",
-                            new_seq,
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                        );
+                        _ => log::warn!(
+                            "[dlv.unlockRouted] signing authority unavailable; receipt not published"
+                        ),
                     }
-                } else {
-                    log::warn!(
-                        "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: signing authority unavailable",
-                        new_seq,
-                        crate::util::text_id::encode_base32_crockford(&vault_id),
-                    );
                 }
+                Err(e) => log::warn!(
+                    "[dlv.unlockRouted] receipt inclusion path unavailable for {}: {e}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                ),
             }
         }
 
@@ -1770,6 +1875,28 @@ async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> 
 ///
 /// Best-effort like its vault-state sibling: a publication failure leaves the
 /// vault unquotable rather than mis-quoted, which is the safe direction.
+/// Everything `Operation::DlvSettle` must carry, captured from the hop that was
+/// verified against the owner's PROVEN reserves.
+///
+/// Collected in one place so the deltas and the authorization are built from a
+/// single set of values. Reading any of them from a second source would let the
+/// two describe different trades while each looked internally consistent.
+struct SettleTerms {
+    owner_public_key: Vec<u8>,
+    owner_devid: [u8; 32],
+    owner_genesis: [u8; 32],
+    input_policy_commit: [u8; 32],
+    output_policy_commit: [u8; 32],
+    input_amount: u64,
+    output_amount: u64,
+    parent_reserves_digest: [u8; 32],
+    reserve_proof_root: [u8; 32],
+    predicate_digest: [u8; 32],
+    fee_bps: u32,
+    sigma: [u8; 32],
+    settler_devid: [u8; 32],
+}
+
 async fn publish_reserve_inclusion_proof(
     core_sdk: &crate::sdk::core_sdk::CoreSDK,
     vault_id: &[u8; 32],

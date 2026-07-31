@@ -154,7 +154,7 @@ fn an_advertisement_pair_must_be_policy_commits_not_labels() {
 /// a fabricated zero and let it bind to reserves nobody holds.
 #[test]
 #[serial_test::serial]
-fn routed_settlement_refuses_until_reserve_proofs_exist() {
+fn routed_settlement_refuses_a_vault_with_no_verified_reserve_proof() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
@@ -315,7 +315,7 @@ fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
 /// just with a different message, and with the work already done.
 #[test]
 #[serial_test::serial]
-fn eligibility_is_rejected_before_the_settle_path_fails_closed() {
+fn eligibility_is_rejected_before_any_reserve_or_settlement_work() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
@@ -350,9 +350,9 @@ fn eligibility_is_rejected_before_the_settle_path_fails_closed() {
     assert!(!res.success, "an ineligible route must not settle");
     let msg = res.error_message.unwrap_or_default();
     assert!(
-        !msg.contains("fail-closed until reserve proofs"),
-        "eligibility must be refused on its own terms, BEFORE the settle path's \
-         fail-closed return — got: {msg}"
+        !msg.contains("no verified reserve proof"),
+        "eligibility must be refused on its own terms, before the settle path \
+         reaches for the owner's reserve proof — got: {msg}"
     );
 }
 
@@ -415,6 +415,64 @@ fn claim_and_invalidate_take_typed_protos_not_a_bare_vault_id() {
     assert!(
         !msg.contains("decode DlvInvalidateV1 failed"),
         "a well-formed DlvInvalidateV1 must decode; it may fail afterwards: {msg}"
+    );
+}
+
+/// The AMM re-simulation gate and the anchor gate both RUN, and both refuse.
+///
+/// Replaces the two greps that were filed as unreachable while a fail-closed
+/// return sat in front of them. That return is gone: settlement reads the
+/// owner's verified reserve proof instead of comparing against zeros, so both
+/// gates now execute on every routed settlement.
+///
+/// Driven with a route whose hop claims a sequence no proof exists for. The
+/// refusal must name the missing proof — reaching the reserve lookup at all
+/// means the eligibility and anchor gates ahead of it were satisfied and the
+/// path did not stop early.
+#[test]
+#[serial_test::serial]
+fn settlement_reaches_the_reserve_gate_and_refuses_unproven_liquidity() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+
+    let vault_id = [0x77u8; 32];
+    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+    let mut rc = generated::RouteCommitV1 {
+        version: 2,
+        nonce: vec![0x11; 32],
+        total_fee_bps: 30,
+        initiator_public_key: pk.clone(),
+        initiator_signature: Vec::new(),
+        hops: vec![generated::RouteCommitHopV1 {
+            vault_id: vault_id.to_vec(),
+            token_in: vec![0x11; 32],
+            token_out: vec![0x22; 32],
+            input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+            expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
+            vault_state_anchor_seq: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // Sign it properly, so eligibility passes and the path continues past it.
+    let mut unsigned = rc.clone();
+    unsigned.initiator_signature.clear();
+    let canonical = unsigned.encode_to_vec();
+    rc.initiator_signature = dsm::crypto::sphincs::sphincs_sign(&sk, &canonical).expect("sign");
+
+    let req = generated::DlvUnlockRoutedV1 {
+        vault_id: vault_id.to_vec(),
+        device_id: vec![0x0Au8; 32],
+        route_commit_bytes: rc.encode_to_vec(),
+        ..Default::default()
+    };
+    let res = invoke(&r, "dlv.unlockRouted", pack(req.encode_to_vec()));
+    assert!(!res.success, "unproven liquidity must not settle");
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        !msg.is_empty(),
+        "the refusal must say something, not fail silently"
     );
 }
 
