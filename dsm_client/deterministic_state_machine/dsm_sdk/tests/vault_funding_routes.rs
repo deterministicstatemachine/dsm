@@ -356,6 +356,68 @@ fn eligibility_is_rejected_before_the_settle_path_fails_closed() {
     );
 }
 
+/// `dlv.claim` and `dlv.invalidate` accept only a valid typed protobuf request.
+///
+/// Replaces greps for `DlvClaimV1::decode` / `DlvInvalidateV1::decode` appearing
+/// in the handler. Those confirmed two symbols were mentioned; they could not
+/// confirm that arbitrary bytes are actually refused, which is the property that
+/// matters — a handler that accepted anything 32 bytes long would satisfy them.
+///
+/// A bare 32-byte value is simply malformed input for these routes. It is worth
+/// testing specifically because 32 arbitrary bytes are a plausible protobuf
+/// prefix, so a lenient decoder would produce a half-populated request rather
+/// than an error, and the route would proceed on fields nobody sent.
+#[test]
+#[serial_test::serial]
+fn claim_and_invalidate_take_typed_protos_not_a_bare_vault_id() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+
+    for method in ["dlv.claim", "dlv.invalidate"] {
+        // A bare vault id: not a `DlvClaimV1`, and not a `DlvInvalidateV1`.
+        let res = invoke(&r, method, pack(vec![0x77u8; 32]));
+        assert!(
+            !res.success,
+            "{method} must not accept a bare 32-byte vault_id"
+        );
+
+        // An EMPTY body is refused too, and distinctly — so the refusal above
+        // is not simply "anything short fails".
+        let empty = invoke(&r, method, pack(Vec::new()));
+        assert!(!empty.success, "{method} must refuse an empty payload");
+        assert!(
+            empty.error_message.unwrap_or_default().contains("empty"),
+            "{method} must name the empty payload rather than fail generically"
+        );
+    }
+
+    // And a well-formed typed request gets PAST decoding — it fails later, on
+    // the vault not existing. Without this the test could pass through blanket
+    // rejection, proving only that the route refuses everything.
+    let claim = generated::DlvClaimV1 {
+        vault_id: vec![0x77u8; 32],
+        ..Default::default()
+    };
+    let res = invoke(&r, "dlv.claim", pack(claim.encode_to_vec()));
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        !msg.contains("decode DlvClaimV1 failed"),
+        "a well-formed DlvClaimV1 must decode; it may fail afterwards: {msg}"
+    );
+
+    let invalidate = generated::DlvInvalidateV1 {
+        vault_id: vec![0x77u8; 32],
+        ..Default::default()
+    };
+    let res = invoke(&r, "dlv.invalidate", pack(invalidate.encode_to_vec()));
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        !msg.contains("decode DlvInvalidateV1 failed"),
+        "a well-formed DlvInvalidateV1 must decode; it may fail afterwards: {msg}"
+    );
+}
+
 /// The routes this file exercises must be reachable through the production
 /// dispatcher. A handler arm that the router does not name is a dead feature
 /// that every unit test still passes.

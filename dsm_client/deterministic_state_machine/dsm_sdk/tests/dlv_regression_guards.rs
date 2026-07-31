@@ -105,28 +105,6 @@ fn dlv_claim_publishes_terminal_state_ad() {
     );
 }
 
-/// Track A invariant — `dlv.invalidate` and `dlv.claim` MUST decode their
-/// requests via the typed `DlvInvalidateV1` / `DlvClaimV1` protos, not via
-/// the historical inline `[32-byte vault_id][rest]` body shape.  A
-/// regression that re-introduced the inline format would silently accept
-/// undersized payloads with no schema enforcement.
-#[test]
-fn dlv_invalidate_and_claim_decode_typed_protos() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        src.contains("generated::DlvInvalidateV1::decode"),
-        "regression: dlv.invalidate decoder no longer reads DlvInvalidateV1 proto"
-    );
-    assert!(
-        src.contains("generated::DlvClaimV1::decode"),
-        "regression: dlv.claim decoder no longer reads DlvClaimV1 proto"
-    );
-    assert!(
-        !src.contains("body must start with 32-byte vault_id"),
-        "regression: dlv handlers reverted to the inline [vault_id][rest] format"
-    );
-}
-
 /// Track C.3 invariant — each trade-flow handler MUST delegate to the
 /// audited SDK helper (chunk #1 / #2 / #3) rather than re-implementing
 /// the logic inline.  A regression that copy-pasted the BLAKE3
