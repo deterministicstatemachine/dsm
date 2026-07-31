@@ -2197,6 +2197,45 @@ mod funded_creation_tests {
         crate::storage::client_db::init_database().expect("init db");
     }
 
+    /// Install an identity keyed by `seed`, WITHOUT resetting storage.
+    ///
+    /// Identity is process-global, so a two-device test switches it between
+    /// phases. The device heads and DLV managers are per-router, so each side
+    /// keeps its own state — which is the boundary that matters: the trader has
+    /// no access to the owner's leaves and must work from published artifacts.
+    fn become_device(seed: u8) -> (Vec<u8>, [u8; 32]) {
+        let device_id = vec![seed; 32];
+        let genesis_hash = vec![seed.wrapping_add(1); 32];
+        let binding_key = vec![seed.wrapping_add(2); 32];
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id.clone(),
+            public_key.clone(),
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        let mut did = [0u8; 32];
+        did.copy_from_slice(&device_id);
+        (public_key, did)
+    }
+
+    fn named_router(name: &str) -> AppRouterImpl {
+        AppRouterImpl::new(SdkConfig {
+            node_id: name.to_string(),
+            storage_endpoints: vec![],
+            enable_offline: true,
+        })
+        .expect("router init")
+    }
+
     fn router() -> AppRouterImpl {
         AppRouterImpl::new(SdkConfig {
             node_id: "funded-creation-test".to_string(),
@@ -2508,6 +2547,361 @@ mod funded_creation_tests {
             call(build(Vec::new())).success,
             "an absent digest must be computed, not required from the caller"
         );
+    }
+
+    /// A vault created FOR a recipient is advertised to that recipient.
+    ///
+    /// Replaces greps for `posted_dlv_sdk::publish_active_advertisement` and
+    /// `intended_recipient_opt.as_ref()` appearing in the handler. Those confirm
+    /// a call site and a field access; they cannot confirm the advertisement
+    /// reaches the recipient's own prefix, which is the only thing that makes a
+    /// posted vault discoverable by the party it was posted to.
+    #[test]
+    #[serial]
+    fn a_vault_posted_to_a_recipient_is_advertised_under_that_recipient() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+
+        let recipient = vec![0xC7u8; 1184];
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                intended_recipient: recipient.clone(),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault");
+
+        // The advertisement is readable at the address derived from the
+        // RECIPIENT — the prefix that recipient scans.
+        let key = crate::sdk::posted_dlv_sdk::advertisement_key(&recipient, &rec.vault_id);
+        let bytes = crate::runtime::get_runtime()
+            .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+            .expect("the posted vault must be advertised under its recipient");
+        assert!(!bytes.is_empty());
+
+        // And NOT under a different recipient's prefix, so one party cannot
+        // discover offers made to another.
+        let other = vec![0xD8u8; 1184];
+        let other_key = crate::sdk::posted_dlv_sdk::advertisement_key(&other, &rec.vault_id);
+        assert_ne!(key, other_key);
+        assert!(
+            crate::runtime::get_runtime()
+                .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&other_key))
+                .map(|b| b.is_empty())
+                .unwrap_or(true),
+            "a posted vault must not be discoverable under another recipient"
+        );
+    }
+
+    /// TWO DEVICES. The owner and the trader are separate routers with separate
+    /// identities, separate device heads and separate vault managers, and they
+    /// communicate ONLY through storage.
+    ///
+    /// This is what the single-device lifecycle cannot show. There, the settling
+    /// side happened to be the same process that funded the vault; the artifacts
+    /// were verified honestly, but nothing forced them to be the only channel.
+    /// Here the trader has no access to the owner's leaves at all — its own head
+    /// holds no reserve for the vault — so every fact it settles against must
+    /// have arrived as a published, verified artifact or it settles nothing.
+    ///
+    /// Process-global identity is switched between phases; heads and vault
+    /// managers are per-router, which is the boundary that matters.
+    #[test]
+    #[serial]
+    fn owner_and_trader_on_separate_devices_settle_through_storage_alone() {
+        use prost::Message as _;
+
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+
+        // ── OWNER ────────────────────────────────────────────────────────────
+        let (owner_pk, _owner_did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(create.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "owner create failed: {:?}", res.error_message);
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault");
+        let vault_id = rec.vault_id;
+
+        // The owner publishes the advertisement, which is how the trader finds
+        // the vault at all.
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/two-device".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // ── TRADER ───────────────────────────────────────────────────────────
+        let (trader_pk, trader_did) = become_device(0x51);
+        assert_ne!(trader_pk, owner_pk, "the two devices must be distinct");
+        let trader = named_router("trader");
+        // A head holding only the input asset. Crucially it holds NO reserve for
+        // this vault — the trader does not own the liquidity it trades against.
+        trader.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD2, 5_000, 0),
+        );
+        let trader_head = trader.core_sdk.device_head().expect("trader head");
+        assert_eq!(
+            trader_head.vault_reserve(&vault_id, &pc_a),
+            0,
+            "precondition: the trader holds none of the vault's reserves"
+        );
+        let (bal_a_before, bal_b_before) = (trader_head.balance(&pc_a), trader_head.balance(&pc_b));
+
+        // The trader acquires the vault the only way it can: from storage.
+        let pair = generated::RoutingPairRequest {
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            trader
+                .invoke(AppInvoke {
+                    method: "route.syncVaultsForPair".to_string(),
+                    args: pack(pair.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "trader sync failed: {:?}", res.error_message);
+
+        // And the reserve proof it will settle against — fetched and verified
+        // from storage, with no access to the owner's leaves.
+        let proof = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(&vault_id, 0),
+            )
+            .expect("the trader must be able to verify the owner's published reserves");
+        assert_eq!(
+            dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_a),
+            Some(10_000)
+        );
+
+        let input = 1_000u64;
+        let expected_out =
+            crate::sdk::routing_path_sdk::constant_product_output(input, 10_000, 5_000, 30)
+                .expect("curve output");
+        let reserves_digest =
+            dsm::dlv::vault_state_anchor::compute_reserves_digest(&pc_a, &pc_b, 10_000, 5_000, 30);
+        let anchor_digest =
+            dsm::dlv::vault_state_anchor::compute_anchor_digest(&vault_id, 0, &reserves_digest);
+        let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x22; 32],
+            total_fee_bps: 30,
+            initiator_public_key: trader_pk.clone(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
+                vault_state_anchor_seq: 0,
+                vault_state_reserves_digest: reserves_digest.to_vec(),
+                vault_state_anchor_digest: anchor_digest.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            dsm::crypto::sphincs::sphincs_sign(&trader_sk, &canonical).expect("trader signs");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    &trader_pk,
+                    &trader_sk,
+                    "two-device",
+                ),
+            )
+            .expect("trader publishes X + pointer");
+
+        let settle = generated::DlvUnlockRoutedV1 {
+            vault_id: vault_id.to_vec(),
+            device_id: trader_did.to_vec(),
+            route_commit_bytes: rc.encode_to_vec(),
+            unlocker_public_key: trader_pk.clone(),
+            signature: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            trader
+                .invoke(AppInvoke {
+                    method: "dlv.unlockRouted".to_string(),
+                    args: pack(settle.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(
+            res.success,
+            "cross-device settlement failed: {:?}",
+            res.error_message
+        );
+
+        // The TRADER's balances moved, on the TRADER's head.
+        let trader_after = trader.core_sdk.device_head().expect("trader head");
+        assert_eq!(trader_after.balance(&pc_a), bal_a_before - input);
+        assert_eq!(trader_after.balance(&pc_b), bal_b_before + expected_out);
+        assert_eq!(
+            trader_after.vault_reserve(&vault_id, &pc_a),
+            0,
+            "settling must not put the owner's reserves on the trader's head"
+        );
+
+        // ── OWNER RECONCILES ─────────────────────────────────────────────────
+        let _ = become_device(0x41);
+        let owner_before = owner.core_sdk.device_head().expect("owner head");
+        assert_eq!(
+            owner_before.vault_reserve(&vault_id, &pc_a),
+            10_000,
+            "the owner's reserves must be untouched until it folds the receipt"
+        );
+
+        // THE HEADS ARE GENUINELY SEPARATE. The trader's settlement moved the
+        // trader's balances; the owner's are exactly where funding left them. If
+        // the two routers shared a head this would fail, and every assertion
+        // above about "the trader" would have been about the owner.
+        assert_eq!(
+            (owner_before.balance(&pc_a), owner_before.balance(&pc_b)),
+            (40_000, 15_000),
+            "a settlement on the trader's device must not touch the owner's balances"
+        );
+        assert_ne!(
+            owner_before.devid(),
+            trader_after.devid(),
+            "the two routers must be different devices, not one head seen twice"
+        );
+        assert_ne!(owner_before.root(), trader_after.root());
+
+        let reconcile = generated::DlvReconcileV1 {
+            vault_id: vault_id.to_vec(),
+            x: x.to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.reconcile".to_string(),
+                    args: pack(reconcile.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(
+            res.success,
+            "owner reconcile failed: {:?}",
+            res.error_message
+        );
+
+        // THE TWO SIDES AGREE. What the trader paid is what the owner received,
+        // and what the trader took is what the owner released — established
+        // across the boundary by the receipt alone.
+        let owner_after = owner.core_sdk.device_head().expect("owner head");
+        assert_eq!(
+            owner_after.vault_reserve(&vault_id, &pc_a),
+            10_000 + input,
+            "the owner received exactly what the trader paid"
+        );
+        assert_eq!(
+            owner_after.vault_reserve(&vault_id, &pc_b),
+            5_000 - expected_out,
+            "the owner released exactly what the trader took"
+        );
+        assert_eq!(
+            owner_after
+                .vault_reserve_entry(&vault_id, &pc_a)
+                .expect("leg A")
+                .sequence,
+            1,
+        );
+
+        // CONSERVATION ACROSS THE PAIR, per asset. The trader's loss is the
+        // vault's gain and vice versa — the headline number.
+        let trader_delta_a = trader_after.balance(&pc_a) as i128 - bal_a_before as i128;
+        let vault_delta_a = owner_after.vault_reserve(&vault_id, &pc_a) as i128 - 10_000i128;
+        assert_eq!(trader_delta_a + vault_delta_a, 0, "asset A is conserved");
+        let trader_delta_b = trader_after.balance(&pc_b) as i128 - bal_b_before as i128;
+        let vault_delta_b = owner_after.vault_reserve(&vault_id, &pc_b) as i128 - 5_000i128;
+        assert_eq!(trader_delta_b + vault_delta_b, 0, "asset B is conserved");
     }
 
     /// THE FULL SETTLEMENT LIFECYCLE, driven through the production dispatcher.

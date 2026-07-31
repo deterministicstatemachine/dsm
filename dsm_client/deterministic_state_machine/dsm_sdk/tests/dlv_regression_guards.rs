@@ -14,6 +14,34 @@
 // allow at the file level for tests.
 #![allow(clippy::disallowed_methods)]
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IS LEFT, AND WHY IT IS STILL HERE
+//
+// 44 of the original 47 entries are gone, replaced by tests that execute the
+// behaviour rather than match this repo's source text. Three remain, retained
+// deliberately rather than deleted or faked:
+//
+//   dlv_claim_uses_local_rel_key_not_creator_rel_key
+//   dlv_claim_publishes_terminal_state_ad
+//     The claim path needs a posted vault with an intended recipient AND the
+//     decryption material to open it. That fixture is real work, and the claim
+//     path is unrelated to SoFi settlement — so building it now would spend
+//     effort on the least-connected corner of the system to retire two entries.
+//     They stay until someone works on claims, at which point the fixture is
+//     needed anyway.
+//
+//   trade_flow_handlers_delegate_to_audited_sdks
+//     Down from five needles to three. Its publish and list halves are proven by
+//     `route_routes::stamping_tests::the_route_and_the_sdk_return_the_same_advertisements`.
+//     The remaining three sit on `route.findAndBindBestPath`, whose behavioural
+//     replacement is output agreement between handler and SDK over a composed
+//     quote — worth writing, not yet written.
+//
+// None of these guards a value-moving path. Every path that moves value is
+// proven by execution: funded creation, reserve-proof publication, routed
+// settlement, owner reconciliation, and the two-device lifecycle.
+// ─────────────────────────────────────────────────────────────────────────────
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -68,23 +96,6 @@ fn dlv_claim_uses_local_rel_key_not_creator_rel_key() {
     assert!(
         !claim_region.contains("v.creator_public_key"),
         "dlv.claim must not read vault.creator_public_key for routing"
-    );
-}
-
-/// Track B invariant — `dlv.create` with a non-empty `intended_recipient`
-/// MUST publish a posted-DLV advertisement.  A regression that dropped
-/// the publish call would leave recipients unable to discover their
-/// vaults while creators see a fully committed on-chain state.
-#[test]
-fn dlv_create_publishes_advertisement_when_intended_recipient_set() {
-    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
-    assert!(
-        src.contains("crate::sdk::posted_dlv_sdk::publish_active_advertisement"),
-        "regression: dlv.create no longer invokes publish_active_advertisement"
-    );
-    assert!(
-        src.contains("intended_recipient_opt.as_ref()"),
-        "regression: dlv.create publish gate must read intended_recipient_opt"
     );
 }
 

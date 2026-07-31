@@ -91,6 +91,36 @@ pub(crate) fn pair_commits() -> ([u8; 32], [u8; 32]) {
 ///
 /// Built through `DeviceState::restore`, the public constructor that takes a
 /// balance map — so the starting balances are ones a real device could hold.
+/// As [`owner_holding`], but on a NAMED device.
+///
+/// Two devices in one test must not share a devid: reserve leaf keys are derived
+/// from `(genesis, devid, vault_id, policy_commit)`, so identical devids would
+/// make two heads derive the same leaf positions and the boundary between them
+/// would be nominal.
+pub(crate) fn device_holding(devid_seed: u8, a: u64, b: u64) -> DeviceState {
+    let (pc_a, pc_b) = pair_commits();
+    let mut balances = BTreeMap::new();
+    if a > 0 {
+        balances.insert(pc_a, a);
+    }
+    if b > 0 {
+        balances.insert(pc_b, b);
+    }
+    DeviceState::restore(
+        GENESIS,
+        [devid_seed; 32],
+        vec![9u8; 32],
+        None,
+        balances,
+        Vec::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        1024,
+    )
+    .expect("fixture device state")
+}
+
 pub(crate) fn owner_holding(a: u64, b: u64) -> DeviceState {
     let (pc_a, pc_b) = pair_commits();
     let mut balances = BTreeMap::new();
