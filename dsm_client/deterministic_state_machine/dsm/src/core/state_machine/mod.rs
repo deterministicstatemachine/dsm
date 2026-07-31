@@ -192,7 +192,7 @@ impl StateMachine {
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
         // Assets to encumber into a vault as part of this transition. `Some` only
         // for `DlvCreate`, so the encumbrance and the transition share one root.
-        reserve_funding: Option<crate::types::device_state::VaultReserveFunding>,
+        reserve_funding: Option<crate::types::device_state::VaultReserveMutation>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
             DsmError::state_machine(

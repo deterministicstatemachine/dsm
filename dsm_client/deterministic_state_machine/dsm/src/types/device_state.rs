@@ -788,15 +788,41 @@ pub struct AnchorLeafUpdate {
 /// `(amount, vault_sequence)`. Accepting a precomputed leaf would be the same
 /// "magnitudes supplied rather than proven" shape that was removed from reserve
 /// composition.
+/// Borrowed view of the `Fund` variant, so the encumbrance body reads the same
+/// as it did before the mutation type grew a second case.
+struct FundingView<'a> {
+    vault_id: [u8; 32],
+    legs: &'a [([u8; 32], u64)],
+    vault_sequence: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VaultReserveFunding {
-    pub vault_id: [u8; 32],
-    /// `(policy_commit, amount)` in canonical pair order, distinct assets, every
-    /// amount non-zero. Checked here rather than trusted.
-    pub legs: Vec<([u8; 32], u64)>,
-    /// The vault's sequence at creation. `0` is a real genesis sequence, not an
-    /// absence.
-    pub vault_sequence: u64,
+pub enum VaultReserveMutation {
+    /// `DlvCreate`: value leaves `balances` and enters the vault's reserve
+    /// leaves.
+    Fund {
+        vault_id: [u8; 32],
+        /// `(policy_commit, amount)` in canonical pair order, distinct assets,
+        /// every amount non-zero. Checked here rather than trusted.
+        legs: Vec<([u8; 32], u64)>,
+        /// The vault's sequence at creation. `0` is a real genesis sequence, not
+        /// an absence.
+        vault_sequence: u64,
+    },
+    /// `DlvOwnerApply`: the owner records a settlement it has verified. The
+    /// input the trader paid arrives, the output it took leaves, and `balances`
+    /// is untouched — the fee accrues inside the reserves as LP yield, so the
+    /// owner's spendable balance is not part of a settlement.
+    ApplySettlement {
+        vault_id: [u8; 32],
+        input_policy_commit: [u8; 32],
+        input_amount: u64,
+        output_policy_commit: [u8; 32],
+        output_amount: u64,
+        /// `parent + 1`. Every reserve write stamps it, so a stale proof cannot
+        /// be replayed against the new state.
+        new_sequence: u64,
+    },
 }
 
 /// Inclusion proofs for the anchor-state leaf across a bearer advance (`Π_i`/`Π_{i+1}`): `parent`
@@ -1153,7 +1179,7 @@ impl DeviceState {
         offline_spend: Option<OfflineSpend>,
         // Assets to encumber into a vault as part of THIS transition. `Some`
         // only for `DlvCreate`; every other advance passes `None`.
-        reserve_funding: Option<VaultReserveFunding>,
+        reserve_mutation: Option<VaultReserveMutation>,
     ) -> Result<AdvanceOutcome, DsmError> {
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
@@ -1263,7 +1289,17 @@ impl DeviceState {
         // Routing funding through deltas would give it back.
         let mut new_vault_reserves = self.vault_reserves.clone();
         let mut funding_leaves: Vec<([u8; 32], [u8; 32])> = Vec::new();
-        if let Some(funding) = &reserve_funding {
+        if let Some(VaultReserveMutation::Fund {
+            vault_id: funding_vault,
+            legs: funding_legs_in,
+            vault_sequence,
+        }) = &reserve_mutation
+        {
+            let funding = FundingView {
+                vault_id: *funding_vault,
+                legs: funding_legs_in,
+                vault_sequence: *vault_sequence,
+            };
             if !matches!(operation, Operation::DlvCreate { .. }) {
                 return Err(DsmError::invalid_operation(
                     "advance: only DlvCreate may encumber reserves",
@@ -1334,6 +1370,85 @@ impl DeviceState {
                     VaultReserve {
                         amount: *amount,
                         sequence: funding.vault_sequence,
+                    },
+                );
+            }
+        }
+
+        // THE OWNER RECORDS A SETTLEMENT it has already verified. The input the
+        // trader paid arrives, the output it took leaves, and `balances` is
+        // untouched: the trader's credit was final at the trader's own advance,
+        // and the fee accrues inside the reserves as LP yield.
+        //
+        // Rides the same batch as the `DlvOwnerApply` transition, for the same
+        // reason funding does — a reserve move in a separate advance would leave
+        // a root in which the vault's state and its reserves disagree.
+        if let Some(VaultReserveMutation::ApplySettlement {
+            vault_id: apply_vault,
+            input_policy_commit,
+            input_amount,
+            output_policy_commit,
+            output_amount,
+            new_sequence,
+        }) = &reserve_mutation
+        {
+            if !matches!(operation, Operation::DlvOwnerApply { .. }) {
+                return Err(DsmError::invalid_operation(
+                    "advance: only DlvOwnerApply may apply a settlement to reserves",
+                ));
+            }
+            if input_policy_commit == output_policy_commit {
+                return Err(DsmError::invalid_operation(
+                    "advance: a settlement cannot name one asset on both legs",
+                ));
+            }
+            if *input_amount == 0 || *output_amount == 0 {
+                return Err(DsmError::invalid_operation(
+                    "advance: settlement amounts must both be non-zero",
+                ));
+            }
+
+            let key_in = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                &self.genesis,
+                &self.devid,
+                apply_vault,
+                input_policy_commit,
+            );
+            let key_out = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                &self.genesis,
+                &self.devid,
+                apply_vault,
+                output_policy_commit,
+            );
+            let cur_in = self
+                .vault_reserves
+                .get(&key_in)
+                .copied()
+                .unwrap_or_default();
+            let cur_out = self
+                .vault_reserves
+                .get(&key_out)
+                .copied()
+                .unwrap_or_default();
+
+            let next_in = cur_in.amount.checked_add(*input_amount).ok_or_else(|| {
+                DsmError::invalid_operation("advance: settlement overflows the input reserve")
+            })?;
+            // Fails closed rather than wrapping: a vault that cannot pay the
+            // output has not settled this trade, whatever a receipt says.
+            let next_out = cur_out.amount.checked_sub(*output_amount).ok_or_else(|| {
+                DsmError::invalid_operation("advance: the vault cannot pay that settlement output")
+            })?;
+
+            for (key, amount) in [(key_in, next_in), (key_out, next_out)] {
+                let leaf_value =
+                    crate::dlv::vault_reserve_leaf::vault_reserve_value(amount, *new_sequence);
+                funding_leaves.push((key, leaf_value));
+                new_vault_reserves.insert(
+                    key,
+                    VaultReserve {
+                        amount,
+                        sequence: *new_sequence,
                     },
                 );
             }

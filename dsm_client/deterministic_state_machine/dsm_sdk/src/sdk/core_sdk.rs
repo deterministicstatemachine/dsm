@@ -1098,14 +1098,14 @@ impl CoreSDK {
     /// record — and rehydration correctly refuses a record-less vault, so the
     /// value would be stranded with no route to withdraw it.
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_on_relationship_with_reserve_funding(
+    pub fn execute_on_relationship_with_reserve_mutation(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
-        reserve_funding: Option<dsm::types::device_state::VaultReserveFunding>,
+        reserve_funding: Option<dsm::types::device_state::VaultReserveMutation>,
         in_tx_extra: Option<
             &dyn Fn(
                 &rusqlite::Transaction<'_>,
@@ -1319,7 +1319,7 @@ impl CoreSDK {
         // Assets to encumber into a vault as part of this transition. `Some` only
         // for `DlvCreate`; the encumbrance rides the SAME prepare/write/commit as
         // the transition, so either both land or neither does.
-        reserve_funding: Option<dsm::types::device_state::VaultReserveFunding>,
+        reserve_funding: Option<dsm::types::device_state::VaultReserveMutation>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.

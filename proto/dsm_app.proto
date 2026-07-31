@@ -1469,6 +1469,21 @@ message RoutingVaultAdvertisementV1 {
 // owner's hash chain — the coordination point is the
 // `ExternalCommitmentV1` anchor.  Until X is published all vaults
 // reject; once it is, all vaults accept.  No global coordinator.
+// Typed request for `dlv.reconcile` — the OWNER folds a settlement it has
+// verified into its own reserve leaves.
+//
+// The trader's credit was already final at the trader's own advance; this is the
+// owner learning what happened, not authorizing it. So the request names only
+// which settlement to look at: everything the owner acts on is re-derived from
+// the receipt it fetches and verifies, never taken from the caller.
+message DlvReconcileV1 {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+  // The external commitment of the settlement to fold. The receipt is fetched
+  // and verified under this key; a request naming a settlement with no valid
+  // receipt applies nothing.
+  bytes x        = 2 [(dsm_fixed_len)=32];
+}
+
 message DlvUnlockRoutedV1 {
   bytes vault_id              = 1 [(dsm_fixed_len)=32];
   bytes device_id             = 2 [(dsm_fixed_len)=32];

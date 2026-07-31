@@ -9476,7 +9476,61 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
  * owner's hash chain — the coordination point is the
  * `ExternalCommitmentV1` anchor.  Until X is published all vaults
  * reject; once it is, all vaults accept.  No global coordinator.
+ * Typed request for `dlv.reconcile` — the OWNER folds a settlement it has
+ * verified into its own reserve leaves.
  *
+ * The trader's credit was already final at the trader's own advance; this is the
+ * owner learning what happened, not authorizing it. So the request names only
+ * which settlement to look at: everything the owner acts on is re-derived from
+ * the receipt it fetches and verifies, never taken from the caller.
+ *
+ * @generated from message dsm.DlvReconcileV1
+ */
+export class DlvReconcileV1 extends Message<DlvReconcileV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * The external commitment of the settlement to fold. The receipt is fetched
+   * and verified under this key; a request naming a settlement with no valid
+   * receipt applies nothing.
+   *
+   * @generated from field: bytes x = 2;
+   */
+  x = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvReconcileV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvReconcileV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvReconcileV1 {
+    return new DlvReconcileV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvReconcileV1 {
+    return new DlvReconcileV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvReconcileV1 {
+    return new DlvReconcileV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvReconcileV1 | PlainMessage<DlvReconcileV1> | undefined, b: DlvReconcileV1 | PlainMessage<DlvReconcileV1> | undefined): boolean {
+    return proto3.util.equals(DlvReconcileV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.DlvUnlockRoutedV1
  */
 export class DlvUnlockRoutedV1 extends Message<DlvUnlockRoutedV1> {

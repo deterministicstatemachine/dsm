@@ -56,6 +56,7 @@ impl AppRouterImpl {
             "dlv.claim" => self.dlv_claim(i).await,
             "dlv.unlock" => self.dlv_unlock(i).await,
             "dlv.unlockRouted" => self.dlv_unlock_routed(i).await,
+            "dlv.reconcile" => self.dlv_reconcile(i).await,
             other => err(format!("unknown dlv invoke method: {other}")),
         }
     }
@@ -660,7 +661,7 @@ impl AppRouterImpl {
         let reserve_funding =
             amm_pair
                 .as_ref()
-                .map(|_| dsm::types::device_state::VaultReserveFunding {
+                .map(|_| dsm::types::device_state::VaultReserveMutation::Fund {
                     vault_id,
                     legs: funding.clone(),
                     vault_sequence: 0,
@@ -747,7 +748,7 @@ impl AppRouterImpl {
             Ok(())
         };
 
-        if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_funding(
+        if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_mutation(
             rel_key,
             actor,
             op,
@@ -1333,6 +1334,119 @@ impl AppRouterImpl {
     /// generic `dlv.unlock failed`) — this is what unlocks
     /// fail-closed semantics for vault owners that haven't yet seen
     /// the trader's anchor publish.
+    /// `dlv.reconcile` — the OWNER folds a verified settlement into its reserves.
+    ///
+    /// The trader's credit was final at the trader's own advance. This is the
+    /// owner learning what already happened, so it AUTHORIZES nothing: every
+    /// value acted on is re-derived from the receipt fetched under `(vault, x)`
+    /// and verified against the trader's signature and SMT path. The request
+    /// says only which settlement to look at.
+    ///
+    /// Idempotent. Folding the same receipt twice would move the reserves twice
+    /// on a trade that happened once, so a receipt whose sequence step the vault
+    /// has already taken applies nothing and reports success.
+    async fn dlv_reconcile(&self, i: AppInvoke) -> AppResult {
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("dlv.reconcile: {e}")),
+        };
+        let req = match generated::DlvReconcileV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => return err(format!("dlv.reconcile: decode DlvReconcileV1 failed: {e}")),
+        };
+        let (Ok(vault_id), Ok(x)) = (
+            <[u8; 32]>::try_from(req.vault_id.as_slice()),
+            <[u8; 32]>::try_from(req.x.as_slice()),
+        ) else {
+            return err("dlv.reconcile: vault_id and x must both be 32 bytes".into());
+        };
+
+        // The receipt is the authority. No receipt, nothing to apply — and that
+        // is a refusal rather than a no-op, because the caller asked about a
+        // settlement that is not witnessed.
+        let Some(receipt) =
+            crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x).await
+        else {
+            return err(format!(
+                "dlv.reconcile: no verified settlement receipt for vault {} at that commitment",
+                crate::util::text_id::encode_base32_crockford(&vault_id),
+            ));
+        };
+
+        let Some(head) = self.core_sdk.device_head() else {
+            return err("dlv.reconcile: no device head".into());
+        };
+        // IDEMPOTENCE, checked against the leaves rather than a bookkeeping
+        // table: the reserve leaf already carries the sequence this receipt
+        // would advance to, so a repeat is visible in the state itself.
+        let already = head
+            .vault_reserve_entry(&vault_id, &receipt.trade.input_policy_commit)
+            .map(|e| e.sequence >= receipt.trade.new_sequence)
+            .unwrap_or(false);
+        if already {
+            return pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                generated::AppStateResponse {
+                    key: "dlv.reconcile".to_string(),
+                    value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
+                },
+            ));
+        }
+
+        let op = dsm::types::operations::Operation::DlvOwnerApply {
+            vault_id: vault_id.to_vec(),
+            settlement_receipt_id: receipt.receipt_id,
+            pending_pointer_x: x,
+            parent_sequence: receipt.trade.parent_sequence,
+            new_sequence: receipt.trade.new_sequence,
+            parent_reserves_digest: [0u8; 32],
+            new_reserves_digest: [0u8; 32],
+            input_policy_commit: receipt.trade.input_policy_commit,
+            output_policy_commit: receipt.trade.output_policy_commit,
+            input_amount: receipt.trade.input_amount,
+            output_amount: receipt.trade.output_amount,
+            signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+        let mutation = dsm::types::device_state::VaultReserveMutation::ApplySettlement {
+            vault_id,
+            input_policy_commit: receipt.trade.input_policy_commit,
+            input_amount: receipt.trade.input_amount,
+            output_policy_commit: receipt.trade.output_policy_commit,
+            output_amount: receipt.trade.output_amount,
+            new_sequence: receipt.trade.new_sequence,
+        };
+
+        let reference_state = match self.core_sdk.get_current_state() {
+            Ok(s) => s,
+            Err(e) => return err(format!("dlv.reconcile: get_current_state failed: {e}")),
+        };
+        let actor = reference_state.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
+        // EMPTY deltas: the owner's spendable balance is not part of a
+        // settlement. Only the reserve leaves move, in this same advance.
+        if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_mutation(
+            rel_key,
+            actor,
+            op,
+            &[],
+            Some(init_tip),
+            Some(mutation),
+            None,
+        ) {
+            return err(format!("dlv.reconcile: advance failed: {e}"));
+        }
+
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+            generated::AppStateResponse {
+                key: "dlv.reconcile".to_string(),
+                value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
+            },
+        ))
+    }
+
     async fn dlv_unlock_routed(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
@@ -2585,6 +2699,118 @@ mod funded_creation_tests {
         assert_eq!(
             rebuilt[0].anchor_enforcement,
             generated::AnchorEnforcement::Required as i32,
+        );
+
+        // (10) THE OWNER RECONCILES. Until now the trader's credit is final but
+        // the owner's reserve leaves still hold the pre-trade amounts — the
+        // settlement is real and unrecorded on this side.
+        let reserves_before_apply = (
+            after.vault_reserve(&vault_id, &pc_a),
+            after.vault_reserve(&vault_id, &pc_b),
+        );
+        assert_eq!(
+            reserves_before_apply,
+            (10_000, 5_000),
+            "reserves must not move until the owner folds the receipt"
+        );
+
+        let reconcile = generated::DlvReconcileV1 {
+            vault_id: vault_id.to_vec(),
+            x: x.to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.reconcile".to_string(),
+                args: pack(reconcile.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "reconcile failed: {:?}", res.error_message);
+
+        // (11) RESERVES MOVED, positionally: the input arrived, the output left.
+        let applied = r.core_sdk.device_head().expect("head");
+        assert_eq!(
+            applied.vault_reserve(&vault_id, &pc_a),
+            10_000 + input,
+            "the input the trader paid must arrive in the reserve"
+        );
+        assert_eq!(
+            applied.vault_reserve(&vault_id, &pc_b),
+            5_000 - expected_out,
+            "the output the trader took must leave the reserve"
+        );
+
+        // (12) THE SEQUENCE ADVANCED EXACTLY ONCE, on both legs.
+        assert_eq!(
+            applied
+                .vault_reserve_entry(&vault_id, &pc_a)
+                .expect("leg A")
+                .sequence,
+            1,
+        );
+        assert_eq!(
+            applied
+                .vault_reserve_entry(&vault_id, &pc_b)
+                .expect("leg B")
+                .sequence,
+            1,
+        );
+
+        // (13) REPLAY IS A NO-OP. Folding the same receipt twice would move the
+        // reserves twice on a trade that happened once.
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.reconcile".to_string(),
+                args: pack(reconcile.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "a repeated reconcile must not error");
+        let twice = r.core_sdk.device_head().expect("head");
+        assert_eq!(
+            (
+                twice.vault_reserve(&vault_id, &pc_a),
+                twice.vault_reserve(&vault_id, &pc_b)
+            ),
+            (
+                applied.vault_reserve(&vault_id, &pc_a),
+                applied.vault_reserve(&vault_id, &pc_b)
+            ),
+            "replaying a receipt must move nothing"
+        );
+        assert_eq!(
+            twice.root(),
+            applied.root(),
+            "and must not advance the device root"
+        );
+
+        // (14) A LATER QUOTE SEES POST-TRADE RESERVES. The owner can now prove
+        // the new amounts at the new sequence, which is what the next trader
+        // composes against.
+        let legs_after = twice
+            .vault_reserve_leg_proofs(&vault_id, &[pc_a, pc_b])
+            .expect("legs after settlement");
+        let proof_after = dsm::dlv::vault_reserve_inclusion::sign_vault_reserve_inclusion_proof(
+            &vault_id,
+            1,
+            &twice.root(),
+            &twice.genesis(),
+            &twice.devid(),
+            legs_after,
+            &pk,
+            &sk,
+        )
+        .expect("sign post-trade proof");
+        dsm::dlv::vault_reserve_inclusion::verify_vault_reserve_inclusion_proof(&proof_after)
+            .expect("the post-trade reserves must be provable");
+        assert_eq!(
+            dsm::dlv::vault_reserve_inclusion::proven_amount(&proof_after, &pc_a),
+            Some(10_000 + input),
+            "a later quote must see the post-trade reserve, not the parent's"
+        );
+        assert_eq!(
+            dsm::dlv::vault_reserve_inclusion::proven_amount(&proof_after, &pc_b),
+            Some(5_000 - expected_out),
         );
     }
 
