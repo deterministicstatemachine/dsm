@@ -8880,65 +8880,6 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
 }
 
 /**
- * Request wrapper for `route.publishExternalCommitment`. The handler
- * accepts either this wrapper OR a bare ExternalCommitmentV1 (legacy
- * callers). When `signed_route_commit_bytes` is non-empty, the handler
- * additionally derives and publishes one VaultPendingPointerV1 per hop
- * (composition discovery aid; see VaultPendingPointerV1 docs).
- *
- * Decode discriminator: try this wrapper first; if it fails to decode
- * or `anchor` is unset, fall back to decoding the body as bare
- * ExternalCommitmentV1. This keeps the old wire shape working for any
- * non-SoFi external-commitment users.
- *
- * @generated from message dsm.PublishExternalCommitmentRequest
- */
-export class PublishExternalCommitmentRequest extends Message<PublishExternalCommitmentRequest> {
-  /**
-   * @generated from field: dsm.ExternalCommitmentV1 anchor = 1;
-   */
-  anchor?: ExternalCommitmentV1;
-
-  /**
-   * Optional. Pass the signed RouteCommitV1 bytes returned by
-   * `route.signRouteCommit` so the handler can derive + publish vault-
-   * keyed pending pointers. Empty bytes → handler publishes the anchor
-   * only, identical to the legacy path.
-   *
-   * @generated from field: bytes signed_route_commit_bytes = 2;
-   */
-  signedRouteCommitBytes = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<PublishExternalCommitmentRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PublishExternalCommitmentRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "anchor", kind: "message", T: ExternalCommitmentV1 },
-    { no: 2, name: "signed_route_commit_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PublishExternalCommitmentRequest {
-    return new PublishExternalCommitmentRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PublishExternalCommitmentRequest {
-    return new PublishExternalCommitmentRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PublishExternalCommitmentRequest {
-    return new PublishExternalCommitmentRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PublishExternalCommitmentRequest | PlainMessage<PublishExternalCommitmentRequest> | undefined, b: PublishExternalCommitmentRequest | PlainMessage<PublishExternalCommitmentRequest> | undefined): boolean {
-    return proto3.util.equals(PublishExternalCommitmentRequest, a, b);
-  }
-}
-
-/**
  * Vault-keyed pointer to a pending state advance, published alongside
  * each ExternalCommitmentV1 (one pointer per hop's vault). Lets the
  * NEXT trader discover pending trades on a specific vault in O(pending)
