@@ -190,6 +190,9 @@ impl StateMachine {
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
+        // Assets to encumber into a vault as part of this transition. `Some` only
+        // for `DlvCreate`, so the encumbrance and the transition share one root.
+        reserve_funding: Option<crate::types::device_state::VaultReserveMutation>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
             DsmError::state_machine(
@@ -230,6 +233,7 @@ impl StateMachine {
             initial_chain_tip,
             anchor_leaf,
             offline_spend,
+            reserve_funding,
         )
     }
 
@@ -315,6 +319,7 @@ impl StateMachine {
             initial_chain_tip,
             None, // anchor_leaf — this convenience path is for ordinary transitions
             None, // offline_spend — ordinary (online) transition, no allocation draw
+            None,
         )?;
         self.commit_advance(&outcome);
         Ok(outcome)
@@ -427,6 +432,7 @@ mod state_machine_tests {
                     amount: 275,
                 }],
                 Some(init),
+                None,
                 None,
                 None,
             )
@@ -571,19 +577,30 @@ mod state_machine_tests {
             );
         }
 
-        // Tamper with intermediate state — adjacency must break.
-        let mut broken_states = states.clone();
-        broken_states[1].entropy = vec![99, 99, 99];
-        if let Ok(hash) = broken_states[1].hash() {
-            broken_states[1].hash = hash;
-        }
-        // states[2].prev_state_hash now points to the OLD broken_states[1] hash
-        if states.len() >= 3 {
-            assert_ne!(
-                broken_states[2].prev_state_hash, broken_states[1].hash,
-                "tampered state breaks adjacency to its successor"
-            );
-        }
+        // Tamper with a state — adjacency to its successor must break.
+        //
+        // Recompute through `compute_hash`, NOT `hash()`. `hash()` is a
+        // memoizing accessor: it returns the stored value whenever it is
+        // non-zero, so a tampered state re-hashed through it yields its
+        // ORIGINAL identity and the assertion below would compare a value
+        // against itself and pass on a tautology.
+        //
+        // Tamper the FIRST state, so the assertion runs at every chain length
+        // this test builds. It previously targeted `states[1]` behind a
+        // `states.len() >= 3` guard, and `num_transitions` is 1 under
+        // `debug_assertions` — so the check silently did not execute in a debug
+        // run, which is the profile the suite is usually exercised in.
+        assert!(
+            states.len() >= 2,
+            "the chain needs a successor to break adjacency against"
+        );
+        let mut tampered = states[0].clone();
+        tampered.entropy = vec![99, 99, 99];
+        assert_ne!(
+            states[1].prev_state_hash,
+            tampered.compute_hash()?,
+            "tampered state breaks adjacency to its successor"
+        );
 
         Ok(())
     }

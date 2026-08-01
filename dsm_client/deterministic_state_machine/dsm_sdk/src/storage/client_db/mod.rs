@@ -15,9 +15,10 @@ pub use crate::storage::codecs::{
 
 // --- Submodules (domain-specific) ---
 
+pub mod amm_vault_records;
 pub mod anchor_enrollments;
 mod auth_tokens;
-mod bcr;
+pub(crate) mod bcr;
 mod bilateral_sessions;
 pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
@@ -846,6 +847,22 @@ fn create_schema(conn: &Connection) -> Result<()> {
             entry_header     BLOB NOT NULL,
             btc_amount_sats  INTEGER NOT NULL,
             created_at       INTEGER NOT NULL
+        );
+
+        -- Canonical AMM vault record: the reconstruction inputs a restart
+        -- cannot re-derive. Reserves and sequence are deliberately ABSENT —
+        -- they live in the reserve leaves, authenticated by the device root,
+        -- and a second copy here would eventually disagree with them.
+        CREATE TABLE IF NOT EXISTS amm_vault_records(
+            vault_id            BLOB PRIMARY KEY,
+            owner_genesis       BLOB NOT NULL,
+            owner_devid         BLOB NOT NULL,
+            policy_commit_a     BLOB NOT NULL,
+            policy_commit_b     BLOB NOT NULL,
+            fee_bps             INTEGER NOT NULL,
+            anchor_enforcement  INTEGER NOT NULL,
+            policy_digest       BLOB NOT NULL,
+            created_at          INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS vault_records(

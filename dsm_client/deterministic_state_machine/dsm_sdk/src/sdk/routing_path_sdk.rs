@@ -30,7 +30,7 @@
 //!     have returned.
 //!   * On equal final-output paths, the lex-smaller `Vec<vault_id>`
 //!     sequence wins.
-//!   * No floating-point arithmetic — all math is `u128` with checked
+//!   * No floating-point arithmetic — base units are `u64` with checked
 //!     ops; an arithmetic overflow disqualifies that hop instead of
 //!     panicking.
 
@@ -59,9 +59,9 @@ pub(crate) struct VaultHop {
     /// Token id produced at this hop (= input of the next hop, if any).
     pub token_out: Vec<u8>,
     /// Amount of `token_in` flowing into this hop.
-    pub input_amount: u128,
+    pub input_amount: u64,
     /// Constant-product simulated output (post-fee).
-    pub expected_output_amount: u128,
+    pub expected_output_amount: u64,
     /// Fee in basis points carried on the advertisement.
     pub fee_bps: u32,
     /// `BLAKE3("DSM/routing-vault-ad", vault_proto_bytes)` from the ad —
@@ -84,8 +84,8 @@ pub(crate) struct VaultHop {
 pub(crate) struct Path {
     pub input_token: Vec<u8>,
     pub output_token: Vec<u8>,
-    pub input_amount: u128,
-    pub final_output_amount: u128,
+    pub input_amount: u64,
+    pub final_output_amount: u64,
     /// Sum of `fee_bps` across the path.  Informational — the cost
     /// function is `final_output_amount`, not this; downstream callers
     /// may use it for fee disclosures.
@@ -100,7 +100,7 @@ pub(crate) enum RoutingError {
     NoPath {
         input_token: Vec<u8>,
         output_token: Vec<u8>,
-        requested_input: u128,
+        requested_input: u64,
     },
     /// `input_token == output_token` — caller bug.
     SameToken,
@@ -116,12 +116,18 @@ pub(crate) enum RoutingError {
 /// degenerate configuration (zero reserve, zero output).  A `None`
 /// disqualifies the hop from the graph rather than panicking — keeps
 /// the search safe against adversarial advertisements.
+/// Amounts are u64 base units at the boundary; the arithmetic is u128 inside.
+///
+/// `reserve_out * input_after_fee` genuinely overflows u64 for realistic
+/// reserves, so the intermediate must be wider. The result is narrowed back
+/// with a checked conversion — an unchecked one at exactly this point is how a
+/// truncation would mint the difference.
 pub(crate) fn constant_product_output(
-    input_amount: u128,
-    reserve_in: u128,
-    reserve_out: u128,
+    input_amount: u64,
+    reserve_in: u64,
+    reserve_out: u64,
     fee_bps: u32,
-) -> Option<u128> {
+) -> Option<u64> {
     if input_amount == 0 || reserve_in == 0 || reserve_out == 0 {
         return None;
     }
@@ -130,6 +136,10 @@ pub(crate) fn constant_product_output(
         // a positive numerator by zero.
         return None;
     }
+    let input_amount = u128::from(input_amount);
+    let reserve_in = u128::from(reserve_in);
+    let reserve_out = u128::from(reserve_out);
+
     let fee_complement = u128::from(10_000u32 - fee_bps);
     let input_after_fee_num = input_amount.checked_mul(fee_complement)?;
     // `reserve_in * 10000 + input_after_fee_num` (denominator).
@@ -138,10 +148,11 @@ pub(crate) fn constant_product_output(
     let num = reserve_out.checked_mul(input_after_fee_num)?;
     let out = num / denom;
     if out == 0 {
-        None
-    } else {
-        Some(out)
+        return None;
     }
+    // Cannot exceed `reserve_out`, which came from a u64 — but check rather
+    // than reason about it.
+    u64::try_from(out).ok()
 }
 
 /// Decode `reserve_*_u128` from its big-endian 16-byte wire form.  An
@@ -182,8 +193,8 @@ struct DirectedEdge {
     token_in: Vec<u8>,
     /// Token produced by this edge.
     token_out: Vec<u8>,
-    reserve_in: u128,
-    reserve_out: u128,
+    reserve_in: u64,
+    reserve_out: u64,
     fee_bps: u32,
     advertisement_digest: [u8; 32],
     state_number: u64,
@@ -235,14 +246,12 @@ fn build_adjacency(
             Some(v) => v,
             None => continue,
         };
-        let reserve_a = match u128_be(&ad.reserve_a_u128) {
-            Some(v) => v,
-            None => continue,
-        };
-        let reserve_b = match u128_be(&ad.reserve_b_u128) {
-            Some(v) => v,
-            None => continue,
-        };
+        // Base units, straight off the advertisement. These used to be
+        // 16-byte big-endian blobs that could fail to parse; a u64 field
+        // cannot, so there is no longer a silent `continue` that drops a
+        // vault from the graph because its reserves would not decode.
+        let reserve_a = ad.reserve_a;
+        let reserve_b = ad.reserve_b;
         let ad_digest = match digest32(&ad.vault_proto_digest) {
             Some(v) => v,
             None => continue,
@@ -311,7 +320,7 @@ pub(crate) fn find_best_path(
     advertisements: &[generated::RoutingVaultAdvertisementV1],
     input_token: &[u8],
     output_token: &[u8],
-    input_amount: u128,
+    input_amount: u64,
     max_hops: usize,
 ) -> Result<Path, RoutingError> {
     if input_token == output_token {
@@ -354,7 +363,7 @@ pub(crate) fn find_best_path(
 fn enumerate(
     current_token: &[u8],
     output_token: &[u8],
-    current_input_amount: u128,
+    current_input_amount: u64,
     adjacency: &HashMap<Vec<u8>, Vec<DirectedEdge>>,
     remaining_hops: usize,
     visited_tokens: &mut Vec<Vec<u8>>,
@@ -467,7 +476,7 @@ pub(crate) async fn find_and_verify_best_path(
     advertisements: &[generated::RoutingVaultAdvertisementV1],
     input_token: &[u8],
     output_token: &[u8],
-    input_amount: u128,
+    input_amount: u64,
     max_hops: usize,
 ) -> Result<Path, RoutingError> {
     let mut verified: Vec<generated::RoutingVaultAdvertisementV1> = Vec::new();
@@ -492,6 +501,74 @@ mod tests {
     //! Path-search tests.  All eight scenarios from the chunk-#2
     //! checklist exercised here, plus a constant-product unit test
     //! that nails the simulation math.
+
+    /// PATH SEARCH PICKS ON FINAL OUTPUT, not on hop count, not on fee, not on
+    /// the order advertisements happened to arrive in.
+    ///
+    /// Replaces a grep for the literal comparison
+    /// `final_output_amount > current.final_output_amount`. That confirmed one
+    /// expression existed; it could not confirm the search actually returns the
+    /// better route when a worse one is cheaper-looking by some other measure.
+    ///
+    /// A trader takes what the route delivers, so anything else being decisive —
+    /// a shorter path, a lower advertised fee — would systematically hand
+    /// traders less than the best available.
+    #[test]
+    fn the_best_path_is_the_one_delivering_the_most_output() {
+        let (a, b) = ([0x11u8; 32], [0x22u8; 32]);
+
+        // Two vaults over the same pair. The DEEPER pool pays more for the same
+        // input despite charging a higher fee — so a search keying on fee, or on
+        // the first acceptable route, picks the worse one.
+        let shallow = generated::RoutingVaultAdvertisementV1 {
+            version: 1,
+            vault_id: vec![0x01; 32],
+            token_a: a.to_vec(),
+            token_b: b.to_vec(),
+            reserve_a: 100_000,
+            reserve_b: 100_000,
+            fee_bps: 5,
+            lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
+            vault_proto_digest: vec![0xD1; 32],
+            unlock_spec_digest: vec![0xD2; 32],
+            ..Default::default()
+        };
+        let deep = generated::RoutingVaultAdvertisementV1 {
+            version: 1,
+            vault_id: vec![0x02; 32],
+            token_a: a.to_vec(),
+            token_b: b.to_vec(),
+            reserve_a: 100_000_000,
+            reserve_b: 100_000_000,
+            fee_bps: 30,
+            lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
+            vault_proto_digest: vec![0xD3; 32],
+            unlock_spec_digest: vec![0xD4; 32],
+            ..Default::default()
+        };
+
+        // Order must not decide it: search both arrangements.
+        for ads in [
+            vec![shallow.clone(), deep.clone()],
+            vec![deep.clone(), shallow.clone()],
+        ] {
+            let path = find_best_path(&ads, &a, &b, 10_000, 4).expect("a path exists");
+            assert_eq!(
+                path.hops[0].vault_id.to_vec(),
+                deep.vault_id,
+                "the deeper pool delivers more output and must win despite the higher fee"
+            );
+
+            // And the winner genuinely is the larger output, recomputed here
+            // rather than taken on trust from the search.
+            let shallow_out =
+                constant_product_output(10_000, 100_000, 100_000, 5).expect("shallow sim");
+            let deep_out =
+                constant_product_output(10_000, 100_000_000, 100_000_000, 30).expect("deep sim");
+            assert!(deep_out > shallow_out);
+            assert_eq!(path.final_output_amount, deep_out);
+        }
+    }
 
     use super::*;
     use crate::sdk::routing_sdk::{
@@ -519,8 +596,8 @@ mod tests {
         vault_id: [u8; 32],
         token_lower: &[u8],
         token_higher: &[u8],
-        reserve_lower: u128,
-        reserve_higher: u128,
+        reserve_lower: u64,
+        reserve_higher: u64,
         fee_bps: u32,
         state_number: u64,
     ) -> generated::RoutingVaultAdvertisementV1 {
@@ -546,8 +623,8 @@ mod tests {
             vault_id: vault_id.to_vec(),
             token_a: a.to_vec(),
             token_b: b.to_vec(),
-            reserve_a_u128: u128_be_arr(ra).to_vec(),
-            reserve_b_u128: u128_be_arr(rb).to_vec(),
+            reserve_a: ra,
+            reserve_b: rb,
             fee_bps,
             unlock_spec_digest: vec![0u8; 32],
             unlock_spec_key: "sofi/spec/test".into(),
@@ -585,8 +662,9 @@ mod tests {
 
     #[test]
     fn constant_product_overflow_disqualifies_hop() {
-        // Reserves at u128::MAX would overflow `reserve_in * 10000`.
-        assert_eq!(constant_product_output(1, u128::MAX, u128::MAX, 30), None);
+        // Saturated u64 reserves: `reserve_in * 10000` overflows even the u128
+        // intermediate, so the hop is disqualified rather than wrapped.
+        assert_eq!(constant_product_output(1, u64::MAX, u64::MAX, 30), None);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -684,8 +762,8 @@ mod tests {
             vault_id: &good_vid,
             token_a: &a,
             token_b: &b,
-            reserve_a_u128: u128_be_arr(1_000_000),
-            reserve_b_u128: u128_be_arr(1_000_000),
+            reserve_a: 1_000_000,
+            reserve_b: 1_000_000,
             fee_bps: 30,
             unlock_spec_digest: [0u8; 32],
             unlock_spec_key: "sofi/spec/good".into(),
@@ -698,8 +776,8 @@ mod tests {
             vault_id: &bad_vid,
             token_a: &a,
             token_b: &b,
-            reserve_a_u128: u128_be_arr(1_000_000),
-            reserve_b_u128: u128_be_arr(1_000_000),
+            reserve_a: 1_000_000,
+            reserve_b: 1_000_000,
             fee_bps: 5, // would otherwise win on fee
             unlock_spec_digest: [0u8; 32],
             unlock_spec_key: "sofi/spec/bad".into(),

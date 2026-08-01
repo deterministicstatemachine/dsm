@@ -218,11 +218,10 @@ describe('dlv.ts', () => {
       // Both digest fields ride empty over the wire — Rust computes.
       expect(req.spec!.contentDigest.length).toBe(0);
       expect(req.spec!.fulfillmentDigest.length).toBe(0);
-      // No lock supplied → all-zero 16 bytes.
-      expect(req.lockedAmountU128.length).toBe(16);
-      expect(req.lockedAmountU128.every((b) => b === 0)).toBe(true);
-      // No token_id supplied → empty bytes.
-      expect(req.tokenId.length).toBe(0);
+      // No lock supplied → NO funding legs. A content-only vault encumbers
+      // nothing, and an empty-token zero-amount leg would ask Rust to fund a
+      // vault with an asset that does not exist.
+      expect(req.fundingLegs.length).toBe(0);
     });
 
     test('passes 32-byte caller-supplied digests through verbatim (Rust strict-verifies)', () => {
@@ -241,25 +240,70 @@ describe('dlv.ts', () => {
       expect(Array.from(req.spec!.fulfillmentDigest)).toEqual(Array.from(fd));
     });
 
-    test('encodes lockedAmount big-endian u128', () => {
+    test('turns a single-asset lock into one funding leg', () => {
       const bytes = buildDlvInstantiateBytes({
         ...baseInput,
-        tokenId: 'FOOBAR',
+        policyCommit: new Uint8Array(32).fill(0x7c),
         lockedAmount: 0x0102_0304_0506_0708n,
       });
       const req = pb.DlvInstantiateV1.fromBinary(bytes);
-      expect(new TextDecoder().decode(req.tokenId)).toBe('FOOBAR');
-      // Big-endian encoding of 0x0102030405060708 in 16 bytes.
-      const expected = new Uint8Array(16);
-      expected[8] = 0x01;
-      expected[9] = 0x02;
-      expected[10] = 0x03;
-      expected[11] = 0x04;
-      expected[12] = 0x05;
-      expected[13] = 0x06;
-      expected[14] = 0x07;
-      expected[15] = 0x08;
-      expect(Array.from(req.lockedAmountU128)).toEqual(Array.from(expected));
+      expect(req.fundingLegs.length).toBe(1);
+      expect(Array.from(req.fundingLegs[0].policyCommit)).toEqual(
+        Array.from(new Uint8Array(32).fill(0x7c)),
+      );
+      // u64 base units, carried as a number the wire understands — not a
+      // 16-byte blob every consumer had to re-decode.
+      expect(req.fundingLegs[0].amount).toBe(0x0102_0304_0506_0708n);
+    });
+
+    test('refuses a leg that names only half of itself', () => {
+      expect(() =>
+        buildDlvInstantiateBytes({
+          ...baseInput,
+          policyCommit: new Uint8Array(32).fill(0x7c),
+        }),
+      ).toThrow(/non-zero amount/);
+      expect(() =>
+        buildDlvInstantiateBytes({ ...baseInput, lockedAmount: 5n }),
+      ).toThrow(/policyCommit/);
+    });
+
+    /// A ticker is not an identity, and nothing resolves it to one. A leg that
+    /// is not exactly 32 bytes dies here rather than being looked up.
+    test('refuses an identity that is not a 32-byte policy commit', () => {
+      for (const bad of [
+        new TextEncoder().encode('RIGB'),
+        new Uint8Array(31),
+        new Uint8Array(33),
+      ]) {
+        expect(() =>
+          buildDlvInstantiateBytes({
+            ...baseInput,
+            policyCommit: bad,
+            lockedAmount: 5n,
+          }),
+        ).toThrow(/32 bytes/);
+      }
+    });
+
+    /// An amount past u64 is REFUSED, never wrapped: these base units are
+    /// debited from real balances, so a silent truncation would lock a
+    /// different number than the caller named.
+    test('refuses an amount that does not fit u64 base units', () => {
+      expect(() =>
+        buildDlvInstantiateBytes({
+          ...baseInput,
+          policyCommit: new Uint8Array(32).fill(0x7c),
+          lockedAmount: 0x1_0000_0000_0000_0000n,
+        }),
+      ).toThrow(/u64/);
+      expect(() =>
+        buildDlvInstantiateBytes({
+          ...baseInput,
+          policyCommit: new Uint8Array(32).fill(0x7c),
+          lockedAmount: -1n,
+        }),
+      ).toThrow(/non-negative/);
     });
 
     test.each([

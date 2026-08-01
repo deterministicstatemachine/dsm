@@ -290,8 +290,9 @@ export async function publishRoutingAdvertisement(input: {
       vaultId: input.vaultId as any,
       tokenA: input.tokenA as any,
       tokenB: input.tokenB as any,
-      reserveAU128: u128BigEndian(input.reserveA) as any,
-      reserveBU128: u128BigEndian(input.reserveB) as any,
+      // Reserves are NOT sent. The handler reads them from the owner's
+      // encumbered reserve leaves — a client that could state its own
+      // liquidity could advertise a vault it had never funded.
       feeBps: input.feeBps,
       unlockSpecDigest: input.unlockSpecDigest as any,
       unlockSpecKey: input.unlockSpecKey,
@@ -375,8 +376,12 @@ export async function listAdvertisementsForPair(input: {
         vaultIdBase32: encodeBase32Crockford(ad.vaultId),
         tokenA: ad.tokenA,
         tokenB: ad.tokenB,
-        reserveA: decodeReserveBigInt(ad.reserveAU128),
-        reserveB: decodeReserveBigInt(ad.reserveBU128),
+        // u64 base units, straight off the wire. These were 16-byte
+        // big-endian blobs decoded here; base units are u64 end to end now,
+        // and a decoder in the render layer was one more place for the
+        // magnitudes to be reinterpreted.
+        reserveA: ad.reserveA,
+        reserveB: ad.reserveB,
         feeBps: ad.feeBps,
         stateNumber: ad.updatedStateNumber,
         ownerPublicKey: ad.ownerPublicKey,

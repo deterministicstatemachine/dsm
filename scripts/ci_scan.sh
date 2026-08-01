@@ -247,4 +247,72 @@ done
 # deterministic encoding/canonicalization and internal migrations.
 # We rely on CI gates and code review to keep protobuf usage disciplined.
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STATIC ARCHITECTURAL RULES — migrated from dsm_sdk/tests/dlv_regression_guards.rs
+#
+# These are the rules from that suite that are GENUINELY STATIC: they say
+# "this code shape must not exist", which no behavioural test can express — a
+# test can only prove the code that DOES exist behaves correctly, never that a
+# forbidden construct is absent.
+#
+# Everything else in that suite asserted `src.contains(...)` about behaviour,
+# and has been replaced by tests that execute the real routes. Those greps were
+# the reason a value path rejected by the conservation chokepoint stayed green
+# for months: they matched the text of code that never ran.
+#
+# Labelled static so nobody mistakes them for coverage.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SDK_SRC="dsm_client/deterministic_state_machine/dsm_sdk/src"
+CORE_SRC="dsm_client/deterministic_state_machine/dsm/src"
+FE_SRC="dsm_client/frontend"
+
+# Protocol state is canonical state, never a preferences blob. A handler that
+# mirrored vault or token state into app-state prefs would create a second copy
+# that drifts from the chain.
+fail_if_found "static: token/dlv/sofi state written to app-state prefs" \
+  -e 'app_state_set\(&format!\("dsm\.(token|dlv|sofi)\.' \
+  "$SDK_SRC/handlers/"
+
+# A policy commit is derived from the canonical policy, never lifted out of a
+# display metadata cache. The cache is populated FROM the commit; reversing that
+# lets a stale or attacker-supplied cache entry decide asset identity.
+fail_if_found "static: policy_commit derived from a metadata cache" \
+  -e 'policy_commit = metadata\.policy_anchor' \
+  -e 'from_policy_anchor\(&metadata\.policy_anchor' \
+  "$SDK_SRC/"
+
+# Path search is pure route arithmetic. If it could build RouteCommits or drive
+# the state machine, quote-time code would be able to move value.
+fail_if_found "static: routing_path_sdk reaches into RouteCommit or settlement" \
+  -e 'RouteCommitV1|execute_on_relationship|Operation::Dlv' \
+  "$SDK_SRC/sdk/routing_path_sdk.rs"
+
+# RouteCommit construction is likewise pure: it binds a quote, it does not
+# settle one. Emitting operations here would put value movement outside the
+# handler that gates it.
+fail_if_found "static: route_commit_sdk emits state-machine operations" \
+  -e 'execute_on_relationship|Operation::DlvUnlock|Operation::DlvClaim|Operation::DlvCreate' \
+  "$SDK_SRC/sdk/route_commit_sdk.rs"
+
+# Business logic stays in Rust: a frontend that can hash can derive identity,
+# and then two implementations decide what an asset is.
+if [ -f "$FE_SRC/package.json" ]; then
+  fail_if_found "static: frontend carries a hashing library" \
+    -e '@noble/hashes|blake3' \
+    "$FE_SRC/package.json"
+fi
+
+# Deleted paths stay deleted. Each of these was removed because it was wrong,
+# not because it was unused, so a reintroduction is a regression rather than a
+# style question.
+fail_if_found "static: the token-policy placeholder hash was reintroduced" \
+  -e 'domain_hash_bytes\("DSM/token-policy' \
+  "$CORE_SRC/core/token/token_state_manager.rs"
+
+fail_if_found "static: DlvCreateV3 was reintroduced" \
+  -e 'DlvCreateV3' \
+  "$CORE_SRC/" "$SDK_SRC/" proto/
+
 green "[CI-SCAN] PASS: No violations detected"

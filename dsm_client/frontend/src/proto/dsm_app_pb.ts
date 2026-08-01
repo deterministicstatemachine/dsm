@@ -2460,37 +2460,33 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
  * `token_a` / `token_b` are stored in canonical lex-sorted order so
  * the vault has a single canonical pair identity regardless of trade
  * direction; `reserve_a` / `reserve_b` follow the same ordering.
+ * The PREDICATE only. Reserves used to live here, which made a vault's
+ * advertised liquidity a number the owner asserted inside its own unlock
+ * condition — nothing held it, and a settled swap moved no value. Reserves are
+ * now encumbered in the owner's device SMT (`DSM/vault-reserve/v1`) and PROVED
+ * to a trader, so a condition no longer carries the quantities it governs.
  *
  * @generated from message dsm.AmmConstantProduct
  */
 export class AmmConstantProduct extends Message<AmmConstantProduct> {
   /**
-   * lex-lower token id
+   * 32-byte CPTA policy commits, lex-sorted. A ticker is NOT an identity —
+   * two distinct tokens have shared the ticker RIGB in this repo — so a pair
+   * named by label is a pair that can match the wrong asset while every
+   * signature on the path still verifies.
+   *
+   * lex-lower policy commit
    *
    * @generated from field: bytes token_a = 1;
    */
   tokenA = new Uint8Array(0);
 
   /**
-   * lex-higher token id
+   * lex-higher policy commit
    *
    * @generated from field: bytes token_b = 2;
    */
   tokenB = new Uint8Array(0);
-
-  /**
-   * big-endian u128
-   *
-   * @generated from field: bytes reserve_a_u128 = 3;
-   */
-  reserveAU128 = new Uint8Array(0);
-
-  /**
-   * big-endian u128
-   *
-   * @generated from field: bytes reserve_b_u128 = 4;
-   */
-  reserveBU128 = new Uint8Array(0);
 
   /**
    * basis points (e.g. 30 = 0.30 %)
@@ -2509,8 +2505,6 @@ export class AmmConstantProduct extends Message<AmmConstantProduct> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
@@ -7791,7 +7785,62 @@ export class DlvSpecV1 extends Message<DlvSpecV1> {
 /**
  * Instance creation.  Carries everything Operation::DlvCreate needs.
  * The creator's chain_tip enters via execute_on_relationship, not this proto.
+ * One asset to encumber. Amounts are u64 base units, matching
+ * `DeviceState::balances` — a u128 here would put a narrowing conversion at the
+ * settlement boundary, which is where a silent truncation mints money.
  *
+ * @generated from message dsm.DlvFundingLegV1
+ */
+export class DlvFundingLegV1 extends Message<DlvFundingLegV1> {
+  /**
+   * 32-byte CPTA policy commit — the asset's IDENTITY, not its ticker.
+   *
+   * This carried a UTF-8 ticker that `dlv.create` resolved to a commit via the
+   * local registry. That resolution is the ambiguity: a ticker can name more
+   * than one token (two distinct RIGB tokens have existed here), so the lookup
+   * could encumber a different asset than the caller meant while every
+   * downstream signature still verified. There is no fallback — a caller that
+   * does not know the commit does not know which asset it is funding.
+   *
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<DlvFundingLegV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvFundingLegV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvFundingLegV1 {
+    return new DlvFundingLegV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvFundingLegV1 {
+    return new DlvFundingLegV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvFundingLegV1 {
+    return new DlvFundingLegV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvFundingLegV1 | PlainMessage<DlvFundingLegV1> | undefined, b: DlvFundingLegV1 | PlainMessage<DlvFundingLegV1> | undefined): boolean {
+    return proto3.util.equals(DlvFundingLegV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.DlvInstantiateV1
  */
 export class DlvInstantiateV1 extends Message<DlvInstantiateV1> {
@@ -7808,25 +7857,22 @@ export class DlvInstantiateV1 extends Message<DlvInstantiateV1> {
   creatorPublicKey = new Uint8Array(0);
 
   /**
-   * optional; empty = content-only vault
-   *
-   * @generated from field: bytes token_id = 3;
-   */
-  tokenId = new Uint8Array(0);
-
-  /**
-   * big-endian u128; all-zeros if no lock
-   *
-   * @generated from field: bytes locked_amount_u128 = 4;
-   */
-  lockedAmountU128 = new Uint8Array(0);
-
-  /**
    * SPHINCS+ over canonical Operation::DlvCreate bytes
    *
    * @generated from field: bytes signature = 5;
    */
   signature = new Uint8Array(0);
+
+  /**
+   * Assets to encumber into this vault. Zero legs = a content-only vault. An
+   * AMM vault MUST carry exactly two, whose token ids are the spec's pair in
+   * lex order and whose amounts are both non-zero — the single-asset lock this
+   * replaces could not express a two-sided vault at all, which is why AMM
+   * vaults were created holding nothing.
+   *
+   * @generated from field: repeated dsm.DlvFundingLegV1 funding_legs = 6;
+   */
+  fundingLegs: DlvFundingLegV1[] = [];
 
   constructor(data?: PartialMessage<DlvInstantiateV1>) {
     super();
@@ -7838,9 +7884,8 @@ export class DlvInstantiateV1 extends Message<DlvInstantiateV1> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "spec", kind: "message", T: DlvSpecV1 },
     { no: 2, name: "creator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "token_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "locked_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "funding_legs", kind: "message", T: DlvFundingLegV1, repeated: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvInstantiateV1 {
@@ -7857,6 +7902,159 @@ export class DlvInstantiateV1 extends Message<DlvInstantiateV1> {
 
   static equals(a: DlvInstantiateV1 | PlainMessage<DlvInstantiateV1> | undefined, b: DlvInstantiateV1 | PlainMessage<DlvInstantiateV1> | undefined): boolean {
     return proto3.util.equals(DlvInstantiateV1, a, b);
+  }
+}
+
+/**
+ * Proof that specific base units are ENCUMBERED in a vault, under the same
+ * device root and sequence as the vault-state inclusion proof.
+ *
+ * This is what converts "the owner says the vault holds 10,000 ERA" into "the
+ * owner's own device root commits 10,000 ERA encumbered in that vault at that
+ * sequence". Without it a trader quoting against a vault is trusting an integer.
+ *
+ * @generated from message dsm.VaultReserveLegProofV1
+ */
+export class VaultReserveLegProofV1 extends Message<VaultReserveLegProofV1> {
+  /**
+   * @generated from field: bytes policy_commit = 1;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * base units
+   *
+   * @generated from field: uint64 amount = 2;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * 256, leaf -> root
+   *
+   * @generated from field: repeated bytes smt_siblings = 3;
+   */
+  smtSiblings: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<VaultReserveLegProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultReserveLegProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "smt_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultReserveLegProofV1 {
+    return new VaultReserveLegProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultReserveLegProofV1 {
+    return new VaultReserveLegProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultReserveLegProofV1 {
+    return new VaultReserveLegProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultReserveLegProofV1 | PlainMessage<VaultReserveLegProofV1> | undefined, b: VaultReserveLegProofV1 | PlainMessage<VaultReserveLegProofV1> | undefined): boolean {
+    return proto3.util.equals(VaultReserveLegProofV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.VaultReserveInclusionProofV1
+ */
+export class VaultReserveInclusionProofV1 extends Message<VaultReserveInclusionProofV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * MUST equal the state proof's sequence
+   *
+   * @generated from field: uint64 sequence = 2;
+   */
+  sequence = protoInt64.zero;
+
+  /**
+   * MUST equal the state proof's root
+   *
+   * @generated from field: bytes smt_root = 3;
+   */
+  smtRoot = new Uint8Array(0);
+
+  /**
+   * key derivation input
+   *
+   * @generated from field: bytes owner_genesis = 4;
+   */
+  ownerGenesis = new Uint8Array(0);
+
+  /**
+   * key derivation input
+   *
+   * @generated from field: bytes owner_devid = 5;
+   */
+  ownerDevid = new Uint8Array(0);
+
+  /**
+   * 2 for an AMM vault, lex by policy_commit
+   *
+   * @generated from field: repeated dsm.VaultReserveLegProofV1 legs = 6;
+   */
+  legs: VaultReserveLegProofV1[] = [];
+
+  /**
+   * @generated from field: bytes owner_public_key = 7;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ over BLAKE3("DSM/vault-reserve-inclusion/v1" || vault_id || seq_be
+   *   || smt_root || owner_genesis || owner_devid
+   *   || (policy_commit || amount_be)* lex-sorted)
+   *
+   * @generated from field: bytes owner_signature = 8;
+   */
+  ownerSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<VaultReserveInclusionProofV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultReserveInclusionProofV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "owner_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "owner_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "legs", kind: "message", T: VaultReserveLegProofV1, repeated: true },
+    { no: 7, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "owner_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultReserveInclusionProofV1 {
+    return new VaultReserveInclusionProofV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultReserveInclusionProofV1 {
+    return new VaultReserveInclusionProofV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultReserveInclusionProofV1 {
+    return new VaultReserveInclusionProofV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultReserveInclusionProofV1 | PlainMessage<VaultReserveInclusionProofV1> | undefined, b: VaultReserveInclusionProofV1 | PlainMessage<VaultReserveInclusionProofV1> | undefined): boolean {
+    return proto3.util.equals(VaultReserveInclusionProofV1, a, b);
   }
 }
 
@@ -7929,6 +8127,8 @@ export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAd
   vaultId = new Uint8Array(0);
 
   /**
+   * 32-byte policy commits, lex-sorted. See AmmConstantProduct.
+   *
    * @generated from field: bytes token_a = 2;
    */
   tokenA = new Uint8Array(0);
@@ -7937,16 +8137,6 @@ export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAd
    * @generated from field: bytes token_b = 3;
    */
   tokenB = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes reserve_a_u128 = 4;
-   */
-  reserveAU128 = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes reserve_b_u128 = 5;
-   */
-  reserveBU128 = new Uint8Array(0);
 
   /**
    * @generated from field: uint32 fee_bps = 6;
@@ -7988,8 +8178,6 @@ export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAd
     { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 7, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
@@ -8019,6 +8207,9 @@ export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAd
  */
 export class RoutingPairRequest extends Message<RoutingPairRequest> {
   /**
+   * 32-byte policy commits. Discovery is keyed by identity, so a ticker here
+   * would list vaults over a different asset that merely shares the name.
+   *
    * @generated from field: bytes token_a = 1;
    */
   tokenA = new Uint8Array(0);
@@ -8138,6 +8329,8 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
   vaultId = new Uint8Array(0);
 
   /**
+   * 32-byte policy commits, lex-sorted.
+   *
    * @generated from field: bytes token_a = 2;
    */
   tokenA = new Uint8Array(0);
@@ -8148,19 +8341,30 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
   tokenB = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes reserve_a_u128 = 4;
-   */
-  reserveAU128 = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes reserve_b_u128 = 5;
-   */
-  reserveBU128 = new Uint8Array(0);
-
-  /**
    * @generated from field: uint32 fee_bps = 6;
    */
   feeBps = 0;
+
+  /**
+   * Authoritative reserves, read from the owner's encumbered reserve leaves.
+   * u64 base units, matching DeviceState::balances.
+   *
+   * @generated from field: uint64 reserve_a = 14;
+   */
+  reserveA = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 reserve_b = 15;
+   */
+  reserveB = protoInt64.zero;
+
+  /**
+   * Settlements published against this vault that the owner has not yet
+   * reconciled. Non-zero means the displayed reserves are behind the chain.
+   *
+   * @generated from field: uint64 pending_unapplied = 16;
+   */
+  pendingUnapplied = protoInt64.zero;
 
   /**
    * Mirror of the published advertisement's state_number; 0 if not advertised.
@@ -8227,9 +8431,10 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 14, name: "reserve_a", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 15, name: "reserve_b", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 16, name: "pending_unapplied", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 7, name: "advertised_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "routing_advertised", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 9, name: "anchor_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
@@ -8346,6 +8551,10 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
   vaultId = new Uint8Array(0);
 
   /**
+   * 32-byte policy commits naming the exact assets traded. A reserve
+   * inclusion proof is keyed by policy commit, so a hop named by label could
+   * be matched against a proof for a different same-ticker asset.
+   *
    * @generated from field: bytes token_in = 2;
    */
   tokenIn = new Uint8Array(0);
@@ -8766,6 +8975,26 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
    */
   publisherSignature = new Uint8Array(0);
 
+  /**
+   * The ONE receipt that can activate this pointer, as
+   * dsm::dlv::settlement_receipt_leaf::receipt_hash. Covered by
+   * publisher_signature.
+   *
+   * A pointer is INERT until a TraderSettlementReceiptV1 hashing to exactly
+   * this value is fetched and verified. Publishing a pointer is cheap and
+   * proves only intent; without this binding a trader could publish one,
+   * abandon its own advance, pay nothing, take nothing, and still remove the
+   * quoted amount from every other trader's view of the vault for as long as
+   * it liked. Binding it to a specific receipt means activating a pointer
+   * requires having actually settled.
+   *
+   * Naming the specific receipt (not merely "some receipt") stops the other
+   * half: a pointer for a large trade satisfied by a receipt for a tiny one.
+   *
+   * @generated from field: bytes expected_receipt_hash = 8;
+   */
+  expectedReceiptHash = new Uint8Array(0);
+
   constructor(data?: PartialMessage<VaultPendingPointerV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8781,6 +9010,7 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
     { no: 5, name: "new_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "publisher_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "publisher_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "expected_receipt_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultPendingPointerV1 {
@@ -8797,6 +9027,154 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
 
   static equals(a: VaultPendingPointerV1 | PlainMessage<VaultPendingPointerV1> | undefined, b: VaultPendingPointerV1 | PlainMessage<VaultPendingPointerV1> | undefined): boolean {
     return proto3.util.equals(VaultPendingPointerV1, a, b);
+  }
+}
+
+/**
+ * Proof that a trader's own DlvSettle advance COMMITTED — the witness a
+ * pending pointer needs before it may consume anyone's liquidity.
+ *
+ * Storage key: defi/vault-receipt/{vault_id_b32}/{x_b32}
+ *
+ * The settlement is bound into a leaf of the trader's own device SMT
+ * (dsm::dlv::settlement_receipt_leaf), written BY the settling advance and
+ * derived from the operation's own authorization — so it cannot be minted
+ * separately, and cannot describe a different trade than the balances that
+ * actually moved. This message carries that leaf's 256-sibling inclusion path
+ * against the trader's post-advance root, signed by the trader.
+ *
+ * Anyone can verify, with no access to the trader's device. What it
+ * establishes is that the input was paid and the output taken on a chain the
+ * trader signed. What it deliberately does NOT establish is that post_root is
+ * the trader's CURRENT root — it need not be, because a committed settlement
+ * stays committed and no later advance can un-pay the input.
+ *
+ * @generated from message dsm.TraderSettlementReceiptV1
+ */
+export class TraderSettlementReceiptV1 extends Message<TraderSettlementReceiptV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes receipt_id = 2;
+   */
+  receiptId = new Uint8Array(0);
+
+  /**
+   * The settled trade, in full. The owner folds these numbers straight into
+   * its reserves, so anything omitted would be something the owner had to
+   * take on trust from elsewhere.
+   *
+   * @generated from field: bytes x = 3;
+   */
+  x = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 parent_sequence = 4;
+   */
+  parentSequence = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 new_sequence = 5;
+   */
+  newSequence = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes input_policy_commit = 6;
+   */
+  inputPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 input_amount = 7;
+   */
+  inputAmount = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes output_policy_commit = 8;
+   */
+  outputPolicyCommit = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 output_amount = 9;
+   */
+  outputAmount = protoInt64.zero;
+
+  /**
+   * Whose chain this witnesses.
+   *
+   * @generated from field: bytes trader_genesis = 10;
+   */
+  traderGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes trader_devid = 11;
+   */
+  traderDevid = new Uint8Array(0);
+
+  /**
+   * The trader's device SMT root after the settling advance committed, and
+   * the 256-sibling path proving the receipt leaf sits under it.
+   *
+   * @generated from field: bytes post_root = 12;
+   */
+  postRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated bytes smt_siblings = 13;
+   */
+  smtSiblings: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes trader_public_key = 14;
+   */
+  traderPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes trader_signature = 15;
+   */
+  traderSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<TraderSettlementReceiptV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TraderSettlementReceiptV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "receipt_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "parent_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "new_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "input_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "input_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "output_policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "output_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "trader_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "trader_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "post_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "smt_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 14, name: "trader_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 15, name: "trader_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TraderSettlementReceiptV1 {
+    return new TraderSettlementReceiptV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TraderSettlementReceiptV1 {
+    return new TraderSettlementReceiptV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TraderSettlementReceiptV1 {
+    return new TraderSettlementReceiptV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TraderSettlementReceiptV1 | PlainMessage<TraderSettlementReceiptV1> | undefined, b: TraderSettlementReceiptV1 | PlainMessage<TraderSettlementReceiptV1> | undefined): boolean {
+    return proto3.util.equals(TraderSettlementReceiptV1, a, b);
   }
 }
 
@@ -8955,32 +9333,34 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
   vaultId = new Uint8Array(0);
 
   /**
-   * lexicographically lower
+   * 32-byte policy commits. The storage prefix is built from these, so pair
+   * identity IS the discovery index — a label here would collide two markets.
+   *
+   * lex-lower policy commit
    *
    * @generated from field: bytes token_a = 3;
    */
   tokenA = new Uint8Array(0);
 
   /**
-   * lexicographically higher
+   * lex-higher policy commit
    *
    * @generated from field: bytes token_b = 4;
    */
   tokenB = new Uint8Array(0);
 
   /**
-   * big-endian u128, token_a reserve
+   * Advertised reserves in u64 base units, sourced from the owner's encumbered
+   * reserve leaves — never from a caller-supplied number.
    *
-   * @generated from field: bytes reserve_a_u128 = 5;
+   * @generated from field: uint64 reserve_a = 17;
    */
-  reserveAU128 = new Uint8Array(0);
+  reserveA = protoInt64.zero;
 
   /**
-   * big-endian u128, token_b reserve
-   *
-   * @generated from field: bytes reserve_b_u128 = 6;
+   * @generated from field: uint64 reserve_b = 18;
    */
-  reserveBU128 = new Uint8Array(0);
+  reserveB = protoInt64.zero;
 
   /**
    * Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
@@ -9054,8 +9434,8 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
     { no: 2, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 17, name: "reserve_a", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 18, name: "reserve_b", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 7, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 8, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
@@ -9096,7 +9476,61 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
  * owner's hash chain — the coordination point is the
  * `ExternalCommitmentV1` anchor.  Until X is published all vaults
  * reject; once it is, all vaults accept.  No global coordinator.
+ * Typed request for `dlv.reconcile` — the OWNER folds a settlement it has
+ * verified into its own reserve leaves.
  *
+ * The trader's credit was already final at the trader's own advance; this is the
+ * owner learning what happened, not authorizing it. So the request names only
+ * which settlement to look at: everything the owner acts on is re-derived from
+ * the receipt it fetches and verifies, never taken from the caller.
+ *
+ * @generated from message dsm.DlvReconcileV1
+ */
+export class DlvReconcileV1 extends Message<DlvReconcileV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * The external commitment of the settlement to fold. The receipt is fetched
+   * and verified under this key; a request naming a settlement with no valid
+   * receipt applies nothing.
+   *
+   * @generated from field: bytes x = 2;
+   */
+  x = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvReconcileV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvReconcileV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvReconcileV1 {
+    return new DlvReconcileV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvReconcileV1 {
+    return new DlvReconcileV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvReconcileV1 {
+    return new DlvReconcileV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvReconcileV1 | PlainMessage<DlvReconcileV1> | undefined, b: DlvReconcileV1 | PlainMessage<DlvReconcileV1> | undefined): boolean {
+    return proto3.util.equals(DlvReconcileV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.DlvUnlockRoutedV1
  */
 export class DlvUnlockRoutedV1 extends Message<DlvUnlockRoutedV1> {

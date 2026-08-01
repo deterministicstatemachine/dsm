@@ -17,6 +17,8 @@ import {
 } from '../../dsm/amm';
 import { publishRoutingAdvertisement } from '../../dsm/route_commit';
 import { decodeBase32Crockford } from '../../utils/textId';
+import { getAllBalances } from '../../dsm/wallet';
+import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
 import '../../styles/EnhancedWallet.css';
 
@@ -26,13 +28,6 @@ interface Props {
   onNavigate?: (screen: string) => void;
 }
 
-function compareBytes(a: Uint8Array, b: Uint8Array): number {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return a.length - b.length;
-}
 
 function bigIntFromString(s: string): bigint {
   if (!/^[0-9]+$/.test(s)) throw new Error('must be a non-negative integer');
@@ -55,6 +50,11 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   const [showCreate, setShowCreate] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
 
+  // The pair is chosen from assets this device actually HOLDS, and each choice
+  // carries the token's 32-byte CPTA anchor. Free text used to be sent as the
+  // pair identity, which made a ticker the asset's name AND its identity — and
+  // a ticker is not an identity: two distinct RIGB tokens have existed here.
+  const [holdings, setHoldings] = useState<TokenBalanceView[]>([]);
   const [tokenA, setTokenA] = useState('');
   const [tokenB, setTokenB] = useState('');
   const [reserveA, setReserveA] = useState('');
@@ -66,6 +66,15 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   const refresh = useCallback(async () => {
     setPhase('loading');
     setError('');
+    try {
+      // Only assets carrying a CPTA anchor can name a pair. One without an
+      // anchor has no identity to send, so it is not offered rather than
+      // offered and rejected later.
+      const bal = await getAllBalances();
+      setHoldings(bal.filter((b) => (b.policyAnchorB32 ?? '').length > 0));
+    } catch {
+      setHoldings([]);
+    }
     const r = await listOwnedAmmVaults();
     if (r.success) {
       setVaults(r.vaults ?? []);
@@ -133,8 +142,16 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     }
   }, [refresh]);
 
+  /// Display name for a selected anchor. Names are for the human reading the
+  /// card; the anchor is what is sent.
+  const tickerFor = useCallback(
+    (anchor: string) => holdings.find((h) => h.policyAnchorB32 === anchor)?.ticker ?? anchor,
+    [holdings],
+  );
+
   const formValid = useMemo(() => {
     if (!tokenA.trim() || !tokenB.trim()) return false;
+    if (tokenA === tokenB) return false;
     if (!reserveA.trim() || !reserveB.trim()) return false;
     if (!policyAnchor.trim()) return false;
     return true;
@@ -145,17 +162,20 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     setToast('');
     try {
       setPhase('creating');
-      let aBytes = new TextEncoder().encode(tokenA.trim());
-      let bBytes = new TextEncoder().encode(tokenB.trim());
-      let rA = bigIntFromString(reserveA);
-      let rB = bigIntFromString(reserveB);
-
-      // Canonical pair ordering — Rust enforces lex-lower-first; swap
-      // here if the user typed them backwards so reserves stay aligned.
-      if (compareBytes(aBytes, bBytes) > 0) {
-        [aBytes, bBytes] = [bBytes, aBytes];
-        [rA, rB] = [rB, rA];
+      // 32-byte CPTA policy commits, taken from the selected holdings. Identity
+      // comes from the picker; nothing here derives it from a name.
+      const aBytes = decodeBase32Crockford(tokenA);
+      const bBytes = decodeBase32Crockford(tokenB);
+      if (aBytes.length !== 32 || bBytes.length !== 32) {
+        throw new Error('each side of the pair must be a 32-byte policy commit');
       }
+      const rA = bigIntFromString(reserveA);
+      const rB = bigIntFromString(reserveB);
+
+      // Ordering is NOT done here. Rust owns canonicalisation: it sorts the pair
+      // over the commits and aligns the funding legs to that order, so there is
+      // one implementation of "which side is A" rather than a render-layer copy
+      // that can disagree with it.
 
       const fee = Number(feeBps);
       if (!Number.isInteger(fee) || fee < 0 || fee >= 10_000) {
@@ -340,13 +360,33 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         {showCreate && (
           <div className="balance-section" style={{ marginTop: 16 }}>
             <h4 style={{ fontSize: 12, marginBottom: 8 }}>New AMM vault</h4>
+            {/* The pair is SELECTED, never typed. The option's value is the
+                token's CPTA anchor — its identity — while the label is the
+                ticker, which is display only. Free text made the two the same
+                thing, and a ticker can name more than one token. */}
             <div className="form-group">
               <label htmlFor="liq-token-a">Token A</label>
-              <input id="liq-token-a" className="form-input" value={tokenA} onChange={(e) => setTokenA(e.target.value)} placeholder="e.g. DEMO_AAA" />
+              <select id="liq-token-a" className="form-input" value={tokenA} onChange={(e) => setTokenA(e.target.value)}>
+                <option value="">select a held asset…</option>
+                {holdings.map((h) => (
+                  <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
+                    {h.ticker} · {h.anchorFingerprint}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="form-group">
               <label htmlFor="liq-token-b">Token B</label>
-              <input id="liq-token-b" className="form-input" value={tokenB} onChange={(e) => setTokenB(e.target.value)} placeholder="e.g. DEMO_BBB" />
+              <select id="liq-token-b" className="form-input" value={tokenB} onChange={(e) => setTokenB(e.target.value)}>
+                <option value="">select a held asset…</option>
+                {holdings
+                  .filter((h) => h.policyAnchorB32 !== tokenA)
+                  .map((h) => (
+                    <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
+                      {h.ticker} · {h.anchorFingerprint}
+                    </option>
+                  ))}
+              </select>
             </div>
             <div className="form-group">
               <label htmlFor="liq-reserve-a">Reserve A</label>
@@ -382,7 +422,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       <ConfirmModal
         visible={showConfirm}
         title="Create AMM vault"
-        message={`Create vault ${tokenA} / ${tokenB} with reserves ${reserveA} / ${reserveB} at ${feeBps} bps fee?`}
+        message={`Create vault ${tickerFor(tokenA)} / ${tickerFor(tokenB)} with reserves ${reserveA} / ${reserveB} at ${feeBps} bps fee?`}
         onConfirm={() => { setShowConfirm(false); void handleCreate(); }}
         onCancel={() => setShowConfirm(false)}
       />

@@ -476,15 +476,24 @@ pub struct LimboVault {
     /// routed unlock.  The chunks #7 gate verifies a trader's
     /// `RouteCommitHop.vault_state_anchor_seq` matches this value.  This
     /// is the LOCAL authoritative truth — never read from storage.
-    /// Domain-only: not persisted in `LimboVaultProto`.
+    ///
+    /// Not in `LimboVaultProto`, and deliberately not: it is recovered after a
+    /// restart from the vault's own reserve leaves, which stamp this sequence
+    /// into every leaf value. Storing it here as well would be a second copy of
+    /// a fact the device root already authenticates, and the two would
+    /// eventually disagree with nothing to say which was right. See
+    /// `dsm_sdk::sdk::vault_rehydration`.
     pub current_sequence: u64,
     /// Tier 2 Foundation: anchor-enforcement policy carried over from the
     /// vault's `DlvSpecV1.anchor_enforcement` at creation time.  Stored as
     /// `i32` to match the proto-generated `AnchorEnforcement` enum (0 =
     /// `Unspecified`, 1 = `Optional`, 2 = `Required`).  The chunks #7 gate
     /// uses this to decide whether `RouteCommitHop` anchor binding fields
-    /// are mandatory, accepted-if-present, or grandfathered.  Domain-only:
-    /// not persisted in `LimboVaultProto`.
+    /// are mandatory, accepted-if-present, or grandfathered.
+    ///
+    /// Not in `LimboVaultProto`; persisted in the canonical vault record
+    /// (`amm_vault_records`) and restored by `vault_rehydration`, which refuses
+    /// an unrecognised value rather than falling back to a permissive default.
     pub anchor_enforcement: i32,
     /// Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
     /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the
@@ -782,16 +791,12 @@ impl From<&FulfillmentMechanism> for crate::types::proto::FulfillmentMechanism {
             FulfillmentMechanism::AmmConstantProduct {
                 token_a,
                 token_b,
-                reserve_a,
-                reserve_b,
                 fee_bps,
             } => proto::FulfillmentMechanism {
                 kind: Some(fulfillment_mechanism::Kind::AmmConstantProduct(
                     proto::AmmConstantProduct {
                         token_a: token_a.clone(),
                         token_b: token_b.clone(),
-                        reserve_a_u128: reserve_a.to_be_bytes().to_vec(),
-                        reserve_b_u128: reserve_b.to_be_bytes().to_vec(),
                         fee_bps: *fee_bps,
                     },
                 )),
@@ -876,26 +881,6 @@ impl TryFrom<crate::types::proto::FulfillmentMechanism> for FulfillmentMechanism
                 FulfillmentMechanism::Or(out)
             }
             Kind::AmmConstantProduct(amm) => {
-                if amm.reserve_a_u128.len() != 16 {
-                    return Err(DsmError::serialization_error(
-                        "AmmConstantProduct",
-                        "reserve_a_u128 must be 16 bytes",
-                        None::<&str>,
-                        None::<core::convert::Infallible>,
-                    ));
-                }
-                if amm.reserve_b_u128.len() != 16 {
-                    return Err(DsmError::serialization_error(
-                        "AmmConstantProduct",
-                        "reserve_b_u128 must be 16 bytes",
-                        None::<&str>,
-                        None::<core::convert::Infallible>,
-                    ));
-                }
-                let mut a_buf = [0u8; 16];
-                a_buf.copy_from_slice(&amm.reserve_a_u128);
-                let mut b_buf = [0u8; 16];
-                b_buf.copy_from_slice(&amm.reserve_b_u128);
                 // Lex-canonical pair invariant: token_a <= token_b.  An
                 // ad/vault that violates this is malformed.
                 if !amm.token_a.is_empty()
@@ -909,11 +894,12 @@ impl TryFrom<crate::types::proto::FulfillmentMechanism> for FulfillmentMechanism
                         None::<core::convert::Infallible>,
                     ));
                 }
+                // No reserve decoding: the condition carries the predicate, and
+                // the quantities it governs are encumbered leaves in the
+                // owner's device SMT.
                 FulfillmentMechanism::AmmConstantProduct {
                     token_a: amm.token_a,
                     token_b: amm.token_b,
-                    reserve_a: u128::from_be_bytes(a_buf),
-                    reserve_b: u128::from_be_bytes(b_buf),
                     fee_bps: amm.fee_bps,
                 }
             }
@@ -2182,12 +2168,9 @@ impl LimboVault {
             } => format!("Bitcoin HTLC vault ({expected_btc_amount_sats} sats)"),
             FulfillmentMechanism::And(v) => format!("All of {} conditions must be met", v.len()),
             FulfillmentMechanism::Or(v) => format!("Any of {} conditions must be met", v.len()),
-            FulfillmentMechanism::AmmConstantProduct {
-                reserve_a,
-                reserve_b,
-                fee_bps,
-                ..
-            } => format!("AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"),
+            FulfillmentMechanism::AmmConstantProduct { fee_bps, .. } => {
+                format!("AMM constant-product (fee={fee_bps}bps)")
+            }
         };
 
         let mut metadata = HashMap::new();

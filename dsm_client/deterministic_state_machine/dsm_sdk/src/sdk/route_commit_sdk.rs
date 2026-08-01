@@ -152,8 +152,8 @@ pub(crate) fn bind_path_to_route_commit(
             vault_id: hop.vault_id.to_vec(),
             token_in: hop.token_in.clone(),
             token_out: hop.token_out.clone(),
-            input_amount_u128: u128_to_be_bytes(hop.input_amount),
-            expected_output_amount_u128: u128_to_be_bytes(hop.expected_output_amount),
+            input_amount_u128: u128_to_be_bytes(u128::from(hop.input_amount)),
+            expected_output_amount_u128: u128_to_be_bytes(u128::from(hop.expected_output_amount)),
             fee_bps: hop.fee_bps,
             advertisement_digest: hop.advertisement_digest.to_vec(),
             state_number: hop.state_number,
@@ -176,8 +176,10 @@ pub(crate) fn bind_path_to_route_commit(
         nonce: input.nonce.to_vec(),
         input_token: input.path.input_token.clone(),
         output_token: input.path.output_token.clone(),
-        input_amount_u128: u128_to_be_bytes(input.path.input_amount),
-        expected_final_output_amount_u128: u128_to_be_bytes(input.path.final_output_amount),
+        input_amount_u128: u128_to_be_bytes(u128::from(input.path.input_amount)),
+        expected_final_output_amount_u128: u128_to_be_bytes(u128::from(
+            input.path.final_output_amount,
+        )),
         total_fee_bps: input.path.total_fee_bps,
         hops: hops_proto,
         initiator_public_key: input.initiator_public_key.to_vec(),
@@ -381,6 +383,15 @@ pub(crate) enum PublishPointerError {
     SignFailed { hop_index: usize, msg: String },
     /// Underlying storage write failed.
     StorageFailed { hop_index: usize, msg: String },
+    /// The hop names its pair by a label rather than by 32-byte policy commits,
+    /// so the settled trade cannot be stated in the terms a settlement receipt
+    /// commits to.
+    ///
+    /// FAILS CLOSED rather than publishing a pointer with a commitment no
+    /// receipt could ever match. Such a pointer would be permanently inert —
+    /// harmless to reserves, but it would silently claim the `(parent_seq, X)`
+    /// slot forever. Refusing to publish says so instead of hiding it.
+    HopPairIsNotPolicyCommits { hop_index: usize },
 }
 
 impl std::fmt::Display for PublishPointerError {
@@ -397,6 +408,12 @@ impl std::fmt::Display for PublishPointerError {
             }
             PublishPointerError::SignFailed { hop_index, msg } => {
                 write!(f, "hop {hop_index}: sphincs sign failed: {msg}")
+            }
+            PublishPointerError::HopPairIsNotPolicyCommits { hop_index } => {
+                write!(
+                    f,
+                    "hop {hop_index}: pair identity is not 32-byte policy commits; a settlement receipt cannot be named"
+                )
             }
             PublishPointerError::StorageFailed { hop_index, msg } => {
                 write!(f, "hop {hop_index}: storage put failed: {msg}")
@@ -511,6 +528,60 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             *h.finalize().as_bytes()
         };
 
+        // Name the ONE receipt that may later activate this pointer.
+        //
+        // Derived from the hop's own settled quantities, so the trader cannot
+        // publish a pointer for one trade and satisfy it with a receipt for a
+        // cheaper one — and derived from `x`, so the id matches what the
+        // settling advance will independently derive.
+        // Through the one pair parser, so the identity a pointer commits to and
+        // the identity a composer derives cannot disagree.
+        let Ok(hop_pair) =
+            dsm::dlv::pair_identity::CanonicalPair::parse(&hop.token_in, &hop.token_out)
+        else {
+            errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
+            continue;
+        };
+        let input_policy_commit = match <[u8; 32]>::try_from(hop.token_in.as_slice()) {
+            Ok(pc) if hop_pair.contains(&pc) => pc,
+            _ => {
+                errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
+                continue;
+            }
+        };
+        let Some(output_policy_commit) = hop_pair.counterpart(&input_policy_commit) else {
+            errors.push(PublishPointerError::HopPairIsNotPolicyCommits { hop_index });
+            continue;
+        };
+        // 16-byte big-endian on the wire, u64 base units in the receipt. The
+        // narrowing is checked here, once: an amount that does not fit is a
+        // malformed hop, never a value to truncate.
+        let (Ok(hop_input_amount), Ok(hop_output_amount)) = (
+            <[u8; 16]>::try_from(hop.input_amount_u128.as_slice())
+                .map_err(|_| ())
+                .and_then(|b| u64::try_from(u128::from_be_bytes(b)).map_err(|_| ())),
+            <[u8; 16]>::try_from(hop.expected_output_amount_u128.as_slice())
+                .map_err(|_| ())
+                .and_then(|b| u64::try_from(u128::from_be_bytes(b)).map_err(|_| ())),
+        ) else {
+            errors.push(PublishPointerError::HopReSimulationFailed { hop_index });
+            continue;
+        };
+        let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id_arr, x);
+        let expected_receipt_hash = dsm::dlv::settlement_receipt_leaf::receipt_commitment(
+            &vault_id_arr,
+            &receipt_id,
+            &dsm::dlv::settlement_receipt_leaf::SettledTrade {
+                x: *x,
+                parent_sequence,
+                new_sequence,
+                input_policy_commit,
+                input_amount: hop_input_amount,
+                output_policy_commit,
+                output_amount: hop_output_amount,
+            },
+        );
+
         // Sign the pointer.
         let signed = match dsm::dlv::vault_pending_pointer::sign_vault_pending_pointer(
             &vault_id_arr,
@@ -518,6 +589,7 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             new_sequence,
             x,
             &marker_digest,
+            &expected_receipt_hash,
             publisher_pk,
             publisher_sk,
         ) {
@@ -543,6 +615,7 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             new_sequence: signed.new_sequence,
             x: signed.x.to_vec(),
             new_reserves_digest: signed.new_reserves_digest.to_vec(),
+            expected_receipt_hash: signed.expected_receipt_hash.to_vec(),
             publisher_public_key: signed.publisher_public_key.clone(),
             publisher_signature: signed.publisher_signature.clone(),
         };
@@ -613,8 +686,8 @@ pub(crate) async fn is_external_commitment_visible(
 /// is sufficient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AmmVerifyOutcome {
-    pub new_reserve_a: u128,
-    pub new_reserve_b: u128,
+    pub new_reserve_a: u64,
+    pub new_reserve_b: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -636,7 +709,10 @@ pub(crate) enum AmmVerifyError {
     /// Reserves moved between routing time and unlock; trader must
     /// rebuild the route.  Carries the simulated and expected values
     /// for diagnostics.
-    OutputMismatch { simulated: u128, expected: u128 },
+    OutputMismatch { simulated: u64, expected: u64 },
+    /// A hop named an amount larger than a u64 base-unit balance can hold.
+    /// Rejected rather than truncated: truncation here mints the difference.
+    AmountExceedsU64BaseUnits,
     /// `simulated > reserve_out` — impossible by the formula but
     /// surfaced anyway as a defensive check.
     SimulatedExceedsReserveOut,
@@ -654,25 +730,35 @@ pub(crate) enum AmmVerifyError {
 /// signed-intent settlement.
 ///
 /// Returns:
-///   * `Ok(Some(outcome))` — AMM vault, swap accepted; caller must
-///     write `outcome.new_reserve_a` / `_b` into
-///     `vault.fulfillment_condition` after the on-chain advance succeeds.
-///   * `Ok(None)` — non-AMM vault; no extra check, no reserve
-///     update.
-///   * `Err(AmmVerifyError)` — typed rejection; caller surfaces
-///     verbatim.
+///
+/// * `Ok(Some(outcome))` — AMM vault, swap accepted. `outcome.new_reserve_a` /
+///   `_b` are the post-trade reserves the OWNER will hold once it reconciles;
+///   they are not written back into the condition, which no longer has anywhere
+///   to put them.
+/// * `Ok(None)` — non-AMM vault; no extra check.
+/// * `Err(AmmVerifyError)` — typed rejection; caller surfaces verbatim.
+///
+/// `reserve_a` / `reserve_b` are PARAMETERS, not fields of the condition.
+///
+/// They used to be read out of the fulfillment mechanism, which meant this gate
+/// re-simulated the swap against a number the vault owner had asserted about
+/// itself. The caller now supplies the authoritative amounts — its own
+/// encumbered reserve leaves, or a verified `VaultReserveInclusionProofV1` from
+/// the owner — so the strict-equality check below is anchored to liquidity that
+/// provably exists. The condition still supplies the pair and the fee, which
+/// are predicate, not quantity.
 pub(crate) fn verify_amm_swap_against_reserves(
     hop: &generated::RouteCommitHopV1,
     fulfillment: &dsm::vault::FulfillmentMechanism,
+    reserve_a: u64,
+    reserve_b: u64,
 ) -> Result<Option<AmmVerifyOutcome>, AmmVerifyError> {
-    let (token_a, token_b, reserve_a, reserve_b, fee_bps) = match fulfillment {
+    let (token_a, token_b, fee_bps) = match fulfillment {
         dsm::vault::FulfillmentMechanism::AmmConstantProduct {
             token_a,
             token_b,
-            reserve_a,
-            reserve_b,
             fee_bps,
-        } => (token_a, token_b, *reserve_a, *reserve_b, *fee_bps),
+        } => (token_a, token_b, *fee_bps),
         _ => return Ok(None),
     };
 
@@ -698,8 +784,16 @@ pub(crate) fn verify_amm_swap_against_reserves(
     in_buf.copy_from_slice(&hop.input_amount_u128);
     let mut out_buf = [0u8; 16];
     out_buf.copy_from_slice(&hop.expected_output_amount_u128);
-    let input_amount = u128::from_be_bytes(in_buf);
-    let expected_output = u128::from_be_bytes(out_buf);
+    // Base units are u64; the wire is 16-byte big-endian. Narrow ONCE, here,
+    // checked — a hop naming an amount that does not fit is malformed, and
+    // truncating it at the settlement boundary is how the difference gets
+    // minted.
+    let (Ok(input_amount), Ok(expected_output)) = (
+        u64::try_from(u128::from_be_bytes(in_buf)),
+        u64::try_from(u128::from_be_bytes(out_buf)),
+    ) else {
+        return Err(AmmVerifyError::AmountExceedsU64BaseUnits);
+    };
 
     let simulated = crate::sdk::routing_path_sdk::constant_product_output(
         input_amount,
@@ -878,11 +972,316 @@ pub(crate) async fn verify_route_commit_unlock_eligibility(
 
 #[cfg(test)]
 mod tests {
+
     //! Chunk #3 tests.
     //!
     //! Cover the full bind → compute X → publish → fetch → verify
     //! cycle plus the determinism + signature-exclusion guarantees
     //! that make X safe to use as an atomic-visibility trigger.
+
+    /// ELIGIBILITY ACTUALLY VERIFIES THE INITIATOR SIGNATURE.
+    ///
+    /// Replaces a grep for `dsm::crypto::sphincs::sphincs_verify` appearing
+    /// anywhere in this file. That confirmed the symbol was mentioned. It could
+    /// not confirm the verification is reached, that its result is acted on, or
+    /// that it covers the message X is derived from — a call whose boolean was
+    /// discarded would satisfy the grep exactly.
+    ///
+    /// Without this check anyone could present a RouteCommit attributed to
+    /// another initiator and have it accepted as eligible.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn eligibility_requires_a_genuine_initiator_signature() {
+        let vault_id = [0x77u8; 32];
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+
+        let mut rc = rc_fixture();
+        rc.hops[0].vault_id = vault_id.to_vec();
+        rc.initiator_public_key = pk.clone();
+
+        // Sign over the canonical form — the same bytes X is derived from.
+        let canonical = canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature = dsm::crypto::sphincs::sphincs_sign(&sk, &canonical).expect("sign");
+
+        // The anchor must be visible for eligibility to pass, so publish X.
+        let x = compute_external_commitment(&rc);
+        publish_external_commitment(&x, &pk, "eligibility-test")
+            .await
+            .expect("publish X");
+
+        let signed_bytes = rc.encode_to_vec();
+        let hop = verify_route_commit_unlock_eligibility(&signed_bytes, &vault_id)
+            .await
+            .expect("a genuinely signed, published route must be eligible");
+        assert_eq!(hop.vault_id, vault_id.to_vec());
+
+        // NOW BREAK ONLY THE SIGNATURE. Everything else — the route, the hop,
+        // the published anchor — is unchanged, so a rejection here can only come
+        // from the signature check itself.
+        let mut forged = rc.clone();
+        forged.initiator_signature[0] ^= 0xff;
+        assert!(
+            verify_route_commit_unlock_eligibility(&forged.encode_to_vec(), &vault_id)
+                .await
+                .is_err(),
+            "a tampered initiator signature must make the route ineligible"
+        );
+
+        // And a signature that is valid for a DIFFERENT key must not pass under
+        // this initiator's identity.
+        let (other_pk, _) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let mut impostor = rc.clone();
+        impostor.initiator_public_key = other_pk;
+        assert!(
+            verify_route_commit_unlock_eligibility(&impostor.encode_to_vec(), &vault_id)
+                .await
+                .is_err(),
+            "a signature must not verify under a substituted initiator key"
+        );
+    }
+
+    /// ONE SIMULATOR, and both callers agree on it.
+    ///
+    /// Replaces two greps: one asserting this file mentions
+    /// `routing_path_sdk::constant_product_output`, another asserting a
+    /// particular `reserve_in.checked_add(input_amount)` line exists. Both
+    /// confirmed a call site; neither confirmed the two paths agree. If the
+    /// quote-time simulator and the settle-time verifier ever diverged, a trade
+    /// would be quoted at one price and settled at another, with every signature
+    /// on the path still valid.
+    #[test]
+    fn the_quote_simulator_and_the_swap_verifier_agree() {
+        let (pc_a, pc_b) = ([0x11u8; 32], [0x22u8; 32]);
+        let fee_bps = 30u32;
+        let fulfillment = dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps,
+        };
+
+        // A spread of reserves and inputs, including a 1-unit trade against a
+        // lopsided pool where floor division bites hardest.
+        for (reserve_a, reserve_b, input) in [
+            (1_000_000u64, 500_000u64, 1_000u64),
+            (1_000_000, 500_000, 250_000),
+            (10, 1_000_000, 1),
+            (1_000_000, 10, 1),
+            (u32::MAX as u64, u32::MAX as u64, 7),
+        ] {
+            let expected = crate::sdk::routing_path_sdk::constant_product_output(
+                input, reserve_a, reserve_b, fee_bps,
+            );
+            let Some(expected) = expected else { continue };
+
+            let hop = generated::RouteCommitHopV1 {
+                vault_id: vec![0x77; 32],
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected as u128).to_be_bytes().to_vec(),
+                ..Default::default()
+            };
+            let outcome =
+                verify_amm_swap_against_reserves(&hop, &fulfillment, reserve_a, reserve_b)
+                    .unwrap_or_else(|e| {
+                        panic!("verifier rejected its own simulator's output: {e:?}")
+                    })
+                    .unwrap_or_else(|| panic!("verifier produced no outcome for a valid AMM hop"));
+
+            // The verifier accepted the simulator's number and moved the
+            // reserves by exactly it. Strict equality, no band: a slippage
+            // tolerance here is a licence to settle at a price nobody quoted.
+            assert_eq!(
+                (outcome.new_reserve_a, outcome.new_reserve_b),
+                (reserve_a + input, reserve_b - expected),
+                "verifier and simulator disagree at reserves=({reserve_a},{reserve_b}) input={input}"
+            );
+
+            // And a hop claiming one unit more than the curve allows is refused,
+            // which is what makes the agreement load-bearing rather than
+            // incidental.
+            let greedy = generated::RouteCommitHopV1 {
+                expected_output_amount_u128: (expected as u128 + 1).to_be_bytes().to_vec(),
+                ..hop.clone()
+            };
+            let greedy_outcome =
+                verify_amm_swap_against_reserves(&greedy, &fulfillment, reserve_a, reserve_b);
+            match greedy_outcome {
+                Err(_) => {}
+                Ok(Some(o)) => assert_ne!(
+                    (o.new_reserve_a, o.new_reserve_b),
+                    (reserve_a + input, reserve_b - (expected + 1)),
+                    "a hop taking more than the curve allows must not verify"
+                ),
+                Ok(None) => {}
+            }
+        }
+    }
+
+    // ── canonical forms ────────────────────────────────────────────────────
+    //
+    // These replace grep guards that asserted the SHAPE of this file's source
+    // text (`src.contains("out.initiator_signature.clear();")`). Text matching
+    // could only confirm a line existed; it could not tell whether the value it
+    // produced had the property the protocol depends on. These run the real
+    // functions and check the property.
+
+    fn rc_fixture() -> generated::RouteCommitV1 {
+        generated::RouteCommitV1 {
+            // The constant, not a literal: a fixture pinned to an old version
+            // would be rejected at the schema gate before reaching the property
+            // under test, and would look like a failure of that property.
+            version: ROUTE_COMMIT_VERSION,
+            nonce: vec![0x11; 32],
+            total_fee_bps: 30,
+            initiator_public_key: vec![0xAA; 64],
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vec![0x77; 32],
+                token_in: vec![0x11; 32],
+                token_out: vec![0x22; 32],
+                input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+                expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
+                vault_state_anchor_seq: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// X MUST NOT depend on the initiator signature.
+    ///
+    /// It cannot: the signature is over X's own preimage, so if X covered it
+    /// the derivation would be circular and no signature could ever be produced.
+    /// Signing changes the message, and X must be the same before and after.
+    #[test]
+    fn the_external_commitment_is_unchanged_by_signing() {
+        let unsigned = rc_fixture();
+        let x_before = compute_external_commitment(&unsigned);
+
+        let mut signed = unsigned.clone();
+        signed.initiator_signature = vec![0xEE; 128];
+        assert_eq!(
+            compute_external_commitment(&signed),
+            x_before,
+            "signing must not move X, or the commitment could never be signed"
+        );
+
+        // A different signature over the same commitment is still the same X —
+        // which is what makes X a name for the TRADE rather than for one signing.
+        let mut resigned = unsigned.clone();
+        resigned.initiator_signature = vec![0x11; 96];
+        assert_eq!(compute_external_commitment(&resigned), x_before);
+    }
+
+    /// EVERYTHING ELSE is covered. The signature is the only exemption; if any
+    /// other field could move without moving X, two different trades would share
+    /// one commitment and one slot.
+    #[test]
+    fn every_other_field_moves_the_external_commitment() {
+        let base = rc_fixture();
+        let x = compute_external_commitment(&base);
+
+        let mutations: Vec<(&str, Box<dyn Fn(&mut generated::RouteCommitV1)>)> = vec![
+            (
+                "nonce",
+                Box::new(|r: &mut generated::RouteCommitV1| r.nonce[0] ^= 0xff),
+            ),
+            (
+                "fee",
+                Box::new(|r: &mut generated::RouteCommitV1| r.total_fee_bps += 1),
+            ),
+            (
+                "initiator pk",
+                Box::new(|r: &mut generated::RouteCommitV1| r.initiator_public_key[0] ^= 0xff),
+            ),
+            (
+                "hop vault",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].vault_id[0] ^= 0xff),
+            ),
+            (
+                "hop token_in",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].token_in[0] ^= 0xff),
+            ),
+            (
+                "hop token_out",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].token_out[0] ^= 0xff),
+            ),
+            (
+                "input amount",
+                Box::new(|r: &mut generated::RouteCommitV1| {
+                    r.hops[0].input_amount_u128 = 1_001u128.to_be_bytes().to_vec()
+                }),
+            ),
+            (
+                "expected output",
+                Box::new(|r: &mut generated::RouteCommitV1| {
+                    r.hops[0].expected_output_amount_u128 = 971u128.to_be_bytes().to_vec()
+                }),
+            ),
+            (
+                "anchor seq",
+                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].vault_state_anchor_seq += 1),
+            ),
+        ];
+        for (what, mutate) in mutations {
+            let mut m = base.clone();
+            mutate(&mut m);
+            assert_ne!(
+                compute_external_commitment(&m),
+                x,
+                "changing the {what} must move X"
+            );
+        }
+    }
+
+    /// The bytes signed and the bytes committed to are the SAME bytes.
+    ///
+    /// If they diverged, a signature could validate over one trade while X named
+    /// another — the initiator would be bound to something it never agreed to.
+    #[test]
+    fn the_signature_and_the_commitment_cover_the_same_bytes() {
+        use prost::Message;
+        let rc = rc_fixture();
+        let canonical = canonicalise_for_commitment(&rc);
+        let canonical_bytes = canonical.encode_to_vec();
+
+        // X is derived from exactly these bytes.
+        assert_eq!(
+            compute_external_commitment(&rc),
+            dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes),
+        );
+
+        // And a signature produced over them verifies, then still verifies once
+        // stamped onto the message — because stamping does not change the
+        // canonical form.
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let sig = dsm::crypto::sphincs::sphincs_sign(&sk, &canonical_bytes).expect("sign");
+        let mut signed = rc.clone();
+        signed.initiator_signature = sig.clone();
+        let recanonical = canonicalise_for_commitment(&signed).encode_to_vec();
+        assert_eq!(
+            recanonical, canonical_bytes,
+            "stamping must not alter the message"
+        );
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(&pk, &recanonical, &sig).expect("verify"),
+            "the signature must verify over the same bytes X names"
+        );
+    }
+
+    /// The commitment is domain-separated: the same bytes under another domain
+    /// must not collide with an external commitment.
+    #[test]
+    fn the_external_commitment_is_domain_separated() {
+        use prost::Message;
+        let rc = rc_fixture();
+        let bytes = canonicalise_for_commitment(&rc).encode_to_vec();
+        assert_ne!(
+            compute_external_commitment(&rc),
+            dsm::crypto::blake3::domain_hash_bytes("DSM/some-other-domain", &bytes),
+        );
+    }
 
     use super::*;
     use crate::sdk::routing_path_sdk::{Path, VaultHop};
@@ -1478,13 +1877,14 @@ mod tests {
         (b"AAA".to_vec(), b"BBB".to_vec())
     }
 
-    fn amm_vault(reserve_a: u128, reserve_b: u128, fee_bps: u32) -> FulfillmentMechanism {
+    /// The PREDICATE only. Reserves are supplied per call, because that is now
+    /// what the verifier takes: quantities are an authenticated INPUT, not a
+    /// property of the vault being verified.
+    fn amm_predicate(fee_bps: u32) -> FulfillmentMechanism {
         let (a, b) = token_a_pair();
         FulfillmentMechanism::AmmConstantProduct {
             token_a: a,
             token_b: b,
-            reserve_a,
-            reserve_b,
             fee_bps,
         }
     }
@@ -1493,16 +1893,19 @@ mod tests {
         vault_id: [u8; 32],
         token_in: &[u8],
         token_out: &[u8],
-        input: u128,
-        expected_output: u128,
+        input: u64,
+        expected_output: u64,
         fee_bps: u32,
     ) -> generated::RouteCommitHopV1 {
         generated::RouteCommitHopV1 {
             vault_id: vault_id.to_vec(),
             token_in: token_in.to_vec(),
             token_out: token_out.to_vec(),
-            input_amount_u128: input.to_be_bytes().to_vec(),
-            expected_output_amount_u128: expected_output.to_be_bytes().to_vec(),
+            // The wire field is 16-byte big-endian; base units are u64. Widen on
+            // write — a u64's to_be_bytes() is 8 bytes and would be rejected as
+            // malformed, which is the correct rejection for the wrong reason.
+            input_amount_u128: u128::from(input).to_be_bytes().to_vec(),
+            expected_output_amount_u128: u128::from(expected_output).to_be_bytes().to_vec(),
             fee_bps,
             advertisement_digest: [0u8; 32].to_vec(),
             state_number: 1,
@@ -1527,22 +1930,125 @@ mod tests {
         };
         let (a, b) = token_a_pair();
         let hop = hop_for(vid(1), &a, &b, 100, 99, 30);
-        match verify_amm_swap_against_reserves(&hop, &payment) {
+        match verify_amm_swap_against_reserves(&hop, &payment, 0, 0) {
             Ok(None) => {}
             other => panic!("non-AMM vault must return Ok(None), got {other:?}"),
         }
     }
 
+    /// (5) PRICING AND AMM VERIFICATION RECEIVE EXPLICIT AUTHENTICATED RESERVES.
+    ///
+    /// The same hop against the same predicate must accept or reject purely on
+    /// the reserves SUPPLIED. Reserves used to be read out of the predicate, so
+    /// a vault could not be re-verified against any state but its own claim —
+    /// which is what made a stale quote undetectable.
+    #[test]
+    fn the_verifier_is_driven_by_the_reserves_it_is_given() {
+        let (a, b) = token_a_pair();
+        let vault = amm_predicate(30);
+        let simulated =
+            crate::sdk::routing_path_sdk::constant_product_output(10_000, 1_000_000, 1_000_000, 30)
+                .expect("simulate");
+        let hop = hop_for(vid(1), &a, &b, 10_000, simulated, 30);
+
+        // Against the reserves it was quoted at: accepted.
+        verify_amm_swap_against_reserves(&hop, &vault, 1_000_000, 1_000_000)
+            .expect("ok")
+            .expect("AMM");
+
+        // Against reserves that produce a DIFFERENT output: rejected, naming both
+        // figures. Note the qualifier — a reserve change small enough not to move
+        // the floor-divided result legitimately still accepts, and asserting
+        // otherwise would be asserting something untrue about the curve. Each
+        // case below is checked to genuinely move the output before it is
+        // required to reject.
+        for (ra, rb) in [
+            (500_000u64, 500_000u64),
+            (2_000_000, 1_000_000),
+            (1_000_000, 900_000),
+        ] {
+            let would_be =
+                crate::sdk::routing_path_sdk::constant_product_output(10_000, ra, rb, 30)
+                    .expect("simulate at the moved reserves");
+            assert_ne!(
+                would_be, simulated,
+                "fixture error: reserves ({ra},{rb}) do not move the output, so \
+                 rejection is not the expected behaviour"
+            );
+            match verify_amm_swap_against_reserves(&hop, &vault, ra, rb) {
+                Err(AmmVerifyError::OutputMismatch {
+                    simulated: got,
+                    expected,
+                }) => {
+                    assert_eq!(got, would_be, "the reject reports what it simulated");
+                    assert_eq!(expected, simulated, "and what the hop claimed");
+                }
+                other => panic!("reserves ({ra},{rb}) must reject, got {other:?}"),
+            }
+        }
+
+        // And the converse, stated explicitly: a reserve change too small to move
+        // the floor-divided output does NOT reject. Strict equality is on the
+        // OUTPUT, not on the reserves.
+        let unmoved =
+            crate::sdk::routing_path_sdk::constant_product_output(10_000, 999_999, 1_000_000, 30)
+                .expect("simulate");
+        if unmoved == simulated {
+            verify_amm_swap_against_reserves(&hop, &vault, 999_999, 1_000_000)
+                .expect("ok")
+                .expect("AMM");
+        }
+    }
+
+    /// (8) CHECKED u64 BOUNDARY: a 16-byte hop amount larger than u64 base units
+    /// is REFUSED, not truncated. Truncating at this exact point is how the
+    /// difference gets minted.
+    #[test]
+    fn an_oversized_16_byte_hop_amount_is_refused_not_truncated() {
+        let (a, b) = token_a_pair();
+        let vault = amm_predicate(30);
+
+        // u64::MAX + 1 — smallest value that cannot be a base-unit amount.
+        let too_big: u128 = u128::from(u64::MAX) + 1;
+        let mut hop = hop_for(vid(1), &a, &b, 1, 1, 30);
+        hop.input_amount_u128 = too_big.to_be_bytes().to_vec();
+        assert!(
+            matches!(
+                verify_amm_swap_against_reserves(&hop, &vault, 1_000_000, 1_000_000),
+                Err(AmmVerifyError::AmountExceedsU64BaseUnits)
+            ),
+            "an oversized input must be refused"
+        );
+
+        // Truncation would have produced 0 here — proving the check is real.
+        assert_eq!(
+            (too_big as u64),
+            0,
+            "the value chosen truncates to zero, so a silent narrowing would pass"
+        );
+
+        let mut hop = hop_for(vid(1), &a, &b, 1, 1, 30);
+        hop.expected_output_amount_u128 = too_big.to_be_bytes().to_vec();
+        assert!(
+            matches!(
+                verify_amm_swap_against_reserves(&hop, &vault, 1_000_000, 1_000_000),
+                Err(AmmVerifyError::AmountExceedsU64BaseUnits)
+            ),
+            "an oversized expected output must be refused"
+        );
+    }
+
     #[test]
     fn amm_verify_matched_output_accepts_and_advances_reserves() {
         let (a, b) = token_a_pair();
-        let vault = amm_vault(1_000_000, 1_000_000, 30);
+        let vault = amm_predicate(30);
+        let (res_a, res_b) = (1_000_000u64, 1_000_000u64);
         // Compute what the simulator produces for input=10_000 to match.
         let simulated =
             crate::sdk::routing_path_sdk::constant_product_output(10_000, 1_000_000, 1_000_000, 30)
                 .expect("simulate");
         let hop = hop_for(vid(1), &a, &b, 10_000, simulated, 30);
-        let outcome = verify_amm_swap_against_reserves(&hop, &vault)
+        let outcome = verify_amm_swap_against_reserves(&hop, &vault, res_a, res_b)
             .expect("ok")
             .expect("AMM");
         // Full input enters reserve_a, simulated leaves reserve_b.
@@ -1550,8 +2056,10 @@ mod tests {
         assert_eq!(outcome.new_reserve_b, 1_000_000 - simulated);
         // Constant-product invariant should be approximately preserved
         // (post-fee k > pre-fee k due to fee accrual to the pool).
-        let pre_k = 1_000_000u128 * 1_000_000u128;
-        let post_k = outcome.new_reserve_a * outcome.new_reserve_b;
+        // Widened deliberately: the product of two realistic reserves overflows
+        // u64, which is exactly why the curve keeps u128 internally.
+        let pre_k = u128::from(res_a) * u128::from(res_b);
+        let post_k = u128::from(outcome.new_reserve_a) * u128::from(outcome.new_reserve_b);
         assert!(
             post_k >= pre_k,
             "post-trade k must be >= pre-trade k (fee accrues to pool); \
@@ -1569,8 +2077,10 @@ mod tests {
             crate::sdk::routing_path_sdk::constant_product_output(10_000, 1_000_000, 1_000_000, 30)
                 .expect("route simulate");
         let hop = hop_for(vid(1), &a, &b, 10_000, route_simulated, 30);
-        let stale_vault = amm_vault(500_000, 500_000, 30); // moved
-        match verify_amm_swap_against_reserves(&hop, &stale_vault) {
+        let stale_vault = amm_predicate(30);
+        // The vault MOVED since the quote: these are its reserves now.
+        let (res_a, res_b) = (500_000u64, 500_000u64);
+        match verify_amm_swap_against_reserves(&hop, &stale_vault, res_a, res_b) {
             Err(AmmVerifyError::OutputMismatch {
                 simulated,
                 expected,
@@ -1589,11 +2099,12 @@ mod tests {
     #[test]
     fn amm_verify_wrong_pair_rejects() {
         let (a, _b) = token_a_pair();
-        let vault = amm_vault(1_000_000, 1_000_000, 30);
+        let vault = amm_predicate(30);
+        let (res_a, res_b) = (1_000_000u64, 1_000_000u64);
         // Hop names tokens that don't exist on this vault.
         let bogus = b"XYZ".to_vec();
         let hop = hop_for(vid(1), &a, &bogus, 10_000, 9_500, 30);
-        match verify_amm_swap_against_reserves(&hop, &vault) {
+        match verify_amm_swap_against_reserves(&hop, &vault, res_a, res_b) {
             Err(AmmVerifyError::HopTokensDoNotMatchVaultPair) => {}
             other => panic!("expected HopTokensDoNotMatchVaultPair, got {other:?}"),
         }
@@ -1605,13 +2116,14 @@ mod tests {
         // must remap reserves: reserve_in = reserve_b, reserve_out =
         // reserve_a.
         let (a, b) = token_a_pair();
-        let vault = amm_vault(2_000_000, 1_000_000, 30);
+        let vault = amm_predicate(30);
+        let (res_a, res_b) = (2_000_000u64, 1_000_000u64);
         // B→A swap: input is on side B, output is on side A.
         let simulated =
             crate::sdk::routing_path_sdk::constant_product_output(5_000, 1_000_000, 2_000_000, 30)
                 .expect("simulate");
         let hop = hop_for(vid(1), &b, &a, 5_000, simulated, 30);
-        let outcome = verify_amm_swap_against_reserves(&hop, &vault)
+        let outcome = verify_amm_swap_against_reserves(&hop, &vault, res_a, res_b)
             .expect("ok")
             .expect("AMM");
         // Input adds to reserve_b; output subtracts from reserve_a.
@@ -1622,9 +2134,10 @@ mod tests {
     #[test]
     fn amm_verify_zero_reserves_rejects_as_insufficient() {
         let (a, b) = token_a_pair();
-        let vault = amm_vault(0, 0, 30);
+        let vault = amm_predicate(30);
+        let (res_a, res_b) = (0u64, 0u64);
         let hop = hop_for(vid(1), &a, &b, 100, 50, 30);
-        match verify_amm_swap_against_reserves(&hop, &vault) {
+        match verify_amm_swap_against_reserves(&hop, &vault, res_a, res_b) {
             Err(AmmVerifyError::InsufficientReservesOrOverflow) => {}
             other => panic!("expected InsufficientReservesOrOverflow, got {other:?}"),
         }
@@ -1633,11 +2146,12 @@ mod tests {
     #[test]
     fn amm_verify_malformed_amount_field_rejects() {
         let (a, b) = token_a_pair();
-        let vault = amm_vault(1_000_000, 1_000_000, 30);
+        let vault = amm_predicate(30);
+        let (res_a, res_b) = (1_000_000u64, 1_000_000u64);
         let mut hop = hop_for(vid(1), &a, &b, 10_000, 9_900, 30);
         // Truncate input_amount_u128 to wrong length.
         hop.input_amount_u128 = vec![0u8; 8];
-        match verify_amm_swap_against_reserves(&hop, &vault) {
+        match verify_amm_swap_against_reserves(&hop, &vault, res_a, res_b) {
             Err(AmmVerifyError::AmountFieldsMustBe16BytesBigEndian) => {}
             other => panic!("expected AmountFieldsMustBe16BytesBigEndian, got {other:?}"),
         }
@@ -1645,18 +2159,20 @@ mod tests {
 
     #[test]
     fn amm_verify_reserve_in_overflow_protection() {
-        // A vault with reserves at u128::MAX would overflow on input.
+        // A vault at the top of the u64 range must refuse, not wrap.
         let (a, b) = token_a_pair();
-        let vault = amm_vault(u128::MAX, 1_000, 30);
+        let vault = amm_predicate(30);
+        // Saturated reserve: the checked arithmetic must refuse, not wrap.
+        let (res_a, res_b) = (u64::MAX, 1_000u64);
         let simulated =
-            crate::sdk::routing_path_sdk::constant_product_output(1, u128::MAX, 1_000, 30);
+            crate::sdk::routing_path_sdk::constant_product_output(1, u64::MAX, 1_000, 30);
         // simulator already disqualifies via overflow internally;
         // re-simulation will fail at InsufficientReservesOrOverflow
         // before reserve-add overflow can fire.
-        let hop_input = 1u128;
+        let hop_input = 1u64;
         let hop_expected = simulated.unwrap_or(0);
         let hop = hop_for(vid(1), &a, &b, hop_input, hop_expected, 30);
-        match verify_amm_swap_against_reserves(&hop, &vault) {
+        match verify_amm_swap_against_reserves(&hop, &vault, res_a, res_b) {
             Err(AmmVerifyError::InsufficientReservesOrOverflow)
             | Err(AmmVerifyError::ReserveInOverflow) => {}
             other => {
@@ -1752,18 +2268,19 @@ mod tests {
             v[31] = 0xA1;
             v
         };
-        let initial_reserve_a: u128 = 1_000_000;
-        let initial_reserve_b: u128 = 1_000_000;
+        let initial_reserve_a: u64 = 1_000_000;
+        let initial_reserve_b: u64 = 1_000_000;
         let fee_bps: u32 = 30;
 
         // Bob's vault state (the chunk-#7 verifier consumes this directly).
-        let mut bobs_fulfillment = FulfillmentMechanism::AmmConstantProduct {
+        // Predicate only. Bob's LIQUIDITY is tracked separately, the way it now
+        // lives separately on his device: encumbered leaves, not condition fields.
+        let bobs_fulfillment = FulfillmentMechanism::AmmConstantProduct {
             token_a: token_aaa.clone(),
             token_b: token_bbb.clone(),
-            reserve_a: initial_reserve_a,
-            reserve_b: initial_reserve_b,
             fee_bps,
         };
+        let (mut bobs_reserve_a, mut bobs_reserve_b) = (initial_reserve_a, initial_reserve_b);
 
         // ── STEP 1 ─ Bob publishes the routing-vault advertisement ────
         // Synthetic vault proto bytes — chunk #1 hashes them but doesn't
@@ -1779,8 +2296,8 @@ mod tests {
                 vault_id: &vault_id,
                 token_a: &token_aaa,
                 token_b: &token_bbb,
-                reserve_a_u128: initial_reserve_a.to_be_bytes(),
-                reserve_b_u128: initial_reserve_b.to_be_bytes(),
+                reserve_a: initial_reserve_a,
+                reserve_b: initial_reserve_b,
                 fee_bps,
                 unlock_spec_digest: [0u8; 32],
                 unlock_spec_key: "sofi/spec/demo".to_string(),
@@ -1801,7 +2318,7 @@ mod tests {
         let ads_for_search: Vec<_> = advert_set.into_iter().map(|p| p.advertisement).collect();
 
         // ── STEP 3 ─ Alice path-searches + binds ──────────────────────
-        let trade_input: u128 = 10_000;
+        let trade_input: u64 = 10_000;
         let path = crate::sdk::routing_path_sdk::find_best_path(
             &ads_for_search,
             &token_aaa,
@@ -1867,9 +2384,14 @@ mod tests {
         assert_eq!(bound_hop.vault_id, vault_id.to_vec());
 
         // ── STEP 7 ─ Bob's AMM re-simulation gate (chunk #7) ──────────
-        let outcome = verify_amm_swap_against_reserves(&bound_hop, &bobs_fulfillment)
-            .expect("re-sim returns Ok")
-            .expect("AMM vault");
+        let outcome = verify_amm_swap_against_reserves(
+            &bound_hop,
+            &bobs_fulfillment,
+            bobs_reserve_a,
+            bobs_reserve_b,
+        )
+        .expect("re-sim returns Ok")
+        .expect("AMM vault");
         // Full input enters reserve_a, simulated output leaves reserve_b.
         assert_eq!(outcome.new_reserve_a, initial_reserve_a + trade_input);
         assert_eq!(
@@ -1885,17 +2407,11 @@ mod tests {
         );
 
         // ── STEP 8 ─ Trade 1 settles; Bob's vault state advances ──────
-        if let FulfillmentMechanism::AmmConstantProduct {
-            ref mut reserve_a,
-            ref mut reserve_b,
-            ..
-        } = bobs_fulfillment
-        {
-            *reserve_a = outcome.new_reserve_a;
-            *reserve_b = outcome.new_reserve_b;
-        } else {
-            panic!("vault must remain AMM-typed");
-        }
+        // Settling advances Bob's ENCUMBERED RESERVES. It used to rewrite fields
+        // inside his own unlock condition — a vault editing the quantities its
+        // predicate governs.
+        bobs_reserve_a = outcome.new_reserve_a;
+        bobs_reserve_b = outcome.new_reserve_b;
 
         // ── STEP 9 ─ Stale-reserves attack — Alice tries to settle
         //            against Bob's NEW state with a route quoted from
@@ -1936,7 +2452,12 @@ mod tests {
                 .await
                 .expect("stale route is structurally valid for chunks #4/#5");
 
-        match verify_amm_swap_against_reserves(&stale_hop, &bobs_fulfillment) {
+        match verify_amm_swap_against_reserves(
+            &stale_hop,
+            &bobs_fulfillment,
+            bobs_reserve_a,
+            bobs_reserve_b,
+        ) {
             Err(AmmVerifyError::OutputMismatch {
                 simulated,
                 expected,
@@ -1968,8 +2489,8 @@ mod tests {
                 vault_id: &vault_id,
                 token_a: &token_aaa,
                 token_b: &token_bbb,
-                reserve_a_u128: outcome.new_reserve_a.to_be_bytes(),
-                reserve_b_u128: outcome.new_reserve_b.to_be_bytes(),
+                reserve_a: outcome.new_reserve_a,
+                reserve_b: outcome.new_reserve_b,
                 fee_bps,
                 unlock_spec_digest: [0u8; 32],
                 unlock_spec_key: "sofi/spec/demo".to_string(),
@@ -2029,9 +2550,14 @@ mod tests {
             verify_route_commit_unlock_eligibility(&fresh_signed.encode_to_vec(), &vault_id)
                 .await
                 .expect("fresh route eligibility");
-        let trade2_outcome = verify_amm_swap_against_reserves(&fresh_hop, &bobs_fulfillment)
-            .expect("re-sim ok")
-            .expect("AMM");
+        let trade2_outcome = verify_amm_swap_against_reserves(
+            &fresh_hop,
+            &bobs_fulfillment,
+            bobs_reserve_a,
+            bobs_reserve_b,
+        )
+        .expect("re-sim ok")
+        .expect("AMM");
         // Trade 2 settles; constant-product invariant still preserved.
         let pre_k_2 = outcome.new_reserve_a * outcome.new_reserve_b;
         let post_k_2 = trade2_outcome.new_reserve_a * trade2_outcome.new_reserve_b;
@@ -2058,8 +2584,8 @@ mod tests {
         vault_id: [u8; 32],
         token_a: &[u8],
         token_b: &[u8],
-        reserve_a: u128,
-        reserve_b: u128,
+        reserve_a: u64,
+        reserve_b: u64,
         fee_bps: u32,
         seq: u64,
     ) -> (generated::RouteCommitHopV1, [u8; 32]) {

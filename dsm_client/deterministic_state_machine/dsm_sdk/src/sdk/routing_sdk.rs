@@ -97,8 +97,11 @@ pub(crate) struct PublishRoutingAdInput<'a> {
     pub vault_id: &'a [u8; 32],
     pub token_a: &'a [u8],
     pub token_b: &'a [u8],
-    pub reserve_a_u128: [u8; 16],
-    pub reserve_b_u128: [u8; 16],
+    /// Base units, u64 — matching `DeviceState::balances` and the owner's
+    /// encumbered reserve leaves. These are read from those leaves by the
+    /// caller; they are never a number a client supplied.
+    pub reserve_a: u64,
+    pub reserve_b: u64,
     pub fee_bps: u32,
     pub unlock_spec_digest: [u8; 32],
     pub unlock_spec_key: String,
@@ -111,7 +114,7 @@ pub(crate) struct PublishRoutingAdInput<'a> {
 /// Token pair is canonicalised (lex-sorted) before key construction; the
 /// caller may pass `(tokenA, tokenB)` or `(tokenB, tokenA)` and end up at
 /// the same key.  Reserves flow with the input order — they are written
-/// into `reserve_a_u128` / `reserve_b_u128` AS THE CALLER INTENDED for
+/// into `reserve_a` / `reserve_b` AS THE CALLER INTENDED for
 /// the lex-lower / lex-higher token, so a caller that supplied them in
 /// reverse order would publish a misleading advertisement.  Helpers
 /// further down the stack should normalise both at the same site.
@@ -129,9 +132,9 @@ pub(crate) async fn publish_active_advertisement(
     // direction the caller happened to pass.
     let (canonical_a, canonical_b) = canonical_token_pair(input.token_a, input.token_b);
     let (reserve_a, reserve_b) = if canonical_a == input.token_a {
-        (input.reserve_a_u128, input.reserve_b_u128)
+        (input.reserve_a, input.reserve_b)
     } else {
-        (input.reserve_b_u128, input.reserve_a_u128)
+        (input.reserve_b, input.reserve_a)
     };
 
     let ad = generated::RoutingVaultAdvertisementV1 {
@@ -139,8 +142,8 @@ pub(crate) async fn publish_active_advertisement(
         vault_id: input.vault_id.to_vec(),
         token_a: canonical_a.to_vec(),
         token_b: canonical_b.to_vec(),
-        reserve_a_u128: reserve_a.to_vec(),
-        reserve_b_u128: reserve_b.to_vec(),
+        reserve_a,
+        reserve_b,
         fee_bps: input.fee_bps,
         unlock_spec_digest: input.unlock_spec_digest.to_vec(),
         unlock_spec_key: input.unlock_spec_key,
@@ -185,7 +188,7 @@ pub(crate) async fn publish_terminal_state(
 
 /// Republish an existing routing-vault advertisement with new reserves
 /// after a settled swap.  Reads the current ad from storage, updates
-/// `reserve_a_u128` / `reserve_b_u128` to the post-trade values,
+/// `reserve_a` / `reserve_b` to the post-trade values,
 /// increments `updated_state_number` so the dedup rule supersedes the
 /// pre-trade form, and writes back to the same key.  All other fields
 /// (vault_id, token pair, fee_bps, vault_proto_key, vault_proto_digest,
@@ -205,8 +208,8 @@ pub(crate) async fn republish_active_advertisement_with_reserves(
     token_a: &[u8],
     token_b: &[u8],
     vault_id: &[u8; 32],
-    new_reserve_a: u128,
-    new_reserve_b: u128,
+    new_reserve_a: u64,
+    new_reserve_b: u64,
 ) -> Result<(), dsm::types::error::DsmError> {
     let ad_key = advertisement_key(token_a, token_b, vault_id);
     let ad_bytes = BitcoinTapSdk::storage_get_bytes(&ad_key).await?;
@@ -219,8 +222,8 @@ pub(crate) async fn republish_active_advertisement_with_reserves(
                 Some(e),
             )
         })?;
-    ad.reserve_a_u128 = new_reserve_a.to_be_bytes().to_vec();
-    ad.reserve_b_u128 = new_reserve_b.to_be_bytes().to_vec();
+    ad.reserve_a = new_reserve_a;
+    ad.reserve_b = new_reserve_b;
     ad.updated_state_number = ad.updated_state_number.saturating_add(1);
     BitcoinTapSdk::storage_put_bytes(&ad_key, &ad.encode_to_vec()).await?;
     Ok(())
@@ -379,6 +382,7 @@ pub(crate) async fn delete_routing_advertisement(
 
 #[cfg(test)]
 mod tests {
+
     //! SoFi routing-vault discovery tests.
     //!
     //! Exercises publish → list → verify → terminal-state → delete on
@@ -390,6 +394,181 @@ mod tests {
     //!
     //! Each test uses unique token-id / vault-id pairs so suites do
     //! not poison each other.
+
+    /// The routing-advertisement digest is DOMAIN-SEPARATED and content-bound.
+    ///
+    /// Replaces a grep for the literal text of the domain constant. That could
+    /// confirm the constant's spelling; it could not confirm that the digest it
+    /// produces is distinguishable from the other digests travelling the same
+    /// storage layer. A collision would let one record be presented as another
+    /// with its binding intact.
+    #[test]
+    fn the_advertisement_digest_cannot_collide_with_another_domain() {
+        let payload = b"vault-proto-bytes";
+        let ours = dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, payload);
+
+        assert_eq!(
+            ours,
+            dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, payload),
+            "identical inputs must give identical digests"
+        );
+        assert_ne!(
+            ours,
+            dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, b"other-bytes"),
+            "the digest must bind the content"
+        );
+        for other in [
+            crate::sdk::posted_dlv_sdk::POSTED_DLV_AD_DOMAIN,
+            crate::sdk::route_commit_sdk::EXT_COMMIT_DOMAIN,
+        ] {
+            assert_ne!(
+                ours,
+                dsm::crypto::blake3::domain_hash_bytes(other, payload),
+                "the routing-ad digest must not collide with the {other} domain"
+            );
+        }
+    }
+
+    /// The advertisement key is addressed by PAIR IDENTITY, so discovery for one
+    /// market cannot enumerate another's — including a market over an asset that
+    /// merely shares a ticker.
+    #[test]
+    fn advertisement_addressing_is_pair_scoped() {
+        let (a, b) = ([0x11u8; 32], [0x22u8; 32]);
+        let impostor = [0x33u8; 32];
+        let vault = [0x77u8; 32];
+
+        let key = advertisement_key(&a, &b, &vault);
+        assert_eq!(key, advertisement_key(&a, &b, &vault));
+        assert!(key.starts_with(&advertisement_prefix_for_pair(&a, &b)));
+        assert!(
+            !key.starts_with(&advertisement_prefix_for_pair(&a, &impostor)),
+            "a different pair must not enumerate this market"
+        );
+        assert_ne!(
+            key,
+            advertisement_key(&a, &b, &[0x88u8; 32]),
+            "a different vault over the same pair is a different record"
+        );
+    }
+
+    /// REQUIRED PROOF: the advertisement encodes the EXACT policy commits the
+    /// vault was funded under, and the exact amounts sitting in its reserve
+    /// leaves.
+    ///
+    /// Everything upstream shares one pair parser, which makes agreement very
+    /// likely — but "likely by construction" is not a test. This reads the
+    /// funded leaves, publishes through the real builder, fetches the emitted
+    /// bytes back out of storage, and compares them field by field.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_advertisement_encodes_the_exact_funded_identities_and_amounts() {
+        use prost::Message;
+
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+
+        // Read reserves the way the publish handler does: out of the leaves,
+        // keyed by the funded commits.
+        let reserve_a = v.head.vault_reserve(&v.vault_id, &v.pc_a);
+        let reserve_b = v.head.vault_reserve(&v.vault_id, &v.pc_b);
+        assert_eq!((reserve_a, reserve_b), (10_000, 5_000));
+
+        publish_active_advertisement(PublishRoutingAdInput {
+            vault_id: &v.vault_id,
+            token_a: &v.pc_a,
+            token_b: &v.pc_b,
+            reserve_a,
+            reserve_b,
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: [0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: &[0xABu8; 64],
+            vault_proto_bytes: b"vault-proto",
+        })
+        .await
+        .expect("publish");
+
+        let key = advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let bytes = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key)
+            .await
+            .expect("fetch the advertisement that was actually written");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(bytes.as_slice()).expect("decode");
+
+        // The identities on the wire are the funded ones, byte for byte.
+        assert_eq!(ad.token_a, v.pc_a.to_vec(), "advertised A is the funded A");
+        assert_eq!(ad.token_b, v.pc_b.to_vec(), "advertised B is the funded B");
+        assert_eq!(ad.token_a.len(), 32);
+        assert_eq!(ad.token_b.len(), 32);
+        assert_eq!(ad.vault_id, v.vault_id.to_vec());
+
+        // And the amounts are the leaf amounts, on the side that holds them.
+        assert_eq!(ad.reserve_a, reserve_a);
+        assert_eq!(ad.reserve_b, reserve_b);
+        assert_eq!(ad.fee_bps, v.fee_bps);
+
+        // A same-ticker impostor is NOT what got advertised, and holds nothing
+        // in this vault — so it could not have been.
+        let impostor = {
+            let mut pc = v.pc_a;
+            pc[0] ^= 0xff;
+            pc
+        };
+        assert_ne!(ad.token_a, impostor.to_vec());
+        assert_eq!(
+            v.head.vault_reserve(&v.vault_id, &impostor),
+            0,
+            "an asset this vault never funded must hold nothing in it"
+        );
+    }
+
+    /// Publishing in the reverse order yields the SAME advertisement: same key,
+    /// same canonical sides, and the reserves follow their assets rather than
+    /// their argument position.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reversed_publication_produces_the_same_advertisement() {
+        use prost::Message;
+
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        let reserve_a = v.head.vault_reserve(&v.vault_id, &v.pc_a);
+        let reserve_b = v.head.vault_reserve(&v.vault_id, &v.pc_b);
+
+        // Deliberately backwards: higher commit first, with ITS reserve first.
+        publish_active_advertisement(PublishRoutingAdInput {
+            vault_id: &v.vault_id,
+            token_a: &v.pc_b,
+            token_b: &v.pc_a,
+            reserve_a: reserve_b,
+            reserve_b: reserve_a,
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: [0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: &[0xABu8; 64],
+            vault_proto_bytes: b"vault-proto",
+        })
+        .await
+        .expect("publish");
+
+        // Same key either way — pair identity, not argument order, indexes it.
+        let key = advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        assert_eq!(key, advertisement_key(&v.pc_b, &v.pc_a, &v.vault_id));
+
+        let bytes = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key)
+            .await
+            .expect("fetch");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(
+            ad.token_a,
+            v.pc_a.to_vec(),
+            "A is still the lex-lower commit"
+        );
+        assert_eq!(ad.token_b, v.pc_b.to_vec());
+        assert_eq!(
+            (ad.reserve_a, ad.reserve_b),
+            (reserve_a, reserve_b),
+            "each reserve followed its own asset across the swap"
+        );
+    }
 
     use super::*;
     use prost::Message;
@@ -427,16 +606,16 @@ mod tests {
         token_a: &[u8],
         token_b: &[u8],
         vault_id: &[u8; 32],
-        reserve_a: u128,
-        reserve_b: u128,
+        reserve_a: u64,
+        reserve_b: u64,
     ) -> Vec<u8> {
         let proto = fake_vault_proto_bytes(tag);
         publish_active_advertisement(PublishRoutingAdInput {
             vault_id,
             token_a,
             token_b,
-            reserve_a_u128: u128_be(reserve_a),
-            reserve_b_u128: u128_be(reserve_b),
+            reserve_a,
+            reserve_b,
             fee_bps: 30,
             unlock_spec_digest: [0u8; 32],
             unlock_spec_key: "sofi/spec/test".to_string(),
@@ -500,8 +679,8 @@ mod tests {
             vault_id: &vault_id,
             token_a: &higher,
             token_b: &lower,
-            reserve_a_u128: u128_be(7_000), // intended for `higher`
-            reserve_b_u128: u128_be(3_000), // intended for `lower`
+            reserve_a: 7_000, // intended for `higher`
+            reserve_b: 3_000, // intended for `lower`
             fee_bps: 25,
             unlock_spec_digest: [0u8; 32],
             unlock_spec_key: "sofi/spec/test".to_string(),
@@ -523,8 +702,8 @@ mod tests {
         // the reserve THE CALLER INTENDED for that token (3_000).
         assert_eq!(ad.advertisement.token_a, lower);
         assert_eq!(ad.advertisement.token_b, higher);
-        assert_eq!(ad.advertisement.reserve_a_u128, u128_be(3_000));
-        assert_eq!(ad.advertisement.reserve_b_u128, u128_be(7_000));
+        assert_eq!(ad.advertisement.reserve_a, 3_000);
+        assert_eq!(ad.advertisement.reserve_b, 7_000);
     }
 
     #[tokio::test]
@@ -641,8 +820,8 @@ mod tests {
             vault_id: vault_id.to_vec(),
             token_a: lower.to_vec(),
             token_b: higher.to_vec(),
-            reserve_a_u128: u128_be(100).to_vec(),
-            reserve_b_u128: u128_be(200).to_vec(),
+            reserve_a: 100,
+            reserve_b: 200,
             fee_bps: 30,
             unlock_spec_digest: vec![0u8; 32],
             unlock_spec_key: "sofi/spec/test".into(),
@@ -754,14 +933,8 @@ mod tests {
             .find(|p| p.advertisement.vault_id == vault_id.to_vec())
             .expect("after ad");
         assert_eq!(after_ad.advertisement.updated_state_number, 2);
-        assert_eq!(
-            after_ad.advertisement.reserve_a_u128,
-            u128_be(1_500_000).to_vec()
-        );
-        assert_eq!(
-            after_ad.advertisement.reserve_b_u128,
-            u128_be(1_500_000).to_vec()
-        );
+        assert_eq!(after_ad.advertisement.reserve_a, 1_500_000);
+        assert_eq!(after_ad.advertisement.reserve_b, 1_500_000);
     }
 
     #[tokio::test]
@@ -861,7 +1034,7 @@ mod tests {
             .find(|p| p.advertisement.vault_id == vault_id.to_vec())
             .expect("present");
         assert_eq!(entry.advertisement.updated_state_number, 2);
-        assert_eq!(entry.advertisement.reserve_a_u128, u128_be(110).to_vec());
-        assert_eq!(entry.advertisement.reserve_b_u128, u128_be(91).to_vec());
+        assert_eq!(entry.advertisement.reserve_a, 110);
+        assert_eq!(entry.advertisement.reserve_b, 91);
     }
 }

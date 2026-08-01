@@ -102,18 +102,22 @@ pub enum FulfillmentMechanism {
     /// unlock; a routing-vault advertisement that quoted stale
     /// reserves will fail the verifier's re-simulation check.
     ///
-    /// `token_a` / `token_b` MUST be canonicalised in lex order;
-    /// `reserve_a` describes the `token_a` reserve, `reserve_b` the
-    /// `token_b` reserve.  `fee_bps` is in basis points (30 = 0.30 %).
+    /// The PREDICATE only: which pair, and at what fee.
+    ///
+    /// `token_a` / `token_b` MUST be canonicalised in lex order. `fee_bps` is in
+    /// basis points (30 = 0.30 %).
+    ///
+    /// Reserves are deliberately ABSENT. They used to live here, which made a
+    /// vault's advertised liquidity a number asserted inside its own unlock
+    /// condition — nothing held it, and a settled swap moved no value at all.
+    /// They now live in the owner's device SMT as encumbered reserve leaves and
+    /// are proved to a trader, so a condition no longer carries the quantities
+    /// it governs.
     AmmConstantProduct {
         /// Lex-lower token id.
         token_a: Vec<u8>,
         /// Lex-higher token id.
         token_b: Vec<u8>,
-        /// Reserve of `token_a`.
-        reserve_a: u128,
-        /// Reserve of `token_b`.
-        reserve_b: u128,
         /// Fee in basis points (e.g. 30 = 0.30 %).
         fee_bps: u32,
     },
@@ -144,15 +148,11 @@ impl fmt::Display for FulfillmentMechanism {
             FulfillmentMechanism::Or(conditions) => {
                 write!(f, "OR({} conditions)", conditions.len())
             }
-            FulfillmentMechanism::AmmConstantProduct {
-                reserve_a,
-                reserve_b,
-                fee_bps,
-                ..
-            } => write!(
-                f,
-                "AMM x*y=k (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"
-            ),
+            // No reserves to show: the condition describes the curve and the
+            // fee, and the quantities live in the owner's encumbered leaves.
+            FulfillmentMechanism::AmmConstantProduct { fee_bps, .. } => {
+                write!(f, "AMM x*y=k (fee={fee_bps}bps)")
+            }
         }
     }
 }

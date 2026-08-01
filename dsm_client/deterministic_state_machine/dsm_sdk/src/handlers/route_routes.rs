@@ -431,9 +431,16 @@ impl AppRouterImpl {
         if req.vault_id.len() != 32 {
             return err("route.publishRoutingAdvertisement: vault_id must be 32 bytes".into());
         }
-        if req.reserve_a_u128.len() != 16 || req.reserve_b_u128.len() != 16 {
+        // Reserves are NOT taken from the request — the fields are reserved in
+        // the proto. An advertisement must describe funds the owner has
+        // actually encumbered, so they are read from this device's reserve
+        // leaves below. A caller that could state its own liquidity could
+        // advertise a vault it never funded, which is precisely the condition
+        // that made every published reserve meaningless.
+        if req.token_a.len() != 32 || req.token_b.len() != 32 {
             return err(
-                "route.publishRoutingAdvertisement: reserves must be 16-byte big-endian u128"
+                "route.publishRoutingAdvertisement: token_a/token_b must be 32-byte policy \
+                 commits — a ticker is not an identity and cannot name a reserve leaf"
                     .into(),
             );
         }
@@ -441,6 +448,40 @@ impl AppRouterImpl {
             return err(
                 "route.publishRoutingAdvertisement: unlock_spec_digest must be 32 bytes".into(),
             );
+        }
+
+        // ENCUMBRANCE FIRST. An advertisement must describe funds the owner has
+        // actually locked into this vault, so that question is settled before
+        // any proto derivation or storage work — both because it is the cheaper
+        // check and because a vault holding nothing should be refused ON THAT
+        // BASIS, not incidentally by whichever later gate happens to trip.
+        //
+        // Reserves are read from this device's own leaves; the request's reserve
+        // fields are reserved in the proto so a caller cannot state its own
+        // liquidity and advertise a vault it never funded.
+        let mut pc_a = [0u8; 32];
+        pc_a.copy_from_slice(&req.token_a);
+        let mut pc_b = [0u8; 32];
+        pc_b.copy_from_slice(&req.token_b);
+        let mut vault_id = [0u8; 32];
+        vault_id.copy_from_slice(&req.vault_id);
+        let Some(head) = self.core_sdk.device_head() else {
+            return err("route.publishRoutingAdvertisement: no device head".into());
+        };
+        let reserve_a = head.vault_reserve(&vault_id, &pc_a);
+        let reserve_b = head.vault_reserve(&vault_id, &pc_b);
+        // BOTH sides, not either. `&&` here accepted a vault with one funded leg
+        // and one empty one — which happens exactly when the advertised pair
+        // names a different asset than the one funded, e.g. an impostor sharing
+        // a ticker with the real one. The half-funded advertisement would then
+        // publish with a zero on that side and describe a market that cannot
+        // trade.
+        if reserve_a == 0 || reserve_b == 0 {
+            return err(format!(
+                "route.publishRoutingAdvertisement: this vault does not hold both advertised \
+                 assets (a={reserve_a}, b={reserve_b}) — fund it, and check the pair names the \
+                 assets actually encumbered"
+            ));
         }
         // Derive vault_proto_bytes from the local DLVManager when the
         // caller passes empty.  This is the path the SoFi test +
@@ -492,12 +533,6 @@ impl AppRouterImpl {
             }
         }
 
-        let mut vault_id = [0u8; 32];
-        vault_id.copy_from_slice(&req.vault_id);
-        let mut reserve_a = [0u8; 16];
-        reserve_a.copy_from_slice(&req.reserve_a_u128);
-        let mut reserve_b = [0u8; 16];
-        reserve_b.copy_from_slice(&req.reserve_b_u128);
         let mut unlock_digest = [0u8; 32];
         unlock_digest.copy_from_slice(&req.unlock_spec_digest);
 
@@ -505,8 +540,8 @@ impl AppRouterImpl {
             vault_id: &vault_id,
             token_a: &req.token_a,
             token_b: &req.token_b,
-            reserve_a_u128: reserve_a,
-            reserve_b_u128: reserve_b,
+            reserve_a,
+            reserve_b,
             fee_bps: req.fee_bps,
             unlock_spec_digest: unlock_digest,
             unlock_spec_key: req.unlock_spec_key,
@@ -606,59 +641,16 @@ impl AppRouterImpl {
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            // Already-mirrored vaults: refresh their reserves from
-            // the latest advertisement.  The advertisement carries
-            // reserves in canonical (lex-lower, lex-higher) pair
-            // order; map back to the vault's storage order before
-            // applying.  This is how the OWNER observes a remote
-            // trader's `dlv.unlockRouted` settle on a vault the
-            // owner created — without this refresh, the owner's
-            // local DLVManager stays frozen at vault-creation-time
-            // reserves and the cross-device SoFi orchestrator's
-            // "owner observes trader's settle" assertion can never
-            // fire.  Trader's post-settle path already publishes the
-            // updated advertisement via
-            // `republish_active_advertisement_with_reserves`; this
-            // closes the loop on the owner side.
-            if let Ok(vault_lock) = dlv_manager.get_vault(&vid).await {
-                if ad.reserve_a_u128.len() == 16 && ad.reserve_b_u128.len() == 16 {
-                    let mut canon_a = [0u8; 16];
-                    canon_a.copy_from_slice(&ad.reserve_a_u128);
-                    let mut canon_b = [0u8; 16];
-                    canon_b.copy_from_slice(&ad.reserve_b_u128);
-                    let ad_canon_a = u128::from_be_bytes(canon_a);
-                    let ad_canon_b = u128::from_be_bytes(canon_b);
-                    // Match the ad's canonical pair order against the
-                    // vault's storage order.  If vault.token_a equals
-                    // ad.token_a, reserves are already in vault order;
-                    // otherwise swap.
-                    let mut vault = vault_lock.lock().await;
-                    let vault_token_a = vault.amm_token_a().map(|s| s.to_vec());
-                    if let Some(vt_a) = vault_token_a {
-                        let (new_a, new_b) = if vt_a.as_slice() == ad.token_a.as_slice() {
-                            (ad_canon_a, ad_canon_b)
-                        } else {
-                            (ad_canon_b, ad_canon_a)
-                        };
-                        if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                            reserve_a,
-                            reserve_b,
-                            ..
-                        } = &vault.fulfillment_condition
-                        {
-                            if *reserve_a != new_a || *reserve_b != new_b {
-                                let _ = vault.update_amm_reserves(new_a, new_b);
-                                log::info!(
-                                    "[route.syncVaultsForPair] refreshed reserves for vault {} from ad: a={} b={} updated_state_number={}",
-                                    crate::util::text_id::encode_base32_crockford(&vid),
-                                    new_a,
-                                    new_b,
-                                    ad.updated_state_number
-                                );
-                            }
-                        }
-                    }
-                }
+            // Already-mirrored vaults are skipped, and their reserves are NOT
+            // refreshed from the advertisement.
+            //
+            // This block used to copy an ad's reserves into the local vault so
+            // the owner could "observe" a trader's settle. That made a
+            // discovery hint the authority for the owner's own liquidity —
+            // anyone who could publish an ad could restate what the owner held.
+            // The owner's reserves are its own encumbered leaves, advanced only
+            // by reconciling settlements it has verified.
+            if dlv_manager.get_vault(&vid).await.is_ok() {
                 continue;
             }
             let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad).await
@@ -749,7 +741,12 @@ impl AppRouterImpl {
         }
         let mut amount_buf = [0u8; 16];
         amount_buf.copy_from_slice(&req.input_amount_u128);
-        let input_amount = u128::from_be_bytes(amount_buf);
+        // Narrow ONCE, here, checked. Base units are u64; a request naming more
+        // than that is malformed, not something to truncate at the boundary
+        // where the difference would be minted.
+        let Ok(input_amount) = u64::try_from(u128::from_be_bytes(amount_buf)) else {
+            return err("route.findAndBindBestPath: input_amount exceeds u64 base units".into());
+        };
         let max_hops = if req.max_hops == 0 {
             crate::sdk::routing_path_sdk::DEFAULT_MAX_HOPS
         } else {
@@ -799,21 +796,20 @@ impl AppRouterImpl {
             crate::sdk::route_commit_sdk::HopAnchorBinding,
         > = std::collections::HashMap::new();
         for mut ad in ads.into_iter() {
-            if ad.vault_id.len() != 32
-                || ad.reserve_a_u128.len() != 16
-                || ad.reserve_b_u128.len() != 16
-            {
+            if ad.vault_id.len() != 32 {
                 ads_after_composition.push(ad);
                 continue;
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            let mut a_buf = [0u8; 16];
-            a_buf.copy_from_slice(&ad.reserve_a_u128);
-            let mut b_buf = [0u8; 16];
-            b_buf.copy_from_slice(&ad.reserve_b_u128);
-            let baseline_reserve_a = u128::from_be_bytes(a_buf);
-            let baseline_reserve_b = u128::from_be_bytes(b_buf);
+            // The advertisement's reserves are a HINT for logging only. They
+            // used to seed composition, which meant a trader quoted against
+            // numbers it read out of a published record — the same
+            // advertisement-as-authority shape deleted from syncVaultsForPair.
+            // `compose_vault_state` now takes them out of the owner's verified
+            // reserve inclusion proof instead.
+            let advertised_reserve_a = ad.reserve_a;
+            let advertised_reserve_b = ad.reserve_b;
 
             // Fetch the latest vault state anchor.  If absent, the ad
             // pre-dates the anchor flow — fall through and use the ad
@@ -832,7 +828,6 @@ impl AppRouterImpl {
             match crate::sdk::vault_state_composition::compose_vault_state(
                 &vid,
                 &anchor,
-                (baseline_reserve_a, baseline_reserve_b),
                 &ad.token_a,
                 &ad.token_b,
                 ad.fee_bps,
@@ -842,16 +837,39 @@ impl AppRouterImpl {
                 Ok(composed) => {
                     if composed.pending_chain_len > 0 || composed.pending_chain_skipped > 0 {
                         log::info!(
-                            "[route.findAndBindBestPath] vault {} composed: baseline=({},{}) composed=({},{}) chain_len={} skipped={} seq={}",
+                            "[route.findAndBindBestPath] vault {} composed: advertised=({},{}) proven+composed=({},{}) chain_len={} skipped={} seq={}",
                             crate::util::text_id::encode_base32_crockford(&vid),
-                            baseline_reserve_a,
-                            baseline_reserve_b,
+                            advertised_reserve_a,
+                            advertised_reserve_b,
                             composed.reserves_a,
                             composed.reserves_b,
                             composed.pending_chain_len,
                             composed.pending_chain_skipped,
                             composed.sequence,
                         );
+                    }
+                    // A validly-signed pointer sits on the exact sequence this
+                    // composition ended on and nothing witnesses it, so some
+                    // trade may already have consumed the state a quote would be
+                    // built against. Drop the vault rather than quote it.
+                    //
+                    // This is not the safety gate — the first-writer claim
+                    // refuses a contested slot before any advance, so a quote
+                    // built here could not settle twice. It is refusing EARLY,
+                    // so the trader does not sign a RouteCommit and publish X
+                    // against a parent in flight only to be refused at the claim.
+                    //
+                    // Keyed on the narrow signal, never on `pending_chain_skipped`:
+                    // that counter sums malformed, stale and depth-exceeded
+                    // pointers too, and refusing on it would let one junk pointer
+                    // un-quotable a vault forever.
+                    if composed.blocked_by_unreceipted_pointer_at_parent {
+                        log::info!(
+                            "[route.findAndBindBestPath] vault {} dropped from candidates: an unreceipted pending trade holds seq={}",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                            composed.sequence,
+                        );
+                        continue;
                     }
                     if composed.pending_chain_len
                         >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
@@ -865,8 +883,8 @@ impl AppRouterImpl {
                     // Replace the ad's reserves with the composed values
                     // so the downstream path search builds AMM edges
                     // against the canonical current state.
-                    ad.reserve_a_u128 = composed.reserves_a.to_be_bytes().to_vec();
-                    ad.reserve_b_u128 = composed.reserves_b.to_be_bytes().to_vec();
+                    ad.reserve_a = composed.reserves_a;
+                    ad.reserve_b = composed.reserves_b;
                     ad.updated_state_number = composed.sequence;
                     // Record this vault's anchor-state binding over the
                     // SAME composed values the vault-side unlock gate will
@@ -955,5 +973,471 @@ impl AppRouterImpl {
             )),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+}
+
+#[cfg(test)]
+mod stamping_tests {
+    //! Accept-or-stamp and stamp-always, proven on the ARTIFACT.
+    //!
+    //! Replaces greps that matched a field assignment in this file's source.
+    //! An assignment being present says nothing about whether the cryptographic
+    //! operation consumed the assigned value — a handler that stamped the
+    //! identity AFTER signing would produce output that looks correct in every
+    //! field while its signature covers the unstamped form. Only recomputing
+    //! the commitment from the returned artifact and verifying against the
+    //! stamped key can tell those apart.
+    //!
+    //! TWO DISTINCT CONTRACTS live here, and conflating them would test the
+    //! wrong thing:
+    //!
+    //! * `route.signRouteCommit` is STAMP-ALWAYS. A caller-supplied initiator
+    //!   key is discarded, deliberately: signing as this device is the whole
+    //!   point, and honouring a supplied key would let anyone claim to sign as
+    //!   anyone.
+    //! * the publish routes are ACCEPT-OR-STAMP. Empty means "stamp me";
+    //!   non-empty is honoured verbatim, because routing-service integrations
+    //!   publish under their own key. That is safe because an advertisement is
+    //!   a discovery hint — authority comes from the reserve inclusion proof,
+    //!   which is signed by the owner and bound to the owner's device root, so
+    //!   a forged owner key on an ad grants nothing.
+    //!
+    //! Neither route REJECTS a conflicting identity, and testing for that would
+    //! assert a contract this system does not have.
+
+    use super::*;
+    use serial_test::serial;
+
+    use crate::bridge::AppRouter;
+    use crate::init::SdkConfig;
+
+    fn install_identity() -> Vec<u8> {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+            std::env::remove_var("DSM_ENV_CONFIG_PATH");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
+            "./.dsm_testdata_route_stamping",
+        ));
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (device_id, genesis_hash, binding_key) =
+            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key.clone(),
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        let _ = crate::storage::client_db::init_database();
+        public_key
+    }
+
+    fn router() -> AppRouterImpl {
+        AppRouterImpl::new(SdkConfig {
+            node_id: "route-stamping-test".to_string(),
+            storage_endpoints: vec![],
+            enable_offline: true,
+        })
+        .expect("router init")
+    }
+
+    fn pack(body: Vec<u8>) -> Vec<u8> {
+        generated::ArgPack {
+            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            codec: generated::Codec::Proto as i32,
+            body,
+        }
+        .encode_to_vec()
+    }
+
+    fn rc_fixture() -> generated::RouteCommitV1 {
+        generated::RouteCommitV1 {
+            version: 1,
+            nonce: vec![0x11; 32],
+            total_fee_bps: 30,
+            initiator_public_key: Vec::new(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vec![0x77; 32],
+                token_in: vec![0x11; 32],
+                token_out: vec![0x22; 32],
+                input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+                expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
+                vault_state_anchor_seq: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn sign_through_router(
+        r: &AppRouterImpl,
+        rc: &generated::RouteCommitV1,
+    ) -> generated::RouteCommitV1 {
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.signRouteCommit".to_string(),
+                args: pack(rc.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "sign failed: {:?}", res.error_message);
+        // Envelope v3: a 1-byte framing prefix, then the message.
+        let env = generated::Envelope::decode(&res.data[1..]).expect("decode envelope");
+        let generated::envelope::Payload::AppStateResponse(resp) = env.payload.expect("payload")
+        else {
+            panic!("unexpected payload")
+        };
+        let bytes = crate::util::text_id::decode_base32_crockford(&resp.value.expect("value"))
+            .expect("decode base32");
+        generated::RouteCommitV1::decode(bytes.as_slice()).expect("decode rc")
+    }
+
+    /// THE ARTIFACT, not the presentation.
+    ///
+    /// An empty initiator key comes back stamped with the wallet's, and the
+    /// returned SIGNATURE verifies against that stamped key over the returned
+    /// message's own canonical bytes. Then the stamped key is altered and
+    /// verification must break — which is what distinguishes "signed over the
+    /// stamped identity" from "stamped after signing".
+    #[test]
+    #[serial]
+    fn signing_stamps_the_wallet_identity_and_signs_over_it() {
+        let wallet_pk = install_identity();
+        let r = router();
+
+        let signed = sign_through_router(&r, &rc_fixture());
+
+        assert_eq!(
+            signed.initiator_public_key, wallet_pk,
+            "an empty initiator key must come back stamped with the wallet's"
+        );
+        assert!(!signed.initiator_signature.is_empty());
+
+        // Recompute the canonical form FROM THE RETURNED ARTIFACT and verify
+        // the returned signature against the stamped key.
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&signed).encode_to_vec();
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(
+                &signed.initiator_public_key,
+                &canonical,
+                &signed.initiator_signature
+            )
+            .expect("verify"),
+            "the signature must verify over the artifact that was returned"
+        );
+
+        // MUTATION SENSITIVITY. Had the handler stamped after signing, the
+        // signature would cover the unstamped form and this alteration would
+        // not be detectable.
+        let mut tampered = signed.clone();
+        tampered.initiator_public_key[0] ^= 0xff;
+        let tampered_canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&tampered).encode_to_vec();
+        assert!(
+            !dsm::crypto::sphincs::sphincs_verify(
+                &tampered.initiator_public_key,
+                &tampered_canonical,
+                &tampered.initiator_signature
+            )
+            .unwrap_or(false),
+            "altering the stamped identity must break verification"
+        );
+
+        // And X derived from the returned artifact is the canonical one, so the
+        // trade's name and its signature describe the same message.
+        assert_eq!(
+            crate::sdk::route_commit_sdk::compute_external_commitment(&signed),
+            dsm::crypto::blake3::domain_hash_bytes(
+                crate::sdk::route_commit_sdk::EXT_COMMIT_DOMAIN,
+                &canonical
+            ),
+        );
+    }
+
+    /// CROSS-LAYER AGREEMENT: the advertisement that was stored and the address
+    /// it was stored under must describe the same market.
+    ///
+    /// Each is verifiable in isolation — a well-formed advertisement, a
+    /// well-formed key — while together they say different things. A trader
+    /// discovering by prefix would fetch bytes describing a market it did not
+    /// ask about, with every signature and digest intact.
+    ///
+    /// Also pins the publish contract, which is ACCEPT-OR-STAMP rather than the
+    /// stamp-always rule signing uses: empty owner key is filled from the
+    /// wallet, a supplied one is honoured verbatim.
+    #[test]
+    #[serial]
+    fn a_published_advertisement_and_its_address_describe_the_same_market() {
+        use prost::Message as _;
+
+        let wallet_pk = install_identity();
+        let r = router();
+
+        // A genuinely funded vault: publication reads the reserve leaves, so an
+        // unfunded head is refused before any stamping happens.
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(), // empty → stamp me
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // Fetch what was actually STORED, at the address the pair and vault
+        // derive, and require the record to name that same pair and vault.
+        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let stored = crate::runtime::get_runtime()
+            .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+            .expect("the advertisement must be readable at its derived address");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(stored.as_slice())
+            .expect("stored bytes must decode as the advertisement");
+
+        assert_eq!(ad.vault_id, v.vault_id.to_vec());
+        assert_eq!(ad.token_a, v.pc_a.to_vec());
+        assert_eq!(ad.token_b, v.pc_b.to_vec());
+        assert_eq!(
+            crate::sdk::routing_sdk::advertisement_key(&ad.token_a, &ad.token_b, &v.vault_id),
+            key,
+            "the address must be re-derivable from the record it stores"
+        );
+
+        // ACCEPT-OR-STAMP, the empty half: the wallet key was filled in.
+        assert_eq!(
+            ad.owner_public_key, wallet_pk,
+            "an empty owner key must be stamped from the active wallet"
+        );
+
+        // Changing the market changes the address, so a record cannot be
+        // discovered under a pair it does not name.
+        let mut impostor = v.pc_b;
+        impostor[0] ^= 0xff;
+        assert_ne!(
+            crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &impostor, &v.vault_id),
+            key,
+        );
+        assert_ne!(
+            crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &[0x99u8; 32]),
+            key,
+        );
+    }
+
+    /// THE HANDLER AND THE SDK AGREE, on write and on read.
+    ///
+    /// Replaces positive greps asserting that this file MENTIONS
+    /// `routing_sdk::publish_active_advertisement` and
+    /// `routing_sdk::load_active_advertisements_for_pair`. A call site existing
+    /// says nothing about whether the handler's result matches the SDK's — a
+    /// handler that called the SDK and then post-processed the result, or that
+    /// wrote through the SDK but read through its own query, would satisfy both
+    /// greps while producing two different answers.
+    ///
+    /// So: publish through the route, then read the same pair BOTH ways, and
+    /// require the records to be identical.
+    #[test]
+    #[serial]
+    fn the_route_and_the_sdk_return_the_same_advertisements() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(publish.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // Read via the SDK the handler is supposed to delegate to.
+        let via_sdk = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::routing_sdk::load_active_advertisements_for_pair(&v.pc_a, &v.pc_b),
+            )
+            .expect("sdk load");
+        // Select THIS vault's advertisement rather than position 0. The fixture
+        // pair is a constant, so the pair prefix is shared with every other test
+        // that publishes against it — indexing by position would silently read
+        // another test's record and compare it against this one's facts.
+        let mine: Vec<_> = via_sdk
+            .iter()
+            .filter(|a| a.advertisement.vault_id == v.vault_id.to_vec())
+            .collect();
+        assert_eq!(
+            mine.len(),
+            1,
+            "the advertisement published through the route must be visible to the \
+             SDK exactly once for this vault"
+        );
+
+        // Read via the production query route.
+        let pair = generated::RoutingPairRequest {
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+        };
+        let q = crate::runtime::get_runtime().block_on(async {
+            r.query(crate::bridge::AppQuery {
+                path: "route.listAdvertisementsForPair".to_string(),
+                params: pack(pair.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(q.success, "list failed: {:?}", q.error_message);
+
+        // The route's answer must carry the SAME advertisement the SDK returned
+        // — same vault, same pair, same reserves, same fee. A route that
+        // re-derived any of these would diverge here.
+        let listed = q.data;
+        let sdk_ad = &mine[0].advertisement;
+        let encoded = sdk_ad.encode_to_vec();
+        let b32 = crate::util::text_id::encode_base32_crockford(&encoded);
+        let body = String::from_utf8_lossy(&listed);
+        assert!(
+            body.contains(&b32),
+            "the route's listing must contain exactly the advertisement the SDK \
+             returns; a re-derived record would differ byte for byte"
+        );
+
+        // And the shared facts are the funded ones, so agreement is not two
+        // copies of the same mistake.
+        assert_eq!(sdk_ad.vault_id, v.vault_id.to_vec());
+        assert_eq!(sdk_ad.token_a, v.pc_a.to_vec());
+        assert_eq!(sdk_ad.token_b, v.pc_b.to_vec());
+        assert_eq!(
+            (sdk_ad.reserve_a, sdk_ad.reserve_b),
+            (
+                v.head.vault_reserve(&v.vault_id, &v.pc_a),
+                v.head.vault_reserve(&v.vault_id, &v.pc_b)
+            ),
+        );
+    }
+
+    /// ACCEPT-OR-STAMP, the non-empty half: a supplied publisher key is
+    /// honoured verbatim rather than overwritten.
+    ///
+    /// This is the opposite of the signing rule, and correct for a different
+    /// reason: an advertisement is discovery metadata. Authority comes from the
+    /// owner-signed reserve inclusion proof bound to the owner's device root, so
+    /// publishing under an integration's own key grants no custody and no
+    /// reserve authority.
+    #[test]
+    #[serial]
+    fn a_supplied_publisher_identity_is_honoured_not_overwritten() {
+        use prost::Message as _;
+
+        let wallet_pk = install_identity();
+        let r = router();
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+
+        let integration_pk = vec![0xC3u8; 64];
+        assert_ne!(integration_pk, wallet_pk);
+
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: integration_pk.clone(),
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let stored = crate::runtime::get_runtime()
+            .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+            .expect("stored");
+        let ad = generated::RoutingVaultAdvertisementV1::decode(stored.as_slice()).expect("decode");
+
+        assert_eq!(
+            ad.owner_public_key, integration_pk,
+            "a supplied publisher key must be preserved, not replaced by the wallet's"
+        );
+    }
+
+    /// STAMP-ALWAYS: a caller-supplied initiator key is discarded, not honoured
+    /// and not rejected.
+    ///
+    /// Honouring it would let a caller obtain a signature attributed to someone
+    /// else's key; the signature would then fail verification against that key,
+    /// but only after a verifier had been handed a plausible-looking artifact.
+    /// Overwriting keeps "the initiator key is who signed" true by construction.
+    #[test]
+    #[serial]
+    fn signing_discards_a_caller_supplied_identity() {
+        let wallet_pk = install_identity();
+        let r = router();
+
+        let mut impostor = rc_fixture();
+        impostor.initiator_public_key = vec![0xEEu8; 64];
+        let signed = sign_through_router(&r, &impostor);
+
+        assert_eq!(
+            signed.initiator_public_key, wallet_pk,
+            "a supplied initiator key must be overwritten by the signer's own"
+        );
+        assert_ne!(signed.initiator_public_key, vec![0xEEu8; 64]);
+
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&signed).encode_to_vec();
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(
+                &signed.initiator_public_key,
+                &canonical,
+                &signed.initiator_signature
+            )
+            .expect("verify"),
+            "and the signature covers the identity that replaced it"
+        );
     }
 }

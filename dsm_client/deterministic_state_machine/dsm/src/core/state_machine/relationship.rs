@@ -286,6 +286,8 @@ impl RelationshipStatePair {
                         Operation::DlvUnlock { .. } => b"dlv_ulk_",
                         Operation::DlvClaim { .. } => b"dlv_clm_",
                         Operation::DlvInvalidate { .. } => b"dlv_inv_",
+                        Operation::DlvSettle { .. } => b"dlv_set_",
+                        Operation::DlvOwnerApply { .. } => b"dlv_app_",
                     };
 
                     if value != op_type {

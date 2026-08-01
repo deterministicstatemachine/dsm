@@ -18,17 +18,19 @@ import { encodeBase32Crockford } from '../utils/textId';
  * canonical proto bytes the `dlv.create` handler expects in
  * `DlvSpecV1.fulfillment_bytes`.
  *
- * Token-pair canonicalisation (lex-lower first) is also enforced
- * here because the proto round-trip would silently swap reserves
- * if the caller passed `(B, A)` with reserves `(reserveA, reserveB)` —
- * Rust would reject the misordered ad anyway, but the frontend
- * should fail fast with a clear error.
+ * Carries the PREDICATE ONLY — the pair and the fee. Reserves used to
+ * live in here, which meant a vault's advertised liquidity was a number
+ * the owner asserted inside its own unlock condition: nothing held it,
+ * and a settled swap moved no value. Liquidity is now encumbered through
+ * `DlvInstantiateV1.funding_legs` and proven from the owner's device
+ * root, so a condition carries a rule and never a balance.
+ *
+ * Token-pair canonicalisation (lex-lower first) is enforced here so the
+ * caller fails fast; Rust rejects a misordered pair regardless.
  */
 export function encodeAmmConstantProductFulfillment(input: {
   tokenA: Uint8Array;
   tokenB: Uint8Array;
-  reserveA: bigint;
-  reserveB: bigint;
   feeBps: number;
 }): Uint8Array {
   if (!input.tokenA || input.tokenA.length === 0) {
@@ -42,9 +44,6 @@ export function encodeAmmConstantProductFulfillment(input: {
       'tokenA must be lex-lower than tokenB (canonical-pair invariant)',
     );
   }
-  if (input.reserveA < 0n || input.reserveB < 0n) {
-    throw new Error('reserves must be non-negative');
-  }
   if (!Number.isInteger(input.feeBps) || input.feeBps < 0 || input.feeBps >= 10_000) {
     throw new Error('feeBps must be 0..9999 (basis points; 10000 = 100%)');
   }
@@ -52,8 +51,6 @@ export function encodeAmmConstantProductFulfillment(input: {
   const amm = new pb.AmmConstantProduct({
     tokenA: input.tokenA as any,
     tokenB: input.tokenB as any,
-    reserveAU128: u128BigEndian(input.reserveA) as any,
-    reserveBU128: u128BigEndian(input.reserveB) as any,
     feeBps: input.feeBps,
   });
   const fm = new pb.FulfillmentMechanism({
@@ -62,16 +59,6 @@ export function encodeAmmConstantProductFulfillment(input: {
   return new Uint8Array(fm.toBinary());
 }
 
-function u128BigEndian(n: bigint): Uint8Array {
-  const out = new Uint8Array(16);
-  let v = n;
-  for (let i = 15; i >= 0; i--) {
-    out[i] = Number(v & 0xffn);
-    v >>= 8n;
-  }
-  if (v !== 0n) throw new Error('amount exceeds u128');
-  return out;
-}
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const len = Math.min(a.length, b.length);
@@ -99,6 +86,12 @@ export async function createAmmVault(input: {
   tokenA: Uint8Array;
   /** Lex-higher token id. */
   tokenB: Uint8Array;
+  /**
+   * Base units to ENCUMBER on each leg, in the pair's canonical order.
+   * These are not a claim about the vault: `dlv.create` debits them from
+   * the owner's canonical balances and commits them to per-vault reserve
+   * leaves, and refuses the whole creation if the balances are short.
+   */
   reserveA: bigint;
   reserveB: bigint;
   feeBps: number;
@@ -111,11 +104,12 @@ export async function createAmmVault(input: {
     if (!input?.policyDigest || input.policyDigest.length !== 32) {
       return { success: false, error: 'policyDigest must be 32 bytes' };
     }
+    if (input.reserveA <= 0n || input.reserveB <= 0n) {
+      return { success: false, error: 'both funding legs must be greater than zero' };
+    }
     const fulfillmentBytes = encodeAmmConstantProductFulfillment({
       tokenA: input.tokenA,
       tokenB: input.tokenB,
-      reserveA: input.reserveA,
-      reserveB: input.reserveB,
       feeBps: input.feeBps,
     });
     const content = input.content ?? new TextEncoder().encode('AMM vault');
@@ -137,8 +131,19 @@ export async function createAmmVault(input: {
       // Empty pk + signature → Rust stamps wallet pk + signs (Track
       // C.4 accept-or-stamp).  No crypto in TS.
       creatorPublicKey: new Uint8Array() as any,
-      tokenId: new Uint8Array() as any,
-      lockedAmountU128: new Uint8Array(16) as any,
+      // Two legs, in the pair's canonical order. The single-asset lock this
+      // replaces could not express a two-sided vault at all, which is why
+      // AMM vaults were created holding nothing.
+      fundingLegs: [
+        new pb.DlvFundingLegV1({
+          policyCommit: input.tokenA as any,
+          amount: input.reserveA,
+        }),
+        new pb.DlvFundingLegV1({
+          policyCommit: input.tokenB as any,
+          amount: input.reserveB,
+        }),
+      ],
       signature: new Uint8Array() as any,
     });
     const argPack = new pb.ArgPack({

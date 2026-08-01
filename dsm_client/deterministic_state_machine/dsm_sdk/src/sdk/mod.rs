@@ -33,6 +33,8 @@
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
 pub mod bootstrap;
+#[cfg(test)]
+pub(crate) mod funded_vault_fixture;
 pub mod kv;
 pub mod runtime_config;
 pub mod sdk_context;
@@ -90,8 +92,6 @@ pub mod storage_node_sdk;
 // bilateral_transaction_manager + contacts store.
 
 // Smart contract and commitment functionality
-#[cfg(feature = "demos")]
-pub mod amm_demo;
 pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
@@ -101,8 +101,12 @@ pub mod posted_dlv_sdk;
 pub mod route_commit_sdk;
 pub mod routing_path_sdk;
 pub mod routing_sdk;
+pub mod settlement_receipt_codec;
+pub mod settlement_slot;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
+pub mod vault_rehydration;
+pub mod vault_reserve_proof_codec;
 pub mod vault_smt_inclusion_codec;
 pub mod vault_state_anchor_codec;
 pub mod vault_state_composition;

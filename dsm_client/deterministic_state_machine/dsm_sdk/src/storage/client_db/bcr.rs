@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Result};
 use dsm::types::device_state::{
     DeviceState, OfflineAllocation, RelChainTip, RelationshipChainState, ValueCapability,
+    VaultReserve,
 };
 use dsm::types::operations::Operation;
 use log::warn;
@@ -73,7 +74,13 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x02;
 // v0x03 adds the non-tip `extra_leaves` section (offline-bearer anchor-state + SoFi vault-state
 // leaves) so a state with any such leaf round-trips: without it, restore replayed only tips and
 // recomputed a mismatched root, bricking the wallet after one offline-bearer transfer.
-const DEVICE_STATE_VERSION: u8 = 0x04;
+// v0x05 adds the `vault_reserves` section — the extractable (amount, sequence) behind each
+// vault-reserve leaf. Same reasoning as v0x04: the leaf HASH commits into the root and is
+// already in `extra_leaves`, but the amount is not recoverable from it. Without this section a
+// funded vault reloads with its reserves absent, recomputes a different root, and the wallet
+// refuses to start — after the owner has already had value debited into the vault. Breaking
+// bump with NO back-compat reader, per the no-legacy directive.
+const DEVICE_STATE_VERSION: u8 = 0x05;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -295,6 +302,16 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(&alloc.sequence.to_le_bytes());
     }
 
+    // v0x05: vault reserves — the extractable (amount, sequence) behind each vault-reserve leaf.
+    // Encumbered value: not in `balances`, not recoverable from the leaf hash.
+    let reserves = head.vault_reserves_snapshot();
+    put_len_u32(&mut out, reserves.len());
+    for (key, reserve) in reserves {
+        out.extend_from_slice(&key);
+        out.extend_from_slice(&reserve.amount.to_le_bytes());
+        out.extend_from_slice(&reserve.sequence.to_le_bytes());
+    }
+
     out
 }
 
@@ -402,6 +419,24 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         );
     }
 
+    // v0x05: vault reserves — extractable (amount, sequence) behind each vault-reserve leaf.
+    let reserve_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("reserve count: {e}"))?;
+    let mut vault_reserves: BTreeMap<[u8; 32], VaultReserve> = BTreeMap::new();
+    for _ in 0..reserve_count {
+        let key: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("reserve key: {e}"))?;
+        let amount_bytes: [u8; 8] =
+            take::<8>(&mut cursor).map_err(|e| anyhow!("reserve amount: {e}"))?;
+        let seq_bytes: [u8; 8] =
+            take::<8>(&mut cursor).map_err(|e| anyhow!("reserve sequence: {e}"))?;
+        vault_reserves.insert(
+            key,
+            VaultReserve {
+                amount: u64::from_le_bytes(amount_bytes),
+                sequence: u64::from_le_bytes(seq_bytes),
+            },
+        );
+    }
+
     // Replay tips + non-tip leaves into the SMT to rebuild the canonical root.
     let head = DeviceState::restore(
         genesis,
@@ -412,6 +447,7 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         tips_in_order,
         extra_leaves,
         offline_allocations,
+        vault_reserves,
         1024,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
@@ -746,6 +782,7 @@ mod tests {
                 Some([0x55; 32]),
                 None,
                 None,
+                None,
             )
             .expect("advance relationship");
 
@@ -776,6 +813,7 @@ mod tests {
                 .new_device_state
                 .offline_allocations_snapshot()
                 .clone(),
+            outcome.new_device_state.vault_reserves_snapshot().clone(),
             1024,
         )
         .expect("restore head with signed rel state");
@@ -803,6 +841,7 @@ mod tests {
                     value_capability: ValueCapability::Unknown,
                 },
             )],
+            BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             1024,
@@ -907,6 +946,94 @@ mod tests {
     }
 
     /// The offline-cash allocation amount is not recoverable from the leaf hash, so v0x04 persists it
+    /// A FUNDED VAULT MUST SURVIVE A RESTART.
+    ///
+    /// The reserve LEAF hash commits into the root and rides along in
+    /// `extra_leaves`, but the amount behind it does not — the hash is not
+    /// reversible. Without the v0x05 section a funded vault reloads with its
+    /// reserves absent, recomputes a different root, and the wallet refuses to
+    /// start, after the owner has already had value debited into the vault.
+    #[test]
+    fn device_head_codec_roundtrip_preserves_vault_reserves() {
+        let (_, _, _, _, head0) = sample_device_and_rel();
+        let token = [0xD4u8; 32]; // funded with 7 by sample_device_and_rel
+        let vault = [0x5Eu8; 32];
+
+        let head = head0
+            .fund_vault_reserves(&vault, &[(token, 5)], 0)
+            .expect("encumber 5 into the vault")
+            .new_device_state;
+        assert_ne!(head.root(), head0.root(), "funding must advance the root");
+
+        let bytes = encode_device_state(&head);
+        let (decoded, stored_root) =
+            decode_device_state(&bytes).expect("decode device head with vault reserves");
+
+        assert_eq!(stored_root, head.root());
+        assert_eq!(
+            decoded.root(),
+            head.root(),
+            "reloaded root must equal the stored root (reserve leaf replayed)"
+        );
+        assert_eq!(
+            decoded.vault_reserve(&vault, &token),
+            5,
+            "the encumbered amount must survive reload"
+        );
+        assert_eq!(
+            decoded
+                .vault_reserve_entry(&vault, &token)
+                .map(|r| r.sequence),
+            Some(0),
+            "and so must the vault sequence it was written at"
+        );
+        // The spendable side was debited by the funding (7 -> 2) and stays so.
+        assert_eq!(decoded.balance(&token), 2);
+    }
+
+    /// Several vaults and several assets all round-trip independently.
+    #[test]
+    fn device_head_codec_roundtrip_preserves_many_reserves() {
+        let (_, _, _, _, head0) = sample_device_and_rel();
+        let token = [0xD4u8; 32];
+        let (v1, v2) = ([0x11u8; 32], [0x22u8; 32]);
+
+        let head = head0
+            .fund_vault_reserves(&v1, &[(token, 3)], 0)
+            .expect("v1")
+            .new_device_state
+            .fund_vault_reserves(&v2, &[(token, 2)], 0)
+            .expect("v2")
+            .new_device_state;
+
+        let bytes = encode_device_state(&head);
+        let (decoded, _) = decode_device_state(&bytes).expect("decode");
+        assert_eq!(decoded.vault_reserve(&v1, &token), 3);
+        assert_eq!(decoded.vault_reserve(&v2, &token), 2);
+        assert_eq!(decoded.root(), head.root());
+    }
+
+    /// A v0x04 blob is REJECTED, never read with reserves defaulted to absent.
+    ///
+    /// Defaulting would silently drop encumbered value: the root would not
+    /// match, and a reader that shrugged at that would be reconstructing a
+    /// state in which the owner's vault liquidity had ceased to exist.
+    #[test]
+    fn a_pre_reserve_device_head_blob_is_rejected() {
+        let (_, _, _, _, head) = sample_device_and_rel();
+        let mut bytes = encode_device_state(&head);
+        assert_eq!(bytes[0], 0x05, "current device-head version");
+
+        bytes[0] = 0x04;
+        let err = decode_device_state(&bytes)
+            .expect_err("an older device-head version must not be readable");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("version") || msg.contains("0x04") || msg.contains('4'),
+            "the refusal should name the version, got: {msg}"
+        );
+    }
+
     /// separately. Assert a loaded allocation survives an encode/decode and the root still matches.
     #[test]
     fn device_head_codec_roundtrip_preserves_offline_allocation() {
@@ -967,18 +1094,22 @@ mod tests {
 
     #[test]
     fn device_head_codec_rejects_invalid_value_capability_byte() {
-        // A state-less tip serializes as [..value_capability, state_flag], then two trailing
-        // u32 counts: the v0x03 extra_leaves count and the v0x04 offline-allocations count (both = 0
-        // here, 8 bytes total). So value_capability sits at n-10 and state_flag at n-9.
+        // A state-less tip serializes as [..value_capability, state_flag], followed by one
+        // u32 count per trailing section — v0x03 extra_leaves, v0x04 offline-allocations,
+        // v0x05 vault-reserves — all empty here. Derived from that count rather than
+        // hardcoded, so adding the next section is a one-line change instead of a puzzling
+        // off-by-four in an unrelated test.
+        const TRAILING_COUNT_SECTIONS: usize = 3;
+        const TRAILING: usize = TRAILING_COUNT_SECTIONS * 4;
+
         let (_, _rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
         let n = bytes.len();
-        let vc = n - 10; // value_capability
-        let sf = n - 9; // state_flag
-        assert_eq!(
-            &bytes[n - 8..],
-            &[0, 0, 0, 0, 0, 0, 0, 0],
-            "trailing extra_leaves + allocations counts should be 0"
+        let vc = n - TRAILING - 2; // value_capability
+        let sf = n - TRAILING - 1; // state_flag
+        assert!(
+            bytes[n - TRAILING..].iter().all(|b| *b == 0),
+            "every trailing section count should be 0"
         );
         assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
         assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
@@ -1016,6 +1147,7 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 9,
                 }],
+                None,
                 None,
                 None,
                 None,
@@ -1063,6 +1195,7 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 11,
                 }],
+                None,
                 None,
                 None,
                 None,

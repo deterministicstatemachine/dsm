@@ -333,6 +333,101 @@ mod tests {
     //! Tests never poison each other because each one uses unique
     //! (recipient_pk, dlv_id) pairs so keyspaces don't collide.
 
+    // ── addressing and domain separation ───────────────────────────────────
+    //
+    // Replaces greps that matched this file's source for a function signature
+    // and a constant's literal text. Those could confirm a name; they could not
+    // confirm the property the name is supposed to carry.
+
+    /// A posted DLV is addressed to its RECIPIENT. The creator does not appear
+    /// in the key at all.
+    ///
+    /// The recipient lists its own prefix to find offers made to it. If the
+    /// creator were part of the address, a recipient would have to know who was
+    /// going to pay it before it could look — and if the creator could stand in
+    /// for the recipient, one party could publish into another's inbox.
+    #[test]
+    fn a_posted_dlv_is_addressed_to_the_recipient_and_not_the_creator() {
+        let recipient_a = vec![0xA1u8; 1184];
+        let recipient_b = vec![0xB2u8; 1184];
+        let dlv_id = [0x77u8; 32];
+
+        let key_a = advertisement_key(&recipient_a, &dlv_id);
+        let key_b = advertisement_key(&recipient_b, &dlv_id);
+
+        // Same semantic inputs, same key — every time.
+        assert_eq!(key_a, advertisement_key(&recipient_a, &dlv_id));
+        // A different recipient is a different address.
+        assert_ne!(key_a, key_b, "the recipient must determine the address");
+        // A different offer to the same recipient is a different address.
+        assert_ne!(key_a, advertisement_key(&recipient_a, &[0x88u8; 32]));
+
+        // The key is exactly prefix/recipient/id — so nothing else, creator
+        // included, can be occupying a segment of it.
+        assert_eq!(
+            key_a,
+            format!(
+                "{}{}/{}",
+                POSTED_DLV_AD_ROOT,
+                encode_base32_crockford(&recipient_a),
+                encode_base32_crockford(&dlv_id)
+            ),
+        );
+        // And the listing prefix a recipient scans contains its own offers and
+        // not the other recipient's.
+        let prefix_a = advertisement_prefix_for_recipient(&recipient_a);
+        assert!(key_a.starts_with(&prefix_a));
+        assert!(
+            !key_b.starts_with(&prefix_a),
+            "one recipient's prefix must not enumerate another's offers"
+        );
+    }
+
+    /// The proto mirror is addressed the same way but kept in a distinct
+    /// namespace, so a fetch for one never returns the other.
+    #[test]
+    fn the_proto_mirror_shares_the_addressing_but_not_the_namespace() {
+        let recipient = vec![0xA1u8; 1184];
+        let dlv_id = [0x77u8; 32];
+        let ad = advertisement_key(&recipient, &dlv_id);
+        let proto = proto_key(&recipient, &dlv_id);
+        assert_ne!(ad, proto);
+        assert!(!proto.starts_with(POSTED_DLV_AD_ROOT));
+    }
+
+    /// The digest is DOMAIN-SEPARATED. The same bytes under another domain must
+    /// not produce the same digest, or an advertisement could be presented as a
+    /// routing advertisement, an external commitment, or vice versa.
+    #[test]
+    fn the_posted_dlv_digest_cannot_collide_with_another_domain() {
+        let payload = b"vault-post-bytes";
+        let ours = dsm::crypto::blake3::domain_hash_bytes(POSTED_DLV_AD_DOMAIN, payload);
+
+        // Deterministic for identical input.
+        assert_eq!(
+            ours,
+            dsm::crypto::blake3::domain_hash_bytes(POSTED_DLV_AD_DOMAIN, payload)
+        );
+        // Different content, different digest.
+        assert_ne!(
+            ours,
+            dsm::crypto::blake3::domain_hash_bytes(POSTED_DLV_AD_DOMAIN, b"other-bytes")
+        );
+        // Same content under the OTHER SoFi domains must not collide. These are
+        // the domains an attacker would want to cross: a routing advertisement
+        // and an external commitment both travel the same storage layer.
+        for other in [
+            crate::sdk::routing_sdk::ROUTING_VAULT_AD_DOMAIN,
+            crate::sdk::route_commit_sdk::EXT_COMMIT_DOMAIN,
+        ] {
+            assert_ne!(
+                ours,
+                dsm::crypto::blake3::domain_hash_bytes(other, payload),
+                "the posted-DLV digest must not collide with the {other} domain"
+            );
+        }
+    }
+
     use super::*;
     use prost::Message;
 
