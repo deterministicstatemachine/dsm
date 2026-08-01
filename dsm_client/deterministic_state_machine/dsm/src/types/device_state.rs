@@ -2596,7 +2596,7 @@ mod tests {
         let proof = sign_vault_reserve_inclusion_proof(
             &vault,
             3,
-            &owner.smt.root().to_owned(),
+            owner.smt.root(),
             &owner.genesis(),
             &owner.devid(),
             legs,
@@ -2647,7 +2647,7 @@ mod tests {
         let proof = sign_vault_reserve_inclusion_proof(
             &vault,
             4,
-            &owner.smt.root().to_owned(),
+            owner.smt.root(),
             &owner.genesis(),
             &owner.devid(),
             legs,
@@ -2666,7 +2666,7 @@ mod tests {
         let stale = sign_vault_reserve_inclusion_proof(
             &vault,
             3,
-            &owner.smt.root().to_owned(),
+            owner.smt.root(),
             &owner.genesis(),
             &owner.devid(),
             stale_legs,

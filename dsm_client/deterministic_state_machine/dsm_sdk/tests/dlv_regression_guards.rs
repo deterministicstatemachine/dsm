@@ -51,13 +51,6 @@ fn sdk_path(rel: &str) -> PathBuf {
     Path::new(manifest_dir).join(rel)
 }
 
-/// Resolve a path relative to `dsm/` (sibling crate).
-fn core_path(rel: &str) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let parent = Path::new(manifest_dir).parent().expect("dsm_sdk parent");
-    parent.join("dsm").join(rel)
-}
-
 fn read(rel_path: PathBuf) -> String {
     fs::read_to_string(&rel_path)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", rel_path.display()))

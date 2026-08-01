@@ -309,7 +309,7 @@ mod tests {
                     .siblings,
             })
             .collect();
-        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        legs.sort_by_key(|a| a.policy_commit);
         legs
     }
 
@@ -377,7 +377,14 @@ mod tests {
     #[test]
     fn every_signed_field_is_covered() {
         let p = signed_proof();
-        let mutations: Vec<(&str, Box<dyn Fn(&mut SignedVaultReserveInclusionProof)>)> = vec![
+        /// One named tamper: a label for the failure message, and the mutation
+        /// that corrupts exactly one field.
+        type ProofTamper = (
+            &'static str,
+            Box<dyn Fn(&mut SignedVaultReserveInclusionProof)>,
+        );
+
+        let mutations: Vec<ProofTamper> = vec![
             (
                 "vault id",
                 Box::new(|p: &mut SignedVaultReserveInclusionProof| p.vault_id[0] ^= 0xff),

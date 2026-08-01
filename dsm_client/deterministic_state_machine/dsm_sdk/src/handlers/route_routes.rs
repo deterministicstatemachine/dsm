@@ -1296,10 +1296,19 @@ mod stamping_tests {
                 crate::sdk::routing_sdk::load_active_advertisements_for_pair(&v.pc_a, &v.pc_b),
             )
             .expect("sdk load");
+        // Select THIS vault's advertisement rather than position 0. The fixture
+        // pair is a constant, so the pair prefix is shared with every other test
+        // that publishes against it — indexing by position would silently read
+        // another test's record and compare it against this one's facts.
+        let mine: Vec<_> = via_sdk
+            .iter()
+            .filter(|a| a.advertisement.vault_id == v.vault_id.to_vec())
+            .collect();
         assert_eq!(
-            via_sdk.len(),
+            mine.len(),
             1,
-            "the advertisement published through the route must be visible to the SDK"
+            "the advertisement published through the route must be visible to the \
+             SDK exactly once for this vault"
         );
 
         // Read via the production query route.
@@ -1320,7 +1329,7 @@ mod stamping_tests {
         // — same vault, same pair, same reserves, same fee. A route that
         // re-derived any of these would diverge here.
         let listed = q.data;
-        let sdk_ad = &via_sdk[0].advertisement;
+        let sdk_ad = &mine[0].advertisement;
         let encoded = sdk_ad.encode_to_vec();
         let b32 = crate::util::text_id::encode_base32_crockford(&encoded);
         let body = String::from_utf8_lossy(&listed);

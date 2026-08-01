@@ -807,7 +807,7 @@ mod tests {
                 }
             })
             .collect();
-        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        legs.sort_by_key(|a| a.policy_commit);
         let reserve_proof = sign_vault_reserve_inclusion_proof(
             vault_id,
             sequence,
@@ -1107,7 +1107,7 @@ mod tests {
                     .siblings,
             })
             .collect();
-        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        legs.sort_by_key(|a| a.policy_commit);
         let proof = sign_vault_reserve_inclusion_proof(
             vault_id,
             sequence,
@@ -1169,7 +1169,7 @@ mod tests {
                     .siblings,
             })
             .collect();
-        legs.sort_by(|a, b| a.policy_commit.cmp(&b.policy_commit));
+        legs.sort_by_key(|a| a.policy_commit);
         let proof = sign_vault_reserve_inclusion_proof(
             vault_id,
             sequence,
@@ -1186,6 +1186,7 @@ mod tests {
             .expect("publish");
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn publish_pointer(
         vault_id: &[u8; 32],
         parent_seq: u64,

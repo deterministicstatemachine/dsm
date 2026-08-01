@@ -475,7 +475,14 @@ mod tests {
     #[test]
     fn every_settled_quantity_is_covered() {
         let (r, _) = signed();
-        let mutations: Vec<(&str, Box<dyn Fn(&mut SignedTraderSettlementReceipt)>)> = vec![
+        /// One named tamper: a label for the failure message, and the mutation
+        /// that corrupts exactly one field.
+        type ReceiptTamper = (
+            &'static str,
+            Box<dyn Fn(&mut SignedTraderSettlementReceipt)>,
+        );
+
+        let mutations: Vec<ReceiptTamper> = vec![
             (
                 "x",
                 Box::new(|r: &mut SignedTraderSettlementReceipt| r.trade.x[0] ^= 0xff),
