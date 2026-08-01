@@ -74,6 +74,16 @@ pub struct AppRouterImpl {
     /// In-process cache: BLAKE3("DSM/policy\0" || bytes) -> raw policy bytes
     /// Used by tokens.publishPolicy and consumed by token.create to extract V2 metadata.
     pub(crate) policy_cache: Mutex<HashMap<[u8; 32], Vec<u8>>>,
+    /// Signed RouteCommits this wallet produced, keyed by their external
+    /// commitment X.
+    ///
+    /// The signed RC is protocol state, so it stays in Rust. It used to be
+    /// handed back to the frontend and expected to come round again on
+    /// `route.publishExternalCommitment`; the frontend sent the bare anchor
+    /// instead, the route took its no-RC branch, and NO pending pointer was
+    /// ever written — which the settlement slot claim then correctly refused.
+    /// Rust signs it, so Rust keeps it.
+    pub(crate) signed_route_commits: Mutex<HashMap<[u8; 32], Vec<u8>>>,
     /// Withdrawal plan cache: plan_id -> CachedWithdrawalPlan.
     /// Cached by `bitcoin.withdraw.plan`, consumed by `bitcoin.withdraw.execute`.
     /// Frontend only sends plan_id to confirm — all routing stays in Rust.
@@ -681,6 +691,7 @@ impl AppRouterImpl {
             bitcoin_keys: Arc::new(Mutex::new(bitcoin_keys)),
             bitcoin_tap,
             bitcoin_tap_restored: tokio::sync::OnceCell::new(),
+            signed_route_commits: Mutex::new(HashMap::new()),
             policy_cache: Mutex::new(HashMap::new()),
             withdrawal_plan_cache: Mutex::new(HashMap::new()),
         })
