@@ -105,6 +105,24 @@ function u128BigEndian(n: bigint): Uint8Array {
   return out;
 }
 
+/// A pair side, as its 32-byte policy commit.
+///
+/// Base32 Crockford in, 32 bytes out, or a refusal naming the field. There is
+/// deliberately no ticker path: a ticker is not an identity — two distinct
+/// tokens have shared one in this repo — so resolving a label here could name
+/// a different asset than the trader meant while every signature downstream
+/// still verified.
+function decodePolicyCommit(value: string, field: string): Uint8Array {
+  const bytes = decodeBase32Crockford(value.trim());
+  if (bytes.length !== 32) {
+    throw new Error(
+      `${field} token must be a 32-byte CPTA policy anchor (Base32 Crockford); ` +
+        `got ${bytes.length} bytes. Copy it from the token's detail card.`,
+    );
+  }
+  return bytes;
+}
+
 function SwapTabInner({
   balances,
   deviceB32,
@@ -121,12 +139,20 @@ function SwapTabInner({
   const [quoted, setQuoted] = useState<QuotedRoute | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  /** Datalist suggestions: union of locally-held tokens (your balances)
-   *  to ease typing. Type any token id — even one you don't hold — and
-   *  Quote will succeed if a vault advertises liquidity for the pair. */
+  /** Datalist suggestions: the CPTA anchors of tokens this wallet holds,
+   *  labelled with their ticker. The VALUE is the anchor because the anchor is
+   *  what the field means; the ticker is shown only so a human can tell them
+   *  apart. Suggesting tickers here would have invited exactly the input the
+   *  pair identity cannot accept. An anchor you do not hold can still be
+   *  pasted — you do not hold what you are buying. */
   const tokenSuggestions = useMemo(() => {
     if (!Array.isArray(balances)) return [];
-    return Array.from(new Set(balances.map((b) => b.tokenId).filter(Boolean)));
+    const seen = new Map<string, string>();
+    for (const b of balances) {
+      const anchor = b.policyAnchorB32 ?? '';
+      if (anchor.length > 0 && !seen.has(anchor)) seen.set(anchor, b.tokenId ?? '');
+    }
+    return Array.from(seen, ([anchor, ticker]) => ({ anchor, ticker }));
   }, [balances]);
 
   const canQuote =
@@ -147,8 +173,15 @@ function SwapTabInner({
     setPhaseDetail('');
     try {
       setPhase('discovering');
-      const inputTokenBytes = new TextEncoder().encode(inputToken.trim());
-      const outputTokenBytes = new TextEncoder().encode(outputToken.trim());
+      // The pair is named by 32-byte CPTA policy commits — the same identity
+      // the vault was funded under. This used to send `TextEncoder().encode()`
+      // of whatever was typed, so the trader asked for a pair named by the
+      // UTF-8 bytes of a label. A vault's pair is commits, so the two could
+      // never match and no advertised liquidity was ever discoverable from
+      // this screen. LiquidityScreen was fixed for exactly this; this side was
+      // missed, and it is the trader's half of the same pair identity.
+      const inputTokenBytes = decodePolicyCommit(inputToken, 'From');
+      const outputTokenBytes = decodePolicyCommit(outputToken, 'To');
       const amountBig = bigIntFromString(amount);
 
       // Sync first so the path search runs against fresh vault state.
@@ -294,7 +327,7 @@ function SwapTabInner({
     <div>
       <datalist id="swap-token-suggestions">
         {tokenSuggestions.map((t) => (
-          <option key={t} value={t} />
+          <option key={t.anchor} value={t.anchor} label={t.ticker} />
         ))}
       </datalist>
 
