@@ -26,6 +26,13 @@ function makeProps(overrides: Partial<React.ComponentProps<typeof SwapTab>> = {}
   };
 }
 
+// Real 52-char Base32 Crockford CPTA anchors. The fields take a 32-byte policy
+// commit, not a ticker: a ticker is not an identity, and typing one used to be
+// encoded as UTF-8 and sent as the pair, which no vault could ever match.
+const ANCHOR_A = 'BRFKTA6X2BHFWBBWBFE1CK9TMD8DDYS64HQGMBP3MBHZXEK61JP0';
+const ANCHOR_B = 'NW9MKEFNZ6GTD8209QN3DQ6996DWP9E9NQ0H5DYCKA9WNS0Z69H0';
+const ANCHOR_C = '0EJ2PSRS2YQR8BR77P3WZ92SV12VJT7XP6NWP0SH5P8MWD81C8H0';
+
 function fillForm({ from, to, amount }: { from: string; to: string; amount: string }) {
   fireEvent.change(screen.getByLabelText(/Input token id/i), { target: { value: from } });
   fireEvent.change(screen.getByLabelText(/Output token id/i), { target: { value: to } });
@@ -42,13 +49,13 @@ describe('SwapTab', () => {
     const quote = screen.getByRole('button', { name: /Quote/ });
     expect(quote).toBeDisabled();
 
-    fillForm({ from: 'DEMO_AAA', to: 'DEMO_BBB', amount: '10000' });
+    fillForm({ from: ANCHOR_A, to: ANCHOR_B, amount: '10000' });
     expect(quote).not.toBeDisabled();
   });
 
   it('disables Quote when from === to (would be a no-op pair)', () => {
     render(<SwapTab {...makeProps()} />);
-    fillForm({ from: 'ERA', to: 'ERA', amount: '10' });
+    fillForm({ from: ANCHOR_A, to: ANCHOR_A, amount: '10' });
     expect(screen.getByRole('button', { name: /Quote/ })).toBeDisabled();
   });
 
@@ -83,11 +90,13 @@ describe('SwapTab', () => {
     });
 
     render(<SwapTab {...makeProps()} />);
-    fillForm({ from: 'DEMO_AAA', to: 'DEMO_BBB', amount: '10000' });
+    fillForm({ from: ANCHOR_A, to: ANCHOR_B, amount: '10000' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(screen.getByText(/1 vault discovered/)).toBeInTheDocument());
-    expect(screen.getByText(/9871 DEMO_BBB/)).toBeInTheDocument();
+    // The exact output Rust computed, against the asset named by its
+    // anchor. The frontend never recomputes this number.
+    expect(screen.getByText(new RegExp(`9871 ${ANCHOR_B}`))).toBeInTheDocument();
     expect(screen.getByText(/exact output/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Swap$/ })).toBeInTheDocument();
   });
@@ -98,7 +107,7 @@ describe('SwapTab', () => {
     const setError = jest.fn();
 
     render(<SwapTab {...makeProps({ setError })} />);
-    fillForm({ from: 'A', to: 'NOPAIR', amount: '1' });
+    fillForm({ from: ANCHOR_A, to: ANCHOR_C, amount: '1' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(setError).toHaveBeenCalledWith(expect.stringMatching(/No liquidity advertised/)));
@@ -110,7 +119,7 @@ describe('SwapTab', () => {
     const setError = jest.fn();
 
     render(<SwapTab {...makeProps({ setError })} />);
-    fillForm({ from: 'A', to: 'X', amount: '1' });
+    fillForm({ from: ANCHOR_A, to: ANCHOR_C, amount: '1' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(setError).toHaveBeenCalledWith('storage node unreachable'));
