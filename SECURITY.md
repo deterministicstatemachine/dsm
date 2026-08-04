@@ -90,6 +90,51 @@ Out of scope (please report via normal issue tracker, not via security email):
 
 If you do not want to be credited, say so explicitly in your initial email.
 
+## Known Cryptographic Limitations
+
+Stated up front so that neither a reviewer nor an integrator has to discover
+them by reading the source.
+
+**The SPHINCS+ implementation is custom and unaudited.** It substitutes BLAKE3
+for SHA2/SHAKE in every hash, PRF and `thash` call, and it uses its own address
+word layout. Only the parameter set *sizes* match the standardised sets. It is
+therefore **not FIPS-205 conformant and not interoperable** with any reference
+implementation, and no published known-answer vectors apply to it. The vectors
+in `dsm/src/crypto/sphincs_kat_tests.rs` are frozen in-source regression
+tripwires, not independent validation. A third-party cryptographic audit has
+not been performed.
+
+**A FORS address collision was found and fixed by internal review (2026-08-03).**
+Two address fields shared a word, so in `fors_sign` the FORS tree number was
+overwritten by the leaf index before the secret was derived. All `k` FORS trees
+drew from a single pool of `2^a` secrets rather than `k` independent pools. For
+SPX128f (`a=6, k=33`) — the variant the anchor firmware signs with — that is 33
+trees over one 64-leaf pool, so a single signature revealed up to 33 of the 64
+secrets in it. FORS is a few-time signature and its security argument requires
+the trees to be independent; that assumption did not hold. The exact forgery
+cost has not been quantified by a cryptographer.
+
+The defect was invisible to the test suite because the verifier reproduced the
+same address construction: signatures verified, an exhaustive single-bit
+malleability sweep passed, and the file named for known-answer testing contained
+only self-comparisons. **A sign/verify round trip cannot detect a defect that
+the signer and the verifier share.** Coverage over such shared code must come
+from tests that assert on the intermediate structure directly.
+
+Fixing it changed the hypertree root, so **every key and signature produced
+before the fix is invalid after it**, and the same mnemonic now derives a
+different identity. Keys, signatures and device state from before the fix must
+be discarded rather than migrated; devices and anchors need re-provisioning.
+Because DSM is pre-release and has no external users, this was taken as a clean
+cut with no compatibility path.
+
+**Signing is deterministic.** The optional randomiser (`opt_rand`) that
+SPHINCS+ permits for the message randomiser `R` is not implemented, so `R` is a
+deterministic function of the secret key and the message. This is a permitted
+mode, but it removes the hedge against fault-injection and side-channel attacks
+that re-signing the same message with fresh randomness would provide. Tracked as
+a hardening item, not a defect.
+
 ## Past Disclosures
 
 | Advisory ID | Date | Severity | Component | Status |
