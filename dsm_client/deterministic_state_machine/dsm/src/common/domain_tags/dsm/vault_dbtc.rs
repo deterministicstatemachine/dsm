@@ -20,7 +20,6 @@ pub const TAG_DSM_DLV_NONCE_SEED: &str = "DSM/dlv-nonce-seed";
 pub const TAG_DSM_DLV_OPEN_NUL: &str = "DSM/dlv/open\0";
 pub const TAG_DSM_DLV_PARAMS: &str = "DSM/dlv-params";
 pub const TAG_DSM_DLV_PARTITION: &str = "DSM/dlv-partition";
-pub const TAG_DSM_DLV_PARTITION_NUL: &str = "DSM/dlv-partition\0";
 pub const TAG_DSM_DLV_POLICY: &str = "DSM/dlv-policy";
 pub const TAG_DSM_DLV_PROOF: &str = "DSM/dlv-proof";
 pub const TAG_DSM_DLV_REFUND: &str = "DSM/dlv-refund";
@@ -54,7 +53,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_DLV_OPEN_NUL,
     TAG_DSM_DLV_PARAMS,
     TAG_DSM_DLV_PARTITION,
-    TAG_DSM_DLV_PARTITION_NUL,
     TAG_DSM_DLV_POLICY,
     TAG_DSM_DLV_PROOF,
     TAG_DSM_DLV_REFUND,
