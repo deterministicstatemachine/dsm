@@ -133,13 +133,30 @@ impl DsmVerifier for DsmStateVerifier<'_> {
     fn verify_transition(
         &self,
         _transition_digest: &[u8; 32],
-        _prev_root: &[u8; 32],
-        _next_root: &[u8; 32],
+        _prev_frontier: &[u8; 32],
+        _next_frontier: &[u8; 32],
     ) -> bool {
-        // The DSM relationship transition `h_i → h_{i+1}` (and its `σ^DSM`) is validated by the
-        // bilateral handler's existing checks that GATE this predicate: `rel_proof_parent`
-        // (h_n ∈ R_i) + `rel_proof_child` (h_{n+1} ∈ R_{i+1}) + the §C1 h_{n+1} recompute, and the
-        // accepted-frontier pin. The handler fails closed BEFORE calling accept if any fail.
+        // NOTE the arguments: the trait names them `prev_root`/`next_root`, but `accept_offline`
+        // passes `cert.prev_frontier` and `cert.next_frontier` (accept.rs:235-239) — anchor
+        // frontiers, not device roots. Both are already validated inside the predicate before this
+        // is reached: the accepted-frontier pin (check 2) and `h_{i+1} = H(h_i ‖ D)` inside
+        // `verify_cert_frontier_and_sigs` (checks 8-11). So there is nothing here left for this
+        // hook to re-check from its arguments.
+        //
+        // What Def. 12 step 12 actually asks for is `σ^DSM` over the transition plus the whole-state
+        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship proofs
+        // (`rel_proof_parent`, `rel_proof_child`) are not carried in the OfflineRelease. The
+        // bilateral handler verifies them, together with the §C1 `h_{n+1}` recompute, and
+        // `accept_offline_release` refuses before running the predicate unless the cert's device
+        // roots equal the ones the handler verified (anchor_accept.rs:251-257).
+        //
+        // So step 12 is genuinely a no-op INSIDE the predicate, and its correctness rests on caller
+        // ordering rather than on anything this function can observe. That is a real gap between the
+        // seventeen-check predicate as written and the fifteen the code enforces, and closing it
+        // means carrying the relationship proofs in the release so the check can be self-contained
+        // — a wire change, not a patch to this function. Do not "fix" this by inventing an equality
+        // check over the arguments: they are frontiers, they are already checked, and comparing them
+        // to device roots type-checks while being meaningless.
         true
     }
 
@@ -148,9 +165,16 @@ impl DsmVerifier for DsmStateVerifier<'_> {
     }
 
     fn verify_upgrade_cert(&self, _bundle: &[u8; 32]) -> bool {
-        // Dormant in Stage 3: acceptance sets is_genesis=false and never calls this. First-transfer
-        // admission stays TOFU (`pin_admit_decision`). The real dual-identity upgrade cert is Stage 5.
-        true
+        // Dormant in Stage 3: acceptance sets is_genesis=false, so the predicate never reaches this.
+        // First-transfer admission stays TOFU (`pin_admit_decision`); the real dual-identity upgrade
+        // cert is Stage 5.
+        //
+        // FAILS CLOSED rather than returning true. Because the hook is unreachable today the two
+        // answers are behaviourally identical NOW, which is exactly why the choice matters: whoever
+        // first sets `is_genesis = true` inherits whatever this returns. `true` would silently admit
+        // every genesis release. `false` refuses them until the Stage 5 cert is implemented, which
+        // is a visible failure that names this function instead of a silent admission.
+        false
     }
 }
 
@@ -354,6 +378,28 @@ mod tests {
             branch_proof: vec![],
         }
         .encode_to_vec()
+    }
+
+    /// The genesis upgrade-cert hook is unreachable today (`is_genesis` is hardcoded `false` at
+    /// every construction site), so this is the only way to observe what it answers. It must be
+    /// `false`.
+    ///
+    /// The point is precisely that the hook is dormant: whoever first sets `is_genesis = true`
+    /// inherits this answer. `true` would silently admit every genesis release; `false` refuses
+    /// them with a named error until the Stage 5 dual-identity cert exists.
+    #[test]
+    fn the_dormant_genesis_upgrade_cert_hook_fails_closed() {
+        let receiver = [7u8; 32];
+        let bundle = [9u8; 32];
+        let dsm = DsmStateVerifier {
+            receiver_device_id: &receiver,
+            bundle: &bundle,
+        };
+        assert!(
+            !dsm.verify_upgrade_cert(&bundle),
+            "verify_upgrade_cert returned true while dormant — the first caller to set \
+             is_genesis=true would admit genesis releases with no cert check at all"
+        );
     }
 
     #[test]
