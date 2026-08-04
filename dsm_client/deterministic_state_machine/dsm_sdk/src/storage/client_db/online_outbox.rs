@@ -366,6 +366,140 @@ pub fn clear_pending_online_outbox_if_matches_with_conn(
     Ok(rows > 0)
 }
 
+/// The §5.4 stale-gate decision. Total, so a caller cannot drop the answer.
+///
+/// This exists because the previous shape returned `Result<bool>` and the BLE
+/// handler consumed it with `if let Err(..)`. `Ok(false)` — "the row you read is
+/// no longer the row in the table" — read as success, and the handler went on to
+/// clear the in-memory modal lock and admit the offline transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleGateOutcome {
+    /// No gate row for this counterparty. Nothing blocks the offline transfer.
+    NoGate,
+    /// The gate was stale and its exact row was deleted. The in-memory lock may
+    /// be cleared.
+    Cleared,
+    /// The chain has not moved past the gate's `parent_tip`: a prior online
+    /// transfer is genuinely still awaiting catch-up.
+    StillPending,
+    /// The row changed between the read and the delete inside the transaction.
+    /// Unreachable while the read and the delete share one transaction, which is
+    /// the point — it is kept, and refuses, so that a future refactor which
+    /// splits them fails closed instead of silently admitting.
+    Raced,
+}
+
+impl StaleGateOutcome {
+    /// Whether the offline transfer may proceed. Only a gate that is absent or
+    /// provably cleared admits; every ambiguous answer refuses.
+    pub fn admits_offline(&self) -> bool {
+        matches!(self, StaleGateOutcome::NoGate | StaleGateOutcome::Cleared)
+    }
+}
+
+/// Read the gate, decide whether it is stale, and delete it — atomically.
+///
+/// The read, the staleness decision and the exact-match delete all run inside
+/// ONE transaction on ONE connection. Previously the caller did the three steps
+/// as separate calls, releasing the global connection mutex between them, so a
+/// concurrent online send could settle the old gate and arm a new one in the
+/// window; the exact-match delete then matched nothing, the newer gate survived
+/// unread, and the caller cleared the in-memory lock anyway.
+///
+/// `sender_reported_tip` is the counterparty's self-reported chain tip from the
+/// prepare request. The gate is stale iff either that tip or our persisted view
+/// of it has moved off the gate's `parent_tip`.
+///
+/// Tips are parsed strictly: a stored row whose `parent_tip` or `next_tip` is not
+/// exactly 32 bytes is an error, not a zero-filled default. Substituting
+/// `[0u8; 32]` guaranteed a non-matching DELETE, which left the persisted gate in
+/// place while the caller cleared the in-memory lock — the worst of both.
+pub fn clear_stale_pending_online_gate(
+    counterparty_device_id: &[u8],
+    sender_reported_tip: Option<[u8; 32]>,
+) -> Result<StaleGateOutcome> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid counterparty_device_id length"));
+    }
+
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    let tx = conn.transaction()?;
+
+    let pending: Option<PendingOnlineOutboxRecord> = tx
+        .query_row(
+            "SELECT counterparty_device_id, message_id, parent_tip, next_tip, created_at
+               FROM pending_online_outbox
+              WHERE counterparty_device_id = ?1",
+            params![counterparty_device_id],
+            |row| {
+                Ok(PendingOnlineOutboxRecord {
+                    counterparty_device_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    parent_tip: row.get(2)?,
+                    next_tip: row.get(3)?,
+                    created_at: row.get::<_, i64>(4)? as u64,
+                })
+            },
+        )
+        .optional()?;
+
+    let Some(pending) = pending else {
+        return Ok(StaleGateOutcome::NoGate);
+    };
+
+    // Strict, like the HTTP sibling in handlers/bilateral_routes.rs.
+    let gate_parent: [u8; 32] = pending
+        .parent_tip
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("persisted online gate has a malformed parent_tip"))?;
+    let gate_next: [u8; 32] = pending
+        .next_tip
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("persisted online gate has a malformed next_tip"))?;
+
+    // Our persisted view of the counterparty's tip, read in the SAME transaction.
+    let persisted_tip: Option<[u8; 32]> = tx
+        .query_row(
+            "SELECT chain_tip FROM contacts WHERE device_id = ?1",
+            params![counterparty_device_id],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten()
+        .and_then(|v| v.as_slice().try_into().ok());
+
+    // The gate's parent_tip was the tip BEFORE the gated send. If the current tip
+    // has moved off it, the chain advanced and the gate is stale.
+    let already_advanced = (sender_reported_tip.is_some()
+        && sender_reported_tip != Some(gate_parent))
+        || (persisted_tip.is_some() && persisted_tip != Some(gate_parent));
+
+    if !already_advanced {
+        return Ok(StaleGateOutcome::StillPending);
+    }
+
+    let deleted = clear_pending_online_outbox_if_matches_with_conn(
+        &tx,
+        counterparty_device_id,
+        &gate_parent,
+        &gate_next,
+    )?;
+    if !deleted {
+        // Cannot happen inside this transaction — we read the row here. Refuse
+        // rather than assume; see StaleGateOutcome::Raced.
+        return Ok(StaleGateOutcome::Raced);
+    }
+
+    tx.commit()?;
+    Ok(StaleGateOutcome::Cleared)
+}
+
 pub fn clear_pending_online_outbox_if_matches(
     counterparty_device_id: &[u8],
     expected_parent_tip: &[u8],

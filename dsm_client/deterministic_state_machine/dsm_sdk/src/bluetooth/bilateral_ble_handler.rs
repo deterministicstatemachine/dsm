@@ -2203,81 +2203,68 @@ impl BilateralBleHandler {
                         bytes_to_base32(&counterparty_device_id[..8]),
                     );
                 }
-                match crate::storage::client_db::get_pending_online_outbox(&counterparty_device_id)
-                {
-                    Ok(Some(pending)) => {
-                        // Fast-path catch-up: if the chain tip already reflects the
-                        // pending transition's next_tip, the gate is stale — clear it.
-                        // Check three sources (in order of authority):
-                        //   1. Sender's chain tip from the incoming prepare request (most current)
-                        //   2. Persisted contacts.chain_tip in SQLite (may be stale)
-                        //   3. The storage.sync outbox sweep handles the network ACK path
-                        //      (checking is_message_acknowledged) proactively every cycle.
-                        let pending_parent: Option<[u8; 32]> =
-                            pending.parent_tip.as_slice().try_into().ok();
+                // The sender's self-reported chain tip from the prepare request. This is the
+                // authoritative catch-up signal: the sender knows its own chain state. Our
+                // persisted view (contacts.chain_tip) is read inside the same transaction below.
+                let sender_reported_tip: Option<[u8; 32]> = prepare_request
+                    .sender_chain_tip
+                    .as_ref()
+                    .and_then(|h| h.v.as_slice().try_into().ok());
 
-                        // Source 1: sender's self-reported chain tip from the prepare request.
-                        // This is authoritative — the sender knows its own chain state.
-                        let sender_reported_tip: Option<[u8; 32]> = prepare_request
-                            .sender_chain_tip
-                            .as_ref()
-                            .and_then(|h| h.v.as_slice().try_into().ok());
-
-                        // Source 2: our local persisted view of the sender's chain tip.
-                        let persisted_tip = crate::storage::client_db::get_contact_chain_tip_raw(
-                            &counterparty_device_id,
-                        );
-
-                        // The gate's parent_tip was the tip BEFORE the gated send.
-                        // If the current tip != parent_tip, the chain moved forward
-                        // (possibly multiple times) and the gate is stale.
-                        let already_advanced = match pending_parent {
-                            Some(pp) => {
-                                (sender_reported_tip.is_some() && sender_reported_tip != Some(pp))
-                                    || (persisted_tip.is_some() && persisted_tip != Some(pp))
+                // Read, decide and delete atomically. This used to be three separate calls that
+                // each took and released the global connection mutex, so a concurrent online send
+                // could settle the old gate and arm a new one in the window. The exact-match delete
+                // then matched nothing and returned Ok(false) — which the caller discarded, because
+                // it consumed the result with `if let Err(..)`. The in-memory lock was cleared
+                // regardless and the offline transfer was admitted while a newer online gate sat
+                // unread in SQLite: a fork against an in-flight online step, which is exactly what
+                // §5.4 exists to prevent.
+                match crate::storage::client_db::clear_stale_pending_online_gate(
+                    &counterparty_device_id,
+                    sender_reported_tip,
+                ) {
+                    Ok(outcome) => {
+                        use crate::storage::client_db::StaleGateOutcome;
+                        match outcome {
+                            StaleGateOutcome::NoGate => {}
+                            StaleGateOutcome::Cleared => {
+                                log::info!(
+                                    "[BilateralBleHandler] ✅ Pending online gate was stale and is cleared for ({}, {})",
+                                    bytes_to_base32(&self.device_id[..8]),
+                                    bytes_to_base32(&counterparty_device_id[..8]),
+                                );
+                                crate::security::modal_sync_lock::clear_pending_online(&smt_key);
+                                modal_locked = false;
                             }
-                            None => true, // no parent means gate is bogus
-                        };
-
-                        if already_advanced {
-                            log::info!(
-                                "[BilateralBleHandler] ✅ Pending online gate stale (sender tip matches next_tip); clearing for ({}, {})",
-                                bytes_to_base32(&self.device_id[..8]),
-                                bytes_to_base32(&counterparty_device_id[..8]),
-                            );
-                            // Exact-match delete: only clears if parent_tip + next_tip match
-                            let gate_parent: [u8; 32] = pending_parent.unwrap_or([0u8; 32]);
-                            let gate_next: [u8; 32] =
-                                pending.next_tip.as_slice().try_into().unwrap_or([0u8; 32]);
-                            if let Err(e) =
-                                crate::storage::client_db::clear_pending_online_outbox_if_matches(
-                                    &counterparty_device_id,
-                                    &gate_parent,
-                                    &gate_next,
-                                )
-                            {
-                                warn!("[BilateralBleHandler] Failed to clear stale gate: {}", e);
+                            StaleGateOutcome::StillPending => {
+                                log::error!(
+                                    "[BilateralBleHandler] ❌ persisted online gate: chain tip unchanged from parent for ({}, {}). sender_tip={}. Rejecting offline.",
+                                    bytes_to_base32(&self.device_id[..8]),
+                                    bytes_to_base32(&counterparty_device_id[..8]),
+                                    sender_reported_tip
+                                        .map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
+                                );
+                                return Err(DsmError::invalid_operation(
+                                    "§5.4: Cannot initiate offline transfer while a prior online transfer for this relationship is still awaiting recipient catch-up",
+                                ));
                             }
-                            crate::security::modal_sync_lock::clear_pending_online(&smt_key);
-                            modal_locked = false;
-                        } else {
-                            log::error!(
-                                "[BilateralBleHandler] ❌ persisted online gate: chain tip unchanged from parent for ({}, {}). sender_tip={} parent_tip={} persisted_tip={}. Rejecting offline.",
-                                bytes_to_base32(&self.device_id[..8]),
-                                bytes_to_base32(&counterparty_device_id[..8]),
-                                sender_reported_tip.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
-                                pending_parent.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
-                                persisted_tip.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
-                            );
-                            return Err(DsmError::invalid_operation(
-                                "§5.4: Cannot initiate offline transfer while a prior online transfer for this relationship is still awaiting recipient catch-up",
-                            ));
+                            StaleGateOutcome::Raced => {
+                                log::error!(
+                                    "[BilateralBleHandler] ❌ §5.4 gate changed under the clear for ({}, {}). Rejecting offline.",
+                                    bytes_to_base32(&self.device_id[..8]),
+                                    bytes_to_base32(&counterparty_device_id[..8]),
+                                );
+                                return Err(DsmError::invalid_operation(
+                                    "§5.4: the pending online gate changed while it was being cleared",
+                                ));
+                            }
                         }
                     }
-                    Ok(None) => {}
                     Err(e) => {
+                        // Includes a malformed persisted tip, which previously became [0u8; 32]
+                        // and guaranteed a delete that matched nothing.
                         log::error!(
-                            "[BilateralBleHandler] ❌ failed to read persisted online gate for ({}, {}): {}",
+                            "[BilateralBleHandler] ❌ failed to evaluate persisted online gate for ({}, {}): {}",
                             bytes_to_base32(&self.device_id[..8]),
                             bytes_to_base32(&counterparty_device_id[..8]),
                             e,
