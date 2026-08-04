@@ -14,14 +14,19 @@
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::common::domain_tags::TAG_COMMITMENT_FIELDS;
+use crate::crypto::domain::TaggedHashDomain;
 
 const OUT_LEN: usize = 32;
 
-// Domain separation tags (versioned, null-terminated style)
-const DOM_BASE: &[u8] = b"DSM/commit/base/v2\0";
-const DOM_TIMELOCK: &[u8] = b"DSM/commit/timelock/v2\0";
-const DOM_CONDITIONAL: &[u8] = b"DSM/commit/conditional/v2\0";
-const DOM_RECURRING: &[u8] = b"DSM/commit/recurring/v2\0";
+// Domain separation tags. The delimiter lives in the encoder, not in these
+// constants — see docs/adr/0001-three-domain-separation-constructions.md.
+const DOM_BASE: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/commit/base/v2");
+const DOM_TIMELOCK: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/commit/timelock/v2");
+const DOM_CONDITIONAL: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/commit/conditional/v2");
+const DOM_RECURRING: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/commit/recurring/v2");
 
 // Canonicalization bounds (defensive, deterministic)
 const MAX_OP_BYTES_LEN: usize = 256 * 1024; // hard cap to avoid pathological allocations
@@ -219,7 +224,7 @@ fn canonical_text(s: &str) -> Result<String, DsmError> {
 }
 
 fn hash_fields(
-    domain: &[u8],
+    domain: TaggedHashDomain<'_>,
     current_state_hash: &[u8],
     op_bytes: &[u8],
     recipient_info: &[u8],
@@ -227,7 +232,8 @@ fn hash_fields(
     opt_extra: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut hasher = crate::crypto::blake3::dsm_domain_hasher(TAG_COMMITMENT_FIELDS);
-    hasher.update(domain);
+    hasher.update(domain.source_bytes());
+    hasher.update(&[0u8]);
 
     // field 1: state hash (length-prefixed)
     crate::crypto::canonical_lp::write_lp(&mut hasher, current_state_hash);
@@ -258,6 +264,27 @@ fn hash_fields(
 
 #[cfg(test)]
 mod tests {
+    /// LAYER PROOF for rule 3 (hash_fields). Same purpose as the precommit
+    /// twin: frozen BEFORE the signature flip so moving each DOM_ constant's
+    /// NUL into the encoder is shown to preserve bytes per caller.
+    #[test]
+    fn rule3_commitment_domains_are_frozen_across_the_delimiter_cut() {
+        let doms: [TaggedHashDomain<'static>; 4] =
+            [DOM_BASE, DOM_TIMELOCK, DOM_CONDITIONAL, DOM_RECURRING];
+        let got: Vec<String> = doms
+            .iter()
+            .map(|d| {
+                let v = super::hash_fields(*d, b"state", b"op", b"rcpt", None, None);
+                format!("{:?}", blake3::hash(&v).as_bytes())
+            })
+            .collect();
+        assert_eq!(
+            got.join(","),
+            "[59, 67, 34, 65, 197, 214, 234, 191, 218, 12, 173, 103, 198, 148, 241, 209, 14, 225, 161, 55, 100, 59, 48, 191, 185, 234, 84, 95, 199, 160, 219, 119],[163, 35, 63, 102, 227, 39, 188, 28, 7, 24, 33, 73, 213, 231, 39, 40, 6, 41, 136, 135, 208, 35, 104, 87, 236, 77, 127, 69, 58, 47, 2, 35],[182, 245, 14, 45, 211, 117, 45, 37, 245, 2, 181, 229, 178, 8, 107, 109, 146, 141, 216, 19, 28, 185, 58, 90, 239, 53, 248, 252, 118, 73, 65, 41],[73, 83, 80, 194, 201, 34, 22, 52, 233, 73, 151, 51, 96, 253, 123, 72, 39, 192, 203, 143, 20, 172, 207, 6, 65, 242, 96, 25, 127, 81, 61, 145]",
+            "a rule-3 commitment domain moved across the delimiter cut"
+        );
+    }
+
     use super::*;
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
     use crate::types::{operations::PreCommitmentOp, token_types::Balance};

@@ -16,6 +16,7 @@
 //!
 
 use crate::crypto::canonical_lp;
+use crate::crypto::domain::TaggedHashDomain;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
@@ -27,11 +28,16 @@ use thiserror::Error;
 use zeroize::Zeroize;
 
 // Domain tags (versioned, null-terminated style)
-const DOM_PRECOMMIT_ROOT: &[u8] = b"DSM/precommit/root/v2\0";
-const DOM_PRECOMMIT_COMMITMENT_HASH: &[u8] = b"DSM/precommit/commitment-hash/v2\0";
-const DOM_FORK_CONTEXT: &[u8] = b"DSM/precommit/fork-context/v2\0";
-const DOM_FORK_POSITIONS: &[u8] = b"DSM/precommit/fork-positions/v2\0";
-const DOM_INVALIDATION_PROOF: &[u8] = b"DSM/precommit/invalidation-proof/v2\0";
+const DOM_PRECOMMIT_ROOT: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/precommit/root/v2");
+const DOM_PRECOMMIT_COMMITMENT_HASH: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/precommit/commitment-hash/v2");
+const DOM_FORK_CONTEXT: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/precommit/fork-context/v2");
+const DOM_FORK_POSITIONS: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/precommit/fork-positions/v2");
+const DOM_INVALIDATION_PROOF: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/precommit/invalidation-proof/v2");
 
 // Defensive bounds (deterministic, avoids pathological allocations)
 const MAX_ID_LEN: usize = 128;
@@ -1272,6 +1278,36 @@ fn derive_event_index(fork_id: &str, fork_hash: &[u8], selected_hash: &[u8]) -> 
 mod tests {
     use super::*;
 
+    /// LAYER PROOF for rule 3 (hash_lp*). Frozen BEFORE the signature flip so
+    /// that moving the NUL out of each DOM_ constant and into the encoder is
+    /// shown to preserve bytes, per caller, rather than argued from the shape of
+    /// the transformation. See docs/adr/0001-impact-table.md rows 1-2.
+    #[test]
+    fn rule3_precommit_domains_are_frozen_across_the_delimiter_cut() {
+        let doms: [(&str, TaggedHashDomain<'static>); 5] = [
+            ("DOM_PRECOMMIT_ROOT", DOM_PRECOMMIT_ROOT),
+            (
+                "DOM_PRECOMMIT_COMMITMENT_HASH",
+                DOM_PRECOMMIT_COMMITMENT_HASH,
+            ),
+            ("DOM_FORK_CONTEXT", DOM_FORK_CONTEXT),
+            ("DOM_FORK_POSITIONS", DOM_FORK_POSITIONS),
+            ("DOM_INVALIDATION_PROOF", DOM_INVALIDATION_PROOF),
+        ];
+        let got: Vec<String> = doms
+            .iter()
+            .map(|(_, d)| {
+                let h = canonical_lp::hash_lp1(*d, b"layer-proof-input");
+                format!("{h:?}")
+            })
+            .collect();
+        assert_eq!(
+            got.join(","),
+            "[249, 76, 35, 180, 242, 230, 36, 18, 22, 237, 60, 218, 76, 175, 183, 196, 11, 105, 148, 134, 146, 107, 110, 68, 188, 246, 45, 90, 92, 208, 7, 4],[252, 225, 191, 185, 103, 184, 181, 38, 16, 155, 116, 221, 16, 93, 73, 145, 134, 89, 101, 114, 172, 227, 200, 132, 254, 164, 60, 179, 66, 126, 200, 97],[222, 86, 11, 254, 21, 81, 70, 178, 120, 53, 235, 238, 246, 134, 218, 20, 137, 35, 248, 93, 154, 168, 246, 191, 136, 155, 74, 60, 130, 244, 98, 90],[37, 145, 216, 75, 184, 122, 24, 115, 193, 112, 191, 129, 160, 247, 68, 58, 89, 101, 1, 246, 186, 213, 73, 200, 202, 90, 161, 94, 85, 154, 168, 67],[126, 161, 168, 171, 89, 231, 114, 59, 175, 148, 172, 74, 78, 12, 226, 207, 36, 183, 80, 119, 226, 201, 74, 190, 88, 228, 227, 201, 211, 191, 199, 93]",
+            "a rule-3 precommit domain moved across the delimiter cut"
+        );
+    }
+
     fn test_buffer(label: &str, size: usize) -> Vec<u8> {
         let mut h = blake3::Hasher::new();
         h.update(b"DSM/test-buffer/v2\0");
@@ -1386,7 +1422,8 @@ mod tests {
     /// Legacy single-tag domain pinned for K4. The protocol no longer
     /// emits hashes under this domain; this constant exists solely so K4
     /// can prove the v2 verifier rejects legacy-domain inputs.
-    const LEGACY_V1_DOMAIN: &[u8] = b"DSM/precommit\0";
+    const LEGACY_V1_DOMAIN: TaggedHashDomain<'static> =
+        TaggedHashDomain::from_static(b"DSM/precommit");
 
     /// K1 — v2 positive vector: `branch_commitment_hash` for a fixed
     /// `(h_n, payload, e)` triple is byte-stable and matches a recomputed
