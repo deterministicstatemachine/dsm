@@ -45,8 +45,58 @@ ends with `\0` passed to a helper that appends another.
 
 | # | site | today | after | blast radius | action |
 |---|---|---|---|---|---|
-| B1 | `dsm_storage_node/src/api/infra/hardening.rs:124` `blake3_tagged("DSM/perm\0", …)` | `"DSM/perm" \|\| 0x00 \|\| 0x00` | `"DSM/perm" \|\| 0x00` | PRF behind `permute_unbiased` → **replica placement on the live fleet** | redeploy all 3 nodes together; placement is recomputed, not stored — confirm before assuming migration-free |
-| B2 | `dsm_storage_node/src/api/infra/hardening.rs:149` `blake3_tagged("DSM/mirror\0", …)` | doubled | single | mirror-set seed → **live fleet** | same redeploy |
+| B1 | `dsm_storage_node/src/api/infra/hardening.rs:124` `blake3_tagged("DSM/perm\0", …)` | `"DSM/perm" \|\| 0x00 \|\| 0x00` | `"DSM/perm" \|\| 0x00` | PRF behind `permute_unbiased` → server-side replication **push order**. NOT a discovery function — see the trace below | synchronized 3-node redeploy; **no migration, no re-replication** |
+| B2 | `dsm_storage_node/src/api/infra/hardening.rs:149` `blake3_tagged("DSM/mirror\0", …)` | doubled | single | `mirror_set_w` → `expected_mirrors`, which feeds **only an `info!` log line** | redeploy; nothing else observes it |
+
+### Why B1/B2 strand nothing — the read/repair trace
+
+Traced from each PRF's output to its sink, and the read path separately, because
+"no placement column" is not sufficient: blob location is itself persisted state.
+
+**Write side.** `permute_unbiased` (the `DSM/perm` consumer) is reached only from
+`replication.rs:254` inside `get_replication_targets`, whose sole production
+caller is `replicate_object` (`store.rs:276`, `b0x.rs:286`). That enqueues
+server-to-server replication pushes. It is a **push preference**, and it is
+belt-and-braces: the SDK already writes to every node itself —
+`put_to_all_replicas` (`storage_node_sdk.rs:983`) loops `self.clients` with no
+placement-derived subset, and `delete_at_all_replicas` (`:1038`) mirrors it.
+
+**Read side — the decisive one.** The node's `get_object_handler`
+(`store.rs:341`) is **local-only**: `db::get_object_by_key` against its own DB,
+404 otherwise. It never recomputes placement and never queries a peer. Discovery
+therefore lives in the client, and `get_from_any_node_path`
+(`dsm_sdk/src/sdk/storage_io.rs:254-283`) iterates **every** entry in
+`config.node_urls`, returning the first success. That is global
+content-addressed discovery over the configured fleet — the address is the only
+input, and the placement function is not consulted.
+
+So an object written under the old permutation stays exactly where it is and
+stays findable, because a reader tries every node regardless of what any PRF
+says.
+
+**Mirror set.** `mirror_set_w` has two call sites: `hardening.rs:157` (its own
+internals) and `bytecommit.rs:170`. At `:170` the result is bound to
+`expected_mirrors` and used **only** in the `info!` at `:176-179` — verified by
+grepping every occurrence in that file. Nothing routes, verifies or persists it,
+and no cross-node comparison exists, so two nodes disagreeing about a mirror set
+would go unnoticed today.
+
+**Repair/gossip.** `api/transport/gossip.rs` contains no reference to
+`permute_unbiased`, `get_replication_targets`, `mirror_set_w` or
+`blake3_tagged` — it does not recompute placement, so there is no repair worker
+that could fail to find an old copy.
+
+**Conclusion.** B1 and B2 remain *cryptographically* breaking — the bytes move —
+but their operational blast radius is a synchronized redeploy. No stranded
+objects, no re-replication, no reindex, no fleet-state clear. A rebalance is
+optional cosmetics, not a correctness requirement.
+
+**Caveat, unverified:** this is a source trace, not a fleet exercise. The runtime
+content of `config.node_urls` is deployment configuration, and the conclusion
+assumes readers are configured with the full node set. If any deployment
+configures a reader with a strict subset of the fleet, discovery narrows to that
+subset — which is true today independently of this cut, but would make an
+unbalanced push order matter more than it does now.
 | B3 | `dsm_sdk/src/storage/client_db/cert_resync.rs:363` `dsm_domain_hasher("DSM/cert-restart/v1\0")` | doubled | single | `compute_joint_auth_hash` — the joint cert-restart statement **both AKs sign** | clear pending cert-restart state; no fallback reader |
 | B4 | `dsm_sdk/src/sdk/kyber_identity.rs:29` `KYBER_IDENTITY_BINDING_TAG = "DSM/kyber-identity-binding\0"` into the **core** `domain_hash` (import confirmed at `:23`) | doubled | single | ML-KEM ↔ device-identity binding; AK-signed, verifier re-derives | regenerate bindings; peers must update together |
 
