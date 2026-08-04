@@ -87,6 +87,65 @@ mod tests {
         }
     }
 
+    /// CHARACTERIZATION of the SDK trimming shim, from the tag side.
+    ///
+    /// `dsm_sdk::wire::domain_hash_bytes` calls `tag.trim_end_matches('\0')`
+    /// before hashing, while `dsm_domain_hasher` does not. So for any tag whose
+    /// declared value ends with a NUL, the two layers hash DIFFERENT bytes for
+    /// the same declared domain, and any two tags that differ only by a trailing
+    /// NUL become the SAME domain on the SDK side.
+    ///
+    /// This records the state before the delimiter cut. It is not the fix: the
+    /// fix is one canonical implementation with no silent trimming. It pins two
+    /// things so the cut can be judged:
+    ///
+    ///   - which tags are affected at all (those ending in NUL), and
+    ///   - that no two DECLARED tags currently collapse into one another under
+    ///     trimming, which is what makes the shim survivable today rather than
+    ///     actively wrong.
+    ///
+    /// If someone re-adds an `X` / `X\0` pair, the second assertion fails and
+    /// says why. Both `TAG_DSM_CONTACT_ADD_NUL` and `TAG_DSM_DLV_PARTITION_NUL`
+    /// were exactly such a pair before they were deleted.
+    #[test]
+    fn characterize_which_tags_the_sdk_trimming_shim_changes() {
+        let tags = all_tags();
+
+        let nul_suffixed: Vec<&str> = tags
+            .iter()
+            .copied()
+            .filter(|t| *t != t.trim_end_matches('\0'))
+            .collect();
+
+        // Exactly one tag is affected today. It is the only one the SDK shim
+        // hashes differently from core.
+        assert_eq!(
+            nul_suffixed,
+            vec![TAG_DSM_DLV_OPEN_NUL],
+            "the set of tags whose bytes differ between core and the SDK shim \
+             changed; every tag listed here is hashed as `tag || 0x00` by \
+             dsm_domain_hasher and as `trim(tag) || 0x00` by \
+             dsm_sdk::wire::domain_hash_bytes"
+        );
+
+        // No two DECLARED tags may become the same domain once trimmed.
+        for (i, a) in tags.iter().enumerate() {
+            for (j, b) in tags.iter().enumerate() {
+                if i >= j {
+                    continue;
+                }
+                assert_ne!(
+                    a.trim_end_matches('\0'),
+                    b.trim_end_matches('\0'),
+                    "tags {a:?} and {b:?} are distinct as declared but collapse to \
+                     ONE domain inside dsm_sdk::wire::domain_hash_bytes, which \
+                     trims the trailing NUL. Two logical domains sharing a digest \
+                     space is a domain-separation failure, not a naming quirk."
+                );
+            }
+        }
+    }
+
     #[test]
     fn tags_do_not_trail_nul_except_compat_tags() {
         // TAG_DSM_DLV_OPEN_NUL is the ONLY tag permitted to carry a NUL, and

@@ -822,3 +822,74 @@ mod bilateral_wire_tests {
         assert_eq!(inner.final_state_hash, vec![0xABu8; 32]);
     }
 }
+
+#[cfg(test)]
+mod domain_hash_characterization {
+    //! CHARACTERIZATION of the delimiter disagreement between core and the SDK,
+    //! recorded before any bytes change. These tests assert what the code does
+    //! TODAY, including what it does wrong. They are not the fix.
+    //!
+    //! Core (`dsm::crypto::blake3::dsm_domain_hasher`) hashes `tag || 0x00`.
+    //! The SDK shim above trims a trailing NUL first, so it hashes
+    //! `trim(tag) || 0x00`. For any tag whose declared value ends in a NUL the
+    //! two layers therefore hash DIFFERENT bytes for the SAME declared domain —
+    //! and the SDK's digest for `"X\0"` is byte-identical to core's digest for
+    //! a differently-named domain `"X"`.
+    //!
+    //! When the canonical rule lands, these tests must be INVERTED, not deleted:
+    //! the same declared domain must produce the same digest in both layers.
+
+    use super::domain_hash_bytes as sdk_domain_hash_bytes;
+    use dsm::common::domain_tags::TAG_DSM_DLV_OPEN_NUL;
+    use dsm::crypto::blake3::domain_hash_bytes as core_domain_hash_bytes;
+
+    const BODY: &[u8] = b"characterization body";
+
+    /// ITEM 6: one logical domain, two different digests, depending on layer.
+    #[test]
+    fn characterize_core_and_sdk_disagree_for_a_nul_suffixed_tag() {
+        let core = core_domain_hash_bytes(TAG_DSM_DLV_OPEN_NUL, BODY);
+        let sdk = sdk_domain_hash_bytes(TAG_DSM_DLV_OPEN_NUL, BODY);
+
+        assert_ne!(
+            core, sdk,
+            "core and the SDK shim agreed for {TAG_DSM_DLV_OPEN_NUL:?}. If this \
+             now passes, the trimming shim was changed — invert this test rather \
+             than deleting it, because agreement is the goal state."
+        );
+    }
+
+    /// The shape of the disagreement: the SDK's digest for the NUL-suffixed tag
+    /// is exactly core's digest for the tag WITHOUT the NUL. That is the
+    /// collision surface — a second domain spelled `"DSM/dlv/open"` would share
+    /// a digest space with `TAG_DSM_DLV_OPEN_NUL` as the SDK hashes it.
+    ///
+    /// No such plain sibling is declared today, which is the only reason this is
+    /// currently survivable. `characterize_which_tags_the_sdk_trimming_shim_changes`
+    /// in the dsm crate pins that no declared pair collapses.
+    #[test]
+    fn characterize_the_sdk_digest_equals_cores_digest_for_the_untrimmed_spelling() {
+        let sdk = sdk_domain_hash_bytes(TAG_DSM_DLV_OPEN_NUL, BODY);
+        let core_plain = core_domain_hash_bytes(TAG_DSM_DLV_OPEN_NUL.trim_end_matches('\0'), BODY);
+
+        assert_eq!(
+            sdk, core_plain,
+            "the SDK shim no longer maps a NUL-suffixed tag onto the plain \
+             spelling's domain"
+        );
+    }
+
+    /// A tag with no trailing NUL is unaffected: both layers agree. This is the
+    /// anti-vacuity case — without it, a shim that mangled EVERY tag would still
+    /// satisfy the disagreement test above.
+    #[test]
+    fn characterize_tags_without_a_trailing_nul_already_agree() {
+        use dsm::common::domain_tags::TAG_DSM_CONTACT_ADD;
+        assert_eq!(
+            core_domain_hash_bytes(TAG_DSM_CONTACT_ADD, BODY),
+            sdk_domain_hash_bytes(TAG_DSM_CONTACT_ADD, BODY),
+            "core and SDK disagree even for a tag with no trailing NUL, so the \
+             divergence is wider than the trimming shim"
+        );
+    }
+}
