@@ -155,3 +155,44 @@ fn the_canonical_encoder_rejects_a_nul_bearing_source_domain() {
     let embedded = std::panic::catch_unwind(|| encode_canonical(b"DSM/a\0b"));
     assert!(embedded.is_err(), "an embedded NUL must be rejected");
 }
+
+/// The new encoder must be byte-identical to `dsm_domain_hasher` for every
+/// domain that is already canonical. This is what makes step 4 a mechanical
+/// conversion rather than a digest change: swapping the call site swaps the
+/// spelling, not the bytes.
+#[test]
+fn the_canonical_encoder_matches_dsm_domain_hasher_exactly() {
+    use dsm::crypto::blake3::{dsm_domain_hasher, tagged_hasher};
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    const SAMPLES: &[&str] = &[
+        "DSM/state-hash",
+        "DSM/smt-leaf",
+        "DSM/smt-node",
+        "DSM/registry",
+        "DSM/dlv/open",
+        "DSM/perm",
+        "DSM/mirror",
+        "DSM/cert-restart/v1",
+        "DSM/kyber-identity-binding",
+    ];
+
+    for tag in SAMPLES {
+        let Ok(domain) = TaggedHashDomain::try_new(tag.as_bytes()) else {
+            panic!("sample {tag:?} is not a canonical domain");
+        };
+
+        let mut old = dsm_domain_hasher(tag);
+        old.update(b"payload");
+
+        let mut new = tagged_hasher(domain);
+        new.update(b"payload");
+
+        assert_eq!(
+            old.finalize().as_bytes(),
+            new.finalize().as_bytes(),
+            "tagged_hasher diverged from dsm_domain_hasher for {tag:?}; the \
+             conversion would move digests instead of only changing spelling"
+        );
+    }
+}

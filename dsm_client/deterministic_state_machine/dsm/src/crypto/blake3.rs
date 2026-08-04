@@ -195,6 +195,22 @@ pub fn dsm_domain_hasher_keyed(tag: &str, key: &[u8; 32]) -> Hasher {
     h
 }
 
+/// THE canonical tagged-hash encoder: `domain || 0x00`, appended here and
+/// nowhere else.
+///
+/// Takes a validated [`TaggedHashDomain`], so a domain carrying its own NUL
+/// cannot reach this function — it fails at construction (at compile time for
+/// `from_static`). See `docs/adr/0001-three-domain-separation-constructions.md`.
+///
+/// Callers MUST NOT append a delimiter themselves. Every hand-inlined
+/// `update(tag); update(&[0]);` pair in the repository is being replaced by this.
+pub fn tagged_hasher(domain: crate::crypto::domain::TaggedHashDomain<'_>) -> Hasher {
+    let mut h = Hasher::new();
+    h.update(domain.source_bytes());
+    h.update(&[0u8]);
+    h
+}
+
 /// Domain-separated hash function as specified in whitepaper
 /// H(tag || data) where tag includes null terminator
 pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {
