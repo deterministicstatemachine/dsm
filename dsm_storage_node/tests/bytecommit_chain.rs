@@ -80,7 +80,7 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
     // Fetch commit bytes at cycle 1 and decode with prost.
     let addr1 = {
         use dsm_sdk::util::text_id;
-        use dsm_storage_node::api::infra::hardening::blake3_tagged;
+        use dsm_storage_node::api::infra::hardening::{blake3_tagged, DOM_OBJ_BYTECOMMIT};
 
         // addr := H("DSM/obj-bytecommit\0" || node_id_32 || t || dt)
         let node_id_32 = *state.node_id.as_bytes();
@@ -88,7 +88,7 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
         body.extend_from_slice(&node_id_32);
         body.extend_from_slice(&1u64.to_be_bytes());
         body.extend_from_slice(&dt1);
-        let digest = blake3_tagged("DSM/obj-bytecommit", &body);
+        let digest = blake3_tagged(DOM_OBJ_BYTECOMMIT, &body);
         text_id::encode_base32_crockford(&digest)
     };
 

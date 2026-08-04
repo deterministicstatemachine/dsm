@@ -18,7 +18,7 @@ use log::info;
 use prost::Message;
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_DRAIN};
 use crate::db;
 use crate::AppState;
 use dsm::types::proto as pb;
@@ -54,7 +54,7 @@ pub async fn submit_drain_proof(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let addr_digest = blake3_tagged("DSM/drain", &body);
+    let addr_digest = blake3_tagged(DOM_DRAIN, &body);
     let addr = text_id::encode_base32_crockford(&addr_digest);
 
     let start_cycle = *proof.cycle_indices.first().unwrap_or(&0) as i64;
@@ -219,8 +219,8 @@ mod tests {
     #[test]
     fn drain_proof_addr_is_deterministic() {
         let body = b"some drain proof bytes";
-        let d1 = blake3_tagged("DSM/drain", body);
-        let d2 = blake3_tagged("DSM/drain", body);
+        let d1 = blake3_tagged(DOM_DRAIN, body);
+        let d2 = blake3_tagged(DOM_DRAIN, body);
         assert_eq!(d1, d2);
         let addr1 = text_id::encode_base32_crockford(&d1);
         let addr2 = text_id::encode_base32_crockford(&d2);

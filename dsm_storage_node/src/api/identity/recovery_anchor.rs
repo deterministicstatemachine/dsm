@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use crate::api::infra::hardening::blake3_tagged;
 use crate::AppState;
+use dsm::crypto::domain::TaggedHashDomain;
 use dsm::types::proto as generated;
 
 /// Two SPHINCS+ SPX256f signatures (~49.9 KiB each) plus three 32-byte fields
@@ -44,7 +45,8 @@ const MAX_ANCHOR_BYTES: usize = 256 * 1024;
 const MAX_SIG_BYTES: usize = 65_535;
 
 /// Domain tag for the stored-anchor content hash (idempotency key).
-const ANCHOR_STORE_TAG: &str = "DSM/recovery/authority-anchor-store";
+const ANCHOR_STORE_TAG: TaggedHashDomain<'static> =
+    TaggedHashDomain::from_static(b"DSM/recovery/authority-anchor-store");
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()

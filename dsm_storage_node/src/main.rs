@@ -155,7 +155,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             material.extend_from_slice(hostname.as_bytes());
             material.extend_from_slice(&port.to_be_bytes());
             text_id::encode_base32_crockford(&api::infra::hardening::blake3_tagged(
-                "DSM/node-id",
+                api::infra::hardening::DOM_NODE_ID,
                 &material,
             ))
         });

@@ -25,7 +25,10 @@ use log::info;
 use prost::Message;
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{
+    blake3_tagged, DOM_APPLY, DOM_NODE_ID, DOM_ORDER, DOM_POSITIONS_SALT, DOM_REGISTRY,
+    DOM_SIGNAL_DOWN, DOM_SIGNAL_UP,
+};
 use crate::db;
 use crate::AppState;
 use dsm::types::proto as pb;
@@ -68,7 +71,7 @@ pub async fn submit_up_signal(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let addr_digest = blake3_tagged("DSM/signal/up", &body);
+    let addr_digest = blake3_tagged(DOM_SIGNAL_UP, &body);
     let addr = text_id::encode_base32_crockford(&addr_digest);
 
     // Derive window bounds from anchors length
@@ -123,7 +126,7 @@ pub async fn submit_down_signal(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let addr_digest = blake3_tagged("DSM/signal/down", &body);
+    let addr_digest = blake3_tagged(DOM_SIGNAL_DOWN, &body);
     let addr = text_id::encode_base32_crockford(&addr_digest);
 
     let window_end = signal.anchors.len() as i64;
@@ -176,7 +179,7 @@ pub async fn submit_applicant(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let addr_digest = blake3_tagged("DSM/apply", &body);
+    let addr_digest = blake3_tagged(DOM_APPLY, &body);
     let addr = text_id::encode_base32_crockford(&addr_digest);
 
     let pool = &*state.db_pool;
@@ -311,13 +314,13 @@ pub async fn trigger_registry_update(
         };
         let mut reg_bytes = Vec::with_capacity(registry.encoded_len());
         let _ = registry.encode(&mut reg_bytes);
-        let addr_reg = blake3_tagged("DSM/registry", &reg_bytes);
+        let addr_reg = blake3_tagged(DOM_REGISTRY, &reg_bytes);
 
         // Deterministic salt: H("DSM/positions/salt\0" || G || addr_reg || ...)
         let mut salt_input = Vec::new();
         salt_input.extend_from_slice(&genesis_hash);
         salt_input.extend_from_slice(&addr_reg);
-        let salt = blake3_tagged("DSM/positions/salt", &salt_input);
+        let salt = blake3_tagged(DOM_POSITIONS_SALT, &salt_input);
 
         // Rank applicants
         let applicants = db::list_pending_applicants(pool)
@@ -330,7 +333,7 @@ pub async fn trigger_registry_update(
                 let mut rank_input = Vec::new();
                 rank_input.extend_from_slice(&salt);
                 rank_input.extend_from_slice(seed_app);
-                let rank = blake3_tagged("DSM/order", &rank_input);
+                let rank = blake3_tagged(DOM_ORDER, &rank_input);
                 (rank, addr.clone(), seed_app.clone())
             })
             .collect();
@@ -340,7 +343,7 @@ pub async fn trigger_registry_update(
         let to_add = delta_p.min(ranked.len() as i64) as usize;
         for (_, applicant_addr, seed_app) in ranked.iter().take(to_add) {
             // Use seed_app hash as node_id for the new registry entry
-            let node_id = blake3_tagged("DSM/node-id", seed_app);
+            let node_id = blake3_tagged(DOM_NODE_ID, seed_app);
             db::upsert_registry_node(pool, &node_id, current_cycle)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -386,7 +389,7 @@ pub async fn trigger_registry_update(
     new_registry
         .encode(&mut reg_bytes)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let reg_addr = blake3_tagged("DSM/registry", &reg_bytes);
+    let reg_addr = blake3_tagged(DOM_REGISTRY, &reg_bytes);
     let reg_addr_str = text_id::encode_base32_crockford(&reg_addr);
     db::upsert_object(
         pool,
@@ -436,11 +439,11 @@ mod tests {
     #[test]
     fn up_signal_address_is_deterministic() {
         let body = b"test-signal-body";
-        let a1 = blake3_tagged("DSM/signal/up", body);
-        let a2 = blake3_tagged("DSM/signal/up", body);
+        let a1 = blake3_tagged(DOM_SIGNAL_UP, body);
+        let a2 = blake3_tagged(DOM_SIGNAL_UP, body);
         assert_eq!(a1, a2, "same input must produce same address");
 
-        let different = blake3_tagged("DSM/signal/up", b"different-body");
+        let different = blake3_tagged(DOM_SIGNAL_UP, b"different-body");
         assert_ne!(
             a1, different,
             "different bodies must produce different addresses"
@@ -450,14 +453,14 @@ mod tests {
     #[test]
     fn up_and_down_signal_domains_differ() {
         let body = b"same-body";
-        let up = blake3_tagged("DSM/signal/up", body);
-        let down = blake3_tagged("DSM/signal/down", body);
+        let up = blake3_tagged(DOM_SIGNAL_UP, body);
+        let down = blake3_tagged(DOM_SIGNAL_DOWN, body);
         assert_ne!(up, down, "domain separation must produce distinct digests");
     }
 
     #[test]
     fn applicant_ranking_is_deterministic_and_sortable() {
-        let salt = blake3_tagged("DSM/positions/salt", b"genesis+registry");
+        let salt = blake3_tagged(DOM_POSITIONS_SALT, b"genesis+registry");
 
         let seeds: Vec<Vec<u8>> = (0u8..5)
             .map(|i| {
@@ -474,7 +477,7 @@ mod tests {
                 let mut input = Vec::new();
                 input.extend_from_slice(&salt);
                 input.extend_from_slice(seed);
-                let rank = blake3_tagged("DSM/order", &input);
+                let rank = blake3_tagged(DOM_ORDER, &input);
                 (rank, idx)
             })
             .collect();
@@ -488,7 +491,7 @@ mod tests {
                 let mut input = Vec::new();
                 input.extend_from_slice(&salt);
                 input.extend_from_slice(seed);
-                let rank = blake3_tagged("DSM/order", &input);
+                let rank = blake3_tagged(DOM_ORDER, &input);
                 (rank, idx)
             })
             .collect();
@@ -550,11 +553,11 @@ mod tests {
     #[test]
     fn registry_address_uses_correct_domain() {
         let body = b"registry-bytes";
-        let addr = blake3_tagged("DSM/registry", body);
+        let addr = blake3_tagged(DOM_REGISTRY, body);
         let addr_str = text_id::encode_base32_crockford(&addr);
         assert!(!addr_str.is_empty());
 
-        let other = blake3_tagged("DSM/apply", body);
+        let other = blake3_tagged(DOM_APPLY, body);
         assert_ne!(
             addr, other,
             "different domain tags must produce different digests"

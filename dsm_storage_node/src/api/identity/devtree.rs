@@ -31,7 +31,7 @@ use axum::{
 use prost::Message;
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_IDENTITY_DEVTREE_ROOT};
 use crate::AppState;
 use dsm::types::proto as generated;
 
@@ -42,7 +42,7 @@ use dsm::types::proto as generated;
 const MAX_DEVTREE_STATE_BYTES: usize = 128 * 1024;
 
 fn key_root(genesis_b: &[u8]) -> String {
-    let k = blake3_tagged("DSM/identity/devtree/root", genesis_b);
+    let k = blake3_tagged(DOM_IDENTITY_DEVTREE_ROOT, genesis_b);
     dsm_sdk::util::text_id::encode_base32_crockford(&k)
 }
 

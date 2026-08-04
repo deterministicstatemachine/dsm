@@ -19,7 +19,7 @@ use prost::Message;
 use std::sync::Arc;
 
 use crate::api::identity::authenticate::authenticate_vaultpost_smart_policy_if_present;
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_OBJECT, DOM_OBJ_BYTES};
 use crate::auth::DeviceContext;
 use crate::db::{self};
 
@@ -91,12 +91,12 @@ fn decode_b32(s: &str) -> Option<Vec<u8>> {
 /// Returns the address as Crockford base32 — the only permitted string encoding at
 /// protocol boundaries (CLAUDE.md hex ban).
 fn compute_object_address(dlv_id: &[u8], path: &str, content: &[u8]) -> String {
-    let content_hash = blake3_tagged("DSM/obj-bytes", content);
+    let content_hash = blake3_tagged(DOM_OBJ_BYTES, content);
     let mut buf = Vec::with_capacity(dlv_id.len() + path.len() + content_hash.len());
     buf.extend_from_slice(dlv_id);
     buf.extend_from_slice(path.as_bytes());
     buf.extend_from_slice(&content_hash);
-    let addr = blake3_tagged("DSM/object", &buf);
+    let addr = blake3_tagged(DOM_OBJECT, &buf);
     encode_b32(&addr)
 }
 

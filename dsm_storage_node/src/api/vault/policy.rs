@@ -19,7 +19,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_POLICY, DOM_POLICY_ANCHOR};
 use crate::{db, AppState};
 
 /// Internal-only: DB uses TEXT keys; we encode anchor bytes to ASCII for storage (hex).
@@ -57,7 +57,7 @@ pub async fn put_policy(
     }
 
     // Deterministic address: BLAKE3("DSM/policy\0" || body)
-    let anchor = blake3_tagged("DSM/policy", body.as_ref());
+    let anchor = blake3_tagged(DOM_POLICY, body.as_ref());
     let anchor_key = anchor_to_db_key(&anchor);
 
     // Persist (namespace "policy" for attribution/debug)
@@ -132,7 +132,7 @@ pub async fn mirror_token_policy(
 
     // policy_digest := H("DSM/policy\0" || body_bytes)
     // NOTE: `blake3_tagged` appends "\0" internally.
-    let policy_digest = blake3_tagged("DSM/policy", body.as_ref());
+    let policy_digest = blake3_tagged(DOM_POLICY, body.as_ref());
     let mirror_path = format!("policy/{}", anchor_to_db_key(&policy_digest));
 
     db::upsert_object(
@@ -163,7 +163,7 @@ pub async fn mirror_policy_anchor(
     }
 
     // anchor_digest := H("DSM/policy/anchor\0" || body_bytes)
-    let anchor_digest = blake3_tagged("DSM/policy/anchor", body.as_ref());
+    let anchor_digest = blake3_tagged(DOM_POLICY_ANCHOR, body.as_ref());
     let mirror_path = format!("policy/anchor/{}", anchor_to_db_key(&anchor_digest));
 
     db::upsert_object(
@@ -228,23 +228,23 @@ mod tests {
     #[test]
     fn blake3_policy_tag_is_deterministic() {
         let body = b"some policy bytes";
-        let d1 = blake3_tagged("DSM/policy", body);
-        let d2 = blake3_tagged("DSM/policy", body);
+        let d1 = blake3_tagged(DOM_POLICY, body);
+        let d2 = blake3_tagged(DOM_POLICY, body);
         assert_eq!(d1, d2);
     }
 
     #[test]
     fn blake3_different_tags_differ() {
         let body = b"same body";
-        let d1 = blake3_tagged("DSM/policy", body);
-        let d2 = blake3_tagged("DSM/policy/anchor", body);
+        let d1 = blake3_tagged(DOM_POLICY, body);
+        let d2 = blake3_tagged(DOM_POLICY_ANCHOR, body);
         assert_ne!(d1, d2);
     }
 
     #[test]
     fn mirror_path_format() {
         let body = b"token policy bytes";
-        let digest = blake3_tagged("DSM/policy", body);
+        let digest = blake3_tagged(DOM_POLICY, body);
         let path = format!("policy/{}", anchor_to_db_key(&digest));
         assert!(path.starts_with("policy/"));
         assert_eq!(path.len(), "policy/".len() + 64);
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn anchor_mirror_path_format() {
         let body = b"anchor bytes";
-        let digest = blake3_tagged("DSM/policy/anchor", body);
+        let digest = blake3_tagged(DOM_POLICY_ANCHOR, body);
         let path = format!("policy/anchor/{}", anchor_to_db_key(&digest));
         assert!(path.starts_with("policy/anchor/"));
         assert_eq!(path.len(), "policy/anchor/".len() + 64);
