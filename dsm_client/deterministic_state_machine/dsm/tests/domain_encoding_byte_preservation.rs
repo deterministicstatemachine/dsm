@@ -184,25 +184,41 @@ fn the_breaking_set_is_exactly_these_six_double_nul_sites() {
     }
 }
 
-/// GUARD against the search that produced the wrong count. Every NUL-bearing
-/// domain literal reaching a rule-1 helper must be listed above. This is a
-/// source-level check because a test over the tag registry cannot see literals —
-/// the same blind spot that hid B3/B4 from the registry tests.
+/// The six above are REGRESSION VECTORS, not the safety argument.
+///
+/// "Exactly six" is a source count, and a source count is only as good as the
+/// search that produced it — the truncated grep that said "four" is the standing
+/// proof of that. So the count is a tripwire, deliberately not the authority.
+///
+/// The authority is structural, and each part is enforced somewhere that cannot
+/// be undercounted:
+///
+/// 1. No registered domain may contain a NUL. Enforced by
+///    `domain_tags::tests::no_registered_tag_carries_a_nul_so_the_layers_cannot_diverge`.
+/// 2. Every rule-1 helper accepts only `TaggedHashDomain`. Enforced by the
+///    signatures of `tagged_hasher`, `hash_lp*`, `hash_fields` and
+///    `blake3_tagged`; a `&str` no longer type-checks.
+/// 3. No NUL-bearing literal can reach any of them. Follows from (2) plus
+///    `TaggedHashDomain::from_static`, which rejects a NUL at COMPILE time, and
+///    `try_new`, which rejects one at construction. There is no third way to
+///    build the type.
+///
+/// Together those make an unlisted NUL-bearing domain unrepresentable rather
+/// than merely unlisted. This test records the reasoning so the vector list is
+/// not mistaken for the guarantee.
 #[test]
-fn no_unlisted_nul_bearing_literal_reaches_a_rule1_helper() {
-    const LISTED: &[&str] = &[
-        "DSM/cert-restart/v1",
-        "DSM/kyber-identity-binding",
-        "DSM/b0x-reply-message-id",
-        "DSM/b0x-certresync-message-id",
-    ];
-    assert_eq!(
-        LISTED.len(),
-        4,
-        "rule-1 carries exactly four NUL-bearing literals (B3-B6); B1/B2 are \
-         rule-4 and already cut. Re-run the enumerating grep WITHOUT a head \
-         limit before changing this number."
-    );
+fn the_safety_argument_is_the_type_not_the_count() {
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    // (3), demonstrated: every way of building the type refuses a NUL.
+    assert!(TaggedHashDomain::try_new(b"DSM/x\0").is_err());
+    assert!(TaggedHashDomain::try_new(b"DSM/a\0b").is_err());
+    assert!(TaggedHashDomain::try_new(b"").is_err());
+    assert!(TaggedHashDomain::try_new(b"DSM/ok").is_ok());
+
+    // `from_static` refuses at compile time; see the `compile_fail` doctest on
+    // TaggedHashDomain. It cannot be exercised at runtime by construction, which
+    // is the point.
 }
 
 /// ANTI-VACUITY. `encode_canonical` must actually reject a NUL-bearing source

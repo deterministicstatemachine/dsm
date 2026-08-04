@@ -116,11 +116,44 @@ by the inventory — which is the argument for keeping that discipline for rule 
 rather than trusting the table. But "exactly four" should never have been
 asserted on the strength of a truncated search.
 
-Severity: LOW relative to B3/B4. These are transport-local identifiers, 16
-truncated bytes, covered by no signature and holding no identity. The only
-consequence is that a message spooled under the old id will not collapse onto a
-repost computed under the new one, so a redelivery in flight across the upgrade
-can produce a duplicate spool row. No key regeneration, no state clear.
+Severity: LOW relative to B3/B4 — no key regeneration, no identity to reissue.
+But **"no state clear required" was wrong**, and the correction matters: a
+synchronized client update does not remove a spool row that already exists under
+the old id.
+
+Evidence from the schema (`db/sqlite.rs:221-234`, `db/pg.rs:306`):
+
+  message_id      TEXT NOT NULL UNIQUE
+  expires_at_iter INTEGER            -- NULLABLE
+
+Dedup is enforced by that UNIQUE column plus `INSERT OR IGNORE`
+(`sqlite.rs:1129`, `:1157`), so it keys on the exact id. Purges are
+`DELETE ... WHERE expires_at_iter IS NOT NULL AND expires_at_iter < ?`
+(`:1284`) and `DELETE ... WHERE acked = 1 AND seq_num < ?` (`:1290`). An UNACKED
+row with a NULL expiry is therefore removed by neither and persists indefinitely.
+A repost after the cut computes a different id, `INSERT OR IGNORE` sees no
+conflict, and the recipient holds the same logical message twice.
+
+**Procedure chosen: quiesce and drain before upgrading.**
+
+    SELECT COUNT(*) FROM inbox_spool WHERE acked = 0;   -- must be 0
+
+Upgrade only when that count is zero on every node. Then no old-id row exists for
+a new-id repost to duplicate.
+
+Why not the alternatives:
+
+  - *Clear only pending reply and cert-resync rows.* The envelope is an opaque
+    BLOB and the id is a truncated digest, so selecting exactly those two message
+    classes means decoding every spooled envelope. More moving parts than
+    draining, for no benefit once drained.
+  - *Accept a bounded duplicate window and rely on handler idempotency.* NOT
+    chosen, because that idempotency is not established. The bilateral confirm
+    path already has a known completion asymmetry where a receiver commits and
+    the sender does not, and the proposed remedy there was to ADD an idempotent
+    re-ACK cache — i.e. the property is a wish, not a fact. Accepting duplicates
+    on the strength of an unproven claim is exactly the move this cut exists to
+    stop making.
 
 `no_unlisted_nul_bearing_literal_reaches_a_rule1_helper` now pins the count and
 tells the next reader to re-run the enumeration unbounded before changing it.
