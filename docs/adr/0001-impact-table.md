@@ -100,6 +100,31 @@ unbalanced push order matter more than it does now.
 | B3 | `dsm_sdk/src/storage/client_db/cert_resync.rs:363` `dsm_domain_hasher("DSM/cert-restart/v1\0")` | doubled | single | `compute_joint_auth_hash` — the joint cert-restart statement **both AKs sign** | clear pending cert-restart state; no fallback reader |
 | B4 | `dsm_sdk/src/sdk/kyber_identity.rs:29` `KYBER_IDENTITY_BINDING_TAG = "DSM/kyber-identity-binding\0"` into the **core** `domain_hash` (import confirmed at `:23`) | doubled | single | ML-KEM ↔ device-identity binding; AK-signed, verifier re-derives | regenerate bindings; peers must update together |
 
+| B5 | `dsm_sdk/src/sdk/b0x_sdk.rs:1349` `dsm_domain_hasher("DSM/b0x-reply-message-id\0")` | doubled | single | b0x transport-local spool id (16 truncated bytes). Dedupes redeliveries onto one spool row; unsigned, not persisted as an identity | synchronized client update; in-flight messages may spool twice across the upgrade |
+| B6 | `dsm_sdk/src/sdk/b0x_sdk.rs:1513` `dsm_domain_hasher("DSM/b0x-certresync-message-id\0")` | doubled | single | same class, cert-resync transport id | same |
+
+### Correction: the breaking set is SIX, not four
+
+B5 and B6 were missed in the original enumeration. The cause was mine and is
+worth recording so the method is not trusted further than it earns: the grep that
+enumerated NUL-bearing literals was run with `head -30`, and the truncated output
+was treated as the complete set. Re-running it unbounded against the rule-1
+helpers found both.
+
+They were caught before any code changed, by the per-layer discipline rather than
+by the inventory — which is the argument for keeping that discipline for rule 1
+rather than trusting the table. But "exactly four" should never have been
+asserted on the strength of a truncated search.
+
+Severity: LOW relative to B3/B4. These are transport-local identifiers, 16
+truncated bytes, covered by no signature and holding no identity. The only
+consequence is that a message spooled under the old id will not collapse onto a
+repost computed under the new one, so a redelivery in flight across the upgrade
+can produce a duplicate spool row. No key regeneration, no state clear.
+
+`no_unlisted_nul_bearing_literal_reaches_a_rule1_helper` now pins the count and
+tells the next reader to re-run the enumeration unbounded before changing it.
+
 Plus one test-only group:
 
 | # | site | today | after | action |

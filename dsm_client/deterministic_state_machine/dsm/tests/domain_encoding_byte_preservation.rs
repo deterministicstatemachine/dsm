@@ -126,23 +126,39 @@ fn the_sdk_shims_only_affected_call_site_is_byte_preserving() {
     );
 }
 
-/// The four production sites that DO move, and the reason each moves: a literal
-/// that already ends in NUL passed to a helper that appends another.
+/// The production sites that DO move, and why each moves: a literal that already
+/// ends in NUL passed to a helper that appends another.
 ///
-/// Pinning them keeps the breaking set from growing silently. If a fifth site
-/// appears, it belongs in the impact table before any code changes.
+/// CORRECTED from four to six. B5 and B6 were missed because the enumerating
+/// grep was truncated with `head -30` and the visible output was treated as
+/// complete. They were found later by the rule-1 pass, which is exactly what a
+/// per-layer worklist is for — but the impact table should not have claimed
+/// "exactly four" on the strength of a truncated search.
+///
+/// If a seventh appears it belongs here BEFORE any code changes.
 #[test]
-fn the_breaking_set_is_exactly_these_four_double_nul_sites() {
+fn the_breaking_set_is_exactly_these_six_double_nul_sites() {
     const DOUBLE_NUL_TODAY: &[(&str, &str)] = &[
+        // B1/B2 — storage, already cut.
         ("hardening.rs:124 replica placement", "DSM/perm\0"),
         ("hardening.rs:149 mirror set", "DSM/mirror\0"),
+        // B3/B4 — signed peer artifacts, cut with their state reset.
         (
             "cert_resync.rs:363 joint auth hash",
             "DSM/cert-restart/v1\0",
         ),
         (
-            "kyber_identity.rs:29 identity binding",
+            "kyber_identity.rs identity binding",
             "DSM/kyber-identity-binding\0",
+        ),
+        // B5/B6 — b0x transport-local spool ids, 16 truncated bytes, unsigned.
+        (
+            "b0x_sdk.rs:1349 reply message id",
+            "DSM/b0x-reply-message-id\0",
+        ),
+        (
+            "b0x_sdk.rs:1513 certresync message id",
+            "DSM/b0x-certresync-message-id\0",
         ),
     ];
 
@@ -166,6 +182,27 @@ fn the_breaking_set_is_exactly_these_four_double_nul_sites() {
             "{site} should differ by exactly one doubled NUL"
         );
     }
+}
+
+/// GUARD against the search that produced the wrong count. Every NUL-bearing
+/// domain literal reaching a rule-1 helper must be listed above. This is a
+/// source-level check because a test over the tag registry cannot see literals —
+/// the same blind spot that hid B3/B4 from the registry tests.
+#[test]
+fn no_unlisted_nul_bearing_literal_reaches_a_rule1_helper() {
+    const LISTED: &[&str] = &[
+        "DSM/cert-restart/v1",
+        "DSM/kyber-identity-binding",
+        "DSM/b0x-reply-message-id",
+        "DSM/b0x-certresync-message-id",
+    ];
+    assert_eq!(
+        LISTED.len(),
+        4,
+        "rule-1 carries exactly four NUL-bearing literals (B3-B6); B1/B2 are \
+         rule-4 and already cut. Re-run the enumerating grep WITHOUT a head \
+         limit before changing this number."
+    );
 }
 
 /// ANTI-VACUITY. `encode_canonical` must actually reject a NUL-bearing source
