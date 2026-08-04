@@ -3,7 +3,8 @@
 use prost::Message;
 
 use crate::vault::lifecycle::author_dlv_open;
-use crate::wire::{author_contact_accept, author_contact_add, domain_hash_bytes, pb};
+use crate::wire::{author_contact_accept, author_contact_add, pb};
+use dsm::crypto::blake3::domain_hash_bytes;
 
 #[test]
 fn contact_accept_add_digest_matches_domain_hash() {

@@ -17,7 +17,7 @@ pub const TAG_DSM_DLV_FULFILLMENT: &str = "DSM/dlv-fulfillment";
 pub const TAG_DSM_DLV_LABEL: &str = "DSM/dlv-label";
 pub const TAG_DSM_DLV_NONCE: &str = "DSM/dlv-nonce";
 pub const TAG_DSM_DLV_NONCE_SEED: &str = "DSM/dlv-nonce-seed";
-pub const TAG_DSM_DLV_OPEN_NUL: &str = "DSM/dlv/open\0";
+pub const TAG_DSM_DLV_OPEN: &str = "DSM/dlv/open";
 pub const TAG_DSM_DLV_PARAMS: &str = "DSM/dlv-params";
 pub const TAG_DSM_DLV_PARTITION: &str = "DSM/dlv-partition";
 pub const TAG_DSM_DLV_POLICY: &str = "DSM/dlv-policy";
@@ -50,7 +50,7 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_DLV_LABEL,
     TAG_DSM_DLV_NONCE,
     TAG_DSM_DLV_NONCE_SEED,
-    TAG_DSM_DLV_OPEN_NUL,
+    TAG_DSM_DLV_OPEN,
     TAG_DSM_DLV_PARAMS,
     TAG_DSM_DLV_PARTITION,
     TAG_DSM_DLV_POLICY,

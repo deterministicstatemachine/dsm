@@ -11,7 +11,7 @@
 
 use prost::Message;
 
-use crate::wire::{domain_hash_bytes, pb};
+use crate::wire::pb;
 
 /// Author a DlvOpenV3 reveal.
 ///
@@ -32,7 +32,7 @@ pub fn author_dlv_open(
 /// Convenience: deterministic digest for the authored DlvOpenV3.
 pub fn dlv_open_digest(open: &pb::DlvOpenV3) -> [u8; 32] {
     let bytes = open.encode_to_vec();
-    domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_DLV_OPEN_NUL, &bytes)
+    dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_DLV_OPEN, &bytes)
 }
 
 #[cfg(test)]
@@ -40,6 +40,22 @@ mod tests {
     use super::*;
 
     const DEVICE: [u8; 32] = [0xAA; 32];
+
+    /// Frozen BEFORE the trimming shim is deleted, so the deletion is proven
+    /// byte-preserving rather than assumed. Impact-table row 5: today the shim
+    /// trims the tag's NUL and hashes `"DSM/dlv/open" || 0x00`; the canonical
+    /// encoder given `"DSM/dlv/open"` produces exactly that. This vector must
+    /// survive the cut unchanged.
+    #[test]
+    fn dlv_open_digest_is_frozen_across_the_delimiter_cut() {
+        let open = author_dlv_open(&[9u8; 32], &[8u8; 32], b"abc\x00\xff");
+        let digest = dlv_open_digest(&open);
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&digest),
+            "33BX41ACBYSA4NHRX617KAGDENGQPP5G219AK7P4ARBK1Z8RJ5FG",
+            "dlv_open_digest moved"
+        );
+    }
 
     #[test]
     fn author_dlv_open_populates_fields() {
