@@ -329,17 +329,20 @@ jobs:
       - name: dsm-sphincs compiles no_std
         run: cargo check --locked -p dsm-sphincs --target thumbv8m.main-none-eabihf
 
-      # Excluded from the root workspace, so `cargo test --workspace` never sees
-      # it and every command must run from inside the crate: its own
-      # .cargo/config.toml supplies the target and the linker rustflags.
+      # Excluded from the root workspace, so `cargo metadata` reports this
+      # directory as its OWN workspace_root and `cargo test --workspace` never
+      # sees it. Every command runs from inside the crate: its own
+      # .cargo/config.toml supplies the target and the linker rustflags, and its
+      # own Cargo.lock (committed, like the other excluded crates') is what
+      # `--locked` binds.
       # No tests exist (`[[bin]] test = false`, no lib target), so build+clippy
       # is the strongest available check — stated rather than implied by a
       # `cargo test` that would silently pass on zero tests.
       - name: dsm-anchor-nonsecure-app builds (thumbv8m)
         working-directory: crates/dsm-anchor-nonsecure-app
         run: |
-          cargo build --release
-          cargo clippy --release -- -D warnings
+          cargo build --release --locked
+          cargo clippy --release --locked -- -D warnings
           cargo fmt --check
 
       # Host harness. serialport's default `libudev` feature needs the system
@@ -351,9 +354,9 @@ jobs:
       - name: dsm-anchor-bench builds and tests (host)
         working-directory: crates/dsm-anchor-bench
         run: |
-          cargo build --release
-          cargo clippy --release -- -D warnings
-          cargo test --release
+          cargo build --release --locked
+          cargo clippy --release --locked -- -D warnings
+          cargo test --release --locked
 
   # --------------------------------------------------------------------------
   # Lean 4: kernel-check the proof tree. No untrusted GitHub event inputs are
