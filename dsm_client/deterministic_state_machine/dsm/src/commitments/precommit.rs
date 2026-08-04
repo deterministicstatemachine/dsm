@@ -552,9 +552,10 @@ impl PreCommitment {
         self.signatures.contains_key(signer_id)
     }
 
-    pub fn has_required_signatures(&self, required: usize) -> bool {
-        self.signatures.len() >= required
-    }
+    // has_required_signatures(required) -> signatures.len() >= required deleted:
+    // zero callers, and a public helper that answers a signature question by
+    // counting is the exact trap that produced the is_fork_invalidated defect.
+    // The threshold now lives inside verify_signatures, where the keys are.
 
     fn create_invalidation_proof(
         &self,
@@ -687,9 +688,25 @@ impl PreCommitment {
         Ok(true)
     }
 
+    /// Verify that at least `required` signers have each produced a VALID
+    /// signature over this pre-commitment's hash, and that no present signature
+    /// is invalid.
+    ///
+    /// `required` is a parameter rather than a separate call the caller has to
+    /// remember. It used to be neither: this function checked no threshold at
+    /// all, so an empty signature map verified vacuously, and the threshold
+    /// lived in a `has_required_signatures` helper that compared a COUNT and
+    /// that nothing was obliged to call.
+    ///
+    /// The signature check itself was worse than vacuous. `sphincs_verify`
+    /// returns `Result<bool, _>`, where `Err` means the input was malformed and
+    /// `Ok(false)` means the signature was well-formed and WRONG. The old code
+    /// tested the Result — `.is_err()` — so `Ok(false)` read as success and any
+    /// well-formed forgery verified. Only `Ok(true)` may count.
     pub fn verify_signatures(
         &self,
         public_keys: &HashMap<String, Vec<u8>>,
+        required: usize,
     ) -> Result<bool, DsmError> {
         for signer_id in self.signatures.keys() {
             if !public_keys.contains_key(signer_id) {
@@ -700,14 +717,23 @@ impl PreCommitment {
             }
         }
 
+        let mut valid: usize = 0;
         for (signer_id, signature) in &self.signatures {
             let public_key_bytes = &public_keys[signer_id];
-            if sphincs::sphincs_verify(public_key_bytes, &self.hash, signature).is_err() {
-                return Ok(false);
+            match sphincs::sphincs_verify(public_key_bytes, &self.hash, signature) {
+                // Valid.
+                Ok(true) => valid += 1,
+                // Well-formed and wrong: a forgery. Refuse the whole set. A
+                // wrong-length key or signature also lands here — `verify`
+                // fails closed on length (sphincs.rs:980) rather than erroring.
+                Ok(false) => return Ok(false),
+                // `verify` could not form a verdict at all. Propagate; never
+                // silently treat an error as either answer.
+                Err(e) => return Err(e),
             }
         }
 
-        Ok(true)
+        Ok(valid >= required)
     }
 
     pub fn get_selected_fork(&self) -> Option<&PreCommitmentFork> {
@@ -716,25 +742,44 @@ impl PreCommitment {
             .and_then(|id| self.forks.iter().find(|f| f.fork_id == *id))
     }
 
-    pub fn is_fork_invalidated(&self, fork_id: &str) -> Result<bool, DsmError> {
-        let fork = match self.forks.iter().find(|f| f.fork_id == fork_id) {
-            Some(f) => f,
-            None => return Ok(false),
+    /// Whether `fork_id` carries a cryptographically valid invalidation proof.
+    ///
+    /// Fork validity has exactly ONE definition —
+    /// [`ForkInvalidationProof::verify_integrity`] — and this delegates to it.
+    /// It used to carry a second, weaker one inline: it compared
+    /// `proof.signatures.len()` against `min_signatures` and checked the fork
+    /// hash, but never verified a single signature. A proof carrying
+    /// `min_signatures` arbitrary byte strings was accepted. `public_keys` is a
+    /// parameter for that reason — a count can be checked without keys, a
+    /// signature cannot.
+    pub fn is_fork_invalidated(
+        &self,
+        fork_id: &str,
+        public_keys: &HashMap<String, Vec<u8>>,
+    ) -> Result<bool, DsmError> {
+        let Some(fork) = self.forks.iter().find(|f| f.fork_id == fork_id) else {
+            return Ok(false);
         };
 
-        let proof = match &fork.invalidation_proof {
-            Some(p) => p,
-            None => return Ok(false),
+        let Some(proof) = &fork.invalidation_proof else {
+            return Ok(false);
         };
 
-        if proof.signatures.len() < self.security_params.min_signatures {
+        // Binds the proof to this fork's hash, requires `min_signatures`
+        // signatures that each VERIFY against the domain-separated invalidation
+        // digest, and refuses a signer whose key was not supplied.
+        let proof_ok = proof.verify_integrity(
+            fork.hash.as_slice(),
+            self.security_params.min_signatures,
+            public_keys,
+        )?;
+        if !proof_ok {
             return Ok(false);
         }
 
-        if proof.fork_hash.as_slice() != fork.hash.as_slice() {
-            return Ok(false);
-        }
-
+        // verify_integrity binds the INVALIDATED fork. The surviving fork it
+        // names must also be one this pre-commitment actually holds, or the
+        // proof invalidates a fork in favour of nothing.
         let selected_exists = self
             .forks
             .iter()
@@ -1594,5 +1639,233 @@ mod tests {
             .verify_integrity(&wrong, 3, &pks)
             .expect("verify must not error");
         assert!(!ok, "fork_hash mismatch must fail closed");
+    }
+
+    // ================== signature verification, not signature counting ==========
+    //
+    // `verify_signatures` used to test the RESULT of `sphincs_verify` rather
+    // than its value: `if sphincs_verify(..).is_err() { return Ok(false) }`.
+    // `sphincs_verify` returns `Result<bool, _>`, so `Ok(false)` — a well-formed
+    // forgery — read as success. It also checked no threshold, so an empty
+    // signature map verified vacuously. Both are pinned below.
+
+    /// A `PreCommitment` whose `hash` is fixed, with the given signatures.
+    fn precommitment_with(hash: [u8; 32], signatures: HashMap<String, Vec<u8>>) -> PreCommitment {
+        PreCommitment {
+            hash,
+            signatures,
+            ..Default::default()
+        }
+    }
+
+    fn signer(id: &str) -> crate::crypto::signatures::SignatureKeyPair {
+        use crate::crypto::signatures::SignatureKeyPair;
+        let entropy = format!("DSM/test/sigverify/{id}").into_bytes();
+        SignatureKeyPair::generate_from_entropy(&entropy).expect("generate test keypair")
+    }
+
+    #[test]
+    fn a_valid_signature_verifies() {
+        let hash = [0x5au8; 32];
+        let kp = signer("alice");
+        let sig = kp.sign(&hash).expect("sign");
+
+        let mut sigs = HashMap::new();
+        sigs.insert("alice".to_string(), sig);
+        let mut pks = HashMap::new();
+        pks.insert("alice".to_string(), kp.public_key().to_vec());
+
+        let pc = precommitment_with(hash, sigs);
+        assert!(
+            pc.verify_signatures(&pks, 1).expect("must not error"),
+            "an honest signature over the commitment hash must verify"
+        );
+    }
+
+    /// THE DEFECT. A signature that is structurally valid but over a DIFFERENT
+    /// message. `sphincs_verify` answers `Ok(false)`. The old code asked
+    /// `.is_err()`, saw `false`, and reported the whole set as verified.
+    #[test]
+    fn a_well_formed_forgery_does_not_verify() {
+        let hash = [0x5au8; 32];
+        let kp = signer("mallory");
+        // Real key, real signature — over something else entirely.
+        let sig = kp.sign(b"a different message").expect("sign");
+
+        let mut sigs = HashMap::new();
+        sigs.insert("mallory".to_string(), sig);
+        let mut pks = HashMap::new();
+        pks.insert("mallory".to_string(), kp.public_key().to_vec());
+
+        let pc = precommitment_with(hash, sigs);
+        assert!(
+            !pc.verify_signatures(&pks, 1).expect("must not error"),
+            "a well-formed signature over the WRONG message verified — \
+             verify_signatures is testing the Result rather than its value, \
+             so every forgery is accepted"
+        );
+    }
+
+    /// A malformed signature is refused, not accepted.
+    ///
+    /// The contract is fail-closed rather than `Err`: `sphincs::verify` returns
+    /// `Ok(false)` when the public key or signature is the wrong length
+    /// (`sphincs.rs:980`), reserving `Err` for the case where it cannot form a
+    /// verdict at all. Either answer is safe; what matters is that neither is
+    /// `true`. This test pins the contract that actually holds.
+    #[test]
+    fn a_malformed_signature_is_refused() {
+        let hash = [0x5au8; 32];
+        let kp = signer("bob");
+
+        let mut sigs = HashMap::new();
+        sigs.insert("bob".to_string(), vec![0u8; 7]); // wrong length
+        let mut pks = HashMap::new();
+        pks.insert("bob".to_string(), kp.public_key().to_vec());
+
+        let pc = precommitment_with(hash, sigs);
+        match pc.verify_signatures(&pks, 1) {
+            Ok(false) => {}
+            Ok(true) => panic!("a 7-byte signature verified"),
+            Err(_) => {} // also acceptable; the contract permits either refusal
+        }
+    }
+
+    /// ANTI-VACUITY. Without this, a `verify_signatures` that returns `Ok(true)`
+    /// unconditionally passes the valid case and fails nothing else.
+    #[test]
+    fn an_empty_signature_set_cannot_satisfy_a_threshold() {
+        let pc = precommitment_with([0x5au8; 32], HashMap::new());
+        assert!(
+            !pc.verify_signatures(&HashMap::new(), 1)
+                .expect("must not error"),
+            "a pre-commitment with NO signatures satisfied a threshold of 1"
+        );
+    }
+
+    /// The threshold is part of the verification, not a separate call the
+    /// caller has to remember.
+    #[test]
+    fn one_valid_signature_does_not_satisfy_a_threshold_of_two() {
+        let hash = [0x5au8; 32];
+        let kp = signer("alice");
+        let sig = kp.sign(&hash).expect("sign");
+
+        let mut sigs = HashMap::new();
+        sigs.insert("alice".to_string(), sig);
+        let mut pks = HashMap::new();
+        pks.insert("alice".to_string(), kp.public_key().to_vec());
+
+        let pc = precommitment_with(hash, sigs);
+        assert!(
+            !pc.verify_signatures(&pks, 2).expect("must not error"),
+            "one valid signature satisfied a two-signature threshold"
+        );
+    }
+
+    #[test]
+    fn a_signature_from_a_signer_with_no_supplied_key_is_an_error() {
+        let hash = [0x5au8; 32];
+        let mut sigs = HashMap::new();
+        sigs.insert("stranger".to_string(), vec![0u8; 64]);
+
+        let pc = precommitment_with(hash, sigs);
+        assert!(
+            pc.verify_signatures(&HashMap::new(), 1).is_err(),
+            "a signer whose public key was not supplied must be an error"
+        );
+    }
+
+    // ================== fork invalidation has one definition ====================
+
+    fn precommitment_with_fork(
+        fork_id: &str,
+        fork_hash: [u8; 32],
+        selected_hash: [u8; 32],
+        proof: ForkInvalidationProof,
+        min_signatures: usize,
+    ) -> PreCommitment {
+        let mk = |id: &str, hash: [u8; 32]| PreCommitmentFork {
+            fork_id: id.to_string(),
+            hash,
+            fixed_params: HashMap::new(),
+            variable_params: HashSet::new(),
+            positions: Vec::new(),
+            signatures: HashMap::new(),
+            is_selected: false,
+            invalidation_proof: None,
+        };
+
+        let mut invalidated = mk(fork_id, fork_hash);
+        invalidated.invalidation_proof = Some(proof);
+        let survivor = mk("survivor", selected_hash);
+
+        PreCommitment {
+            forks: vec![invalidated, survivor],
+            security_params: SecurityParameters {
+                min_signatures,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_fork_invalidation_proof_with_valid_signatures_is_accepted() {
+        let fork_hash = [0x11u8; 32];
+        let selected = [0x22u8; 32];
+        let (proof, pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2"], "forkA", fork_hash, selected, 42);
+
+        let pc = precommitment_with_fork("forkA", fork_hash, selected, proof, 2);
+        assert!(
+            pc.is_fork_invalidated("forkA", &pks)
+                .expect("must not error"),
+            "a proof with two valid signatures over the right digest must be accepted"
+        );
+    }
+
+    /// THE DEFECT. `is_fork_invalidated` gated on `proof.signatures.len() >=
+    /// min_signatures` — a COUNT — and never verified one. A proof carrying
+    /// `min_signatures` arbitrary byte strings invalidated a fork.
+    #[test]
+    fn a_fork_invalidation_proof_with_enough_but_invalid_signatures_is_refused() {
+        let fork_hash = [0x11u8; 32];
+        let selected = [0x22u8; 32];
+        let (mut proof, pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2"], "forkA", fork_hash, selected, 42);
+
+        // Same signers, same count, same everything — signatures replaced with
+        // bytes nobody signed.
+        for sig in proof.signatures.values_mut() {
+            let len = sig.len();
+            *sig = vec![0xABu8; len];
+        }
+
+        let pc = precommitment_with_fork("forkA", fork_hash, selected, proof, 2);
+        assert!(
+            !pc.is_fork_invalidated("forkA", &pks)
+                .expect("must not error"),
+            "a fork was invalidated by {} unverified byte strings — \
+             is_fork_invalidated is counting signatures instead of checking them",
+            2
+        );
+    }
+
+    /// The proof must name a survivor this pre-commitment actually holds.
+    #[test]
+    fn a_fork_invalidation_proof_naming_an_unknown_survivor_is_refused() {
+        let fork_hash = [0x11u8; 32];
+        let absent = [0x77u8; 32];
+        let (proof, pks, _sks) =
+            signed_invalidation_proof(&["s1", "s2"], "forkA", fork_hash, absent, 42);
+
+        // The survivor hash the proof names is not among this commitment's forks.
+        let pc = precommitment_with_fork("forkA", fork_hash, [0x22u8; 32], proof, 2);
+        assert!(
+            !pc.is_fork_invalidated("forkA", &pks)
+                .expect("must not error"),
+            "a fork was invalidated in favour of a fork that does not exist here"
+        );
     }
 }
