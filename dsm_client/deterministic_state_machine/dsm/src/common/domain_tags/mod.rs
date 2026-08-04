@@ -117,14 +117,31 @@ mod tests {
             .filter(|t| *t != t.trim_end_matches('\0'))
             .collect();
 
-        // Exactly one tag is affected today. It is the only one the SDK shim
-        // hashes differently from core.
+        // SCOPE — read this before trusting the assertion below.
+        //
+        // `all_tags()` is the DECLARED REGISTRY only. It is not the set of
+        // domain tags this repository hashes. Domain strings are also passed as
+        // bare literals that never reach this module, and several of those carry
+        // an embedded trailing NUL, which is exactly the case this test is
+        // about. Known examples, all outside `all_tags()`:
+        //
+        //   dsm_sdk/src/storage/client_db/cert_resync.rs:363
+        //       "DSM/cert-restart/v1\0"      -> dsm_domain_hasher, DOUBLE NUL
+        //   dsm/src/crypto/kyber_identity.rs
+        //       "DSM/kyber-identity-binding\0" -> domain_hash, DOUBLE NUL
+        //   dsm/src/recovery/capsule.rs:25-26, dsm_sdk/src/sdk/seed_vault.rs
+        //       "DSM/recovery-aead\0" etc.   -> blake3::derive_key, a DIFFERENT
+        //                                       construction that appends no NUL
+        //
+        // So the assertion that follows says "exactly one tag IN THE REGISTRY",
+        // not "exactly one tag in the codebase". Catching the literals needs a
+        // lint over call sites, not a test over this list.
         assert_eq!(
             nul_suffixed,
             vec![TAG_DSM_DLV_OPEN_NUL],
-            "the set of tags whose bytes differ between core and the SDK shim \
-             changed; every tag listed here is hashed as `tag || 0x00` by \
-             dsm_domain_hasher and as `trim(tag) || 0x00` by \
+            "the set of REGISTERED tags whose bytes differ between core and the \
+             SDK shim changed; every tag listed here is hashed as `tag || 0x00` \
+             by dsm_domain_hasher and as `trim(tag) || 0x00` by \
              dsm_sdk::wire::domain_hash_bytes"
         );
 
