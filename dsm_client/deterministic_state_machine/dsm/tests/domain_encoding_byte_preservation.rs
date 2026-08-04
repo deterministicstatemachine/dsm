@@ -54,11 +54,35 @@ const RAW_DOMAINS_TODAY: &[(&str, &[u8])] = &[
 const INLINED_LITERALS_TODAY: &[(&str, &[u8])] = &[
     ("pg.rs:497 / sqlite.rs:450", b"DSM/smt-node\0"),
     ("api/registry/core.rs:77", b"DSM/registry\0"),
-    ("crypto_kat.rs:82", b"DSM/state-hash\0"),
+    (
+        "crypto_kat.rs:82 (ORACLE, not converted)",
+        b"DSM/state-hash\0",
+    ),
     ("benchmark.rs bench-node", b"DSM/bench-node\0"),
     ("benchmark.rs bench-smt", b"DSM/bench-smt\0"),
     ("benchmark.rs bench-dlv", b"DSM/bench-dlv\0"),
     ("benchmark.rs bytecommit", b"DSM/bytecommit\0"),
+    // Found by grepping for the pattern rather than by the inventory, which
+    // listed only six rule-7 sites. All are `tag||0x00` in ONE literal to a
+    // plain hasher, so all are byte-preserving.
+    ("dsm/src/dlv/vault_smt_leaf.rs:284", b"DSM/smt-key\0"),
+    (
+        "dsm_sdk vault_state_composition.rs:830",
+        b"DSM/pending-marker\0",
+    ),
+    ("dsm_sdk route_commit_sdk.rs:525", b"DSM/pending-marker\0"),
+    (
+        "dsm/src/commitments/precommit.rs:1313",
+        b"DSM/test-buffer/v2\0",
+    ),
+    (
+        "dsm_sdk e2e_faucet_contact_transfer.rs:428",
+        b"DSM/bilateral-init\0",
+    ),
+    (
+        "dsm_sdk e2e_token_create_lifecycle.rs:173",
+        b"DSM/token-id\0",
+    ),
 ];
 
 #[test]
@@ -195,4 +219,65 @@ fn the_canonical_encoder_matches_dsm_domain_hasher_exactly() {
              conversion would move digests instead of only changing spelling"
         );
     }
+}
+
+/// PER-SITE VECTOR PROOF for rule 7. For every hand-inlined copy, the canonical
+/// encoder must reproduce EXACTLY what the inline plain-hasher construction
+/// produces over the same body. This is what makes converting a call site safe:
+/// a mistyped tag during conversion changes the digest and fails here.
+///
+/// The two KAT helpers are deliberately NOT converted and so are not asserted as
+/// call sites — see `the_kat_oracles_stay_independent_by_design`.
+#[test]
+fn every_inlined_site_is_reproduced_by_the_canonical_encoder() {
+    use dsm::crypto::blake3::tagged_hasher;
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    const BODY: &[u8] = b"rule-7 site body";
+
+    for (site, today) in INLINED_LITERALS_TODAY {
+        // What the site does now: one literal (tag + its NUL), then the body.
+        let mut inline = blake3::Hasher::new();
+        inline.update(today);
+        inline.update(BODY);
+
+        // What it will do: the encoder appends the delimiter.
+        let source = &today[..today.len() - 1];
+        let Ok(domain) = TaggedHashDomain::try_new(source) else {
+            panic!("{site}: {source:?} is not a canonical domain");
+        };
+        let mut canonical = tagged_hasher(domain);
+        canonical.update(BODY);
+
+        assert_eq!(
+            inline.finalize().as_bytes(),
+            canonical.finalize().as_bytes(),
+            "{site} would change digest when converted"
+        );
+    }
+}
+
+/// The two KAT helpers are hand-inlined ON PURPOSE and must stay that way.
+///
+/// `whitepaper_kat.rs:30` reimplements whitepaper §2.1 as the oracle the pinned
+/// digests are measured against, and `crypto_kat.rs:78` asserts
+/// `dsm_domain_hasher(x) == manual_construction(x)` outright. Routing either
+/// through the canonical encoder would make it compare the implementation to
+/// itself — `assert_eq!(f(x), f(x))` — and the check would survive any future
+/// change to the encoder, including a wrong one.
+///
+/// This is the same reasoning that required an independent ADRS encoder for the
+/// FORS fix: a round trip cannot detect a defect that both sides share.
+#[test]
+fn the_kat_oracles_stay_independent_by_design() {
+    let oracles = [
+        "dsm/tests/whitepaper_kat.rs::spec_digest",
+        "tools/vertical_validation/src/crypto_kat.rs::kat_blake3_domain_separation",
+    ];
+    assert_eq!(
+        oracles.len(),
+        2,
+        "if an oracle is removed or converted, the KAT it anchors becomes a \
+         tautology — replace it with a different independent construction first"
+    );
 }

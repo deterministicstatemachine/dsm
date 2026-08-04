@@ -520,9 +520,9 @@ pub(crate) async fn publish_route_anchor_with_pointers(
         //   "DSM/pending-marker\0" || x || hop_index_le)
         // which is unique per (X, hop) and unforgeable without σ.
         let marker_digest: [u8; 32] = {
-            use blake3::Hasher;
-            let mut h = Hasher::new();
-            h.update(b"DSM/pending-marker\0");
+            let mut h = dsm::crypto::blake3::tagged_hasher(
+                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/pending-marker"),
+            );
             h.update(x);
             h.update(&(hop_index as u32).to_le_bytes());
             *h.finalize().as_bytes()
