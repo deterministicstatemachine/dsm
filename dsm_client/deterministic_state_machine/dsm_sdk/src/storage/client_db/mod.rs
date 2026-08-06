@@ -2737,6 +2737,351 @@ mod tests {
         assert_eq!(gate.next_tip, new_next.to_vec());
     }
 
+    // ============ §5.4 stale-gate decision (clear_stale_pending_online_gate) ============
+    //
+    // The test above pins the storage PRIMITIVE: an exact-match delete carrying a
+    // stale identity refuses. The BLE handler used to ignore that refusal — it
+    // consumed the `Result<bool>` with `if let Err(..)`, so `Ok(false)` read as
+    // success and it cleared the in-memory §5.4 modal lock and admitted the
+    // offline transfer anyway. These pin the DECISION the handler now consumes.
+
+    // ===================== tagged-hash cut deployment preflight =====================
+    //
+    // The drain is a CUT BOUNDARY, not an observation. These pin that the
+    // preflight refuses in both blocking conditions and permits only when both
+    // are clear. Prose in the ADR describes the operator sequence; this is the
+    // part a machine enforces.
+
+    #[test]
+    fn the_cut_preflight_permits_only_a_fully_clear_state() {
+        use crate::storage::client_db::cert_resync::CutPreflight;
+        assert!(CutPreflight::Clear.may_upgrade());
+        assert!(
+            !CutPreflight::OutstandingResyncs(1).may_upgrade(),
+            "a relationship mid-resync cannot complete across the cut — its \
+             in-flight joint statement was derived under the pre-cut digest"
+        );
+        // The spool half is NODE-side, and scoped to the holders of the
+        // affected traffic rather than to the fleet — see
+        // dsm_storage_node::api::infra::hardening::spool_drain_preflight.
+        // This enum deliberately does not model a table this process does not own.
+    }
+
+    /// ANTI-VACUITY for the B3 arm, and the third of the three B3 checks: a
+    /// relationship that still owes a resync must BLOCK the cut. Its in-flight
+    /// joint statement was derived under the pre-cut digest and cannot be
+    /// completed across it — the two sides would derive different statements.
+    #[test]
+    #[serial]
+    fn an_outstanding_cert_resync_blocks_the_cut() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let rel = [0x5Au8; 32];
+        crate::storage::client_db::cert_resync::mark_cert_resync_required(&rel)
+            .expect("mark required");
+
+        let outcome = crate::storage::client_db::cert_resync::tagged_hash_cut_preflight()
+            .expect("preflight must not error");
+        assert_eq!(
+            outcome,
+            crate::storage::client_db::cert_resync::CutPreflight::OutstandingResyncs(1)
+        );
+        assert!(
+            !outcome.may_upgrade(),
+            "the cut proceeded while a relationship was mid-resync"
+        );
+    }
+
+    /// B4 CACHE INVENTORY, pinned rather than asserted in prose.
+    ///
+    /// The trace found NO cached verification verdict for the ML-KEM identity
+    /// binding anywhere:
+    ///
+    ///   - `verify_kyber_identity_binding` has ZERO production callers; only
+    ///     `build_local_kyber_identity_binding` is used (b0x_sdk ×2,
+    ///     storage_node_sdk ×1).
+    ///   - the storage node PERSISTS `kyber_public_key` + `kyber_binding_sig`
+    ///     in its device registry and never verifies the signature.
+    ///   - `contacts.kyber_public_key` caches the peer's KEY, not the binding
+    ///     digest and not a verdict.
+    ///   - no Android/Kotlin reference exists at all.
+    ///
+    /// `contacts.verified` / `verification_proof` are contact-trust fields with
+    /// a sticky OR on upsert, written from `ContactRecord`, never from a binding
+    /// check. This test pins that independence: storing a contact WITH a Kyber
+    /// public key must not mark it verified. If a future change ever routes a
+    /// binding verdict into that column, it becomes a B4 cache and this fails.
+    #[test]
+    #[serial]
+    fn storing_a_kyber_public_key_does_not_cache_a_verification_verdict() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0x6Bu8; 32];
+        seed_contact_for_chain_tip_tests(device_id, [0x6Cu8; 32], "BleCapable");
+
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            let read_verified = |conn: &rusqlite::Connection| -> i32 {
+                conn.query_row(
+                    "SELECT verified FROM contacts WHERE device_id = ?1",
+                    rusqlite::params![device_id.to_vec()],
+                    |r| r.get(0),
+                )
+                .expect("read verified")
+            };
+
+            // Compare BEFORE and AFTER rather than against a literal: the
+            // fixture already sets `verified`, so asserting a fixed value would
+            // measure the fixture instead of the behaviour.
+            let before = read_verified(&conn);
+            conn.execute(
+                "UPDATE contacts SET kyber_public_key = ?1 WHERE device_id = ?2",
+                rusqlite::params![vec![0x6Du8; 1184], device_id.to_vec()],
+            )
+            .expect("store kyber pk");
+            let after = read_verified(&conn);
+
+            assert_eq!(
+                before, after,
+                "storing a Kyber public key changed contacts.verified — that \
+                 column would then be a cached binding verdict and the B4 cut \
+                 must invalidate it"
+            );
+
+            // And the key really did land, so the comparison above is not
+            // vacuous over a no-op UPDATE.
+            let stored: Vec<u8> = conn
+                .query_row(
+                    "SELECT kyber_public_key FROM contacts WHERE device_id = ?1",
+                    rusqlite::params![device_id.to_vec()],
+                    |r| r.get(0),
+                )
+                .expect("read kyber pk");
+            assert_eq!(stored.len(), 1184, "the Kyber public key was not stored");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn the_cut_preflight_is_clear_on_a_quiesced_database() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        assert_eq!(
+            crate::storage::client_db::cert_resync::tagged_hash_cut_preflight()
+                .expect("preflight must not error"),
+            crate::storage::client_db::cert_resync::CutPreflight::Clear
+        );
+    }
+
+    /// Only an absent or provably-deleted gate admits. Every ambiguous answer refuses.
+    #[test]
+    fn only_a_cleared_or_absent_gate_admits_an_offline_transfer() {
+        assert!(StaleGateOutcome::NoGate.admits_offline());
+        assert!(StaleGateOutcome::Cleared.admits_offline());
+        assert!(
+            !StaleGateOutcome::StillPending.admits_offline(),
+            "a live online gate must not admit an offline transfer"
+        );
+        assert!(
+            !StaleGateOutcome::Raced.admits_offline(),
+            "a gate that changed under the clear must refuse — this is the answer the \
+             old code discarded"
+        );
+    }
+
+    /// THE RACE. A concurrent online send settles the old gate and arms a new one.
+    /// The decision must be made against the row that is actually in the table, and
+    /// a live newer gate must refuse — leaving the modal lock in place.
+    ///
+    /// The old shape read gate A, released the connection, then deleted by A's
+    /// identity. That delete matched nothing (gate B is there now), the bool was
+    /// dropped, the lock was cleared, and the offline transfer proceeded on top of
+    /// an in-flight online step. Reading and deciding in one transaction makes
+    /// acting on a stale identity impossible.
+    #[test]
+    #[serial]
+    fn a_gate_replaced_by_a_concurrent_online_send_still_refuses() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE8u8; 32];
+        let old_parent = [0x20u8; 32];
+        let old_next = [0x21u8; 32];
+        let new_parent = [0x22u8; 32];
+        let new_next = [0x23u8; 32];
+
+        // Gate A, then a concurrent online send replaces it with gate B. The chain
+        // tip is gate B's parent, i.e. B is LIVE — nothing has caught up past it.
+        seed_contact_for_chain_tip_tests(device_id, new_parent, "BleCapable");
+        store_pending_online_outbox(&device_id, "old_msg", &old_parent, &old_next)
+            .expect("insert gate A");
+        clear_pending_online_outbox(&device_id).expect("clear A");
+        store_pending_online_outbox(&device_id, "new_msg", &new_parent, &new_next)
+            .expect("insert gate B");
+
+        let outcome = clear_stale_pending_online_gate(&device_id, Some(new_parent))
+            .expect("decision must not error");
+
+        assert_eq!(
+            outcome,
+            StaleGateOutcome::StillPending,
+            "the decision was made against a stale gate identity instead of the row \
+             actually in the table"
+        );
+        assert!(
+            !outcome.admits_offline(),
+            "an offline transfer was admitted while a newer online gate is still live"
+        );
+        // The newer gate must survive: nothing may delete a gate it did not read.
+        let gate = get_pending_online_outbox(&device_id)
+            .expect("load")
+            .expect("gate B must survive");
+        assert_eq!(gate.message_id, "new_msg");
+    }
+
+    /// ANTI-VACUITY. Without this, a decision that returned `StillPending`
+    /// unconditionally would satisfy every refusal test above.
+    #[test]
+    #[serial]
+    fn a_genuinely_stale_gate_is_cleared_and_admits() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE9u8; 32];
+        let parent = [0x30u8; 32];
+        let next = [0x31u8; 32];
+        let advanced = [0x32u8; 32];
+
+        // The chain moved off the gate's parent: the gated send has been caught up.
+        seed_contact_for_chain_tip_tests(device_id, advanced, "BleCapable");
+        store_pending_online_outbox(&device_id, "settled_msg", &parent, &next)
+            .expect("insert gate");
+
+        let outcome = clear_stale_pending_online_gate(&device_id, Some(advanced))
+            .expect("decision must not error");
+
+        assert_eq!(outcome, StaleGateOutcome::Cleared);
+        assert!(outcome.admits_offline());
+        assert!(
+            get_pending_online_outbox(&device_id)
+                .expect("load")
+                .is_none(),
+            "a cleared gate must actually be deleted, and the delete must be committed"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_live_gate_refuses_and_survives() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xEAu8; 32];
+        let parent = [0x40u8; 32];
+        let next = [0x41u8; 32];
+
+        // Chain tip still sits on the gate's parent: the online send has NOT settled.
+        seed_contact_for_chain_tip_tests(device_id, parent, "BleCapable");
+        store_pending_online_outbox(&device_id, "live_msg", &parent, &next).expect("insert gate");
+
+        let outcome = clear_stale_pending_online_gate(&device_id, Some(parent))
+            .expect("decision must not error");
+
+        assert_eq!(outcome, StaleGateOutcome::StillPending);
+        assert!(!outcome.admits_offline());
+        assert!(
+            get_pending_online_outbox(&device_id)
+                .expect("load")
+                .is_some(),
+            "a live gate must not be deleted"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn no_gate_admits() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xEBu8; 32];
+        seed_contact_for_chain_tip_tests(device_id, [0x50u8; 32], "BleCapable");
+
+        let outcome = clear_stale_pending_online_gate(&device_id, Some([0x50u8; 32]))
+            .expect("decision must not error");
+        assert_eq!(outcome, StaleGateOutcome::NoGate);
+        assert!(outcome.admits_offline());
+    }
+
+    /// A malformed persisted tip is an ERROR, which the handler turns into a
+    /// refusal. It used to become `[0u8; 32]` via `unwrap_or`, which guaranteed a
+    /// DELETE that matched nothing — leaving the gate row in SQLite while the
+    /// caller cleared the in-memory lock and admitted the transfer.
+    #[test]
+    #[serial]
+    fn a_malformed_persisted_tip_is_an_error_not_a_zero_filled_default() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xECu8; 32];
+        seed_contact_for_chain_tip_tests(device_id, [0x60u8; 32], "BleCapable");
+
+        // Written by raw SQL: every public writer validates length 32, so this is
+        // only reachable through external corruption — which is exactly when a
+        // silent zero-fill is most dangerous.
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            conn.execute(
+                "INSERT INTO pending_online_outbox
+                   (counterparty_device_id, message_id, parent_tip, next_tip, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    device_id.to_vec(),
+                    "corrupt_msg",
+                    vec![0x61u8; 8], // short parent_tip
+                    vec![0x62u8; 32],
+                    0i64
+                ],
+            )
+            .expect("insert corrupt row");
+        }
+
+        let err = clear_stale_pending_online_gate(&device_id, Some([0x60u8; 32]))
+            .expect_err("a malformed persisted tip must be an error");
+        assert!(
+            err.to_string().contains("parent_tip"),
+            "the error must name the malformed field, got: {err}"
+        );
+    }
+
     #[test]
     #[serial]
     fn test_success_invariant_chain_tip_equals_local_bilateral() {

@@ -198,11 +198,15 @@ pub fn canonical_offline_bearer_policy() -> AuthorityPolicy {
     AuthorityPolicy {
         mode: AuthorityMode::OfflineBearerRequired,
         policy_id: crate::crypto::blake3::domain_hash_bytes(
-            "DSM/offline-bearer/policy-id/well-known/v1",
+            crate::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/offline-bearer/policy-id/well-known/v1",
+            ),
             &[],
         ),
         anchor_set_id: crate::crypto::blake3::domain_hash_bytes(
-            "DSM/offline-bearer/anchor-set-id/well-known/v1",
+            crate::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/offline-bearer/anchor-set-id/well-known/v1",
+            ),
             &[],
         ),
     }

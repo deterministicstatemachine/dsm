@@ -633,7 +633,9 @@ impl SmartCommitment {
                     // Commitment-bound signing message: prevents replay of
                     // a signature captured from a different commitment.
                     let msg = crate::crypto::blake3::domain_hash(
-                        "DSM/smart-commit/multisig/v2",
+                        crate::crypto::domain::TaggedHashDomain::from_static(
+                            b"DSM/smart-commit/multisig/v2",
+                        ),
                         commitment_hash,
                     );
                     let mut ok = 0usize;
@@ -742,7 +744,12 @@ impl SmartCommitment {
                 buf.extend_from_slice(&self.recipient);
                 buf.extend_from_slice(&self.amount.to_le_bytes());
                 buf.extend_from_slice(condition.as_bytes());
-                let msg = crate::crypto::blake3::domain_hash("DSM/smart-commit/oracle/v2", &buf);
+                let msg = crate::crypto::blake3::domain_hash(
+                    crate::crypto::domain::TaggedHashDomain::from_static(
+                        b"DSM/smart-commit/oracle/v2",
+                    ),
+                    &buf,
+                );
                 use crate::crypto::signatures::SignatureKeyPair;
                 SignatureKeyPair::verify_raw(msg.as_bytes(), &sig, oracle_pubkey).map_err(|e| {
                     DsmError::crypto(String::from("oracle verification failed"), Some(e))
@@ -1610,8 +1617,11 @@ mod tests {
     }
 
     fn signing_msg_for_multisig(commitment_hash: &[u8; 32]) -> [u8; 32] {
-        *crate::crypto::blake3::domain_hash("DSM/smart-commit/multisig/v2", commitment_hash)
-            .as_bytes()
+        *crate::crypto::blake3::domain_hash(
+            crate::tagged_domain!(b"DSM/smart-commit/multisig/v2"),
+            commitment_hash,
+        )
+        .as_bytes()
     }
 
     #[test]
@@ -1693,7 +1703,11 @@ mod tests {
         buf.extend_from_slice(&commitment.recipient);
         buf.extend_from_slice(&commitment.amount.to_le_bytes());
         buf.extend_from_slice(condition.as_bytes());
-        *crate::crypto::blake3::domain_hash("DSM/smart-commit/oracle/v2", &buf).as_bytes()
+        *crate::crypto::blake3::domain_hash(
+            crate::tagged_domain!(b"DSM/smart-commit/oracle/v2"),
+            &buf,
+        )
+        .as_bytes()
     }
 
     #[test]

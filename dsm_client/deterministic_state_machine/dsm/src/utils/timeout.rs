@@ -63,7 +63,7 @@ pub async fn calibrate_device_performance() -> Result<&'static DeviceCalibration
         // Perform calibration workload (simple BLAKE3 hashes)
         for i in 0..current_iterations {
             let _ = crate::crypto::blake3::domain_hash(
-                "DSM/calibration",
+                crate::tagged_domain!(b"DSM/calibration"),
                 format!("calibration-data-{}", i).as_bytes(),
             );
         }

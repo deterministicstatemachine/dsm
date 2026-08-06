@@ -27,14 +27,13 @@ pub mod pb {
 
 /* ---------------------- Normative v3 authoring helpers --------------------- */
 
-/// Deterministic domain-separated hash: H(tag \0 || bytes).
-///
-/// Delegates to `dsm::crypto::blake3::domain_hash_bytes` which automatically
-/// appends the NUL terminator. Strips any trailing `\0` from `tag` first to
-/// prevent double-NUL when callers embed the terminator in the literal.
-pub fn domain_hash_bytes(tag: &str, body: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes(tag.trim_end_matches('\0'), body)
-}
+// The trimming shim is DELETED. It called `tag.trim_end_matches('\0')` before
+// delegating, so a domain spelled "X\0" silently became domain "X" — two
+// declared domains sharing one digest space, and the same tag hashing
+// differently in the SDK than in core. Callers now use
+// `dsm::crypto::blake3::domain_hash_bytes` directly, which appends exactly one
+// delimiter and never normalizes the tag.
+// See docs/adr/0001-three-domain-separation-constructions.md.
 
 /// Author a ContactAddV3 request for a new peer.
 ///
@@ -64,7 +63,10 @@ pub fn author_contact_accept(
     local_tip: &[u8; 32],
 ) -> pb::ContactAcceptV3 {
     let add_bytes = add_req.encode_to_vec();
-    let add_digest = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_CONTACT_ADD, &add_bytes);
+    let add_digest = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_CONTACT_ADD,
+        &add_bytes,
+    );
 
     pb::ContactAcceptV3 {
         accepter_device_id: accepter_id.to_vec(),
@@ -820,5 +822,64 @@ mod bilateral_wire_tests {
         };
         assert_eq!(inner.session_id, vec![0x22u8; 16]);
         assert_eq!(inner.final_state_hash, vec![0xABu8; 32]);
+    }
+}
+
+#[cfg(test)]
+mod domain_hash_agreement {
+    //! INVERTED from a characterization of the core/SDK delimiter disagreement.
+    //!
+    //! These tests used to assert that the two layers hashed DIFFERENT bytes for
+    //! the same declared domain, because `dsm_sdk::wire::domain_hash_bytes`
+    //! trimmed a trailing NUL before delegating and core did not. The shim is
+    //! deleted and the one NUL-bearing registered tag was renamed, so the
+    //! property flips to agreement — which was always the goal state.
+    //!
+    //! Kept rather than deleted so the regression is named: if a second
+    //! normalizing helper appears, these fail.
+
+    use dsm::common::domain_tags::{TAG_DSM_CONTACT_ADD, TAG_DSM_DLV_OPEN};
+    use dsm::crypto::blake3::domain_hash_bytes;
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    const BODY: &[u8] = b"characterization body";
+
+    /// The tag that used to diverge. There is now ONE implementation, so the
+    /// question "which layer computed this" no longer has an answer.
+    #[test]
+    fn the_formerly_divergent_tag_has_a_single_encoding() {
+        let via_helper = domain_hash_bytes(TAG_DSM_DLV_OPEN, BODY);
+
+        // The tag IS a TaggedHashDomain now — there is no &str to re-validate,
+        // which is itself the end state this test was written to anticipate.
+        let mut canonical = dsm::crypto::blake3::tagged_hasher(TAG_DSM_DLV_OPEN);
+        canonical.update(BODY);
+
+        assert_eq!(
+            via_helper,
+            *canonical.finalize().as_bytes(),
+            "the legacy helper and the canonical encoder disagree for \
+             TAG_DSM_DLV_OPEN"
+        );
+    }
+
+    /// Neither tag may be spelled with a delimiter any more — the type refuses
+    /// to represent one, which is what removed the divergence at its source.
+    #[test]
+    fn neither_tag_can_be_spelled_with_its_own_delimiter() {
+        for tag in [TAG_DSM_CONTACT_ADD, TAG_DSM_DLV_OPEN] {
+            let spelled = String::from_utf8_lossy(tag.source_bytes()).into_owned();
+            assert!(
+                TaggedHashDomain::try_new(spelled.as_bytes()).is_ok(),
+                "{spelled:?} must be representable"
+            );
+
+            let with_nul = format!("{spelled}\0");
+            assert!(
+                TaggedHashDomain::try_new(with_nul.as_bytes()).is_err(),
+                "{spelled:?} plus a hand-written NUL must be unrepresentable, not \
+                 silently trimmed back onto {tag:?}'s domain"
+            );
+        }
     }
 }

@@ -3,7 +3,8 @@
 use prost::Message;
 
 use crate::vault::lifecycle::author_dlv_open;
-use crate::wire::{author_contact_accept, author_contact_add, domain_hash_bytes, pb};
+use crate::wire::{author_contact_accept, author_contact_add, pb};
+use dsm::crypto::blake3::domain_hash_bytes;
 
 #[test]
 fn contact_accept_add_digest_matches_domain_hash() {
@@ -16,10 +17,10 @@ fn contact_accept_add_digest_matches_domain_hash() {
     let accept = author_contact_accept(&author, &add, &local_tip);
 
     let add_bytes = add.encode_to_vec();
-    let expected = domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_CONTACT_ADD_NUL,
-        &add_bytes,
-    );
+    // The SAME tag the producer uses. This previously named the _NUL variant
+    // and passed only because `wire::domain_hash_bytes` strips a trailing NUL
+    // from the tag, which silently made two declared-distinct tags identical.
+    let expected = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_CONTACT_ADD, &add_bytes);
     assert_eq!(accept.add_digest, expected.to_vec());
 }
 

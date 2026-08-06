@@ -165,6 +165,33 @@ struct SpxAddress {
     w: [u32; 8],
 }
 
+// ── ADDRESS LAYOUT, and the aliasing invariant ────────────────────────
+//
+// w[0]      layer
+// w[1..2]   tree
+// w[3]      type
+// w[4]      keypair          — WOTS(0), FORS_TREE(4), FORS_PK(5)
+// w[5]      chain | tree_height
+//             chain       — WOTS(0) only
+//             tree_height — HASHTREE(2), FORS_TREE(4)
+// w[6]      hash  | tree_index
+//             hash        — WOTS(0) only
+//             tree_index  — HASHTREE(2), FORS_TREE(4)
+// w[7]      reserved (always 0)
+//
+// THE INVARIANT: two fields may share a word only if no address TYPE sets
+// both. w[5] and w[6] each pair a WOTS-only field with a HASHTREE/FORS-only
+// field, so the type sets are disjoint. w[4] is keypair alone.
+//
+// This layout replaced one where `keypair` and `tree_index` BOTH wrote
+// w[5], justified by a comment claiming they belonged to different address
+// types. That was true of WOTS and HASHTREE and false of FORS_TREE, which
+// sets keypair (the tree number), tree_height AND tree_index — three
+// type-dependent fields into two words. The tree number was overwritten by
+// the leaf index before the secret was derived, so all k FORS trees drew
+// from ONE pool of 2^a secrets and FORS few-time security did not hold.
+// The verifier reproduced the same address, so signatures verified and the
+// whole suite passed. `fors_independence_tests` pins it now.
 impl SpxAddress {
     fn new() -> Self {
         Self { w: [0; 8] }
@@ -192,9 +219,12 @@ impl SpxAddress {
         self.w[4] = h;
     }
     fn set_tree_index(&mut self, i: u32) {
-        // tree_index goes in word 5 (same position as keypair, but different address types)
-        // keypair is used for WOTS (type 0), tree_index for HASHTREE (type 2) and FORS (types 4/5)
-        self.w[5] = i;
+        // Word 6. `set_chain` also writes word 6, but a chain address is only
+        // ever written on a type-0/1 WOTS address and a tree index is only ever
+        // written on a type-2 hashtree or type-4 FORS address, so the two never
+        // coexist. Word 5 (`keypair`) must stay untouched here: FORS carries the
+        // tree number there while indexing leaves.
+        self.w[6] = i;
     }
     #[allow(dead_code)]
     fn copy_subtree_from(&mut self, other: &SpxAddress) {
@@ -690,6 +720,8 @@ fn compute_root_with_auth(
     // node is a right child, sibling goes on the left (sibling || node); otherwise
     // (node || sibling).
     let mut a = *addr;
+    // Internal hashtree nodes carry no keypair — see build_merkle_and_auth.
+    a.set_keypair(0);
     let mut node = leaf.to_vec();
     for h in 0..p.layer_height {
         a.set_tree_height(h as u32);
@@ -721,8 +753,17 @@ fn build_merkle_and_auth(
         let v = leaf_fn(i);
         leaves[i * p.n..(i + 1) * p.n].copy_from_slice(&v);
     }
+    // An internal hypertree node belongs to the tree, not to any one WOTS
+    // keypair beneath it: key generation builds this tree from an address with
+    // no keypair set, so signing must clear the leaf's keypair to reach the same
+    // root. Previously `set_tree_index` erased word 5 and hid the discrepancy.
+    // This clear is confined to the hypertree — `build_auth_path_and_root` is
+    // shared with FORS, which carries its tree number in the keypair word and
+    // must keep it in internal nodes for the k trees to stay independent.
+    let mut taddr = *addr;
+    taddr.set_keypair(0);
     let (auth, root) =
-        build_auth_path_and_root(p, pub_seed, addr, &mut leaves, idx, p.layer_height);
+        build_auth_path_and_root(p, pub_seed, &taddr, &mut leaves, idx, p.layer_height);
     (auth, root)
 }
 
@@ -1118,6 +1159,384 @@ pub fn sphincs_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<bool, DsmErro
     verify(SphincsVariant::SPX256f, pk, msg, sig)
 }
 // ================================= Tests ====================================
+
+#[cfg(test)]
+mod fors_independence_tests {
+    use super::*;
+
+    /// THE FORS TREES MUST BE INDEPENDENT.
+    ///
+    /// FORS is a FEW-TIME signature. Its whole security argument is that the `k`
+    /// trees draw from `k` disjoint secret pools: one signature reveals one leaf
+    /// per tree, and forgery requires covering leaves the signer never opened.
+    /// If the trees share a pool, every signature reveals `k` secrets out of a
+    /// single `2^a` set and the margin the scheme is built on is gone.
+    ///
+    /// The address is what separates them. Two FORS trees differ only by their
+    /// tree number, so if that number does not survive into the address the
+    /// secret is derived from, the trees are the same tree.
+    ///
+    /// This test fixes the leaf index and varies ONLY the tree number. It must
+    /// see different secrets.
+    #[test]
+    fn two_fors_trees_must_not_share_a_secret_at_the_same_leaf_index() {
+        let p = param_set(SphincsVariant::SPX128f);
+        let sk_seed = [0x11u8; 32];
+
+        // Same everything except the FORS tree number.
+        let addr_for = |tree_number: u32| {
+            let mut a = SpxAddress::new();
+            a.set_type(4); // FORS TREE
+            a.set_layer(0);
+            a.set_tree(0);
+            a.set_keypair(tree_number);
+            a
+        };
+
+        const LEAF: u32 = 5;
+        let mut secrets = std::collections::HashSet::new();
+        for tree_number in 0..(p.k as u32) {
+            let mut a = addr_for(tree_number);
+            a.set_tree_height(0);
+            a.set_tree_index(LEAF);
+            secrets.insert(prf_addr(p.n, &sk_seed, &a));
+        }
+
+        assert_eq!(
+            secrets.len(),
+            p.k,
+            "all {} FORS trees produced {} distinct secrets at leaf index {LEAF} — \
+             they are drawing from ONE pool, so a single signature reveals {} of the \
+             {} secrets in it and FORS few-time security does not hold",
+            p.k,
+            secrets.len(),
+            p.k,
+            1usize << p.a,
+        );
+    }
+
+    /// The same property at the public-leaf level, through the function the
+    /// signer actually calls.
+    #[test]
+    fn fors_tree_leaves_differ_across_tree_numbers() {
+        let p = param_set(SphincsVariant::SPX128f);
+        let sk_seed = [0x33u8; 32];
+        let pub_seed = [0x44u8; 32];
+
+        for leaf in [0u32, 1, 7, 31, 63] {
+            let mut a0 = SpxAddress::new();
+            a0.set_type(4);
+            a0.set_keypair(0);
+            let mut a1 = SpxAddress::new();
+            a1.set_type(4);
+            a1.set_keypair(1);
+
+            assert_ne!(
+                fors_tree_leaf(&p, &sk_seed, &pub_seed, &a0, leaf),
+                fors_tree_leaf(&p, &sk_seed, &pub_seed, &a1, leaf),
+                "FORS trees 0 and 1 produced the same leaf at index {leaf}"
+            );
+        }
+    }
+
+    /// THE ADDRESS FIELDS THAT COEXIST MUST NOT ALIAS.
+    ///
+    /// Stated as a property of the encoding rather than of one call site: for a
+    /// FORS TREE address, setting the tree number and then the leaf index must
+    /// leave BOTH readable. The collision this pins was invisible because the
+    /// verifier repeated it, so signatures still verified.
+    #[test]
+    fn setting_a_fors_leaf_index_must_not_erase_the_tree_number() {
+        let mut a = SpxAddress::new();
+        a.set_type(4);
+        a.set_keypair(9);
+        let after_keypair = a.as_bytes();
+
+        a.set_tree_index(3);
+        let after_index = a.as_bytes();
+
+        // Setting the index must change the address...
+        assert_ne!(after_keypair, after_index);
+
+        // ...but a DIFFERENT tree number with the SAME index must still differ.
+        let mut b = SpxAddress::new();
+        b.set_type(4);
+        b.set_keypair(10);
+        b.set_tree_index(3);
+        assert_ne!(
+            a.as_bytes(),
+            b.as_bytes(),
+            "tree numbers 9 and 10 encode identically once a leaf index is set — \
+             set_tree_index has overwritten set_keypair"
+        );
+    }
+
+    /// THE LAYOUT PROOF, not one call site.
+    ///
+    /// Eight words carry more than eight logical fields, so some pairs must
+    /// share a word. This enumerates every address type this implementation
+    /// builds, together with every field that type writes, and asserts each of
+    /// those fields is independently observable in the encoding. Two fields of
+    /// the same type sharing a word makes the earlier writer invisible and fails
+    /// here.
+    ///
+    /// Aliases that are legal because the two fields belong to disjoint types:
+    ///   word 6 — `chain` (WOTS types 0/1) and `tree_index` (types 2/4)
+    /// Every other field owns a word outright.
+    #[test]
+    fn no_two_fields_of_the_same_address_type_alias() {
+        type Setter = fn(&mut SpxAddress, u32);
+        /// (type name, type tag, fields written by that type, in write order)
+        type AddressType<'a> = (&'a str, u32, &'a [(&'a str, Setter)]);
+
+        let layer: Setter = |a, v| a.set_layer(v);
+        let tree: Setter = |a, v| a.set_tree(v as u64);
+        let keypair: Setter = |a, v| a.set_keypair(v);
+        let chain: Setter = |a, v| a.set_chain(v);
+        let hash: Setter = |a, v| a.set_hash(v);
+        let tree_height: Setter = |a, v| a.set_tree_height(v);
+        let tree_index: Setter = |a, v| a.set_tree_index(v);
+
+        // Written in the order the implementation writes them, because an alias
+        // only hides the EARLIER writer.
+        let types: &[AddressType] = &[
+            (
+                "WOTS_HASH",
+                0,
+                &[
+                    ("layer", layer),
+                    ("tree", tree),
+                    ("keypair", keypair),
+                    ("chain", chain),
+                    ("hash", hash),
+                ],
+            ),
+            (
+                "WOTS_PK",
+                1,
+                &[("layer", layer), ("tree", tree), ("keypair", keypair)],
+            ),
+            (
+                "HASHTREE",
+                2,
+                &[
+                    ("layer", layer),
+                    ("tree", tree),
+                    ("keypair", keypair),
+                    ("tree_height", tree_height),
+                    ("tree_index", tree_index),
+                ],
+            ),
+            (
+                "FORS_TREE",
+                4,
+                &[
+                    ("layer", layer),
+                    ("tree", tree),
+                    ("keypair", keypair),
+                    ("tree_height", tree_height),
+                    ("tree_index", tree_index),
+                ],
+            ),
+            (
+                "FORS_PK",
+                5,
+                &[("layer", layer), ("tree", tree), ("keypair", keypair)],
+            ),
+        ];
+
+        for (type_name, type_tag, fields) in types {
+            let build = |bumped: Option<usize>| {
+                let mut a = SpxAddress::new();
+                a.set_type(*type_tag);
+                for (i, (_, set)) in fields.iter().enumerate() {
+                    // Distinct per-field base values so a swap is caught too.
+                    let v = 1 + i as u32;
+                    set(&mut a, if bumped == Some(i) { v + 100 } else { v });
+                }
+                a.as_bytes()
+            };
+
+            let base = build(None);
+            for (i, (field_name, _)) in fields.iter().enumerate() {
+                assert_ne!(
+                    base,
+                    build(Some(i)),
+                    "{type_name}: changing `{field_name}` does not change the address — \
+                     a later field of the same type shares its word, so `{field_name}` \
+                     is not part of the hash input the way the design assumes"
+                );
+            }
+        }
+    }
+
+    /// Cross-tree independence over the FULL index space, not one leaf.
+    ///
+    /// `two_fors_trees_must_not_share_a_secret_at_the_same_leaf_index` fixes the
+    /// index and varies the tree. This varies both, so a layout that merely
+    /// permuted the collision rather than removing it still fails.
+    #[test]
+    fn fors_secrets_are_distinct_across_every_tree_and_index_pair() {
+        for variant in [
+            SphincsVariant::SPX128f,
+            SphincsVariant::SPX192f,
+            SphincsVariant::SPX256f,
+        ] {
+            let p = param_set(variant);
+            let sk_seed = [0x5au8; 32];
+            let leaf_count = 1usize << p.a;
+
+            let mut secrets = std::collections::HashSet::new();
+            for tree_number in 0..(p.k as u32) {
+                for leaf in 0..(leaf_count as u32) {
+                    let mut a = SpxAddress::new();
+                    a.set_type(4);
+                    a.set_layer(0);
+                    a.set_tree(0);
+                    a.set_keypair(tree_number);
+                    a.set_tree_height(0);
+                    a.set_tree_index(leaf);
+                    secrets.insert(prf_addr(p.n, &sk_seed, &a));
+                }
+            }
+
+            assert_eq!(
+                secrets.len(),
+                p.k * leaf_count,
+                "{variant:?}: {} distinct secrets across {} trees x {leaf_count} leaves, \
+                 expected {} — the (tree, index) pair is not injective in the address",
+                secrets.len(),
+                p.k,
+                p.k * leaf_count,
+            );
+        }
+    }
+
+    /// The hypertree must not regain independence at the cost of soundness:
+    /// signatures still verify, at several leaf indices, and tampering with the
+    /// FORS region of the signature is still refused.
+    #[test]
+    fn signatures_verify_and_fors_region_tampering_is_refused() -> Result<(), DsmError> {
+        for variant in [SphincsVariant::SPX128f, SphincsVariant::SPX256f] {
+            let p = param_set(variant);
+            let kp = generate_keypair_from_seed(variant, &[0x7cu8; 32])?;
+
+            // Different messages land on different hypertree leaves and different
+            // FORS index sets, so this sweeps the tree/index space the signer
+            // actually reaches rather than a single fixed path.
+            for m in 0u8..8 {
+                let msg = [m; 48];
+                let sig = sign(variant, &kp.secret_key, &msg)?;
+                assert!(
+                    verify(variant, &kp.public_key, &msg, &sig)?,
+                    "{variant:?}: honest signature failed to verify for message {m}"
+                );
+
+                // The FORS region is R (n bytes) followed by k * (a + 1) * n bytes.
+                let fors_start = p.n;
+                let fors_end = fors_start + p.k * (p.a + 1) * p.n;
+                for offset in [
+                    fors_start,
+                    fors_start + p.n,     // second tree's material
+                    fors_start + p.n / 2, // mid-element
+                    fors_end - 1,         // last FORS byte
+                ] {
+                    let mut tampered = sig.clone();
+                    tampered[offset] ^= 0x01;
+                    assert!(
+                        !verify(variant, &kp.public_key, &msg, &tampered)?,
+                        "{variant:?}: a single-bit change at FORS offset {offset} \
+                         still verified for message {m}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An encoder written from the layout table rather than by calling the
+    /// production setters, so it cannot inherit their bugs.
+    ///
+    /// Round-tripping sign against verify cannot see an address defect, because
+    /// both sides call the same setters. This compares the setters against a
+    /// separately written statement of where each field lives. Note that the
+    /// signature has ONE parameter for word 6: that word is shared by `chain`
+    /// (WOTS) and `tree_index` (hashtree/FORS), and the alias is legal only
+    /// because no address type writes both. Every other field has its own
+    /// parameter, so a layout that puts two of them in one word cannot be
+    /// expressed here and fails the comparison below.
+    fn reference_adrs(
+        layer: u32,
+        tree: u64,
+        type_tag: u32,
+        tree_height: u32,
+        keypair: u32,
+        chain_or_tree_index: u32,
+        hash: u32,
+    ) -> [u8; 32] {
+        let words = [
+            layer,
+            (tree >> 32) as u32,
+            tree as u32,
+            type_tag,
+            tree_height,
+            keypair,
+            chain_or_tree_index,
+            hash,
+        ];
+        let mut out = [0u8; 32];
+        for (i, w) in words.iter().enumerate() {
+            out[i * 4..(i + 1) * 4].copy_from_slice(&w.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn the_production_setters_agree_with_an_independently_written_encoder() {
+        // A FORS TREE address carrying a tree number AND a leaf index — the
+        // exact combination that was collapsing.
+        let mut fors = SpxAddress::new();
+        fors.set_layer(0);
+        fors.set_tree(0);
+        fors.set_type(4);
+        fors.set_keypair(29);
+        fors.set_tree_height(0);
+        fors.set_tree_index(41);
+        assert_eq!(
+            fors.as_bytes(),
+            reference_adrs(0, 0, 4, 0, 29, 41, 0),
+            "FORS TREE address does not match the documented layout"
+        );
+
+        // A WOTS chain address, which is what makes word 6 shared.
+        let mut wots = SpxAddress::new();
+        wots.set_layer(3);
+        wots.set_tree(0x0123_4567_89ab_cdef);
+        wots.set_type(0);
+        wots.set_keypair(7);
+        wots.set_chain(11);
+        wots.set_hash(13);
+        assert_eq!(
+            wots.as_bytes(),
+            reference_adrs(3, 0x0123_4567_89ab_cdef, 0, 0, 7, 11, 13),
+            "WOTS address does not match the documented layout"
+        );
+
+        // A hashtree address at a nonzero height and index.
+        let mut tree = SpxAddress::new();
+        tree.set_layer(2);
+        tree.set_tree(9);
+        tree.set_type(2);
+        tree.set_keypair(5);
+        tree.set_tree_height(4);
+        tree.set_tree_index(6);
+        assert_eq!(
+            tree.as_bytes(),
+            reference_adrs(2, 9, 2, 4, 5, 6, 0),
+            "hashtree address does not match the documented layout"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

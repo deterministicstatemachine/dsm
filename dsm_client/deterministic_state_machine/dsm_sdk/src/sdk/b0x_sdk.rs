@@ -528,8 +528,39 @@ impl CircuitBreaker {
     }
 }
 
+/// Transport-local spool id for an acceptance reply. 16 opaque bytes derived
+/// from the transition's own commitment (never wall-clock), stable across
+/// reposts so a redelivery collapses onto the same `inbox_spool` row.
+///
+/// IMPACT-TABLE ROW B5. The domain literal used to carry its own NUL and was
+/// handed to `dsm_domain_hasher`, which appends another — a DOUBLED NUL.
+/// Extracted from `submit_acceptance_reply` so the move can carry a vector.
+pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) -> Vec<u8> {
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-reply-message-id"));
+    h.update(commitment);
+    h.update(sender_projection_tip);
+    h.finalize().as_bytes()[..16].to_vec()
+}
+
+/// Transport-local spool id for a cert-resync message, from method + route + a
+/// digest of the body. IMPACT-TABLE ROW B6, same defect and same extraction
+/// reason as [`reply_message_id`].
+pub(crate) fn certresync_message_id(method: &str, recipient_tip: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/b0x-certresync-message-id"
+    ));
+    h.update(method.as_bytes());
+    h.update(recipient_tip);
+    h.update(body);
+    h.finalize().as_bytes()[..16].to_vec()
+}
+
 impl B0xSDK {
-    fn hash_b0x_component(domain_tag: &str, input: &[u8]) -> [u8; 32] {
+    fn hash_b0x_component(
+        domain_tag: dsm::crypto::domain::TaggedHashDomain<'_>,
+        input: &[u8],
+    ) -> [u8; 32] {
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(domain_tag);
         hasher.update(input);
         *hasher.finalize().as_bytes()
@@ -547,8 +578,11 @@ impl B0xSDK {
         // secret). genesis_hash is the public Genesis v2 digest `G`; combined with device_id it
         // gives per-device, domain-separated salts. (A future §16.4 hardening can fold the secret
         // Smaster here once b0x salt derivation is wired through the unlocked-wallet path.)
-        let tag_str = std::str::from_utf8(domain_tag).unwrap_or("DSM/b0x-salt");
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag_str);
+        // Runtime domain: validated at construction, falling back to a fixed
+        // static domain rather than silently normalizing a malformed one.
+        let tag = dsm::crypto::domain::TaggedHashDomain::try_new(domain_tag)
+            .unwrap_or(dsm::tagged_domain!(b"DSM/b0x-salt"));
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag);
         // Augment with public genesis material for domain separation when storage is available.
         if crate::storage_utils::get_storage_base_dir().is_some() {
             if let Some(genesis) = crate::sdk::app_state::AppState::get_genesis_hash() {
@@ -644,9 +678,9 @@ impl B0xSDK {
                 "genesis/device/tip must be 32 bytes",
             ));
         }
-        let h_g = Self::hash_b0x_component("DSM/b0x-G", genesis);
-        let h_d = Self::hash_b0x_component("DSM/b0x-D", device);
-        let h_t = Self::hash_b0x_component("DSM/b0x-T", tip);
+        let h_g = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), genesis);
+        let h_d = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), device);
+        let h_t = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), tip);
 
         let mut hasher =
             dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
@@ -1346,10 +1380,7 @@ impl B0xSDK {
         // Transport-local id: 16 opaque bytes derived from the transition's own
         // commitment (never wall-clock). Stable across reposts, so a redelivery
         // collapses onto the same spool row instead of piling up duplicates.
-        let mut mid_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x-reply-message-id\0");
-        mid_hasher.update(&artifact.commitment);
-        mid_hasher.update(sender_projection_tip);
-        let message_id_bytes = mid_hasher.finalize().as_bytes()[..16].to_vec();
+        let message_id_bytes = reply_message_id(&artifact.commitment, sender_projection_tip);
         let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         let local_device_bytes =
@@ -1510,11 +1541,7 @@ impl B0xSDK {
             Self::compute_b0x_address(recipient_genesis, recipient_device, recipient_tip)?;
 
         // Deterministic transport id from method + route + a digest of the body.
-        let mut mid = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x-certresync-message-id\0");
-        mid.update(method.as_bytes());
-        mid.update(recipient_tip);
-        mid.update(&body);
-        let message_id_bytes = mid.finalize().as_bytes()[..16].to_vec();
+        let message_id_bytes = certresync_message_id(method, recipient_tip, &body);
         let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         let local_device_bytes =
@@ -3481,6 +3508,98 @@ impl B0xSDK {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, clippy::useless_conversion)]
 mod tests {
+
+    /// IMPACT-TABLE ROWS B5 and B6, asserted in both directions.
+    ///
+    /// Both derive a transport-local `inbox_spool` id. The old spelling carried
+    /// its own NUL into `dsm_domain_hasher`, which appends another, so the
+    /// preimage began `"…id" || 0x00 || 0x00`. Reconstructed explicitly below.
+    ///
+    /// Consequence of the move, and why the drain procedure exists: the spool
+    /// dedupes on `message_id UNIQUE` with `INSERT OR IGNORE`, so a message
+    /// spooled under the old id will NOT collapse onto a repost computed under
+    /// the new one. An unacked row with a NULL `expires_at_iter` is purged by
+    /// neither expiry sweep, so it persists until drained.
+    #[test]
+    fn b5_and_b6_message_ids_moved_off_the_double_nul_digest() {
+        fn old_id(tag_with_nul: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+            let mut h = blake3::Hasher::new();
+            h.update(tag_with_nul); // the literal, NUL included
+            h.update(&[0u8]); // the helper's appended NUL
+            for p in parts {
+                h.update(p);
+            }
+            h.finalize().as_bytes()[..16].to_vec()
+        }
+        fn canonical_id(tag: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+            let mut h = blake3::Hasher::new();
+            h.update(tag);
+            h.update(&[0u8]);
+            for p in parts {
+                h.update(p);
+            }
+            h.finalize().as_bytes()[..16].to_vec()
+        }
+
+        // B5
+        let commitment = [0xA1u8; 32];
+        let tip = [0xB2u8; 32];
+        let b5 = super::reply_message_id(&commitment, &tip);
+        assert_ne!(
+            b5,
+            old_id(b"DSM/b0x-reply-message-id\0", &[&commitment, &tip]),
+            "B5 still produces the doubled-NUL id"
+        );
+        assert_eq!(
+            b5,
+            canonical_id(b"DSM/b0x-reply-message-id", &[&commitment, &tip]),
+            "B5 did not land on the canonical id"
+        );
+        assert_eq!(b5.len(), 16, "the spool id is 16 truncated bytes");
+
+        // B6
+        let method = "cert.resync";
+        let rtip = [0xC3u8; 32];
+        let body = [0xD4u8; 48];
+        let b6 = super::certresync_message_id(method, &rtip, &body);
+        assert_ne!(
+            b6,
+            old_id(
+                b"DSM/b0x-certresync-message-id\0",
+                &[method.as_bytes(), &rtip, &body]
+            ),
+            "B6 still produces the doubled-NUL id"
+        );
+        assert_eq!(
+            b6,
+            canonical_id(
+                b"DSM/b0x-certresync-message-id",
+                &[method.as_bytes(), &rtip, &body]
+            ),
+            "B6 did not land on the canonical id"
+        );
+
+        // The two domains stay separated from each other.
+        assert_ne!(b5, b6, "B5 and B6 must not share an id space");
+    }
+
+    /// The property the ids exist for, preserved across the cut: a repost of the
+    /// same logical message derives the SAME id, so a redelivery collapses onto
+    /// one spool row rather than piling up.
+    #[test]
+    fn a_repost_still_derives_the_same_spool_id() {
+        let c = [0x11u8; 32];
+        let t = [0x22u8; 32];
+        assert_eq!(
+            super::reply_message_id(&c, &t),
+            super::reply_message_id(&c, &t)
+        );
+        assert_ne!(
+            super::reply_message_id(&c, &t),
+            super::reply_message_id(&c, &[0x23u8; 32]),
+            "a different projection tip must give a different id"
+        );
+    }
     use super::*;
 
     fn dev_id32_b32() -> String {
@@ -3581,9 +3700,9 @@ mod tests {
 
         let actual = B0xSDK::compute_b0x_address(&genesis, &device, &tip).expect("ok");
 
-        let h_g = B0xSDK::hash_b0x_component("DSM/b0x-G", &genesis);
-        let h_d = B0xSDK::hash_b0x_component("DSM/b0x-D", &device);
-        let h_t = B0xSDK::hash_b0x_component("DSM/b0x-T", &tip);
+        let h_g = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), &genesis);
+        let h_d = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), &device);
+        let h_t = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), &tip);
 
         let mut hasher =
             dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);

@@ -12,7 +12,7 @@ use log::{debug, info};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::process::Command;
 
-use super::hardening::blake3_tagged;
+use super::hardening::{blake3_tagged, DOM_NODE_ID};
 
 #[derive(Debug, Clone)]
 pub struct AutoNetworkConfig {
@@ -250,7 +250,7 @@ impl NetworkDetector {
         material.extend_from_slice(ip.to_string().as_bytes());
         material.extend_from_slice(&(node_index as u64).to_be_bytes());
         material.extend_from_slice(&port.to_be_bytes());
-        text_id::encode_base32_crockford(&blake3_tagged("DSM/node-id", &material))
+        text_id::encode_base32_crockford(&blake3_tagged(DOM_NODE_ID, &material))
     }
 
     /// Deterministic peer list for local dev nodes (same host).

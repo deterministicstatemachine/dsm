@@ -5,6 +5,7 @@
 //! These helpers are pure functions used by object_store/bytecommit and indexers.
 
 use blake3::Hasher;
+use dsm::crypto::domain::TaggedHashDomain;
 use std::env;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,15 +37,98 @@ pub const GRACE_WINDOWS: usize = 12; // new-position grace in global windows
 #[allow(dead_code)]
 pub const SHARE_CAP_PCT: f64 = 0.01; // per-device cap contribution
 
-/// Domain-separated BLAKE3-256: H(ASCII+NUL || body)
-pub fn blake3_tagged(tag: &str, body: &[u8]) -> [u8; 32] {
+/// Domain-separated BLAKE3-256, storage-node side: `domain || 0x00 || body`.
+///
+/// Takes a validated [`TaggedHashDomain`], so a caller cannot spell the
+/// delimiter itself. Two callers used to — `"DSM/perm\0"` and `"DSM/mirror\0"`
+/// produced a DOUBLED NUL, the mirror image of the SDK shim's trimming defect.
+/// Both are impact-table rows B1 and B2; see
+/// docs/adr/0001-three-domain-separation-constructions.md.
+pub fn blake3_tagged(domain: TaggedHashDomain<'_>, body: &[u8]) -> [u8; 32] {
     let mut hasher = Hasher::new();
-    hasher.update(tag.as_bytes());
-    hasher.update(&[0]); // NUL
+    hasher.update(domain.source_bytes());
+    hasher.update(&[0]);
     hasher.update(body);
     let out = hasher.finalize();
     *out.as_bytes()
 }
+
+/// Node-side half of the tagged-hash-cut deployment preflight (impact-table rows
+/// B5/B6). The client-side half is
+/// `dsm_sdk::storage::client_db::cert_resync::tagged_hash_cut_preflight`.
+///
+/// `inbox_spool` dedupes on `message_id UNIQUE` with `INSERT OR IGNORE`, and the
+/// ids move across the cut. An UNACKED row with a NULL `expires_at_iter` is
+/// purged by neither expiry sweep, so it survives to be duplicated by its own
+/// repost. Zero unacked rows is the boundary condition.
+///
+/// **Only meaningful while producers are disabled.** Disable producers and
+/// retries, let deliveries settle, THEN call this, and keep them disabled
+/// through the upgrade — with traffic live the count is a sample, not an
+/// invariant.
+///
+/// SCOPE — per HOLDER, not per fleet. Replication here is epidemic: an object
+/// lives on its ASSIGNED replica set (`get_replication_targets` permutes alive
+/// nodes and takes `replication_factor`; `mirror_set_w` takes `MMIRROR`), not on
+/// every node. The b0x spool is placed differently again — the SDK submit loop
+/// posts to every endpoint in `storage_node_endpoints` and does NOT break on
+/// first success (`b0x_sdk.rs:1470-1507`) — so a row can exist on any endpoint a
+/// participating client was configured with.
+///
+/// The set that must report zero is that union, NOT "all N nodes". At the
+/// present fleet size the two coincide because clients carry the whole endpoint
+/// list; that is a property of this deployment, not of the protocol, and it
+/// stops holding as soon as the fleet outgrows a client's endpoint list.
+///
+/// AND IT IS HISTORICAL, NOT CURRENT. An unacked row with a NULL
+/// `expires_at_iter` is purged by neither sweep, so it outlives any endpoint
+/// list — including a node taken out of service and later rejoined. The set is
+/// every node that could have received a PRE-CUT submission and may return.
+/// An unavailable node cannot be silently omitted: decommission it permanently,
+/// clear it before it rejoins, or refuse the cut. If the historical set cannot
+/// be established, drain or wipe the whole potentially reachable fleet.
+pub fn spool_drain_preflight(unacked_rows: i64) -> Result<(), String> {
+    if unacked_rows > 0 {
+        return Err(format!(
+            "{unacked_rows} unacknowledged inbox_spool row(s): a repost after \
+             the cut derives a different message id and will not dedupe. Drain \
+             before upgrading."
+        ));
+    }
+    Ok(())
+}
+
+/// Storage-node tagged-hash domains. The delimiter belongs to the encoder,
+/// never to these constants — a NUL here fails to compile.
+pub const DOM_APPLY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/apply");
+pub const DOM_BYTECOMMIT: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/bytecommit");
+pub const DOM_DRAIN: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/drain");
+pub const DOM_IDENTITY_DEVTREE_ROOT: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/identity/devtree/root");
+pub const DOM_IDENTITY_TIPS_HEAD: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/identity/tips/head");
+pub const DOM_IDENTITY_TIPS_LEAF: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/identity/tips/leaf");
+pub const DOM_MIRROR: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/mirror");
+pub const DOM_NODE_ID: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/node-id");
+pub const DOM_OBJ_BYTECOMMIT: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/obj-bytecommit");
+pub const DOM_OBJ_BYTES: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/obj-bytes");
+pub const DOM_OBJECT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/object");
+pub const DOM_ORDER: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/order");
+pub const DOM_PAY_STORAGE: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/pay/storage");
+pub const DOM_PERM: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/perm");
+pub const DOM_PLACE: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/place");
+pub const DOM_POLICY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/policy");
+pub const DOM_POLICY_ANCHOR: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/policy/anchor");
+pub const DOM_POSITIONS_SALT: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/positions/salt");
+pub const DOM_RECOVERY_CAPSULE: TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/recovery/capsule");
+pub const DOM_REGISTRY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/registry");
+pub const DOM_SIGNAL_DOWN: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/signal/down");
+pub const DOM_SIGNAL_UP: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/signal/up");
+pub const DOM_WIN_SEED: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/win-seed");
 
 /// Enforce production-only safety in release builds.
 /// Rejects dev/test toggles and dev config paths when compiled without debug assertions.
@@ -121,7 +205,7 @@ fn blake3_tagged_stream(seed: [u8; 32], ctr: u64) -> [u8; 32] {
     let mut inbuf = Vec::with_capacity(40);
     inbuf.extend_from_slice(&seed);
     inbuf.extend_from_slice(&ctr.to_le_bytes());
-    blake3_tagged("DSM/perm\0", &inbuf)
+    blake3_tagged(DOM_PERM, &inbuf)
 }
 
 fn sample_u64(buf: &mut [u8; 32], k: &mut usize, ctr: &mut u64, seed: [u8; 32]) -> u64 {
@@ -146,7 +230,7 @@ pub fn mirror_set_w(
     let mut tag_input = Vec::with_capacity(node_id.len() + window_seed.len());
     tag_input.extend_from_slice(node_id);
     tag_input.extend_from_slice(&window_seed);
-    let seed = blake3_tagged("DSM/mirror\0", &tag_input);
+    let seed = blake3_tagged(DOM_MIRROR, &tag_input);
 
     // Filter exclude
     let filtered: Vec<Vec<u8>> = active_positions
@@ -224,6 +308,74 @@ pub fn coalesce_cycle_ops(ops: &[(OpKey, OpKind)]) -> Vec<(OpKey, OpKind)> {
 
 #[cfg(test)]
 mod tests {
+    /// RULE-4 LAYER PROOF. Values captured BEFORE the signature flip.
+    ///
+    /// Three claims, per docs/adr/0001-impact-table.md, asserted in both
+    /// directions — an unchanged B1 would be as wrong as a changed ordinary tag:
+    ///   - ordinary storage tags are byte-preserving;
+    ///   - B1 ("DSM/perm") moves off the double-NUL digest onto the canonical one;
+    ///   - B2 ("DSM/mirror") moves likewise.
+    #[test]
+    fn rule4_storage_domains_are_frozen_across_the_delimiter_cut() {
+        const B1_OLD_DOUBLE_NUL: [u8; 32] = [
+            214, 71, 179, 114, 59, 108, 160, 214, 43, 124, 227, 252, 69, 195, 198, 228, 72, 67, 45,
+            193, 112, 235, 184, 221, 85, 209, 103, 92, 64, 242, 241, 43,
+        ];
+        const B2_OLD_DOUBLE_NUL: [u8; 32] = [
+            59, 50, 18, 175, 194, 250, 56, 224, 128, 98, 56, 134, 175, 75, 34, 192, 169, 247, 251,
+            166, 233, 91, 105, 148, 214, 249, 230, 180, 184, 214, 95, 97,
+        ];
+        const B1_CANONICAL: [u8; 32] = [
+            192, 226, 168, 144, 237, 15, 13, 143, 45, 124, 61, 12, 144, 177, 255, 15, 229, 196, 50,
+            242, 74, 36, 196, 67, 118, 246, 162, 120, 114, 109, 125, 138,
+        ];
+        const B2_CANONICAL: [u8; 32] = [
+            40, 107, 152, 69, 115, 17, 208, 245, 70, 252, 25, 83, 130, 197, 146, 82, 116, 37, 97,
+            58, 157, 227, 63, 141, 94, 6, 160, 237, 20, 53, 69, 13,
+        ];
+        const ORDINARY_FROZEN: &str = "[20, 244, 53, 207, 97, 62, 162, 23, 252, 252, 203, 51, 44, 183, 186, 142, 162, 162, 224, 30, 124, 189, 220, 5, 243, 4, 243, 107, 192, 55, 147, 32],[6, 81, 32, 82, 42, 52, 187, 62, 126, 60, 132, 18, 100, 88, 67, 28, 77, 18, 56, 232, 156, 121, 89, 141, 88, 201, 247, 245, 10, 93, 196, 83],[88, 45, 78, 57, 126, 145, 72, 87, 220, 118, 211, 211, 4, 178, 35, 25, 10, 93, 112, 209, 136, 231, 21, 30, 67, 227, 157, 82, 1, 131, 57, 250],[171, 171, 162, 255, 106, 186, 31, 224, 132, 150, 162, 161, 170, 200, 122, 71, 35, 138, 5, 123, 51, 86, 72, 63, 164, 145, 233, 27, 0, 35, 144, 41]";
+
+        let b1 = blake3_tagged(DOM_PERM, b"layer-proof-input");
+        let b2 = blake3_tagged(DOM_MIRROR, b"layer-proof-input");
+
+        assert_eq!(b1, B1_CANONICAL, "B1 did not land on the canonical digest");
+        assert_eq!(b2, B2_CANONICAL, "B2 did not land on the canonical digest");
+        assert_ne!(
+            b1, B1_OLD_DOUBLE_NUL,
+            "B1 still produces the doubled-NUL digest — the cut did not take"
+        );
+        assert_ne!(
+            b2, B2_OLD_DOUBLE_NUL,
+            "B2 still produces the doubled-NUL digest"
+        );
+
+        let ord: Vec<String> = [DOM_PLACE, DOM_REGISTRY, DOM_OBJECT, DOM_NODE_ID]
+            .iter()
+            .map(|t| format!("{:?}", blake3_tagged(*t, b"layer-proof-input")))
+            .collect();
+        assert_eq!(
+            ord.join(","),
+            ORDINARY_FROZEN,
+            "an ordinary storage domain moved; only B1 and B2 may change"
+        );
+    }
+
+    /// The corrected permutation must still be deterministic — every node has to
+    /// derive the same order from the same seed, or replication push targets
+    /// diverge across the fleet.
+    #[test]
+    fn rule4_corrected_permutation_is_deterministic_across_nodes() {
+        let items: Vec<u8> = (0u8..16).collect();
+        let seed = blake3_tagged(DOM_PLACE, b"object-key");
+        let node_a = permute_unbiased(seed, &items);
+        let node_b = permute_unbiased(seed, &items);
+        assert_eq!(
+            node_a, node_b,
+            "permutation is not reproducible from a seed"
+        );
+        assert_ne!(node_a, items, "permutation is the identity");
+    }
+
     use super::*;
     #[test]
     fn test_permutation_determinism() {

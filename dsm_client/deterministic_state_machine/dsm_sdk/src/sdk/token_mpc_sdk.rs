@@ -338,7 +338,7 @@ impl TokenMpcSDK {
     ) -> Result<String, DsmError> {
         // Generate unique session ID from token parameters
         let params_hash = dsm::crypto::blake3::domain_hash(
-            "DSM/mpc-params",
+            dsm::tagged_domain!(b"DSM/mpc-params"),
             &[
                 params.token_name.as_bytes(),
                 params.token_symbol.as_bytes(),
@@ -583,7 +583,7 @@ impl TokenMpcSDK {
             let participants: Vec<[u8; 32]> = (0..session.params.threshold)
                 .map(|i| {
                     *dsm::crypto::blake3::domain_hash(
-                        "DSM/mpc-node-id",
+                        dsm::tagged_domain!(b"DSM/mpc-node-id"),
                         format!("node_{i}").as_bytes(),
                     )
                     .as_bytes()
@@ -594,7 +594,7 @@ impl TokenMpcSDK {
                 .map(|p| TokenContribution {
                     participant: *p,
                     material: *dsm::crypto::blake3::domain_hash(
-                        "DSM/mpc-material",
+                        dsm::tagged_domain!(b"DSM/mpc-material"),
                         b"dummy_material",
                     )
                     .as_bytes(),
@@ -1029,27 +1029,19 @@ impl TokenMpcSDK {
             if parts.len() == 3 && parts[0] == "dsm" && parts[1] == "policy" {
                 let policy_id = parts[2];
 
-                // Check if policy exists in cache
+                // `get_policy` already consults the cache and falls back to the
+                // network. This was written twice, byte for byte, under the
+                // comments "check the cache" then "try to fetch from network":
+                // the second call was a no-op retry of the first, not a fallback.
                 if let Ok(policy_response) = self.policy_cache.get_policy(policy_id).await {
                     if policy_response.found {
-                        // Already cached
                         self.policy_cache
                             .mark_policy_as_required(policy_id, "token_operation")?;
                         return Ok(true);
                     }
                 }
 
-                // Try to fetch from network and cache
-                if let Ok(policy_response) = self.policy_cache.get_policy(policy_id).await {
-                    if policy_response.found {
-                        // Mark as required since this token references it
-                        self.policy_cache
-                            .mark_policy_as_required(policy_id, "token_operation")?;
-                        return Ok(true);
-                    }
-                }
-
-                // Policy not found
+                // Policy not found. Callers must not treat this as success.
                 return Ok(false);
             }
         }
@@ -1170,9 +1162,20 @@ impl TokenMpcSDK {
         token_id: &str,
         metadata: TokenMetadata,
     ) -> Result<bool, DsmError> {
-        // First, check if we have the token's policy and cache it if needed
-        if let Some(_policy_anchor) = &metadata.policy_anchor {
-            self.ensure_policy_cached(&metadata).await?;
+        // First, check if we have the token's policy and cache it if needed.
+        //
+        // `ensure_policy_cached` returns `Result<bool, _>`: `Err` is a cache-layer
+        // failure, `Ok(false)` is "the policy this token names could not be
+        // resolved". The `?` used to discard that second answer, so a token whose
+        // policy anchor resolved to nothing was imported anyway and this function
+        // returned `Ok(true)`. Refuse instead — the token's policy is the thing
+        // that governs it, and importing it unresolved is importing an ungoverned
+        // token.
+        if metadata.policy_anchor.is_some() && !self.ensure_policy_cached(&metadata).await? {
+            return Err(DsmError::invalid_operation(format!(
+                "token {token_id} names a policy anchor that could not be resolved; \
+                 refusing to import it unresolved"
+            )));
         }
 
         // Store token metadata in the token SDK

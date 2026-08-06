@@ -2,6 +2,11 @@
 
 //! DSM namespace tags: genesis identity
 
+// TAGS below is consumed only by the cfg(test) `all_tags()` collector, so
+// both it and this import are test-only in a non-test build.
+#[cfg(test)]
+use crate::crypto::domain::TaggedHashDomain;
+
 mod device;
 mod genesis;
 mod identity;
@@ -13,7 +18,8 @@ pub use identity::*;
 pub use system::*;
 
 #[cfg(test)]
-pub(super) const TAGS: &[&str] = &[
+#[cfg(test)]
+pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_CONTACT_GENESIS,
     TAG_DSM_DEVICE,
     TAG_DSM_DEVICE_ENTROPY,

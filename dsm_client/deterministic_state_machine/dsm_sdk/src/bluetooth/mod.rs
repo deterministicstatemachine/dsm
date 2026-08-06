@@ -45,7 +45,8 @@ use std::sync::RwLock;
 /// and no pairing exchange — the test shortcut that stands in for the Safe 7 element + admission.
 #[cfg(feature = "mock-anchor")]
 pub fn mock_anchor_seed(device_id: &[u8; 32]) -> [u8; 32] {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/mock-anchor-seed/v1");
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/mock-anchor-seed/v1"));
     h.update(device_id);
     *h.finalize().as_bytes()
 }

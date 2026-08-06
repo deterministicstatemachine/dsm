@@ -21,7 +21,10 @@ use axum::{
 use log::{info, warn};
 use std::sync::Arc;
 
-use crate::api::infra::hardening::{blake3_tagged, mirror_set_w, window_index, B_GLOBAL};
+use crate::api::infra::hardening::{
+    blake3_tagged, mirror_set_w, window_index, B_GLOBAL, DOM_BYTECOMMIT, DOM_OBJ_BYTECOMMIT,
+    DOM_WIN_SEED,
+};
 use crate::db;
 use crate::AppState;
 use dsm_sdk::util::text_id;
@@ -63,7 +66,7 @@ const HDR_OBJ_ADDR: &str = "x-object-address"; // response header
 /// dt := H("DSM/bytecommit\0" || ProtoDet(Bt))  (opaque to server)
 #[inline]
 fn bytecommit_digest_bytes(bytes: &[u8]) -> [u8; 32] {
-    blake3_tagged("DSM/bytecommit", bytes)
+    blake3_tagged(DOM_BYTECOMMIT, bytes)
 }
 
 /// addrB_t := H("DSM/obj-bytecommit\0" || node_id || t || dt)
@@ -73,7 +76,7 @@ fn bytecommit_addr(node_id: &[u8; 32], cycle_index: u64, dt: &[u8; 32]) -> Strin
     body.extend_from_slice(node_id);
     body.extend_from_slice(&cycle_index.to_be_bytes());
     body.extend_from_slice(dt);
-    let digest = blake3_tagged("DSM/obj-bytecommit", &body);
+    let digest = blake3_tagged(DOM_OBJ_BYTECOMMIT, &body);
     text_id::encode_base32_crockford(&digest)
 }
 
@@ -162,7 +165,7 @@ pub async fn publish_bytecommit(
     let addr = bytecommit_addr(&node_id_arr, cycle_index, &dt);
 
     // Mirror-set computation from live registry
-    let win_seed = blake3_tagged("DSM/win-seed", &dt);
+    let win_seed = blake3_tagged(DOM_WIN_SEED, &dt);
     let _t = window_index(B_GLOBAL);
     let active_positions: Vec<Vec<u8>> = db::get_active_registry_node_ids(pool)
         .await

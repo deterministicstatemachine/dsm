@@ -231,7 +231,7 @@ impl GenesisSession {
         self.commitments = contributions
             .iter()
             .map(|c| {
-                let mut h = dsm_domain_hasher("DSM/genesis-commit");
+                let mut h = dsm_domain_hasher(crate::tagged_domain!(b"DSM/genesis-commit"));
                 h.update(&self.session_id);
                 h.update(c);
                 let mut out = [0u8; 32];
@@ -249,7 +249,9 @@ impl GenesisSession {
             return false;
         }
         for (rev, com) in self.reveals.iter().zip(self.commitments.iter()) {
-            let mut h = dsm_domain_hasher("DSM/genesis-commit");
+            let mut h = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/genesis-commit",
+            ));
             h.update(&self.session_id);
             h.update(rev);
             let mut out = [0u8; 32];
@@ -467,7 +469,8 @@ pub fn genesis_authority_policy_hash() -> [u8; 32] {
     };
     let mut bytes = Vec::new();
     default.append_canonical(&mut bytes);
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/authority-policy/v1");
+    let mut h =
+        crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/authority-policy/v1"));
     h.update(&bytes);
     *h.finalize().as_bytes()
 }
@@ -522,7 +525,9 @@ pub struct GenesisMasterKeypair {
 
 /// Deterministic device entropy (bytes-only), derived from 32-byte device_id
 pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-device-entropy");
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(
+        b"DSM/genesis-device-entropy"
+    ));
     h.update(device_id);
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
@@ -622,7 +627,9 @@ pub async fn create_genesis_with_transport<T: GenesisTransport + Sync>(
 
     // Device commitment material for transport calls: H(session_id || device_entropy)
     let device_commitment = {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-device-commit");
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(
+            b"DSM/genesis-device-commit"
+        ));
         h.update(&session.session_id);
         h.update(&session.device_entropy);
         let mut out = [0u8; 32];
@@ -867,10 +874,14 @@ mod tests {
     #[test]
     fn commit_domain_is_distinct_from_genesis_domain() {
         let input = id32(0xAB).to_vec();
-        let mut h_g = dsm_domain_hasher("DSM/genesis");
+        let mut h_g = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+            b"DSM/genesis",
+        ));
         h_g.update(&input);
         let g_hash = h_g.finalize();
-        let mut h_c = dsm_domain_hasher("DSM/genesis-commit");
+        let mut h_c = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+            b"DSM/genesis-commit",
+        ));
         h_c.update(&input);
         let c_hash = h_c.finalize();
         assert_ne!(g_hash.as_bytes(), c_hash.as_bytes());

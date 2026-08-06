@@ -14,7 +14,7 @@
 //! - Network partition tolerance
 //! - Clockless operation using deterministic ticks
 
-use crate::api::infra::hardening::{blake3_tagged, permute_unbiased};
+use crate::api::infra::hardening::{blake3_tagged, permute_unbiased, DOM_NODE_ID, DOM_PLACE};
 use crate::db;
 use crate::AppState;
 use dsm::types::proto as pb;
@@ -33,7 +33,7 @@ pub struct StorageNodeId([u8; 32]);
 
 impl StorageNodeId {
     pub fn derive(stable_bytes: &[u8]) -> Self {
-        Self(blake3_tagged("DSM/node-id", stable_bytes))
+        Self(blake3_tagged(DOM_NODE_ID, stable_bytes))
     }
 
     pub fn from_base32(value: &str) -> Option<Self> {
@@ -250,7 +250,7 @@ impl ReplicationManager {
         alive_nodes.sort_by_key(node_sort_key);
 
         // Keyed Fisher-Yates: seed = H("DSM/place\0" || object_key)
-        let seed = blake3_tagged("DSM/place", object_key.as_bytes());
+        let seed = blake3_tagged(DOM_PLACE, object_key.as_bytes());
         let permuted = permute_unbiased(seed, &alive_nodes);
 
         permuted

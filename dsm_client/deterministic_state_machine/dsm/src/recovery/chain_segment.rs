@@ -25,6 +25,8 @@
 //! with the faithful [`RelationshipChainStateProto`] codec). Acceptance is hash adjacency /
 //! parent consumption — never numeric heights.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use std::collections::BTreeMap;
 
 use crate::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
@@ -38,8 +40,9 @@ use crate::types::proto::{
     RelationshipChainSegmentV1, RelationshipChainStateProto,
 };
 
-const REL_SEGMENT_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_REL_SEGMENT;
-const ESTABLISH_RECEIPT_DOMAIN: &str =
+const REL_SEGMENT_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_REL_SEGMENT;
+const ESTABLISH_RECEIPT_DOMAIN: TaggedHashDomain<'static> =
     crate::common::domain_tags::TAG_DSM_RECOVERY_ESTABLISH_RECEIPT;
 
 /// Coerce a protobuf `bytes` field to a fixed 32-byte array, failing closed on any other

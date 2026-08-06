@@ -36,6 +36,8 @@
 //! authority holder must not be able to post a SHRUNK value-capable set) is an open
 //! design point recorded in §0.2 gap 13 and is NOT resolved by this module.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
@@ -46,8 +48,8 @@ use crate::types::proto::{
     Message as _, PostedPdsmtHeadV1, PostedPdsmtLeafRecordV1, PostedPdsmtLeafSetV1,
 };
 
-const PDSMT_HEAD_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_PDSMT_HEAD;
-const PDSMT_LEAF_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_PDSMT_LEAF;
+const PDSMT_HEAD_DOMAIN: TaggedHashDomain<'static> = crate::common::domain_tags::TAG_DSM_PDSMT_HEAD;
+const PDSMT_LEAF_DOMAIN: TaggedHashDomain<'static> = crate::common::domain_tags::TAG_DSM_PDSMT_LEAF;
 
 /// Fail-closed `Vec<u8>` → `[u8; 32]` (proto `dsm_fixed_len` is a hint, not enforced).
 fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {

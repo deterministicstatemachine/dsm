@@ -349,6 +349,13 @@ mod tests {
         }
     }
 
+    /// These digests were REGENERATED when the FORS address collision was fixed
+    /// (`set_tree_index` no longer overwrites `set_keypair`). That fix changes
+    /// the hypertree root, so every SPHINCS+ public key, secret key and
+    /// signature this repository produces changed with it. Keys and signatures
+    /// minted before the fix are not valid after it and must not be carried
+    /// across: the same mnemonic now yields a different identity. If this test
+    /// fails again, the key derivation moved — find out why before updating it.
     #[test]
     fn default_entropy_keypair_digest_is_stable() {
         let kp = SignatureKeyPair::generate_from_entropy(b"DSM/default-entropy-kat")
@@ -359,15 +366,15 @@ mod tests {
         assert_eq!(
             pk_digest,
             [
-                236, 23, 150, 97, 121, 151, 231, 49, 137, 242, 102, 79, 185, 13, 132, 232, 170,
-                132, 189, 216, 124, 118, 71, 87, 182, 168, 208, 245, 46, 79, 201, 96,
+                126, 34, 13, 25, 67, 57, 208, 5, 209, 8, 15, 15, 95, 9, 168, 132, 27, 53, 201, 124,
+                103, 177, 116, 31, 248, 109, 22, 175, 136, 131, 15, 158,
             ]
         );
         assert_eq!(
             sk_digest,
             [
-                136, 152, 136, 166, 60, 168, 196, 13, 64, 154, 36, 9, 16, 132, 236, 213, 143, 244,
-                113, 186, 132, 38, 108, 122, 25, 110, 74, 26, 87, 32, 211, 39,
+                20, 1, 60, 183, 29, 157, 21, 84, 240, 0, 12, 60, 183, 216, 211, 94, 94, 32, 225,
+                189, 80, 227, 9, 213, 190, 110, 155, 221, 210, 94, 95, 102,
             ]
         );
     }

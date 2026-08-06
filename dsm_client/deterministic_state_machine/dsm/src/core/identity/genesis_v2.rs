@@ -28,6 +28,8 @@
 //! anti-cloning — a seed copy holds it and can sign; anti-clone is the fused
 //! Anchor alone.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use zeroize::Zeroize;
 
 use crate::common::domain_tags::{
@@ -54,13 +56,13 @@ pub enum GenesisEntropyProfile {
 /// (terminated by `0x00`, mirroring `dsm_domain_hasher`) is the HKDF salt; `secret` is the
 /// IKM (any length — `wallet_seed` is the 64-byte BIP39 seed); `parts` are the bound
 /// context. Mirrors the master-seed family's use of `hkdf::extract_and_expand`.
-fn kdf32(secret: &[u8], domain: &str, parts: &[&[u8]]) -> [u8; 32] {
+fn kdf32(secret: &[u8], domain: TaggedHashDomain<'_>, parts: &[&[u8]]) -> [u8; 32] {
     debug_assert!(
-        domain.starts_with("DSM/"),
+        domain.source_bytes().starts_with(b"DSM/"),
         "domain tag must start with DSM/"
     );
-    let mut salt = Vec::with_capacity(domain.len() + 1);
-    salt.extend_from_slice(domain.as_bytes());
+    let mut salt = Vec::with_capacity(domain.source_bytes().len() + 1);
+    salt.extend_from_slice(domain.source_bytes());
     salt.push(0u8);
     let mut info: Vec<u8> = Vec::new();
     for p in parts {

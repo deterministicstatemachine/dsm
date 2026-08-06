@@ -14,6 +14,7 @@ mod tests {
     use crate::crypto::kyber::generate_kyber_keypair_from_entropy;
     use crate::crypto::rng::{generate_deterministic_random, mix_entropy};
     use crate::crypto::canonical_lp::{hash_lp1, hash_lp2, hash_lp3};
+    use crate::crypto::domain::TaggedHashDomain;
     use crate::crypto::blake3::domain_hash;
     use crate::crypto::signatures::SignatureKeyPair;
     use crate::emissions::uniform_index;
@@ -96,10 +97,28 @@ mod tests {
             prop_assert_eq!(r1, r2);
         }
 
+        /// The complement of the two `prop_assume!`s below: any generated
+        /// domain containing a NUL must be refused, never silently normalized.
+        #[test]
+        fn pbt_a_nul_bearing_domain_is_always_refused(
+            prefix in proptest::collection::vec(any::<u8>(), 0..=16),
+            suffix in proptest::collection::vec(any::<u8>(), 0..=16)
+        ) {
+            let mut d = prefix.clone();
+            d.push(0);
+            d.extend_from_slice(&suffix);
+            prop_assert!(TaggedHashDomain::try_new(&d).is_err());
+        }
+
         #[test]
         fn pbt_canonical_lp1_is_deterministic(domain in any::<[u8;8]>(), a in proptest::collection::vec(any::<u8>(), 0..=256)) {
-            let h1 = hash_lp1(&domain, &a);
-            let h2 = hash_lp1(&domain, &a);
+            // Arbitrary bytes may contain a NUL, which is no longer a
+            // representable domain — the delimiter belongs to the encoder.
+            // Skip those here and assert the refusal explicitly below.
+            prop_assume!(!domain.contains(&0));
+            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL domain");
+            let h1 = hash_lp1(d, &a);
+            let h2 = hash_lp1(d, &a);
             prop_assert_eq!(h1, h2);
         }
 
@@ -109,8 +128,10 @@ mod tests {
             a in proptest::collection::vec(any::<u8>(), 0..=256),
             b in proptest::collection::vec(any::<u8>(), 0..=256)
         ) {
-            let h1 = hash_lp2(&domain, &a, &b);
-            let h2 = hash_lp2(&domain, &a, &b);
+            prop_assume!(!domain.contains(&0));
+            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL domain");
+            let h1 = hash_lp2(d, &a, &b);
+            let h2 = hash_lp2(d, &a, &b);
             prop_assert_eq!(h1, h2);
         }
 
@@ -121,16 +142,20 @@ mod tests {
             b in proptest::collection::vec(any::<u8>(), 0..=256),
             c in proptest::collection::vec(any::<u8>(), 0..=256)
         ) {
-            let h1 = hash_lp3(&domain, &a, &b, &c);
-            let h2 = hash_lp3(&domain, &a, &b, &c);
+            prop_assume!(!domain.contains(&0));
+            let d = TaggedHashDomain::try_new(&domain).expect("non-NUL domain");
+            let h1 = hash_lp3(d, &a, &b, &c);
+            let h2 = hash_lp3(d, &a, &b, &c);
             prop_assert_eq!(h1, h2);
         }
 
         #[test]
         fn pbt_blake3_domain_hash_is_deterministic(suffix in "[a-zA-Z0-9_-]{1,32}", data in proptest::collection::vec(any::<u8>(), 0..=256)) {
             let tag = format!("DSM/{}", suffix);
-            let h1 = domain_hash(&tag, &data);
-            let h2 = domain_hash(&tag, &data);
+            // A generated tag is a RUNTIME domain: validated at construction.
+            let d = TaggedHashDomain::try_new(tag.as_bytes()).expect("generated tag has no NUL");
+            let h1 = domain_hash(d, &data);
+            let h2 = domain_hash(d, &data);
             prop_assert_eq!(h1, h2);
         }
 

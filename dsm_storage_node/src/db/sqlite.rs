@@ -446,8 +446,7 @@ pub async fn get_current_cycle_stats(pool: &DBPool) -> Result<([u8; 32], u64)> {
         let mut stmt =
             conn.prepare_cached("SELECT key, size_bytes FROM objects ORDER BY key ASC")?;
         let mut bytes_used: u64 = 0;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"DSM/smt-node\0");
+        let mut hasher = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/smt-node"));
 
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {

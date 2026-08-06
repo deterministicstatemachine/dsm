@@ -16,7 +16,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_RECOVERY_CAPSULE};
 use crate::db;
 use crate::AppState;
 use dsm_sdk::util::text_id;
@@ -28,7 +28,7 @@ const HDR_OBJ_ADDR: &str = "x-object-address"; // response header
 
 #[inline]
 fn capsule_addr(content: &[u8]) -> String {
-    let digest = blake3_tagged("DSM/recovery/capsule", content);
+    let digest = blake3_tagged(DOM_RECOVERY_CAPSULE, content);
     text_id::encode_base32_crockford(&digest)
 }
 

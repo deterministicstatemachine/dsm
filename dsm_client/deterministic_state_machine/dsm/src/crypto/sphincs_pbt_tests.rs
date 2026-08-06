@@ -124,8 +124,12 @@ mod tests {
             let kp = generate_keypair(v).expect("keygen");
             let tag_a = format!("DSM/pbt/{suffix_a}");
             let tag_b = format!("DSM/pbt/{suffix_b}");
-            let digest_a = domain_hash(&tag_a, &msg);
-            let digest_b = domain_hash(&tag_b, &msg);
+            let da = crate::crypto::domain::TaggedHashDomain::try_new(tag_a.as_bytes())
+                .expect("generated tag has no NUL");
+            let db = crate::crypto::domain::TaggedHashDomain::try_new(tag_b.as_bytes())
+                .expect("generated tag has no NUL");
+            let digest_a = domain_hash(da, &msg);
+            let digest_b = domain_hash(db, &msg);
 
             let sig = sign(v, &kp.secret_key, digest_a.as_bytes()).expect("sign");
             let valid = verify(v, &kp.public_key, digest_b.as_bytes(), &sig).expect("verify");

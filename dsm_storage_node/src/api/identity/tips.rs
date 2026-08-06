@@ -12,21 +12,21 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_IDENTITY_TIPS_HEAD, DOM_IDENTITY_TIPS_LEAF};
 use crate::AppState;
 
 const MAX_HEAD_BYTES: usize = 256; // small TipHeadV2
 const MAX_LEAF_BYTES: usize = 2048; // TipLeafCipherV2 ciphertext cap
 
 fn key_head(device_b: &[u8]) -> String {
-    let k = blake3_tagged("DSM/identity/tips/head", device_b);
+    let k = blake3_tagged(DOM_IDENTITY_TIPS_HEAD, device_b);
     dsm_sdk::util::text_id::encode_base32_crockford(&k)
 }
 fn key_leaf(device_b: &[u8], rel_b: &[u8]) -> String {
     let mut buf = Vec::with_capacity(device_b.len() + rel_b.len());
     buf.extend_from_slice(device_b);
     buf.extend_from_slice(rel_b);
-    let k = blake3_tagged("DSM/identity/tips/leaf", &buf);
+    let k = blake3_tagged(DOM_IDENTITY_TIPS_LEAF, &buf);
     dsm_sdk::util::text_id::encode_base32_crockford(&k)
 }
 

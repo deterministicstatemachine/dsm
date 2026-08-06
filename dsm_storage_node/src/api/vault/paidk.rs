@@ -19,7 +19,7 @@ use log::info;
 use prost::Message;
 use std::sync::Arc;
 
-use crate::api::infra::hardening::blake3_tagged;
+use crate::api::infra::hardening::{blake3_tagged, DOM_PAY_STORAGE};
 use crate::db;
 use crate::AppState;
 use dsm_sdk::util::text_id;
@@ -84,7 +84,7 @@ pub async fn submit_receipt(
     }
 
     // Deterministic content address
-    let addr_digest = blake3_tagged("DSM/pay/storage", &body);
+    let addr_digest = blake3_tagged(DOM_PAY_STORAGE, &body);
     let addr = text_id::encode_base32_crockford(&addr_digest);
 
     let device_id_b32 = text_id::encode_base32_crockford(&receipt.device_id);
@@ -173,6 +173,7 @@ pub async fn get_status(
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+    use crate::api::infra::hardening::DOM_SIGNAL_UP;
     use dsm::types::proto::StoragePaymentReceiptV3;
     use prost::Message;
 
@@ -185,19 +186,19 @@ mod tests {
     #[test]
     fn receipt_address_is_deterministic() {
         let body = b"receipt-payload";
-        let a1 = blake3_tagged("DSM/pay/storage", body);
-        let a2 = blake3_tagged("DSM/pay/storage", body);
+        let a1 = blake3_tagged(DOM_PAY_STORAGE, body);
+        let a2 = blake3_tagged(DOM_PAY_STORAGE, body);
         assert_eq!(a1, a2);
 
-        let different = blake3_tagged("DSM/pay/storage", b"other-payload");
+        let different = blake3_tagged(DOM_PAY_STORAGE, b"other-payload");
         assert_ne!(a1, different);
     }
 
     #[test]
     fn receipt_address_domain_separation() {
         let body = b"same-body";
-        let pay = blake3_tagged("DSM/pay/storage", body);
-        let sig = blake3_tagged("DSM/signal/up", body);
+        let pay = blake3_tagged(DOM_PAY_STORAGE, body);
+        let sig = blake3_tagged(DOM_SIGNAL_UP, body);
         assert_ne!(
             pay, sig,
             "different domain tags must produce distinct digests"
@@ -268,7 +269,7 @@ mod tests {
 
     #[test]
     fn address_encoding_produces_nonempty_string() {
-        let digest = blake3_tagged("DSM/pay/storage", b"test");
+        let digest = blake3_tagged(DOM_PAY_STORAGE, b"test");
         let addr = text_id::encode_base32_crockford(&digest);
         assert!(!addr.is_empty());
         assert!(

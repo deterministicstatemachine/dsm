@@ -30,7 +30,8 @@ use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::util::text_id::encode_base32_crockford;
 
 /// BLAKE3 domain tag binding the advertisement to the full vault proto.
-pub(crate) const ROUTING_VAULT_AD_DOMAIN: &str = "DSM/routing-vault-ad";
+pub(crate) const ROUTING_VAULT_AD_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/routing-vault-ad");
 
 /// Base prefix for routing-vault advertisements.
 pub(crate) const ROUTING_VAULT_AD_ROOT: &str = "sofi/vault/";
@@ -424,7 +425,8 @@ mod tests {
             assert_ne!(
                 ours,
                 dsm::crypto::blake3::domain_hash_bytes(other, payload),
-                "the routing-ad digest must not collide with the {other} domain"
+                "the routing-ad digest must not collide with {:?}",
+                String::from_utf8_lossy(other.source_bytes())
             );
         }
     }

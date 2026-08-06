@@ -2,6 +2,9 @@
 
 //! DSM-prefixed domain tag constants grouped by protocol surface.
 
+#[cfg(test)]
+use crate::crypto::domain::TaggedHashDomain;
+
 mod bilateral_transport;
 mod core;
 mod crypto_keys;
@@ -21,7 +24,8 @@ pub use recovery::*;
 pub use vault_dbtc::*;
 
 #[cfg(test)]
-pub(super) fn all_tags() -> Vec<&'static str> {
+#[cfg(test)]
+pub(super) fn all_tags() -> Vec<TaggedHashDomain<'static>> {
     let mut tags = Vec::new();
     tags.extend_from_slice(core::TAGS);
     tags.extend_from_slice(bilateral_transport::TAGS);

@@ -33,7 +33,10 @@ fn generate_secure_random(rng: &mut impl RngCore, len: usize) -> Result<Vec<u8>,
 
 #[inline]
 fn blake3_hash(data: &[u8]) -> Result<[u8; 32], DsmError> {
-    Ok(*crate::crypto::blake3::domain_hash("DSM/genesis-hash", data).as_bytes())
+    Ok(
+        *crate::crypto::blake3::domain_hash(crate::tagged_domain!(b"DSM/genesis-hash"), data)
+            .as_bytes(),
+    )
 }
 
 #[allow(dead_code)]
@@ -186,7 +189,9 @@ fn calculate_initial_entropy(
     genesis_hash: &[u8],
     contributions: &[Vec<u8>],
 ) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis-initial-entropy");
+    let mut hasher = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+        b"DSM/genesis-initial-entropy",
+    ));
     hasher.update(genesis_hash);
     for contrib in contributions {
         hasher.update(contrib);
@@ -203,7 +208,9 @@ fn calculate_device_entropy(
     device_id: &str,
     device_specific_entropy: &[u8],
 ) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/sub-genesis-device-entropy");
+    let mut hasher = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+        b"DSM/sub-genesis-device-entropy",
+    ));
     hasher.update(sub_genesis_hash);
     hasher.update(master_entropy);
     hasher.update(device_id.as_bytes());
@@ -241,7 +248,11 @@ pub fn derive_device_sub_genesis(
         participants: HashSet::from([device_id.to_string()]),
         merkle_root: Some(master_genesis.hash),
         device_id: Some(
-            *crate::crypto::blake3::domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes(),
+            *crate::crypto::blake3::domain_hash(
+                crate::tagged_domain!(b"DSM/device-id"),
+                device_id.as_bytes(),
+            )
+            .as_bytes(),
         ),
         signing_key,
         kyber_keypair,
@@ -413,7 +424,8 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
 pub fn get_device_entropy(
     device_id: &str,
 ) -> Result<Vec<u8>, crate::core::identity::IdentityError> {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/DEV_ENT/v2");
+    let mut hasher =
+        crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/DEV_ENT/v2"));
     hasher.update(device_id.as_bytes());
     Ok(hasher.finalize().as_bytes().to_vec())
 }
@@ -677,7 +689,11 @@ mod tests {
         assert_eq!(device.merkle_root.unwrap(), master.hash);
         assert_eq!(
             device.device_id.unwrap(),
-            *crate::crypto::blake3::domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes()
+            *crate::crypto::blake3::domain_hash(
+                crate::tagged_domain!(b"DSM/device-id"),
+                device_id.as_bytes()
+            )
+            .as_bytes()
         );
         assert_eq!(device.hash.len(), 32);
         assert_eq!(device.initial_entropy.len(), 32);

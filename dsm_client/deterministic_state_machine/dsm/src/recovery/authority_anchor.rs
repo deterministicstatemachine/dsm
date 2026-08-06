@@ -39,13 +39,17 @@
 //! genesis-key signature, candidate-pubkey commitment binding, and authority
 //! self-signature. All digests are BLAKE3 domain-separated; all signatures SPHINCS+.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, RecoveryAuthorityAnchorProto};
 
-const AUTHORITY_COMMIT_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_COMMIT;
-const AUTHORITY_ANCHOR_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_ANCHOR;
+const AUTHORITY_COMMIT_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_COMMIT;
+const AUTHORITY_ANCHOR_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_AUTHORITY_ANCHOR;
 
 /// Commit to a recovery-authority public key (length-prefixed, domain-separated).
 pub fn compute_authority_pubkey_commit(authority_pubkey: &[u8]) -> [u8; 32] {

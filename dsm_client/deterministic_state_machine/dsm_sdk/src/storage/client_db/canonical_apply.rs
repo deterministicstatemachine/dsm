@@ -66,7 +66,9 @@ impl CanonicalApplyRecord {
     /// Complete-result integrity hash: id + authoritative applied B roots.
     pub fn record_hash(&self) -> [u8; 32] {
         let id = self.canonical_apply_id();
-        let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-record/v1");
+        let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+            b"DSM/canonical-apply-record/v1"
+        ));
         h.update(&id);
         h.update(&self.applied_parent_root_b);
         h.update(&self.applied_child_root_b);
@@ -88,7 +90,8 @@ pub fn compute_canonical_apply_id(
     recipient_device: &[u8; 32],
     nonce_hash: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-id/v1");
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/canonical-apply-id/v1"));
     h.update(relationship_key);
     h.update(parent_tip);
     h.update(child_tip);

@@ -15,13 +15,16 @@
 //! gate — so a forged or partial index can only yield Bitcoin-verify-out (extra ids) or a
 //! locked deadlock (missing ids), never a double-spend. Storage is availability-only.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::recovery::authority_anchor::compute_authority_pubkey_commit;
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, PostedDbtcVaultIndexV1};
 
-const VAULT_INDEX_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_DBTC_VAULT_INDEX;
+const VAULT_INDEX_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_DBTC_VAULT_INDEX;
 
 fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
     b.try_into().map_err(|_| {

@@ -188,6 +188,53 @@ pub fn relationships_requiring_resync() -> Result<Vec<[u8; 32]>> {
         .collect())
 }
 
+/// Outcome of the tagged-hash-cut preflight. Total, so a caller cannot read it
+/// as a bare bool and proceed on an ambiguous answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CutPreflight {
+    /// Nothing outstanding: no relationship owes a resync and no unacked spool
+    /// row exists. Safe to upgrade.
+    Clear,
+    /// Relationships are mid-resync. Their in-flight joint statements were
+    /// derived under the pre-cut digest and cannot be reproduced after it.
+    OutstandingResyncs(usize),
+}
+
+// NOTE ON SCOPE, learned the hard way: `inbox_spool` is a STORAGE-NODE table
+// (`dsm_storage_node/src/db/{sqlite,pg}.rs`), not a client one. The B5/B6 drain
+// therefore cannot be checked from here — it runs per node, via
+// `dsm_storage_node::api::infra::hardening::spool_drain_preflight`. This
+// client-side half covers B3 only. A preflight that queried a table it does not
+// own would have failed closed at best and lied at worst.
+
+impl CutPreflight {
+    /// Only `Clear` permits the upgrade.
+    pub fn may_upgrade(&self) -> bool {
+        matches!(self, CutPreflight::Clear)
+    }
+}
+
+/// Deployment preflight for the canonical tagged-hash cut — executable, not
+/// prose. See `docs/adr/0001-impact-table.md`.
+///
+/// CLIENT-SIDE HALF, covering B3 only. A resync already in flight cannot be
+/// completed across the cut: the digest moves, so the two sides would derive
+/// different joint statements. The B5/B6 spool drain is the NODE-side half —
+/// `inbox_spool` lives on the storage node — and both must be clear.
+///
+/// **This check is only meaningful while producers are disabled.** Run it as
+/// step 3 of the documented sequence — disable producers and retries, let
+/// deliveries settle, THEN call this, and keep producers disabled through the
+/// upgrade. Called with traffic live it samples a moving target.
+pub fn tagged_hash_cut_preflight() -> Result<CutPreflight> {
+    let outstanding = relationships_requiring_resync()?;
+    if !outstanding.is_empty() {
+        return Ok(CutPreflight::OutstandingResyncs(outstanding.len()));
+    }
+
+    Ok(CutPreflight::Clear)
+}
+
 /// True while any relationship owes a resync (REQUIRED or PENDING). Keeps the
 /// poller alive so the recovery actually runs.
 pub fn has_outstanding_cert_resync() -> Result<bool> {
@@ -360,7 +407,7 @@ pub fn compute_joint_auth_hash(
     epoch: i64,
     preserved_acceptance_commitment: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/cert-restart/v1\0");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/cert-restart/v1"));
     h.update(relationship_key);
     h.update(agreed_tip);
     h.update(&epoch.to_le_bytes());
@@ -590,6 +637,119 @@ pub const CERT_RESYNC_ACK_METHOD: &str = "wallet.certResyncAck";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B3 OLD-ARTIFACT REJECTION / NEW-ARTIFACT ACCEPTANCE, two-party, no fallback.
+    ///
+    /// The joint restart statement is signed by BOTH AKs over
+    /// `cert_resync_signing_target`, which wraps the joint auth hash. So the test
+    /// uses two real keypairs, not one: a single-signer version would not
+    /// exercise the "joint" part at all.
+    ///
+    /// Old artifacts must FAIL and regenerated ones must PASS **for both
+    /// parties**. If a compatibility verifier is ever introduced, the rejection
+    /// assertions break — which is the point of asserting the negative.
+    #[test]
+    fn old_joint_statements_fail_and_regenerated_ones_verify_for_both_aks() {
+        use dsm::crypto::signatures::SignatureKeyPair;
+
+        let rel = [0x31u8; 32];
+        let tip = [0x32u8; 32];
+        let epoch = 9i64;
+        let preserved = [0x33u8; 32];
+        let ek = [0x34u8; 32];
+
+        let ak_local =
+            SignatureKeyPair::generate_from_entropy(b"DSM/test/b3-local").expect("local AK");
+        let ak_peer =
+            SignatureKeyPair::generate_from_entropy(b"DSM/test/b3-peer").expect("peer AK");
+
+        // Rebuild the PRE-CUT joint auth hash: the literal carried its own NUL
+        // and dsm_domain_hasher appended another.
+        let mut old = blake3::Hasher::new();
+        old.update(b"DSM/cert-restart/v1\0");
+        old.update(&[0u8]);
+        old.update(&rel);
+        old.update(&tip);
+        old.update(&epoch.to_le_bytes());
+        old.update(&preserved);
+        let old_joint: [u8; 32] = *old.finalize().as_bytes();
+
+        let stale_target = cert_resync_signing_target(&old_joint, &ek);
+        let stale_local = ak_local.sign(&stale_target).expect("sign stale local");
+        let stale_peer = ak_peer.sign(&stale_target).expect("sign stale peer");
+
+        // What the corrected code produces, and what a verifier now re-derives.
+        let current_joint = compute_joint_auth_hash(&rel, &tip, epoch, &preserved);
+        let current_target = cert_resync_signing_target(&current_joint, &ek);
+
+        assert_ne!(
+            old_joint, current_joint,
+            "the pre-cut and canonical joint statements must differ"
+        );
+
+        // BOTH parties' pre-cut signatures must be refused.
+        for (who, kp, sig) in [
+            ("local", &ak_local, &stale_local),
+            ("peer", &ak_peer, &stale_peer),
+        ] {
+            assert!(
+                !matches!(
+                    dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current_target, sig),
+                    Ok(true)
+                ),
+                "the {who} AK's pre-cut joint signature still verifies — there is \
+                 a compatibility path that must not exist"
+            );
+        }
+
+        // ANTI-VACUITY: regenerated signatures from BOTH parties must verify, so
+        // the rejections above are not simply "this verifier refuses everything".
+        for (who, kp) in [("local", &ak_local), ("peer", &ak_peer)] {
+            let fresh = kp.sign(&current_target).expect("sign current");
+            assert!(
+                matches!(
+                    dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current_target, &fresh),
+                    Ok(true)
+                ),
+                "the {who} AK's regenerated joint signature must verify"
+            );
+        }
+    }
+
+    /// RULE-1 LAYER PROOF for B3, captured BEFORE the signature flip.
+    ///
+    /// `compute_joint_auth_hash` is the joint cert-restart statement BOTH AKs
+    /// sign. Its domain literal carries its own NUL and is handed to
+    /// `dsm_domain_hasher`, which appends another — impact-table row B3. This
+    /// pins BOTH digests so the move is asserted in both directions.
+    #[test]
+    fn b3_joint_auth_hash_is_frozen_across_the_delimiter_cut() {
+        // The digest the doubled-NUL spelling produced. Every joint statement
+        // signed before the cut derives from this construction.
+        const B3_OLD_DOUBLE_NUL: [u8; 32] = [
+            2, 162, 118, 237, 87, 134, 5, 64, 174, 142, 255, 231, 182, 55, 197, 122, 60, 88, 137,
+            28, 18, 176, 28, 124, 173, 84, 137, 120, 1, 194, 66, 127,
+        ];
+        let h = compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 7, &[3u8; 32]);
+        assert_ne!(
+            h, B3_OLD_DOUBLE_NUL,
+            "B3 still produces the doubled-NUL digest — the cut did not take, and \
+             statements signed before it would still verify"
+        );
+
+        // And it must equal the canonical encoding of the same inputs.
+        let mut canonical =
+            dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/cert-restart/v1"));
+        canonical.update(&[1u8; 32]);
+        canonical.update(&[2u8; 32]);
+        canonical.update(&7i64.to_le_bytes());
+        canonical.update(&[3u8; 32]);
+        assert_eq!(
+            h,
+            *canonical.finalize().as_bytes(),
+            "B3 did not land on the canonical digest"
+        );
+    }
     use crate::storage::client_db::cert_chain::{load_cert_chain_head_pubkey, CertChainSide};
 
     fn init() {

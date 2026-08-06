@@ -83,7 +83,8 @@ impl BilateralStateManager {
         let cid = Self::id_from_32(counterparty_id);
         let op_bytes = operation.to_bytes();
 
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+        let mut hasher =
+            crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/state-entropy"));
         match self.relationship_manager.get_relationship_state(&eid, &cid) {
             Ok(state) => {
                 hasher.update(&state.entropy);

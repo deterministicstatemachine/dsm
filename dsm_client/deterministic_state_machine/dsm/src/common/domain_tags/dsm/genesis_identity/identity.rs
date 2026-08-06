@@ -2,12 +2,23 @@
 
 //! DSM namespace tags: identity claim and label domains
 
-pub const TAG_DSM_IDENTITY_ANCHOR: &str = "DSM/identity/anchor";
-pub const TAG_DSM_IDENTITY_CLAIM: &str = "DSM/identity/claim";
-pub const TAG_DSM_IDENTITY_COMBINE: &str = "DSM/identity-combine";
-pub const TAG_DSM_IDENTITY_DID: &str = "DSM/identity-did";
-pub const TAG_DSM_IDENTITY_HASH: &str = "DSM/identity-hash";
-pub const TAG_DSM_IDENTITY_ID: &str = "DSM/identity-id";
-pub const TAG_DSM_IDENTITY_LABEL: &str = "DSM/identity-label";
-pub const TAG_DSM_IDENTITY_MPC_ID: &str = "DSM/identity-mpc-id";
-pub const TAG_DSM_IDENTITY_SEED_ENTROPY: &str = "DSM/identity-seed-entropy";
+use crate::crypto::domain::TaggedHashDomain;
+
+pub const TAG_DSM_IDENTITY_ANCHOR: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity/anchor");
+pub const TAG_DSM_IDENTITY_CLAIM: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity/claim");
+pub const TAG_DSM_IDENTITY_COMBINE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-combine");
+pub const TAG_DSM_IDENTITY_DID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-did");
+pub const TAG_DSM_IDENTITY_HASH: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-hash");
+pub const TAG_DSM_IDENTITY_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-id");
+pub const TAG_DSM_IDENTITY_LABEL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-label");
+pub const TAG_DSM_IDENTITY_MPC_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-mpc-id");
+pub const TAG_DSM_IDENTITY_SEED_ENTROPY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/identity-seed-entropy");

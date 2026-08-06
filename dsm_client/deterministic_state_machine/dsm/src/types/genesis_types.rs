@@ -77,7 +77,7 @@ impl MPCContribution {
 /// `device_id ∥ device_entropy`; node contributions are 32-byte entropies) all
 /// normalise to a uniform 32-byte fold input.
 pub fn hash_contribution(material: &[u8]) -> Digest32 {
-    *domain_hash("DSM/genesis/contribution", material).as_bytes()
+    *domain_hash(crate::tagged_domain!(b"DSM/genesis/contribution"), material).as_bytes()
 }
 
 /// Compute the canonical genesis hash `G` (whitepaper §2.5, acyclic form).
@@ -96,7 +96,9 @@ pub fn hash_contribution(material: &[u8]) -> Digest32 {
 /// and the revealed contributions, never on values derived from `G` (keys,
 /// keys), which bind to genesis by being derived from it.
 pub fn compute_genesis_hash(device_id: &[u8; 32], contributions: &[MPCContribution]) -> Digest32 {
-    let mut h = dsm_domain_hasher("DSM/genesis");
+    let mut h = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+        b"DSM/genesis",
+    ));
     h.update(device_id);
 
     let mut ordered: Vec<&MPCContribution> = contributions.iter().collect();

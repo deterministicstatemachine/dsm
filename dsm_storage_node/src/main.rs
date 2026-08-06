@@ -155,7 +155,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             material.extend_from_slice(hostname.as_bytes());
             material.extend_from_slice(&port.to_be_bytes());
             text_id::encode_base32_crockford(&api::infra::hardening::blake3_tagged(
-                "DSM/node-id",
+                api::infra::hardening::DOM_NODE_ID,
                 &material,
             ))
         });
@@ -495,21 +495,27 @@ async fn async_main() -> Result<()> {
 mod tests {
     use dsm::common::domain_tags::{TAG_DSM_BYTECOMMIT, TAG_DSM_NODE_ID};
 
-    /// Verify that central storage-related tags remain ASCII DSM tags and that
-    /// hashing preimages append a trailing NUL byte.
+    /// Central storage-related tags remain ASCII `DSM/` domains.
+    ///
+    /// REWRITTEN for the canonical encoder. This used to build `format!("{tag}\0")`
+    /// and assert the result ended with a NUL — i.e. it checked that the TEST
+    /// could append a delimiter, which was true by construction and proved
+    /// nothing about the hasher. The delimiter now belongs to `tagged_hasher`
+    /// alone and a tag carrying its own is unrepresentable, so the meaningful
+    /// statement is about the SOURCE bytes.
     #[test]
-    fn node_id_domain_tag_is_nul_terminated_ascii() {
+    fn node_id_domain_tags_are_ascii_dsm_and_carry_no_delimiter() {
         for tag in [TAG_DSM_NODE_ID, TAG_DSM_BYTECOMMIT] {
-            assert!(tag.is_ascii(), "domain tag must be ASCII: {tag}");
+            let b = tag.source_bytes();
+            let shown = String::from_utf8_lossy(b);
+            assert!(b.is_ascii(), "domain tag must be ASCII: {shown}");
             assert!(
-                tag.starts_with("DSM/"),
-                "domain tag must use DSM/ prefix: {tag}"
+                b.starts_with(b"DSM/"),
+                "domain tag must use DSM/ prefix: {shown}"
             );
-
-            let nul_terminated = format!("{tag}\0");
             assert!(
-                nul_terminated.ends_with('\0'),
-                "domain tag must be NUL-terminated per whitepaper §2.1: {nul_terminated}"
+                !b.contains(&0),
+                "the delimiter belongs to the encoder, never the tag: {shown}"
             );
         }
     }

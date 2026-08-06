@@ -183,15 +183,18 @@ fn golden_tag_bytes_exact() {
     // this test pins only the constant string identifier, which is
     // the input to the hasher primitive.
     assert_eq!(
-        TAG_SMT_NODE, "DSM/smt-node",
+        TAG_SMT_NODE,
+        dsm::tagged_domain!(b"DSM/smt-node"),
         "TAG_SMT_NODE string literal changed"
     );
     assert_eq!(
-        TAG_SMT_LEAF, "DSM/smt-leaf",
+        TAG_SMT_LEAF,
+        dsm::tagged_domain!(b"DSM/smt-leaf"),
         "TAG_SMT_LEAF string literal changed"
     );
     assert_eq!(
-        TAG_RECEIPT_COMMIT, "DSM/receipt-commit",
+        TAG_RECEIPT_COMMIT,
+        dsm::tagged_domain!(b"DSM/receipt-commit"),
         "TAG_RECEIPT_COMMIT string literal changed"
     );
 }

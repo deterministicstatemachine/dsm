@@ -292,6 +292,141 @@ jobs:
             dsm_client/frontend/coverage/lcov.info
 
   # --------------------------------------------------------------------------
+  # Embedded: the no_std / bare-metal compile paths that `cargo test` never
+  # exercises, plus the two excluded anchor crates that need no external
+  # checkout. No untrusted GitHub event inputs are used.
+  #
+  # WHAT THIS DOES NOT COVER, and why. Four anchor crates —
+  # dsm-anchor-pico, dsm-anchor-hw-verifier, dsm-android-anchor and
+  # dsm-anchor-secure-monitor — all reach `tropic01 = { path =
+  # "../../../../libtropic-rs/tropic01" }`. That resolves ABOVE
+  # $GITHUB_WORKSPACE, which actions/checkout cannot write to, and no commit is
+  # pinned anywhere in this repo (tropic01 is `publish = false`, so there is no
+  # registry version either). Cloning an unpinned third-party repo at CI time
+  # would also make the dependency invisible to the spdx and sbom jobs. Those
+  # four crates stay uncovered until libtropic-rs is vendored into the workspace
+  # or pinned by SHA. Do not add them to this job without doing that first.
+  # --------------------------------------------------------------------------
+  embedded:
+    name: Embedded (no_std + excluded anchor crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same pin as the `rust` job: clippy output is version-specific.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: thumbv8m.main-none-eabihf
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # dsm-sphincs IS a workspace member, so the `rust` job already builds and
+      # tests it — on the host, where `cfg(test)` makes it std. `src/lib.rs` is
+      # `#![cfg_attr(not(test), no_std)]`, so the no_std configuration it is
+      # actually deployed in (the Pico anchor and the secure monitor link it) is
+      # never compiled by any existing job. This is that check.
+      - name: dsm-sphincs compiles no_std
+        run: cargo check --locked -p dsm-sphincs --target thumbv8m.main-none-eabihf
+
+      # Excluded from the root workspace, so `cargo metadata` reports this
+      # directory as its OWN workspace_root and `cargo test --workspace` never
+      # sees it. Every command runs from inside the crate: its own
+      # .cargo/config.toml supplies the target and the linker rustflags, and its
+      # own Cargo.lock (committed, like the other excluded crates') is what
+      # `--locked` binds.
+      # No tests exist (`[[bin]] test = false`, no lib target), so build+clippy
+      # is the strongest available check — stated rather than implied by a
+      # `cargo test` that would silently pass on zero tests.
+      - name: dsm-anchor-nonsecure-app builds (thumbv8m)
+        working-directory: crates/dsm-anchor-nonsecure-app
+        run: |
+          cargo build --release --locked
+          cargo clippy --release --locked -- -D warnings
+          cargo fmt --check
+
+      # Host harness. serialport's default `libudev` feature needs the system
+      # library on Linux; the USB bench itself is hardware-only and is never
+      # invoked here, but the 2 unit tests are real and do run.
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: dsm-anchor-bench builds and tests (host)
+        working-directory: crates/dsm-anchor-bench
+        run: |
+          cargo build --release --locked
+          cargo clippy --release --locked -- -D warnings
+          cargo test --release --locked
+
+  # --------------------------------------------------------------------------
+  # Lean 4: kernel-check the proof tree. No untrusted GitHub event inputs are
+  # used.
+  #
+  # There is no Lake project — lean4/ is 10 loose modules with a lean-toolchain
+  # and no lakefile, and they import nothing outside Lean core. So each file is
+  # checked directly rather than via `lake build`.
+  #
+  # -DwarningAsError=true is load-bearing and is the `sorry` check. Plain `lean`
+  # reports "declaration uses 'sorry'" as a WARNING and exits 0, so a job
+  # without this flag would be vacuous. Verified both ways on v4.23.0: plain
+  # lean on a `sorry` theorem exits 0, with the flag it exits 1 as an error.
+  #
+  # A raw `grep -c sorry` is deliberately NOT used: all four occurrences of the
+  # string in lean4/ today are prose in comments asserting "zero `sorry`", so a
+  # grep gate would fail on the documentation while catching nothing. The file
+  # count is asserted instead, so a newly added module cannot be skipped by the
+  # glob without the job noticing.
+  #
+  # SCOPE, so a green result is not overread: the tree declares 17 `axiom`s and
+  # 3 `opaque` defs (e.g. the SPHINCS+ round-trip). Theorems resting on those
+  # are checked against the axioms, not against the Rust. This job proves the
+  # proofs are well-formed and sorry-free; it does not prove the axioms.
+  # --------------------------------------------------------------------------
+  lean:
+    name: Lean 4 proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache elan toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ hashFiles('lean4/lean-toolchain') }}
+
+      - name: Install elan
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.elan/bin/lean" ]; then
+            curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --default-toolchain "$(cat lean4/lean-toolchain)"
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Kernel-check every module, sorry-free
+        run: |
+          set -euo pipefail
+          expected=10
+          found=$(ls lean4/*.lean | wc -l)
+          if [ "$found" -ne "$expected" ]; then
+            echo "::error::lean4/ has $found modules, expected $expected."
+            echo "A module was added or removed. Update the expected count so"
+            echo "the glob below cannot silently skip a new proof file."
+            exit 1
+          fi
+          failed=0
+          for f in lean4/*.lean; do
+            printf '%-42s' "$(basename "$f")"
+            if lean -DwarningAsError=true "$f"; then
+              echo "OK"
+            else
+              echo "FAIL"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  # --------------------------------------------------------------------------
   # SPDX: every source file under the primary code paths must carry an
   # SPDX-License-Identifier header (Issue #23). The check itself is just
   # a bash script (`scripts/check-spdx.sh`) — fast, no toolchain needed.

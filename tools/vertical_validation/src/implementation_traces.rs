@@ -488,7 +488,9 @@ fn trace_bilateral_precommit_tripwire(
         };
 
         let mut consumed_tip = *domain_hash(
-            "DSM/trace-bilateral-parent-consumed",
+            dsm::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/trace-bilateral-parent-consumed",
+            ),
             &second_pre.bilateral_commitment_hash,
         )
         .as_bytes();
@@ -1639,7 +1641,9 @@ fn trace_bilateral_full_offline_finality(
 
         // Manually advance tip to simulate parent consumption
         let mut consumed_tip = *domain_hash(
-            "DSM/trace-finality-parent-consumed",
+            dsm::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/trace-finality-parent-consumed",
+            ),
             &pre3.bilateral_commitment_hash,
         )
         .as_bytes();

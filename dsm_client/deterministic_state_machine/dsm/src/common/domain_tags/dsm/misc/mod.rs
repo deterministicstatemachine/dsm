@@ -2,6 +2,11 @@
 
 //! DSM namespace tags: misc
 
+// TAGS below is consumed only by the cfg(test) `all_tags()` collector, so
+// both it and this import are test-only in a non-test build.
+#[cfg(test)]
+use crate::crypto::domain::TaggedHashDomain;
+
 mod addressing;
 mod protocol;
 mod testing;
@@ -13,7 +18,8 @@ pub use testing::*;
 pub use token_ops::*;
 
 #[cfg(test)]
-pub(super) const TAGS: &[&str] = &[
+#[cfg(test)]
+pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ADDR_D,
     TAG_DSM_ADDR_G,
     TAG_DSM_ADDR_T,
@@ -24,7 +30,6 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_CANONICAL_BALANCE,
     TAG_DSM_CANONICAL_LP,
     TAG_DSM_CONTACT_ADD,
-    TAG_DSM_CONTACT_ADD_NUL,
     TAG_DSM_COUNTERPARTY_ID,
     TAG_DSM_DETERMINISTIC_ID,
     TAG_DSM_DETERMINISTIC_TIME,
