@@ -101,39 +101,33 @@ pub fn spool_drain_preflight(unacked_rows: i64) -> Result<(), String> {
 /// Storage-node tagged-hash domains. The delimiter belongs to the encoder,
 /// never to these constants — a NUL here fails to compile.
 pub const DOM_APPLY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/apply");
-pub const DOM_BYTECOMMIT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bytecommit");
+pub const DOM_BYTECOMMIT: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/bytecommit");
 pub const DOM_DRAIN: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/drain");
 pub const DOM_IDENTITY_DEVTREE_ROOT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/identity/devtree/root");
+    dsm::tagged_domain!(b"DSM/identity/devtree/root");
 pub const DOM_IDENTITY_TIPS_HEAD: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/identity/tips/head");
+    dsm::tagged_domain!(b"DSM/identity/tips/head");
 pub const DOM_IDENTITY_TIPS_LEAF: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/identity/tips/leaf");
+    dsm::tagged_domain!(b"DSM/identity/tips/leaf");
 pub const DOM_MIRROR: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/mirror");
 pub const DOM_NODE_ID: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/node-id");
 pub const DOM_OBJ_BYTECOMMIT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/obj-bytecommit");
-pub const DOM_OBJ_BYTES: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/obj-bytes");
+    dsm::tagged_domain!(b"DSM/obj-bytecommit");
+pub const DOM_OBJ_BYTES: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/obj-bytes");
 pub const DOM_OBJECT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/object");
 pub const DOM_ORDER: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/order");
-pub const DOM_PAY_STORAGE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/pay/storage");
+pub const DOM_PAY_STORAGE: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/pay/storage");
 pub const DOM_PERM: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/perm");
 pub const DOM_PLACE: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/place");
 pub const DOM_POLICY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/policy");
-pub const DOM_POLICY_ANCHOR: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/policy/anchor");
+pub const DOM_POLICY_ANCHOR: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/policy/anchor");
 pub const DOM_POSITIONS_SALT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/positions/salt");
+    dsm::tagged_domain!(b"DSM/positions/salt");
 pub const DOM_RECOVERY_CAPSULE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/recovery/capsule");
+    dsm::tagged_domain!(b"DSM/recovery/capsule");
 pub const DOM_REGISTRY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/registry");
-pub const DOM_SIGNAL_DOWN: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/signal/down");
-pub const DOM_SIGNAL_UP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/signal/up");
+pub const DOM_SIGNAL_DOWN: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/signal/down");
+pub const DOM_SIGNAL_UP: TaggedHashDomain<'static> = dsm::tagged_domain!(b"DSM/signal/up");
 pub const DOM_WIN_SEED: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/win-seed");
 
 /// Enforce production-only safety in release builds.

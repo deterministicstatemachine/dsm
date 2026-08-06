@@ -407,9 +407,7 @@ pub fn compute_joint_auth_hash(
     epoch: i64,
     preserved_acceptance_commitment: &[u8; 32],
 ) -> [u8; 32] {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/cert-restart/v1"),
-    );
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/cert-restart/v1"));
     h.update(relationship_key);
     h.update(agreed_tip);
     h.update(&epoch.to_le_bytes());
@@ -740,9 +738,8 @@ mod tests {
         );
 
         // And it must equal the canonical encoding of the same inputs.
-        let mut canonical = dsm::crypto::blake3::tagged_hasher(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/cert-restart/v1"),
-        );
+        let mut canonical =
+            dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/cert-restart/v1"));
         canonical.update(&[1u8; 32]);
         canonical.update(&[2u8; 32]);
         canonical.update(&7i64.to_le_bytes());

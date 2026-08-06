@@ -27,7 +27,7 @@ use crate::sdk::app_state::AppState;
 
 /// Domain tag binding an ML-KEM public key to a device identity + genesis.
 pub const KYBER_IDENTITY_BINDING_TAG: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/kyber-identity-binding");
+    dsm::tagged_domain!(b"DSM/kyber-identity-binding");
 
 /// Canonical binding digest over `device_id || genesis_hash || kyber_pubkey`,
 /// domain-separated by [`KYBER_IDENTITY_BINDING_TAG`]. This is the message the

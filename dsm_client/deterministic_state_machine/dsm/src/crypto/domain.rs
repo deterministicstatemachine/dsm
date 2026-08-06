@@ -83,6 +83,9 @@ impl TaggedHashDomain<'static> {
     /// Used in a `const` context, a violation is a compile error rather than a
     /// panic — which is the point: the four double-NUL sites this cut fixes
     /// become a compiler worklist, not a runtime surprise.
+    /// Prefer the [`tagged_domain!`] macro, which forces const evaluation so the
+    /// panic below is a compile error and cannot be reached at runtime.
+    ///
     /// The two `panic!`s are the COMPILE-TIME gate, not runtime error handling.
     ///
     /// `const fn` has no fallible return in a const context — a `Result` cannot
@@ -129,6 +132,38 @@ impl<'a> TaggedHashDomain<'a> {
     pub const fn source_bytes(self) -> &'a [u8] {
         self.0
     }
+}
+
+/// Build a `TaggedHashDomain` from a literal, **forcing const evaluation**.
+///
+/// `TaggedHashDomain::from_static` is a `const fn`, and a `const fn` can also be
+/// called at runtime — where its `panic!` would be an ordinary production panic
+/// rather than the intended compile error. That weakened the "no production
+/// panic" property the repo's safety gate enforces.
+///
+/// This macro closes it: the inline `const { … }` block makes the call a
+/// constant expression, so a NUL-bearing or empty literal is
+/// `error[E0080]: evaluation panicked` at BUILD time and the panic is
+/// unreachable at run time.
+///
+/// ```
+/// # use dsm::tagged_domain;
+/// let d = tagged_domain!(b"DSM/example");
+/// assert_eq!(d.source_bytes(), b"DSM/example");
+/// ```
+///
+/// ```compile_fail
+/// # use dsm::tagged_domain;
+/// let d = tagged_domain!(b"DSM/example\0");
+/// ```
+///
+/// Runtime bytes cannot use this macro by construction — use
+/// [`TaggedHashDomain::try_new`], which returns [`DomainError`].
+#[macro_export]
+macro_rules! tagged_domain {
+    ($bytes:expr) => {
+        const { $crate::crypto::domain::TaggedHashDomain::from_static($bytes) }
+    };
 }
 
 #[cfg(test)]

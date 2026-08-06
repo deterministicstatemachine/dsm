@@ -21,12 +21,10 @@ const OUT_LEN: usize = 32;
 // Domain separation tags. The delimiter lives in the encoder, not in these
 // constants — see docs/adr/0001-three-domain-separation-constructions.md.
 const DOM_BASE: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/commit/base/v2");
-const DOM_TIMELOCK: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/commit/timelock/v2");
+const DOM_TIMELOCK: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/commit/timelock/v2");
 const DOM_CONDITIONAL: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/commit/conditional/v2");
-const DOM_RECURRING: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/commit/recurring/v2");
+    crate::tagged_domain!(b"DSM/commit/conditional/v2");
+const DOM_RECURRING: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/commit/recurring/v2");
 
 // Canonicalization bounds (defensive, deterministic)
 const MAX_OP_BYTES_LEN: usize = 256 * 1024; // hard cap to avoid pathological allocations

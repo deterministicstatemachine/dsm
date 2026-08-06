@@ -1618,7 +1618,7 @@ mod tests {
 
     fn signing_msg_for_multisig(commitment_hash: &[u8; 32]) -> [u8; 32] {
         *crate::crypto::blake3::domain_hash(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/smart-commit/multisig/v2"),
+            crate::tagged_domain!(b"DSM/smart-commit/multisig/v2"),
             commitment_hash,
         )
         .as_bytes()
@@ -1704,7 +1704,7 @@ mod tests {
         buf.extend_from_slice(&commitment.amount.to_le_bytes());
         buf.extend_from_slice(condition.as_bytes());
         *crate::crypto::blake3::domain_hash(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/smart-commit/oracle/v2"),
+            crate::tagged_domain!(b"DSM/smart-commit/oracle/v2"),
             &buf,
         )
         .as_bytes()

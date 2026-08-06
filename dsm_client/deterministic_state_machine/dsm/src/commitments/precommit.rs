@@ -29,15 +29,15 @@ use zeroize::Zeroize;
 
 // Domain tags (versioned, null-terminated style)
 const DOM_PRECOMMIT_ROOT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/precommit/root/v2");
+    crate::tagged_domain!(b"DSM/precommit/root/v2");
 const DOM_PRECOMMIT_COMMITMENT_HASH: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/precommit/commitment-hash/v2");
+    crate::tagged_domain!(b"DSM/precommit/commitment-hash/v2");
 const DOM_FORK_CONTEXT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/precommit/fork-context/v2");
+    crate::tagged_domain!(b"DSM/precommit/fork-context/v2");
 const DOM_FORK_POSITIONS: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/precommit/fork-positions/v2");
+    crate::tagged_domain!(b"DSM/precommit/fork-positions/v2");
 const DOM_INVALIDATION_PROOF: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/precommit/invalidation-proof/v2");
+    crate::tagged_domain!(b"DSM/precommit/invalidation-proof/v2");
 
 // Defensive bounds (deterministic, avoids pathological allocations)
 const MAX_ID_LEN: usize = 128;
@@ -1422,8 +1422,7 @@ mod tests {
     /// Legacy single-tag domain pinned for K4. The protocol no longer
     /// emits hashes under this domain; this constant exists solely so K4
     /// can prove the v2 verifier rejects legacy-domain inputs.
-    const LEGACY_V1_DOMAIN: TaggedHashDomain<'static> =
-        TaggedHashDomain::from_static(b"DSM/precommit");
+    const LEGACY_V1_DOMAIN: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/precommit");
 
     /// K1 — v2 positive vector: `branch_commitment_hash` for a fixed
     /// `(h_n, payload, e)` triple is byte-stable and matches a recomputed

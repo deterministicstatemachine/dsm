@@ -415,44 +415,30 @@ pub mod strategies {
 
     /// Deterministic valid system state (coherent references, no wall-clock time).
     pub fn valid_system_state() -> SystemState {
-        let seed = domain_hash_bytes(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/VALID_STATE"),
-            b"",
-        );
+        let seed = domain_hash_bytes(crate::tagged_domain!(b"DSM/PBT/VALID_STATE"), b"");
         build_system_state_from_seed(seed)
     }
 
     fn build_system_state_from_seed(seed: [u8; 32]) -> SystemState {
         let mut rng = DeterministicRng::new(seed);
 
-        let version = rng.next_range_u64(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/VERSION"),
-            1,
-            1_000_000,
-        );
+        let version = rng.next_range_u64(crate::tagged_domain!(b"DSM/PBT/VERSION"), 1, 1_000_000);
 
-        let vault_count = rng.next_range_u64(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/VAULT_COUNT"),
-            1,
-            MAX_VAULTS,
-        ) as usize;
+        let vault_count =
+            rng.next_range_u64(crate::tagged_domain!(b"DSM/PBT/VAULT_COUNT"), 1, MAX_VAULTS)
+                as usize;
         let mut vault_ids: Vec<VaultId> = Vec::with_capacity(vault_count);
         let mut vaults: HashMap<VaultId, VaultState> = HashMap::with_capacity(vault_count);
 
         for _ in 0..vault_count {
-            let vid = VaultId::new(rng.next_uuid(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/VAULT_ID"),
-            ));
+            let vid = VaultId::new(rng.next_uuid(crate::tagged_domain!(b"DSM/PBT/VAULT_ID")));
             let balance = rng.next_range_u64(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/VAULT_BAL"),
+                crate::tagged_domain!(b"DSM/PBT/VAULT_BAL"),
                 MIN_BALANCE,
                 MAX_BALANCE,
             );
-            let last_activity = rng.next_range_u64(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/VAULT_LAST"),
-                0,
-                version,
-            );
+            let last_activity =
+                rng.next_range_u64(crate::tagged_domain!(b"DSM/PBT/VAULT_LAST"), 0, version);
 
             let vs = VaultState {
                 id: vid.clone(),
@@ -471,11 +457,8 @@ pub mod strategies {
             .values()
             .fold(0u64, |acc, v| acc.saturating_add(v.balance));
 
-        let tx_count = rng.next_range_u64(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/TX_COUNT"),
-            0,
-            MAX_TXS,
-        ) as usize;
+        let tx_count =
+            rng.next_range_u64(crate::tagged_domain!(b"DSM/PBT/TX_COUNT"), 0, MAX_TXS) as usize;
         let mut transactions: Vec<TransactionState> = Vec::with_capacity(tx_count);
         // Track reserved amounts for pending transactions so that later confirmed
         // transactions cannot consume funds already promised to pending sends.
@@ -490,9 +473,8 @@ pub mod strategies {
                 b"DSM/PBT/SENDER_IDX",
             )) as usize)
                 % vault_ids.len();
-            let mut receiver_idx = (rng.next_u64(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/RECV_IDX"),
-            ) as usize)
+            let mut receiver_idx = (rng.next_u64(crate::tagged_domain!(b"DSM/PBT/RECV_IDX"))
+                as usize)
                 % vault_ids.len();
             if receiver_idx == sender_idx {
                 receiver_idx = (receiver_idx + 1) % vault_ids.len();
@@ -510,11 +492,7 @@ pub mod strategies {
             let reserved_for_sender = *reserved.get(&sender).unwrap_or(&0u64);
             let available_balance = base_balance.saturating_sub(reserved_for_sender);
 
-            let status = if rng.next_bool(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/TX_STATUS"),
-                7,
-                10,
-            ) {
+            let status = if rng.next_bool(crate::tagged_domain!(b"DSM/PBT/TX_STATUS"), 7, 10) {
                 TransactionStatus::Confirmed
             } else {
                 TransactionStatus::Pending
@@ -528,14 +506,12 @@ pub mod strategies {
                 continue;
             }
             let amount = rng.next_range_u64(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/TX_AMT"),
+                crate::tagged_domain!(b"DSM/PBT/TX_AMT"),
                 MIN_TX_AMOUNT,
                 max_amt,
             );
 
-            let tx_id = TransactionId::new(rng.next_uuid(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/TX_ID"),
-            ));
+            let tx_id = TransactionId::new(rng.next_uuid(crate::tagged_domain!(b"DSM/PBT/TX_ID")));
             let status_clone = status.clone();
             transactions.push(TransactionState {
                 id: tx_id.clone(),
@@ -572,15 +548,10 @@ pub mod strategies {
         let mut sessions: HashMap<SessionId, SessionState> = HashMap::new();
         for vid in &vault_ids {
             // Deterministic ~60% inclusion
-            if rng.next_bool(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/SESS_INCLUDE"),
-                6,
-                10,
-            ) {
+            if rng.next_bool(crate::tagged_domain!(b"DSM/PBT/SESS_INCLUDE"), 6, 10) {
                 for _ in 0..MAX_SESSIONS_PER_VAULT {
-                    let sid = SessionId::new(rng.next_uuid(
-                        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/SESS_ID"),
-                    ));
+                    let sid =
+                        SessionId::new(rng.next_uuid(crate::tagged_domain!(b"DSM/PBT/SESS_ID")));
                     let created_at = rng.next_range_u64(
                         crate::crypto::domain::TaggedHashDomain::from_static(
                             b"DSM/PBT/SESS_CREATED",
@@ -588,11 +559,8 @@ pub mod strategies {
                         0,
                         version,
                     );
-                    let expires_after = rng.next_range_u64(
-                        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/SESS_TTL"),
-                        1,
-                        10_000,
-                    );
+                    let expires_after =
+                        rng.next_range_u64(crate::tagged_domain!(b"DSM/PBT/SESS_TTL"), 1, 10_000);
 
                     let mut expires_at = created_at.saturating_add(expires_after);
                     // If active, force non-expired (logical time)
@@ -633,14 +601,14 @@ pub mod strategies {
             sessions,
             network_state: NetworkState {
                 connected_nodes: (rng.next_range_u64(
-                    crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/NODES"),
+                    crate::tagged_domain!(b"DSM/PBT/NODES"),
                     1,
                     100,
                 ) as usize)
                     .max(1),
                 total_transactions: transactions.len() as u64,
                 network_hash_rate: rng.next_range_u64(
-                    crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/PBT/NHR"),
+                    crate::tagged_domain!(b"DSM/PBT/NHR"),
                     1,
                     10_000,
                 ),

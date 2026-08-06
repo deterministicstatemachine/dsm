@@ -5,65 +5,53 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_BITCOIN_ACCOUNT_ID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bitcoin-account-id");
+    crate::tagged_domain!(b"DSM/bitcoin-account-id");
 pub const TAG_DSM_DBTC_BEARER_ETA: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dbtc-bearer-eta");
-pub const TAG_DSM_DBTC_CLAIM: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dbtc-claim");
+    crate::tagged_domain!(b"DSM/dbtc-bearer-eta");
+pub const TAG_DSM_DBTC_CLAIM: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dbtc-claim");
 pub const TAG_DSM_DBTC_PREIMAGE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dbtc-preimage");
+    crate::tagged_domain!(b"DSM/dbtc-preimage");
 pub const TAG_DSM_DBTC_TEST_VAULT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dbtc-test-vault");
+    crate::tagged_domain!(b"DSM/dbtc-test-vault");
 pub const TAG_DSM_DBTC_WITHDRAWAL_PLAN: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dbtc-withdrawal-plan");
+    crate::tagged_domain!(b"DSM/dbtc-withdrawal-plan");
 pub const TAG_DSM_DLV_CHAIN_LINK: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-chain-link");
-pub const TAG_DSM_DLV_CLAIM: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-claim");
+    crate::tagged_domain!(b"DSM/dlv-chain-link");
+pub const TAG_DSM_DLV_CLAIM: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-claim");
 pub const TAG_DSM_DLV_CONDITION: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-condition");
+    crate::tagged_domain!(b"DSM/dlv-condition");
 pub const TAG_DSM_DLV_CONTENT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-content");
+    crate::tagged_domain!(b"DSM/dlv-content");
 pub const TAG_DSM_DLV_CONTENT_COMMIT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-content-commit");
+    crate::tagged_domain!(b"DSM/dlv-content-commit");
 pub const TAG_DSM_DLV_FULFILLMENT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-fulfillment");
-pub const TAG_DSM_DLV_LABEL: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-label");
-pub const TAG_DSM_DLV_NONCE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-nonce");
+    crate::tagged_domain!(b"DSM/dlv-fulfillment");
+pub const TAG_DSM_DLV_LABEL: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-label");
+pub const TAG_DSM_DLV_NONCE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-nonce");
 pub const TAG_DSM_DLV_NONCE_SEED: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-nonce-seed");
-pub const TAG_DSM_DLV_OPEN: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv/open");
-pub const TAG_DSM_DLV_PARAMS: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-params");
+    crate::tagged_domain!(b"DSM/dlv-nonce-seed");
+pub const TAG_DSM_DLV_OPEN: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv/open");
+pub const TAG_DSM_DLV_PARAMS: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-params");
 pub const TAG_DSM_DLV_PARTITION: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-partition");
-pub const TAG_DSM_DLV_POLICY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-policy");
-pub const TAG_DSM_DLV_PROOF: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-proof");
-pub const TAG_DSM_DLV_REFUND: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-refund");
-pub const TAG_DSM_DLV_UNLOCK: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-unlock");
+    crate::tagged_domain!(b"DSM/dlv-partition");
+pub const TAG_DSM_DLV_POLICY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-policy");
+pub const TAG_DSM_DLV_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-proof");
+pub const TAG_DSM_DLV_REFUND: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-refund");
+pub const TAG_DSM_DLV_UNLOCK: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-unlock");
 pub const TAG_DSM_DLV_VAULT_ID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/dlv-vault-id");
-pub const TAG_DSM_VAULT_AD: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/vault-ad");
+    crate::tagged_domain!(b"DSM/dlv-vault-id");
+pub const TAG_DSM_VAULT_AD: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/vault-ad");
 pub const TAG_DSM_VAULT_COMMITMENT_V2: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/vault-commitment-v2");
+    crate::tagged_domain!(b"DSM/vault-commitment-v2");
 pub const TAG_DSM_VAULT_ENVELOPE_V2: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/vault-envelope-v2");
+    crate::tagged_domain!(b"DSM/vault-envelope-v2");
 pub const TAG_DSM_VAULT_KEK_V2: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/Vault/KEK/v2");
+    crate::tagged_domain!(b"DSM/Vault/KEK/v2");
 pub const TAG_DSM_VAULT_KEY_TYPE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/vault-key-type");
+    crate::tagged_domain!(b"DSM/vault-key-type");
 pub const TAG_DSM_VAULT_NONCE_V2: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/Vault/Nonce/v2");
-pub const TAG_DSM_WITHDRAWAL: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/withdrawal");
+    crate::tagged_domain!(b"DSM/Vault/Nonce/v2");
+pub const TAG_DSM_WITHDRAWAL: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/withdrawal");
 
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[

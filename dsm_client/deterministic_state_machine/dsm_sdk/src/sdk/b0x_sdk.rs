@@ -536,9 +536,8 @@ impl CircuitBreaker {
 /// handed to `dsm_domain_hasher`, which appends another — a DOUBLED NUL.
 /// Extracted from `submit_acceptance_reply` so the move can carry a vector.
 pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) -> Vec<u8> {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-reply-message-id"),
-    );
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-reply-message-id"));
     h.update(commitment);
     h.update(sender_projection_tip);
     h.finalize().as_bytes()[..16].to_vec()
@@ -548,9 +547,9 @@ pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) 
 /// digest of the body. IMPACT-TABLE ROW B6, same defect and same extraction
 /// reason as [`reply_message_id`].
 pub(crate) fn certresync_message_id(method: &str, recipient_tip: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-certresync-message-id"),
-    );
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/b0x-certresync-message-id"
+    ));
     h.update(method.as_bytes());
     h.update(recipient_tip);
     h.update(body);
@@ -581,9 +580,8 @@ impl B0xSDK {
         // Smaster here once b0x salt derivation is wired through the unlocked-wallet path.)
         // Runtime domain: validated at construction, falling back to a fixed
         // static domain rather than silently normalizing a malformed one.
-        let tag = dsm::crypto::domain::TaggedHashDomain::try_new(domain_tag).unwrap_or(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-salt"),
-        );
+        let tag = dsm::crypto::domain::TaggedHashDomain::try_new(domain_tag)
+            .unwrap_or(dsm::tagged_domain!(b"DSM/b0x-salt"));
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag);
         // Augment with public genesis material for domain separation when storage is available.
         if crate::storage_utils::get_storage_base_dir().is_some() {
@@ -680,18 +678,9 @@ impl B0xSDK {
                 "genesis/device/tip must be 32 bytes",
             ));
         }
-        let h_g = Self::hash_b0x_component(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-G"),
-            genesis,
-        );
-        let h_d = Self::hash_b0x_component(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-D"),
-            device,
-        );
-        let h_t = Self::hash_b0x_component(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-T"),
-            tip,
-        );
+        let h_g = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), genesis);
+        let h_d = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), device);
+        let h_t = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), tip);
 
         let mut hasher =
             dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
@@ -3711,18 +3700,9 @@ mod tests {
 
         let actual = B0xSDK::compute_b0x_address(&genesis, &device, &tip).expect("ok");
 
-        let h_g = B0xSDK::hash_b0x_component(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-G"),
-            &genesis,
-        );
-        let h_d = B0xSDK::hash_b0x_component(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-D"),
-            &device,
-        );
-        let h_t = B0xSDK::hash_b0x_component(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-T"),
-            &tip,
-        );
+        let h_g = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), &genesis);
+        let h_d = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), &device);
+        let h_t = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), &tip);
 
         let mut hasher =
             dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);

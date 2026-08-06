@@ -1108,7 +1108,7 @@ impl LimboVault {
 
         // Symmetric key for AES-GCM: bind KEM secret + aad + content hash
         let sym_key = domain_hash_bytes(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/dlv-sym-key"),
+            crate::tagged_domain!(b"DSM/dlv-sym-key"),
             &concat_bytes(&[
                 &shared_secret,
                 &aad,
@@ -1318,7 +1318,7 @@ impl LimboVault {
                 proof_ref @ FulfillmentProof::CryptoConditionProof { solution, .. },
             ) => {
                 let h = domain_hash(
-                    crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/dlv-crypto-cond"),
+                    crate::tagged_domain!(b"DSM/dlv-crypto-cond"),
                     &concat_bytes(&[solution, public_params]),
                 );
                 let result = secure_eq(h.as_bytes(), condition_hash);
@@ -1377,7 +1377,7 @@ impl LimboVault {
                 },
             ) => {
                 let seed = domain_hash(
-                    crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/dlv-rw-seed"),
+                    crate::tagged_domain!(b"DSM/dlv-rw-seed"),
                     &concat_bytes(&[verification_key, statement.as_bytes()]),
                 );
                 let expected = generate_positions(
@@ -2062,7 +2062,7 @@ impl LimboVault {
 
         // Final symmetric key binds KEM secret + unlocking key + AAD
         let final_key = domain_hash_bytes(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/dlv-final-key"),
+            crate::tagged_domain!(b"DSM/dlv-final-key"),
             &concat_bytes(&[&shared_secret, &unlocking_key, &self.encrypted_content.aad]),
         )
         .to_vec();

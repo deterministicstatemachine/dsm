@@ -228,13 +228,13 @@ mod tests_domain_hash {
     use super::*;
 
     const TAG_DSM_AB_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/ab");
+        crate::tagged_domain!(b"DSM/ab");
     const TAG_DSM_ABC_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/abC");
+        crate::tagged_domain!(b"DSM/abC");
     // No longer a valid tag by prefix, but still representable — the prefix
     // rule is a debug_assert in the hasher, not part of the type.
     const TAG_NOT_DSM_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
-        crate::crypto::domain::TaggedHashDomain::from_static(b"not-dsm");
+        crate::tagged_domain!(b"not-dsm");
 
     #[test]
     fn domain_hash_includes_nul_terminator() {
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn domain_hash_bytes_matches_hash() {
-        let tag = crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/test");
+        let tag = crate::tagged_domain!(b"DSM/test");
         let data = b"payload";
         let h = domain_hash(tag, data);
         let hb = domain_hash_bytes(tag, data);

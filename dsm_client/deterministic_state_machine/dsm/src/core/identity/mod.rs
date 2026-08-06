@@ -92,7 +92,7 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
                 &level[i]
             };
             // Distinct sub-domain — this is the contribution Merkle tree,
-            // not the whitepaper's genesis hash (`crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis")`).
+            // not the whitepaper's genesis hash (`crate::tagged_domain!(b"DSM/genesis")`).
             let mut h = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
                 b"DSM/genesis-merkle",
             ));
@@ -225,7 +225,7 @@ pub async fn create_trustless_genesis<
 
     // Deterministic 32B device hash label for MPC inputs
     let device_id_bytes: [u8; 32] = *domain_hash(
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+        crate::tagged_domain!(b"DSM/device-id"),
         device_id.as_bytes(),
     )
     .as_bytes();
@@ -299,7 +299,7 @@ pub async fn create_trustless_genesis<
     }
 
     let device_id_bytes = domain_hash(
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+        crate::tagged_domain!(b"DSM/device-id"),
         device_id.as_bytes(),
     )
     .into();
@@ -378,7 +378,7 @@ impl IdentityStore {
                 .ok_or_else(|| IdentityError::IdentityNotFound("Identity not found".into()))?;
             let device_id = format!("device_{:016x}", crate::performance::mono_commit_height());
             let device_id_bytes = domain_hash(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+                crate::tagged_domain!(b"DSM/device-id"),
                 device_id.as_bytes(),
             )
             .into();
@@ -476,7 +476,7 @@ impl IdentityStore {
             )?;
 
         let device_id_bytes = domain_hash(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+            crate::tagged_domain!(b"DSM/device-id"),
             device_id.as_bytes(),
         )
         .into();
@@ -684,7 +684,7 @@ impl Identity {
 
     pub fn genesis_hash(&self) -> blake3::Hash {
         domain_hash(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis-hash"),
+            crate::tagged_domain!(b"DSM/genesis-hash"),
             &self.master_genesis.hash,
         )
     }

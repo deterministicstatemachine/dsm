@@ -33,11 +33,10 @@ fn generate_secure_random(rng: &mut impl RngCore, len: usize) -> Result<Vec<u8>,
 
 #[inline]
 fn blake3_hash(data: &[u8]) -> Result<[u8; 32], DsmError> {
-    Ok(*crate::crypto::blake3::domain_hash(
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis-hash"),
-        data,
+    Ok(
+        *crate::crypto::blake3::domain_hash(crate::tagged_domain!(b"DSM/genesis-hash"), data)
+            .as_bytes(),
     )
-    .as_bytes())
 }
 
 #[allow(dead_code)]
@@ -250,7 +249,7 @@ pub fn derive_device_sub_genesis(
         merkle_root: Some(master_genesis.hash),
         device_id: Some(
             *crate::crypto::blake3::domain_hash(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+                crate::tagged_domain!(b"DSM/device-id"),
                 device_id.as_bytes(),
             )
             .as_bytes(),
@@ -425,9 +424,8 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
 pub fn get_device_entropy(
     device_id: &str,
 ) -> Result<Vec<u8>, crate::core::identity::IdentityError> {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher(
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/DEV_ENT/v2"),
-    );
+    let mut hasher =
+        crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/DEV_ENT/v2"));
     hasher.update(device_id.as_bytes());
     Ok(hasher.finalize().as_bytes().to_vec())
 }
@@ -692,7 +690,7 @@ mod tests {
         assert_eq!(
             device.device_id.unwrap(),
             *crate::crypto::blake3::domain_hash(
-                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+                crate::tagged_domain!(b"DSM/device-id"),
                 device_id.as_bytes()
             )
             .as_bytes()

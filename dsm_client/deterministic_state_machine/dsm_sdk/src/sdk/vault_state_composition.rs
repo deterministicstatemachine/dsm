@@ -825,9 +825,7 @@ mod tests {
     }
 
     fn marker_digest(x: &[u8; 32], hop_index: u32) -> [u8; 32] {
-        let mut h = dsm::crypto::blake3::tagged_hasher(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/pending-marker"),
-        );
+        let mut h = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/pending-marker"));
         h.update(x);
         h.update(&hop_index.to_le_bytes());
         *h.finalize().as_bytes()

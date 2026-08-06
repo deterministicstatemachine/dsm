@@ -5,64 +5,61 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_B0X: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/b0x");
-pub const TAG_DSM_B0X_MSGID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/b0x-msgid");
+pub const TAG_DSM_B0X_MSGID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-msgid");
 pub const TAG_DSM_B0X_UNILATERAL: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/B0X/UNILATERAL");
+    crate::tagged_domain!(b"DSM/B0X/UNILATERAL");
 pub const TAG_DSM_BILATERAL_COMMIT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bilateral-commit");
+    crate::tagged_domain!(b"DSM/bilateral-commit");
 pub const TAG_DSM_BILATERAL_ENTROPY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bilateral-entropy");
+    crate::tagged_domain!(b"DSM/bilateral-entropy");
 pub const TAG_DSM_BILATERAL_OP_COMMIT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bilateral-op-commit");
+    crate::tagged_domain!(b"DSM/bilateral-op-commit");
 pub const TAG_DSM_BILATERAL_PARAMS_HASH: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bilateral-params-hash");
+    crate::tagged_domain!(b"DSM/bilateral-params-hash");
 pub const TAG_DSM_BILATERAL_STATE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/bilateral-state");
-pub const TAG_DSM_BLE_FRAME: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/ble-frame");
+    crate::tagged_domain!(b"DSM/bilateral-state");
+pub const TAG_DSM_BLE_FRAME: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/ble-frame");
 pub const TAG_DSM_BLE_FRAME_CHECKSUM: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/ble-frame-checksum");
+    crate::tagged_domain!(b"DSM/ble-frame-checksum");
 pub const TAG_DSM_BLE_SESSION_KEY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/ble-session-key");
-pub const TAG_DSM_CHAIN_TIP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/CHAIN_TIP");
+    crate::tagged_domain!(b"DSM/ble-session-key");
+pub const TAG_DSM_CHAIN_TIP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/CHAIN_TIP");
 pub const TAG_DSM_CHAIN_TIP_ID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/chain-tip-id");
+    crate::tagged_domain!(b"DSM/chain-tip-id");
 pub const TAG_DSM_ENVELOPE_ID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/ENVELOPE_ID");
+    crate::tagged_domain!(b"DSM/ENVELOPE_ID");
 pub const TAG_DSM_ENVELOPE_MSGID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/envelope-msgid");
+    crate::tagged_domain!(b"DSM/envelope-msgid");
 pub const TAG_DSM_ERROR_ENVELOPE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/error-envelope");
+    crate::tagged_domain!(b"DSM/error-envelope");
 pub const TAG_DSM_ERROR_ENVELOPE_CHAIN: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/error-envelope/chain");
+    crate::tagged_domain!(b"DSM/error-envelope/chain");
 pub const TAG_DSM_JNI_CORE_ENVELOPE_MESSAGE_ID_V1: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/jni-core-envelope-message-id/v1");
+    crate::tagged_domain!(b"DSM/jni-core-envelope-message-id/v1");
 pub const TAG_DSM_JNI_ENVELOPE_MESSAGE_ID_V1: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/jni-envelope-message-id/v1");
+    crate::tagged_domain!(b"DSM/jni-envelope-message-id/v1");
 pub const TAG_DSM_OFFLINE_KEY_CTX: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/offline-key-ctx");
+    crate::tagged_domain!(b"DSM/offline-key-ctx");
 pub const TAG_DSM_OFFLINE_TX_CTX: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/offline-tx-ctx");
+    crate::tagged_domain!(b"DSM/offline-tx-ctx");
 pub const TAG_DSM_ONLINETRANSFERREQUEST_NONCE_V1: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/OnlineTransferRequest/nonce/v1");
+    crate::tagged_domain!(b"DSM/OnlineTransferRequest/nonce/v1");
 pub const TAG_DSM_ONLINE_MESSAGE_NONCE_V3: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/online-message/nonce/v3");
+    crate::tagged_domain!(b"DSM/online-message/nonce/v3");
 pub const TAG_DSM_ONLINE_MESSAGE_V3: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/online-message/v3");
+    crate::tagged_domain!(b"DSM/online-message/v3");
 pub const TAG_DSM_RELATIONSHIP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/relationship");
+    crate::tagged_domain!(b"DSM/relationship");
 pub const TAG_DSM_RELATIONSHIP_KEY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/relationship-key");
+    crate::tagged_domain!(b"DSM/relationship-key");
 pub const TAG_DSM_SDK_BILATERAL_ENTRY_V1: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/sdk/bilateral-entry/v1");
+    crate::tagged_domain!(b"DSM/sdk/bilateral-entry/v1");
 pub const TAG_DSM_SYSTEM_PEER_TIP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/system-peer-tip");
+    crate::tagged_domain!(b"DSM/system-peer-tip");
 pub const TAG_DSM_SYSTEM_PEER_TRANSITION: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/system-peer-transition");
+    crate::tagged_domain!(b"DSM/system-peer-transition");
 pub const TAG_DSM_TRANSFER_V3: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/transfer/v3");
+    crate::tagged_domain!(b"DSM/transfer/v3");
 
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[

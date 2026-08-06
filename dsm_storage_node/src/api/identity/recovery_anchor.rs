@@ -46,7 +46,7 @@ const MAX_SIG_BYTES: usize = 65_535;
 
 /// Domain tag for the stored-anchor content hash (idempotency key).
 const ANCHOR_STORE_TAG: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/recovery/authority-anchor-store");
+    dsm::tagged_domain!(b"DSM/recovery/authority-anchor-store");
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()

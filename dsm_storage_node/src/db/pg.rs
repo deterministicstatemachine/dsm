@@ -493,9 +493,7 @@ pub async fn get_current_cycle_stats(pool: &Pool) -> Result<([u8; 32], u64)> {
         .await?;
 
     let mut bytes_used: u64 = 0;
-    let mut hasher = dsm::crypto::blake3::tagged_hasher(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/smt-node"),
-    );
+    let mut hasher = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/smt-node"));
 
     for r in rows {
         let key: String = r.get(0);

@@ -1827,7 +1827,7 @@ impl AppRouterImpl {
                                                 );
                                             let tx_hash = {
                                                 let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                                                    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/tx-record-hash"),
+                                                    dsm::tagged_domain!(b"DSM/tx-record-hash"),
                                                 );
                                                 h.update(entry.transaction_id.as_bytes());
                                                 h.update(entry.sender_device_id.as_bytes());

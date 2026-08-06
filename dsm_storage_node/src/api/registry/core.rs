@@ -73,9 +73,7 @@ fn registry_metadata_plain(rows: &[(String, i16, i64)]) -> Bytes {
 #[inline]
 fn content_addr_b64url(body: &Bytes) -> String {
     // Domain-separated BLAKE3 for registry evidence (opaque bytes)
-    let mut hasher = dsm::crypto::blake3::tagged_hasher(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/registry"),
-    );
+    let mut hasher = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/registry"));
     hasher.update(body);
     let out = hasher.finalize();
     b64_url_no_pad(out.as_bytes())

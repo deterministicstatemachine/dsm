@@ -31,7 +31,7 @@ use crate::util::text_id::encode_base32_crockford;
 
 /// BLAKE3 domain tag binding the advertisement to the full vault proto.
 pub(crate) const ROUTING_VAULT_AD_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/routing-vault-ad");
+    dsm::tagged_domain!(b"DSM/routing-vault-ad");
 
 /// Base prefix for routing-vault advertisements.
 pub(crate) const ROUTING_VAULT_AD_ROOT: &str = "sofi/vault/";

@@ -27,7 +27,7 @@ use crate::util::text_id::encode_base32_crockford;
 
 /// BLAKE3 domain tag binding the advertisement to the full vault proto.
 pub(crate) const POSTED_DLV_AD_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/posted-dlv-ad");
+    dsm::tagged_domain!(b"DSM/posted-dlv-ad");
 
 /// Base prefix for posted-mode DLV advertisements.
 pub(crate) const POSTED_DLV_AD_ROOT: &str = "dlv/posted/";

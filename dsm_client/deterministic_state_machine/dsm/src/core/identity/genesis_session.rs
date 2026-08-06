@@ -231,9 +231,7 @@ impl GenesisSession {
         self.commitments = contributions
             .iter()
             .map(|c| {
-                let mut h = dsm_domain_hasher(
-                    crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis-commit"),
-                );
+                let mut h = dsm_domain_hasher(crate::tagged_domain!(b"DSM/genesis-commit"));
                 h.update(&self.session_id);
                 h.update(c);
                 let mut out = [0u8; 32];
@@ -471,9 +469,8 @@ pub fn genesis_authority_policy_hash() -> [u8; 32] {
     };
     let mut bytes = Vec::new();
     default.append_canonical(&mut bytes);
-    let mut h = crate::crypto::blake3::dsm_domain_hasher(
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/authority-policy/v1"),
-    );
+    let mut h =
+        crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/authority-policy/v1"));
     h.update(&bytes);
     *h.finalize().as_bytes()
 }
@@ -528,9 +525,9 @@ pub struct GenesisMasterKeypair {
 
 /// Deterministic device entropy (bytes-only), derived from 32-byte device_id
 pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
-    let mut h = crate::crypto::blake3::dsm_domain_hasher(
-        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis-device-entropy"),
-    );
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(
+        b"DSM/genesis-device-entropy"
+    ));
     h.update(device_id);
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
@@ -630,9 +627,9 @@ pub async fn create_genesis_with_transport<T: GenesisTransport + Sync>(
 
     // Device commitment material for transport calls: H(session_id || device_entropy)
     let device_commitment = {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis-device-commit"),
-        );
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(
+            b"DSM/genesis-device-commit"
+        ));
         h.update(&session.session_id);
         h.update(&session.device_entropy);
         let mut out = [0u8; 32];

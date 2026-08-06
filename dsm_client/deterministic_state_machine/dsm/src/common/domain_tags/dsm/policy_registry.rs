@@ -6,12 +6,11 @@ use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_CPTA: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/cpta");
 pub const TAG_DSM_DISCOVERY_URL: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/discovery-url");
+    crate::tagged_domain!(b"DSM/discovery-url");
 pub const TAG_DSM_NODE_ENDPOINT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/node-endpoint");
+    crate::tagged_domain!(b"DSM/node-endpoint");
 pub const TAG_DSM_POLICY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/policy");
-pub const TAG_DSM_REGISTRY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/registry");
+pub const TAG_DSM_REGISTRY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/registry");
 
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[

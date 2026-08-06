@@ -323,7 +323,7 @@ impl IdentitySDK {
     pub fn provision_device(&mut self, label: &str) -> Result<(String, Vec<u8>), DsmError> {
         // Generate device info
         let device_entropy = dsm::crypto::blake3::domain_hash(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/identity-entropy"),
+            dsm::tagged_domain!(b"DSM/identity-entropy"),
             format!(
                 "{}_entropy_{}",
                 label,
@@ -903,7 +903,7 @@ impl IdentitySDK {
     pub async fn generate_pairing_qr(&self) -> Result<crate::generated::ContactQrV3, DsmError> {
         // Build a canonical ContactQrV3 proto instance for pairing use.
         let sdk_fingerprint = dsm::crypto::blake3::domain_hash(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/identity-fingerprint"),
+            dsm::tagged_domain!(b"DSM/identity-fingerprint"),
             self.identity_id.as_bytes(),
         );
         // Fetch genesis hash from AppState and encode as Base32 (spec requirement),

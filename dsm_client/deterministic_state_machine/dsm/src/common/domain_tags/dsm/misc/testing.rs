@@ -9,30 +9,28 @@ use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_TEST: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/test");
 pub const TAG_DSM_TEST_DEVICE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-device");
+    crate::tagged_domain!(b"DSM/test-device");
 pub const TAG_DSM_TEST_ENTITY_ID: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-entity-id");
+    crate::tagged_domain!(b"DSM/test-entity-id");
 pub const TAG_DSM_TEST_ENTROPY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-entropy");
+    crate::tagged_domain!(b"DSM/test-entropy");
 pub const TAG_DSM_TEST_CSPRNG_SEED: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-csprng-seed");
+    crate::tagged_domain!(b"DSM/test-csprng-seed");
 pub const TAG_DSM_TEST_CSPRNG_NEXT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-csprng-next");
-pub const TAG_DSM_TEST_TIP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-tip");
+    crate::tagged_domain!(b"DSM/test-csprng-next");
+pub const TAG_DSM_TEST_TIP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/test-tip");
 pub const TAG_DSM_TEST_NEXT_TIP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-next-tip");
+    crate::tagged_domain!(b"DSM/test-next-tip");
 pub const TAG_DSM_TEST_COMMIT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-commit");
+    crate::tagged_domain!(b"DSM/test-commit");
 pub const TAG_DSM_TEST_PARENT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-parent");
-pub const TAG_DSM_TEST_CHILD: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/test-child");
+    crate::tagged_domain!(b"DSM/test-parent");
+pub const TAG_DSM_TEST_CHILD: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/test-child");
 pub const TAG_DSM_BENCH: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/bench");
 pub const TAG_DSM_TRACE_GENESIS: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/trace-genesis");
+    crate::tagged_domain!(b"DSM/trace-genesis");
 pub const TAG_DSM_TRACE_DEVICE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DSM/trace-device");
+    crate::tagged_domain!(b"DSM/trace-device");
 pub const TAG_DSM_TAG: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tag");
 pub const TAG_DSM_TAG_A: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tag-a");
 pub const TAG_DSM_TAG_B: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tag-b");

@@ -293,20 +293,15 @@ impl DsmImplementationHarness {
         let mut bootstrap = Vec::with_capacity(device_values.len());
         for device in &device_values {
             let label = tla_atom(device)?;
-            let identity_seed = trace_seed(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/device-seed"),
-                &label,
-            );
+            let identity_seed = trace_seed(dsm::tagged_domain!(b"DSM/VV/device-seed"), &label);
             let signing =
                 generate_keypair_from_seed(TRACE_VARIANT, &identity_seed).with_context(|| {
                     format!("failed to generate direct replay signing key for {label}")
                 })?;
-            let device_id = bytes32_from_hash(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/device-id"),
-                label.as_bytes(),
-            );
+            let device_id =
+                bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/device-id"), label.as_bytes());
             let genesis_hash = bytes32_from_hash(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/device-genesis"),
+                dsm::tagged_domain!(b"DSM/VV/device-genesis"),
                 label.as_bytes(),
             );
             let state = create_direct_trace_state(&identity_seed, device_id, &signing.public_key)?;
@@ -495,17 +490,11 @@ impl DsmImplementationHarness {
         let label = tla_atom(&changed_device)?;
         let _signing = generate_keypair_from_seed(
             TRACE_VARIANT,
-            &trace_seed(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/generated-signing"),
-                &label,
-            ),
+            &trace_seed(dsm::tagged_domain!(b"DSM/VV/generated-signing"), &label),
         )
         .with_context(|| format!("failed to generate replay SPHINCS+ key for {label}"))?;
         let _kyber = generate_kyber_keypair_from_entropy(
-            &trace_seed(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/generated-kyber"),
-                &label,
-            ),
+            &trace_seed(dsm::tagged_domain!(b"DSM/VV/generated-kyber"), &label),
             &label,
         )
         .with_context(|| format!("failed to generate replay Kyber key for {label}"))?;
@@ -1169,7 +1158,7 @@ impl DsmImplementationHarness {
         let label = self.device(device)?.label.clone();
         let activation_id = self.activation_identity(device, expected_shard)?;
         let nonce = trace_seed(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/jap"),
+            dsm::tagged_domain!(b"DSM/VV/jap"),
             &format!("{label}:{ordinal}"),
         );
         Ok(JoinActivationProof {
@@ -1194,7 +1183,7 @@ impl DsmImplementationHarness {
 
         for attempt in 0..4096u64 {
             let candidate = bytes32_from_hash(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/jap-id"),
+                dsm::tagged_domain!(b"DSM/VV/jap-id"),
                 format!("{label}:{attempt}").as_bytes(),
             );
             if activation_shard_index(&candidate, shard_depth) == target_shard {
@@ -1263,10 +1252,7 @@ impl DsmImplementationHarness {
         bytes.extend_from_slice(&lo);
         bytes.extend_from_slice(&hi);
         bytes.extend_from_slice(&tip.to_le_bytes());
-        bytes32_from_hash(
-            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/relationship-tip"),
-            &bytes,
-        )
+        bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/relationship-tip"), &bytes)
     }
 
     fn update_contact_tip(
@@ -1445,7 +1431,7 @@ fn build_direct_signed_transfer(
     let mut nonce = Vec::with_capacity(16);
     nonce.extend_from_slice(&(message_id as u64).to_le_bytes());
     let payload_hash = bytes32_from_hash(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/net-payload"),
+        dsm::tagged_domain!(b"DSM/VV/net-payload"),
         format!("{}", payload.display()).as_bytes(),
     );
     nonce.extend_from_slice(&payload_hash[..8]);
@@ -1493,10 +1479,7 @@ fn tripwire_transition_hash(devices: &[TlaValue], tip: i64) -> [u8; 32] {
     labels.sort();
     let mut bytes = labels.join("|").into_bytes();
     bytes.extend_from_slice(&tip.to_le_bytes());
-    bytes32_from_hash(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/VV/tripwire-parent"),
-        &bytes,
-    )
+    bytes32_from_hash(dsm::tagged_domain!(b"DSM/VV/tripwire-parent"), &bytes)
 }
 
 fn chain_tip_id(tip: i64) -> String {

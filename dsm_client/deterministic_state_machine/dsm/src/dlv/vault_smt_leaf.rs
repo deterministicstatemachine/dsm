@@ -280,9 +280,8 @@ mod tests {
         // The vault-state key cannot collide with a bilateral-tip key
         // for the same 32-byte input, because the two functions hash
         // disjoint domain tags before the input.
-        let mut bilateral = crate::crypto::blake3::tagged_hasher(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/smt-key"),
-        );
+        let mut bilateral =
+            crate::crypto::blake3::tagged_hasher(crate::tagged_domain!(b"DSM/smt-key"));
         // Bilateral keys hash min(A, B) || max(A, B) — feeding the
         // same `vault_id` twice replicates the worst-case-collision
         // input but the domain tag still makes them disjoint.

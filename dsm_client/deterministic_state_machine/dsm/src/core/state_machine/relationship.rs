@@ -510,11 +510,7 @@ impl RelationshipManager {
                 };
                 format!(
                     "H:{}",
-                    binary_key(
-                        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/RELKEY/v2"),
-                        a,
-                        b
-                    )
+                    binary_key(crate::tagged_domain!(b"DSM/RELKEY/v2"), a, b)
                 )
             }
         }
@@ -716,7 +712,7 @@ mod tests {
     /// label only — it plays no role in acceptance predicates.
     fn create_test_state(seed: u64, prev_hash: [u8; 32]) -> State {
         let hash = *crate::crypto::blake3::domain_hash(
-            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/test-state-hash"),
+            crate::tagged_domain!(b"DSM/test-state-hash"),
             format!("test_state_{seed}").as_bytes(),
         )
         .as_bytes();

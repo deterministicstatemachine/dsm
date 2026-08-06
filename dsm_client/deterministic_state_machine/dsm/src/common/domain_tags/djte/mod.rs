@@ -6,20 +6,16 @@
 
 use crate::crypto::domain::TaggedHashDomain;
 
-pub const TAG_DJTE_ACTIVE: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DJTE.ACTIVE");
-pub const TAG_DJTE_DLV_TIP: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DJTE.DLV.TIP");
+pub const TAG_DJTE_ACTIVE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.ACTIVE");
+pub const TAG_DJTE_DLV_TIP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.DLV.TIP");
 pub const TAG_DJTE_JAP: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.JAP");
-pub const TAG_DJTE_POLICY: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DJTE.POLICY");
+pub const TAG_DJTE_POLICY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.POLICY");
 pub const TAG_DJTE_RCPT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.RCPT");
-pub const TAG_DJTE_RESEED: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DJTE.RESEED");
+pub const TAG_DJTE_RESEED: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.RESEED");
 pub const TAG_DJTE_SEED: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.SEED");
 pub const TAG_DJTE_SHARD: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.SHARD");
 pub const TAG_DJTE_SHARDS_ROOT: TaggedHashDomain<'static> =
-    TaggedHashDomain::from_static(b"DJTE.SHARDS.ROOT");
+    crate::tagged_domain!(b"DJTE.SHARDS.ROOT");
 pub const TAG_DJTE_SPENT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.SPENT");
 
 #[cfg(test)]

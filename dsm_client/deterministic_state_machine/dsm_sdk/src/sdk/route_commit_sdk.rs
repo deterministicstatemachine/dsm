@@ -32,7 +32,7 @@ use crate::util::text_id::encode_base32_crockford;
 /// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommit))`.
 /// Matches SoFi spec §3.2 `ExtCommit(X) = H("DSM/ext" || X)`.
 pub(crate) const EXT_COMMIT_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/ext");
+    dsm::tagged_domain!(b"DSM/ext");
 
 /// Storage-node prefix for external-commitment anchors.  Each anchor
 /// is stored at `sofi/extcommit/{X_b32}` — the suffix doubles as the
@@ -521,9 +521,8 @@ pub(crate) async fn publish_route_anchor_with_pointers(
         //   "DSM/pending-marker\0" || x || hop_index_le)
         // which is unique per (X, hop) and unforgeable without σ.
         let marker_digest: [u8; 32] = {
-            let mut h = dsm::crypto::blake3::tagged_hasher(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/pending-marker"),
-            );
+            let mut h =
+                dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/pending-marker"));
             h.update(x);
             h.update(&(hop_index as u32).to_le_bytes());
             *h.finalize().as_bytes()
@@ -1281,7 +1280,7 @@ mod tests {
         assert_ne!(
             compute_external_commitment(&rc),
             dsm::crypto::blake3::domain_hash_bytes(
-                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/some-other-domain"),
+                dsm::tagged_domain!(b"DSM/some-other-domain"),
                 &bytes
             ),
         );
