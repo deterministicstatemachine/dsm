@@ -2,6 +2,11 @@
 
 //! DSM namespace tags: crypto keys
 
+// TAGS below is consumed only by the cfg(test) `all_tags()` collector, so
+// both it and this import are test-only in a non-test build.
+#[cfg(test)]
+use crate::crypto::domain::TaggedHashDomain;
+
 mod commitments;
 mod key_derivation;
 mod nonce_randomness;
@@ -11,7 +16,8 @@ pub use key_derivation::*;
 pub use nonce_randomness::*;
 
 #[cfg(test)]
-pub(super) const TAGS: &[&str] = &[
+#[cfg(test)]
+pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ATTRACTOR_COMMIT,
     TAG_DSM_BALANCE_COMMIT,
     TAG_DSM_BTC_NONCE,

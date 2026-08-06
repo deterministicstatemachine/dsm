@@ -850,10 +850,9 @@ mod domain_hash_agreement {
     fn the_formerly_divergent_tag_has_a_single_encoding() {
         let via_helper = domain_hash_bytes(TAG_DSM_DLV_OPEN, BODY);
 
-        let Ok(domain) = TaggedHashDomain::try_new(TAG_DSM_DLV_OPEN.as_bytes()) else {
-            panic!("TAG_DSM_DLV_OPEN must be a valid tagged-hash domain");
-        };
-        let mut canonical = dsm::crypto::blake3::tagged_hasher(domain);
+        // The tag IS a TaggedHashDomain now — there is no &str to re-validate,
+        // which is itself the end state this test was written to anticipate.
+        let mut canonical = dsm::crypto::blake3::tagged_hasher(TAG_DSM_DLV_OPEN);
         canonical.update(BODY);
 
         assert_eq!(
@@ -869,15 +868,16 @@ mod domain_hash_agreement {
     #[test]
     fn neither_tag_can_be_spelled_with_its_own_delimiter() {
         for tag in [TAG_DSM_CONTACT_ADD, TAG_DSM_DLV_OPEN] {
+            let spelled = String::from_utf8_lossy(tag.source_bytes()).into_owned();
             assert!(
-                TaggedHashDomain::try_new(tag.as_bytes()).is_ok(),
-                "{tag:?} must be representable"
+                TaggedHashDomain::try_new(spelled.as_bytes()).is_ok(),
+                "{spelled:?} must be representable"
             );
 
-            let with_nul = format!("{tag}\0");
+            let with_nul = format!("{spelled}\0");
             assert!(
                 TaggedHashDomain::try_new(with_nul.as_bytes()).is_err(),
-                "{tag:?} plus a hand-written NUL must be unrepresentable, not \
+                "{spelled:?} plus a hand-written NUL must be unrepresentable, not \
                  silently trimmed back onto {tag:?}'s domain"
             );
         }

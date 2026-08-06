@@ -40,12 +40,13 @@ keys) all derive from non-NUL tags through rule 1 and are preserved.
 
 ## Breaking — digest moves, clean cut required
 
-Four production sites. All four are **double-NUL today**: a literal that already
-ends with `\0` passed to a helper that appends another.
+Six production sites. All six are **double-NUL today**: a literal that already
+ends with `\0` passed to a helper that appends another. (It was recorded as four
+until the rule-1 pass found B5/B6 — see the correction below.)
 
 | # | site | today | after | blast radius | action |
 |---|---|---|---|---|---|
-| B1 | `dsm_storage_node/src/api/infra/hardening.rs:124` `blake3_tagged("DSM/perm\0", …)` | `"DSM/perm" \|\| 0x00 \|\| 0x00` | `"DSM/perm" \|\| 0x00` | PRF behind `permute_unbiased` → server-side replication **push order**. NOT a discovery function — see the trace below | synchronized 3-node redeploy; **no migration, no re-replication** |
+| B1 | `dsm_storage_node/src/api/infra/hardening.rs:124` `blake3_tagged("DSM/perm\0", …)` | `"DSM/perm" \|\| 0x00 \|\| 0x00` | `"DSM/perm" \|\| 0x00` | PRF behind `permute_unbiased` → server-side replication **push order**. NOT a discovery function — see the trace below | synchronized redeploy of the assigned holders; **no migration, no re-replication** |
 | B2 | `dsm_storage_node/src/api/infra/hardening.rs:149` `blake3_tagged("DSM/mirror\0", …)` | doubled | single | `mirror_set_w` → `expected_mirrors`, which feeds **only an `info!` log line** | redeploy; nothing else observes it |
 
 ### Why B1/B2 strand nothing — the read/repair trace
@@ -98,10 +99,40 @@ configures a reader with a strict subset of the fleet, discovery narrows to that
 subset — which is true today independently of this cut, but would make an
 unbalanced push order matter more than it does now.
 | B3 | `dsm_sdk/src/storage/client_db/cert_resync.rs:363` `dsm_domain_hasher("DSM/cert-restart/v1\0")` | doubled | single | `compute_joint_auth_hash` — the joint cert-restart statement **both AKs sign** | clear pending cert-restart state; no fallback reader |
-| B4 | `dsm_sdk/src/sdk/kyber_identity.rs:29` `KYBER_IDENTITY_BINDING_TAG = "DSM/kyber-identity-binding\0"` into the **core** `domain_hash` (import confirmed at `:23`) | doubled | single | ML-KEM ↔ device-identity binding; AK-signed, verifier re-derives | regenerate bindings; peers must update together |
+| B4 | `dsm_sdk/src/sdk/kyber_identity.rs:29` `KYBER_IDENTITY_BINDING_TAG = "DSM/kyber-identity-binding\0"` into the **core** `domain_hash` (import confirmed at `:23`) | doubled | single | ML-KEM ↔ device-identity binding, AK-signed. **Nothing verifies it today** — see the cache trace below | regenerate bindings; peers must update together |
 
 | B5 | `dsm_sdk/src/sdk/b0x_sdk.rs:1349` `dsm_domain_hasher("DSM/b0x-reply-message-id\0")` | doubled | single | b0x transport-local spool id (16 truncated bytes). Dedupes redeliveries onto one spool row; unsigned, not persisted as an identity | synchronized client update; in-flight messages may spool twice across the upgrade |
 | B6 | `dsm_sdk/src/sdk/b0x_sdk.rs:1513` `dsm_domain_hasher("DSM/b0x-certresync-message-id\0")` | doubled | single | same class, cert-resync transport id | same |
+
+### B4 cache trace — no verdict is cached anywhere, and nothing verifies
+
+Searched for persisted verification booleans, accepted-binding rows, in-memory
+maps, Android-side caches, and any lookup keyed by the preserved identity rather
+than the binding digest. Result:
+
+- **`verify_kyber_identity_binding` has ZERO production callers.** Only
+  `build_local_kyber_identity_binding` is used — `b0x_sdk.rs:979`, `:1155`,
+  `storage_node_sdk.rs:3148`. The binding is produced and shipped; nothing on
+  any path checks it.
+- **The storage node persists but does not verify.** `kyber_public_key` and
+  `kyber_binding_sig` are columns on the device registry (`db/pg.rs:286-287`,
+  `db/sqlite.rs:206`), written by the registration insert and read back by
+  `get_device`. No signature check exists on that path.
+- **`contacts.kyber_public_key` caches the peer's KEY**, not the binding digest
+  and not a verdict.
+- **`contacts.verified` / `verification_proof` are contact-trust fields**, sticky
+  -OR on upsert and written from `ContactRecord`, never from a binding check.
+  Pinned by `storing_a_kyber_public_key_does_not_cache_a_verification_verdict`,
+  which compares the column BEFORE and AFTER storing a key rather than against a
+  literal — the fixture already sets it, so a fixed-value assertion would have
+  measured the fixture.
+- **No Android/Kotlin reference exists at all.**
+
+Consequence, stated plainly: **B4's digest move is inert in production today**,
+because no code verifies the binding. The stored `kyber_binding_sig` rows become
+unverifiable-if-anyone-ever-checks, which is why they are still regenerated — but
+there is no cached verdict to invalidate, and the earlier claim in the B4 row
+that a "verifier re-derives" was wrong. A verifier exists; nothing calls it.
 
 ### Correction: the breaking set is SIX, not four
 
@@ -134,12 +165,46 @@ row with a NULL expiry is therefore removed by neither and persists indefinitely
 A repost after the cut computes a different id, `INSERT OR IGNORE` sees no
 conflict, and the recipient holds the same logical message twice.
 
-**Procedure chosen: quiesce and drain before upgrading.**
+**Procedure chosen: quiesce and drain, as an actual cut boundary.**
 
-    SELECT COUNT(*) FROM inbox_spool WHERE acked = 0;   -- must be 0
+The order matters. Querying the count while producers are still running proves
+nothing: a message can arrive between the query and the upgrade, and the drain
+becomes a hopeful observation rather than a boundary.
 
-Upgrade only when that count is zero on every node. Then no old-id row exists for
-a new-id repost to duplicate.
+  1. Disable new b0x producers AND retries.
+  2. Let in-flight deliveries and acknowledgements settle.
+  3. On every node that can HOLD a row for the affected traffic, verify
+
+         SELECT COUNT(*) FROM inbox_spool WHERE acked = 0;   -- must be 0
+
+     "Every node" is the wrong rule and only looks right at the current fleet
+     size. Replication is epidemic: an object lives on its ASSIGNED replica set
+     (`get_replication_targets` permutes alive nodes and takes
+     `replication_factor`; `mirror_set_w` takes `MMIRROR`), not on all of them.
+     The b0x spool is placed differently again — the SDK submit loop posts to
+     every endpoint in `storage_node_endpoints` WITHOUT breaking on first
+     success (`b0x_sdk.rs:1470-1507`), so a row can exist on any endpoint a
+     participating client was configured with.
+
+     AND THE SET IS HISTORICAL, NOT CURRENT. An unacked row with a NULL
+     `expires_at_iter` is purged by neither sweep, so it survives indefinitely —
+     including across a node being taken out of service and later rejoining. The
+     required set is therefore **every storage node that could have received a
+     pre-cut submission and may return to service**, not the union of today's
+     endpoint lists. A node that is unavailable at check time CANNOT be silently
+     omitted: it must be permanently decommissioned, or cleared before it
+     rejoins, or the cut is refused.
+
+     If that historical set cannot be established with confidence, the safe rule
+     is to drain or wipe the entire potentially reachable storage fleet. An
+     unchecked node that rejoins carries pre-cut rows back into service.
+
+  4. Keep producers disabled — the check is only valid while nothing can write.
+  5. Upgrade all clients and nodes together.
+  6. Re-enable traffic only once every participant is on the canonical encoding.
+
+Steps 1 and 4 are what make step 3 meaningful. With producers still enabled the
+zero is a sample, not an invariant.
 
 Why not the alternatives:
 

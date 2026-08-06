@@ -3468,11 +3468,15 @@ impl BilateralBleHandler {
                         },
                     ) => {
                         let object_id = dsm::crypto::blake3::domain_hash_bytes(
-                            "DSM/bearer-object/v1",
+                            dsm::crypto::domain::TaggedHashDomain::from_static(
+                                b"DSM/bearer-object/v1",
+                            ),
                             token_id,
                         );
                         let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
-                            "DSM/bearer-payload/v1",
+                            dsm::crypto::domain::TaggedHashDomain::from_static(
+                                b"DSM/bearer-payload/v1",
+                            ),
                             &op_bytes,
                         );
                         let authority_policy_hash = authority_policy

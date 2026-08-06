@@ -152,8 +152,10 @@ mod tests {
         #[test]
         fn pbt_blake3_domain_hash_is_deterministic(suffix in "[a-zA-Z0-9_-]{1,32}", data in proptest::collection::vec(any::<u8>(), 0..=256)) {
             let tag = format!("DSM/{}", suffix);
-            let h1 = domain_hash(&tag, &data);
-            let h2 = domain_hash(&tag, &data);
+            // A generated tag is a RUNTIME domain: validated at construction.
+            let d = TaggedHashDomain::try_new(tag.as_bytes()).expect("generated tag has no NUL");
+            let h1 = domain_hash(d, &data);
+            let h2 = domain_hash(d, &data);
             prop_assert_eq!(h1, h2);
         }
 

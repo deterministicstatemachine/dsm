@@ -41,7 +41,7 @@ fn first8_le_u64(bytes: &[u8]) -> u64 {
 
 fn era_source_dlv_device_id() -> [u8; 32] {
     dsm::crypto::blake3::domain_hash_bytes(
-        "DSM/system-peer-device-id",
+        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/system-peer-device-id"),
         ERA_SOURCE_DLV_PEER_KEY.as_bytes(),
     )
 }

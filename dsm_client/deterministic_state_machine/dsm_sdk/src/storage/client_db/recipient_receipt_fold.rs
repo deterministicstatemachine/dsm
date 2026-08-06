@@ -123,7 +123,9 @@ const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterpart
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
 pub fn acceptance_artifact_hash(exact_full_receipt_bytes: &[u8]) -> [u8; 32] {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/acceptance-artifact/v1");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/acceptance-artifact/v1"),
+    );
     h.update(exact_full_receipt_bytes);
     let mut out = [0u8; 32];
     out.copy_from_slice(&h.finalize().as_bytes()[..32]);

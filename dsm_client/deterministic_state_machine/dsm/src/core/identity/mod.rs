@@ -68,7 +68,9 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
     let mut leaves: Vec<[u8; 32]> = contributions
         .iter()
         .map(|c| {
-            let mut h = dsm_domain_hasher("DSM/GENESIS/CONTRIB/v2");
+            let mut h = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/GENESIS/CONTRIB/v2",
+            ));
             h.update(&c.data);
             *h.finalize().as_bytes()
         })
@@ -90,8 +92,10 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
                 &level[i]
             };
             // Distinct sub-domain — this is the contribution Merkle tree,
-            // not the whitepaper's genesis hash (`"DSM/genesis"`).
-            let mut h = dsm_domain_hasher("DSM/genesis-merkle");
+            // not the whitepaper's genesis hash (`crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis")`).
+            let mut h = dsm_domain_hasher(crate::crypto::domain::TaggedHashDomain::from_static(
+                b"DSM/genesis-merkle",
+            ));
             h.update(left);
             h.update(right);
             next.push(*h.finalize().as_bytes());
@@ -220,7 +224,11 @@ pub async fn create_trustless_genesis<
     }
 
     // Deterministic 32B device hash label for MPC inputs
-    let device_id_bytes: [u8; 32] = *domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes();
+    let device_id_bytes: [u8; 32] = *domain_hash(
+        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+        device_id.as_bytes(),
+    )
+    .as_bytes();
 
     let session = create_genesis(
         device_id_bytes,
@@ -290,7 +298,11 @@ pub async fn create_trustless_genesis<
         s.put(&hash32, &ser).await?;
     }
 
-    let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
+    let device_id_bytes = domain_hash(
+        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+        device_id.as_bytes(),
+    )
+    .into();
     Ok(TrustlessGenesisArtifacts {
         device_id: device_id_bytes,
         genesis_state,
@@ -365,7 +377,11 @@ impl IdentityStore {
                 .get_mut(genesis_id)
                 .ok_or_else(|| IdentityError::IdentityNotFound("Identity not found".into()))?;
             let device_id = format!("device_{:016x}", crate::performance::mono_commit_height());
-            let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
+            let device_id_bytes = domain_hash(
+                crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+                device_id.as_bytes(),
+            )
+            .into();
             if identity
                 .devices
                 .iter()
@@ -459,7 +475,11 @@ impl IdentityStore {
                 |e| IdentityError::DeviceError(format!("Device genesis derivation failed: {e:?}")),
             )?;
 
-        let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
+        let device_id_bytes = domain_hash(
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/device-id"),
+            device_id.as_bytes(),
+        )
+        .into();
         let identity = Identity {
             name: name.to_string(),
             master_genesis: genesis,
@@ -663,6 +683,9 @@ impl Identity {
     }
 
     pub fn genesis_hash(&self) -> blake3::Hash {
-        domain_hash("DSM/genesis-hash", &self.master_genesis.hash)
+        domain_hash(
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/genesis-hash"),
+            &self.master_genesis.hash,
+        )
     }
 }

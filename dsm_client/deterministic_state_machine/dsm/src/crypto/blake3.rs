@@ -162,13 +162,16 @@ pub fn new_hasher() -> Hasher {
 ///
 /// # Panics
 /// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
-pub fn dsm_domain_hasher(tag: &str) -> Hasher {
+use crate::crypto::domain::TaggedHashDomain;
+
+pub fn dsm_domain_hasher(tag: TaggedHashDomain<'_>) -> Hasher {
     assert!(
-        tag.starts_with("DSM/") || tag.starts_with("DJTE."),
-        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {tag}"
+        tag.source_bytes().starts_with(b"DSM/") || tag.source_bytes().starts_with(b"DJTE."),
+        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {:?}",
+        String::from_utf8_lossy(tag.source_bytes())
     );
     let mut h = Hasher::new();
-    h.update(tag.as_bytes());
+    h.update(tag.source_bytes());
     h.update(&[0u8]);
     h
 }
@@ -184,13 +187,14 @@ pub fn dsm_domain_hasher(tag: &str) -> Hasher {
 ///
 /// # Panics
 /// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
-pub fn dsm_domain_hasher_keyed(tag: &str, key: &[u8; 32]) -> Hasher {
+pub fn dsm_domain_hasher_keyed(tag: TaggedHashDomain<'_>, key: &[u8; 32]) -> Hasher {
     assert!(
-        tag.starts_with("DSM/") || tag.starts_with("DJTE."),
-        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {tag}"
+        tag.source_bytes().starts_with(b"DSM/") || tag.source_bytes().starts_with(b"DJTE."),
+        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {:?}",
+        String::from_utf8_lossy(tag.source_bytes())
     );
     let mut h = Hasher::new_keyed(key);
-    h.update(tag.as_bytes());
+    h.update(tag.source_bytes());
     h.update(&[0u8]);
     h
 }
@@ -213,7 +217,7 @@ pub fn tagged_hasher(domain: crate::crypto::domain::TaggedHashDomain<'_>) -> Has
 
 /// Domain-separated hash function as specified in whitepaper
 /// H(tag || data) where tag includes null terminator
-pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {
+pub fn domain_hash(tag: TaggedHashDomain<'_>, data: &[u8]) -> Hash {
     let mut hasher = dsm_domain_hasher(tag);
     hasher.update(data);
     hasher.finalize()
@@ -223,9 +227,14 @@ pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {
 mod tests_domain_hash {
     use super::*;
 
-    const TAG_DSM_AB_FIXTURE: &str = "DSM/ab";
-    const TAG_DSM_ABC_FIXTURE: &str = "DSM/abC";
-    const TAG_NOT_DSM_FIXTURE: &str = "not-dsm";
+    const TAG_DSM_AB_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
+        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/ab");
+    const TAG_DSM_ABC_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
+        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/abC");
+    // No longer a valid tag by prefix, but still representable — the prefix
+    // rule is a debug_assert in the hasher, not part of the type.
+    const TAG_NOT_DSM_FIXTURE: crate::crypto::domain::TaggedHashDomain<'static> =
+        crate::crypto::domain::TaggedHashDomain::from_static(b"not-dsm");
 
     #[test]
     fn domain_hash_includes_nul_terminator() {
@@ -245,7 +254,7 @@ mod tests_domain_hash {
 }
 
 /// Domain-separated hash returning bytes
-pub fn domain_hash_bytes(tag: &str, data: &[u8]) -> [u8; 32] {
+pub fn domain_hash_bytes(tag: TaggedHashDomain<'_>, data: &[u8]) -> [u8; 32] {
     *domain_hash(tag, data).as_bytes()
 }
 
@@ -500,7 +509,7 @@ mod tests {
 
     #[test]
     fn domain_hash_bytes_matches_hash() {
-        let tag = "DSM/test";
+        let tag = crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/test");
         let data = b"payload";
         let h = domain_hash(tag, data);
         let hb = domain_hash_bytes(tag, data);

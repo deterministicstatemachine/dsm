@@ -23,6 +23,8 @@
 //! is the authoritative online-posted, value-capable relationship set under the
 //! genesis; this module enforces that the seal accounts for EXACTLY that set.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::recovery::capsule::contact_set_commit_from_device_ids;
 use crate::recovery::succession_binding::CrossRelationshipSuccessionEvidence;
@@ -40,8 +42,10 @@ fn seal_fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
     })
 }
 
-const EVIDENCE_ROOT_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_ACK_ROOT;
-const ACTIVATION_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_ACTIVATION;
+const EVIDENCE_ROOT_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_ACK_ROOT;
+const ACTIVATION_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_ACTIVATION;
 
 /// Commit to the complete, ordered set of per-counterparty evidence outcomes
 /// (sorted by counterparty id): each entry is `(counterparty_devid, verified_tip)`.

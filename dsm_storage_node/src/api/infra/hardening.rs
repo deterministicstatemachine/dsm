@@ -53,6 +53,51 @@ pub fn blake3_tagged(domain: TaggedHashDomain<'_>, body: &[u8]) -> [u8; 32] {
     *out.as_bytes()
 }
 
+/// Node-side half of the tagged-hash-cut deployment preflight (impact-table rows
+/// B5/B6). The client-side half is
+/// `dsm_sdk::storage::client_db::cert_resync::tagged_hash_cut_preflight`.
+///
+/// `inbox_spool` dedupes on `message_id UNIQUE` with `INSERT OR IGNORE`, and the
+/// ids move across the cut. An UNACKED row with a NULL `expires_at_iter` is
+/// purged by neither expiry sweep, so it survives to be duplicated by its own
+/// repost. Zero unacked rows is the boundary condition.
+///
+/// **Only meaningful while producers are disabled.** Disable producers and
+/// retries, let deliveries settle, THEN call this, and keep them disabled
+/// through the upgrade — with traffic live the count is a sample, not an
+/// invariant.
+///
+/// SCOPE — per HOLDER, not per fleet. Replication here is epidemic: an object
+/// lives on its ASSIGNED replica set (`get_replication_targets` permutes alive
+/// nodes and takes `replication_factor`; `mirror_set_w` takes `MMIRROR`), not on
+/// every node. The b0x spool is placed differently again — the SDK submit loop
+/// posts to every endpoint in `storage_node_endpoints` and does NOT break on
+/// first success (`b0x_sdk.rs:1470-1507`) — so a row can exist on any endpoint a
+/// participating client was configured with.
+///
+/// The set that must report zero is that union, NOT "all N nodes". At the
+/// present fleet size the two coincide because clients carry the whole endpoint
+/// list; that is a property of this deployment, not of the protocol, and it
+/// stops holding as soon as the fleet outgrows a client's endpoint list.
+///
+/// AND IT IS HISTORICAL, NOT CURRENT. An unacked row with a NULL
+/// `expires_at_iter` is purged by neither sweep, so it outlives any endpoint
+/// list — including a node taken out of service and later rejoined. The set is
+/// every node that could have received a PRE-CUT submission and may return.
+/// An unavailable node cannot be silently omitted: decommission it permanently,
+/// clear it before it rejoins, or refuse the cut. If the historical set cannot
+/// be established, drain or wipe the whole potentially reachable fleet.
+pub fn spool_drain_preflight(unacked_rows: i64) -> Result<(), String> {
+    if unacked_rows > 0 {
+        return Err(format!(
+            "{unacked_rows} unacknowledged inbox_spool row(s): a repost after \
+             the cut derives a different message id and will not dedupe. Drain \
+             before upgrading."
+        ));
+    }
+    Ok(())
+}
+
 /// Storage-node tagged-hash domains. The delimiter belongs to the encoder,
 /// never to these constants — a NUL here fails to compile.
 pub const DOM_APPLY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/apply");

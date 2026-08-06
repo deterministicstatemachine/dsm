@@ -121,7 +121,9 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<SenderOutboxRecord> {
 /// full 32-byte commitment is retained on this row and is what a 409 is
 /// compared against — the truncation is an id, never the equality test.
 pub fn derive_submission_id(commitment: &[u8; 32]) -> String {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/b0x-submission-id/v1");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/b0x-submission-id/v1"),
+    );
     h.update(commitment);
     crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
 }

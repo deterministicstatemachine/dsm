@@ -31,7 +31,8 @@ use crate::util::text_id::encode_base32_crockford;
 /// BLAKE3 domain tag for the external commitment derivation
 /// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommit))`.
 /// Matches SoFi spec §3.2 `ExtCommit(X) = H("DSM/ext" || X)`.
-pub(crate) const EXT_COMMIT_DOMAIN: &str = "DSM/ext";
+pub(crate) const EXT_COMMIT_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
+    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/ext");
 
 /// Storage-node prefix for external-commitment anchors.  Each anchor
 /// is stored at `sofi/extcommit/{X_b32}` — the suffix doubles as the
@@ -1279,7 +1280,10 @@ mod tests {
         let bytes = canonicalise_for_commitment(&rc).encode_to_vec();
         assert_ne!(
             compute_external_commitment(&rc),
-            dsm::crypto::blake3::domain_hash_bytes("DSM/some-other-domain", &bytes),
+            dsm::crypto::blake3::domain_hash_bytes(
+                dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/some-other-domain"),
+                &bytes
+            ),
         );
     }
 

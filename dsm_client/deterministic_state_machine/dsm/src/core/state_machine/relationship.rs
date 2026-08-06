@@ -445,7 +445,11 @@ impl RelationshipManager {
     /// * `EntityCentric` — order-dependent (entity-first; per-side view).
     /// * `Hashed` — order-independent alias, retained for back-compat.
     pub fn get_relationship_key(&self, entity_id: &[u8; 32], counterparty_id: &[u8; 32]) -> String {
-        fn binary_key(domain: &str, a: &[u8; 32], b: &[u8; 32]) -> String {
+        fn binary_key(
+            domain: crate::crypto::domain::TaggedHashDomain<'_>,
+            a: &[u8; 32],
+            b: &[u8; 32],
+        ) -> String {
             let mut h = dsm_domain_hasher(domain);
             h.update(a.as_bytes());
             h.update(b.as_bytes());
@@ -472,13 +476,28 @@ impl RelationshipManager {
                 } else {
                     (counterparty_id, entity_id)
                 };
-                format!("C:{}", binary_key("DSM/RELKEY/canonical/v3", a, b))
+                format!(
+                    "C:{}",
+                    binary_key(
+                        crate::crypto::domain::TaggedHashDomain::from_static(
+                            b"DSM/RELKEY/canonical/v3"
+                        ),
+                        a,
+                        b
+                    )
+                )
             }
             KeyDerivationStrategy::EntityCentric => {
                 // Order-dependent: entity first.
                 format!(
                     "E:{}",
-                    binary_key("DSM/RELKEY/entity-centric/v3", entity_id, counterparty_id)
+                    binary_key(
+                        crate::crypto::domain::TaggedHashDomain::from_static(
+                            b"DSM/RELKEY/entity-centric/v3"
+                        ),
+                        entity_id,
+                        counterparty_id
+                    )
                 )
             }
             KeyDerivationStrategy::Hashed => {
@@ -489,7 +508,14 @@ impl RelationshipManager {
                 } else {
                     (counterparty_id, entity_id)
                 };
-                format!("H:{}", binary_key("DSM/RELKEY/v2", a, b))
+                format!(
+                    "H:{}",
+                    binary_key(
+                        crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/RELKEY/v2"),
+                        a,
+                        b
+                    )
+                )
             }
         }
     }
@@ -690,7 +716,7 @@ mod tests {
     /// label only — it plays no role in acceptance predicates.
     fn create_test_state(seed: u64, prev_hash: [u8; 32]) -> State {
         let hash = *crate::crypto::blake3::domain_hash(
-            "DSM/test-state-hash",
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/test-state-hash"),
             format!("test_state_{seed}").as_bytes(),
         )
         .as_bytes();

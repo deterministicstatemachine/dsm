@@ -338,7 +338,7 @@ impl TokenMpcSDK {
     ) -> Result<String, DsmError> {
         // Generate unique session ID from token parameters
         let params_hash = dsm::crypto::blake3::domain_hash(
-            "DSM/mpc-params",
+            dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/mpc-params"),
             &[
                 params.token_name.as_bytes(),
                 params.token_symbol.as_bytes(),
@@ -583,7 +583,7 @@ impl TokenMpcSDK {
             let participants: Vec<[u8; 32]> = (0..session.params.threshold)
                 .map(|i| {
                     *dsm::crypto::blake3::domain_hash(
-                        "DSM/mpc-node-id",
+                        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/mpc-node-id"),
                         format!("node_{i}").as_bytes(),
                     )
                     .as_bytes()
@@ -594,7 +594,7 @@ impl TokenMpcSDK {
                 .map(|p| TokenContribution {
                     participant: *p,
                     material: *dsm::crypto::blake3::domain_hash(
-                        "DSM/mpc-material",
+                        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/mpc-material"),
                         b"dummy_material",
                     )
                     .as_bytes(),

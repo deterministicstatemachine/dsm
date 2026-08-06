@@ -259,7 +259,7 @@ fn the_canonical_encoder_matches_dsm_domain_hasher_exactly() {
             panic!("sample {tag:?} is not a canonical domain");
         };
 
-        let mut old = dsm_domain_hasher(tag);
+        let mut old = dsm_domain_hasher(domain);
         old.update(b"payload");
 
         let mut new = tagged_hasher(domain);

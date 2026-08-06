@@ -1834,7 +1834,9 @@ impl AppRouterImpl {
                                 }
                             };
                             let vault_id = *dsm::crypto::blake3::domain_hash(
-                                "DSM/vault-device",
+                                dsm::crypto::domain::TaggedHashDomain::from_static(
+                                    b"DSM/vault-device",
+                                ),
                                 req.vault_op_id.as_bytes(),
                             )
                             .as_bytes();
@@ -3999,7 +4001,9 @@ impl AppRouterImpl {
                                 Err(e) => return err(format!("await_and_complete: no state: {e}")),
                             };
                             let vault_id = *dsm::crypto::blake3::domain_hash(
-                                "DSM/vault-device",
+                                dsm::crypto::domain::TaggedHashDomain::from_static(
+                                    b"DSM/vault-device",
+                                ),
                                 vault_op_id.as_bytes(),
                             )
                             .as_bytes();

@@ -2972,7 +2972,11 @@ impl CoreSDK {
             &nonce,
         );
         let operation_digest = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/canonical-apply-op-digest/v1");
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::crypto::domain::TaggedHashDomain::from_static(
+                    b"DSM/canonical-apply-op-digest/v1",
+                ),
+            );
             h.update(canonical_operation_bytes);
             let mut out = [0u8; 32];
             out.copy_from_slice(&h.finalize().as_bytes()[..32]);

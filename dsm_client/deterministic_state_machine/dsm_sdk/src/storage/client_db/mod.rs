@@ -2745,6 +2745,147 @@ mod tests {
     // success and it cleared the in-memory §5.4 modal lock and admitted the
     // offline transfer anyway. These pin the DECISION the handler now consumes.
 
+    // ===================== tagged-hash cut deployment preflight =====================
+    //
+    // The drain is a CUT BOUNDARY, not an observation. These pin that the
+    // preflight refuses in both blocking conditions and permits only when both
+    // are clear. Prose in the ADR describes the operator sequence; this is the
+    // part a machine enforces.
+
+    #[test]
+    fn the_cut_preflight_permits_only_a_fully_clear_state() {
+        use crate::storage::client_db::cert_resync::CutPreflight;
+        assert!(CutPreflight::Clear.may_upgrade());
+        assert!(
+            !CutPreflight::OutstandingResyncs(1).may_upgrade(),
+            "a relationship mid-resync cannot complete across the cut — its \
+             in-flight joint statement was derived under the pre-cut digest"
+        );
+        // The spool half is NODE-side, and scoped to the holders of the
+        // affected traffic rather than to the fleet — see
+        // dsm_storage_node::api::infra::hardening::spool_drain_preflight.
+        // This enum deliberately does not model a table this process does not own.
+    }
+
+    /// ANTI-VACUITY for the B3 arm, and the third of the three B3 checks: a
+    /// relationship that still owes a resync must BLOCK the cut. Its in-flight
+    /// joint statement was derived under the pre-cut digest and cannot be
+    /// completed across it — the two sides would derive different statements.
+    #[test]
+    #[serial]
+    fn an_outstanding_cert_resync_blocks_the_cut() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let rel = [0x5Au8; 32];
+        crate::storage::client_db::cert_resync::mark_cert_resync_required(&rel)
+            .expect("mark required");
+
+        let outcome = crate::storage::client_db::cert_resync::tagged_hash_cut_preflight()
+            .expect("preflight must not error");
+        assert_eq!(
+            outcome,
+            crate::storage::client_db::cert_resync::CutPreflight::OutstandingResyncs(1)
+        );
+        assert!(
+            !outcome.may_upgrade(),
+            "the cut proceeded while a relationship was mid-resync"
+        );
+    }
+
+    /// B4 CACHE INVENTORY, pinned rather than asserted in prose.
+    ///
+    /// The trace found NO cached verification verdict for the ML-KEM identity
+    /// binding anywhere:
+    ///
+    ///   - `verify_kyber_identity_binding` has ZERO production callers; only
+    ///     `build_local_kyber_identity_binding` is used (b0x_sdk ×2,
+    ///     storage_node_sdk ×1).
+    ///   - the storage node PERSISTS `kyber_public_key` + `kyber_binding_sig`
+    ///     in its device registry and never verifies the signature.
+    ///   - `contacts.kyber_public_key` caches the peer's KEY, not the binding
+    ///     digest and not a verdict.
+    ///   - no Android/Kotlin reference exists at all.
+    ///
+    /// `contacts.verified` / `verification_proof` are contact-trust fields with
+    /// a sticky OR on upsert, written from `ContactRecord`, never from a binding
+    /// check. This test pins that independence: storing a contact WITH a Kyber
+    /// public key must not mark it verified. If a future change ever routes a
+    /// binding verdict into that column, it becomes a B4 cache and this fails.
+    #[test]
+    #[serial]
+    fn storing_a_kyber_public_key_does_not_cache_a_verification_verdict() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0x6Bu8; 32];
+        seed_contact_for_chain_tip_tests(device_id, [0x6Cu8; 32], "BleCapable");
+
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            let read_verified = |conn: &rusqlite::Connection| -> i32 {
+                conn.query_row(
+                    "SELECT verified FROM contacts WHERE device_id = ?1",
+                    rusqlite::params![device_id.to_vec()],
+                    |r| r.get(0),
+                )
+                .expect("read verified")
+            };
+
+            // Compare BEFORE and AFTER rather than against a literal: the
+            // fixture already sets `verified`, so asserting a fixed value would
+            // measure the fixture instead of the behaviour.
+            let before = read_verified(&conn);
+            conn.execute(
+                "UPDATE contacts SET kyber_public_key = ?1 WHERE device_id = ?2",
+                rusqlite::params![vec![0x6Du8; 1184], device_id.to_vec()],
+            )
+            .expect("store kyber pk");
+            let after = read_verified(&conn);
+
+            assert_eq!(
+                before, after,
+                "storing a Kyber public key changed contacts.verified — that \
+                 column would then be a cached binding verdict and the B4 cut \
+                 must invalidate it"
+            );
+
+            // And the key really did land, so the comparison above is not
+            // vacuous over a no-op UPDATE.
+            let stored: Vec<u8> = conn
+                .query_row(
+                    "SELECT kyber_public_key FROM contacts WHERE device_id = ?1",
+                    rusqlite::params![device_id.to_vec()],
+                    |r| r.get(0),
+                )
+                .expect("read kyber pk");
+            assert_eq!(stored.len(), 1184, "the Kyber public key was not stored");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn the_cut_preflight_is_clear_on_a_quiesced_database() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        assert_eq!(
+            crate::storage::client_db::cert_resync::tagged_hash_cut_preflight()
+                .expect("preflight must not error"),
+            crate::storage::client_db::cert_resync::CutPreflight::Clear
+        );
+    }
+
     /// Only an absent or provably-deleted gate admits. Every ambiguous answer refuses.
     #[test]
     fn only_a_cleared_or_absent_gate_admits_an_offline_transfer() {

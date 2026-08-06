@@ -26,7 +26,8 @@ use dsm::types::error::DsmError;
 use crate::sdk::app_state::AppState;
 
 /// Domain tag binding an ML-KEM public key to a device identity + genesis.
-pub const KYBER_IDENTITY_BINDING_TAG: &str = "DSM/kyber-identity-binding\0";
+pub const KYBER_IDENTITY_BINDING_TAG: dsm::crypto::domain::TaggedHashDomain<'static> =
+    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/kyber-identity-binding");
 
 /// Canonical binding digest over `device_id || genesis_hash || kyber_pubkey`,
 /// domain-separated by [`KYBER_IDENTITY_BINDING_TAG`]. This is the message the
@@ -116,6 +117,156 @@ pub fn verify_kyber_identity_binding(
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    /// B4 CACHE TRACE, second half: verification is RECOMPUTED from the binding
+    /// every call, never read from a stored verdict.
+    ///
+    /// The inventory found no acceptance cache anywhere —
+    /// `verify_kyber_identity_binding` has zero production callers, the storage
+    /// node persists `kyber_binding_sig` without checking it, `contacts` caches
+    /// the peer KEY not a verdict, and there is no Android reference. This test
+    /// pins the remaining half: the verifier is a pure function of its
+    /// arguments, so there is nothing to invalidate at the cut beyond the stored
+    /// signatures themselves.
+    ///
+    /// Method: call the verifier twice with the SAME accepted inputs, then a
+    /// third time with one input perturbed. A cached verdict keyed on identity
+    /// would return the earlier answer for the perturbed call; recomputation
+    /// rejects it.
+    #[test]
+    fn binding_verification_is_recomputed_not_cached() {
+        use dsm::crypto::signatures::SignatureKeyPair;
+
+        let device_id = [0x7Au8; 32];
+        let genesis = [0x7Bu8; 32];
+        let kp = SignatureKeyPair::generate_from_entropy(b"DSM/test/b4-nocache").expect("keypair");
+        let kyber_pk = vec![0x7Cu8; dsm::crypto::kyber::public_key_bytes()];
+
+        let digest = binding_digest(&device_id, &genesis, &kyber_pk);
+        let sig = kp.sign(&digest).expect("sign binding");
+
+        // Accepted, twice — a memoizing verifier would also pass this.
+        for _ in 0..2 {
+            verify_kyber_identity_binding(&device_id, &genesis, &kyber_pk, &sig, kp.public_key())
+                .expect("a valid binding must verify");
+        }
+
+        // Same device identity, DIFFERENT Kyber key: the signature no longer
+        // binds. A verdict cached against (device_id, genesis) would wrongly
+        // accept; recomputation refuses.
+        let substituted = vec![0x7Du8; dsm::crypto::kyber::public_key_bytes()];
+        assert!(
+            verify_kyber_identity_binding(
+                &device_id,
+                &genesis,
+                &substituted,
+                &sig,
+                kp.public_key()
+            )
+            .is_err(),
+            "a substituted Kyber key was accepted under the same device identity \
+             — the verdict is cached against identity rather than recomputed \
+             from the binding, and that cache must be invalidated by the B4 cut"
+        );
+
+        // And the original still verifies afterwards, so the refusal above did
+        // not simply poison some shared state.
+        verify_kyber_identity_binding(&device_id, &genesis, &kyber_pk, &sig, kp.public_key())
+            .expect("the original binding must still verify after a rejection");
+    }
+
+    /// IMPACT-TABLE ROW B4, asserted in both directions.
+    ///
+    /// The old construction is written out explicitly rather than frozen as an
+    /// opaque array: the tag literal carried its own NUL and `domain_hash`
+    /// appended another, so the preimage began `"…binding" || 0x00 || 0x00`.
+    /// Reconstructing it here documents exactly what moved.
+    ///
+    /// This digest is what a device AK signs and what a verifier re-derives, so
+    /// every binding published before the cut fails against the new code. That
+    /// is intended — see the regeneration coverage below.
+    #[test]
+    fn b4_identity_binding_moved_off_the_double_nul_digest() {
+        let device_id = [1u8; 32];
+        let genesis = [2u8; 32];
+        let kyber_pk = [3u8; 64];
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&device_id);
+        preimage.extend_from_slice(&genesis);
+        preimage.extend_from_slice(&kyber_pk);
+
+        // What the doubled spelling produced.
+        let mut old = blake3::Hasher::new();
+        old.update(b"DSM/kyber-identity-binding\0"); // the literal, NUL included
+        old.update(&[0u8]); // the helper's appended NUL
+        old.update(&preimage);
+        let old_digest = *old.finalize().as_bytes();
+
+        // What the canonical encoding produces.
+        let mut new = blake3::Hasher::new();
+        new.update(b"DSM/kyber-identity-binding");
+        new.update(&[0u8]);
+        new.update(&preimage);
+        let canonical = *new.finalize().as_bytes();
+
+        let actual = binding_digest(&device_id, &genesis, &kyber_pk);
+        assert_ne!(
+            actual, old_digest,
+            "B4 still produces the doubled-NUL digest — bindings signed before \
+             the cut would still verify"
+        );
+        assert_eq!(actual, canonical, "B4 did not land on the canonical digest");
+    }
+
+    /// OLD ARTIFACT REJECTED / NEW ARTIFACT ACCEPTED, with no fallback path.
+    ///
+    /// A binding signature made over the OLD digest must fail verification, and
+    /// a freshly generated one must pass. If a compatibility verifier is ever
+    /// added, the first assertion breaks.
+    #[test]
+    fn an_old_binding_fails_and_a_regenerated_one_verifies() {
+        use dsm::crypto::signatures::SignatureKeyPair;
+
+        let device_id = [4u8; 32];
+        let genesis = [5u8; 32];
+        let kp = SignatureKeyPair::generate_from_entropy(b"DSM/test/b4-regen").expect("keypair");
+        let kyber_pk = [6u8; 64];
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&device_id);
+        preimage.extend_from_slice(&genesis);
+        preimage.extend_from_slice(&kyber_pk);
+
+        // An artifact signed under the OLD rule.
+        let mut old = blake3::Hasher::new();
+        old.update(b"DSM/kyber-identity-binding\0");
+        old.update(&[0u8]);
+        old.update(&preimage);
+        let stale_sig = kp.sign(old.finalize().as_bytes()).expect("sign old");
+
+        // The verifier re-derives with the canonical rule, so the stale
+        // signature is over the wrong message.
+        let current = binding_digest(&device_id, &genesis, &kyber_pk);
+        assert!(
+            !matches!(
+                dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current, &stale_sig),
+                Ok(true)
+            ),
+            "a binding signed under the pre-cut digest still verifies — there is \
+             a compatibility path that must not exist"
+        );
+
+        // Regenerated against the current digest: accepted.
+        let fresh_sig = kp.sign(&current).expect("sign current");
+        assert!(
+            matches!(
+                dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current, &fresh_sig),
+                Ok(true)
+            ),
+            "a regenerated binding must verify"
+        );
+    }
 
     // A fresh AK (SPHINCS+) + Kyber pubkey and a correctly-built binding.
     struct Fixture {

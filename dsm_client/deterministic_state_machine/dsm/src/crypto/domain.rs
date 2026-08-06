@@ -83,6 +83,19 @@ impl TaggedHashDomain<'static> {
     /// Used in a `const` context, a violation is a compile error rather than a
     /// panic — which is the point: the four double-NUL sites this cut fixes
     /// become a compiler worklist, not a runtime surprise.
+    /// The two `panic!`s are the COMPILE-TIME gate, not runtime error handling.
+    ///
+    /// `const fn` has no fallible return in a const context — a `Result` cannot
+    /// halt compilation. Evaluated in a `const` position (which is how every
+    /// protocol domain is declared) a violation becomes
+    /// `error[E0080]: evaluation panicked`, verified against the real
+    /// `"DSM/cert-restart/v1\0"` literal during the cut. That is the mechanism
+    /// that turned a ~676-site migration into a compiler worklist.
+    ///
+    /// `clippy::panic` is allowed here deliberately and NOWHERE else in this
+    /// module. Runtime construction must use [`TaggedHashDomain::try_new`],
+    /// which returns [`DomainError`] instead.
+    #[allow(clippy::panic)]
     pub const fn from_static(bytes: &'static [u8]) -> Self {
         if bytes.is_empty() {
             panic!("tagged-hash domain must not be empty");

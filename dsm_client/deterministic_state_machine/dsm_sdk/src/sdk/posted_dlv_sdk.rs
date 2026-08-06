@@ -26,7 +26,8 @@ use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::util::text_id::encode_base32_crockford;
 
 /// BLAKE3 domain tag binding the advertisement to the full vault proto.
-pub(crate) const POSTED_DLV_AD_DOMAIN: &str = "DSM/posted-dlv-ad";
+pub(crate) const POSTED_DLV_AD_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
+    dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/posted-dlv-ad");
 
 /// Base prefix for posted-mode DLV advertisements.
 pub(crate) const POSTED_DLV_AD_ROOT: &str = "dlv/posted/";
@@ -423,7 +424,8 @@ mod tests {
             assert_ne!(
                 ours,
                 dsm::crypto::blake3::domain_hash_bytes(other, payload),
-                "the posted-DLV digest must not collide with the {other} domain"
+                "the posted-DLV digest must not collide with {:?}",
+                String::from_utf8_lossy(other.source_bytes())
             );
         }
     }

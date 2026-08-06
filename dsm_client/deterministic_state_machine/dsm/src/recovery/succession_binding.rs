@@ -25,13 +25,16 @@
 //!
 //! Acceptance uses hash adjacency / parent consumption only — never numeric heights.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use crate::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::recovery::tombstone::{verify_recovery_pair, SuccessionReceipt, TombstoneReceipt};
 use crate::types::device_state::RelationshipChainState;
 use crate::types::error::DsmError;
 
-const CARRY_FORWARD_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_RECOVERY_CARRY_FORWARD;
+const CARRY_FORWARD_DOMAIN: TaggedHashDomain<'static> =
+    crate::common::domain_tags::TAG_DSM_RECOVERY_CARRY_FORWARD;
 
 /// The carry-forward commitment bound into the FIRST accepted state of the new
 /// `(A_new,C)` relationship — a complete, auditable bridge from the old device leaf to

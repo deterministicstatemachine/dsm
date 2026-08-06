@@ -506,7 +506,10 @@ impl PolicyManager {
 
         let mut msg = b"policy-update|v1|".to_vec();
         msg.extend_from_slice(token_id.as_bytes());
-        let msg_hash = blake3::domain_hash("DSM/policy-update-auth-v1", &msg);
+        let msg_hash = blake3::domain_hash(
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/policy-update-auth-v1"),
+            &msg,
+        );
         let verified = sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)?;
         if !verified {
             return Err(DsmError::unauthorized(
@@ -749,7 +752,7 @@ impl PolicyManager {
 
     fn deterministic_policy_id(
         &self,
-        id_domain: &str,
+        id_domain: crate::crypto::domain::TaggedHashDomain<'_>,
         id_prefix: &str,
         token_id: &str,
         policy_anchor: &PolicyAnchor,
@@ -769,7 +772,7 @@ impl PolicyManager {
     fn generate_update_id(&self, token_id: &str, new_anchor: &PolicyAnchor, tick: u64) -> String {
         let nonce = self.update_id_counter.fetch_add(1, Ordering::Relaxed);
         self.deterministic_policy_id(
-            "DSM/policy/update-id",
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/policy/update-id"),
             "update",
             token_id,
             new_anchor,
@@ -781,7 +784,7 @@ impl PolicyManager {
     fn generate_vote_id(&self, token_id: &str, policy_anchor: &PolicyAnchor) -> String {
         let nonce = self.vote_id_counter.fetch_add(1, Ordering::Relaxed);
         self.deterministic_policy_id(
-            "DSM/policy/vote-id",
+            crate::crypto::domain::TaggedHashDomain::from_static(b"DSM/policy/vote-id"),
             "vote",
             token_id,
             policy_anchor,
