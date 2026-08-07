@@ -96,7 +96,10 @@ pub(crate) struct QuorumDeviceIdentity {
     /// serves a divergent Kyber key (equivocation) breaks agreement.
     pub(crate) kyber_public_key: Vec<u8>,
     /// SPHINCS+ (device AK) signature binding `kyber_public_key` to the device
-    /// identity; verified at contact-add against the QR-carried AK.
+    /// identity. Verified by the consuming client against the pinned QR/BLE AK
+    /// before the Kyber key is used or cached (ADR 0002) — on this node-served
+    /// path that is the repair/hydrate flow, NOT at contact-add (the QR carries
+    /// no Kyber key).
     pub(crate) kyber_binding_sig: Vec<u8>,
 }
 
@@ -3044,7 +3047,9 @@ pub(crate) async fn fetch_quorum_device_identity(
                 }
                 // Kyber material is MANDATORY (DSM beta, no legacy path). A record
                 // without a well-formed ML-KEM-768 key + binding is invalid; the
-                // cryptographic binding is verified at contact-add against the AK.
+                // cryptographic binding is verified against the pinned AK before the
+                // Kyber key is cached/used (repair/hydrate paths; ADR 0002), NOT at
+                // contact-add.
                 if decoded.kyber_public_key.len() != 1184 {
                     last_error = Some(format!(
                         "device identity from {} had invalid kyber_public_key length {}",

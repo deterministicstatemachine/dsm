@@ -1299,39 +1299,6 @@ pub fn has_unpaired_contacts() -> bool {
     }
 }
 
-/// Update a contact's public key (e.g., after receiving signing key via BLE prepare)
-pub fn update_contact_public_key(device_id: &[u8], public_key: &[u8]) -> Result<()> {
-    if device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let rows_changed = conn.execute(
-        "UPDATE contacts SET public_key = ?1 WHERE device_id = ?2",
-        params![public_key, device_id],
-    )?;
-
-    if rows_changed == 0 {
-        info!(
-            "No contact found with device_id={:?} to update public_key",
-            &device_id[..8]
-        );
-    } else {
-        info!(
-            "Updated contact public_key: device_id={:?} key_len={}",
-            &device_id[..8],
-            public_key.len()
-        );
-    }
-
-    Ok(())
-}
-
 /// FIRST-WRITE-WINS persist of a counterparty's ML-KEM capability.
 ///
 /// Writes ONLY when the contact currently has no key. A locally-bound nonempty
@@ -1366,6 +1333,75 @@ pub fn bind_contact_kyber_key_if_absent(device_id: &[u8], kyber_public_key: &[u8
         params![kyber_public_key, device_id],
     )?;
     Ok(rows_changed > 0)
+}
+
+/// Outcome of a first-write-wins attempt to set a contact's signing AK from wire bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AkBindOutcome {
+    /// The contact had no AK; this call established it.
+    Established,
+    /// A matching AK was already pinned; nothing changed.
+    AlreadyPinnedMatching,
+    /// A *different* AK was already pinned; the wire AK was REJECTED and the pinned AK stands
+    /// (possible substitution/equivocation).
+    RejectedSubstitution,
+    /// No contact exists for this `device_id`.
+    NoContact,
+}
+
+/// FIRST-WRITE-WINS persist of a counterparty's signing AK — the pairing trust root (ADR 0002).
+///
+/// The signing AK is established out-of-band by the QR/BLE pairing and is the root every Kyber
+/// identity binding is verified against. It is NEVER re-rooted from wire bytes: this writes ONLY
+/// when the contact currently has no AK. A non-empty pinned AK is preserved; a *differing* wire AK
+/// is reported as a substitution attempt and rejected. Rotation, if DSM ever needs it, is an
+/// explicit re-pairing, never a side effect of a transfer handshake.
+///
+/// (This closes matrix rows 6/7. Authenticating the BLE-delivered *Kyber* key against the pinned AK
+/// — rows 8/9 — is the separate release-blocking BLE P0 work and is deliberately not done here.)
+pub fn bind_contact_public_key_if_absent(
+    device_id: &[u8],
+    public_key: &[u8],
+) -> Result<AkBindOutcome> {
+    if device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let existing: Option<Option<Vec<u8>>> = conn
+        .query_row(
+            "SELECT public_key FROM contacts WHERE device_id = ?1",
+            params![device_id],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?;
+
+    match existing {
+        None => Ok(AkBindOutcome::NoContact),
+        Some(pinned) => {
+            let pinned = pinned.unwrap_or_default();
+            if pinned.is_empty() {
+                // First establishment. The WHERE clause re-checks emptiness so a concurrent
+                // establisher cannot be clobbered.
+                conn.execute(
+                    "UPDATE contacts SET public_key = ?1
+                     WHERE device_id = ?2
+                       AND (public_key IS NULL OR length(public_key) = 0)",
+                    params![public_key, device_id],
+                )?;
+                Ok(AkBindOutcome::Established)
+            } else if pinned == public_key {
+                Ok(AkBindOutcome::AlreadyPinnedMatching)
+            } else {
+                Ok(AkBindOutcome::RejectedSubstitution)
+            }
+        }
+    }
 }
 
 /// Remove a contact by its contact_id. Returns Ok(true) if a row was deleted, Ok(false) if not found.
@@ -1504,6 +1540,64 @@ mod tests {
         assert_eq!(loaded.alias, "alice");
         assert_eq!(loaded.device_id, device_id.to_vec());
         assert_eq!(loaded.public_key, vec![0xBBu8; 64]);
+    }
+
+    /// Trust-root preservation (ADR 0002, matrix rows 6/7): the pairing-established signing AK is
+    /// first-write-wins and is NEVER re-rooted from wire bytes. A differing wire AK is reported as a
+    /// substitution and the pinned AK is preserved byte-for-byte.
+    #[test]
+    #[serial]
+    fn bind_contact_public_key_if_absent_is_first_write_wins_and_rejects_substitution() {
+        init_test_db();
+        let device_id = [0x5Au8; 32];
+
+        // No contact yet → NoContact (nothing to establish).
+        assert_eq!(
+            bind_contact_public_key_if_absent(&device_id, &[0x01u8; 64]).unwrap(),
+            AkBindOutcome::NoContact
+        );
+
+        // Contact with an EMPTY AK → first write establishes it.
+        let mut c = make_contact(device_id, "peer");
+        c.public_key = Vec::new();
+        store_contact(&c).expect("store empty-AK contact");
+        let established_ak = vec![0xE1u8; 64];
+        assert_eq!(
+            bind_contact_public_key_if_absent(&device_id, &established_ak).unwrap(),
+            AkBindOutcome::Established
+        );
+        assert_eq!(
+            get_contact_by_device_id(&device_id)
+                .unwrap()
+                .unwrap()
+                .public_key,
+            established_ak,
+            "the empty slot was established from the wire"
+        );
+
+        // Same AK again → AlreadyPinnedMatching, unchanged.
+        assert_eq!(
+            bind_contact_public_key_if_absent(&device_id, &established_ak).unwrap(),
+            AkBindOutcome::AlreadyPinnedMatching
+        );
+
+        // A DIFFERENT wire AK → RejectedSubstitution; the pinned AK is preserved byte-for-byte.
+        let attacker_ak = vec![0xEEu8; 64];
+        assert_eq!(
+            bind_contact_public_key_if_absent(&device_id, &attacker_ak).unwrap(),
+            AkBindOutcome::RejectedSubstitution
+        );
+        assert_eq!(
+            get_contact_by_device_id(&device_id)
+                .unwrap()
+                .unwrap()
+                .public_key,
+            established_ak,
+            "a differing wire AK must NEVER re-root the pinned AK"
+        );
+
+        // Malformed device_id → error.
+        assert!(bind_contact_public_key_if_absent(&[0u8; 16], &established_ak).is_err());
     }
 
     /// Cold-peer RPA rotation: after a paired peer's BLE address rotates, the canonical re-persist

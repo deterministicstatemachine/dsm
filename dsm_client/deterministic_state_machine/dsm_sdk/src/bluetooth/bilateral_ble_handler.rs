@@ -2296,33 +2296,55 @@ impl BilateralBleHandler {
                 prepare_request.sender_signing_public_key.is_empty()
             );
             if !prepare_request.sender_signing_public_key.is_empty() {
-                log::info!(
-                    "[BilateralBleHandler] 🔑 Updating contact signing key from prepare request (len={})",
-                    prepare_request.sender_signing_public_key.len()
-                );
-                // Update in-memory contact manager
-                if let Err(e) = mgr.update_contact_signing_key(
+                // TRUST-ROOT PRESERVATION (ADR 0002, matrix rows 6/7): the pairing-established
+                // signing AK is NEVER re-rooted from wire bytes. Establish it only when the contact
+                // has none; a *differing* wire AK is a possible substitution and is rejected — the
+                // pinned AK stands. The SQLite row is the decision point; the in-memory manager is
+                // mirrored only when the wire AK equals the pinned trust root.
+                let ak = &prepare_request.sender_signing_public_key;
+                match crate::storage::client_db::bind_contact_public_key_if_absent(
                     &counterparty_device_id,
-                    prepare_request.sender_signing_public_key.clone(),
+                    ak,
                 ) {
-                    log::warn!(
-                        "[BilateralBleHandler] ⚠️ Failed to update in-memory contact signing key: {}",
-                        e
-                    );
-                    // Continue anyway - relationship may still work if contact already has key
-                }
-                // Persist to SQLite for durability across restarts
-                if let Err(e) = crate::storage::client_db::update_contact_public_key(
-                    &counterparty_device_id,
-                    &prepare_request.sender_signing_public_key,
-                ) {
-                    log::warn!(
-                        "[BilateralBleHandler] ⚠️ Failed to persist contact public_key to SQLite: {}",
-                        e
-                    );
-                    // Non-fatal - in-memory update still happened
-                } else {
-                    log::info!("[BilateralBleHandler] ✅ Persisted contact public_key to SQLite");
+                    Ok(crate::storage::client_db::AkBindOutcome::Established) => {
+                        if let Err(e) =
+                            mgr.update_contact_signing_key(&counterparty_device_id, ak.clone())
+                        {
+                            log::warn!(
+                                "[BilateralBleHandler] ⚠️ Failed to mirror established contact AK into memory: {e}"
+                            );
+                        }
+                        log::info!(
+                            "[BilateralBleHandler] ✅ Established contact signing AK from prepare request (first-write)"
+                        );
+                    }
+                    Ok(crate::storage::client_db::AkBindOutcome::AlreadyPinnedMatching) => {
+                        if let Err(e) =
+                            mgr.update_contact_signing_key(&counterparty_device_id, ak.clone())
+                        {
+                            log::warn!(
+                                "[BilateralBleHandler] ⚠️ Failed to refresh in-memory contact AK: {e}"
+                            );
+                        }
+                        log::debug!(
+                            "[BilateralBleHandler] contact signing AK matches the pinned trust root"
+                        );
+                    }
+                    Ok(crate::storage::client_db::AkBindOutcome::RejectedSubstitution) => {
+                        log::warn!(
+                            "[BilateralBleHandler] ⚠️ prepare-request signing AK differs from the pinned QR/BLE AK — ignoring (possible substitution); trust root preserved"
+                        );
+                    }
+                    Ok(crate::storage::client_db::AkBindOutcome::NoContact) => {
+                        log::warn!(
+                            "[BilateralBleHandler] ⚠️ no contact record for prepare-request device — signing AK not established"
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[BilateralBleHandler] ⚠️ Failed to persist contact signing AK: {e}"
+                        );
+                    }
                 }
             } else {
                 log::warn!(
@@ -3072,38 +3094,57 @@ impl BilateralBleHandler {
             };
 
             if let Some(counterparty_device_id) = counterparty_device_id {
-                log::info!(
-                    "[BilateralBleHandler] 🔑 handle_prepare_response: Updating contact signing key from response (len={})",
-                    prepare_response.responder_signing_public_key.len()
-                );
-
-                // Update in-memory contact manager
-                {
-                    let mut mgr = self.bilateral_tx_manager.write().await;
-                    if let Err(e) = mgr.update_contact_signing_key(
+                // TRUST-ROOT PRESERVATION (ADR 0002, matrix rows 6/7): first-write-wins; never
+                // re-root the pinned QR/BLE AK from the response wire. Mirror the in-memory manager
+                // only when the wire AK equals the pinned trust root.
+                if !prepare_response.responder_signing_public_key.is_empty() {
+                    let ak = &prepare_response.responder_signing_public_key;
+                    match crate::storage::client_db::bind_contact_public_key_if_absent(
                         &counterparty_device_id,
-                        prepare_response.responder_signing_public_key.clone(),
+                        ak,
                     ) {
-                        log::warn!(
-                            "[BilateralBleHandler] ⚠️ Failed to update in-memory contact signing key in handle_prepare_response: {}",
-                            e
-                        );
+                        Ok(crate::storage::client_db::AkBindOutcome::Established) => {
+                            let mut mgr = self.bilateral_tx_manager.write().await;
+                            if let Err(e) =
+                                mgr.update_contact_signing_key(&counterparty_device_id, ak.clone())
+                            {
+                                log::warn!(
+                                    "[BilateralBleHandler] ⚠️ Failed to mirror established responder AK into memory: {e}"
+                                );
+                            }
+                            log::info!(
+                                "[BilateralBleHandler] ✅ Established contact signing AK from prepare response (first-write)"
+                            );
+                        }
+                        Ok(crate::storage::client_db::AkBindOutcome::AlreadyPinnedMatching) => {
+                            let mut mgr = self.bilateral_tx_manager.write().await;
+                            if let Err(e) =
+                                mgr.update_contact_signing_key(&counterparty_device_id, ak.clone())
+                            {
+                                log::warn!(
+                                    "[BilateralBleHandler] ⚠️ Failed to refresh in-memory responder AK: {e}"
+                                );
+                            }
+                            log::debug!(
+                                "[BilateralBleHandler] responder signing AK matches the pinned trust root"
+                            );
+                        }
+                        Ok(crate::storage::client_db::AkBindOutcome::RejectedSubstitution) => {
+                            log::warn!(
+                                "[BilateralBleHandler] ⚠️ prepare-response signing AK differs from the pinned QR/BLE AK — ignoring (possible substitution); trust root preserved"
+                            );
+                        }
+                        Ok(crate::storage::client_db::AkBindOutcome::NoContact) => {
+                            log::warn!(
+                                "[BilateralBleHandler] ⚠️ no contact record for prepare-response device — signing AK not established"
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[BilateralBleHandler] ⚠️ Failed to persist responder signing AK: {e}"
+                            );
+                        }
                     }
-                }
-
-                // Persist to SQLite for durability across restarts
-                if let Err(e) = crate::storage::client_db::update_contact_public_key(
-                    &counterparty_device_id,
-                    &prepare_response.responder_signing_public_key,
-                ) {
-                    log::warn!(
-                        "[BilateralBleHandler] ⚠️ Failed to persist responder public_key to SQLite in handle_prepare_response: {}",
-                        e
-                    );
-                } else {
-                    log::info!(
-                        "[BilateralBleHandler] ✅ Persisted responder public_key to SQLite (handle_prepare_response)"
-                    );
                 }
 
                 // Bind the responder's Kyber (ML-KEM-768) capability alongside the signing key:
