@@ -312,17 +312,28 @@ impl AppRouterImpl {
         mut contact_record: crate::storage::client_db::ContactRecord,
         authoritative: &QuorumDeviceIdentity,
     ) -> Result<crate::storage::client_db::ContactRecord, String> {
-        // The AK established in-person via the QR (the contact's signing key) is
-        // what verifies the recipient's registry-carried ML-KEM identity binding.
-        // Capture it before any repair overwrites `public_key`.
+        // The AK established in-person via the QR/BLE pairing (the contact's signing key) is the
+        // trust root: it verifies the recipient's registry-carried ML-KEM identity binding, and it
+        // is NEVER overwritten by a node/quorum-served value. Capture it before any repair.
         let contact_ak = contact_record.public_key.clone();
 
-        let public_key_matches = authoritative.public_key.is_empty()
-            || contact_record.public_key == authoritative.public_key;
+        // Trust-root invariant: a non-empty authoritative (node/quorum) AK that DIFFERS from the
+        // pinned contact AK is a substitution attempt. Reject and leave the pinned contact untouched
+        // — node-derived repair may refresh genesis/Kyber material, but MAY NOT re-root the AK. A
+        // genuinely rotated AK is a new identity that must be re-established in person (no implicit
+        // TOFU). An empty authoritative AK carries no AK claim to check (the Kyber binding below is
+        // still verified against the pinned `contact_ak`, so forged material fails closed regardless).
+        if !authoritative_ak_permits_repair(&contact_ak, &authoritative.public_key) {
+            return Err(
+                "authoritative device AK differs from the pairing-established contact AK — \
+                 rejecting (possible substitution/equivocation)"
+                    .to_string(),
+            );
+        }
+
         let kyber_matches = !authoritative.kyber_public_key.is_empty()
             && contact_record.kyber_public_key == authoritative.kyber_public_key;
         if contact_record.genesis_hash.as_slice() == authoritative.genesis_hash.as_slice()
-            && public_key_matches
             && kyber_matches
         {
             return Ok(contact_record);
@@ -340,9 +351,8 @@ impl AppRouterImpl {
         );
 
         contact_record.genesis_hash = authoritative.genesis_hash.to_vec();
-        if !authoritative.public_key.is_empty() {
-            contact_record.public_key = authoritative.public_key.clone();
-        }
+        // The AK (`public_key`) is the pairing-established trust root and is NEVER overwritten from a
+        // node/quorum value — the guard above already required any authoritative AK to equal it.
 
         // MANDATORY recipient ML-KEM identity binding (DSM beta, no legacy path):
         // the quorum-agreed Kyber key must be bound to (device_id, genesis) under
@@ -2784,6 +2794,42 @@ fn select_quorum_device_identity(
         }
     }
     None
+}
+
+/// Whether a node/quorum-served authoritative AK may participate in a contact-identity repair.
+/// The pairing-established contact AK is the trust root: a non-empty authoritative AK that DIFFERS
+/// from it is a substitution attempt and is rejected; an empty or matching one carries no
+/// re-rooting claim. Either way the AK itself is NEVER overwritten (the Kyber binding is verified
+/// against the pinned contact AK), so a permitted repair can only refresh genesis/Kyber material.
+fn authoritative_ak_permits_repair(contact_ak: &[u8], authoritative_ak: &[u8]) -> bool {
+    authoritative_ak.is_empty() || authoritative_ak == contact_ak
+}
+
+#[cfg(test)]
+mod ak_trust_root_tests {
+    use super::authoritative_ak_permits_repair;
+
+    /// Read-side trust-root invariant: node-derived repair may never re-root the AK. A node serving a
+    /// DIFFERENT AK than the QR/BLE-pinned one is rejected (substitution); an absent or matching node
+    /// AK is permitted — and even then the AK is never overwritten by the repair.
+    #[test]
+    fn node_substituted_ak_is_rejected_matching_or_absent_is_permitted() {
+        let contact_ak = vec![0xA1u8; 64]; // pairing-established trust root
+        assert!(
+            authoritative_ak_permits_repair(&contact_ak, &[]),
+            "an absent node AK carries no claim → permitted (Kyber still verified against contact_ak)"
+        );
+        assert!(
+            authoritative_ak_permits_repair(&contact_ak, &contact_ak),
+            "a node AK equal to the pinned AK is permitted"
+        );
+        assert!(
+            !authoritative_ak_permits_repair(&contact_ak, &vec![0xE5u8; 64]),
+            "a node AK differing from the pinned AK is a substitution → rejected"
+        );
+        // A shorter/off-by-one AK must not accidentally match.
+        assert!(!authoritative_ak_permits_repair(&contact_ak, &vec![0xA1u8; 63]));
+    }
 }
 
 pub(crate) async fn fetch_quorum_device_identity(
