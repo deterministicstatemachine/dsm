@@ -309,88 +309,43 @@ struct OnlineSendArtifacts {
 impl AppRouterImpl {
     async fn repair_contact_identity_from_quorum(
         &self,
-        mut contact_record: crate::storage::client_db::ContactRecord,
+        contact_record: crate::storage::client_db::ContactRecord,
         authoritative: &QuorumDeviceIdentity,
     ) -> Result<crate::storage::client_db::ContactRecord, String> {
-        // The AK established in-person via the QR/BLE pairing (the contact's signing key) is the
-        // trust root: it verifies the recipient's registry-carried ML-KEM identity binding, and it
-        // is NEVER overwritten by a node/quorum-served value. Capture it before any repair.
-        let contact_ak = contact_record.public_key.clone();
+        let alias = contact_record.alias.clone();
+        let old_genesis = contact_record.genesis_hash.clone();
 
-        // Trust-root invariant: a non-empty authoritative (node/quorum) AK that DIFFERS from the
-        // pinned contact AK is a substitution attempt. Reject and leave the pinned contact untouched
-        // — node-derived repair may refresh genesis/Kyber material, but MAY NOT re-root the AK. A
-        // genuinely rotated AK is a new identity that must be re-established in person (no implicit
-        // TOFU). An empty authoritative AK carries no AK claim to check (the Kyber binding below is
-        // still verified against the pinned `contact_ak`, so forged material fails closed regardless).
-        if !authoritative_ak_permits_repair(&contact_ak, &authoritative.public_key) {
-            return Err(
-                "authoritative device AK differs from the pairing-established contact AK — \
-                 rejecting (possible substitution/equivocation)"
-                    .to_string(),
-            );
+        // The trust decision — AK guard, ML-KEM binding verification, and record synthesis — is a
+        // pure, I/O-free function. `store_contact` below is UNREACHABLE unless it returns
+        // `Repaired`, so a future refactor cannot slip a persist ahead of the guard/verify: the only
+        // way to reach persistence is for the decision to have already accepted the material.
+        match repair_contact_decision(contact_record, authoritative)? {
+            ContactRepair::Unchanged(record) => Ok(record),
+            ContactRepair::Repaired(record) => {
+                log::warn!(
+                    "[wallet.send] repairing stale contact identity alias={} genesis_old={} genesis_new={}",
+                    alias,
+                    crate::util::text_id::encode_base32_crockford(&old_genesis)
+                        .get(..8)
+                        .unwrap_or("?"),
+                    crate::util::text_id::encode_base32_crockford(&record.genesis_hash)
+                        .get(..8)
+                        .unwrap_or("?"),
+                );
+
+                crate::storage::client_db::store_contact(&record)
+                    .map_err(|e| format!("failed to persist repaired contact identity: {e}"))?;
+
+                if let Some(verified) = record.to_verified_contact() {
+                    let mut cm = self.contact_manager.clone();
+                    cm.restore_contact_from_storage(verified)
+                        .await
+                        .map_err(|e| format!("failed to refresh in-memory contact identity: {e}"))?;
+                }
+
+                Ok(record)
+            }
         }
-
-        let kyber_matches = !authoritative.kyber_public_key.is_empty()
-            && contact_record.kyber_public_key == authoritative.kyber_public_key;
-        if contact_record.genesis_hash.as_slice() == authoritative.genesis_hash.as_slice()
-            && kyber_matches
-        {
-            return Ok(contact_record);
-        }
-
-        log::warn!(
-            "[wallet.send] repairing stale contact identity alias={} genesis_old={} genesis_new={}",
-            contact_record.alias,
-            crate::util::text_id::encode_base32_crockford(&contact_record.genesis_hash)
-                .get(..8)
-                .unwrap_or("?"),
-            crate::util::text_id::encode_base32_crockford(&authoritative.genesis_hash)
-                .get(..8)
-                .unwrap_or("?"),
-        );
-
-        contact_record.genesis_hash = authoritative.genesis_hash.to_vec();
-        // The AK (`public_key`) is the pairing-established trust root and is NEVER overwritten from a
-        // node/quorum value — the guard above already required any authoritative AK to equal it.
-
-        // MANDATORY recipient ML-KEM identity binding (DSM beta, no legacy path):
-        // the quorum-agreed Kyber key must be bound to (device_id, genesis) under
-        // the QR-established AK before we persist it to the contact. Fail-closed on
-        // missing or unbound (substituted/equivocating) material — an online
-        // per-step-EK send has no legacy fallback.
-        if authoritative.kyber_public_key.is_empty() {
-            return Err("recipient identity quorum returned no Kyber public key".to_string());
-        }
-        let recipient_device_id: [u8; 32] = contact_record
-            .device_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| "contact device_id is not 32 bytes".to_string())?;
-        crate::sdk::kyber_identity::verify_kyber_identity_binding(
-            &recipient_device_id,
-            &authoritative.genesis_hash,
-            &authoritative.kyber_public_key,
-            &authoritative.kyber_binding_sig,
-            &contact_ak,
-        )
-        .map_err(|e| format!("recipient Kyber identity binding invalid: {e}"))?;
-        contact_record.kyber_public_key = authoritative.kyber_public_key.clone();
-
-        contact_record.verified = true;
-        contact_record.needs_online_reconcile = false;
-
-        crate::storage::client_db::store_contact(&contact_record)
-            .map_err(|e| format!("failed to persist repaired contact identity: {e}"))?;
-
-        if let Some(verified) = contact_record.to_verified_contact() {
-            let mut cm = self.contact_manager.clone();
-            cm.restore_contact_from_storage(verified)
-                .await
-                .map_err(|e| format!("failed to refresh in-memory contact identity: {e}"))?;
-        }
-
-        Ok(contact_record)
     }
 
     pub fn new(config: SdkConfig) -> Result<Self, dsm::types::error::DsmError> {
@@ -2805,9 +2760,90 @@ fn authoritative_ak_permits_repair(contact_ak: &[u8], authoritative_ak: &[u8]) -
     authoritative_ak.is_empty() || authoritative_ak == contact_ak
 }
 
+/// Outcome of the pure contact-repair trust decision.
+enum ContactRepair {
+    /// The pinned contact already matches the authoritative identity — nothing to persist.
+    Unchanged(crate::storage::client_db::ContactRecord),
+    /// Genesis/Kyber material was refreshed under the pinned AK — the caller must persist this.
+    Repaired(crate::storage::client_db::ContactRecord),
+}
+
+/// Reconcile a node/quorum-served identity against a pinned contact, WITHOUT any I/O.
+///
+/// The pairing-established AK (`contact_record.public_key`) is the trust root: it verifies the
+/// recipient's registry-carried ML-KEM identity binding and is NEVER overwritten by a
+/// node/quorum-served value. A non-empty authoritative AK that differs from it is a substitution
+/// attempt and is rejected here (no implicit TOFU) — the caller's persistence step is unreachable on
+/// this path, so a rejected repair cannot touch the stored contact. A permitted repair may refresh
+/// only genesis/Kyber material, and only after the ML-KEM binding verifies under the pinned AK.
+fn repair_contact_decision(
+    mut contact_record: crate::storage::client_db::ContactRecord,
+    authoritative: &QuorumDeviceIdentity,
+) -> Result<ContactRepair, String> {
+    // Capture the pinned AK before touching anything; it is the binding-verification trust root.
+    let contact_ak = contact_record.public_key.clone();
+
+    // Trust-root invariant: a non-empty authoritative (node/quorum) AK that DIFFERS from the pinned
+    // contact AK is a substitution attempt. Reject and leave the pinned contact untouched — a
+    // genuinely rotated AK is a new identity that must be re-established in person. An empty
+    // authoritative AK carries no AK claim (the Kyber binding is still verified against the pinned
+    // `contact_ak`, so forged material fails closed regardless).
+    if !authoritative_ak_permits_repair(&contact_ak, &authoritative.public_key) {
+        return Err(
+            "authoritative device AK differs from the pairing-established contact AK — \
+             rejecting (possible substitution/equivocation)"
+                .to_string(),
+        );
+    }
+
+    let kyber_matches = !authoritative.kyber_public_key.is_empty()
+        && contact_record.kyber_public_key == authoritative.kyber_public_key;
+    if contact_record.genesis_hash.as_slice() == authoritative.genesis_hash.as_slice()
+        && kyber_matches
+    {
+        return Ok(ContactRepair::Unchanged(contact_record));
+    }
+
+    contact_record.genesis_hash = authoritative.genesis_hash.to_vec();
+    // The AK (`public_key`) is the pairing-established trust root and is NEVER overwritten from a
+    // node/quorum value — the guard above already required any authoritative AK to equal it.
+
+    // MANDATORY recipient ML-KEM identity binding (DSM beta, no legacy path): the quorum-agreed
+    // Kyber key must be bound to (device_id, genesis) under the QR-established AK before it can be
+    // persisted. Fail-closed on missing or unbound (substituted/equivocating) material.
+    if authoritative.kyber_public_key.is_empty() {
+        return Err("recipient identity quorum returned no Kyber public key".to_string());
+    }
+    let recipient_device_id: [u8; 32] = contact_record
+        .device_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| "contact device_id is not 32 bytes".to_string())?;
+    crate::sdk::kyber_identity::verify_kyber_identity_binding(
+        &recipient_device_id,
+        &authoritative.genesis_hash,
+        &authoritative.kyber_public_key,
+        &authoritative.kyber_binding_sig,
+        &contact_ak,
+    )
+    .map_err(|e| format!("recipient Kyber identity binding invalid: {e}"))?;
+    contact_record.kyber_public_key = authoritative.kyber_public_key.clone();
+
+    contact_record.verified = true;
+    contact_record.needs_online_reconcile = false;
+
+    Ok(ContactRepair::Repaired(contact_record))
+}
+
 #[cfg(test)]
 mod ak_trust_root_tests {
-    use super::authoritative_ak_permits_repair;
+    use super::{
+        authoritative_ak_permits_repair, repair_contact_decision, ContactRepair,
+        QuorumDeviceIdentity,
+    };
+    use crate::sdk::kyber_identity::binding_digest;
+    use crate::storage::client_db::ContactRecord;
+    use dsm::crypto::{kyber, sphincs};
 
     /// Read-side trust-root invariant: node-derived repair may never re-root the AK. A node serving a
     /// DIFFERENT AK than the QR/BLE-pinned one is rejected (substitution); an absent or matching node
@@ -2829,6 +2865,122 @@ mod ak_trust_root_tests {
         );
         // A shorter/off-by-one AK must not accidentally match.
         assert!(!authoritative_ak_permits_repair(&contact_ak, &vec![0xA1u8; 63]));
+    }
+
+    /// Minimal contact row pinned to `ak` (the pairing-established AK) with the given genesis/Kyber.
+    fn pinned_contact(
+        device_id: [u8; 32],
+        ak: &[u8],
+        genesis: [u8; 32],
+        kyber_public_key: Vec<u8>,
+    ) -> ContactRecord {
+        ContactRecord {
+            contact_id: "peer".to_string(),
+            device_id: device_id.to_vec(),
+            alias: "peer".to_string(),
+            genesis_hash: genesis.to_vec(),
+            public_key: ak.to_vec(),
+            kyber_public_key,
+            current_chain_tip: None,
+            added_at: 0,
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "active".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        }
+    }
+
+    /// Real repair-path proof (not just the pure guard helper): a node that serves a Kyber binding
+    /// that is genuinely VALID under the pinned AK, but ALSO substitutes a different device AK, is
+    /// rejected by `repair_contact_decision` — it never yields a `Repaired` record, so the caller's
+    /// `store_contact` is never reached and the pinned contact row is left byte-for-byte unchanged.
+    ///
+    /// The binding is valid on purpose: it isolates the AK guard. A malformed binding would be
+    /// caught by the Kyber verify regardless, proving nothing about the guard. This case passes the
+    /// Kyber verify (binding signed by the pinned AK) so ONLY the guard can reject it — which is why
+    /// disabling `authoritative_ak_permits_repair` flips this to `Repaired` and turns the test red.
+    #[test]
+    fn repair_rejects_ak_substitution_even_with_a_binding_valid_under_the_pinned_ak() {
+        let device_id = [0x11u8; 32];
+        let (pinned_ak, pinned_sk) = sphincs::generate_sphincs_keypair().expect("keypair");
+        let genesis = [0x22u8; 32];
+        let kyber_public_key = vec![0x9Au8; kyber::public_key_bytes()];
+
+        // Binding genuinely valid under the PINNED AK.
+        let digest = binding_digest(&device_id, &genesis, &kyber_public_key);
+        let binding_sig = sphincs::sphincs_sign(&pinned_sk, &digest).expect("sign");
+
+        let contact = pinned_contact(device_id, &pinned_ak, genesis, Vec::new());
+
+        // The node substitutes a DIFFERENT AK (equivocation) while carrying the valid binding.
+        let substituted_ak = vec![0xE5u8; pinned_ak.len()];
+        assert_ne!(substituted_ak, pinned_ak);
+        let authoritative = QuorumDeviceIdentity {
+            device_id,
+            genesis_hash: genesis,
+            public_key: substituted_ak,
+            kyber_public_key,
+            kyber_binding_sig: binding_sig,
+        };
+
+        let outcome = repair_contact_decision(contact, &authoritative);
+        assert!(
+            matches!(outcome, Err(_)),
+            "AK substitution must be rejected even when the Kyber binding is valid under the pinned AK; \
+             got a non-error outcome (guard bypassed → store_contact would run)"
+        );
+    }
+
+    /// Real repair-path proof of the permitted case: a node AK that MATCHES the pinned AK, carrying a
+    /// valid canonical binding for a refreshed genesis/Kyber key, yields `Repaired` with the genesis
+    /// and Kyber fields updated — while `public_key` remains EXACTLY the pinned AK (never re-rooted).
+    #[test]
+    fn repair_refreshes_genesis_and_kyber_but_preserves_the_pinned_ak() {
+        let device_id = [0x44u8; 32];
+        let (pinned_ak, pinned_sk) = sphincs::generate_sphincs_keypair().expect("keypair");
+        let old_genesis = [0x55u8; 32];
+        let new_genesis = [0x66u8; 32];
+        let new_kyber = vec![0x7Bu8; kyber::public_key_bytes()];
+
+        // Canonical binding for the refreshed (genesis, Kyber) under the pinned AK.
+        let digest = binding_digest(&device_id, &new_genesis, &new_kyber);
+        let binding_sig = sphincs::sphincs_sign(&pinned_sk, &digest).expect("sign");
+
+        // Stale contact: old genesis, no Kyber yet.
+        let contact = pinned_contact(device_id, &pinned_ak, old_genesis, Vec::new());
+
+        let authoritative = QuorumDeviceIdentity {
+            device_id,
+            genesis_hash: new_genesis,
+            public_key: pinned_ak.clone(), // node AK matches the pinned trust root
+            kyber_public_key: new_kyber.clone(),
+            kyber_binding_sig: binding_sig,
+        };
+
+        match repair_contact_decision(contact, &authoritative) {
+            Ok(ContactRepair::Repaired(record)) => {
+                assert_eq!(record.genesis_hash, new_genesis.to_vec(), "genesis refreshed");
+                assert_eq!(record.kyber_public_key, new_kyber, "Kyber key refreshed");
+                assert_eq!(
+                    record.public_key, pinned_ak,
+                    "the pairing-established AK MUST be preserved exactly (never re-rooted)"
+                );
+                assert!(record.verified, "a verified repair marks the contact verified");
+            }
+            other => panic!(
+                "expected Repaired with the pinned AK preserved; got {}",
+                match other {
+                    Ok(ContactRepair::Unchanged(_)) => "Unchanged",
+                    Ok(ContactRepair::Repaired(_)) => unreachable!(),
+                    Err(_) => "Err",
+                }
+            ),
+        }
     }
 }
 
