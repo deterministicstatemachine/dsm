@@ -36,6 +36,10 @@ pub enum RegisterError {
     InvalidGenesisHash,
     InvalidKyberKey,
     InvalidKyberBinding,
+    /// The binding is well-formed but does not verify against the device's AK.
+    /// Distinct from `InvalidKyberBinding` (absent/malformed) so a forgery is
+    /// never reported as a formatting problem.
+    KyberBindingDoesNotVerify,
     DeviceAlreadyExists,
     DeviceNotFound,
     DatabaseError(String),
@@ -52,6 +56,10 @@ impl IntoResponse for RegisterError {
             RegisterError::InvalidKyberKey => (
                 StatusCode::BAD_REQUEST,
                 "Invalid or missing kyber_public_key (ML-KEM-768, 1184 bytes required)",
+            ),
+            RegisterError::KyberBindingDoesNotVerify => (
+                StatusCode::BAD_REQUEST,
+                "kyber_binding_sig does not bind this Kyber key to (device_id, genesis_hash) under the device's AK",
             ),
             RegisterError::InvalidKyberBinding => (
                 StatusCode::BAD_REQUEST,
@@ -94,14 +102,54 @@ pub async fn register_device(
         return Err(RegisterError::InvalidGenesisHash);
     }
 
-    // Validate Kyber material — MANDATORY (DSM beta has no legacy path). The node
-    // is a dumb indexer: it enforces length/presence only; the cryptographic
-    // identity binding is verified client-side against the peer's AK.
+    // Validate Kyber material — MANDATORY (DSM beta has no legacy path).
     if req.kyber_public_key.len() != 1184 {
         return Err(RegisterError::InvalidKyberKey);
     }
     if req.kyber_binding_sig.is_empty() || req.kyber_binding_sig.len() > 51200 {
         return Err(RegisterError::InvalidKyberBinding);
+    }
+
+    // VERIFY BEFORE PERSISTENCE.
+    //
+    // This block used to read: "the node is a dumb indexer: it enforces
+    // length/presence only; the cryptographic identity binding is verified
+    // client-side against the peer's AK." That client-side verification did not
+    // exist — `verify_kyber_identity_binding` had ZERO callers anywhere in the
+    // repository. The node stored a signature nothing ever checked, so an
+    // ML-KEM key was bound to a device identity purely by assertion, and a
+    // substituted key would have been served to every peer that fetched it.
+    //
+    // Being a dumb indexer is about not interpreting CONTENT. It was never a
+    // reason to persist an identity claim without checking the signature that
+    // makes it a claim at all.
+    //
+    // `verify_kyber_identity_binding` re-derives
+    // `H(domain ‖ device_id ‖ genesis_hash ‖ kyber_pubkey)` and requires
+    // `Ok(true)` from `sphincs_verify` — an `Err` and an `Ok(false)` are both
+    // refusals, and neither reaches the database.
+    let device_id_arr: [u8; 32] = req
+        .device_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| RegisterError::InvalidDeviceId)?;
+    let genesis_arr: [u8; 32] = req
+        .genesis_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| RegisterError::InvalidGenesisHash)?;
+    if let Err(e) = dsm_sdk::sdk::kyber_identity::verify_kyber_identity_binding(
+        &device_id_arr,
+        &genesis_arr,
+        &req.kyber_public_key,
+        &req.kyber_binding_sig,
+        &req.pubkey,
+    ) {
+        log::warn!(
+            "device registration refused: kyber identity binding failed to verify for {}: {e}",
+            text_id::encode_base32_crockford(&req.device_id)
+        );
+        return Err(RegisterError::KyberBindingDoesNotVerify);
     }
 
     // Convert to Base32 for DB storage (DB uses string device_id)
