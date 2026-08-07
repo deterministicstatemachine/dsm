@@ -340,7 +340,9 @@ impl AppRouterImpl {
                     let mut cm = self.contact_manager.clone();
                     cm.restore_contact_from_storage(verified)
                         .await
-                        .map_err(|e| format!("failed to refresh in-memory contact identity: {e}"))?;
+                        .map_err(|e| {
+                            format!("failed to refresh in-memory contact identity: {e}")
+                        })?;
                 }
 
                 Ok(record)
@@ -2860,11 +2862,11 @@ mod ak_trust_root_tests {
             "a node AK equal to the pinned AK is permitted"
         );
         assert!(
-            !authoritative_ak_permits_repair(&contact_ak, &vec![0xE5u8; 64]),
+            !authoritative_ak_permits_repair(&contact_ak, &[0xE5u8; 64]),
             "a node AK differing from the pinned AK is a substitution → rejected"
         );
         // A shorter/off-by-one AK must not accidentally match.
-        assert!(!authoritative_ak_permits_repair(&contact_ak, &vec![0xA1u8; 63]));
+        assert!(!authoritative_ak_permits_repair(&contact_ak, &[0xA1u8; 63]));
     }
 
     /// Minimal contact row pinned to `ak` (the pairing-established AK) with the given genesis/Kyber.
@@ -2930,7 +2932,7 @@ mod ak_trust_root_tests {
 
         let outcome = repair_contact_decision(contact, &authoritative);
         assert!(
-            matches!(outcome, Err(_)),
+            outcome.is_err(),
             "AK substitution must be rejected even when the Kyber binding is valid under the pinned AK; \
              got a non-error outcome (guard bypassed → store_contact would run)"
         );
@@ -2964,13 +2966,20 @@ mod ak_trust_root_tests {
 
         match repair_contact_decision(contact, &authoritative) {
             Ok(ContactRepair::Repaired(record)) => {
-                assert_eq!(record.genesis_hash, new_genesis.to_vec(), "genesis refreshed");
+                assert_eq!(
+                    record.genesis_hash,
+                    new_genesis.to_vec(),
+                    "genesis refreshed"
+                );
                 assert_eq!(record.kyber_public_key, new_kyber, "Kyber key refreshed");
                 assert_eq!(
                     record.public_key, pinned_ak,
                     "the pairing-established AK MUST be preserved exactly (never re-rooted)"
                 );
-                assert!(record.verified, "a verified repair marks the contact verified");
+                assert!(
+                    record.verified,
+                    "a verified repair marks the contact verified"
+                );
             }
             other => panic!(
                 "expected Repaired with the pinned AK preserved; got {}",
