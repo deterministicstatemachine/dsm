@@ -332,6 +332,7 @@ mod tests {
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
             sender_kyber_public_key: vec![],
+            sender_kyber_binding_sig: vec![],
         };
         let body = req.encode_to_vec();
         let env = make_invoke_envelope("bilateral.prepare", &body);
@@ -391,6 +392,7 @@ mod tests {
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
             sender_kyber_public_key: vec![],
+            sender_kyber_binding_sig: vec![],
         };
         let body = req.encode_to_vec();
         let mut env = make_invoke_envelope("bilateral.prepare", &body);

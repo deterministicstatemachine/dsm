@@ -318,6 +318,11 @@ impl BilateralHandler for BiImpl {
                         &req.operation_data,
                     );
 
+                    // ADR 0002 detached binding: carry our Kyber key + its SPHINCS+ binding under
+                    // our AK, mirroring the BLE handler, so the peer verifies before caching.
+                    let (responder_kyber_public_key, responder_kyber_binding_sig) =
+                        crate::sdk::kyber_identity::build_local_kyber_identity_binding()
+                            .unwrap_or_default();
                     let response = pb::BilateralPrepareResponse {
                         commitment_hash: Some(pb::Hash32 {
                             v: commitment.as_bytes().to_vec(),
@@ -329,8 +334,8 @@ impl BilateralHandler for BiImpl {
                         responder_signing_public_key:
                             crate::sdk::app_state::AppState::get_public_key().unwrap_or_default(),
                         receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
-                        responder_kyber_public_key: crate::bridge::local_kyber_pubkey()
-                            .unwrap_or_default(),
+                        responder_kyber_public_key,
+                        responder_kyber_binding_sig,
                     };
 
                     BiResult {

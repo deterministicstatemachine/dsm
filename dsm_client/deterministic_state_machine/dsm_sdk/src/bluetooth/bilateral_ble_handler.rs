@@ -106,6 +106,91 @@ pub struct BilateralBleHandler {
 }
 
 impl BilateralBleHandler {
+    /// Verify a BLE prepare's detached ML-KEM identity binding against the PINNED contact AK, then
+    /// cache the Kyber key only if it authenticates (ADR 0002, matrix rows 8/9 — the release-blocking
+    /// BLE trust boundary).
+    ///
+    /// The chain is: pinned QR/BLE AK → verifies `binding_sig` over
+    /// `binding_digest(pinned device_id, pinned genesis, wire kyber_pk)` → only then first-write
+    /// cache. It reuses the SAME identity-binding primitive as storage-fetch and repair, so a
+    /// malformed, forged, wrong-AK, substituted-key, or old-domain binding is rejected. Every
+    /// rejection is fail-closed and side-effect-free: a contact with no pinned AK/genesis, or a
+    /// binding that does not verify, caches NOTHING and leaves any prior Kyber state untouched. No
+    /// implicit TOFU — the wire `device_id`/`genesis`/signing key are never trusted; only the pinned
+    /// contact identity is.
+    fn verify_and_cache_peer_kyber(
+        counterparty_device_id: &[u8; 32],
+        wire_kyber_pk: &[u8],
+        wire_binding_sig: &[u8],
+        label: &str,
+    ) {
+        if wire_kyber_pk.is_empty() {
+            log::warn!(
+                "[BilateralBleHandler] no Kyber key in {label} (legacy peer?) — nothing to cache"
+            );
+            return;
+        }
+        let contact = match crate::storage::client_db::get_contact_by_device_id(
+            counterparty_device_id,
+        ) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                log::warn!(
+                        "[BilateralBleHandler] ⚠️ no contact for {label} — refusing to cache Kyber (no TOFU)"
+                    );
+                return;
+            }
+            Err(e) => {
+                log::warn!("[BilateralBleHandler] ⚠️ contact lookup failed for {label}: {e}");
+                return;
+            }
+        };
+        if contact.public_key.is_empty() {
+            log::warn!(
+                "[BilateralBleHandler] ⚠️ contact has no pinned AK for {label} — refusing to cache Kyber (no TOFU)"
+            );
+            return;
+        }
+        let genesis: [u8; 32] = match contact.genesis_hash.as_slice().try_into() {
+            Ok(g) => g,
+            Err(_) => {
+                log::warn!(
+                    "[BilateralBleHandler] ⚠️ pinned genesis is not 32 bytes for {label} — refusing to cache Kyber"
+                );
+                return;
+            }
+        };
+        // Verify the detached binding against the PINNED AK — never the wire signing key. On any
+        // failure we return before the cache write below, so prior Kyber state is untouched.
+        if let Err(e) = crate::sdk::kyber_identity::verify_kyber_identity_binding(
+            counterparty_device_id,
+            &genesis,
+            wire_kyber_pk,
+            wire_binding_sig,
+            &contact.public_key,
+        ) {
+            log::warn!(
+                "[BilateralBleHandler] ⚠️ {label} Kyber identity binding did NOT verify against the pinned AK — refusing to cache (prior Kyber state untouched): {e}"
+            );
+            return;
+        }
+        // Authenticated. First-write-wins cache (never overwrites an already-verified key).
+        match crate::storage::client_db::bind_contact_kyber_key_if_absent(
+            counterparty_device_id,
+            wire_kyber_pk,
+        ) {
+            Ok(true) => log::info!(
+                "[BilateralBleHandler] ✅ cached {label} Kyber key (binding verified against the pinned AK)"
+            ),
+            Ok(false) => log::debug!(
+                "[BilateralBleHandler] {label} Kyber key already bound — keeping the verified one"
+            ),
+            Err(e) => {
+                log::warn!("[BilateralBleHandler] ⚠️ failed to persist {label} Kyber key: {e}")
+            }
+        }
+    }
+
     pub async fn transition_session_to_failed(&self, commitment_hash: &[u8; 32]) {
         let pending_key = {
             let mut sessions = self.sessions.sessions.lock().await;
@@ -1742,6 +1827,12 @@ impl BilateralBleHandler {
             bytes_to_base32(&sender_chain_tip[..8])
         );
 
+        // Detached ML-KEM identity binding (ADR 0002): carry both the Kyber key and a SPHINCS+
+        // signature over binding_digest(device_id, genesis, kyber_pk) under our own AK, so the
+        // receiver verifies it against our PINNED AK before caching. Fail-soft to empty (locked
+        // wallet / no key); the receiver then fail-closes and caches nothing.
+        let (sender_kyber_public_key, sender_kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding().unwrap_or_default();
         let prepare_request = generated::BilateralPrepareRequest {
             counterparty_device_id: counterparty_device_id.to_vec(),
             operation_data: operation.to_bytes(),
@@ -1769,9 +1860,8 @@ impl BilateralBleHandler {
             token_id_hint: String::new(),
             memo_hint: String::new(),
             transfer_amount_display: String::new(),
-            // Randomized-per-init Kyber key: the receiver refreshes its contact copy from this
-            // (empty when no wallet key is installed — legacy behavior, receipt fail-closes).
-            sender_kyber_public_key: crate::bridge::local_kyber_pubkey().unwrap_or_default(),
+            sender_kyber_public_key,
+            sender_kyber_binding_sig,
         };
 
         let tip_override = {
@@ -2352,31 +2442,15 @@ impl BilateralBleHandler {
                 );
             }
 
-            // Bind the sender's Kyber (ML-KEM-768) capability alongside the signing key: the
-            // per-step EK receipt this transfer builds fail-closes without a copy on the contact
-            // record. FIRST-WRITE-WINS — the peer's key is deterministic (Genesis v2 derivation),
-            // so it never legitimately changes; rebinding it from a live exchange would let a
-            // handshake redirect where future receipts encapsulate.
-            if !prepare_request.sender_kyber_public_key.is_empty() {
-                match crate::storage::client_db::bind_contact_kyber_key_if_absent(
-                    &counterparty_device_id,
-                    &prepare_request.sender_kyber_public_key,
-                ) {
-                    Ok(true) => log::info!(
-                        "[BilateralBleHandler] ✅ Bound contact kyber_public_key from prepare request"
-                    ),
-                    Ok(false) => log::debug!(
-                        "[BilateralBleHandler] contact kyber_public_key already bound — keeping it"
-                    ),
-                    Err(e) => log::warn!(
-                        "[BilateralBleHandler] ⚠️ Failed to persist contact kyber_public_key: {e}"
-                    ),
-                }
-            } else {
-                log::warn!(
-                    "[BilateralBleHandler] ⚠️ No sender_kyber_public_key in prepare request (legacy peer?)"
-                );
-            }
+            // ADR 0002 rows 8/9: authenticate the sender's ML-KEM key against the PINNED AK via its
+            // detached binding BEFORE caching. Fail-closed, no TOFU; prior Kyber state untouched on
+            // any rejection. (Replaces the old unverified first-write-wins bind.)
+            Self::verify_and_cache_peer_kyber(
+                &counterparty_device_id,
+                &prepare_request.sender_kyber_public_key,
+                &prepare_request.sender_kyber_binding_sig,
+                "prepare-request",
+            );
 
             // =====================================================================
             // CRITICAL: Update our view of sender's chain tip from prepare request
@@ -2774,6 +2848,11 @@ impl BilateralBleHandler {
             }
         }
 
+        // Detached ML-KEM identity binding (ADR 0002): as on the request path, carry the Kyber key
+        // and a SPHINCS+ signature over binding_digest(device_id, genesis, kyber_pk) under our AK.
+        // Fail-soft to empty; the sender then fail-closes and caches nothing.
+        let (responder_kyber_public_key, responder_kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding().unwrap_or_default();
         // Build prepare response
         let prepare_response = generated::BilateralPrepareResponse {
             commitment_hash: Some(generated::Hash32 {
@@ -2789,9 +2868,8 @@ impl BilateralBleHandler {
             }),
             responder_signing_public_key: local_signing_key,
             receiver_challenge: receiver_challenge.to_vec(),
-            // Randomized-per-init Kyber key: the sender refreshes its contact copy from this
-            // before building the per-step EK receipt in the immediately following confirm.
-            responder_kyber_public_key: crate::bridge::local_kyber_pubkey().unwrap_or_default(),
+            responder_kyber_public_key,
+            responder_kyber_binding_sig,
         };
 
         // Wrap in envelope
@@ -3147,30 +3225,14 @@ impl BilateralBleHandler {
                     }
                 }
 
-                // Bind the responder's Kyber (ML-KEM-768) capability alongside the signing key:
-                // the per-step EK receipt built in send_bilateral_confirm (immediately after this)
-                // encapsulates to it and fail-closes without a copy on the contact record.
-                // FIRST-WRITE-WINS for the same reason as the request path above.
-                if !prepare_response.responder_kyber_public_key.is_empty() {
-                    match crate::storage::client_db::bind_contact_kyber_key_if_absent(
-                        &counterparty_device_id,
-                        &prepare_response.responder_kyber_public_key,
-                    ) {
-                        Ok(true) => log::info!(
-                            "[BilateralBleHandler] ✅ Bound contact kyber_public_key from prepare response"
-                        ),
-                        Ok(false) => log::debug!(
-                            "[BilateralBleHandler] contact kyber_public_key already bound — keeping it"
-                        ),
-                        Err(e) => log::warn!(
-                            "[BilateralBleHandler] ⚠️ Failed to persist responder kyber_public_key: {e}"
-                        ),
-                    }
-                } else {
-                    log::warn!(
-                        "[BilateralBleHandler] ⚠️ No responder_kyber_public_key in prepare response (legacy peer?)"
-                    );
-                }
+                // ADR 0002 rows 8/9: authenticate the responder's ML-KEM key against the PINNED AK
+                // via its detached binding BEFORE caching. Fail-closed, no TOFU; prior state kept.
+                Self::verify_and_cache_peer_kyber(
+                    &counterparty_device_id,
+                    &prepare_response.responder_kyber_public_key,
+                    &prepare_response.responder_kyber_binding_sig,
+                    "prepare-response",
+                );
             } else {
                 log::warn!(
                     "[BilateralBleHandler] ⚠️ No session found to extract counterparty device ID for signing key update"
@@ -6418,6 +6480,148 @@ mod tests {
         )));
         let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
         (bilateral_manager, handler)
+    }
+
+    /// ADR 0002 rows 8/9 (BLE P0): the receiver verifies a peer's detached ML-KEM binding against
+    /// the PINNED AK BEFORE caching. Proves the accept path and that EVERY rejection
+    /// (empty / forged / wrong-AK / substituted-key / non-canonical-domain / no-contact / no-AK)
+    /// leaves the prior Kyber cache untouched, with no implicit TOFU.
+    #[test]
+    #[serial]
+    fn verify_and_cache_peer_kyber_verifies_before_caching() {
+        use crate::sdk::kyber_identity::binding_digest;
+        use crate::storage::client_db::{get_contact_by_device_id, store_contact, ContactRecord};
+        use dsm::crypto::{kyber, sphincs};
+
+        init_test_db();
+
+        let device_id = [0x7Cu8; 32];
+        let genesis = [0x3Du8; 32];
+        let (pinned_ak, pinned_sk) = sphincs::generate_sphincs_keypair().expect("ak keypair");
+        let kyber_pk = vec![0x9Au8; kyber::public_key_bytes()];
+
+        let contact = ContactRecord {
+            contact_id: "peer".into(),
+            device_id: device_id.to_vec(),
+            alias: "peer".into(),
+            genesis_hash: genesis.to_vec(),
+            public_key: pinned_ak.clone(), // pinned QR/BLE AK — the trust root
+            kyber_public_key: Vec::new(),  // empty slot: nothing cached yet
+            current_chain_tip: None,
+            added_at: 0,
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "active".into(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        };
+        store_contact(&contact).expect("store pinned contact");
+
+        let cached = || {
+            get_contact_by_device_id(&device_id)
+                .unwrap()
+                .unwrap()
+                .kyber_public_key
+        };
+        let valid_sig =
+            sphincs::sphincs_sign(&pinned_sk, &binding_digest(&device_id, &genesis, &kyber_pk))
+                .expect("sign binding");
+
+        // --- Rejections: nothing is cached, empty slot untouched ---
+        BilateralBleHandler::verify_and_cache_peer_kyber(&device_id, &[], &valid_sig, "empty-key");
+        assert!(cached().is_empty(), "empty key");
+        BilateralBleHandler::verify_and_cache_peer_kyber(&device_id, &kyber_pk, &[], "empty-sig");
+        assert!(cached().is_empty(), "empty sig must not verify");
+        BilateralBleHandler::verify_and_cache_peer_kyber(
+            &device_id,
+            &kyber_pk,
+            &vec![0u8; valid_sig.len()],
+            "forged",
+        );
+        assert!(cached().is_empty(), "forged sig");
+
+        // wrong AK: a genuinely valid binding, but signed by a key that is NOT the pinned AK.
+        let (_other_pk, other_sk) = sphincs::generate_sphincs_keypair().unwrap();
+        let wrong_ak_sig =
+            sphincs::sphincs_sign(&other_sk, &binding_digest(&device_id, &genesis, &kyber_pk))
+                .unwrap();
+        BilateralBleHandler::verify_and_cache_peer_kyber(
+            &device_id,
+            &kyber_pk,
+            &wrong_ak_sig,
+            "wrong-ak",
+        );
+        assert!(
+            cached().is_empty(),
+            "binding under a non-pinned AK must be rejected"
+        );
+
+        // substituted key: valid sig over kyber_pk, but a DIFFERENT wire key is presented.
+        let substituted = vec![0xBBu8; kyber::public_key_bytes()];
+        BilateralBleHandler::verify_and_cache_peer_kyber(
+            &device_id,
+            &substituted,
+            &valid_sig,
+            "substituted",
+        );
+        assert!(
+            cached().is_empty(),
+            "a key not covered by the signed digest must be rejected"
+        );
+
+        // non-canonical domain (old-domain class): a signature over a non-`binding_digest` value.
+        let old_domain_sig = sphincs::sphincs_sign(&pinned_sk, &[0x11u8; 32]).unwrap();
+        BilateralBleHandler::verify_and_cache_peer_kyber(
+            &device_id,
+            &kyber_pk,
+            &old_domain_sig,
+            "old-domain",
+        );
+        assert!(
+            cached().is_empty(),
+            "a binding not over the canonical domain digest must be rejected"
+        );
+
+        // no contact / no TOFU: an unknown device is never cached.
+        let unknown = [0xEEu8; 32];
+        BilateralBleHandler::verify_and_cache_peer_kyber(
+            &unknown,
+            &kyber_pk,
+            &valid_sig,
+            "no-contact",
+        );
+        assert!(get_contact_by_device_id(&unknown).unwrap().is_none());
+
+        // no pinned AK: a contact with an empty AK has no trust root → no caching (no TOFU).
+        let no_ak_id = [0x5Fu8; 32];
+        let mut no_ak = contact.clone();
+        no_ak.contact_id = "no-ak".into();
+        no_ak.device_id = no_ak_id.to_vec();
+        no_ak.public_key = Vec::new();
+        store_contact(&no_ak).expect("store no-ak contact");
+        BilateralBleHandler::verify_and_cache_peer_kyber(&no_ak_id, &kyber_pk, &valid_sig, "no-ak");
+        assert!(
+            get_contact_by_device_id(&no_ak_id)
+                .unwrap()
+                .unwrap()
+                .kyber_public_key
+                .is_empty(),
+            "a contact with no pinned AK must never cache from the wire (no TOFU)"
+        );
+
+        // --- Accept: a valid binding under the pinned AK IS cached ---
+        BilateralBleHandler::verify_and_cache_peer_kyber(
+            &device_id, &kyber_pk, &valid_sig, "valid",
+        );
+        assert_eq!(
+            cached(),
+            kyber_pk,
+            "a valid binding under the pinned AK is cached"
+        );
     }
 
     #[tokio::test]
