@@ -324,13 +324,29 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     use dsm::core::contact_manager::DsmContactManager;
     use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
     // Note: Health state tracking removed - always proceed
-    use dsm::crypto::signatures::SignatureKeyPair;
     use tokio::sync::RwLock as TokioRwLock;
 
     let storage_nodes: Vec<dsm::types::identifiers::NodeId> =
         vec![dsm::types::identifiers::NodeId::new("n")];
     let contact_manager = DsmContactManager::new(dev_fixed, storage_nodes);
-    let keypair = SignatureKeyPair::new().map_err(|e| format!("keypair generation failed: {e}"))?;
+    // The bilateral σ signer MUST be the device identity AK — the same key the QR pins and σ is
+    // verified against (`derive_device_ak_keypair(seed, genesis, 0, policy)`), NEVER a random
+    // keypair. This late-init manager can win the global-signer `OnceLock` race (first-writer-wins)
+    // against the canonical AK-keyed manager from `init_dsm_sdk`; if it holds a random key, σ_A/σ_B
+    // are signed with a key the peer never pinned and every transfer fails σ verification. Derive
+    // the AK from the cached wallet seed exactly as the canonical path; if the seed is locked,
+    // REFUSE to register rather than mint a non-AK key that would hijack the signer slot.
+    let keypair = match crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed() {
+        Some(seed) => crate::init::derive_device_signing_keypair(&seed, &gen_fixed)
+            .map_err(|e| format!("device signing keypair derivation failed: {e}"))?,
+        None => {
+            log::warn!(
+                "[BLE] ensure_bluetooth_manager_and_sync_contact: wallet seed not unlocked; \
+                 refusing to late-init the BLE signer with a non-AK key"
+            );
+            return Ok(false);
+        }
+    };
     let chain_tip_store = Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new());
     let manager = BilateralTransactionManager::new_with_chain_tip_store(
         contact_manager,
