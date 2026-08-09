@@ -2930,6 +2930,36 @@ impl B0xSDK {
         }
     }
 
+    /// Encode the `/api/v2/b0x/ack` body: a `BatchEnvelope` whose entries carry ONLY the
+    /// transport `message_id`.
+    ///
+    /// This is the exact wire shape the storage node's ack route contracts for
+    /// (`validate_ack_batch_envelope_bytes`): an acknowledgement retires ids the client already
+    /// pulled, so it has no version, headers, or payload to send and the node must not demand
+    /// them. Extracted so both halves of that contract can be tested against each other without
+    /// standing up HTTP.
+    pub fn build_ack_batch_body(tx_ids: &[String]) -> Result<Vec<u8>, DsmError> {
+        let mut batch = dsm::types::proto::BatchEnvelope::default();
+        for tx_id in tx_ids {
+            if let Some(mid_bytes) = text_id::decode_base32_crockford(tx_id) {
+                batch.envelopes.push(dsm::types::proto::Envelope {
+                    message_id: mid_bytes,
+                    ..Default::default()
+                });
+            } else {
+                warn!("Skipping invalid tx_id in ack: {}", tx_id);
+            }
+        }
+        let mut body = Vec::with_capacity(batch.encoded_len());
+        batch.encode(&mut body).map_err(|e| {
+            DsmError::internal(
+                format!("ack batch encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        Ok(body)
+    }
+
     pub async fn acknowledge_b0x_v2(
         &mut self,
         b0x_address: &str,
@@ -2961,27 +2991,7 @@ impl B0xSDK {
         // - `x-dsm-b0x-address` MUST match the rotated inbox key used at submit.
         // - Authorization remains the recipient device identity for auth only.
 
-        // Build BatchEnvelope with envelopes containing only message_id
-        let mut batch = dsm::types::proto::BatchEnvelope::default();
-        for tx_id in tx_ids {
-            if let Some(mid_bytes) = text_id::decode_base32_crockford(&tx_id) {
-                let env = dsm::types::proto::Envelope {
-                    message_id: mid_bytes,
-                    ..Default::default()
-                };
-                batch.envelopes.push(env);
-            } else {
-                warn!("Skipping invalid tx_id in ack: {}", tx_id);
-            }
-        }
-
-        let mut body = Vec::with_capacity(batch.encoded_len());
-        batch.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("ack batch encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let body = Self::build_ack_batch_body(&tx_ids)?;
 
         let endpoints: Vec<String> = self
             .storage_node_endpoints
