@@ -1186,13 +1186,13 @@ mod tests {
         assert_eq!(batch.envelopes.len(), 1);
         assert_eq!(batch.envelopes[0].message_id, vec![7u8; 16]);
 
-        // Ack as receiver.
-        let mut ack_batch = dsm::types::proto::BatchEnvelope::default();
-        ack_batch.envelopes.push(make_env(&receiver_dev, &tip, 16));
-        let mut ack_body = Vec::with_capacity(ack_batch.encoded_len());
-        ack_batch
-            .encode(&mut ack_body)
-            .unwrap_or_else(|e| panic!("encode ack batch failed: {e}"));
+        // Ack as receiver, in the shape the client actually sends: message_id ONLY. (This used to
+        // push a full `make_env(..)` envelope, which matched the route's old full-canonical-v3
+        // validation; that validation is what rejected every real acknowledgement.)
+        let ack_body = dsm_sdk::sdk::b0x_sdk::B0xSDK::build_ack_batch_body(&[
+            dsm_sdk::util::text_id::encode_base32_crockford(&[7u8; 16]),
+        ])
+        .unwrap_or_else(|e| panic!("client ack encode failed: {e}"));
 
         let req_ack = Request::builder()
             .method("POST")
