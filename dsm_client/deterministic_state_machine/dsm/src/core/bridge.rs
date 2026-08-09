@@ -1584,6 +1584,7 @@ pub fn handle_bilateral_offline_send(env_bytes: &[u8], ble_address: &str) -> Vec
                         responder_signing_public_key: vec![], // Populated by BLE handler with local signing key
                         receiver_challenge: vec![], // r_R: set by the BLE receiver path for bearer transfers
                         responder_kyber_public_key: vec![], // Populated by BLE handler with local Kyber key
+                        responder_kyber_binding_sig: vec![], // Populated by BLE handler (ADR 0002 detached binding)
                     };
                     let body = response.encode_to_vec();
                     results.push(op_success(op_id, body, None, None, gp::Codec::Proto));

@@ -19,6 +19,12 @@ fn fixed_device(id_byte: u8) -> [u8; 32] {
 
 #[tokio::test]
 async fn bilateral_reject_session_emits_event_and_updates_phase() {
+    // Building a prepare now signs the local Kyber identity binding, which reads the global
+    // AppState identity. Run in test-isolation mode so AppState uses an in-memory default (empty
+    // binding — fine for a reject-flow test) instead of trying to load persisted state, which in
+    // production is primed at startup via set_storage_base_dir().
+    unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+
     // Setup local + counterparty identities
     let local_device = fixed_device(0x11);
     let remote_device = fixed_device(0x22);
