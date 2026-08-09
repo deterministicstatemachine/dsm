@@ -88,11 +88,75 @@ fn read_batch_len<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], S
     Ok(out)
 }
 
-fn validate_batch_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
+/// `Envelope.message_id` is a fixed 16-byte opaque transport id (`dsm_fixed_len = 16`).
+const ACK_MESSAGE_ID_LEN: usize = 16;
+/// An ack can only retire what a retrieve handed out, so the ack batch is capped identically.
+const MAX_ACK_BATCH: usize = MAX_BATCH_RETRIEVE as usize;
+
+/// Canonical wire contract for **one ack entry**:
+///
+/// ```text
+/// Envelope { bytes message_id = 3 }   // present exactly once, exactly 16 bytes
+/// ```
+///
+/// An acknowledgement consumes the transport id and nothing else, so every other envelope field
+/// is REJECTED rather than decoded-and-ignored. That keeps the ack representation deterministic
+/// and stops this route from becoming a generic envelope parser that carries unused,
+/// attacker-controlled material (payloads, signatures, headers) into the node.
+fn validate_ack_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
     let mut cursor = 0usize;
     let mut last_field = 0u32;
-    let mut batch_signature_seen = false;
-    let mut atomic_execution_seen = false;
+    let mut message_id_seen = false;
+
+    while cursor < bytes.len() {
+        let key = read_batch_varint(bytes, &mut cursor)?;
+        let field = u32::try_from(key >> 3).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let wire_type = key & 0x07;
+
+        // Canonical protobuf: fields serialized in non-decreasing tag order.
+        if field < last_field {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        last_field = field;
+
+        // Only `message_id` (field 3, length-delimited), and only once.
+        if field != 3 || wire_type != 2 || message_id_seen {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        message_id_seen = true;
+        if read_batch_len(bytes, &mut cursor)?.len() != ACK_MESSAGE_ID_LEN {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    if !message_id_seen {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+/// Canonical wire contract for the `/api/v2/b0x/ack` body:
+///
+/// ```text
+/// BatchEnvelope { repeated Envelope envelopes = 1 }
+///   └─ Envelope { bytes message_id = 3 }
+/// ```
+///
+/// This route deliberately does NOT use the full canonical-v3 envelope validation: an ack carries
+/// no version, headers, or payload (the client has none to send — it is retiring ids it already
+/// pulled), and validating for them rejects every well-formed acknowledgement. The wire-level
+/// protections are all preserved and applied to the shape the operation actually consumes:
+/// canonical field ordering, permitted wire types, no unknown/extra fields at either level,
+/// a non-empty batch, and a bounded entry count. The overall body size is capped by the router's
+/// `RequestBodyLimitLayer(MAX_ENVELOPE_BYTES)`, and ack scoping by the canonical
+/// `x-dsm-b0x-address` check in the handler.
+///
+/// Validation runs to completion BEFORE any row is touched, so a batch containing one bad entry
+/// fails whole and never partially acks the entries preceding it.
+fn validate_ack_batch_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
+    let mut cursor = 0usize;
+    let mut last_field = 0u32;
+    let mut entries = 0usize;
 
     while cursor < bytes.len() {
         let key = read_batch_varint(bytes, &mut cursor)?;
@@ -104,33 +168,22 @@ fn validate_batch_envelope_bytes(bytes: &[u8]) -> Result<(), StatusCode> {
         }
         last_field = field;
 
-        match field {
-            1 => {
-                if wire_type != 2 {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-                let envelope = read_batch_len(bytes, &mut cursor)?;
-                dsm::envelope::validate_canonical_envelope_v3_bytes(envelope)
-                    .map_err(|_| StatusCode::BAD_REQUEST)?;
-            }
-            2 => {
-                if wire_type != 2 || batch_signature_seen {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-                batch_signature_seen = true;
-                read_batch_len(bytes, &mut cursor)?;
-            }
-            3 => {
-                if wire_type != 0 || atomic_execution_seen {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-                atomic_execution_seen = true;
-                read_batch_varint(bytes, &mut cursor)?;
-            }
-            _ => return Err(StatusCode::BAD_REQUEST),
+        // Only `envelopes` (field 1, length-delimited). `batch_signature` (2) and
+        // `atomic_execution` (3) are not part of an acknowledgement and are refused.
+        if field != 1 || wire_type != 2 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let envelope = read_batch_len(bytes, &mut cursor)?;
+        validate_ack_envelope_bytes(envelope)?;
+
+        entries += 1;
+        if entries > MAX_ACK_BATCH {
+            return Err(StatusCode::BAD_REQUEST);
         }
     }
 
+    // A zero-entry batch is a no-op ack, not a malformed one: it retires nothing and touches no
+    // row. The client short-circuits before sending one; the handler stays idempotent for it.
     Ok(())
 }
 
@@ -492,7 +545,7 @@ async fn ack_b0x_batch(
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
     require_protobuf(&headers)?;
-    validate_batch_envelope_bytes(body.as_ref())?;
+    validate_ack_batch_envelope_bytes(body.as_ref())?;
     let batch =
         dsm::types::proto::BatchEnvelope::decode(&*body).map_err(|_| StatusCode::BAD_REQUEST)?;
     // Determine ACK scope: prefer the explicit rotated routing key, else an explicit
@@ -594,6 +647,206 @@ mod tests {
         let routed = text_id::encode_base32_crockford(&[0x55u8; 32]);
         assert!(valid_spool_key(&routed));
         assert!(!valid_spool_key("b0x[TEST][TEST][TEST]"));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // `/api/v2/b0x/ack` canonical wire contract.
+    //
+    // These are deliberately UNGATED (no DB): they pin the exact byte-level contract the handler
+    // enforces via `validate_ack_batch_envelope_bytes`, so they run in CI where the DB-backed
+    // handler tests below return early.
+    // ---------------------------------------------------------------------------------------
+
+    /// One canonical ack entry: `Envelope { message_id = 3 }` with a 16-byte id.
+    fn ack_entry(id: [u8; ACK_MESSAGE_ID_LEN]) -> Vec<u8> {
+        let mut e = vec![(3 << 3) | 2, ACK_MESSAGE_ID_LEN as u8]; // field 3, length-delimited
+        e.extend_from_slice(&id);
+        e
+    }
+
+    /// Wrap pre-encoded entries as `BatchEnvelope { envelopes = 1 }`.
+    fn ack_batch(entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for e in entries {
+            b.push((1 << 3) | 2); // field 1, length-delimited
+            b.push(e.len() as u8);
+            b.extend_from_slice(e);
+        }
+        b
+    }
+
+    /// THE regression: the shape the client actually sends (message-id-only entries) must be
+    /// accepted. Before this contract existed the route validated every entry as a full canonical
+    /// v3 envelope, which requires version/headers the ack does not carry — so every real
+    /// acknowledgement was rejected 400 and `ack quorum not met: 0/3` was unavoidable.
+    #[test]
+    fn ack_accepts_message_id_only_entries() {
+        let body = ack_batch(&[ack_entry([7u8; 16]), ack_entry([8u8; 16])]);
+        assert_eq!(validate_ack_batch_envelope_bytes(&body), Ok(()));
+    }
+
+    /// The two halves agree: the CLIENT's own encoder output satisfies the NODE's contract.
+    /// This is what proves the fix, rather than a handcrafted fixture that only matches the node.
+    #[test]
+    fn client_ack_body_satisfies_the_node_ack_contract() {
+        let ids: Vec<String> = [[0x11u8; 16], [0x22u8; 16], [0x33u8; 16]]
+            .iter()
+            .map(|b| text_id::encode_base32_crockford(b))
+            .collect();
+        let body = dsm_sdk::sdk::b0x_sdk::B0xSDK::build_ack_batch_body(&ids)
+            .unwrap_or_else(|e| panic!("client ack encode failed: {e}"));
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&body),
+            Ok(()),
+            "the node must accept exactly what acknowledge_b0x_v2 sends"
+        );
+    }
+
+    /// A zero-entry ack retires nothing; it is a no-op, not malformed (the client short-circuits
+    /// before sending one, and the handler stays idempotent).
+    #[test]
+    fn ack_allows_empty_batch_as_noop() {
+        assert_eq!(validate_ack_batch_envelope_bytes(&[]), Ok(()));
+    }
+
+    /// Strict minimal contract: a FULL canonical v3 envelope (version + headers + message_id) is
+    /// refused rather than decoded-and-ignored, so the route never carries unused
+    /// attacker-controlled material.
+    #[test]
+    fn ack_rejects_full_canonical_v3_envelope() {
+        let full = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: vec![1u8; 32],
+                chain_tip: vec![2u8; 32],
+                genesis_hash: vec![3u8; 32],
+                seq: 0,
+            }),
+            message_id: vec![7u8; 16],
+            ..Default::default()
+        };
+        let mut enc = Vec::new();
+        full.encode(&mut enc).expect("encode");
+        let body = ack_batch(&[enc]);
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&body),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn ack_rejects_wrong_length_or_missing_message_id() {
+        for bad_len in [0usize, 15, 17, 32] {
+            let mut e = vec![(3 << 3) | 2, bad_len as u8];
+            e.extend(std::iter::repeat_n(0x5Au8, bad_len));
+            assert_eq!(
+                validate_ack_batch_envelope_bytes(&ack_batch(&[e])),
+                Err(StatusCode::BAD_REQUEST),
+                "message_id length {bad_len} must be refused"
+            );
+        }
+        // Entry with no message_id at all.
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&ack_batch(&[Vec::new()])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn ack_rejects_duplicate_message_id_in_one_entry() {
+        let mut e = ack_entry([7u8; 16]);
+        e.extend_from_slice(&ack_entry([8u8; 16]));
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&ack_batch(&[e])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    /// `batch_signature` (2) and `atomic_execution` (3) are not part of an acknowledgement.
+    #[test]
+    fn ack_rejects_extra_batch_level_fields() {
+        let mut with_sig = ack_batch(&[ack_entry([7u8; 16])]);
+        with_sig.push((2 << 3) | 2); // batch_signature
+        with_sig.push(1);
+        with_sig.push(0xAA);
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&with_sig),
+            Err(StatusCode::BAD_REQUEST)
+        );
+
+        let mut with_atomic = ack_batch(&[ack_entry([7u8; 16])]);
+        with_atomic.push(3 << 3); // atomic_execution, varint
+        with_atomic.push(1);
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&with_atomic),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn ack_rejects_wrong_wire_type_and_noncanonical_order() {
+        // envelopes (field 1) as a varint instead of length-delimited
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&[1 << 3, 0x01]),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // message_id (field 3) as a varint inside an entry
+        let e = vec![3 << 3, 0x01];
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&ack_batch(&[e])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // Non-canonical: descending field order at entry level (field 3 then field 1).
+        let mut e2 = ack_entry([7u8; 16]);
+        e2.push((1 << 3) | 2);
+        e2.push(0);
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&ack_batch(&[e2])),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn ack_rejects_oversized_batch() {
+        let ok: Vec<Vec<u8>> = (0..MAX_ACK_BATCH)
+            .map(|i| ack_entry([i as u8; 16]))
+            .collect();
+        assert_eq!(validate_ack_batch_envelope_bytes(&ack_batch(&ok)), Ok(()));
+
+        let too_many: Vec<Vec<u8>> = (0..MAX_ACK_BATCH + 1)
+            .map(|i| ack_entry([i as u8; 16]))
+            .collect();
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&ack_batch(&too_many)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    /// A batch whose LAST entry is invalid must fail whole. Validation completes before the
+    /// handler touches a row, so nothing preceding the bad entry is acked.
+    #[test]
+    fn ack_rejects_mixed_batch_without_partially_acking() {
+        let mut bad = vec![(3 << 3) | 2, 4]; // wrong-length message_id
+        bad.extend_from_slice(&[1, 2, 3, 4]);
+        let body = ack_batch(&[ack_entry([7u8; 16]), ack_entry([8u8; 16]), bad]);
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&body),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn ack_rejects_truncated_and_malformed_protobuf() {
+        // Length prefix claims more bytes than remain.
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&[(1 << 3) | 2, 0x40, 0x00]),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        // Unknown batch-level field.
+        assert_eq!(
+            validate_ack_batch_envelope_bytes(&[(9 << 3) | 2, 0x00]),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     async fn maybe_state_and_auth() -> Option<(Arc<AppState>, Arc<AuthState>, Router)> {
