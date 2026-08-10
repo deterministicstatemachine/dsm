@@ -84,8 +84,8 @@ pub(crate) fn upsert_balance_projection_with_conn(
     conn.execute(
         "INSERT INTO balance_projections (
             balance_key, device_id, token_id, policy_commit,
-            available, locked, source_state_hash, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            available, locked, source_state_hash, source_state_number, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
          ON CONFLICT(balance_key) DO UPDATE SET
             available = excluded.available,
             locked = excluded.locked,
