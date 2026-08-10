@@ -11,7 +11,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Rust builder (compile storage_node binary)
 # ---------------------------------------------------------------------------
-FROM rust:1.91-slim-bookworm AS builder
+FROM rust:1.97-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -30,6 +30,15 @@ COPY dsm_storage_node/Cargo.toml dsm_storage_node/Cargo.toml
 COPY dsm_client/deterministic_state_machine/dsm/Cargo.toml dsm_client/deterministic_state_machine/dsm/Cargo.toml
 COPY dsm_client/deterministic_state_machine/dsm_sdk/Cargo.toml dsm_client/deterministic_state_machine/dsm_sdk/Cargo.toml
 
+# `crates/*` joined the workspace in #514 (2026-06-28) but were never added here, so cargo could
+# not load the member manifests and the image stopped building. These are NOT stubbable like
+# tools/*: dsm_sdk takes real path dependencies on dsm-anchor-core and dsm-anchor-verifier.
+COPY crates/dsm-anchor-core/Cargo.toml crates/dsm-anchor-core/Cargo.toml
+COPY crates/dsm-anchor-core/build.rs crates/dsm-anchor-core/build.rs
+COPY crates/dsm-anchor-core/proto/ crates/dsm-anchor-core/proto/
+COPY crates/dsm-anchor-verifier/Cargo.toml crates/dsm-anchor-verifier/Cargo.toml
+COPY crates/dsm-sphincs/Cargo.toml crates/dsm-sphincs/Cargo.toml
+
 # Stub crates for remaining workspace members so resolver doesn't fail
 RUN mkdir -p dsm-gen/src && echo 'fn main(){}' > dsm-gen/src/main.rs
 RUN mkdir -p tools/vector_runner/src && echo 'fn main(){}' > tools/vector_runner/src/main.rs
@@ -46,6 +55,9 @@ RUN test -f tools/vertical_validation/Cargo.toml || (echo '[package]\nname="vert
 RUN mkdir -p dsm_storage_node/src && echo 'fn main(){}' > dsm_storage_node/src/main.rs && echo '' > dsm_storage_node/src/lib.rs
 RUN mkdir -p dsm_client/deterministic_state_machine/dsm/src && echo '' > dsm_client/deterministic_state_machine/dsm/src/lib.rs
 RUN mkdir -p dsm_client/deterministic_state_machine/dsm_sdk/src && echo '' > dsm_client/deterministic_state_machine/dsm_sdk/src/lib.rs
+RUN mkdir -p crates/dsm-anchor-core/src && echo '' > crates/dsm-anchor-core/src/lib.rs
+RUN mkdir -p crates/dsm-anchor-verifier/src && echo '' > crates/dsm-anchor-verifier/src/lib.rs
+RUN mkdir -p crates/dsm-sphincs/src && echo '' > crates/dsm-sphincs/src/lib.rs
 
 # Proto files needed by dsm build.rs
 COPY proto/ proto/
@@ -61,13 +73,19 @@ RUN cargo build --release --package dsm_storage_node 2>/dev/null || true
 COPY dsm_storage_node/src/ dsm_storage_node/src/
 COPY dsm_client/deterministic_state_machine/dsm/src/ dsm_client/deterministic_state_machine/dsm/src/
 COPY dsm_client/deterministic_state_machine/dsm_sdk/src/ dsm_client/deterministic_state_machine/dsm_sdk/src/
+COPY crates/dsm-anchor-core/src/ crates/dsm-anchor-core/src/
+COPY crates/dsm-anchor-verifier/src/ crates/dsm-anchor-verifier/src/
+COPY crates/dsm-sphincs/src/ crates/dsm-sphincs/src/
 
 # Force cargo to detect source changes (COPY preserves original unix_tss,
 # so cargo's fingerprint check may skip recompilation of the stub binary).
 RUN rm -f target/release/storage_node target/release/deps/storage_node-* \
     && touch dsm_storage_node/src/main.rs \
               dsm_client/deterministic_state_machine/dsm/src/lib.rs \
-              dsm_client/deterministic_state_machine/dsm_sdk/src/lib.rs
+              dsm_client/deterministic_state_machine/dsm_sdk/src/lib.rs \
+              crates/dsm-anchor-core/src/lib.rs \
+              crates/dsm-anchor-verifier/src/lib.rs \
+              crates/dsm-sphincs/src/lib.rs
 
 # Build the real binary (PostgreSQL mode — default features)
 ENV DSM_PROTO_ROOT=/build/proto
