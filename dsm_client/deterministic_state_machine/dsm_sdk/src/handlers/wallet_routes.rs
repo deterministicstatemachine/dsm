@@ -228,14 +228,17 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
     }
 }
 
-/// Merge canonical projection rows over the legacy `State` seed.
+/// Merge canonical projection rows over the head-synthesized `State` seed.
 ///
-/// The canonical `DeviceState` head is the authority and `balance_projections`
-/// is its cache: every settlement upserts the row from the head, and
-/// `reconcile_projections_against_head` rebuilds any divergent row at startup.
-/// `State.token_balances` is the legacy pre-BCR view, useful only as a seed for
-/// tokens no projection row names yet. So where both carry a token, the
-/// projection wins — unconditionally.
+/// Both inputs descend from the canonical `DeviceState` head, but they are not
+/// equivalent. `StateMachine::current_state()` synthesizes a compat `State`
+/// directly from the head, and `Balance::from_state` hardcodes `locked: 0` — so
+/// the seed carries the head's GROSS balance and no lock accounting whatsoever.
+/// `balance_projections` is the settled view: `available` is already net of
+/// `locked` (for dBTC, the sats committed to an in-flight withdrawal burn), and
+/// a receiver's fresh credit is written ahead of the head, which does not
+/// auto-credit until that device's next own operation. Where both name a token,
+/// the projection is the one to report.
 ///
 /// This merge used to be gated on the projection "matching the current state":
 ///
@@ -244,18 +247,20 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
 /// ```
 ///
 /// Neither half could hold. `build_balance_projection_from_device_head` stamps
-/// `source_state_hash` with the device head root `r_A`, a digest of a different
-/// structure than `State::hash()` — never equal. The `State`-derived writers
-/// stamped `source_state_number` with `state.hash[0]`, the first byte of a
-/// BLAKE3 digest standing in for a counter that §4.3 says does not exist. The
-/// gate was therefore false for every head-derived row, and the wallet rendered
-/// the stale legacy balance while silently discarding the projection the
-/// startup reconcile had just rebuilt from the head: the 8XK wound, reproduced
-/// in the read path.
+/// `source_state_hash` with the device head root `r_A`; `State::hash()` digests
+/// a different structure, so the two were never equal. The `State`-derived
+/// writers stamped `source_state_number` with `state.hash[0]` — the first byte
+/// of a BLAKE3 digest standing in for a counter that §4.3 says does not exist.
 ///
-/// There is no freshness comparison to restore — §4.3 leaves no counter to
-/// compare and the two hashes are not commensurable — and none is needed,
-/// because the projection is by construction the fresher of the two.
+/// The gate was therefore false for every head-derived row, and `balance.list`
+/// reported gross balances with `locked: 0`, overstating what was actually
+/// spendable, and withheld incoming credits until the receiver's next own
+/// operation. The startup reconcile rebuilt the projection from the head and the
+/// read path threw it away.
+///
+/// There is no freshness comparison to restore — §4.3 leaves no counter and the
+/// two hashes are not commensurable — and none is needed: the projection is by
+/// construction the more complete of the two.
 fn merge_balance_projections(
     items: &mut Vec<generated::BalanceGetResponse>,
     projections: Vec<crate::storage::client_db::BalanceProjectionRecord>,
@@ -1390,25 +1395,44 @@ mod tests {
         }
     }
 
-    /// THE DEFECT. The legacy `State` seed carries a stale 100 for ERA while the
-    /// canonical head — via its projection — holds 275. `balance.list` must
-    /// report the head's 275.
+    /// THE DEFECT, in the shape that costs money: the head-synthesized seed
+    /// reports a GROSS 300 with `locked: 0` (`Balance::from_state` hardcodes it),
+    /// while the projection holds the settled 275 available / 25 locked.
     ///
-    /// This is the 8XK wound in the read path: the old freshness gate required
-    /// `record.source_state_hash == State::hash()`, which a head-derived row can
-    /// never satisfy, so the projection was discarded and the stale legacy value
-    /// was rendered. Restore that gate and this test goes red.
+    /// The old gate required `record.source_state_hash == State::hash()`, which a
+    /// head-derived row (stamped with the head root `r_A`) can never satisfy — so
+    /// the projection was discarded and `balance.list` told the user 300 was
+    /// spendable when 25 of it was committed to an in-flight withdrawal burn.
+    /// Restore that gate and this test goes red.
     #[test]
-    fn projection_overrides_a_stale_legacy_state_seed() {
-        let mut items = vec![seed("ERA", 100, 0)];
-        merge_balance_projections(&mut items, vec![head_projection("ERA", 275, 25)]);
+    fn projection_locked_accounting_overrides_the_gross_seed() {
+        let mut items = vec![seed("dBTC", 300, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("dBTC", 275, 25)]);
 
         assert_eq!(items.len(), 1, "the seeded row is updated, not duplicated");
         assert_eq!(
             items[0].available, 275,
-            "canonical head balance must win over the legacy State seed"
+            "spendable must be net of locked, not the head's gross balance"
         );
-        assert_eq!(items[0].locked, 25, "locked comes from the projection too");
+        assert_eq!(
+            items[0].locked, 25,
+            "the seed has no lock accounting at all; only the projection does"
+        );
+    }
+
+    /// A receiver's credit is written to the projection ahead of the head, which
+    /// does not auto-credit until that device's next own operation. Under the old
+    /// gate the credit was discarded and an incoming payment simply did not
+    /// appear.
+    #[test]
+    fn projection_shows_a_receiver_credit_the_head_has_not_applied_yet() {
+        let mut items = vec![seed("ERA", 100, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("ERA", 125, 0)]);
+
+        assert_eq!(
+            items[0].available, 125,
+            "the fresh credit must be visible before the receiver's next own op"
+        );
     }
 
     /// A token the legacy state never knew about still reaches the wallet.
