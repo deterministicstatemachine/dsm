@@ -80,7 +80,7 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x02;
 // funded vault reloads with its reserves absent, recomputes a different root, and the wallet
 // refuses to start — after the owner has already had value debited into the vault. Breaking
 // bump with NO back-compat reader, per the no-legacy directive.
-const DEVICE_STATE_VERSION: u8 = 0x05;
+const DEVICE_STATE_VERSION: u8 = 0x06;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -312,6 +312,16 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(&reserve.sequence.to_le_bytes());
     }
 
+    // v0x06: offline-bearer attestation. It is DEVICE AUTHORITY STATE, not canonical
+    // hash material — it does not enter `root()` — but it is state all the same, and it
+    // was previously not written at all. `restore` hardcoded `NotAttested`, so an
+    // `Attested` device silently lost its attestation across every restart. Persisting
+    // it is what makes the offline-bearer authority tier survive a reload.
+    //
+    // Written as the canonical wire tag (1/2/3); `0` is invalid by construction, so a
+    // zeroed or truncated tail cannot decode as any attestation state at all.
+    out.push(u8::try_from(head.offline_bearer_attestation().to_wire()).unwrap_or(0));
+
     out
 }
 
@@ -438,7 +448,7 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
     }
 
     // Replay tips + non-tip leaves into the SMT to rebuild the canonical root.
-    let head = DeviceState::restore(
+    let mut head = DeviceState::restore(
         genesis,
         devid,
         public_key,
@@ -451,6 +461,20 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         1024,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
+
+    // v0x06: offline-bearer attestation. FAIL CLOSED on absence or corruption — a
+    // truncated blob errors out of `read_u8`, and any tag outside {1,2,3} (including the
+    // `0` a zero-filled tail would give) is refused by `from_wire`. Neither path can
+    // synthesize an `Attested` device: the only way to decode as attested is for an
+    // encoder to have written a `1` that a real attestation put there.
+    let att_tag = read_u8(&mut cursor)
+        .map_err(|e| anyhow!("device_state offline_bearer_attestation missing: {e}"))?;
+    let attestation =
+        dsm::types::device_state::OfflineBearerAttestation::from_wire(i32::from(att_tag))
+            .ok_or_else(|| {
+                anyhow!("device_state offline_bearer_attestation invalid tag {att_tag}")
+            })?;
+    head.set_offline_bearer_attestation(attestation);
 
     if head.root() != smt_root {
         return Err(anyhow!(
@@ -1022,7 +1046,7 @@ mod tests {
     fn a_pre_reserve_device_head_blob_is_rejected() {
         let (_, _, _, _, head) = sample_device_and_rel();
         let mut bytes = encode_device_state(&head);
-        assert_eq!(bytes[0], 0x05, "current device-head version");
+        assert_eq!(bytes[0], 0x06, "current device-head version");
 
         bytes[0] = 0x04;
         let err = decode_device_state(&bytes)
@@ -1096,11 +1120,14 @@ mod tests {
     fn device_head_codec_rejects_invalid_value_capability_byte() {
         // A state-less tip serializes as [..value_capability, state_flag], followed by one
         // u32 count per trailing section — v0x03 extra_leaves, v0x04 offline-allocations,
-        // v0x05 vault-reserves — all empty here. Derived from that count rather than
-        // hardcoded, so adding the next section is a one-line change instead of a puzzling
-        // off-by-four in an unrelated test.
+        // v0x05 vault-reserves — all empty here, then v0x06's 1-byte offline-bearer
+        // attestation tag. Derived from those rather than hardcoded, so adding the next
+        // section is a one-line change instead of a puzzling off-by-four in an unrelated
+        // test.
         const TRAILING_COUNT_SECTIONS: usize = 3;
-        const TRAILING: usize = TRAILING_COUNT_SECTIONS * 4;
+        /// v0x06: a single attestation tag byte, NOT a length-prefixed section.
+        const TRAILING_ATTESTATION: usize = 1;
+        const TRAILING: usize = TRAILING_COUNT_SECTIONS * 4 + TRAILING_ATTESTATION;
 
         let (_, _rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
@@ -1108,7 +1135,9 @@ mod tests {
         let vc = n - TRAILING - 2; // value_capability
         let sf = n - TRAILING - 1; // state_flag
         assert!(
-            bytes[n - TRAILING..].iter().all(|b| *b == 0),
+            bytes[n - TRAILING..n - TRAILING_ATTESTATION]
+                .iter()
+                .all(|b| *b == 0),
             "every trailing section count should be 0"
         );
         assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
