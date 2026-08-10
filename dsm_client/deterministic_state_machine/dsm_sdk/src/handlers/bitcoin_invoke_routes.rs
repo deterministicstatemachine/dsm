@@ -138,7 +138,6 @@ fn sync_dbtc_projection_from_state(
             available: spendable,
             locked: locked_sats,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         },
     )
@@ -5103,7 +5102,6 @@ mod tests {
             available: amount_sats,
             locked: 0,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         })
         .expect("seed dBTC projection");

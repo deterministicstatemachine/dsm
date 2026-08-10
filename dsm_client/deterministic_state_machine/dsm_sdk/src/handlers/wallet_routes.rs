@@ -228,6 +228,65 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
     }
 }
 
+/// Merge canonical projection rows over the head-synthesized `State` seed.
+///
+/// Both inputs descend from the canonical `DeviceState` head, but they are not
+/// equivalent. `StateMachine::current_state()` synthesizes a compat `State`
+/// directly from the head, and `Balance::from_state` hardcodes `locked: 0` — so
+/// the seed carries the head's GROSS balance and no lock accounting whatsoever.
+/// `balance_projections` is the settled view: `available` is already net of
+/// `locked` (for dBTC, the sats committed to an in-flight withdrawal burn), and
+/// a receiver's fresh credit is written ahead of the head, which does not
+/// auto-credit until that device's next own operation. Where both name a token,
+/// the projection is the one to report.
+///
+/// This merge used to be gated on the projection "matching the current state":
+///
+/// ```text
+/// record.source_state_number == 0 && record.source_state_hash == State::hash()
+/// ```
+///
+/// Neither half could hold. `build_balance_projection_from_device_head` stamps
+/// `source_state_hash` with the device head root `r_A`; `State::hash()` digests
+/// a different structure, so the two were never equal. The `State`-derived
+/// writers stamped `source_state_number` with `state.hash[0]` — the first byte
+/// of a BLAKE3 digest standing in for a counter that §4.3 says does not exist.
+///
+/// The gate was therefore false for every head-derived row, and `balance.list`
+/// reported gross balances with `locked: 0`, overstating what was actually
+/// spendable, and withheld incoming credits until the receiver's next own
+/// operation. The startup reconcile rebuilt the projection from the head and the
+/// read path threw it away.
+///
+/// There is no freshness comparison to restore — §4.3 leaves no counter and the
+/// two hashes are not commensurable — and none is needed: the projection is by
+/// construction the more complete of the two.
+fn merge_balance_projections(
+    items: &mut Vec<generated::BalanceGetResponse>,
+    projections: Vec<crate::storage::client_db::BalanceProjectionRecord>,
+) {
+    for record in projections {
+        let tok_id = canonicalize_token_id(&record.token_id);
+        // dBTC is projected under its own token id; BTC_CHAIN is the on-chain
+        // wallet view and is not a DSM balance.
+        if tok_id == "BTC_CHAIN" {
+            continue;
+        }
+        match items.iter_mut().find(|i| i.token_id == tok_id) {
+            Some(existing) => {
+                existing.available = record.available;
+                existing.locked = record.locked;
+            }
+            None => items.push(generated::BalanceGetResponse {
+                token_id: tok_id,
+                available: record.available,
+                locked: record.locked,
+                ..Default::default()
+            }),
+        }
+    }
+}
+
 pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
     let trimmed = token_id.trim();
     if trimmed.is_empty() {
@@ -670,13 +729,8 @@ impl AppRouterImpl {
 
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                let _current_state_number = current_state.as_ref().map(|_| 0u64);
-                let current_state_hash: Option<String> = current_state
-                    .as_ref()
-                    .and_then(|cs| cs.hash().ok())
-                    .map(|hash| crate::util::text_id::encode_base32_crockford(&hash));
-
-                // Seed from canonical state first.
+                // Seed from legacy state first; the projection merge below
+                // overrides it wherever the canonical head has spoken.
                 if let Some(cs) = current_state.as_ref() {
                     for (token_key, balance) in &cs.token_balances {
                         let token_id = canonicalize_token_id(&if let Some((_, t)) =
@@ -700,38 +754,11 @@ impl AppRouterImpl {
                     }
                 }
 
-                // Merge canonical projection rows.
+                // Merge canonical projection rows over the legacy seed.
                 if let Ok(projected) =
                     crate::storage::client_db::list_balance_projections(&device_id_txt)
                 {
-                    for record in projected {
-                        let tok_id = canonicalize_token_id(&record.token_id);
-                        if tok_id == "BTC_CHAIN" {
-                            continue;
-                        }
-                        let projection_matches_current_state =
-                            match (_current_state_number, current_state_hash.as_ref()) {
-                                (Some(state_number), Some(state_hash)) => {
-                                    record.source_state_number == state_number
-                                        && record.source_state_hash == *state_hash
-                                }
-                                _ => true,
-                            };
-
-                        if let Some(existing) = items.iter_mut().find(|i| i.token_id == tok_id) {
-                            if projection_matches_current_state {
-                                existing.available = record.available;
-                                existing.locked = record.locked;
-                            }
-                        } else {
-                            items.push(generated::BalanceGetResponse {
-                                token_id: tok_id,
-                                available: record.available,
-                                locked: record.locked,
-                                ..Default::default()
-                            });
-                        }
-                    }
+                    merge_balance_projections(&mut items, projected);
                 }
 
                 // Ensure built-in tokens always appear (even at zero balance).
@@ -1335,10 +1362,126 @@ impl AppRouterImpl {
 mod tests {
     use super::{
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
-        ensure_default_visible_balances, parse_display_amount_to_base_units,
+        ensure_default_visible_balances, merge_balance_projections,
+        parse_display_amount_to_base_units,
     };
+    use crate::storage::client_db::BalanceProjectionRecord;
     use dsm::types::proto as generated;
     use dsm::types::operations::Operation;
+
+    /// A projection row as `build_balance_projection_from_device_head` writes it:
+    /// `source_state_hash` is the device head root `r_A`, NOT a `State::hash()`.
+    fn head_projection(token_id: &str, available: u64, locked: u64) -> BalanceProjectionRecord {
+        BalanceProjectionRecord {
+            balance_key: format!("bk-{token_id}"),
+            device_id: "DEV".to_string(),
+            token_id: token_id.to_string(),
+            policy_commit: format!("pc-{token_id}"),
+            available,
+            locked,
+            // A device head root. Nothing in the read path may compare this to a
+            // legacy `State::hash()` — they digest different structures.
+            source_state_hash: "HEADROOT0000000000000000000000000".to_string(),
+            updated_at: 7,
+        }
+    }
+
+    fn seed(token_id: &str, available: u64, locked: u64) -> generated::BalanceGetResponse {
+        generated::BalanceGetResponse {
+            token_id: token_id.to_string(),
+            available,
+            locked,
+            ..Default::default()
+        }
+    }
+
+    /// THE DEFECT, in the shape that costs money: the head-synthesized seed
+    /// reports a GROSS 300 with `locked: 0` (`Balance::from_state` hardcodes it),
+    /// while the projection holds the settled 275 available / 25 locked.
+    ///
+    /// The old gate required `record.source_state_hash == State::hash()`, which a
+    /// head-derived row (stamped with the head root `r_A`) can never satisfy — so
+    /// the projection was discarded and `balance.list` told the user 300 was
+    /// spendable when 25 of it was committed to an in-flight withdrawal burn.
+    /// Restore that gate and this test goes red.
+    #[test]
+    fn projection_locked_accounting_overrides_the_gross_seed() {
+        let mut items = vec![seed("dBTC", 300, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("dBTC", 275, 25)]);
+
+        assert_eq!(items.len(), 1, "the seeded row is updated, not duplicated");
+        assert_eq!(
+            items[0].available, 275,
+            "spendable must be net of locked, not the head's gross balance"
+        );
+        assert_eq!(
+            items[0].locked, 25,
+            "the seed has no lock accounting at all; only the projection does"
+        );
+    }
+
+    /// A receiver's credit is written to the projection ahead of the head, which
+    /// does not auto-credit until that device's next own operation. Under the old
+    /// gate the credit was discarded and an incoming payment simply did not
+    /// appear.
+    #[test]
+    fn projection_shows_a_receiver_credit_the_head_has_not_applied_yet() {
+        let mut items = vec![seed("ERA", 100, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("ERA", 125, 0)]);
+
+        assert_eq!(
+            items[0].available, 125,
+            "the fresh credit must be visible before the receiver's next own op"
+        );
+    }
+
+    /// A token the legacy state never knew about still reaches the wallet.
+    #[test]
+    fn projection_only_token_is_added() {
+        let mut items = vec![seed("ERA", 10, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("RIGB", 4_200, 0)]);
+
+        let rigb = items
+            .iter()
+            .find(|i| i.token_id == "RIGB")
+            .expect("projection-only token appears");
+        assert_eq!(rigb.available, 4_200);
+        assert_eq!(items.len(), 2);
+    }
+
+    /// A seeded token with no projection row is left exactly as it was — the
+    /// merge overrides, it never blanks.
+    #[test]
+    fn seed_without_a_projection_is_untouched() {
+        let mut items = vec![seed("ERA", 10, 3)];
+        merge_balance_projections(&mut items, vec![head_projection("dBTC", 500, 0)]);
+
+        let era = items.iter().find(|i| i.token_id == "ERA").unwrap();
+        assert_eq!((era.available, era.locked), (10, 3));
+    }
+
+    /// The projection's token id is canonicalized before matching, so a `dbtc`
+    /// row updates the seeded `dBTC` entry instead of adding a second one.
+    #[test]
+    fn projection_token_id_is_canonicalized_before_matching() {
+        let mut items = vec![seed("dBTC", 1, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("dbtc", 90_000, 0)]);
+
+        assert_eq!(items.len(), 1, "no duplicate dBTC row");
+        assert_eq!(items[0].token_id, "dBTC");
+        assert_eq!(items[0].available, 90_000);
+    }
+
+    /// `BTC_CHAIN` is the on-chain wallet view, not a DSM balance, and must not
+    /// surface as a token row.
+    #[test]
+    fn btc_chain_projection_is_not_a_balance_row() {
+        let mut items = vec![seed("ERA", 10, 0)];
+        merge_balance_projections(&mut items, vec![head_projection("BTC_CHAIN", 999, 0)]);
+
+        assert_eq!(items.len(), 1);
+        assert!(!items.iter().any(|i| i.token_id == "BTC_CHAIN"));
+    }
 
     #[test]
     fn canonicalize_token_id_maps_dbtc_aliases() {

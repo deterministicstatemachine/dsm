@@ -30,7 +30,6 @@ fn seed_era_projection(device_txt: &str, available: u64) {
             available,
             locked: 0,
             source_state_hash: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
-            source_state_number: 0,
             updated_at: 0,
         },
     )

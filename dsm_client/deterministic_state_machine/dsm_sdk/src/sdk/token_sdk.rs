@@ -619,7 +619,6 @@ impl<I: Send + Sync> TokenSDK<I> {
             available: balance.available(),
             locked: balance.locked(),
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         };
 

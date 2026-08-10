@@ -674,7 +674,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
             available           INTEGER NOT NULL DEFAULT 0 CHECK(available >= 0),
             locked              INTEGER NOT NULL DEFAULT 0 CHECK(locked >= 0),
             source_state_hash   TEXT NOT NULL,
-            source_state_number INTEGER NOT NULL,
+            -- RETIRED (never read, never gated on). Kept in the table only so an
+            -- EXISTING device does not need a schema reset: this column is NOT NULL
+            -- on every already-provisioned wallet, and dropping it would fail every
+            -- projection INSERT. A device head and its signed chain-state archive
+            -- live in this same database and are not recoverable from the storage
+            -- nodes (they are a persistence layer, not an authority — ADR 0002), so
+            -- a wipe here costs real canonical state. Writers pin it to 0.
+            source_state_number INTEGER NOT NULL DEFAULT 0,
             updated_at          INTEGER NOT NULL,
             UNIQUE (device_id, token_id)
         );
