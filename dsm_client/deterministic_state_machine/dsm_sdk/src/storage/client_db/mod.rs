@@ -288,7 +288,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// upgraded in place. Bump this whenever a change would make an older database
 /// structurally invalid (a new NOT NULL column, a renamed/removed table, an
 /// altered key). See [`enforce_schema_version`].
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 2;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 3;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -674,7 +674,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             available           INTEGER NOT NULL DEFAULT 0 CHECK(available >= 0),
             locked              INTEGER NOT NULL DEFAULT 0 CHECK(locked >= 0),
             source_state_hash   TEXT NOT NULL,
-            source_state_number INTEGER NOT NULL,
             updated_at          INTEGER NOT NULL,
             UNIQUE (device_id, token_id)
         );

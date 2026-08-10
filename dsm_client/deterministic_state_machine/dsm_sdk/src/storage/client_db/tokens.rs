@@ -16,7 +16,6 @@ pub struct BalanceProjectionRecord {
     pub available: u64,
     pub locked: u64,
     pub source_state_hash: String,
-    pub source_state_number: u64,
     pub updated_at: u64,
 }
 
@@ -59,7 +58,7 @@ pub(crate) fn upsert_balance_projection_with_conn(
     let existing = conn
         .query_row(
             "SELECT balance_key, device_id, token_id, policy_commit,
-                    available, locked, source_state_hash, source_state_number, updated_at
+                    available, locked, source_state_hash, updated_at
              FROM balance_projections
              WHERE device_id = ?1 AND token_id = ?2",
             params![record.device_id, record.token_id],
@@ -72,8 +71,7 @@ pub(crate) fn upsert_balance_projection_with_conn(
                     available: row.get::<_, i64>(4)? as u64,
                     locked: row.get::<_, i64>(5)? as u64,
                     source_state_hash: row.get(6)?,
-                    source_state_number: row.get::<_, i64>(7)? as u64,
-                    updated_at: row.get::<_, i64>(8)? as u64,
+                    updated_at: row.get::<_, i64>(7)? as u64,
                 })
             },
         )
@@ -86,13 +84,12 @@ pub(crate) fn upsert_balance_projection_with_conn(
     conn.execute(
         "INSERT INTO balance_projections (
             balance_key, device_id, token_id, policy_commit,
-            available, locked, source_state_hash, source_state_number, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            available, locked, source_state_hash, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(balance_key) DO UPDATE SET
             available = excluded.available,
             locked = excluded.locked,
             source_state_hash = excluded.source_state_hash,
-            source_state_number = excluded.source_state_number,
             updated_at = excluded.updated_at",
         params![
             record.balance_key,
@@ -102,7 +99,6 @@ pub(crate) fn upsert_balance_projection_with_conn(
             record.available as i64,
             record.locked as i64,
             record.source_state_hash,
-            record.source_state_number as i64,
             record.updated_at as i64,
         ],
     )?;
@@ -137,7 +133,6 @@ pub fn build_balance_projection_from_state(
         available: spendable,
         locked,
         source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-        source_state_number: state.hash[0] as u64,
         updated_at: tick(),
     })
 }
@@ -151,10 +146,10 @@ pub fn build_balance_projection_from_state(
 /// caller passes `head.balance(policy_commit) + amount` so the UI shows the
 /// fresh credit immediately.
 ///
-/// `source_state_hash` is the device head root `r_A` (§2.2). The legacy
-/// `source_state_number` field is set to `0` — there are no counters in
-/// canonical state per §4.3, and freshness comparisons fall back to
-/// `updated_at` (deterministic tick) for ordering.
+/// `source_state_hash` is the device head root `r_A` (§2.2) — provenance, not a
+/// freshness key. It is not comparable to `State::hash()`, and §4.3 leaves no
+/// counter to compare, so nothing downstream may gate on it: the projection IS
+/// the head's cache, so a reader that has one has the canonical value.
 pub fn build_balance_projection_from_device_head(
     device_id: &str,
     token_id: &str,
@@ -176,7 +171,6 @@ pub fn build_balance_projection_from_device_head(
         available: spendable,
         locked,
         source_state_hash: crate::util::text_id::encode_base32_crockford(&head_root),
-        source_state_number: 0,
         updated_at: tick(),
     })
 }
@@ -189,7 +183,7 @@ pub fn get_balance_projection(
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let result = conn.query_row(
         "SELECT balance_key, device_id, token_id, policy_commit,
-                available, locked, source_state_hash, source_state_number, updated_at
+                available, locked, source_state_hash, updated_at
          FROM balance_projections
          WHERE device_id = ?1 AND token_id = ?2",
         params![device_id, token_id],
@@ -202,8 +196,7 @@ pub fn get_balance_projection(
                 available: row.get::<_, i64>(4)? as u64,
                 locked: row.get::<_, i64>(5)? as u64,
                 source_state_hash: row.get(6)?,
-                source_state_number: row.get::<_, i64>(7)? as u64,
-                updated_at: row.get::<_, i64>(8)? as u64,
+                updated_at: row.get::<_, i64>(7)? as u64,
             })
         },
     );
@@ -232,7 +225,6 @@ pub fn get_validated_balance_projection(
                     available: record.available,
                     locked: record.locked,
                     source_state_hash: record.source_state_hash.clone(),
-                    source_state_number: record.source_state_number,
                     updated_at: record.updated_at,
                 },
             )?;
@@ -247,7 +239,7 @@ pub fn list_balance_projections(device_id: &str) -> Result<Vec<BalanceProjection
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
         "SELECT balance_key, device_id, token_id, policy_commit,
-                available, locked, source_state_hash, source_state_number, updated_at
+                available, locked, source_state_hash, updated_at
          FROM balance_projections
          WHERE device_id = ?1",
     )?;
@@ -261,8 +253,7 @@ pub fn list_balance_projections(device_id: &str) -> Result<Vec<BalanceProjection
                 available: row.get::<_, i64>(4)? as u64,
                 locked: row.get::<_, i64>(5)? as u64,
                 source_state_hash: row.get(6)?,
-                source_state_number: row.get::<_, i64>(7)? as u64,
-                updated_at: row.get::<_, i64>(8)? as u64,
+                updated_at: row.get::<_, i64>(7)? as u64,
             })
         })?
         .filter_map(|r| r.ok())
@@ -324,7 +315,6 @@ mod tests {
             available: 5,
             locked: 1,
             source_state_hash: "state-1".to_string(),
-            source_state_number: 7,
             updated_at: 11,
         };
         upsert_balance_projection(&first).expect("insert projection");
@@ -333,7 +323,6 @@ mod tests {
             available: 9,
             locked: 2,
             source_state_hash: "state-2".to_string(),
-            source_state_number: 8,
             updated_at: 12,
             ..first.clone()
         };
@@ -355,7 +344,6 @@ mod tests {
             available: 5,
             locked: 0,
             source_state_hash: "state-1".to_string(),
-            source_state_number: 7,
             updated_at: 11,
         };
         let err = validate_projection_identity(
@@ -363,7 +351,6 @@ mod tests {
             &BalanceProjectionRecord {
                 policy_commit: "policy-b".to_string(),
                 source_state_hash: "state-2".to_string(),
-                source_state_number: 8,
                 updated_at: 12,
                 ..first.clone()
             },
