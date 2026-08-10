@@ -380,11 +380,23 @@ impl CoreSDK {
             | DsmOperation::DlvCreate { signature, .. }
             | DsmOperation::DlvUnlock { signature, .. }
             | DsmOperation::DlvClaim { signature, .. }
-            | DsmOperation::DlvInvalidate { signature, .. } => {
+            | DsmOperation::DlvInvalidate { signature, .. }
+            | DsmOperation::DlvSettle { signature, .. }
+            | DsmOperation::DlvOwnerApply { signature, .. } => {
                 *signature = sig;
             }
-            _ => {
-                log::warn!("[CoreSDK] sign_operation called on non-signable operation type");
+            // FAIL, never return unsigned. This arm used to `log::warn!` and hand back
+            // the operation with an empty signature and an `Ok`, so a caller that asked
+            // to sign a value-moving operation got a success it had no reason to doubt
+            // and an operation no verifier would accept. `DlvSettle` and `DlvOwnerApply`
+            // fell through here — both are `EgressAsset::Asset` — and the unsigned
+            // result was committed into the canonical root, where it cannot be
+            // retro-signed because the signature is inside `compute_chain_tip`.
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "sign_operation_sphincs: {} carries no signature field",
+                    other.get_operation_type()
+                )));
             }
         }
 

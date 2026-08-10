@@ -2376,6 +2376,8 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
+            | Operation::DlvSettle { signature, .. }
+            | Operation::DlvOwnerApply { signature, .. }
                 if !signature.is_empty() =>
             {
                 Some(signature.clone())
@@ -2434,7 +2436,9 @@ impl Operation {
             | Operation::DlvCreate { signature, .. }
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
-            | Operation::DlvInvalidate { signature, .. } => {
+            | Operation::DlvInvalidate { signature, .. }
+            | Operation::DlvSettle { signature, .. }
+            | Operation::DlvOwnerApply { signature, .. } => {
                 signature.clear();
             }
             _ => {}
@@ -2459,7 +2463,9 @@ impl Operation {
             | Operation::DlvCreate { signature, .. }
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
-            | Operation::DlvInvalidate { signature, .. } => {
+            | Operation::DlvInvalidate { signature, .. }
+            | Operation::DlvSettle { signature, .. }
+            | Operation::DlvOwnerApply { signature, .. } => {
                 *signature = sig;
             }
             _ => {}

@@ -1404,8 +1404,18 @@ impl AppRouterImpl {
             output_policy_commit: receipt.trade.output_policy_commit,
             input_amount: receipt.trade.input_amount,
             output_amount: receipt.trade.output_amount,
+            // Signed below. Empty here was previously the ONLY value this field could
+            // hold — `with_signature` silently ignored the variant — so the owner's root
+            // committed an unauthorized record of an authorized settlement.
             signature: Vec::new(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+
+        // Sign BEFORE the advance, for the same reason as `DlvSettle`: the signature is
+        // inside the committed operation bytes and therefore inside the chain tip.
+        let op = match self.core_sdk.sign_operation_sphincs(op) {
+            Ok(signed) => signed,
+            Err(e) => return err(format!("dlv.reconcile: failed to sign DlvOwnerApply: {e}")),
         };
         let mutation = dsm::types::device_state::VaultReserveMutation::ApplySettlement {
             vault_id,
@@ -1818,8 +1828,20 @@ impl AppRouterImpl {
             settler_public_key: unlocker_pk,
             settler_devid: settle.settler_devid,
             settlement_receipt_id: receipt_id,
-            signature: req.signature.clone(),
+            // Signed below, by THIS device. Not carried in from `req`: the settler is
+            // the actor whose self-loop is being advanced, so the signature is ours to
+            // produce, and a caller-supplied one is unverifiable material that only
+            // looks like authorization.
+            signature: Vec::new(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+
+        // Sign BEFORE the advance: the signature is part of `operation.to_bytes()` and
+        // therefore part of `compute_chain_tip()`, so a transition committed unsigned
+        // cannot be signed afterwards without rewriting the tip and every descendant.
+        let op = match self.core_sdk.sign_operation_sphincs(op) {
+            Ok(signed) => signed,
+            Err(e) => return err(format!("dlv.unlockRouted: failed to sign DlvSettle: {e}")),
         };
 
         // The two POSITIONAL deltas the conservation arm requires: the input the
