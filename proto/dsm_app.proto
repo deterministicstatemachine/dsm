@@ -1127,6 +1127,19 @@ message AmmVaultSummaryV1 {
   // Centralised in Rust so the frontend stays purely a renderer per the
   // Layer Communication Law.
   optional string unlock_spec_key = 12 [(dsm_max_len)=128];
+  // Display labels for `token_a` / `token_b`, resolved in Rust against the token
+  // registry.  The frontend CANNOT derive these: `token_a`/`token_b` are 32-byte
+  // BLAKE3 policy commits, not text, and rendering those bytes as UTF-8 is what
+  // produced mojibake pair labels on the owner's LiquidityScreen.  Resolved here
+  // so the frontend stays purely a renderer per the Layer Communication Law.
+  //
+  // NEVER EMPTY.  When the commit is not in this device's registry the value is
+  // the CANONICAL BASE32 CROCKFORD ENCODING of the commit itself — an explicit,
+  // deterministic, lossless fallback.  The renderer prints this verbatim and
+  // never substitutes, truncates, or guesses; an unresolved token must look
+  // unresolved, not broken.  52 chars for an encoded 32-byte commit, hence 64.
+  string token_a_ticker = 17 [(dsm_max_len)=64];
+  string token_b_ticker = 18 [(dsm_max_len)=64];
 }
 
 // Per-vault signed state anchor.  Owner publishes one at vault

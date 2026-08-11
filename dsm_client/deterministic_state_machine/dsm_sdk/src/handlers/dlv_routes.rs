@@ -109,23 +109,39 @@ impl AppRouterImpl {
                 // Reserves come from THIS DEVICE'S encumbered leaves, not from
                 // the condition and not from an advertisement. The owner's
                 // screen must show what the owner actually holds.
-                let (reserve_a, reserve_b) = {
-                    let resolve = |t: &[u8]| -> Option<[u8; 32]> {
-                        let tid = std::str::from_utf8(t).ok()?;
-                        self.wallet.token_sdk.resolve_policy_commit_strict(tid).ok()
-                    };
-                    match (
-                        self.core_sdk.device_head(),
-                        resolve(&token_a),
-                        resolve(&token_b),
-                    ) {
-                        (Some(head), Some(pc_a), Some(pc_b)) => (
-                            head.vault_reserve(&vid, &pc_a),
-                            head.vault_reserve(&vid, &pc_b),
-                        ),
-                        _ => (0, 0),
+                // `AmmConstantProduct.token_a/token_b` ARE the 32-byte policy commits
+                // (see `amm_fulfillment_bytes`, and the `(dsm_fixed_len)=32` on the wire
+                // fields). They were being parsed as UTF-8 ticker text first:
+                // `std::str::from_utf8` on 32 bytes of BLAKE3 output all but always
+                // fails, the `?` returned None, and the match fell to `_ => (0, 0)` — so
+                // this route reported ZERO reserves for every funded AMM vault. Use the
+                // commit directly; there is nothing to resolve.
+                let as_commit = |t: &[u8]| -> Option<[u8; 32]> { <[u8; 32]>::try_from(t).ok() };
+                let (pc_a, pc_b) = (as_commit(&token_a), as_commit(&token_b));
+                let (reserve_a, reserve_b) = match (self.core_sdk.device_head(), pc_a, pc_b) {
+                    (Some(head), Some(pc_a), Some(pc_b)) => (
+                        head.vault_reserve(&vid, &pc_a),
+                        head.vault_reserve(&vid, &pc_b),
+                    ),
+                    _ => (0, 0),
+                };
+
+                // Display labels, resolved HERE because a policy commit is a digest the
+                // frontend cannot invert. NEVER EMPTY: an unresolved commit falls back to
+                // its own canonical Base32 Crockford encoding, which is explicit,
+                // deterministic and lossless. Returning "" would just move the guess into
+                // React, which is the shape of the bug being fixed.
+                let ticker = |pc: Option<[u8; 32]>| -> String {
+                    match pc {
+                        Some(pc) => dsm::core::token::resolve_ticker_for_policy_commit(&pc)
+                            .unwrap_or_else(|| crate::util::text_id::encode_base32_crockford(&pc)),
+                        // Unreachable for a well-formed vault (the commits are fixed 32
+                        // bytes); a malformed one still gets a stable, non-empty label
+                        // rather than an empty cell that looks like a rendering failure.
+                        None => "<malformed policy commit>".to_string(),
                     }
                 };
+                let (token_a_ticker, token_b_ticker) = (ticker(pc_a), ticker(pc_b));
                 let anchor_sequence = vault.current_sequence;
                 let anchor_enforcement = vault.anchor_enforcement;
                 // Phase 13 follow-up: pull the persisted `policy_digest`
@@ -173,6 +189,8 @@ impl AppRouterImpl {
                     vault_id: vid.to_vec(),
                     token_a,
                     token_b,
+                    token_a_ticker,
+                    token_b_ticker,
                     reserve_a,
                     reserve_b,
                     // Reconciliation is not wired yet; the owner sees a real
@@ -3227,6 +3245,198 @@ mod funded_creation_tests {
         assert_eq!(
             dsm::dlv::vault_reserve_inclusion::proven_amount(&proof_after, &pc_b),
             Some(5_000 - expected_out),
+        );
+    }
+
+    /// THE ROUTE THAT HAD NO TEST — which is why both wounds shipped.
+    ///
+    /// `dlv_list_owned_amm_vaults` parsed `AmmConstantProduct.token_a/token_b` as UTF-8
+    /// ticker text. Those fields are 32-byte CPTA policy commits (the proto has always
+    /// said so; the Rust doc used to say "token id"), so `from_utf8` failed, the `?`
+    /// returned `None`, and the match fell to `_ => (0, 0)`: the owner's own screen
+    /// showed ZERO reserves for a funded vault. The same misreading reached the frontend,
+    /// which UTF-8-decoded the commits into mojibake pair labels.
+    ///
+    /// Two tests LOOK like they cover this — both assert `(10_000, 5_000)` — but both
+    /// bind `v` from `rehydrate_all_amm_vaults`, a different path entirely.
+    ///
+    /// This drives the REAL route once and pins all three properties together.
+    #[test]
+    #[serial_test::serial]
+    fn list_owned_amm_vaults_keeps_commits_reports_real_reserves_and_resolves_tickers() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+
+        // Known display names for those exact commits.
+        dsm::core::token::register_policy_commit_ticker(pc_a, "AAA");
+        dsm::core::token::register_policy_commit_ticker(pc_b, "BBB");
+
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let created = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            created.success,
+            "create failed: {:?}",
+            created.error_message
+        );
+
+        // THE ACTUAL ROUTE, through the dispatcher.
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.query(crate::bridge::AppQuery {
+                path: "dlv.listOwnedAmmVaults".to_string(),
+                params: Vec::new(),
+            })
+            .await
+        });
+        assert!(res.success, "list failed: {:?}", res.error_message);
+
+        // `pack_envelope_ok` prefixes a 0x03 v3 framing byte before the Envelope.
+        assert_eq!(res.data.first(), Some(&0x03u8), "Envelope v3 framing byte");
+        let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
+        let Some(generated::envelope::Payload::AppStateResponse(state)) = env.payload else {
+            panic!("expected AppStateResponse");
+        };
+        let line = state.value.expect("value");
+        let bytes = crate::util::text_id::decode_base32_crockford(line.trim())
+            .expect("summary decodes from Base32");
+        let v = generated::AmmVaultSummaryV1::decode(&*bytes).expect("summary");
+
+        // 1. The commit fields keep their established meaning — byte-exact, unchanged.
+        assert_eq!(
+            v.token_a, pc_a,
+            "token_a must remain the exact 32-byte policy commit"
+        );
+        assert_eq!(v.token_b, pc_b, "token_b must remain the exact commit");
+
+        // 2. THE CORRECTNESS WOUND: real reserves, not the (0, 0) the broken lookup gave.
+        assert_eq!(
+            (v.reserve_a, v.reserve_b),
+            (10_000, 5_000),
+            "reserves must come from the owner's encumbered leaves; (0, 0) means the \
+             policy commit was parsed as ticker text again"
+        );
+
+        // 3. THE DISPLAY WOUND: resolved labels, so the frontend never decodes a digest.
+        assert_eq!(v.token_a_ticker, "AAA");
+        assert_eq!(v.token_b_ticker, "BBB");
+    }
+
+    /// WIRE COMPATIBILITY for the additive display fields.
+    ///
+    /// `token_a_ticker` / `token_b_ticker` are new tags (17, 18) on a QUERY RESPONSE.
+    /// Additive, so this is not a head-format change and adds no wipe/reseed requirement —
+    /// but it must actually be additive, which means both directions have to hold:
+    /// a message written by an OLD encoder must still decode, and a message written by
+    /// the new one must round-trip byte-for-byte.
+    #[test]
+    fn the_additive_display_fields_are_wire_compatible_in_both_directions() {
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+
+        // OLD -> NEW: a producer that never heard of tags 17/18. Encoding a summary with
+        // the fields empty is byte-identical to what the pre-change encoder emitted,
+        // because proto3 omits empty strings entirely.
+        let old_shape = generated::AmmVaultSummaryV1 {
+            vault_id: vec![0x11u8; 32],
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            reserve_a: 10_000,
+            reserve_b: 5_000,
+            fee_bps: 30,
+            ..Default::default()
+        };
+        let old_bytes = old_shape.encode_to_vec();
+        assert!(
+            !old_bytes.iter().any(|b| *b == 0x8A || *b == 0x92),
+            "empty display fields must not be emitted at all (tags 17/18 absent on the wire)"
+        );
+        let decoded = generated::AmmVaultSummaryV1::decode(&*old_bytes).expect("old decodes");
+        assert_eq!(decoded.token_a, pc_a, "existing commit semantics preserved");
+        assert_eq!((decoded.reserve_a, decoded.reserve_b), (10_000, 5_000));
+        assert!(
+            decoded.token_a_ticker.is_empty() && decoded.token_b_ticker.is_empty(),
+            "absent display fields decode to empty, never to garbage"
+        );
+
+        // NEW -> NEW: full round trip, values intact.
+        let new_shape = generated::AmmVaultSummaryV1 {
+            token_a_ticker: "AAA".to_string(),
+            token_b_ticker: crate::util::text_id::encode_base32_crockford(&pc_b),
+            ..old_shape.clone()
+        };
+        let round =
+            generated::AmmVaultSummaryV1::decode(&*new_shape.encode_to_vec()).expect("new decodes");
+        assert_eq!(round, new_shape, "round trip must be lossless");
+        assert_eq!(
+            round.token_a, pc_a,
+            "commits still untouched by the display fields"
+        );
+        assert_eq!(
+            round.token_b_ticker.len(),
+            52,
+            "an encoded 32-byte commit is 52 Base32 Crockford chars — inside the 64 cap"
+        );
+    }
+
+    /// An UNREGISTERED commit still gets a deterministic, non-empty label: its own
+    /// canonical Base32 Crockford encoding. Empty would push the guess back into React,
+    /// which is the shape of the bug being fixed.
+    #[test]
+    #[serial_test::serial]
+    fn an_unresolvable_token_falls_back_to_its_canonical_encoding_never_empty() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = ([0x7Eu8; 32], [0x7Fu8; 32]);
+
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::device_holding(
+                0x99, 50_000, 20_000,
+            ));
+        let _ = (pc_a, pc_b);
+
+        // Resolution itself is the unit under test here — the route wraps exactly this.
+        let label = |pc: [u8; 32]| -> String {
+            dsm::core::token::resolve_ticker_for_policy_commit(&pc)
+                .unwrap_or_else(|| crate::util::text_id::encode_base32_crockford(&pc))
+        };
+        let a = label(pc_a);
+        assert!(!a.is_empty(), "a label must never be empty");
+        assert_eq!(
+            a,
+            crate::util::text_id::encode_base32_crockford(&pc_a),
+            "an unresolved commit renders as its own canonical encoding"
+        );
+        assert!(
+            !a.contains('\u{FFFD}'),
+            "never a replacement character — that is what UTF-8-decoding a digest produced"
         );
     }
 

@@ -8420,6 +8420,28 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
    */
   unlockSpecKey?: string;
 
+  /**
+   * Display labels for `token_a` / `token_b`, resolved in Rust against the token
+   * registry.  The frontend CANNOT derive these: `token_a`/`token_b` are 32-byte
+   * BLAKE3 policy commits, not text, and rendering those bytes as UTF-8 is what
+   * produced mojibake pair labels on the owner's LiquidityScreen.  Resolved here
+   * so the frontend stays purely a renderer per the Layer Communication Law.
+   *
+   * NEVER EMPTY.  When the commit is not in this device's registry the value is
+   * the CANONICAL BASE32 CROCKFORD ENCODING of the commit itself — an explicit,
+   * deterministic, lossless fallback.  The renderer prints this verbatim and
+   * never substitutes, truncates, or guesses; an unresolved token must look
+   * unresolved, not broken.  52 chars for an encoded 32-byte commit, hence 64.
+   *
+   * @generated from field: string token_a_ticker = 17;
+   */
+  tokenATicker = "";
+
+  /**
+   * @generated from field: string token_b_ticker = 18;
+   */
+  tokenBTicker = "";
+
   constructor(data?: PartialMessage<AmmVaultSummaryV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8441,6 +8463,8 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 10, name: "anchor_enforcement", kind: "enum", T: proto3.getEnumType(AnchorEnforcement) },
     { no: 11, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
     { no: 12, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 17, name: "token_a_ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 18, name: "token_b_ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmVaultSummaryV1 {
@@ -13228,6 +13252,18 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    */
   senderKyberPublicKey = new Uint8Array(0);
 
+  /**
+   * Detached SPHINCS+ (device AK) signature over
+   * binding_digest(device_id, genesis, sender_kyber_public_key), per ADR 0002. The
+   * receiver verifies this against the PINNED peer AK (never the wire signing key)
+   * BEFORE caching the Kyber key — the one identity-binding primitive shared with
+   * storage-fetch and repair. Empty = unverifiable: the receiver fail-closes and does
+   * not cache the Kyber key (no implicit TOFU).
+   *
+   * @generated from field: bytes sender_kyber_binding_sig = 17;
+   */
+  senderKyberBindingSig = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13251,6 +13287,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "sender_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 17, name: "sender_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {
@@ -13406,6 +13443,16 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
    */
   responderKyberPublicKey = new Uint8Array(0);
 
+  /**
+   * Detached SPHINCS+ (device AK) signature over
+   * binding_digest(device_id, genesis, responder_kyber_public_key), per ADR 0002. The
+   * sender verifies this against the PINNED peer AK (never the wire signing key) BEFORE
+   * caching the responder's Kyber key. Empty = unverifiable: fail-closed, no cache, no TOFU.
+   *
+   * @generated from field: bytes responder_kyber_binding_sig = 10;
+   */
+  responderKyberBindingSig = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralPrepareResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13422,6 +13469,7 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
     { no: 6, name: "responder_signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "receiver_challenge", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "responder_kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "responder_kyber_binding_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareResponse {

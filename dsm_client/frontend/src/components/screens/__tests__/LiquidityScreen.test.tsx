@@ -69,18 +69,33 @@ describe('LiquidityScreen', () => {
       vaults: [
         {
           vaultIdBase32: '0123456789ABCDEFGHJKMNPQRSTVWXYZ',
-          tokenA: new TextEncoder().encode('AAA'),
-          tokenB: new TextEncoder().encode('BBB'),
+          // 32-byte CPTA policy commits — what the wire actually carries. The old
+          // fixture used TextEncoder('AAA'), which baked in the very assumption that
+          // produced mojibake labels in the real screen.
+          tokenA: new Uint8Array(32).fill(0xa1),
+          tokenB: new Uint8Array(32).fill(0xb2),
+          tokenATicker: 'AAA',
+          tokenBTicker: 'BBB',
           reserveA: 1000n,
           reserveB: 2000n,
           feeBps: 30,
           advertisedStateNumber: 3n,
           routingAdvertised: true,
+          anchorSequence: 0n,
+          anchorEnforcement: 'required' as const,
         },
       ],
     });
     render(<LiquidityScreen />);
+    // The label comes from the Rust-resolved ticker fields, NOT from decoding the
+    // commit bytes. This assertion used to pass for the wrong reason: the fixture
+    // supplied TextEncoder('AAA') as `tokenA` and the screen UTF-8-decoded it, so a
+    // green test coexisted with mojibake on real data, where `tokenA` is a 32-byte
+    // digest. The fixture now carries a real commit, so only the ticker field can
+    // produce this text.
     await waitFor(() => expect(screen.getByText(/AAA \/ BBB/)).toBeInTheDocument());
+    // And the commit bytes must never reach the DOM as text.
+    expect(screen.queryByText(/\uFFFD/)).toBeNull();
     expect(screen.getByText(/fee 30 bps/)).toBeInTheDocument();
     expect(screen.getByText(/reserves: 1000 \/ 2000/)).toBeInTheDocument();
     expect(screen.getByText(/ad: ✓ seq=3/)).toBeInTheDocument();
@@ -183,13 +198,17 @@ describe('LiquidityScreen', () => {
         vaults: [
           {
             vaultIdBase32: ZERO_VAULT_ID_B32,
-            tokenA: new TextEncoder().encode('AAA'),
-            tokenB: new TextEncoder().encode('BBB'),
+            tokenA: new Uint8Array(32).fill(0xa1),
+            tokenB: new Uint8Array(32).fill(0xb2),
+            tokenATicker: 'AAA',
+            tokenBTicker: 'BBB',
             reserveA: 1000n,
             reserveB: 2000n,
             feeBps: 30,
             advertisedStateNumber: 1n,
             routingAdvertised: true,
+            anchorSequence: 0n,
+            anchorEnforcement: 'required' as const,
           },
         ],
       });

@@ -114,9 +114,17 @@ pub enum FulfillmentMechanism {
     /// are proved to a trader, so a condition no longer carries the quantities
     /// it governs.
     AmmConstantProduct {
-        /// Lex-lower token id.
+        /// Lex-LOWER 32-byte CPTA **policy commit** — NOT a ticker, and not text.
+        ///
+        /// The proto has always said so (`AmmConstantProduct.token_a`,
+        /// `(dsm_fixed_len)=32`, "A ticker is NOT an identity"), but this doc said
+        /// "token id", and a reader who believed it wrote
+        /// `std::str::from_utf8(&token_a)` in `dlv_list_owned_amm_vaults`. That parse
+        /// fails on 32 bytes of BLAKE3 output, so the route silently reported ZERO
+        /// reserves for every funded AMM vault. Resolve a display label through the
+        /// registry; never through UTF-8.
         token_a: Vec<u8>,
-        /// Lex-higher token id.
+        /// Lex-HIGHER 32-byte CPTA **policy commit**. See [`Self::AmmConstantProduct::token_a`].
         token_b: Vec<u8>,
         /// Fee in basis points (e.g. 30 = 0.30 %).
         fee_bps: u32,
