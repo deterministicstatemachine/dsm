@@ -97,6 +97,20 @@ pub(crate) fn pair_commits() -> ([u8; 32], [u8; 32]) {
 /// from `(genesis, devid, vault_id, policy_commit)`, so identical devids would
 /// make two heads derive the same leaf positions and the boundary between them
 /// would be nominal.
+/// The public key a fixture head must carry: the CURRENTLY INSTALLED signing key.
+///
+/// Fixtures used to hardcode `vec![9u8; 32]`, which was harmless only while nothing
+/// verified anything. `DeviceState::advance` now verifies `DlvSettle` / `DlvOwnerApply`
+/// against the advancing device's own key, so a head whose `public_key` is not the key
+/// the signer actually holds cannot authorize its own transitions — production keeps
+/// them equal (a real head carries a 64-byte SPX256f key) and the fixture must too.
+///
+/// Falls back to the old placeholder when no identity is installed, so fixtures that
+/// never sign keep working unchanged.
+fn fixture_public_key() -> Vec<u8> {
+    crate::sdk::signing_authority::current_public_key().unwrap_or_else(|_| vec![9u8; 32])
+}
+
 pub(crate) fn device_holding(devid_seed: u8, a: u64, b: u64) -> DeviceState {
     let (pc_a, pc_b) = pair_commits();
     let mut balances = BTreeMap::new();
@@ -109,7 +123,7 @@ pub(crate) fn device_holding(devid_seed: u8, a: u64, b: u64) -> DeviceState {
     DeviceState::restore(
         GENESIS,
         [devid_seed; 32],
-        vec![9u8; 32],
+        fixture_public_key(),
         None,
         balances,
         Vec::new(),
@@ -133,7 +147,7 @@ pub(crate) fn owner_holding(a: u64, b: u64) -> DeviceState {
     DeviceState::restore(
         GENESIS,
         DEVID,
-        vec![9u8; 32],
+        fixture_public_key(),
         None,
         balances,
         Vec::new(),

@@ -1128,6 +1128,39 @@ impl DeviceState {
             offline_spend.map(|o| o.amount),
         )?;
 
+        // AUTHORIZATION ON THE REAL PATH (§ canonical rule, transition.rs).
+        //
+        // `DlvSettle` and `DlvOwnerApply` are value-moving egress (`EgressAsset::Asset`)
+        // and are not among the rule's no-signature exemptions (`Genesis`, `Noop`,
+        // `Receive`). They used to reach this point unverified: the rule's own helper,
+        // `enforce_operation_authorization`, is only wired into the legacy
+        // `create_transition` / `execute_relationship_transition` paths, and neither is
+        // on the device-head advance every DLV route actually takes. The signature was
+        // therefore hashed into `compute_chain_tip()` — into the SMT leaf and the device
+        // root `r_A` — whether or not anyone had produced it.
+        //
+        // Both are SELF-LOOP transitions (`rel_key = compute_smt_key(actor, actor)`), so
+        // the authorizing key is this device's own AK. It is deliberately NOT read out of
+        // the operation (`DlvSettle` carries a `settler_public_key`): a key travelling
+        // inside the material it authorizes proves nothing, and a caller could name any
+        // key it liked. Verifying against `self.public_key()` is what makes the signature
+        // bind to the actor whose head is advancing.
+        //
+        // Fail-closed and BEFORE the chain tip is computed: the signature is part of the
+        // committed operation bytes, so an unsigned transition cannot be repaired later
+        // without rewriting this tip and every descendant.
+        if matches!(
+            operation,
+            Operation::DlvSettle { .. } | Operation::DlvOwnerApply { .. }
+        ) {
+            let op_name = operation.get_operation_type();
+            crate::core::state_machine::transition::verify_operation_signature(
+                &operation,
+                &self.public_key,
+                op_name,
+            )?;
+        }
+
         // Offline-bearer spend: draw the value from the device-bound offline-cash allocation instead of
         // the online balance. Requires the anchor-state advance (a bearer transfer always advances
         // the anchor leaf), so the allocation debit and the transition land in ONE atomic device root.
@@ -2295,8 +2328,34 @@ mod tests {
     fn devid(b: u8) -> [u8; 32] {
         [b; 32]
     }
+    /// The test device's ACTUAL signing keypair, cached — SPHINCS+ keygen is slow.
+    ///
+    /// `pubkey()` used to be `vec![0xAA; 64]`, which was fine while nothing verified
+    /// anything. Now that `advance` verifies `DlvSettle` / `DlvOwnerApply` against the
+    /// advancing device's own key, a head whose public key is not a real SPX256f key
+    /// cannot authorize its own transitions — and a test that cannot sign is a test that
+    /// cannot exercise the gate. Same 64-byte length (SPX256f pk = 2n), so every other
+    /// fixture is unaffected.
+    fn test_keypair() -> &'static crate::crypto::signatures::SignatureKeyPair {
+        static KP: std::sync::OnceLock<crate::crypto::signatures::SignatureKeyPair> =
+            std::sync::OnceLock::new();
+        KP.get_or_init(|| {
+            crate::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0xAA; 32])
+                .expect("test keypair")
+        })
+    }
+
     fn pubkey() -> Vec<u8> {
-        vec![0xAA; 64]
+        test_keypair().public_key.clone()
+    }
+
+    /// Sign `op` with the test device's key over the canonical preimage
+    /// (`with_cleared_signature().to_bytes()`), exactly as production does.
+    fn sign_op(op: Operation) -> Operation {
+        let payload = op.with_cleared_signature().to_bytes();
+        let sig = crate::crypto::sphincs::sphincs_sign(&test_keypair().secret_key, &payload)
+            .expect("sign test operation");
+        op.with_signature(sig)
     }
     fn pc(b: u8) -> [u8; 32] {
         [b; 32]
@@ -2596,7 +2655,7 @@ mod tests {
         output_pc: [u8; 32],
         output_amount: u64,
     ) -> Operation {
-        Operation::DlvSettle {
+        sign_op(Operation::DlvSettle {
             vault_id: vault.to_vec(),
             owner_public_key: vec![0xAA; 64],
             owner_devid: devid(0xA1),
@@ -2616,9 +2675,9 @@ mod tests {
             settler_public_key: vec![0xBB; 64],
             settler_devid: devid(0xB1),
             settlement_receipt_id: [0x77; 32],
-            signature: vec![0xCC; 64],
+            signature: Vec::new(),
             mode: TransactionMode::Bilateral,
-        }
+        })
     }
 
     fn delta(policy_commit: [u8; 32], direction: BalanceDirection, amount: u64) -> BalanceDelta {

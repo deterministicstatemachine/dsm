@@ -22,6 +22,27 @@ use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState, Vaul
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm_sdk::storage::client_db::{decode_device_state, encode_device_state};
 
+/// The owner device's ACTUAL signing keypair, cached (SPHINCS+ keygen is slow).
+/// `advance` verifies DlvOwnerApply against the advancing head's own public key, so the
+/// head must carry a real SPX256f key and the test must sign with its mate — exactly the
+/// production relationship between a device head and its AK.
+fn owner_keypair() -> &'static dsm::crypto::signatures::SignatureKeyPair {
+    static KP: std::sync::OnceLock<dsm::crypto::signatures::SignatureKeyPair> =
+        std::sync::OnceLock::new();
+    KP.get_or_init(|| {
+        dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[0xD6; 32])
+            .expect("owner keypair")
+    })
+}
+
+/// Sign over the canonical preimage `with_cleared_signature().to_bytes()`.
+fn sign_as_owner(op: Operation) -> Operation {
+    let payload = op.with_cleared_signature().to_bytes();
+    let sig = dsm::crypto::sphincs::sphincs_sign(&owner_keypair().secret_key, &payload)
+        .expect("sign operation");
+    op.with_signature(sig)
+}
+
 const OWNER: [u8; 32] = [0xD6; 32];
 const PEER: [u8; 32] = [0xB8; 32];
 const VAULT: [u8; 32] = [0x5A; 32];
@@ -68,7 +89,7 @@ fn mint(head: &DeviceState, policy: [u8; 32], token: &[u8], amount: u64) -> Devi
 /// own: two balances, a second (peer) relationship tip, a vault-state extra leaf, and
 /// funded reserves on both legs.
 fn rich_owner_head() -> DeviceState {
-    let base = DeviceState::new(OWNER, OWNER, vec![0xAA; 64], 64);
+    let base = DeviceState::new(OWNER, OWNER, owner_keypair().public_key.clone(), 64);
     let head = mint(&base, era(), b"ERA", 1_000);
     let head = mint(&head, sofi(), b"dBTC", 2_000);
 
@@ -166,7 +187,10 @@ fn owner_apply_preserves_every_field_the_settlement_does_not_own() {
     let allocations_before = before.offline_allocations_snapshot().clone();
     let reserves_before = before.vault_reserves_snapshot();
 
-    let after = apply_settlement(&before, owner_apply_op_as_built_by_reconcile());
+    let after = apply_settlement(
+        &before,
+        sign_as_owner(owner_apply_op_as_built_by_reconcile()),
+    );
 
     // --- identity is immutable ---
     assert_eq!(after.genesis_digest(), before.genesis_digest());
@@ -233,7 +257,10 @@ fn owner_apply_preserves_every_field_the_settlement_does_not_own() {
 /// the stored root, and every collection round-trips.
 #[test]
 fn owner_apply_head_round_trips_through_persistence() {
-    let after = apply_settlement(&rich_owner_head(), owner_apply_op_as_built_by_reconcile());
+    let after = apply_settlement(
+        &rich_owner_head(),
+        sign_as_owner(owner_apply_op_as_built_by_reconcile()),
+    );
 
     let bytes = encode_device_state(&after);
     let (decoded, stored_root) = decode_device_state(&bytes).expect("decode");
@@ -260,7 +287,12 @@ fn owner_apply_head_round_trips_through_persistence() {
     );
 }
 
-/// `DlvSettle` and `DlvOwnerApply` are STRUCTURALLY UNSIGNABLE.
+/// `DlvSettle` and `DlvOwnerApply` are signed, and the real path verifies them.
+///
+/// THIS WAS #634's RED-ON-PURPOSE ACCEPTANCE TEST. Its assertions are unchanged; only
+/// the `#[ignore]`, the fixture (which now holds a real key and signs), and this name
+/// have moved. It was called `value_moving_dlv_operations_cannot_be_signed_by_any_code_path`
+/// and it recorded that:
 ///
 /// Both are classified as value-moving egress — `EgressAsset::Asset` at
 /// operations.rs:885-901, "the owner's OUTPUT leg leaves its reserves" — and both sit
@@ -297,13 +329,7 @@ fn owner_apply_head_round_trips_through_persistence() {
 /// descendant. Every settlement committed before the fix is permanently unverifiable
 /// and cannot be retro-signed in place.
 #[test]
-#[ignore = "RED ON PURPOSE — pins an unbuilt authorization path, not a bypassed gate. \
-            DlvSettle and DlvOwnerApply are value-moving egress that no code can sign: \
-            with_cleared_signature omits them so the signing preimage is \
-            self-referential, and sign_operation_sphincs returns Ok() unsigned. \
-            Removing this #[ignore] is the acceptance criterion — it must go green \
-            without being edited."]
-fn value_moving_dlv_operations_cannot_be_signed_by_any_code_path() {
+fn value_moving_dlv_operations_are_signed_and_verified_on_the_real_path() {
     let op = owner_apply_op_as_built_by_reconcile();
 
     // The canonical rule refuses it, and DlvOwnerApply is not among the documented
@@ -333,7 +359,7 @@ fn value_moving_dlv_operations_cannot_be_signed_by_any_code_path() {
     // DeviceState::advance calls no authorization gate (the rule's only two callers,
     // relationship.rs:598 and transition.rs:551, are both off this path).
     let before = rich_owner_head();
-    let after = apply_settlement(&before, op);
+    let after = apply_settlement(&before, sign_as_owner(op));
     assert_ne!(after.root(), before.root(), "the advance did happen");
 
     let committed = after

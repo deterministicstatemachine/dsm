@@ -835,7 +835,7 @@ pub fn apply_transition(
 /// The canonical signing payload is `operation.with_cleared_signature().to_bytes()`.
 /// This function is fail-closed: missing, empty, or invalid signatures all produce
 /// errors.
-fn verify_operation_signature(
+pub(crate) fn verify_operation_signature(
     operation: &Operation,
     public_key: &[u8],
     op_name: &str,
