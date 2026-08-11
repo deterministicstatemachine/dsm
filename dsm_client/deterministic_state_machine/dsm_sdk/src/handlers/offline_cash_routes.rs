@@ -95,3 +95,148 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::OfflineCashResponse(resp))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::init::SdkConfig;
+    use crate::handlers::app_router_impl::AppRouterImpl;
+
+    /// Minimal process-global identity + storage, as every route test needs.
+    /// Deliberately NOT installing an anchor appliance factory — that absence IS the
+    /// condition under test.
+    fn install_identity() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+            std::env::remove_var("DSM_ENV_CONFIG_PATH");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
+            "./.dsm_testdata_offline_cash_gate",
+        ));
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (device_id, genesis_hash, binding_key) =
+            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn router() -> AppRouterImpl {
+        AppRouterImpl::new(SdkConfig {
+            node_id: "offline-cash-gate-test".to_string(),
+            storage_endpoints: vec![],
+            enable_offline: true,
+        })
+        .expect("router init")
+    }
+
+    fn pack(body: Vec<u8>) -> Vec<u8> {
+        generated::ArgPack {
+            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            codec: generated::Codec::Proto as i32,
+            body,
+        }
+        .encode_to_vec()
+    }
+
+    /// Install a factory that FAILS to attach — a chip that is absent or unreadable.
+    ///
+    /// This is the only way to reach the entry gate from a test build. With no factory
+    /// installed, `anchor_appliance_status` falls back to `hardware_appliance_or_fail`,
+    /// whose `#[cfg(test)]` arm returns the in-process mock and reports connected. The
+    /// fail-closed `#[cfg(not(test))]` arm that real device builds get is unreachable
+    /// here by construction, so a failing factory stands in for "no chip".
+    /// Restores on drop, panic included — the factory is process-global, and leaving one
+    /// installed silently changes anchor attachment for every later test.
+    struct FailingApplianceFactory;
+
+    impl FailingApplianceFactory {
+        fn install() -> Self {
+            crate::bridge::install_anchor_appliance_factory(std::sync::Arc::new(|| {
+                Err(dsm::types::error::DsmError::invalid_operation(
+                    "test: no anchor appliance attached",
+                ))
+            }));
+            Self
+        }
+    }
+
+    impl Drop for FailingApplianceFactory {
+        fn drop(&mut self) {
+            crate::bridge::clear_anchor_appliance_factory_for_tests();
+        }
+    }
+
+    /// GATE 1 — REGIME ENTRY. Offline cash is the appliance-gated regime: with no anchor
+    /// appliance reachable, no allocation can be created, so no bearer spend can ever
+    /// have anything to draw from.
+    ///
+    /// This is one of the three live gates carrying offline-bearer authority after the
+    /// vestigial `offline_bearer_attestation` flag was deleted. The flag could only
+    /// remember a past belief; this requires the appliance to answer NOW, on this
+    /// attempt. Delete the `!snap.connected` refusal and this test goes red.
+    #[test]
+    #[serial_test::serial]
+    fn load_offline_refuses_when_the_anchor_appliance_cannot_be_reached() {
+        install_identity();
+        let _factory = FailingApplianceFactory::install();
+        let r = router();
+        let req = generated::OfflineCashRequest {
+            token_id: "ERA".to_string(),
+            amount: 10,
+        };
+
+        let res = futures::executor::block_on(r.handle_offline_cash_invoke(AppInvoke {
+            method: "wallet.loadOffline".to_string(),
+            args: pack(req.encode_to_vec()),
+        }));
+
+        assert!(!res.success, "load must refuse when no appliance answers");
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("connect your anchor device"),
+            "the refusal must be the appliance gate, not a later balance/resolve error — got: {msg}"
+        );
+    }
+
+    /// The same gate gates the reverse direction: unload also crosses the regime
+    /// boundary and is bound to the enrolled bundle B.
+    #[test]
+    #[serial_test::serial]
+    fn unload_offline_refuses_when_the_anchor_appliance_cannot_be_reached() {
+        install_identity();
+        let _factory = FailingApplianceFactory::install();
+        let r = router();
+        let req = generated::OfflineCashRequest {
+            token_id: "ERA".to_string(),
+            amount: 10,
+        };
+
+        let res = futures::executor::block_on(r.handle_offline_cash_invoke(AppInvoke {
+            method: "wallet.unloadOffline".to_string(),
+            args: pack(req.encode_to_vec()),
+        }));
+
+        assert!(!res.success);
+        assert!(res
+            .error_message
+            .unwrap_or_default()
+            .contains("connect your anchor device"));
+    }
+}

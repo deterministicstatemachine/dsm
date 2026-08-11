@@ -371,6 +371,18 @@ pub fn anchor_appliance_factory() -> Option<AnchorApplianceFactory> {
     ANCHOR_APPLIANCE_FACTORY.read().ok()?.clone()
 }
 
+/// Test-only: uninstall the factory so the next test does not inherit it.
+///
+/// The factory is process-global. A test that installs one and does not remove it
+/// changes the anchor-attach outcome for every test that runs after it, which surfaces
+/// as unrelated failures far from the cause.
+#[cfg(test)]
+pub(crate) fn clear_anchor_appliance_factory_for_tests() {
+    if let Ok(mut g) = ANCHOR_APPLIANCE_FACTORY.write() {
+        *g = None;
+    }
+}
+
 #[cfg(test)]
 pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
     if let Ok(mut guard) = APP_ROUTER.write() {
