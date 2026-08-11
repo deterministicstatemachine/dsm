@@ -3,7 +3,7 @@
 // Tabbed contacts interface with "My Contacts" and "Add Contact"
 const CONTACTS_DEBUG = false; // flip to true for on-device BLE/contacts debugging
 import React, { useCallback, useEffect, useState, useRef, useMemo } from 'react';
-import SatelliteIcon from '../icons/SatelliteIcon';
+import BluetoothIcon from '../icons/BluetoothIcon';
 import ArrowIcon from '../icons/ArrowIcon';
 import QRCodeScannerPanel from '../qr/QRCodeScannerPanel';
 import MyContactInfoPanel from '../contacts/MyContactInfoPanel';
@@ -510,7 +510,7 @@ const ContactsTabScreen: React.FC<Props> = ({ eraTokenSrc = 'images/logos/era_to
                       </div>
                       <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                         {c.bleAddress && (
-                          <SatelliteIcon size={12} color="var(--stateboy-dark)" />
+                          <BluetoothIcon size={12} color="var(--stateboy-dark)" />
                         )}
                         <ArrowIcon
                           direction={selected === i ? 'down' : 'right'}
