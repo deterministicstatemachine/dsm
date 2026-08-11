@@ -34,14 +34,6 @@ function bigIntFromString(s: string): bigint {
   return BigInt(s);
 }
 
-function decodeUtf8(bytes: Uint8Array): string {
-  try {
-    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-  } catch {
-    return '';
-  }
-}
-
 export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   const [phase, setPhase] = useState<Phase>('loading');
   const [vaults, setVaults] = useState<AmmVaultSummary[]>([]);
@@ -309,7 +301,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               <div key={v.vaultIdBase32} className="balance-card" style={{ padding: '8px 12px' }}>
                 <div className="balance-info">
                   <span className="token-symbol">
-                    {decodeUtf8(v.tokenA)} / {decodeUtf8(v.tokenB)}
+                    {v.tokenATicker} / {v.tokenBTicker}
                   </span>
                   <span className="balance-amount">fee {v.feeBps} bps</span>
                 </div>

@@ -184,8 +184,18 @@ import { routerQueryBin } from './WebViewBridge';
  */
 export interface AmmVaultSummary {
   vaultIdBase32: string;
+  /** 32-byte CPTA policy commit (lex-lower). NOT text — never decode as UTF-8. */
   tokenA: Uint8Array;
+  /** 32-byte CPTA policy commit (lex-higher). NOT text — never decode as UTF-8. */
   tokenB: Uint8Array;
+  /**
+   * Display labels for the pair, resolved in RUST from the token registry.
+   * Never empty: an unresolved commit arrives as its own canonical Base32
+   * Crockford encoding. Render verbatim — resolving a commit to a ticker is
+   * protocol knowledge and does not belong in React.
+   */
+  tokenATicker: string;
+  tokenBTicker: string;
   reserveA: bigint;
   reserveB: bigint;
   feeBps: number;
@@ -210,14 +220,6 @@ export interface AmmVaultSummary {
    * used.  `undefined` for legacy vaults (see `unlockSpecDigest`).
    */
   unlockSpecKey?: string;
-}
-
-function decodeReserveBigInt(bytes: Uint8Array): bigint {
-  let acc = 0n;
-  for (const b of bytes) {
-    acc = (acc << 8n) | BigInt(b);
-  }
-  return acc;
 }
 
 function anchorEnforcementToString(
@@ -290,8 +292,14 @@ export async function listOwnedAmmVaults(): Promise<{
         vaultIdBase32: encodeBase32Crockford(summary.vaultId),
         tokenA: summary.tokenA,
         tokenB: summary.tokenB,
-        reserveA: decodeReserveBigInt(summary.reserveAU128),
-        reserveB: decodeReserveBigInt(summary.reserveBU128),
+        // `reserve_a_u128` / `reserve_b_u128` were RESERVED out of the proto and
+        // replaced by the uint64 `reserve_a` / `reserve_b`. This mapper still read
+        // the removed fields, so reserves rendered from `undefined` — the frontend
+        // half of the same wound the Rust route had.
+        reserveA: summary.reserveA,
+        reserveB: summary.reserveB,
+        tokenATicker: summary.tokenATicker,
+        tokenBTicker: summary.tokenBTicker,
         feeBps: summary.feeBps,
         advertisedStateNumber: summary.advertisedStateNumber,
         routingAdvertised: summary.routingAdvertised,
