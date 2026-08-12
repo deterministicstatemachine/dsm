@@ -203,16 +203,23 @@ impl StateMachine {
         // Generate entropy from hash-adjacency inputs (§11 eq. 14).
         // Read prior entropy + hash from the DeviceState's tip for this
         // relationship, or fall back to the SMT root for fresh chains.
-        let (prior_entropy, prior_hash) = if let Some(tip_state) = ds.tip_state(&rel_key) {
-            (tip_state.entropy.clone(), tip_state.compute_chain_tip())
-        } else {
-            let root = ds.root();
-            let entropy = {
-                let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
-                h.update(&root);
-                h.finalize().as_bytes().to_vec()
-            };
-            (entropy, root)
+        // `prior_hash` is read straight from the committed tip digest. It used
+        // to be recomputed from a cached copy of the whole tip state, but the
+        // head codec already rejects any tip whose cached state does not hash
+        // to `chain_tip`, so the recomputation could only ever reproduce it —
+        // at the cost of retaining a ~50 KB SPHINCS+ preimage per relationship.
+        let (prior_entropy, prior_hash) = match (ds.tip_entropy(&rel_key), ds.chain_tip(&rel_key)) {
+            (Some(entropy), Some(tip)) => (entropy.to_vec(), tip),
+            _ => {
+                let root = ds.root();
+                let entropy = {
+                    let mut h =
+                        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
+                    h.update(&root);
+                    h.finalize().as_bytes().to_vec()
+                };
+                (entropy, root)
+            }
         };
         let entropy = {
             let op_data = operation.to_bytes();

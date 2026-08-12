@@ -229,10 +229,22 @@ impl ValueCapability {
 
 /// Cached per-relationship tip metadata.
 ///
-/// Contains the current chain tip digest (mirror of the SMT leaf) plus the
-/// full [`RelationshipChainState`] that produced it, so the next advance on
-/// this relationship can read `embedded_parent` and prior `balance_witness`
-/// without an archive fetch.
+/// This is a **bounded accumulator entry**: a fixed-size commitment to the
+/// relationship's position, not a copy of the state that produced it.
+///
+/// The head previously retained the whole [`RelationshipChainState`] per tip.
+/// That cost ~50 KB per relationship — the operation embeds a 49,856-byte
+/// SPHINCS+ signature — while only two values were ever read back out:
+/// `entropy`, and a chain-tip recomputation that the codec already forced to
+/// equal `chain_tip`. Heads therefore grew ~50 KB per counterparty and
+/// overran the storage node's 128 KiB `MAX_ENVELOPE_BYTES`, which the
+/// envelope inherits because it carries the head.
+///
+/// So the tip keeps the digest and the entropy and nothing else. `root()` is
+/// unaffected: the SMT leaf has always been `rel_key -> chain_tip`, never the
+/// state. The operation being transacted still travels in full in its own
+/// envelope field — it is only the *retained history* that is now a
+/// commitment.
 #[derive(Clone, Debug)]
 pub struct RelChainTip {
     /// Current chain tip `h_n = H(canonical_bytes(state))`.
@@ -242,9 +254,15 @@ pub struct RelChainTip {
     /// Counterparty device identifier for this relationship.
     pub counterparty_devid: [u8; 32],
 
-    /// Full state at the tip, if available. `None` when the tip was restored
-    /// from a recovery capsule that only carried the digest.
-    pub state: Option<RelationshipChainState>,
+    /// Entropy of the state at this tip — the `prior_entropy` input to the
+    /// next advance's hash-adjacency derivation (§11 eq. 14).
+    ///
+    /// This is the ONLY part of the tip state that later operations consume,
+    /// which is why it is retained explicitly instead of being recovered from
+    /// a 50 KB state copy. Empty ONLY for a digest-only tip restored from a
+    /// recovery capsule that never carried one; an advance on such a tip
+    /// falls back to the SMT-root derivation, exactly as a fresh chain does.
+    pub tip_entropy: Vec<u8>,
 
     /// Canonical value-capability (R4 anti-shrink). Witnessed-birth relationships are
     /// `Yes`/`No`; imported/capsule-restored tips are `Unknown` until history proves
@@ -1019,10 +1037,17 @@ impl DeviceState {
         self.tips.get(rel_key).map(|t| t.chain_tip)
     }
 
-    /// Retrieve the cached full state at a relationship's current tip,
-    /// if present.
-    pub fn tip_state(&self, rel_key: &[u8; 32]) -> Option<&RelationshipChainState> {
-        self.tips.get(rel_key).and_then(|t| t.state.as_ref())
+    /// Entropy of the state at a relationship's current tip — the
+    /// `prior_entropy` input to the next advance (§11 eq. 14).
+    ///
+    /// `None` when the relationship is unknown, or when its tip carries no
+    /// entropy (a digest-only tip restored from a recovery capsule). Both
+    /// cases mean the caller must fall back to the SMT-root derivation.
+    pub fn tip_entropy(&self, rel_key: &[u8; 32]) -> Option<&[u8]> {
+        self.tips
+            .get(rel_key)
+            .map(|t| t.tip_entropy.as_slice())
+            .filter(|e| !e.is_empty())
     }
 
     /// Retrieve the cached tip metadata for a relationship, if present.
@@ -1644,7 +1669,10 @@ impl DeviceState {
             RelChainTip {
                 chain_tip: child_chain_tip,
                 counterparty_devid,
-                state: Some(new_chain_state.clone()),
+                // Retain only the entropy: the next advance's sole input from
+                // this tip. The state that produced it is not kept — its
+                // digest is `child_chain_tip`, already committed to the SMT.
+                tip_entropy: new_chain_state.entropy.clone(),
                 value_capability,
             },
         );

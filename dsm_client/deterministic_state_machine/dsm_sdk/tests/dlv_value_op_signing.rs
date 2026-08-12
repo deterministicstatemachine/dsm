@@ -333,9 +333,15 @@ fn the_canonical_preimage_is_stable_across_signing() {
     }
 }
 
-/// The head that results from a signed advance still round-trips through persistence
-/// with a matching root — a signature is 49,856 bytes and rides inside the committed
-/// operation bytes, so it must survive encode/decode intact.
+/// The head that results from a signed advance round-trips through persistence with a
+/// matching root, and does so WITHOUT retaining the 49,856-byte signature.
+///
+/// The head commits to the signed operation through the tip digest, not by keeping a
+/// copy of it. Retaining the copy cost ~50 KB per relationship and pushed the b0x
+/// envelope (which carries the head) past the storage node's 128 KiB
+/// `MAX_ENVELOPE_BYTES`, deterministically failing transfers. The signed operation
+/// still exists in full in the BCR chain-state archive, which is where historical /
+/// audit material belongs.
 #[test]
 fn a_signed_advance_round_trips_through_persistence() {
     use dsm_sdk::storage::client_db::{decode_device_state, encode_device_state};
@@ -354,12 +360,29 @@ fn a_signed_advance_round_trips_through_persistence() {
     );
     assert_eq!(decoded.root(), after.root());
 
-    let committed = decoded
-        .tip_state(&compute_smt_key(&ACTOR, &ACTOR))
-        .expect("tip state");
+    let rel_key = compute_smt_key(&ACTOR, &ACTOR);
+
+    // The tip retains the entropy the next advance consumes, and the committed digest.
+    assert!(
+        decoded.tip_entropy(&rel_key).is_some_and(|e| !e.is_empty()),
+        "the tip must retain the entropy feeding the next advance"
+    );
     assert_eq!(
-        committed.operation.get_signature().map(|s| s.len()),
-        Some(49_856),
-        "the signature must survive the persistence round trip intact"
+        decoded.chain_tip(&rel_key),
+        after.chain_tip(&rel_key),
+        "the committed tip digest must round-trip"
+    );
+
+    // ...and the head must NOT carry the signature preimage. Before this cut a single
+    // signed op made the head >50 KB; two relationships then overran the node's 128 KiB
+    // envelope cap. Bound it explicitly so the regression cannot return silently.
+    assert!(
+        bytes.len() < 4096,
+        "head must stay bounded, not scale with retained signatures: {} bytes",
+        bytes.len()
+    );
+    assert!(
+        bytes.len() < 49_856,
+        "a head larger than one SPHINCS+ signature means a signature is being retained"
     );
 }

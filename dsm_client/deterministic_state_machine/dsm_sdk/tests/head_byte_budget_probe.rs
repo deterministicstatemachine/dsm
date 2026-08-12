@@ -72,37 +72,14 @@ fn head_byte_budget() {
         // rel_key + chain_tip + counterparty + vc_tag + state_flag
         accounted += 32 + 32 + 32 + 1 + 1;
         println!("  rel {} vc={:?}", hex(&rk[..6]), tip.value_capability);
-        match tip.state.as_ref() {
-            None => println!("    state: NONE  <-- digest-only tip, no acceptance material"),
-            Some(s) => {
-                let op = s.operation.to_bytes();
-                let e = s.entity_sig.as_ref().map(|v| v.len()).unwrap_or(0);
-                let c = s.counterparty_sig.as_ref().map(|v| v.len()).unwrap_or(0);
-                op_bytes_total += op.len();
-                sig_bytes_total += e + c;
-                println!("    state: SOME");
-                println!(
-                    "      operation       : {} bytes  ({:?})",
-                    op.len(),
-                    core::mem::discriminant(&s.operation)
-                );
-                println!("      entropy         : {} bytes", s.entropy.len());
-                println!(
-                    "      encap_entropy   : {} bytes",
-                    s.encapsulated_entropy
-                        .as_ref()
-                        .map(|v| v.len())
-                        .unwrap_or(0)
-                );
-                println!(
-                    "      balance_witness : {} entries",
-                    s.balance_witness.len()
-                );
-                println!("      entity_sig      : {e} bytes");
-                println!("      counterparty_sig: {c} bytes");
-                accounted += 4 + op.len() + s.entropy.len() + e + c;
-            }
+        // v0x06: a tip is a bounded accumulator entry — digest + entropy. The
+        // operation and its ~50 KB signature live in the BCR archive, not here.
+        if tip.tip_entropy.is_empty() {
+            println!("    entropy: NONE  <-- digest-only tip (capsule restore)");
+        } else {
+            println!("    entropy: {} bytes", tip.tip_entropy.len());
         }
+        accounted += 4 + tip.tip_entropy.len();
     }
 
     let extra = head.extra_leaves_snapshot();

@@ -80,7 +80,15 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x02;
 // funded vault reloads with its reserves absent, recomputes a different root, and the wallet
 // refuses to start — after the owner has already had value debited into the vault. Breaking
 // bump with NO back-compat reader, per the no-legacy directive.
-const DEVICE_STATE_VERSION: u8 = 0x05;
+// v0x06 replaces the per-tip cached `RelationshipChainState` with the 32-byte `tip_entropy`.
+// The cached state cost ~50 KB per relationship (its operation embeds a 49,856-byte SPHINCS+
+// signature) while only two values were ever read back: `entropy`, and a chain-tip
+// recomputation this codec already forced to equal the stored `chain_tip`. Heads therefore
+// grew ~50 KB per counterparty, and the b0x envelope — which carries the head — overran the
+// storage node's 128 KiB MAX_ENVELOPE_BYTES, deterministically 413-ing every transfer once a
+// device had two relationships. `root()` is unaffected: the SMT leaf has always been
+// `rel_key -> chain_tip`, never the state. Breaking bump with NO back-compat reader.
+const DEVICE_STATE_VERSION: u8 = 0x06;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -271,14 +279,10 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         // Canonical value-capability (R4): 1=Yes, 2=No, 3=Unknown. Always explicit.
         out.push(tip.value_capability.commit_tag());
 
-        match tip.state.as_ref() {
-            Some(s) => {
-                out.push(1u8);
-                let inner = encode_rel_chain_state(s);
-                put_vec(&mut out, &inner);
-            }
-            None => out.push(0u8),
-        }
+        // v0x06: the tip's entropy, length-prefixed. Empty is legal and means a
+        // digest-only tip (recovery-capsule restore) whose next advance falls
+        // back to the SMT-root derivation.
+        put_vec(&mut out, &tip.tip_entropy);
     }
 
     // v0x03: non-tip SMT leaves (offline-bearer anchor-state + SoFi vault-state), sorted by key
@@ -362,29 +366,13 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         let vc_byte = read_u8(&mut cursor).map_err(|e| anyhow!("tip value_capability: {e}"))?;
         let value_capability = ValueCapability::from_wire(vc_byte as i32)
             .ok_or_else(|| anyhow!("tip value_capability invalid byte: {vc_byte}"))?;
-        let state_flag = read_u8(&mut cursor).map_err(|e| anyhow!("tip state flag: {e}"))?;
-        let state = match state_flag {
-            0 => None,
-            1 => {
-                let inner = read_vec(&mut cursor).map_err(|e| anyhow!("tip state bytes: {e}"))?;
-                let (decoded, recomputed_tip) = decode_rel_chain_state(&inner)?;
-                if recomputed_tip != chain_tip {
-                    return Err(anyhow!(
-                        "tip cached state digest mismatch: encoded {} != recomputed {}",
-                        crate::util::text_id::encode_base32_crockford(&chain_tip),
-                        crate::util::text_id::encode_base32_crockford(&recomputed_tip)
-                    ));
-                }
-                Some(decoded)
-            }
-            other => return Err(anyhow!("tip state_flag invalid: {other}")),
-        };
+        let tip_entropy = read_vec(&mut cursor).map_err(|e| anyhow!("tip entropy: {e}"))?;
         tips_in_order.push((
             rk,
             RelChainTip {
                 chain_tip,
                 counterparty_devid: cp_devid,
-                state,
+                tip_entropy,
                 value_capability,
             },
         ));
@@ -804,7 +792,7 @@ mod tests {
                 RelChainTip {
                     chain_tip: rel.compute_chain_tip(),
                     counterparty_devid: counterparty,
-                    state: Some(rel.clone()),
+                    tip_entropy: rel.entropy.clone(),
                     value_capability: ValueCapability::Unknown,
                 },
             )],
@@ -837,7 +825,7 @@ mod tests {
                 RelChainTip {
                     chain_tip,
                     counterparty_devid: counterparty,
-                    state: None,
+                    tip_entropy: Vec::new(),
                     value_capability: ValueCapability::Unknown,
                 },
             )],
@@ -904,7 +892,12 @@ mod tests {
                 .map(|t| t.counterparty_devid),
             Some(rel.counterparty_devid)
         );
-        assert!(decoded.tip_state(&rel_key).is_some());
+        // The tip retains the entropy the next advance consumes -- and ONLY that.
+        assert_eq!(
+            decoded.tip_entropy(&rel_key),
+            Some(rel.entropy.as_slice()),
+            "tip entropy must round-trip: it is the sole input the next advance reads"
+        );
         // Canonical value_capability round-trips (the sample tip is Unknown).
         assert_eq!(
             decoded.rel_chain_tip(&rel_key).map(|t| t.value_capability),
@@ -1022,9 +1015,9 @@ mod tests {
     fn a_pre_reserve_device_head_blob_is_rejected() {
         let (_, _, _, _, head) = sample_device_and_rel();
         let mut bytes = encode_device_state(&head);
-        assert_eq!(bytes[0], 0x05, "current device-head version");
+        assert_eq!(bytes[0], 0x06, "current device-head version");
 
-        bytes[0] = 0x04;
+        bytes[0] = 0x05;
         let err = decode_device_state(&bytes)
             .expect_err("an older device-head version must not be readable");
         let msg = format!("{err}");
@@ -1088,30 +1081,37 @@ mod tests {
             decoded_tip.counterparty_devid,
             original_tip.counterparty_devid
         );
-        assert!(decoded_tip.state.is_none());
+        assert!(
+            decoded_tip.tip_entropy.is_empty(),
+            "a digest-only tip carries no entropy and must decode as such"
+        );
         assert_eq!(decoded_tip.value_capability, original_tip.value_capability);
     }
 
     #[test]
     fn device_head_codec_rejects_invalid_value_capability_byte() {
-        // A state-less tip serializes as [..value_capability, state_flag], followed by one
-        // u32 count per trailing section — v0x03 extra_leaves, v0x04 offline-allocations,
-        // v0x05 vault-reserves — all empty here. Derived from that count rather than
-        // hardcoded, so adding the next section is a one-line change instead of a puzzling
-        // off-by-four in an unrelated test.
+        // An entropy-less tip serializes as [..value_capability, entropy_len:u32],
+        // followed by one u32 count per trailing section — v0x03 extra_leaves, v0x04
+        // offline-allocations, v0x05 vault-reserves — all empty here. Derived from those
+        // counts rather than hardcoded, so adding the next section is a one-line change
+        // instead of a puzzling off-by-four in an unrelated test.
         const TRAILING_COUNT_SECTIONS: usize = 3;
         const TRAILING: usize = TRAILING_COUNT_SECTIONS * 4;
+        // v0x06: the tip tail is value_capability(1) + entropy length prefix(4).
+        const TIP_TAIL: usize = 1 + 4;
 
         let (_, _rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
         let n = bytes.len();
-        let vc = n - TRAILING - 2; // value_capability
-        let sf = n - TRAILING - 1; // state_flag
+        let vc = n - TRAILING - TIP_TAIL; // value_capability
         assert!(
             bytes[n - TRAILING..].iter().all(|b| *b == 0),
             "every trailing section count should be 0"
         );
-        assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
+        assert!(
+            bytes[vc + 1..vc + 1 + 4].iter().all(|b| *b == 0),
+            "entropy length should be 0 for an entropy-less tip"
+        );
         assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
 
         // Corrupt to UNSPECIFIED(0): decode MUST reject — never silently read as `No`.
