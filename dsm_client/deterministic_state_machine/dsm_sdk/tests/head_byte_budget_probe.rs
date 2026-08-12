@@ -65,21 +65,22 @@ fn head_byte_budget() {
     let rel_keys = head.relationship_keys();
     accounted += 4;
     println!("\n-- tips: {} relationship(s) --", rel_keys.len());
-    let mut sig_bytes_total = 0usize;
-    let mut op_bytes_total = 0usize;
+    let mut tip_bytes_total = 0usize;
     for rk in &rel_keys {
         let tip = head.rel_chain_tip(rk).expect("tip");
-        // rel_key + chain_tip + counterparty + vc_tag + state_flag
-        accounted += 32 + 32 + 32 + 1 + 1;
+        // v0x06 tip: rel_key + chain_tip + counterparty + vc_tag + entropy(len+bytes)
+        let tip_bytes = 32 + 32 + 32 + 1 + 4 + tip.tip_entropy.len();
+        tip_bytes_total += tip_bytes;
+        accounted += tip_bytes;
         println!("  rel {} vc={:?}", hex(&rk[..6]), tip.value_capability);
-        // v0x06: a tip is a bounded accumulator entry — digest + entropy. The
-        // operation and its ~50 KB signature live in the BCR archive, not here.
+        // A tip is a bounded accumulator entry — digest + entropy. The operation
+        // and its ~50 KB signature live in the BCR archive, not here.
         if tip.tip_entropy.is_empty() {
             println!("    entropy: NONE  <-- digest-only tip (capsule restore)");
         } else {
             println!("    entropy: {} bytes", tip.tip_entropy.len());
         }
-        accounted += 4 + tip.tip_entropy.len();
+        println!("    tip total: {tip_bytes} bytes");
     }
 
     let extra = head.extra_leaves_snapshot();
@@ -99,15 +100,18 @@ fn head_byte_budget() {
     }
 
     println!("\n=== ATTRIBUTION ===");
-    println!("  SIGNATURE bytes (entity+counterparty across all tips): {sig_bytes_total}");
-    println!("  OPERATION bytes (across all tips)                    : {op_bytes_total}");
+    println!("  TIP bytes (all relationships)  : {tip_bytes_total}");
     println!(
-        "  everything else (approx)                             : {}",
-        bytes.len() as i64 - sig_bytes_total as i64 - op_bytes_total as i64
+        "  everything else (approx)       : {}",
+        bytes.len() as i64 - tip_bytes_total as i64
     );
     println!(
-        "  head minus signatures                                : {}",
-        bytes.len() - sig_bytes_total
+        "  bytes per relationship         : {}",
+        if rel_keys.is_empty() {
+            0
+        } else {
+            tip_bytes_total / rel_keys.len()
+        }
     );
     println!(
         "  (rough accounted total: {accounted} vs actual {})",
