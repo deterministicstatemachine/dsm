@@ -68,7 +68,7 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("decode FaucetClaimRequest failed: {e}")),
                 };
 
-                // Validate device_id only (no geo checks for testnet faucet)
+                // A claim is identified by device_id alone.
                 let dev = req.device_id.clone();
                 if dev.len() != 32 {
                     return err("faucet.claim: device_id must be 32 bytes".into());
