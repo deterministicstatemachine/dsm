@@ -35,6 +35,14 @@ pub static SDK_READY: AtomicBool = AtomicBool::new(false);
 /// SiliconFingerprint derivation, instead of falling back to "needs_genesis".
 pub static BOOTSTRAP_SECURING: AtomicBool = AtomicBool::new(false);
 
+/// Latches once this device's identity has reached publication quorum.
+///
+/// Publication is monotonic — a verified quorum does not become unverified when
+/// a node later goes unreachable, because the nodes still hold the tuple. The
+/// latch therefore only ever goes false -> true, and exists so the phase
+/// computation does not hit SQLite on every snapshot.
+pub static IDENTITY_PUBLISHED: AtomicBool = AtomicBool::new(false);
+
 /// Set SDK readiness flag.
 pub fn set_sdk_ready(ready: bool) {
     SDK_READY.store(ready, Ordering::SeqCst);
@@ -199,6 +207,10 @@ impl SessionManager {
         let securing = BOOTSTRAP_SECURING.load(Ordering::SeqCst);
         let sdk_ready = SDK_READY.load(Ordering::SeqCst);
         let has_id = AppState::get_has_identity();
+        // Short-circuits: the publication lookup resolves the device id, which
+        // requires storage to be initialised. With no identity there is nothing
+        // to publish, so never ask.
+        let published = has_id && Self::identity_published();
         let locked = self.lock_locked;
 
         let phase = if fatal {
@@ -213,6 +225,11 @@ impl SessionManager {
             "runtime_loading"
         } else if !has_id {
             "needs_genesis"
+        } else if !published {
+            // Local genesis is durable but the identity is not yet resolvable by
+            // peers. The wallet is NOT ready: online sends to this device cannot
+            // be addressed and authenticated storage writes will 401.
+            "publication_pending"
         } else if locked {
             "locked"
         } else {
@@ -220,15 +237,43 @@ impl SessionManager {
         };
 
         log::info!(
-            "COMPUTE_PHASE: fatal={} securing={} sdk_ready={} has_id={} locked={} -> phase={}",
+            "COMPUTE_PHASE: fatal={} securing={} sdk_ready={} has_id={} published={} locked={} -> phase={}",
             fatal,
             securing,
             sdk_ready,
             has_id,
+            published,
             locked,
             phase
         );
         phase
+    }
+
+    /// Whether this device's identity has reached publication quorum.
+    ///
+    /// Cached in an atomic because publication is monotonic — once a quorum has
+    /// been read-back verified the identity stays published — so the SQLite
+    /// lookup only runs while still unpublished, not on every snapshot.
+    fn identity_published() -> bool {
+        if IDENTITY_PUBLISHED.load(Ordering::SeqCst) {
+            return true;
+        }
+        // Resolving the device id reads app state, which panics if the storage
+        // base dir has not been set. Phase computation runs on every snapshot
+        // and must never panic, so treat "storage not ready" as "not yet
+        // published" rather than asking.
+        if crate::storage_utils::get_storage_base_dir().is_none() {
+            return false;
+        }
+        let Some(device_id) = AppState::get_device_id() else {
+            return false;
+        };
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+        let ready = crate::sdk::identity_publication::is_identity_ready(&device_id_b32);
+        if ready {
+            IDENTITY_PUBLISHED.store(true, Ordering::SeqCst);
+        }
+        ready
     }
 
     /// Compute identity status from existing Rust truth.
@@ -389,7 +434,17 @@ mod tests {
         AppState::reset_memory_for_testing();
         AppState::ensure_storage_loaded();
         SDK_READY.store(false, Ordering::SeqCst);
+        // The publication latch is process-global and monotonic. Reset it here
+        // so one test marking an identity published cannot leak into the next.
+        IDENTITY_PUBLISHED.store(false, Ordering::SeqCst);
         guard
+    }
+
+    /// Mark the identity as published for tests whose subject is a LATER phase
+    /// (lock, fatal error) and which therefore need to get past the publication
+    /// gate. Tests that are about publication itself must not use this.
+    fn mark_identity_published_for_test() {
+        IDENTITY_PUBLISHED.store(true, Ordering::SeqCst);
     }
 
     #[test]
@@ -421,6 +476,7 @@ mod tests {
         let _g = setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
         AppState::set_has_identity(true);
+        mark_identity_published_for_test();
 
         let mgr = SessionManager {
             lock_locked: true,
@@ -429,6 +485,28 @@ mod tests {
         let snap = mgr.compute_snapshot();
         assert_eq!(snap.phase, "locked");
         assert_eq!(snap.identity_status, "ready");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn phase_is_publication_pending_when_identity_is_not_published() {
+        let _g = setup_test_env();
+        SDK_READY.store(true, Ordering::SeqCst);
+        // Genesis committed locally -- the device HAS an identity -- but no node
+        // has been read-back verified, so it is not resolvable by peers.
+        AppState::set_has_identity(true);
+
+        let mgr = SessionManager::default();
+        let snap = mgr.compute_snapshot();
+        assert_eq!(
+            snap.phase, "publication_pending",
+            "a durable local genesis must not report the wallet as ready"
+        );
+
+        // And once publication reaches quorum, the wallet becomes ready.
+        mark_identity_published_for_test();
+        let snap = mgr.compute_snapshot();
+        assert_eq!(snap.phase, "wallet_ready");
     }
 
     #[test]
@@ -447,6 +525,9 @@ mod tests {
 
     #[test]
     fn auto_lock_on_background() {
+        // Without this the test depends on some earlier test having set the
+        // storage base dir, and panics when run in isolation.
+        let _g = setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: true,

@@ -837,6 +837,27 @@ pub struct NodePerformanceMetrics {
 // Removed orphan trait implementation for GenesisState - cannot implement orphan traits
 // Default for GenesisState should be implemented in the dsm crate where it's defined
 
+/// Result of an identity-publication attempt across the configured fleet.
+///
+/// `verified` counts only nodes whose read-back matched the full identity
+/// tuple — not nodes that merely returned 2xx to the register call.
+#[derive(Debug, Clone)]
+pub struct PublicationReport {
+    pub verified: u32,
+    pub required: u32,
+    pub total_nodes: usize,
+    /// `(node_url, reason)` for every node that did not verify.
+    pub failures: Vec<(String, String)>,
+}
+
+impl PublicationReport {
+    /// Whether a quorum was reached. `required == 0` means no nodes are
+    /// configured, which is never "published".
+    pub fn is_published(&self) -> bool {
+        self.required > 0 && self.verified >= self.required
+    }
+}
+
 /// Production-grade SDK for interacting with DSM Storage Nodes
 #[derive(Clone)]
 pub struct StorageNodeSDK {
@@ -3281,6 +3302,314 @@ impl StorageNodeSDK {
                 None::<std::io::Error>,
             )),
         }
+    }
+
+    /// Publish this device's identity to the storage fleet and *verify by
+    /// read-back* that each node durably holds the exact identity tuple.
+    ///
+    /// This is deliberately stronger than [`Self::register_device_for_auth`],
+    /// which treats an HTTP 2xx as success. A 2xx only says the node accepted
+    /// the request; it does not say the row survived, that it carries the ML-KEM
+    /// binding, or that the node will answer a later lookup. So for every node
+    /// this method registers (or reconciles, if already registered) and then
+    /// performs `GET /api/v2/device/{id}`, comparing all five fields — device
+    /// id, genesis hash, AK, ML-KEM public key, ML-KEM binding signature. Only a
+    /// node that returns a full match counts toward quorum.
+    ///
+    /// Idempotent by construction: a node that already has the device answers
+    /// the register with 409 CONFLICT, which is reconciled (not failed) by
+    /// reissuing a transport token and then verifying the read-back. Re-running
+    /// this against an already-published identity is a no-op that re-confirms
+    /// it.
+    pub async fn publish_identity(
+        &self,
+        device_id: &str,
+        pubkey: &str,
+        genesis_hash: &str,
+    ) -> Result<PublicationReport, DsmError> {
+        let device_id_bytes =
+            crate::util::text_id::decode_base32_crockford(device_id).ok_or_else(|| {
+                DsmError::invalid_parameter("publish_identity: device_id must be base32")
+            })?;
+        if device_id_bytes.len() != 32 {
+            return Err(DsmError::invalid_parameter(format!(
+                "publish_identity: device_id base32 decoded to {} bytes (expected 32)",
+                device_id_bytes.len()
+            )));
+        }
+        let pubkey_bytes =
+            crate::util::text_id::decode_base32_crockford(pubkey).ok_or_else(|| {
+                DsmError::invalid_parameter("publish_identity: pubkey must be base32")
+            })?;
+        let genesis_bytes = crate::util::text_id::decode_base32_crockford(genesis_hash)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter("publish_identity: genesis_hash must be base32")
+            })?;
+
+        // The ML-KEM identity binding is mandatory. If it cannot be built the
+        // wallet is locked or the key is not installed — fail closed rather than
+        // publishing an identity that peers cannot send to.
+        let (kyber_public_key, kyber_binding_sig) =
+            crate::sdk::kyber_identity::build_local_kyber_identity_binding()?;
+
+        let req = dsm::types::proto::RegisterDeviceRequest {
+            device_id: device_id_bytes.clone(),
+            pubkey: pubkey_bytes.clone(),
+            genesis_hash: genesis_bytes.clone(),
+            kyber_public_key: kyber_public_key.clone(),
+            kyber_binding_sig: kyber_binding_sig.clone(),
+        };
+        let mut body = Vec::with_capacity(req.encoded_len());
+        req.encode(&mut body).map_err(|e| {
+            DsmError::internal(
+                format!("publish_identity: failed to encode RegisterDeviceRequest: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        let total_nodes = self.config.node_urls.len();
+        let required = crate::storage::client_db::publication::quorum_for(total_nodes);
+        let mut failures: Vec<(String, String)> = Vec::new();
+
+        for node_url in &self.config.node_urls {
+            let base = node_url.trim_end_matches('/');
+
+            // --- Step 1: register (or reconcile an existing registration) ---
+            let register_url = format!("{base}/api/v2/device/register");
+            let registered = match self
+                .inner
+                .client
+                .post(&register_url)
+                .header("Content-Type", "application/protobuf")
+                .body(body.clone())
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                    Ok(bytes) => {
+                        match dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref()) {
+                            Ok(parsed) => {
+                                let token =
+                                    crate::util::text_id::encode_base32_crockford(&parsed.token);
+                                if let Err(e) = crate::storage::client_db::store_auth_token(
+                                    node_url,
+                                    device_id,
+                                    genesis_hash,
+                                    &token,
+                                ) {
+                                    log::warn!(
+                                        "publish_identity: failed to store auth token for {node_url}: {e}"
+                                    );
+                                }
+                                true
+                            }
+                            Err(e) => {
+                                failures.push((node_url.clone(), format!("decode error: {e}")));
+                                false
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        failures.push((node_url.clone(), format!("read error: {e}")));
+                        false
+                    }
+                },
+                Ok(resp) if resp.status() == reqwest::StatusCode::CONFLICT => {
+                    // Already registered. This is the normal outcome of a retry,
+                    // NOT a failure — reconcile the local token slot and fall
+                    // through to read-back verification, which is what actually
+                    // decides whether this node counts.
+                    log::info!(
+                        "publish_identity: {node_url} already holds device {}, reconciling",
+                        &device_id[..8.min(device_id.len())]
+                    );
+                    if let Err(e) = self
+                        .reissue_transport_token(base, node_url, device_id, genesis_hash, &body)
+                        .await
+                    {
+                        log::warn!("publish_identity: token reissue on {node_url} failed: {e}");
+                    }
+                    true
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
+                    failures.push((node_url.clone(), format!("HTTP {status}: {text}")));
+                    false
+                }
+                Err(e) => {
+                    failures.push((node_url.clone(), format!("network error: {e}")));
+                    false
+                }
+            };
+
+            if !registered {
+                // Registration failed outright; a stale prior verification for
+                // this node must not keep counting toward quorum.
+                let _ = crate::storage::client_db::publication::clear_verified_node(
+                    device_id, node_url,
+                );
+                continue;
+            }
+
+            // --- Step 2: read back and verify the FULL tuple ---
+            match self
+                .verify_identity_readback(
+                    base,
+                    device_id,
+                    &device_id_bytes,
+                    &pubkey_bytes,
+                    &genesis_bytes,
+                    &kyber_public_key,
+                    &kyber_binding_sig,
+                )
+                .await
+            {
+                Ok(()) => {
+                    if let Err(e) = crate::storage::client_db::publication::record_verified_node(
+                        device_id, node_url,
+                    ) {
+                        log::warn!("publish_identity: failed to record verified node: {e}");
+                    }
+                }
+                Err(e) => {
+                    let _ = crate::storage::client_db::publication::clear_verified_node(
+                        device_id, node_url,
+                    );
+                    failures.push((node_url.clone(), format!("read-back mismatch: {e}")));
+                }
+            }
+        }
+
+        let verified =
+            crate::storage::client_db::publication::count_verified_nodes(device_id).unwrap_or(0);
+
+        log::info!(
+            "publish_identity: {verified}/{total_nodes} nodes verified (quorum {required}) for device={}",
+            &device_id[..8.min(device_id.len())]
+        );
+
+        Ok(PublicationReport {
+            verified,
+            required,
+            total_nodes,
+            failures,
+        })
+    }
+
+    /// Re-issue a transport token for a device the node already knows about.
+    /// Used on the 409 reconciliation path so a retry restores the local token
+    /// slot instead of leaving authenticated writes permanently 401ing.
+    async fn reissue_transport_token(
+        &self,
+        base: &str,
+        node_url: &str,
+        device_id: &str,
+        genesis_hash: &str,
+        body: &[u8],
+    ) -> Result<(), DsmError> {
+        let url = format!("{base}/api/v2/device/token");
+        let resp = self
+            .inner
+            .client
+            .post(&url)
+            .header("Content-Type", "application/protobuf")
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| DsmError::network(format!("token reissue failed: {e}"), Some(e)))?;
+
+        if !resp.status().is_success() {
+            return Err(DsmError::storage(
+                format!("token reissue returned HTTP {}", resp.status()),
+                None::<std::io::Error>,
+            ));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| DsmError::network(format!("token reissue read failed: {e}"), Some(e)))?;
+        let parsed =
+            dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref()).map_err(|e| {
+                DsmError::internal(
+                    format!("token reissue decode failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        let token = crate::util::text_id::encode_base32_crockford(&parsed.token);
+        crate::storage::client_db::store_auth_token(node_url, device_id, genesis_hash, &token)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("failed to store reissued token: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        Ok(())
+    }
+
+    /// Fetch the identity a node claims to hold and require it to match every
+    /// field we published. Any mismatch means the node must not count toward
+    /// publication quorum.
+    #[allow(clippy::too_many_arguments)]
+    async fn verify_identity_readback(
+        &self,
+        base: &str,
+        device_id_b32: &str,
+        expected_device_id: &[u8],
+        expected_pubkey: &[u8],
+        expected_genesis: &[u8],
+        expected_kyber_pk: &[u8],
+        expected_kyber_sig: &[u8],
+    ) -> Result<(), DsmError> {
+        let url = format!("{base}/api/v2/device/{device_id_b32}");
+        let resp =
+            self.inner.client.get(&url).send().await.map_err(|e| {
+                DsmError::network(format!("read-back request failed: {e}"), Some(e))
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(DsmError::storage(
+                format!("read-back returned HTTP {}", resp.status()),
+                None::<std::io::Error>,
+            ));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| DsmError::network(format!("read-back read failed: {e}"), Some(e)))?;
+        let stored =
+            dsm::types::proto::RegisterDeviceRequest::decode(bytes.as_ref()).map_err(|e| {
+                DsmError::internal(
+                    format!("read-back decode failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+
+        // Compare every field. A node that returns a *different* identity under
+        // this device id is worse than one that returns nothing, so this is a
+        // hard mismatch rather than a warning.
+        let mismatch = |field: &str| {
+            Err(DsmError::storage(
+                format!("read-back {field} does not match published identity"),
+                None::<std::io::Error>,
+            ))
+        };
+        if stored.device_id != expected_device_id {
+            return mismatch("device_id");
+        }
+        if stored.genesis_hash != expected_genesis {
+            return mismatch("genesis_hash");
+        }
+        if stored.pubkey != expected_pubkey {
+            return mismatch("pubkey");
+        }
+        if stored.kyber_public_key != expected_kyber_pk {
+            return mismatch("kyber_public_key");
+        }
+        if stored.kyber_binding_sig != expected_kyber_sig {
+            return mismatch("kyber_binding_sig");
+        }
+        Ok(())
     }
 
     /// Sync with a storage node (simplified for JNI)
