@@ -147,6 +147,16 @@ fn owner_apply_op_as_built_by_reconcile() -> Operation {
 }
 
 fn apply_settlement(head: &DeviceState, op: Operation) -> DeviceState {
+    try_apply_settlement(head, op)
+        .expect("owner apply advance")
+        .new_device_state
+}
+
+/// Non-panicking variant, so a test can assert that an advance is REFUSED.
+fn try_apply_settlement(
+    head: &DeviceState,
+    op: Operation,
+) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
     let rel = compute_smt_key(&OWNER, &OWNER);
     head.advance(
         rel,
@@ -167,8 +177,6 @@ fn apply_settlement(head: &DeviceState, op: Operation) -> DeviceState {
             new_sequence: 1,
         }),
     )
-    .expect("owner apply advance")
-    .new_device_state
 }
 
 /// THE PRESERVATION INVARIANT.
@@ -216,9 +224,8 @@ fn owner_apply_preserves_every_field_the_settlement_does_not_own() {
         peer_tip_before.counterparty_devid
     );
     assert_eq!(
-        peer_tip_after.state.is_some(),
-        peer_tip_before.state.is_some(),
-        "an unrelated tip must not be downgraded to a digest-only tip"
+        peer_tip_after.tip_entropy, peer_tip_before.tip_entropy,
+        "an unrelated tip must keep the entropy its next advance depends on"
     );
 
     // --- offline allocations are not a settlement's business ---
@@ -362,17 +369,27 @@ fn value_moving_dlv_operations_are_signed_and_verified_on_the_real_path() {
     let after = apply_settlement(&before, sign_as_owner(op));
     assert_ne!(after.root(), before.root(), "the advance did happen");
 
-    let committed = after
-        .tip_state(&compute_smt_key(&OWNER, &OWNER))
-        .expect("owner tip carries the committed operation");
-    let Operation::DlvOwnerApply { signature, .. } = &committed.operation else {
-        panic!("owner tip should carry the DlvOwnerApply operation");
-    };
+    // The head no longer retains the operation (v0x06: tips are digest + entropy), so
+    // the guarantee is asserted where it actually binds: `advance` itself must REFUSE
+    // to commit an unsigned value-egress transition. This is strictly stronger than
+    // inspecting a retained copy after the fact — an unsigned settlement can never
+    // reach the root at all, rather than reaching it and being detectable afterwards.
+    let unsigned = try_apply_settlement(&before, owner_apply_op_as_built_by_reconcile());
+    let err = unsigned.expect_err(
+        "DEFECT: advance() committed an unsigned DlvOwnerApply into the canonical root",
+    );
     assert!(
-        !signature.is_empty(),
-        "DEFECT: root {} commits an unsigned value-egress transition. It cannot be \
-         retro-signed — the signature is inside compute_chain_tip, so signing rewrites \
-         this tip and every descendant.",
+        format!("{err:?}").contains("signature"),
+        "the refusal must be about the missing signature, not an unrelated failure \
+         that would mask an unsigned commit: {err:?}"
+    );
+
+    // And the signed advance did commit, so the refusal above is the signature gate
+    // rather than this operation being unadvanceable in general.
+    let rel = compute_smt_key(&OWNER, &OWNER);
+    assert!(
+        after.chain_tip(&rel).is_some(),
+        "root {} should carry the signed owner tip",
         hex_root(&after)
     );
 }
