@@ -36,6 +36,7 @@ mod nonces;
 mod online_outbox;
 mod pending_transactions;
 mod projection_repair;
+pub mod publication;
 pub mod recipient_receipt_fold;
 pub mod recovery;
 pub mod sender_outbox;
@@ -360,6 +361,30 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at        INTEGER NOT NULL,
             genesis_nonce     TEXT NOT NULL DEFAULT '',
             genesis_profile   TEXT NOT NULL DEFAULT ''
+        );
+
+        -- Identity publication lifecycle (§ "local genesis durable != identity ready").
+        -- A device is only `published` once a quorum of storage nodes has been
+        -- read back and confirmed to hold the exact identity tuple. Local genesis
+        -- stays durable regardless; this table records how far publication got so
+        -- startup can resume it without the user visiting the storage screen.
+        CREATE TABLE IF NOT EXISTS identity_publication(
+            device_id       TEXT PRIMARY KEY,
+            genesis_hash    TEXT NOT NULL,
+            state           TEXT NOT NULL,
+            quorum_required INTEGER NOT NULL,
+            last_attempt_at INTEGER NOT NULL,
+            last_error      TEXT NOT NULL DEFAULT ''
+        );
+
+        -- One row per node whose read-back matched the full tuple. Presence here
+        -- is the ONLY thing that counts toward quorum -- a 2xx from register is
+        -- not sufficient evidence that the node durably stored the identity.
+        CREATE TABLE IF NOT EXISTS identity_publication_nodes(
+            device_id   TEXT NOT NULL,
+            node_url    TEXT NOT NULL,
+            verified_at INTEGER NOT NULL,
+            PRIMARY KEY (device_id, node_url)
         );
 
         CREATE TABLE IF NOT EXISTS contacts(

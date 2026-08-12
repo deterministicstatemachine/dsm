@@ -636,6 +636,17 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
     match crate::runtime::get_runtime().block_on(crate::init_dsm_sdk()) {
         Ok(()) => {
             crate::sdk::session_manager::set_sdk_ready(true);
+
+            // Resume any identity whose publication never reached quorum.
+            // Publication is a precondition of "identity created", so a device
+            // that got as far as a durable local genesis must keep trying to
+            // publish on its own — the user must never have to discover this
+            // through unrelated symptoms or repair it from the storage screen.
+            // Spawned so a slow/unreachable fleet cannot delay startup.
+            crate::runtime::get_runtime().spawn(async {
+                crate::sdk::identity_publication::retry_pending_publications().await;
+            });
+
             Ok(startup_ok())
         }
         Err(e) => {

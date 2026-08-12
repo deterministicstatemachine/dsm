@@ -108,53 +108,65 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             &device_id_b32[..8]
         );
 
-        // Register the new device with each storage node's auth endpoint so
-        // subsequent authenticated PUTs (routing-advertisement publish,
-        // external-commitment publish, etc.) succeed.  Without this every
-        // storage write returns 401 Unauthorized because the per-node auth
-        // token slot is empty.  `register_device_for_auth` is idempotent at
-        // the storage-node level and persists the token via
-        // `store_auth_token`, which `resolve_storage_auth` reads on every
-        // PUT path.  Best-effort: a single-node failure is logged but does
-        // NOT roll back genesis — the genesis record is already durable
-        // and a later retry on the same node will get the token.
+        // Publish the identity to the storage fleet.
+        //
+        // Creating an identity is not complete when the local genesis record is
+        // durable — it is complete when a quorum of storage nodes can be read
+        // back and shown to hold this device's exact identity tuple. Until then
+        // no peer can resolve the device and every authenticated write 401s.
+        //
+        // Genesis is NOT rolled back on failure: the local state machine stays
+        // durable and the device is parked in `PublicationPending`, which
+        // startup retries automatically. What must not happen is reporting the
+        // wallet as ready while it is unreachable.
         {
-            let cfg_for_auth =
-                match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        log::warn!(
-                            "system.genesis: auth-registration cfg load failed (genesis still durable): {e}"
-                        );
-                        None
-                    }
-                };
-            if let Some(cfg) = cfg_for_auth {
-                let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
-                match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
-                    Ok(auth_sdk) => match auth_sdk
-                        .register_device_for_auth(
-                            &device_id_b32,
-                            &public_key_b32,
-                            &crate::util::text_id::encode_base32_crockford(&genesis_hash),
-                        )
-                        .await
-                    {
-                        Ok(_token) => {
-                            log::info!(
-                                "system.genesis: auth-registration completed for device={}",
-                                &device_id_b32[..8]
-                            );
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "system.genesis: auth-registration failed (subsequent PUTs may 401 until retry): {e}"
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        log::warn!("system.genesis: auth-registration SDK init failed: {e}");
-                    }
+            let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
+
+            // Mark the local commit first so a crash between here and the
+            // publish attempt still leaves a record for startup to retry.
+            if let Err(e) = crate::storage::client_db::publication::upsert_publication_state(
+                &device_id_b32,
+                &genesis_hash_b32,
+                crate::storage::client_db::publication::PublicationState::LocalGenesisCommitted,
+                0,
+                "",
+            ) {
+                log::warn!("system.genesis: failed to record local-genesis publication state: {e}");
+            }
+
+            match crate::sdk::identity_publication::publish_identity_now(
+                &device_id_b32,
+                &crate::util::text_id::encode_base32_crockford(&public_key),
+                &genesis_hash_b32,
+            )
+            .await
+            {
+                Ok(report) if report.is_published() => {
+                    log::info!(
+                        "system.genesis: identity PUBLISHED for device={} ({}/{} nodes verified, quorum {})",
+                        &device_id_b32[..8],
+                        report.verified,
+                        report.total_nodes,
+                        report.required
+                    );
+                }
+                Ok(report) => {
+                    log::warn!(
+                        "system.genesis: identity NOT published for device={} ({}/{} verified, quorum {}) — \
+                         local genesis is durable and startup will retry. failures: {:?}",
+                        &device_id_b32[..8],
+                        report.verified,
+                        report.total_nodes,
+                        report.required,
+                        report.failures
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "system.genesis: identity publication failed for device={} \
+                         (local genesis durable, startup will retry): {e}",
+                        &device_id_b32[..8]
+                    );
                 }
             }
         }
