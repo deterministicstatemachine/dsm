@@ -361,6 +361,29 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 CREATE INDEX IF NOT EXISTS idx_payment_receipts_device ON payment_receipts(device_id);
 
                 ALTER TABLE devices ADD COLUMN IF NOT EXISTS paidk_satisfied BOOLEAN NOT NULL DEFAULT FALSE;
+
+                -- ML-KEM identity binding (ec6f8322, 2026-07-15). These were added to the
+                -- CREATE TABLE above and NOWHERE ELSE, so every database created before that
+                -- commit never got them: `CREATE TABLE IF NOT EXISTS` is a no-op on a live
+                -- table. `register_device` then INSERTs naming these columns, Postgres
+                -- rejects it, and the handler maps that to a 500 "Database error" — which is
+                -- what the production fleet has returned for EVERY device registration since.
+                -- Genesis logs it as best-effort and continues, so the symptom is silent:
+                -- wallets are created, never published, and are invisible to `wallet.send`'s
+                -- identity quorum.
+                --
+                -- Backfilled EMPTY on purpose. An empty `kyber_binding_sig` is refused by the
+                -- reader (`fetch_quorum_device_identity`), so pre-existing rows stay
+                -- fail-closed until the device re-registers with a real binding, rather than
+                -- becoming silently trusted with no binding at all.
+                ALTER TABLE devices ADD COLUMN IF NOT EXISTS kyber_public_key  BYTEA NOT NULL DEFAULT ''::bytea;
+                ALTER TABLE devices ADD COLUMN IF NOT EXISTS kyber_binding_sig BYTEA NOT NULL DEFAULT ''::bytea;
+                -- The DEFAULT exists only to satisfy NOT NULL while backfilling. Dropping it
+                -- means a future INSERT that forgets these columns FAILS instead of silently
+                -- writing an unusable identity — the create-time-only change is exactly how
+                -- this bug happened, and a lingering default would let it happen again.
+                ALTER TABLE devices ALTER COLUMN kyber_public_key  DROP DEFAULT;
+                ALTER TABLE devices ALTER COLUMN kyber_binding_sig DROP DEFAULT;
             "#,
         )
         .await?;
