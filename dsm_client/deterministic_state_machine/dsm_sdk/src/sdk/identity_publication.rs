@@ -118,6 +118,18 @@ pub fn is_identity_ready(device_id_b32: &str) -> bool {
 /// device that is already registered on a node reconciles through the node's
 /// 409 path rather than failing.
 pub async fn retry_pending_publications() {
+    // Identities created before the publication table existed have no row, so
+    // they would be invisible here while still reporting unpublished — parked
+    // in `publication_pending` with nothing driving them out. Backfill first so
+    // the retry actually covers them.
+    match publication::backfill_publication_rows_for_local_identities() {
+        Ok(0) => {}
+        Ok(n) => log::info!(
+            "identity_publication: backfilled {n} pre-existing identity/identities for publication"
+        ),
+        Err(e) => log::warn!("identity_publication: backfill failed: {e}"),
+    }
+
     let pending = match publication::list_unpublished() {
         Ok(p) => p,
         Err(e) => {

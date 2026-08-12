@@ -171,6 +171,39 @@ pub fn get_publication_record(device_id: &str) -> Result<Option<PublicationRecor
     Ok(rec)
 }
 
+/// Give every locally-committed genesis a publication row if it lacks one.
+///
+/// Devices whose genesis predates this table have no row at all. Without this
+/// backfill they are invisible to [`list_unpublished`] and so never retried,
+/// while [`is_published`] correctly reports false — leaving them parked in
+/// `publication_pending` forever with nothing driving them out of it. That is
+/// strictly worse than the old best-effort behaviour, so the backfill is a
+/// precondition of the retry, not an optimisation.
+///
+/// Seeds `LocalGenesisCommitted` (never `Published`): the row asserts only that
+/// genesis is durable locally. Whether any node holds the identity is decided by
+/// read-back, and `quorum_required = 0` cannot satisfy `is_published`.
+///
+/// Returns how many rows were created.
+pub fn backfill_publication_rows_for_local_identities() -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let inserted = conn.execute(
+        "INSERT INTO identity_publication
+            (device_id, genesis_hash, state, quorum_required, last_attempt_at, last_error)
+         SELECT g.device_id, g.genesis_id, ?1, 0, ?2, ''
+         FROM genesis_records g
+         WHERE NOT EXISTS (
+             SELECT 1 FROM identity_publication p WHERE p.device_id = g.device_id
+         )",
+        params![
+            PublicationState::LocalGenesisCommitted.as_str(),
+            tick() as i64
+        ],
+    )?;
+    Ok(inserted)
+}
+
 /// Every device whose identity is not yet published. Startup walks this list
 /// and retries publication in the background.
 pub fn list_unpublished() -> Result<Vec<PublicationRecord>> {
@@ -323,6 +356,91 @@ mod tests {
         assert!(
             !is_published("DEVICE-LOCAL-ONLY").expect("is_published"),
             "a Published state string with zero verified nodes must not count as published"
+        );
+    }
+
+    /// Insert a genesis record the way a pre-publication-table device would
+    /// have: durable local genesis, no `identity_publication` row.
+    fn insert_legacy_genesis(device_id: &str, genesis_id: &str) {
+        let binding = get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.execute(
+            "INSERT INTO genesis_records
+                (genesis_id, device_id, mpc_proof, device_birth_binding, merkle_root,
+                 participant_count, chain_tip, publication_hash, storage_nodes,
+                 entropy_hash, protocol_version, created_at)
+             VALUES (?1, ?2, '', '', '', 0, '', ?1, '', '', 'v3', 0)",
+            params![genesis_id, device_id],
+        )
+        .expect("insert legacy genesis");
+    }
+
+    #[test]
+    #[serial]
+    fn preexisting_identities_are_backfilled_and_then_retried() {
+        fresh_db();
+        // Exactly the live 9FF case: genesis committed before the publication
+        // table existed, so there is no publication row for it.
+        insert_legacy_genesis("DEV-LEGACY", "GEN-LEGACY");
+        assert!(
+            get_publication_record("DEV-LEGACY").expect("get").is_none(),
+            "precondition: legacy device has no publication row"
+        );
+        assert!(
+            !list_unpublished()
+                .expect("list")
+                .iter()
+                .any(|r| r.device_id == "DEV-LEGACY"),
+            "precondition: without backfill the legacy device is invisible to the retry, \
+             which is the bug -- it would sit publication_pending forever"
+        );
+
+        let n = backfill_publication_rows_for_local_identities().expect("backfill");
+        assert_eq!(n, 1, "the legacy identity must be seeded");
+
+        let rec = get_publication_record("DEV-LEGACY")
+            .expect("get")
+            .expect("row exists");
+        assert_eq!(rec.state, PublicationState::LocalGenesisCommitted);
+        assert_eq!(rec.genesis_hash, "GEN-LEGACY");
+        assert!(
+            !is_published("DEV-LEGACY").expect("is_published"),
+            "backfill records local commitment only -- it must never imply publication"
+        );
+        assert!(
+            list_unpublished()
+                .expect("list")
+                .iter()
+                .any(|r| r.device_id == "DEV-LEGACY"),
+            "after backfill the legacy device must be picked up by the startup retry"
+        );
+
+        // Idempotent: re-running must not duplicate or reset anything.
+        assert_eq!(
+            backfill_publication_rows_for_local_identities().expect("backfill again"),
+            0,
+            "backfill must not re-seed a device that already has a row"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn backfill_never_overwrites_an_already_published_identity() {
+        fresh_db();
+        insert_legacy_genesis("DEV-PUB", "GEN-PUB");
+        upsert_publication_state("DEV-PUB", "GEN-PUB", PublicationState::Published, 2, "")
+            .expect("upsert");
+        record_verified_node("DEV-PUB", "https://node-1:8080").expect("v1");
+        record_verified_node("DEV-PUB", "https://node-2:8080").expect("v2");
+        assert!(is_published("DEV-PUB").expect("published"));
+
+        assert_eq!(
+            backfill_publication_rows_for_local_identities().expect("backfill"),
+            0
+        );
+        assert!(
+            is_published("DEV-PUB").expect("still published"),
+            "backfill must not downgrade a published identity to LocalGenesisCommitted"
         );
     }
 
