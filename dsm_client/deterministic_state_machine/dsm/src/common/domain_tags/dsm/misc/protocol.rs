@@ -28,6 +28,18 @@ pub const TAG_DSM_PROTOCOL_TRANSITION: TaggedHashDomain<'static> =
 pub const TAG_DSM_RECEIPT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/receipt");
 pub const TAG_DSM_RECEIPT_BIND_SESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/receipt-bind-session");
+/// Content address of an A-side receipt-evidence artifact (ADR 0003).
+///
+/// Separated BY ROLE from the B-side tag below. Every evidence artifact is a
+/// byte blob, so an undifferentiated `H(full_bytes)` would make an A-side
+/// object, a B-side delta, and any future evidence type structurally
+/// interchangeable -- a reference obtained in one role could be satisfied by an
+/// object produced for another. The role is part of the identity.
+pub const TAG_DSM_RECEIPT_EVIDENCE_A: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/receipt-evidence/A/v1");
+/// Content address of a B-side countersign delta artifact (ADR 0003).
+pub const TAG_DSM_RECEIPT_EVIDENCE_B: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/receipt-evidence/B/v1");
 pub const TAG_DSM_SILICON_FP_V4: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/silicon_fp/v4");
 pub const TAG_DSM_SMT_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/smt-proof");

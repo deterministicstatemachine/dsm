@@ -667,6 +667,38 @@ fn create_schema(conn: &Connection) -> Result<()> {
             ))
         );
 
+        -- ADR 0003: additional frozen artifacts belonging to ONE outbox proposal.
+        --
+        -- The transfer artifact keeps living in `sender_outbox.envelope_bytes`.
+        -- This table holds every OTHER artifact the same proposal will emit --
+        -- today the A-side receipt evidence, later the B-side countersign delta.
+        --
+        -- One proposal owns the deterministic ids and exact bytes of all of its
+        -- artifacts, and they are written in the SAME transaction as the
+        -- canonical advance. That makes the invariant structural rather than
+        -- remembered: after the local debit commits, either every deliverable
+        -- artifact is durably reconstructible byte-for-byte, or none is.
+        --
+        -- The FK is enforced (PRAGMA foreign_keys = ON), so an artifact cannot
+        -- outlive or precede its proposal, and ON DELETE CASCADE keeps GC from
+        -- stranding orphans.
+        CREATE TABLE IF NOT EXISTS sender_outbox_artifacts(
+            relationship_key    BLOB NOT NULL,
+            canonical_parent    BLOB NOT NULL,
+            proposal_nonce      BLOB NOT NULL,
+            role                TEXT NOT NULL,
+            submission_id       TEXT NOT NULL,   -- deterministic; the node message_id
+            envelope_bytes      BLOB NOT NULL,   -- exact submitted bytes; retry replays these
+            content_digest      BLOB NOT NULL,   -- role-domain-separated address of the payload
+            created_at          INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, canonical_parent, proposal_nonce, role),
+            UNIQUE (submission_id),
+            FOREIGN KEY (relationship_key, canonical_parent, proposal_nonce)
+                REFERENCES sender_outbox(relationship_key, canonical_parent, proposal_nonce)
+                ON DELETE CASCADE,
+            CHECK (role IN ('evidence_a', 'countersign_b'))
+        );
+
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
             commitment             BLOB PRIMARY KEY,
             relationship_key       BLOB NOT NULL,

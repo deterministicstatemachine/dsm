@@ -49,6 +49,71 @@ pub const OUTBOX_GC_PENDING: &str = "gc_pending";
 /// Transport GC done. Terminal.
 pub const OUTBOX_COMPLETE: &str = "complete";
 
+/// Which artifact of a proposal a row in `sender_outbox_artifacts` holds.
+///
+/// The role is not decoration: it is part of the content address (ADR 0003), so
+/// an A-side object can never satisfy a reference obtained for a B-side one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactRole {
+    /// A-side receipt evidence: the full `ReceiptCommit` the transfer references.
+    EvidenceA,
+    /// B-side countersign delta returned by the recipient.
+    CountersignB,
+}
+
+impl ArtifactRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtifactRole::EvidenceA => "evidence_a",
+            ArtifactRole::CountersignB => "countersign_b",
+        }
+    }
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "evidence_a" => Ok(ArtifactRole::EvidenceA),
+            "countersign_b" => Ok(ArtifactRole::CountersignB),
+            other => Err(anyhow!("unknown sender_outbox_artifacts.role: {other}")),
+        }
+    }
+}
+
+/// Content address of an evidence payload, separated by role.
+///
+/// Hashes the FULL wire bytes, never `ReceiptCommit::compute_commitment()`: the
+/// commitment covers fields 1-11 and hard-zeroes 12-20, so a commitment-addressed
+/// object could be served with substituted signatures. The digest must bind the
+/// exact bytes whose signatures the receiver will verify.
+pub fn evidence_content_digest(role: ArtifactRole, full_wire_bytes: &[u8]) -> [u8; 32] {
+    match role {
+        ArtifactRole::EvidenceA => dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
+            full_wire_bytes,
+        ),
+        ArtifactRole::CountersignB => dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_B,
+            full_wire_bytes,
+        ),
+    }
+}
+
+/// One frozen artifact belonging to a proposal, beyond the transfer envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderOutboxArtifact {
+    /// Owning proposal identity — matches the `sender_outbox` primary key.
+    pub relationship_key: [u8; 32],
+    pub canonical_parent: [u8; 32],
+    pub proposal_nonce: [u8; 32],
+    pub role: ArtifactRole,
+    /// Deterministic; equals the node `message_id` for THIS artifact.
+    pub submission_id: String,
+    /// EXACT bytes to submit. A retry replays these verbatim rather than
+    /// rebuilding an artifact from state that may have moved.
+    pub envelope_bytes: Vec<u8>,
+    /// Role-domain-separated address of the payload this artifact carries.
+    pub content_digest: [u8; 32],
+}
+
 /// One online send's durable lifecycle record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderOutboxRecord {
@@ -205,6 +270,91 @@ pub fn insert_sender_outbox_with_conn(conn: &Connection, r: &SenderOutboxRecord)
 /// The cert-head CAS runs inside this transaction, so losing the race against
 /// the acceptance finalizer aborts the whole commit — nothing is written and
 /// nothing was ever sent.
+/// Persist one frozen artifact for a proposal.
+///
+/// MUST be called inside the same transaction as the canonical advance and the
+/// `sender_outbox` row. The FK to `sender_outbox` is enforced, so calling this
+/// outside that transaction (or before the proposal row exists) fails rather
+/// than producing an artifact nobody owns.
+pub fn insert_sender_outbox_artifact_with_conn(
+    tx: &Connection,
+    artifact: &SenderOutboxArtifact,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO sender_outbox_artifacts(
+            relationship_key, canonical_parent, proposal_nonce, role,
+            submission_id, envelope_bytes, content_digest, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            artifact.relationship_key.as_slice(),
+            artifact.canonical_parent.as_slice(),
+            artifact.proposal_nonce.as_slice(),
+            artifact.role.as_str(),
+            artifact.submission_id,
+            artifact.envelope_bytes,
+            artifact.content_digest.as_slice(),
+            tick() as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Every extra artifact belonging to a proposal, for replay.
+pub fn load_sender_outbox_artifacts(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+    proposal_nonce: &[u8; 32],
+) -> Result<Vec<SenderOutboxArtifact>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(
+        "SELECT relationship_key, canonical_parent, proposal_nonce, role,
+                submission_id, envelope_bytes, content_digest
+         FROM sender_outbox_artifacts
+         WHERE relationship_key = ?1 AND canonical_parent = ?2 AND proposal_nonce = ?3
+         ORDER BY role",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                relationship_key.as_slice(),
+                canonical_parent.as_slice(),
+                proposal_nonce.as_slice()
+            ],
+            |row| {
+                let to32 = |v: Vec<u8>| -> [u8; 32] {
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&v);
+                    out
+                };
+                Ok((
+                    to32(row.get::<_, Vec<u8>>(0)?),
+                    to32(row.get::<_, Vec<u8>>(1)?),
+                    to32(row.get::<_, Vec<u8>>(2)?),
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    to32(row.get::<_, Vec<u8>>(6)?),
+                ))
+            },
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    rows.into_iter()
+        .map(|(rk, cp, pn, role, sid, bytes, digest)| {
+            Ok(SenderOutboxArtifact {
+                relationship_key: rk,
+                canonical_parent: cp,
+                proposal_nonce: pn,
+                role: ArtifactRole::from_str(&role)?,
+                submission_id: sid,
+                envelope_bytes: bytes,
+                content_digest: digest,
+            })
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn commit_send_prerequisites_atomically(
     proposal: &super::sender_proposal::SenderOnlineProposal,
@@ -214,6 +364,7 @@ pub fn commit_send_prerequisites_atomically(
     ek_secret_key: &[u8],
     chain_head_wrap_key: &[u8; 32],
     ek_is_init: bool,
+    artifacts: &[SenderOutboxArtifact],
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -227,6 +378,7 @@ pub fn commit_send_prerequisites_atomically(
         ek_secret_key,
         chain_head_wrap_key,
         ek_is_init,
+        artifacts,
     )?;
     tx.commit()?;
     Ok(())
@@ -252,6 +404,7 @@ pub fn commit_send_prerequisites_with_conn(
     ek_secret_key: &[u8],
     chain_head_wrap_key: &[u8; 32],
     ek_is_init: bool,
+    artifacts: &[SenderOutboxArtifact],
 ) -> Result<()> {
     super::sender_proposal::insert_sender_proposal_with_conn(tx, proposal)?;
 
@@ -276,6 +429,14 @@ pub fn commit_send_prerequisites_with_conn(
     )?;
 
     insert_sender_outbox_with_conn(tx, outbox)?;
+
+    // ADR 0003: every OTHER artifact this proposal will emit, frozen in the
+    // SAME transaction. The outbox row must exist first -- the FK is enforced.
+    // After this returns, either every deliverable artifact is durably
+    // reconstructible byte-for-byte, or none is.
+    for artifact in artifacts {
+        insert_sender_outbox_artifact_with_conn(tx, artifact)?;
+    }
     Ok(())
 }
 
@@ -1064,6 +1225,130 @@ mod tests {
         }
     }
 
+    fn artifact_for(
+        p: &super::super::sender_proposal::SenderOnlineProposal,
+        bytes: Vec<u8>,
+    ) -> SenderOutboxArtifact {
+        let digest = evidence_content_digest(ArtifactRole::EvidenceA, &bytes);
+        SenderOutboxArtifact {
+            relationship_key: p.relationship_key,
+            canonical_parent: p.canonical_parent,
+            proposal_nonce: p.nonce_hash,
+            role: ArtifactRole::EvidenceA,
+            submission_id: format!("EVID-{}", derive_submission_id(&p.commitment)),
+            envelope_bytes: bytes,
+            content_digest: digest,
+        }
+    }
+
+    /// ADR 0003, the first dangerous invariant of the split:
+    ///
+    /// > After local debit advancement commits, either BOTH deliverable
+    /// > artifacts are durably reconstructible byte-for-byte, or neither is.
+    ///
+    /// Both artifacts are written in the same transaction as the canonical
+    /// advance, and the bytes come back verbatim -- a retry replays them rather
+    /// than rebuilding from state that may have moved.
+    #[test]
+    #[serial]
+    fn both_artifacts_are_durable_byte_for_byte_after_the_atomic_commit() {
+        init_test_db();
+        let rel = [0xC1u8; 32];
+        let cp = [0xC2u8; 32];
+        let (pp, pt) = ([0xC3u8; 32], [0xC4u8; 32]);
+        seed_contact(cp, pp);
+        let p = proposal_for(rel, cp, [0xC5u8; 32], [0xC6u8; 32], pp, pt);
+        let ob = outbox_for(&p, None, true);
+        let evidence_bytes: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let art = artifact_for(&p, evidence_bytes.clone());
+
+        commit_send_prerequisites_atomically(
+            &p,
+            &ob,
+            "MSGID-ART",
+            &[0xA1u8; 64],
+            &[0xA2u8; 64],
+            &[0x42u8; 32],
+            true,
+            std::slice::from_ref(&art),
+        )
+        .expect("atomic commit with artifact");
+
+        // The transfer artifact.
+        let stored = get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+            .expect("load outbox")
+            .expect("outbox row exists");
+        assert_eq!(
+            stored.envelope_bytes, ob.envelope_bytes,
+            "transfer artifact must be byte-identical to what was committed"
+        );
+
+        // The evidence artifact.
+        let arts = load_sender_outbox_artifacts(&rel, &p.canonical_parent, &p.nonce_hash)
+            .expect("load artifacts");
+        assert_eq!(arts.len(), 1, "exactly the artifact committed");
+        assert_eq!(
+            arts[0].envelope_bytes, evidence_bytes,
+            "evidence artifact must be byte-identical, not rebuilt"
+        );
+        assert_eq!(arts[0].role, ArtifactRole::EvidenceA);
+        assert_eq!(
+            arts[0].content_digest,
+            evidence_content_digest(ArtifactRole::EvidenceA, &evidence_bytes),
+            "content digest must bind the exact stored bytes"
+        );
+    }
+
+    /// The other half of the invariant: if ANY part of the bundle fails, nothing
+    /// is durable -- including the artifact. A duplicate submission_id aborts the
+    /// whole transaction, so no artifact can survive a proposal that did not.
+    #[test]
+    #[serial]
+    fn a_failed_bundle_leaves_no_artifact_behind() {
+        init_test_db();
+        let rel = [0xD1u8; 32];
+        let cp = [0xD2u8; 32];
+        let (pp, pt) = ([0xD3u8; 32], [0xD4u8; 32]);
+        seed_contact(cp, pp);
+        let p = proposal_for(rel, cp, [0xD5u8; 32], [0xD6u8; 32], pp, pt);
+        let ob = outbox_for(&p, None, true);
+
+        // Two artifacts claiming the SAME submission_id: the second violates
+        // UNIQUE(submission_id) and must abort the entire commit.
+        let a1 = artifact_for(&p, vec![0x01; 64]);
+        let mut a2 = artifact_for(&p, vec![0x02; 64]);
+        a2.role = ArtifactRole::CountersignB;
+
+        let err = commit_send_prerequisites_atomically(
+            &p,
+            &ob,
+            "MSGID-DUP",
+            &[0xA1u8; 64],
+            &[0xA2u8; 64],
+            &[0x42u8; 32],
+            true,
+            &[a1, a2],
+        )
+        .expect_err("duplicate submission_id must abort the bundle");
+        assert!(
+            err.to_string().to_lowercase().contains("unique"),
+            "expected a uniqueness violation, got: {err}"
+        );
+
+        assert!(
+            load_sender_outbox_artifacts(&rel, &p.canonical_parent, &p.nonce_hash)
+                .expect("load artifacts")
+                .is_empty(),
+            "a failed bundle must leave NO artifact durable"
+        );
+        assert!(
+            get_sender_outbox(&rel, &p.canonical_parent, &p.nonce_hash)
+                .expect("load outbox")
+                .is_none(),
+            "a failed bundle must leave no outbox row either -- all or nothing"
+        );
+    }
+
     /// HAPPY PATH: all four records land together, and the transfer is
     /// immediately forward-only.
     #[test]
@@ -1085,6 +1370,7 @@ mod tests {
             &[0xA2u8; 64],
             &[0x42u8; 32],
             true,
+            &[],
         )
         .expect("atomic commit");
 
@@ -1141,6 +1427,7 @@ mod tests {
             &[0xB2u8; 64],
             &[0x42u8; 32],
             true,
+            &[],
         )
         .expect_err("gate write must fail for an unknown contact");
         assert!(err.to_string().contains("unknown contact"), "got: {err}");
@@ -1189,6 +1476,7 @@ mod tests {
             &[0xC2u8; 64],
             &[0x42u8; 32],
             false,
+            &[],
         )
         .expect_err("a moved cert head must abort the commit");
         assert!(err.to_string().contains("CAS failed"), "got: {err}");
@@ -1228,6 +1516,7 @@ mod tests {
             &[0xD2u8; 64],
             &[0x42u8; 32],
             true,
+            &[],
         )
         .unwrap();
 
@@ -1288,6 +1577,7 @@ mod tests {
             &[0xE2u8; 64],
             &[0x42u8; 32],
             true,
+            &[],
         )
         .unwrap();
         set_sender_outbox_status(&rel, &p.canonical_parent, &p.nonce_hash, OUTBOX_SUBMITTING)
@@ -1335,6 +1625,7 @@ mod tests {
             &[0xF2u8; 64],
             &[0x42u8; 32],
             true,
+            &[],
         )
         .unwrap();
 
