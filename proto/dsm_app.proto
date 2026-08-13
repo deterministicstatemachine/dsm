@@ -3327,13 +3327,30 @@ message OnlineTransferRequest {
   bytes from_device_id = 7 [(dsm_fixed_len)=32]; // REQUIRED: sender identity for key selection
   bytes chain_tip = 8 [(dsm_fixed_len)=32]; // RESERVED/IGNORED: SDK derives bilateral tip from SQLite; frontend must never supply this
   uint64 seq = 9; // REQUIRED: deterministic sequence counter
-  // §4.2 ReceiptCommit canonical protobuf bytes — SMT proofs for this transition
+  // LEGACY INLINE FORM (ADR 0003). Historically carried the FULL ReceiptCommit
+  // wire object — despite this comment saying "canonical" — which made the
+  // transfer envelope 168,400 bytes against the node's 128 KiB cap and failed
+  // every send with 413. Under the split it is EMPTY: the evidence travels as
+  // its own artifact, referenced by `receipt_evidence_digest` below. Field 10
+  // becomes reserved once the receiver no longer needs the intermediate build
+  // to compile.
   bytes receipt_commit = 10 [(dsm_max_len)=131072];
   // §4.2.1 Canonical unsigned Operation bytes (signing preimage).
   // Sender populates with signing_op.to_bytes() (signature field empty).
   // Receiver MUST use these bytes directly for SPHINCS+ verification and
   // h_{n+1} tip computation — no reconstruction from individual fields.
   bytes canonical_operation_bytes = 11 [(dsm_max_len)=65535];
+  // ADR 0003: content address of the A-side receipt-evidence artifact this
+  // transfer refers to. Role-domain-separated
+  // (BLAKE3("DSM/receipt-evidence/A/v1" ‖ full_wire_bytes)) and computed over
+  // the FULL wire bytes, never ReceiptCommit::compute_commitment(), which
+  // hard-zeroes fields 12-20 — a commitment-addressed object could be served
+  // with substituted signatures.
+  //
+  // A dedicated field rather than reusing 10: the two carry different semantic
+  // types (a 32-byte address vs a full object), and encoding both in one field
+  // would make "which form is this?" a runtime guess.
+  bytes receipt_evidence_digest = 12 [(dsm_fixed_len)=32];
 }
 
 message OnlineTransferSmartRequest {

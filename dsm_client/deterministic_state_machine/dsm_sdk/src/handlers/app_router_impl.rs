@@ -1845,6 +1845,15 @@ impl AppRouterImpl {
                 }
             };
 
+            // ADR 0003: content address of the A-side evidence artifact, over the
+            // EXACT wire bytes the receiver will verify signatures against --
+            // never `compute_commitment()`, which hard-zeroes fields 12-20 and
+            // would let a substituted-signature object satisfy the reference.
+            let evidence_digest = crate::storage::client_db::evidence_content_digest(
+                crate::storage::client_db::ArtifactRole::EvidenceA,
+                &receipt_commit_bytes,
+            );
+
             let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
                 // Deterministic, derived from the receipt commitment: known
                 // before the local commit and identical on every retry, so a
@@ -1860,7 +1869,13 @@ impl AppRouterImpl {
                 ttl_seconds: 0,
                 seq,
                 next_chain_tip: Some(b0x_next_chain_tip),
-                receipt_commit: receipt_commit_bytes,
+                // ADR 0003: the transfer no longer carries the receipt inline.
+                // It carries a 32-byte role-separated reference to the evidence
+                // artifact, which travels separately. Field 10 stays empty --
+                // the two forms are different semantic types and must not share
+                // a field.
+                receipt_commit: Vec::new(),
+                receipt_evidence_digest: evidence_digest.to_vec(),
                 routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
             };
@@ -2337,6 +2352,7 @@ impl AppRouterImpl {
             receipt_commit: Vec::new(),
             routing_address,
             canonical_operation_bytes: Vec::new(),
+            receipt_evidence_digest: Vec::new(),
         };
 
         let sender_device_id_b32 = crate::util::text_id::encode_base32_crockford(&from_device_id);

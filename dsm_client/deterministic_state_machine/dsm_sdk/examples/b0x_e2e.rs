@@ -82,6 +82,7 @@ async fn main() {
         receipt_commit: vec![],
         routing_address: routing_address.clone(),
         canonical_operation_bytes: vec![],
+        receipt_evidence_digest: Vec::new(),
     };
 
     println!("Submitting to b0x (self)");

@@ -199,6 +199,11 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
+    /// ADR 0003: content address of the A-side receipt-evidence artifact this
+    /// transfer refers to, populated into proto field 12. Empty means the
+    /// legacy inline composition (the whole receipt in `receipt_commit`), which
+    /// exceeds the node's envelope cap and is retained only for fixtures.
+    pub receipt_evidence_digest: Vec<u8>,
     /// §16.6 defect zero: caller-supplied DETERMINISTIC submission id.
     ///
     /// The forward-transfer path derives this from the receipt commitment
@@ -423,7 +428,13 @@ impl B0xSubmissionParams {
             next_chain_tip,
             receipt_commit,
             routing_address,
+            // This codec does not carry `canonical_operation_bytes` or
+            // `receipt_evidence_digest`; both are rebuilt by the caller. It is a
+            // partial serialization and is not the durable freeze -- the exact
+            // wire bytes live in `sender_outbox.envelope_bytes` and
+            // `sender_outbox_artifacts.envelope_bytes`.
             canonical_operation_bytes: Vec::new(),
+            receipt_evidence_digest: Vec::new(),
         })
     }
 }
@@ -1895,6 +1906,7 @@ impl B0xSDK {
                     seq: params.seq,
                     receipt_commit: params.receipt_commit.clone(),
                     canonical_operation_bytes: params.canonical_operation_bytes.clone(),
+                    receipt_evidence_digest: params.receipt_evidence_digest.clone(),
                 };
                 info!(
                     "submit_to_b0x: transfer req context from_device_id(first4)={:?} seq={}",
@@ -3516,6 +3528,7 @@ impl B0xSDK {
                 receipt_commit: Vec::new(),
                 routing_address,
                 canonical_operation_bytes: Vec::new(),
+                receipt_evidence_digest: Vec::new(),
             };
 
             match sdk.submit_to_b0x(params).await {
@@ -3934,6 +3947,7 @@ mod tests {
             seq: 1,
             receipt_commit: vec![],
             canonical_operation_bytes: vec![],
+            receipt_evidence_digest: Vec::new(),
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4012,6 +4026,7 @@ mod tests {
             seq: 2,
             receipt_commit: vec![],
             canonical_operation_bytes: vec![],
+            receipt_evidence_digest: Vec::new(),
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4194,6 +4209,7 @@ mod tests {
             seq: 9,
             receipt_commit: vec![],
             canonical_operation_bytes: vec![],
+            receipt_evidence_digest: Vec::new(),
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4330,6 +4346,23 @@ mod tests {
     /// Submission params carrying production-sized SIG A and canonical op bytes.
     /// `receipt_commit` is supplied by the caller so the same production encoder
     /// measures both the inline shape and the split shape.
+    /// The ADR 0003 split composition: no inline receipt, a 32-byte reference.
+    fn params_split_shape() -> B0xSubmissionParams {
+        let digest = evidence_content_digest_for_test();
+        let mut p = params_with_receipt(Vec::new());
+        p.receipt_evidence_digest = digest.to_vec();
+        p
+    }
+
+    fn evidence_content_digest_for_test() -> [u8; 32] {
+        crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &production_sized_receipt_a(),
+        )
+    }
+
+    /// The LEGACY inline composition, retained as a fixture so the evidence that
+    /// it exceeds the cap survives after production stops using it.
     fn params_with_receipt(receipt_commit: Vec<u8>) -> B0xSubmissionParams {
         B0xSubmissionParams {
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
@@ -4359,6 +4392,7 @@ mod tests {
             receipt_commit,
             routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
+            receipt_evidence_digest: Vec::new(),
             submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
         }
     }
@@ -4373,30 +4407,69 @@ mod tests {
             .len()
     }
 
-    /// Proves the budget has teeth: the CURRENT inline transport, which embeds
-    /// the whole A-side receipt in the transfer message, exceeds the node cap.
-    /// Measured on hardware at 168,400 bytes.
+    /// The LEGACY inline composition -- the whole A-side receipt embedded in the
+    /// transfer message -- exceeds the node cap. Measured on hardware at 168,400
+    /// bytes before the split.
+    ///
+    /// Production no longer builds this shape. The fixture is retained
+    /// deliberately: deleting it would delete the evidence for WHY the split
+    /// exists, and nothing would then catch a regression that put the receipt
+    /// back inline.
     #[test]
-    fn current_inline_transport_exceeds_the_node_cap() {
+    fn legacy_inline_composition_exceeds_the_node_cap() {
         let bytes = encode_via_production_path(&params_with_receipt(production_sized_receipt_a()));
-        report_budget("inline transfer (CURRENT)", bytes);
+        report_budget("legacy inline composition", bytes);
         assert!(
             bytes > NODE_MAX_ENVELOPE_BYTES,
-            "inline transport measured {bytes} bytes; if this now fits, the shape changed \
-             and this guard must be re-derived rather than deleted"
+            "legacy inline composition measured {bytes} bytes; if this now fits, the fixture \
+             no longer reproduces the shape it exists to document"
         );
     }
 
-    /// ADR 0003 shape 1: the transfer artifact carries a 32-byte evidence
-    /// digest instead of the receipt, and must fit with real margin.
+    /// ADR 0003 shape 1, as PRODUCTION now builds it: no inline receipt, a
+    /// 32-byte role-separated reference in field 12.
     #[test]
     fn adr0003_transfer_envelope_fits_the_node_cap() {
-        let digest = vec![0x5A; 32];
-        let bytes = encode_via_production_path(&params_with_receipt(digest));
+        let params = params_split_shape();
+        assert!(
+            params.receipt_commit.is_empty(),
+            "the split transfer must not carry an inline receipt"
+        );
+        assert_eq!(
+            params.receipt_evidence_digest.len(),
+            32,
+            "the split transfer must carry a 32-byte evidence reference"
+        );
+
+        let bytes = encode_via_production_path(&params);
         report_budget("ADR0003 TransferEnvelope", bytes);
         assert!(
             bytes < NODE_MAX_ENVELOPE_BYTES,
             "TransferEnvelope measured {bytes} bytes, over the {NODE_MAX_ENVELOPE_BYTES} cap"
+        );
+        // ~50.8 KB. Bounded on both sides: a shape that suddenly got much
+        // smaller has probably dropped something the receiver needs.
+        assert!(
+            (45_000..60_000).contains(&bytes),
+            "TransferEnvelope should be ~50.8 KB, measured {bytes}"
+        );
+    }
+
+    /// Byte stability: the same logical send must produce an identical digest
+    /// and identical encoded bytes on every attempt. A retry replays frozen
+    /// bytes, so instability here would mean a retry submits a DIFFERENT
+    /// artifact under the same deterministic id.
+    #[test]
+    fn the_split_transfer_encoding_is_byte_stable_across_attempts() {
+        let d1 = evidence_content_digest_for_test();
+        let d2 = evidence_content_digest_for_test();
+        assert_eq!(d1, d2, "evidence digest must be deterministic");
+
+        let a = encode_via_production_path(&params_split_shape());
+        let b = encode_via_production_path(&params_split_shape());
+        assert_eq!(
+            a, b,
+            "the same logical send must encode to the same number of bytes"
         );
     }
 
