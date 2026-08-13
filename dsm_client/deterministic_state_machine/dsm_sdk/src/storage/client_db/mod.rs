@@ -38,6 +38,7 @@ mod pending_transactions;
 mod projection_repair;
 pub mod publication;
 pub mod recipient_receipt_fold;
+pub mod recipient_staging;
 pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
@@ -697,6 +698,41 @@ fn create_schema(conn: &Connection) -> Result<()> {
                 REFERENCES sender_outbox(relationship_key, canonical_parent, proposal_nonce)
                 ON DELETE CASCADE,
             CHECK (role IN ('evidence_a', 'countersign_b'))
+        );
+
+        -- ADR 0003 step 3: the recipient's durable staging area.
+        --
+        -- A split transfer arrives as two independent artifacts. Neither half
+        -- alone authorises anything, so each is staged durably and NOTHING is
+        -- acknowledged or applied until both are present, digest-bound and
+        -- verified. Arrival order is not part of identity: the row is keyed by
+        -- the logical transfer correlation id, and whichever half arrives first
+        -- creates it.
+        --
+        -- Exact received bytes are stored for both halves. Pairing and
+        -- verification operate on those frozen bytes, never on a protobuf
+        -- reconstructed from them -- a re-encode is how "the bytes I verified"
+        -- silently stops being "the bytes that arrived".
+        --
+        -- `terminal_reject` is STICKY. A digest mismatch is a decision, and must
+        -- never decay back into "still waiting for the other half".
+        CREATE TABLE IF NOT EXISTS recipient_staging(
+            correlation_key          TEXT PRIMARY KEY,
+            state                    TEXT NOT NULL,
+            -- transfer half (exact received bytes)
+            transfer_bytes           BLOB,
+            -- the evidence reference the transfer carries (proto field 12)
+            expected_evidence_digest BLOB,
+            -- evidence half (exact received bytes) + the digest computed over them
+            evidence_bytes           BLOB,
+            evidence_digest          BLOB,
+            reject_reason            TEXT,
+            created_at               INTEGER NOT NULL,
+            updated_at               INTEGER NOT NULL,
+            CHECK (state IN (
+                'staged_transfer', 'staged_evidence', 'ready_to_verify',
+                'terminal_reject', 'accepted'
+            ))
         );
 
         CREATE TABLE IF NOT EXISTS recipient_outbound_reply(
