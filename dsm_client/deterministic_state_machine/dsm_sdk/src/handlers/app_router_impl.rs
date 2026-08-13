@@ -1939,6 +1939,12 @@ impl AppRouterImpl {
                     &artifacts.ek_material.ek_sk,
                     &artifacts.ek_material.at_rest_key,
                     artifacts.ek_material.is_init,
+                    // ADR 0003 step 2a: the persistence boundary now accepts the
+                    // proposal's other frozen artifacts. The sender does not BUILD
+                    // one yet, so this is empty and the wire shape is unchanged.
+                    // Populating it is the next slice, gated on this transaction
+                    // being tested first.
+                    &[],
                 )
                 .map_err(|e| {
                     dsm::types::error::DsmError::internal(
