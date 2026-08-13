@@ -3612,6 +3612,17 @@ mod tests {
     }
     use super::*;
 
+    /// Ensure the storage base dir is set. `CoreSDK::new` reads app state, which
+    /// panics outright when it is unset, so any test touching it is otherwise
+    /// order-dependent: it passes only when some earlier test happened to set it.
+    fn ensure_test_storage_dir() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        let _ =
+            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+    }
+
     fn dev_id32_b32() -> String {
         // Deterministic 32-byte device id for tests.
         // Must satisfy B0xSDK::new base32(32 bytes) invariant.
@@ -3835,6 +3846,7 @@ mod tests {
     #[tokio::test]
     async fn test_envelope_to_b0x_entry_preserves_signature(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_storage_dir();
         let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
         let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
 
@@ -3912,6 +3924,7 @@ mod tests {
     #[tokio::test]
     async fn test_envelope_to_b0x_entry_prefers_transfer_sig_but_falls_back_to_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_storage_dir();
         let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
         let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
 
@@ -3998,6 +4011,7 @@ mod tests {
     #[tokio::test]
     async fn test_envelope_to_b0x_entry_online_message_payload_and_signature(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_storage_dir();
         let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
         let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
 
@@ -4092,6 +4106,7 @@ mod tests {
     #[tokio::test]
     async fn test_envelope_to_b0x_entry_uses_post_state_hash_as_next_tip(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        ensure_test_storage_dir();
         let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
         let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
 
