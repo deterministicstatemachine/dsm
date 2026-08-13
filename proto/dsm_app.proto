@@ -3353,6 +3353,28 @@ message OnlineTransferRequest {
   bytes receipt_evidence_digest = 12 [(dsm_fixed_len)=32];
 }
 
+// ADR 0003: the A-side receipt evidence, carried as its OWN b0x artifact
+// rather than inline in the transfer. Its own message and its own invoke
+// method -- it is not an Operation and must not be threaded through one.
+//
+// INVARIANT:
+//   receipt_evidence_digest == BLAKE3("DSM/receipt-evidence/A/v1\0" || full_receipt_bytes)
+//
+// The digest here is cryptographically redundant (the recipient can recompute
+// it) but structurally useful: the artifact can identify itself before the
+// recipient has paired it with a transfer. The AUTHORITATIVE binding remains
+// the digest in field 12 of the transfer.
+message ReceiptEvidenceA {
+  // The transfer artifact this evidence belongs to, for correlation while
+  // staging. Not authority -- the digest is.
+  string transfer_submission_id = 1;
+  bytes  receipt_evidence_digest = 2 [(dsm_fixed_len)=32];
+  // The FULL ReceiptCommit wire object: canonical fields plus sig_a,
+  // ek_cert_a, ek_pk_a and Kyber material. ~118 KB with production-sized
+  // SPHINCS+ material, against the node's 128 KiB envelope cap.
+  bytes  full_receipt_bytes = 3 [(dsm_max_len)=131072];
+}
+
 message OnlineTransferSmartRequest {
   string recipient = 1; // Alias or Base32 ID
   string amount = 2; // Decimal string

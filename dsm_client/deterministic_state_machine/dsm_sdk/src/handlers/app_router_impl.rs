@@ -307,6 +307,9 @@ struct OnlineSendArtifacts {
     envelope_bytes: Vec<u8>,
     /// Canonical receipt bytes, retained for the acceptance-reply path.
     receipt_canonical_bytes: Vec<u8>,
+    /// ADR 0003: every OTHER frozen artifact this send will emit, already
+    /// encoded. Persisted in the SAME transaction as everything above.
+    extra_artifacts: Vec<crate::storage::client_db::SenderOutboxArtifact>,
 }
 
 impl AppRouterImpl {
@@ -1801,6 +1804,9 @@ impl AppRouterImpl {
             };
             let recipient_genesis_b32 =
                 crate::util::text_id::encode_base32_crockford(&recipient_genesis_raw);
+            // Retained for the evidence artifact: `recipient_genesis_b32` is moved
+            // into the transfer params below.
+            let recipient_genesis_b32_for_evidence = recipient_genesis_b32.clone();
 
             // Use relationship-specific h_{n+1} as next_chain_tip (not entity hash).
             // SMT failure is terminal (function returns early), so we always have a valid tip here.
@@ -1899,23 +1905,66 @@ impl AppRouterImpl {
             // identity survives any future change to envelope construction.
             let sender_b32_for_build =
                 crate::util::text_id::encode_base32_crockford(&from_device_id);
-            let prebuilt = match crate::sdk::b0x_sdk::B0xSDK::new(
+            let evidence_builder = match crate::sdk::b0x_sdk::B0xSDK::new(
                 sender_b32_for_build,
                 self.core_sdk.clone(),
                 storage_endpoints.clone(),
             ) {
-                Ok(builder) => builder.build_envelope_bytes(&b0x_params),
-                Err(e) => Err(e),
-            };
-            let (envelope_bytes, _built_msg_id) = match prebuilt {
-                Ok(pair) => pair,
+                Ok(b) => b,
                 Err(e) => {
                     return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                        "wallet.send: envelope build failed (nothing sent): {e}"
+                        "wallet.send: envelope builder init failed (nothing sent): {e}"
                     )));
                 }
             };
+
+            // ADR 0003 construction order, deliberately rigid:
+            //   full_receipt_bytes -> digest -> evidence id
+            //     -> TransferEnvelope(field10="", field12=digest)
+            //     -> ReceiptEvidenceEnvelope(full bytes, digest)
+            //     -> freeze BOTH exact encodings
+            //     -> one 2a transaction persists both or neither
+            // The persistence layer receives FINAL byte vectors, never anything
+            // it could re-encode later: a rebuild is how a retry stops being the
+            // same logical send.
+            let (envelope_bytes, _built_msg_id) =
+                match evidence_builder.build_envelope_bytes(&b0x_params) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                            "wallet.send: envelope build failed (nothing sent): {e}"
+                        )));
+                    }
+                };
             outbox_record.envelope_bytes = envelope_bytes.clone();
+
+            let evidence_submission_id =
+                crate::storage::client_db::derive_artifact_submission_id(&evidence_digest);
+            let evidence_envelope = match evidence_builder.build_evidence_envelope(
+                &to_device_id_str,
+                &recipient_genesis_b32_for_evidence,
+                &submission_id,
+                &evidence_submission_id,
+                &evidence_digest,
+                &receipt_commit_bytes,
+            ) {
+                Ok(built) => built,
+                Err(e) => {
+                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
+                        "wallet.send: evidence envelope build failed (nothing sent): {e}"
+                    )));
+                }
+            };
+
+            let evidence_artifact = crate::storage::client_db::SenderOutboxArtifact {
+                relationship_key: sender_proposal.relationship_key,
+                canonical_parent: sender_proposal.canonical_parent,
+                proposal_nonce: sender_proposal.nonce_hash,
+                role: crate::storage::client_db::ArtifactRole::EvidenceA,
+                submission_id: evidence_submission_id,
+                envelope_bytes: evidence_envelope.bytes,
+                content_digest: evidence_digest,
+            };
 
             Ok(OnlineSendArtifacts {
                 sender_proposal,
@@ -1925,6 +1974,7 @@ impl AppRouterImpl {
                 ek_material,
                 envelope_bytes,
                 receipt_canonical_bytes,
+                extra_artifacts: vec![evidence_artifact],
             })
         };
 
@@ -1954,12 +2004,7 @@ impl AppRouterImpl {
                     &artifacts.ek_material.ek_sk,
                     &artifacts.ek_material.at_rest_key,
                     artifacts.ek_material.is_init,
-                    // ADR 0003 step 2a: the persistence boundary now accepts the
-                    // proposal's other frozen artifacts. The sender does not BUILD
-                    // one yet, so this is empty and the wire shape is unchanged.
-                    // Populating it is the next slice, gated on this transaction
-                    // being tested first.
-                    &[],
+                    &artifacts.extra_artifacts,
                 )
                 .map_err(|e| {
                     dsm::types::error::DsmError::internal(
@@ -1989,6 +2034,7 @@ impl AppRouterImpl {
             ek_material,
             envelope_bytes,
             receipt_canonical_bytes,
+            extra_artifacts: _,
         } = artifacts;
         let _ = (&new_state, &advance_outcome, &ek_material, &routing_address);
 
