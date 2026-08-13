@@ -144,7 +144,7 @@ pub(crate) fn resolve_trusted_sender_ak(
     Ok(trusted)
 }
 
-fn verify_inbound_receipt_sig_a(
+pub(crate) fn verify_inbound_receipt_sig_a(
     receipt: &dsm::types::receipt_types::StitchedReceiptV2,
     commitment: &[u8; 32],
     ak_pk_genesis: &[u8],
