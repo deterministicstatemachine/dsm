@@ -32,6 +32,14 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
         'VERSION: 1.0.0',
       ];
+    case 'publication_pending':
+      return [
+        'GENESIS: COMMITTED',
+        'NETWORK: PUBLISHING',
+        'DEVICE: VERIFIED',
+        `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
+        'VERSION: 1.0.0',
+      ];
     case 'wallet_ready':
       return [
         'GENESIS: INITIALIZED',
