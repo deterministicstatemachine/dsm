@@ -192,6 +192,26 @@ pub fn derive_submission_id(commitment: &[u8; 32]) -> String {
     crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
 }
 
+/// Deterministic submission id for a non-transfer artifact (ADR 0003).
+///
+/// Derived from the artifact's CONTENT DIGEST, which is already
+/// role-domain-separated, so the id inherits that separation: an A-side and a
+/// B-side artifact of the same transfer can never collide on
+/// `UNIQUE(submission_id)`, and neither can collide with the transfer's own id
+/// (derived from the commitment under a different tag).
+///
+/// Truncated to 16 bytes for the same reason as [`derive_submission_id`]:
+/// deployed storage nodes hard-require that width. The full digest stays on the
+/// row and is what an equality test uses -- the truncation is an id, never the
+/// comparison.
+pub fn derive_artifact_submission_id(content_digest: &[u8; 32]) -> String {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/b0x-artifact-submission-id/v1"
+    ));
+    h.update(content_digest);
+    crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
+}
+
 /// Insert the lifecycle row INSIDE the caller's advance transaction.
 ///
 /// Takes `&Connection` (a `&Transaction` derefs to one) and never opens its
@@ -1239,6 +1259,40 @@ mod tests {
             envelope_bytes: bytes,
             content_digest: digest,
         }
+    }
+
+    /// Every artifact of one transfer must get a DISTINCT deterministic id.
+    /// `UNIQUE(submission_id)` depends on it, and so does the node's
+    /// `UNIQUE(message_id)` -- a collision would silently collapse two
+    /// artifacts onto one spool row.
+    #[test]
+    fn artifact_submission_ids_are_distinct_per_role_and_from_the_transfer() {
+        let commitment = [0x5Cu8; 32];
+        let payload = vec![0x11u8; 512];
+
+        let transfer_id = derive_submission_id(&commitment);
+        let a_digest = evidence_content_digest(ArtifactRole::EvidenceA, &payload);
+        let b_digest = evidence_content_digest(ArtifactRole::CountersignB, &payload);
+        let a_id = derive_artifact_submission_id(&a_digest);
+        let b_id = derive_artifact_submission_id(&b_digest);
+
+        assert_ne!(a_digest, b_digest, "role must separate the content address");
+        assert_ne!(a_id, b_id, "role separation must reach the submission id");
+        assert_ne!(
+            a_id, transfer_id,
+            "artifact id must differ from the transfer id"
+        );
+        assert_ne!(
+            b_id, transfer_id,
+            "artifact id must differ from the transfer id"
+        );
+
+        // Deterministic: a retry derives the same ids rather than new ones.
+        assert_eq!(a_id, derive_artifact_submission_id(&a_digest));
+        assert_eq!(
+            a_digest,
+            evidence_content_digest(ArtifactRole::EvidenceA, &payload)
+        );
     }
 
     /// ADR 0003, the first dangerous invariant of the split:
