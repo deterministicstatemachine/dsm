@@ -4184,4 +4184,251 @@ mod tests {
 
         Ok(())
     }
+
+    // ==================================================================
+    // WIRE BUDGET (ADR 0003) — real-size encoded artifacts must fit the
+    // storage node's MAX_ENVELOPE_BYTES.
+    //
+    // These build PRODUCTION-SIZED cryptographic material and measure the
+    // ACTUAL encoded `Envelope`, not inner structs. The node enforces the
+    // cap with `RequestBodyLimitLayer::new(MAX_ENVELOPE_BYTES)` as its
+    // OUTERMOST layer, so the wire message is what must fit — an inner
+    // object that fits while its envelope does not still 413s.
+    //
+    // This budget was absent, which is why a 168,400-byte transfer reached
+    // hardware and failed 413 on every fleet node, permanently: the outbox
+    // freezes exact submitted bytes, so each retry replayed the same
+    // oversized message.
+    // ==================================================================
+
+    /// The storage node's cap (`dsm_storage_node/src/api/transport/b0x.rs`).
+    /// Duplicated deliberately: the client must not silently track a change
+    /// to the node's limit.
+    const NODE_MAX_ENVELOPE_BYTES: usize = 128 * 1024;
+
+    /// Report a measured artifact against the budget. A wire-budget test whose
+    /// numbers are invisible tells you it passed but not how close it came.
+    fn report_budget(shape: &str, bytes: usize) {
+        let pct = 100.0 * bytes as f64 / NODE_MAX_ENVELOPE_BYTES as f64;
+        let headroom = NODE_MAX_ENVELOPE_BYTES as i64 - bytes as i64;
+        println!(
+            "[wire-budget] {shape:<34} {bytes:>8} bytes  {pct:5.1}% of cap  headroom {headroom:>8}"
+        );
+    }
+
+    fn sphincs_sig_len() -> usize {
+        dsm::crypto::sphincs::signature_bytes(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+    }
+
+    /// Field sizes decoded from a REAL stuck envelope pulled off the bench rig
+    /// (submission RX6BA3TY6KRDEBVXGXNCTHWVT0, 168,400 bytes). Using measured
+    /// production values, not guesses, is the whole point of this budget.
+    const REL_PROOF_LEN: usize = 8_261;
+    const DEV_PROOF_LEN: usize = 9;
+    const REPLACE_WITNESS_LEN: usize = 4;
+    const KYBER_CT_LEN: usize = 1_088;
+    const EK_PK_LEN: usize = 64;
+    const CANONICAL_OP_LEN: usize = 303;
+
+    /// A production-sized one-way (A-side) ReceiptCommit.
+    fn production_sized_receipt_a() -> Vec<u8> {
+        let sig = sphincs_sig_len();
+        let rc = dsm::types::proto::ReceiptCommit {
+            genesis: vec![0x01; 32],
+            devid_a: vec![0x02; 32],
+            devid_b: vec![0x03; 32],
+            parent_tip: vec![0x04; 32],
+            child_tip: vec![0x05; 32],
+            parent_root: vec![0x06; 32],
+            child_root: vec![0x07; 32],
+            rel_proof_parent: vec![0x08; REL_PROOF_LEN],
+            rel_proof_child: vec![0x09; REL_PROOF_LEN],
+            dev_proof: vec![0x0A; DEV_PROOF_LEN],
+            rel_replace_witness: vec![0x0B; REPLACE_WITNESS_LEN],
+            sig_a: vec![0xAA; sig],
+            ek_cert_a: vec![0xCC; sig],
+            ek_pk_a: vec![0xDD; EK_PK_LEN],
+            kyber_ct_a: vec![0xEE; KYBER_CT_LEN],
+            ..Default::default()
+        };
+        let mut out = Vec::with_capacity(rc.encoded_len());
+        rc.encode(&mut out).expect("encode ReceiptCommit");
+        out
+    }
+
+    /// Submission params carrying production-sized SIG A and canonical op bytes.
+    /// `receipt_commit` is supplied by the caller so the same production encoder
+    /// measures both the inline shape and the split shape.
+    fn params_with_receipt(receipt_commit: Vec<u8>) -> B0xSubmissionParams {
+        B0xSubmissionParams {
+            recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+            recipient_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+            transaction: dsm::types::operations::Operation::Transfer {
+                to_device_id: vec![0x44; 32],
+                amount: dsm::types::token_types::Balance::from_state(100, [0u8; 32]),
+                token_id: b"ERA".to_vec(),
+                policy_commit: [0x0F; 32],
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+                nonce: vec![0x7E; 32],
+                verification: dsm::types::operations::VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x44; 32],
+                to: vec![0x44; 32],
+                message: String::new(),
+                signature: vec![0xA5; sphincs_sig_len()],
+                authority_policy: None,
+            },
+            signature: vec![0xA5; sphincs_sig_len()],
+            sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x66u8; 32]),
+            sender_chain_tip: crate::util::text_id::encode_base32_crockford(&[0x77u8; 32]),
+            sender_signing_public_key: vec![0x88; EK_PK_LEN],
+            ttl_seconds: 0,
+            seq: 1,
+            next_chain_tip: Some(vec![0x99; 32]),
+            receipt_commit,
+            routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
+            canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
+            submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
+        }
+    }
+
+    fn encode_via_production_path(params: &B0xSubmissionParams) -> usize {
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        sdk.build_envelope_for_submission(params)
+            .expect("build envelope")
+            .bytes
+            .len()
+    }
+
+    /// Proves the budget has teeth: the CURRENT inline transport, which embeds
+    /// the whole A-side receipt in the transfer message, exceeds the node cap.
+    /// Measured on hardware at 168,400 bytes.
+    #[test]
+    fn current_inline_transport_exceeds_the_node_cap() {
+        let bytes = encode_via_production_path(&params_with_receipt(production_sized_receipt_a()));
+        report_budget("inline transfer (CURRENT)", bytes);
+        assert!(
+            bytes > NODE_MAX_ENVELOPE_BYTES,
+            "inline transport measured {bytes} bytes; if this now fits, the shape changed \
+             and this guard must be re-derived rather than deleted"
+        );
+    }
+
+    /// ADR 0003 shape 1: the transfer artifact carries a 32-byte evidence
+    /// digest instead of the receipt, and must fit with real margin.
+    #[test]
+    fn adr0003_transfer_envelope_fits_the_node_cap() {
+        let digest = vec![0x5A; 32];
+        let bytes = encode_via_production_path(&params_with_receipt(digest));
+        report_budget("ADR0003 TransferEnvelope", bytes);
+        assert!(
+            bytes < NODE_MAX_ENVELOPE_BYTES,
+            "TransferEnvelope measured {bytes} bytes, over the {NODE_MAX_ENVELOPE_BYTES} cap"
+        );
+    }
+
+    /// ADR 0003 shape 2: the A-side evidence artifact. This is the tightest of
+    /// the three (~90% of cap) and the one to watch — 99,712 of its bytes are
+    /// two SPHINCS+ objects.
+    #[test]
+    fn adr0003_a_side_evidence_envelope_fits_the_node_cap() {
+        let bytes = envelope_bytes_for_evidence_body(production_sized_receipt_a());
+        report_budget("ADR0003 A-side evidence", bytes);
+        assert!(
+            bytes < NODE_MAX_ENVELOPE_BYTES,
+            "A-side ReceiptEvidenceEnvelope measured {bytes} bytes, over the cap"
+        );
+    }
+
+    /// ADR 0003 shape 3: the B-side countersign delta — the A-evidence
+    /// reference plus B-only authorization material. Measured at ~101,630
+    /// bytes (77.5% of cap).
+    ///
+    /// NORMATIVE (ADR 0003): this artifact carries exactly TWO SPHINCS+
+    /// signature-sized objects, `sig_b` and `ek_cert_b`. Its headroom is less
+    /// than one signature, so a third does not degrade it gradually — it
+    /// breaks it. Adding one is a transport-design change, not a schema
+    /// extension.
+    #[test]
+    fn adr0003_b_side_countersign_delta_fits_the_node_cap() {
+        let sig = sphincs_sig_len();
+        let delta = dsm::types::proto::ReceiptCommit {
+            // Reference to the A-side evidence being countersigned.
+            genesis: vec![0x11; 32],
+            devid_a: vec![0x22; 32],
+            devid_b: vec![0x33; 32],
+            child_tip: vec![0x44; 32],
+            child_root: vec![0x55; 32],
+            // B-only authorization material. No A-side signatures, and no
+            // proof material: the SMT proofs are shared, not per-side.
+            sig_b: vec![0xBB; sig],
+            ek_cert_b: vec![0xCC; sig],
+            ek_pk_b: vec![0xDD; EK_PK_LEN],
+            kyber_ct_b: vec![0xEE; KYBER_CT_LEN],
+            ..Default::default()
+        };
+        let mut body = Vec::with_capacity(delta.encoded_len());
+        delta.encode(&mut body).expect("encode B delta");
+
+        let two_signatures = 2 * sig;
+        assert!(
+            body.len() < two_signatures + 8 * 1024,
+            "B delta grew beyond two signatures plus reference material: {} bytes. \
+             ADR 0003 fixes this artifact at exactly two SPHINCS+-sized objects.",
+            body.len()
+        );
+
+        let bytes = envelope_bytes_for_evidence_body(body);
+        report_budget("ADR0003 B-side countersign", bytes);
+        assert!(
+            bytes < NODE_MAX_ENVELOPE_BYTES,
+            "B-side ReceiptCountersignEnvelope measured {bytes} bytes, over the cap"
+        );
+    }
+
+    /// Wrap an evidence body in the same Envelope framing the production
+    /// submit path uses, and return the encoded wire length.
+    fn envelope_bytes_for_evidence_body(body: Vec<u8>) -> usize {
+        let arg_pack = dsm::types::proto::ArgPack {
+            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body,
+        };
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: "receipt.evidence".to_string(),
+            args: Some(arg_pack),
+            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            cosigners: vec![],
+            evidence: None,
+            nonce: Some(dsm::types::proto::Hash16 { v: vec![0u8; 16] }),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: vec![0x11; 32],
+                chain_tip: vec![0x22; 32],
+                genesis_hash: vec![0x33; 32],
+                seq: 1,
+            }),
+            message_id: vec![0x44; 16],
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![dsm::types::proto::UniversalOp {
+                        op_id: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                        actor: vec![0x11; 32],
+                        genesis_hash: vec![0x33; 32],
+                        kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+                    }],
+                    atomic: true,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).expect("encode Envelope");
+        buf.len()
+    }
 }
