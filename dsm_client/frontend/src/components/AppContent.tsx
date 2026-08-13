@@ -245,6 +245,24 @@ export default function AppContent({
         </div>
       );
 
+    // Local genesis is committed but the identity is not yet published to a
+    // quorum of storage nodes, so it is not resolvable by peers. Rust retries
+    // publication on its own; this screen just reports the wait. Without a case
+    // here the switch falls through and renders an empty screen.
+    case 'publication_pending':
+      return (
+        <div className="dsm-content">
+          <LoadingSpinner message="Publishing Identity" size="large" eraTokenSrc={eraTokenSrc} />
+          <StatusText
+            lines={[
+              'GENESIS: COMMITTED',
+              'PUBLISHING TO NETWORK',
+              'PLEASE WAIT...',
+            ]}
+          />
+        </div>
+      );
+
     case 'securing_device':
       return (
         <div className="dsm-content dsm-content--securing" style={securingContentStyle}>

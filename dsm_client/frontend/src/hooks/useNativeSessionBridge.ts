@@ -34,7 +34,9 @@ export function useNativeSessionBridge({ themes, setThemeIndex }: Args): NativeS
     // architecture where the frontend state machine drove the securing screen,
     // and Rust's session.phase only transitioned to wallet_ready/error at the
     // end of genesis. The legitimate exits from securing_device are:
-    //   securing_device → wallet_ready  (genesis succeeded, identity installed)
+    //   securing_device → publication_pending (genesis committed locally; the
+    //                                          identity is not published yet)
+    //   securing_device → wallet_ready  (genesis succeeded, identity published)
     //   securing_device → error         (fatal error during genesis)
     //   securing_device → locked        (lock engaged mid-flow, extremely rare)
     // Any transient `needs_genesis` (or `runtime_loading`/`loading`) reported

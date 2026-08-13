@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-export type AppState = 'loading' | 'runtime_loading' | 'needs_genesis' | 'securing_device' | 'wallet_ready' | 'locked' | 'error';
+export type AppState = 'loading' | 'runtime_loading' | 'needs_genesis' | 'securing_device' | 'publication_pending' | 'wallet_ready' | 'locked' | 'error';
 
 export type ScreenType =
   | 'home'
