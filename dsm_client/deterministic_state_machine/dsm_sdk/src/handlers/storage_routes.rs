@@ -106,6 +106,44 @@ fn record_observed_remote_tip_and_refresh(device_id: &[u8], observed_tip: &[u8; 
 /// the transition is durably applied and the acceptance marker is written, so a
 /// receipt that verifies but fails to apply never advances the receiver's chain
 /// (lockstep: a failed acceptance leaves both chains where they were).
+/// Resolve the SPHINCS+ key an inbound online entry is verified against.
+///
+/// TRUST ROOT: the sender's AK comes from the LOCALLY STORED contact, never
+/// from the wire artifact.
+///
+/// This drain previously preferred `entry.sender_signing_public_key` and then
+/// verified that entry's own signature against it, so an attacker who could
+/// place an inbox entry supplied both the key and a signature made with the
+/// matching secret — SIG A verified against the attacker's own root. Ordinary
+/// transfer verification must not bootstrap trust from the same message it is
+/// authenticating; establishing an AK for an unknown sender needs its own
+/// authenticated identity rule.
+///
+/// A wire-embedded key that disagrees with the stored AK is a signal, not a
+/// tiebreak: it is reported and ignored, and verification stays rooted in the
+/// stored value.
+///
+/// Extracted so the property is unit-testable rather than buried in the drain.
+pub(crate) fn resolve_trusted_sender_ak(
+    sender_device_id: &str,
+    wire_supplied: &[u8],
+) -> Result<Vec<u8>, String> {
+    let trusted = crate::storage::client_db::get_contact_public_key_by_device_id(sender_device_id)
+        .ok_or_else(|| {
+            format!(
+                "no locally trusted sender AK for {sender_device_id}; wire-supplied keys are \
+                 never trusted"
+            )
+        })?;
+    if !wire_supplied.is_empty() && wire_supplied != trusted.as_slice() {
+        log::warn!(
+            "[storage.sync] ⚠️ entry from {sender_device_id} embeds a sender key that differs \
+             from the stored AK; IGNORING the wire value"
+        );
+    }
+    Ok(trusted)
+}
+
 fn verify_inbound_receipt_sig_a(
     receipt: &dsm::types::receipt_types::StitchedReceiptV2,
     commitment: &[u8; 32],
@@ -986,17 +1024,27 @@ impl AppRouterImpl {
                                         }
                                         let signing_bytes = entry.canonical_operation_bytes.clone();
 
-                                        // Resolve signer key: embedded evidence first, contacts second.
-                                        let (pk, pk_source) = if !entry.sender_signing_public_key.is_empty() {
-                                                    (entry.sender_signing_public_key.clone(), "embedded_evidence")
-                                                } else if let Some(k) = crate::storage::client_db::get_contact_public_key_by_device_id(&entry.sender_device_id) {
-                                                    (k, "contact_book")
-                                                } else {
-                                                    log::warn!("[storage.sync] ❌ No public key for sender {} (tx {}) - REJECTING", entry.sender_device_id, entry.transaction_id);
-                                                    let mut state_guard = batch_state.lock().await;
-                                                    state_guard.errors.push(format!("unknown sender public key for tx {}", entry.transaction_id));
-                                                    continue;
-                                                };
+                                        // TRUST ROOT: the stored contact, never the wire. See
+                                        // `resolve_trusted_sender_ak`.
+                                        let pk = match resolve_trusted_sender_ak(
+                                            &entry.sender_device_id,
+                                            &entry.sender_signing_public_key,
+                                        ) {
+                                            Ok(k) => k,
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "[storage.sync] ❌ REJECTING tx {}: {e}",
+                                                    entry.transaction_id
+                                                );
+                                                let mut state_guard = batch_state.lock().await;
+                                                state_guard.errors.push(format!(
+                                                    "{e} (tx {})",
+                                                    entry.transaction_id
+                                                ));
+                                                continue;
+                                            }
+                                        };
+                                        let pk_source = "stored_contact";
                                         let pk_hash = dsm::crypto::blake3::domain_hash(
                                             dsm::common::domain_tags::TAG_DSM_PK_HASH,
                                             &pk,
@@ -2618,6 +2666,7 @@ fn name_and_region_from_endpoint(endpoint: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_trusted_sender_ak;
     use super::select_history_receipt_bytes;
 
     #[test]
@@ -2635,5 +2684,115 @@ mod tests {
         let selected = select_history_receipt_bytes(None, &[7u8, 8, 9]);
 
         assert_eq!(selected, Some(vec![7u8, 8, 9]));
+    }
+
+    // =====================================================================
+    // TRUST ROOT (issue #656): the online inbox must not verify an entry
+    // against a key that entry supplied.
+    //
+    // The drain previously preferred `entry.sender_signing_public_key` over
+    // the contact book and then passed it to `decode_and_bind_signed`. An
+    // attacker who could place an inbox entry therefore supplied BOTH the key
+    // and a signature made with the matching secret, and SIG A verified
+    // against the attacker's own root.
+    // =====================================================================
+
+    fn trust_root_test_db() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        let _ =
+            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn seed_sender_contact(devid: [u8; 32], ak: Vec<u8>) -> String {
+        let c = crate::storage::client_db::ContactRecord {
+            contact_id: "cid-trust-root".to_string(),
+            device_id: devid.to_vec(),
+            alias: "sender".to_string(),
+            genesis_hash: [0xAAu8; 32].to_vec(),
+            public_key: ak,
+            kyber_public_key: vec![0xCCu8; 1184],
+            current_chain_tip: None,
+            added_at: 1,
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "Created".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        };
+        crate::storage::client_db::store_contact(&c).expect("seed contact");
+        crate::util::text_id::encode_base32_crockford(&devid)
+    }
+
+    /// 1. Stored AK present, no wire key -> the stored AK is used.
+    #[test]
+    #[serial_test::serial]
+    fn stored_ak_is_used_when_no_wire_key_is_embedded() {
+        trust_root_test_db();
+        let stored = vec![0xBBu8; 64];
+        let dev = seed_sender_contact([0x51u8; 32], stored.clone());
+
+        let resolved = resolve_trusted_sender_ak(&dev, &[]).expect("stored AK must resolve");
+        assert_eq!(resolved, stored);
+    }
+
+    /// 2. THE ATTACK. An attacker embeds their own key; verification must NOT
+    ///    root in it. Before the fix this returned the attacker's key, so a
+    ///    signature made with the attacker's secret verified.
+    #[test]
+    #[serial_test::serial]
+    fn an_attacker_supplied_wire_key_is_never_trusted() {
+        trust_root_test_db();
+        let stored = vec![0xBBu8; 64];
+        let dev = seed_sender_contact([0x52u8; 32], stored.clone());
+
+        let attacker = vec![0xEEu8; 64];
+        let resolved = resolve_trusted_sender_ak(&dev, &attacker).expect("resolve");
+        assert_eq!(
+            resolved, stored,
+            "verification must root in the STORED AK, never the wire-supplied key"
+        );
+        assert_ne!(
+            resolved, attacker,
+            "the attacker's key must never become the verification root"
+        );
+    }
+
+    /// 3. Wire key disagrees with the stored AK -> the wire value is ignored and
+    ///    verification still roots in the stored one.
+    #[test]
+    #[serial_test::serial]
+    fn a_disagreeing_wire_key_is_ignored_not_preferred() {
+        trust_root_test_db();
+        let stored = vec![0x01u8; 64];
+        let dev = seed_sender_contact([0x53u8; 32], stored.clone());
+
+        let resolved = resolve_trusted_sender_ak(&dev, &[0x02u8; 64]).expect("resolve");
+        assert_eq!(resolved, stored);
+    }
+
+    /// 4. No stored AK -> FAIL CLOSED. Never fall back to the wire value.
+    ///    Establishing an AK for an unknown sender needs its own authenticated
+    ///    identity rule; transfer verification must not bootstrap trust from the
+    ///    message it is authenticating.
+    #[test]
+    #[serial_test::serial]
+    fn no_stored_ak_fails_closed_and_never_falls_back_to_the_wire() {
+        trust_root_test_db();
+        let unknown = crate::util::text_id::encode_base32_crockford(&[0x54u8; 32]);
+
+        let err = resolve_trusted_sender_ak(&unknown, &[0xEEu8; 64])
+            .expect_err("an unknown sender must fail closed");
+        assert!(
+            err.contains("no locally trusted sender AK"),
+            "unexpected error: {err}"
+        );
     }
 }
