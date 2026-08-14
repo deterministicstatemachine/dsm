@@ -134,6 +134,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Rust macro bodies are invisible to CodeQL without std/core sources.
+      # Measured on the 2026-08-14 full-tree run of this workflow WITHOUT this
+      # step: /language:rust returned 64 results, all rust/hard-coded-
+      # cryptographic-value — while rust/cleartext-logging returned 0 against
+      # 105 in March, and rust/cleartext-transmission 0 against 2. That is the
+      # expected signature of 15,081 "macro expansion failed" warnings: the
+      # cleartext-logging sinks (log::__private_api::log, std::io::stdio::
+      # _print, core::panicking::panic_fmt) are reachable ONLY through macro
+      # expansion, so losing expansion deletes the entire query's sink set.
+      # The extractor logged `sysroot: None, sysroot_src: None`, and rust-src
+      # is not preinstalled on the ubuntu runner image.
+      #
+      # This targets the ~11,000 std-macro failures (assert_eq 3412, assert
+      # 2678, vec 2615, format 2300). The ~1,800 third-party macro_rules
+      # failures (log 1053, anyhow 448, rusqlite 321) need dependency sources
+      # and are a separate variable — deliberately not changed in the same
+      # step, so the effect of this one stays attributable.
+      - name: Provide Rust sysroot sources for the CodeQL extractor
+        if: matrix.language == 'rust'
+        run: rustup component add rust-src
+
       # Mirrors the existing `android-unit-tests` job in ci.yml, which builds
       # this module green on ubuntu-latest with the same JDK.
       - name: Set up JDK 17
@@ -177,14 +198,25 @@ jobs:
       # --no-daemon is required for correctness, not just hygiene: a reused
       # Gradle daemon starts outside the CodeQL tracer, and compilations it
       # performs would go unobserved.
+      #
+      # androidTest is deliberately EXCLUDED. Those 7 instrumented-test files
+      # do not compile today — :app:compileDebugAndroidTestKotlin fails with 14
+      # "Unresolved reference" errors against protobuf accessors that no longer
+      # exist (reserveAU128, reserveBU128, setReserveAU128, setTokenId) in
+      # SoFiCrossDeviceOwnerTest.kt, SoFiTestHelpers.kt and SoFiTradeRealHwTest
+      # .kt. Nothing in CI compiles them: ci.yml runs :app:testDebugUnitTest,
+      # which covers main and test but never androidTest. That breakage is
+      # pre-existing and tracked separately — it is not this workflow's to fix,
+      # and blocking all Kotlin security coverage on it would be the wrong
+      # trade. The two tasks below cover the 78 files that matter: all 58
+      # production sources plus the 20 unit tests.
       - name: Compile Kotlin under the CodeQL tracer
         if: matrix.language == 'java-kotlin'
         working-directory: dsm_client/android
         run: |
           ./gradlew --no-daemon --stacktrace \
             :app:compileDebugKotlin \
-            :app:compileDebugUnitTestKotlin \
-            :app:compileDebugAndroidTestKotlin
+            :app:compileDebugUnitTestKotlin
 
       - name: Analyze
         uses: github/codeql-action/analyze@v4
