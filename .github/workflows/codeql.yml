@@ -1,0 +1,113 @@
+# CodeQL security analysis — advanced setup, in-repo and reviewable.
+#
+# No untrusted GitHub event inputs are used: the only expressions are
+# `matrix.language` / `matrix.build-mode`, both defined in this file.
+#
+# WHY THIS FILE EXISTS
+#
+# CodeQL *security* analysis has not run on this repository since 2026-03-26.
+# A workflow named "CodeQL" has been green every day since, which is why the
+# gap was invisible. The green run is a different product:
+#
+#   Initialize CodeQL:  analysis-kinds: code-quality
+#                       disable-default-queries: true
+#                       - uses: code-quality
+#
+# That is GitHub's *code quality* default setup. It runs the maintainability
+# suite over javascript-typescript and python and uploads `*.quality.sarif`.
+# It produces no security results, and `code-scanning/default-setup` reports
+# `state: not-configured` — the security half was switched off and only the
+# quality half kept running.
+#
+# What the last real security scan (2026-03-26) covered, and found:
+#
+#   /language:rust                   178 results  -> 100 alerts
+#   /language:actions                  4 results
+#   /language:javascript-typescript    4 results
+#   /language:python                   0 results
+#   /language:c-cpp                    0 results
+#
+# All 100 rust alerts were triaged by the owner on 2026-03-26 and 2026-03-29
+# (50 "false positive", 50 "won't fix"). Dismissals are keyed by alert
+# fingerprint and survive re-enablement, so restoring this workflow does not
+# resurrect them — but it also means the current "0 open alerts" reflects that
+# triage, not five months of clean scans.
+#
+# Everything merged since 2026-03-26 — the FORS address collision, the
+# forged-signature verifier, the domain-separation cut, the Kyber binding
+# enforcement, the BLE trust-root work — has never been seen by a security
+# query. A settings toggle can be flipped with no diff and no notification;
+# a committed workflow can only change through review. That is the fix.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a language that stops analyzing surfaces as a failing
+    # scheduled run rather than as silence.
+    - cron: "27 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # Rust and Kotlin are large here; give them room rather than letting a
+    # timeout masquerade as a language that "doesn't work".
+    timeout-minutes: 90
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      # One language failing must not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          # build-mode: none analyses read source directly. That matters here:
+          # a full --all-features workspace build takes ~30 minutes, and
+          # requiring one is how Rust coverage gets quietly dropped again the
+          # next time the build is slow or breaks.
+          - language: rust
+            build-mode: none
+          # java-kotlin was never in the pre-2026-03-26 matrix, so the Android
+          # client (85 Kotlin files) has never been analyzed at all.
+          - language: java-kotlin
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+          # c-cpp is deliberately NOT restored. It returned 0 results on
+          # 2026-03-26 because there is no first-party C to extract: the repo
+          # tracks 3 headers and no .c/.cpp. It also cannot run build-mode:
+          # none. Add it back with a real build mode if firmware C lands here.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # No `queries:` override — this is the same default suite that ran
+          # before 2026-03-26. Restoring coverage and changing the query suite
+          # in one step would make the resulting alert delta unattributable.
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          # Same category strings as the 2026-03-26 analyses, so alerts land in
+          # the existing namespace and prior triage still applies.
+          category: "/language:${{ matrix.language }}"
