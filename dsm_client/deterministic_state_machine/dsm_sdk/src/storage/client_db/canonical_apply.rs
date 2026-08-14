@@ -548,4 +548,218 @@ mod tests {
         // Different applied roots → different record hash.
         assert_ne!(a.record_hash(), b.record_hash());
     }
+
+    // =====================================================================
+    // REPLAY MATRIX (ADR 0003, pre-3c security gate).
+    //
+    // THE QUESTION: can the same already-valid signed operation + A-side
+    // evidence be delivered under a FRESH transport correlation identity, after
+    // one successful acceptance, and cause a SECOND semantic apply?
+    //
+    // THE ANSWER: no -- but by LAYERED DEFENCE, not by this identity alone.
+    // Read that carefully before changing anything here, because the obvious
+    // reading is wrong in a way that a single mutation test will not catch.
+    //
+    // What THIS module contributes: `canonical_apply_id` hashes only
+    // AUTHENTICATED material -- relationship, parent/child tips, precommit and
+    // operation digests, both device ids, and the nonce. No transport metadata
+    // (transaction id, correlation key, envelope message id) is an input, so a
+    // replay under any number of fresh correlation ids collapses onto the SAME
+    // identity and is classified `Duplicate`. The tests below prove exactly
+    // that -- a CLASSIFICATION property, at the outermost of five layers.
+    //
+    // What actually stops a double credit, established by a per-layer mutation
+    // ladder against `CoreSDK::apply_incoming_transfer_full_state`:
+    //
+    //   L1  this pre-execution lookup (canonical_apply_id)
+    //   L2  A-side head pin: signed parent must equal the pinned counterparty head
+    //   L3  in-tx `is_nonce_spent` pre-check          (race window only)
+    //   L4  in-tx canonical-apply insert -> Err        (race window only)
+    //   L5  `spent_nonces` UNIQUE **at the INSERT**   <-- AUTHORITATIVE
+    //
+    // Bypassing L1 alone turns the duplicate test red, but the replay is
+    // refused by L2 and no second mutation occurs -- so a mutation test that
+    // stops at L1 credits this identity with a guarantee it does not provide.
+    // Bypassing L1+L2+L3+L4 together leaves the suite GREEN. Only weakening the
+    // L5 writer (`INSERT` -> `INSERT OR IGNORE` in `mark_nonce_spent_with_conn`)
+    // produces a genuine second `Applied`. The read-then-check at L3 is TOCTOU
+    // decoration; the WRITE is what holds.
+    //
+    //   same authenticated operation
+    //   + arbitrary fresh transport correlation ids
+    //   = one canonical apply
+    //     one semantic acceptance identity
+    //     possibly repeated delivery acknowledgements
+    //     but NEVER a second value-bearing result
+    //
+    // Honest coverage note: L3 and L4 have no uniquely-observing test. They
+    // guard a concurrent-apply race that a single-threaded test cannot create,
+    // beneath authoritative UNIQUE constraints. Do not describe them as covered.
+    // =====================================================================
+
+    /// The identity is a pure function of authenticated material. This is the
+    /// property every other replay test rests on -- and the limit of what this
+    /// module guarantees on its own (see the L1..L5 note above).
+    #[test]
+    fn the_apply_identity_ignores_transport_metadata_entirely() {
+        let a = rec(0xA1, 0xB1, 0xC1);
+        // Byte-identical operation, delivered "again" -- nothing about transport
+        // is an input, so there is no way to express a different correlation id
+        // in this identity at all.
+        let b = rec(0xA1, 0xB1, 0xC1);
+        assert_eq!(
+            a.canonical_apply_id(),
+            b.canonical_apply_id(),
+            "the same authenticated operation must have ONE identity regardless of delivery"
+        );
+
+        // ...and any change to authenticated material DOES change it.
+        assert_ne!(
+            a.canonical_apply_id(),
+            rec(0xA2, 0xB1, 0xC1).canonical_apply_id()
+        );
+        assert_ne!(
+            a.canonical_apply_id(),
+            rec(0xA1, 0xB2, 0xC1).canonical_apply_id()
+        );
+        assert_ne!(
+            a.canonical_apply_id(),
+            rec(0xA1, 0xB1, 0xC2).canonical_apply_id()
+        );
+    }
+
+    /// Exact replay under a fresh correlation -> Duplicate, never a second apply.
+    #[test]
+    #[serial]
+    fn exact_replay_under_a_fresh_correlation_is_a_duplicate() {
+        init_test_db();
+        let r = rec(0xD1, 0xD2, 0xD3);
+
+        {
+            // Scoped: the connection mutex is NOT reentrant, and
+            // `lookup_canonical_apply_status` takes it itself. Holding it across
+            // that call hangs silently -- no panic, no error, just a stuck test.
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            insert_canonical_apply_identity_with_conn(&conn, &r).expect("first apply");
+        }
+
+        // The replay: same authenticated material, arriving under whatever fresh
+        // transport identity an attacker or a retry chooses.
+        match lookup_canonical_apply_status(
+            &r.canonical_apply_id(),
+            &r.relationship_key,
+            &r.parent_tip,
+            &r.nonce_hash,
+        )
+        .expect("lookup")
+        {
+            CanonicalApplyLookup::Duplicate(stored) => {
+                assert_eq!(
+                    stored.canonical_apply_id(),
+                    r.canonical_apply_id(),
+                    "the duplicate must converge on the SAME canonical record"
+                );
+            }
+            other => panic!("expected Duplicate, got {other:?}"),
+        }
+    }
+
+    /// The guard lives in canonical-apply storage, not in transport staging, so
+    /// reaping a staging row cannot defeat it.
+    #[test]
+    #[serial]
+    fn dedup_survives_reaping_the_transport_staging_row() {
+        init_test_db();
+        let r = rec(0xE1, 0xE2, 0xE3);
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            insert_canonical_apply_identity_with_conn(&conn, &r).expect("first apply");
+        }
+
+        // Simulate the transport layer forgetting everything it knew: the
+        // recipient staging table is emptied. The canonical record is a
+        // different table with a different lifetime.
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute("DELETE FROM recipient_staging", [])
+                .expect("reap staging");
+        }
+
+        assert!(
+            matches!(
+                lookup_canonical_apply_status(
+                    &r.canonical_apply_id(),
+                    &r.relationship_key,
+                    &r.parent_tip,
+                    &r.nonce_hash
+                )
+                .expect("lookup"),
+                CanonicalApplyLookup::Duplicate(_)
+            ),
+            "dedup must not depend on transport staging retention"
+        );
+    }
+
+    /// Same nonce, DIFFERENT operation identity -> Conflict, fail closed.
+    #[test]
+    #[serial]
+    fn the_same_nonce_with_a_different_operation_conflicts() {
+        init_test_db();
+        let first = rec(0xF1, 0xF2, 0xF3);
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            insert_canonical_apply_identity_with_conn(&conn, &first).expect("first apply");
+        }
+
+        // Different relationship and parent -- a genuinely different transition --
+        // but reusing the nonce.
+        let impostor = rec(0xAA, 0xBB, 0xF3);
+        assert_ne!(impostor.canonical_apply_id(), first.canonical_apply_id());
+        assert!(
+            matches!(
+                lookup_canonical_apply_status(
+                    &impostor.canonical_apply_id(),
+                    &impostor.relationship_key,
+                    &impostor.parent_tip,
+                    &impostor.nonce_hash
+                )
+                .expect("lookup"),
+                CanonicalApplyLookup::Conflict
+            ),
+            "a different identity reusing a spent nonce must fail closed"
+        );
+    }
+
+    /// Same (relationship, parent) with a conflicting transition -> Conflict.
+    #[test]
+    #[serial]
+    fn the_same_relationship_and_parent_with_a_different_transition_conflicts() {
+        init_test_db();
+        let first = rec(0x11, 0x22, 0x33);
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            insert_canonical_apply_identity_with_conn(&conn, &first).expect("first apply");
+        }
+
+        let forked = rec(0x11, 0x22, 0x99); // same rel+parent, different nonce
+        assert_ne!(forked.canonical_apply_id(), first.canonical_apply_id());
+        assert!(
+            matches!(
+                lookup_canonical_apply_status(
+                    &forked.canonical_apply_id(),
+                    &forked.relationship_key,
+                    &forked.parent_tip,
+                    &forked.nonce_hash
+                )
+                .expect("lookup"),
+                CanonicalApplyLookup::Conflict
+            ),
+            "a fork on the same (relationship, parent) must fail closed"
+        );
+    }
 }
