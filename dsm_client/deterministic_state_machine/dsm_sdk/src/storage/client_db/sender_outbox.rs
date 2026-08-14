@@ -192,6 +192,26 @@ pub fn derive_submission_id(commitment: &[u8; 32]) -> String {
     crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
 }
 
+/// Deterministic submission id for a non-transfer artifact (ADR 0003).
+///
+/// Derived from the artifact's CONTENT DIGEST, which is already
+/// role-domain-separated, so the id inherits that separation: an A-side and a
+/// B-side artifact of the same transfer can never collide on
+/// `UNIQUE(submission_id)`, and neither can collide with the transfer's own id
+/// (derived from the commitment under a different tag).
+///
+/// Truncated to 16 bytes for the same reason as [`derive_submission_id`]:
+/// deployed storage nodes hard-require that width. The full digest stays on the
+/// row and is what an equality test uses -- the truncation is an id, never the
+/// comparison.
+pub fn derive_artifact_submission_id(content_digest: &[u8; 32]) -> String {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/b0x-artifact-submission-id/v1"
+    ));
+    h.update(content_digest);
+    crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
+}
+
 /// Insert the lifecycle row INSIDE the caller's advance transaction.
 ///
 /// Takes `&Connection` (a `&Transaction` derefs to one) and never opens its
@@ -280,6 +300,41 @@ pub fn insert_sender_outbox_artifact_with_conn(
     tx: &Connection,
     artifact: &SenderOutboxArtifact,
 ) -> Result<()> {
+    // A re-entry on the same submission id is idempotent ONLY when it carries
+    // the identical artifact. The id is 16 bytes truncated from a 32-byte
+    // digest, so a collision is a 128-bit possibility rather than an
+    // impossibility -- and the storage node resolves `UNIQUE(message_id)` with
+    // `ON CONFLICT DO NOTHING`, which ACCEPTS a colliding id silently. Without
+    // this check, two different artifacts sharing an id would see the second
+    // quietly discarded and its transfer stall with no error anywhere.
+    //
+    // Same id + same bytes -> no-op. Same id + different bytes -> fail closed.
+    if let Some((existing_bytes, existing_digest)) = tx
+        .query_row(
+            "SELECT envelope_bytes, content_digest FROM sender_outbox_artifacts
+             WHERE submission_id = ?1",
+            params![artifact.submission_id],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()?
+    {
+        if existing_bytes == artifact.envelope_bytes
+            && existing_digest == artifact.content_digest.as_slice()
+        {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "sender_outbox_artifacts: submission_id {} already holds a DIFFERENT artifact \
+             (stored {} bytes / digest {}, incoming {} bytes / digest {}); refusing to \
+             silently replace or drop it",
+            artifact.submission_id,
+            existing_bytes.len(),
+            crate::util::text_id::encode_base32_crockford(&existing_digest),
+            artifact.envelope_bytes.len(),
+            crate::util::text_id::encode_base32_crockford(&artifact.content_digest),
+        ));
+    }
+
     tx.execute(
         "INSERT INTO sender_outbox_artifacts(
             relationship_key, canonical_parent, proposal_nonce, role,
@@ -1241,6 +1296,111 @@ mod tests {
         }
     }
 
+    /// Distinct deterministic ids for the artifacts of one transfer.
+    ///
+    /// This proves DOMAIN SEPARATION for the tested artifacts -- it does not
+    /// prove ids cannot collide. The id is 16 bytes truncated from a 32-byte
+    /// digest, so collision is a 128-bit possibility: cryptographically
+    /// negligible, not impossible. Correctness therefore cannot rest on
+    /// uniqueness alone, because the node resolves `UNIQUE(message_id)` with
+    /// `ON CONFLICT DO NOTHING` -- a colliding id is accepted silently rather
+    /// than rejected. The content check in
+    /// `same_artifact_id_with_different_bytes_fails_closed` is what makes that
+    /// safe: same id + different bytes must fail, not disappear.
+    #[test]
+    fn artifact_submission_ids_are_distinct_per_role_and_from_the_transfer() {
+        let commitment = [0x5Cu8; 32];
+        let payload = vec![0x11u8; 512];
+
+        let transfer_id = derive_submission_id(&commitment);
+        let a_digest = evidence_content_digest(ArtifactRole::EvidenceA, &payload);
+        let b_digest = evidence_content_digest(ArtifactRole::CountersignB, &payload);
+        let a_id = derive_artifact_submission_id(&a_digest);
+        let b_id = derive_artifact_submission_id(&b_digest);
+
+        assert_ne!(a_digest, b_digest, "role must separate the content address");
+        assert_ne!(a_id, b_id, "role separation must reach the submission id");
+        assert_ne!(
+            a_id, transfer_id,
+            "artifact id must differ from the transfer id"
+        );
+        assert_ne!(
+            b_id, transfer_id,
+            "artifact id must differ from the transfer id"
+        );
+
+        // Deterministic: a retry derives the same ids rather than new ones.
+        assert_eq!(a_id, derive_artifact_submission_id(&a_digest));
+        assert_eq!(
+            a_digest,
+            evidence_content_digest(ArtifactRole::EvidenceA, &payload)
+        );
+    }
+
+    /// Same submission id + DIFFERENT bytes must fail closed.
+    ///
+    /// The id is 16 bytes truncated from a 32-byte digest, so a collision is a
+    /// 128-bit possibility rather than an impossibility -- and the storage node
+    /// resolves `UNIQUE(message_id)` with `ON CONFLICT DO NOTHING`, which
+    /// ACCEPTS a colliding id silently. Uniqueness alone is therefore not a
+    /// safety property; the content equality check is.
+    ///
+    /// Same id + same bytes stays idempotent, so an ordinary retry is unaffected.
+    #[test]
+    #[serial]
+    fn same_artifact_id_with_different_bytes_fails_closed() {
+        init_test_db();
+        let rel = [0xE1u8; 32];
+        let cp = [0xE2u8; 32];
+        let (pp, pt) = ([0xE3u8; 32], [0xE4u8; 32]);
+        seed_contact(cp, pp);
+        let p = proposal_for(rel, cp, [0xE5u8; 32], [0xE6u8; 32], pp, pt);
+        let ob = outbox_for(&p, None, true);
+        let original = artifact_for(&p, vec![0xAA; 128]);
+
+        commit_send_prerequisites_atomically(
+            &p,
+            &ob,
+            "MSGID-CONFLICT",
+            &[0xA1u8; 64],
+            &[0xA2u8; 64],
+            &[0x42u8; 32],
+            true,
+            std::slice::from_ref(&original),
+        )
+        .expect("first commit");
+
+        let binding = get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Same id, same bytes -> idempotent no-op.
+        insert_sender_outbox_artifact_with_conn(&conn, &original)
+            .expect("identical re-entry must be idempotent");
+
+        // Same id, DIFFERENT bytes -> fail closed, never silently dropped.
+        let mut impostor = original.clone();
+        impostor.envelope_bytes = vec![0xBB; 128];
+        impostor.content_digest =
+            evidence_content_digest(ArtifactRole::EvidenceA, &impostor.envelope_bytes);
+        let err = insert_sender_outbox_artifact_with_conn(&conn, &impostor)
+            .expect_err("same id with different bytes must fail closed");
+        assert!(
+            err.to_string()
+                .contains("already holds a DIFFERENT artifact"),
+            "unexpected error: {err}"
+        );
+        drop(conn);
+
+        // The original survives untouched.
+        let arts =
+            load_sender_outbox_artifacts(&rel, &p.canonical_parent, &p.nonce_hash).expect("load");
+        assert_eq!(arts.len(), 1);
+        assert_eq!(
+            arts[0].envelope_bytes, original.envelope_bytes,
+            "the stored artifact must not be replaced by a colliding one"
+        );
+    }
+
     /// ADR 0003, the first dangerous invariant of the split:
     ///
     /// > After local debit advancement commits, either BOTH deliverable
@@ -1331,8 +1491,9 @@ mod tests {
         )
         .expect_err("duplicate submission_id must abort the bundle");
         assert!(
-            err.to_string().to_lowercase().contains("unique"),
-            "expected a uniqueness violation, got: {err}"
+            err.to_string()
+                .contains("already holds a DIFFERENT artifact"),
+            "expected the fail-closed conflict check, got: {err}"
         );
 
         assert!(

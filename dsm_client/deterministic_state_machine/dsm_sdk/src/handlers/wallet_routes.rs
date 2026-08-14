@@ -1314,6 +1314,7 @@ impl AppRouterImpl {
                     seq,
                     receipt_commit: Vec::new(), // ReceiptCommit built in process_online_transfer_logic
                     canonical_operation_bytes: Vec::new(),
+                    receipt_evidence_digest: Vec::new(),
                 };
 
                 // Compute deterministic nonce: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)

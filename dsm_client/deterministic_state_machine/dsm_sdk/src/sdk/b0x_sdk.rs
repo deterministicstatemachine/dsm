@@ -165,6 +165,13 @@ pub struct B0xEntry {
 
 /// The product of pure envelope construction: the exact canonical wire bytes
 /// plus the identity they were built under. Carries no network capability.
+/// The storage node's per-envelope admission cap
+/// (`dsm_storage_node/src/api/transport/b0x.rs`). Duplicated deliberately: the
+/// client must not silently track a change to the node's limit, and building an
+/// artifact that exceeds it produces a 413 that no retry can ever clear.
+pub(crate) const MAX_B0X_ENVELOPE_BYTES: usize = 128 * 1024;
+
+#[derive(Debug)]
 pub(crate) struct BuiltEnvelope {
     /// EXACT bytes. The durable outbox freezes these; a retry replays them
     /// verbatim rather than re-running construction.
@@ -199,6 +206,11 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
+    /// ADR 0003: content address of the A-side receipt-evidence artifact this
+    /// transfer refers to, populated into proto field 12. Empty means the
+    /// legacy inline composition (the whole receipt in `receipt_commit`), which
+    /// exceeds the node's envelope cap and is retained only for fixtures.
+    pub receipt_evidence_digest: Vec<u8>,
     /// §16.6 defect zero: caller-supplied DETERMINISTIC submission id.
     ///
     /// The forward-transfer path derives this from the receipt commitment
@@ -423,7 +435,13 @@ impl B0xSubmissionParams {
             next_chain_tip,
             receipt_commit,
             routing_address,
+            // This codec does not carry `canonical_operation_bytes` or
+            // `receipt_evidence_digest`; both are rebuilt by the caller. It is a
+            // partial serialization and is not the durable freeze -- the exact
+            // wire bytes live in `sender_outbox.envelope_bytes` and
+            // `sender_outbox_artifacts.envelope_bytes`.
             canonical_operation_bytes: Vec::new(),
+            receipt_evidence_digest: Vec::new(),
         })
     }
 }
@@ -1711,6 +1729,149 @@ impl B0xSDK {
     /// this signature. That is the point: the durable outbox freezes the exact
     /// wire bytes BEFORE anything is deliverable, so the builder must be
     /// callable from inside a synchronous, pre-commit context.
+    /// Build the frozen wire bytes for an A-side receipt-evidence artifact
+    /// (ADR 0003).
+    ///
+    /// Deliberately NOT routed through `build_envelope_for_submission`: that
+    /// builder dispatches on `params.transaction`, and evidence is not an
+    /// `Operation`. Inventing a fake variant to satisfy it would put a
+    /// non-operation into the operation type purely for transport convenience.
+    ///
+    /// Enforces the artifact budget at CONSTRUCTION. CI already asserts the
+    /// accepted shapes fit, but production must not cheerfully build an
+    /// artifact the peer can never accept -- a 413 at submit time is a far
+    /// worse place to learn this than a hard error here.
+    pub(crate) fn build_evidence_envelope(
+        &self,
+        recipient_device_id: &str,
+        recipient_genesis_hash: &str,
+        transfer_submission_id: &str,
+        evidence_submission_id: &str,
+        evidence_digest: &[u8; 32],
+        full_receipt_bytes: &[u8],
+    ) -> Result<BuiltEnvelope, DsmError> {
+        // The artifact must be self-consistent before it is frozen.
+        let recomputed = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            full_receipt_bytes,
+        );
+        if &recomputed != evidence_digest {
+            return Err(DsmError::internal(
+                "build_evidence_envelope: digest does not match full_receipt_bytes",
+                None::<std::io::Error>,
+            ));
+        }
+
+        let self_device_bytes = crate::util::text_id::decode_base32_crockford(&self.device_id)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter("build_evidence_envelope: device_id must be base32")
+            })?;
+        let recipient_bytes = crate::util::text_id::decode_base32_crockford(recipient_device_id)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter("build_evidence_envelope: recipient must be base32")
+            })?;
+        let genesis_bytes = crate::util::text_id::decode_base32_crockford(recipient_genesis_hash)
+            .ok_or_else(|| {
+            DsmError::invalid_parameter("build_evidence_envelope: recipient genesis must be base32")
+        })?;
+        let msg_id_bytes = crate::util::text_id::decode_base32_crockford(evidence_submission_id)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "build_evidence_envelope: evidence submission id must be base32",
+                )
+            })?;
+        if msg_id_bytes.len() != 16 {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_evidence_envelope: message id must be 16 bytes, got {}",
+                msg_id_bytes.len()
+            )));
+        }
+
+        let body = dsm::types::proto::ReceiptEvidenceA {
+            transfer_submission_id: transfer_submission_id.to_string(),
+            receipt_evidence_digest: evidence_digest.to_vec(),
+            full_receipt_bytes: full_receipt_bytes.to_vec(),
+        };
+        let mut body_bytes = Vec::with_capacity(body.encoded_len());
+        body.encode(&mut body_bytes).map_err(|e| {
+            DsmError::internal(
+                format!("ReceiptEvidenceA encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        let arg_pack = dsm::types::proto::ArgPack {
+            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: body_bytes,
+        };
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: "receipt.evidence.a".to_string(),
+            args: Some(arg_pack),
+            pre_state_hash: None,
+            post_state_hash: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: self_device_bytes.clone(),
+                chain_tip: vec![0u8; 32],
+                genesis_hash: genesis_bytes,
+                seq: 0,
+            }),
+            message_id: msg_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![dsm::types::proto::UniversalOp {
+                        op_id: Some(dsm::types::proto::Hash32 {
+                            v: evidence_digest.to_vec(),
+                        }),
+                        actor: self_device_bytes.clone(),
+                        genesis_hash: vec![0u8; 32],
+                        kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+                    }],
+                    atomic: true,
+                },
+            )),
+        };
+
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        prost::Message::encode(&envelope, &mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("evidence Envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::internal(
+                format!(
+                    "build_evidence_envelope: artifact is {} bytes, at or over the storage \
+                     node's {MAX_B0X_ENVELOPE_BYTES}-byte envelope cap; it could never be \
+                     accepted. Split the evidence rather than raising the cap (ADR 0003).",
+                    buf.len()
+                ),
+                None::<std::io::Error>,
+            ));
+        }
+
+        info!(
+            "build_evidence_envelope: {} bytes ({}% of cap)",
+            buf.len(),
+            100 * buf.len() / MAX_B0X_ENVELOPE_BYTES
+        );
+
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32: evidence_submission_id.to_string(),
+            to_device_id_bytes: recipient_bytes,
+        })
+    }
+
     fn build_envelope_for_submission(
         &self,
         params: &B0xSubmissionParams,
@@ -1895,6 +2056,7 @@ impl B0xSDK {
                     seq: params.seq,
                     receipt_commit: params.receipt_commit.clone(),
                     canonical_operation_bytes: params.canonical_operation_bytes.clone(),
+                    receipt_evidence_digest: params.receipt_evidence_digest.clone(),
                 };
                 info!(
                     "submit_to_b0x: transfer req context from_device_id(first4)={:?} seq={}",
@@ -3516,6 +3678,7 @@ impl B0xSDK {
                 receipt_commit: Vec::new(),
                 routing_address,
                 canonical_operation_bytes: Vec::new(),
+                receipt_evidence_digest: Vec::new(),
             };
 
             match sdk.submit_to_b0x(params).await {
@@ -3934,6 +4097,7 @@ mod tests {
             seq: 1,
             receipt_commit: vec![],
             canonical_operation_bytes: vec![],
+            receipt_evidence_digest: Vec::new(),
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4012,6 +4176,7 @@ mod tests {
             seq: 2,
             receipt_commit: vec![],
             canonical_operation_bytes: vec![],
+            receipt_evidence_digest: Vec::new(),
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4194,6 +4359,7 @@ mod tests {
             seq: 9,
             receipt_commit: vec![],
             canonical_operation_bytes: vec![],
+            receipt_evidence_digest: Vec::new(),
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4330,6 +4496,23 @@ mod tests {
     /// Submission params carrying production-sized SIG A and canonical op bytes.
     /// `receipt_commit` is supplied by the caller so the same production encoder
     /// measures both the inline shape and the split shape.
+    /// The ADR 0003 split composition: no inline receipt, a 32-byte reference.
+    fn params_split_shape() -> B0xSubmissionParams {
+        let digest = evidence_content_digest_for_test();
+        let mut p = params_with_receipt(Vec::new());
+        p.receipt_evidence_digest = digest.to_vec();
+        p
+    }
+
+    fn evidence_content_digest_for_test() -> [u8; 32] {
+        crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &production_sized_receipt_a(),
+        )
+    }
+
+    /// The LEGACY inline composition, retained as a fixture so the evidence that
+    /// it exceeds the cap survives after production stops using it.
     fn params_with_receipt(receipt_commit: Vec<u8>) -> B0xSubmissionParams {
         B0xSubmissionParams {
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
@@ -4359,6 +4542,7 @@ mod tests {
             receipt_commit,
             routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
+            receipt_evidence_digest: Vec::new(),
             submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
         }
     }
@@ -4373,30 +4557,252 @@ mod tests {
             .len()
     }
 
-    /// Proves the budget has teeth: the CURRENT inline transport, which embeds
-    /// the whole A-side receipt in the transfer message, exceeds the node cap.
-    /// Measured on hardware at 168,400 bytes.
+    /// The LEGACY inline composition -- the whole A-side receipt embedded in the
+    /// transfer message -- exceeds the node cap. Measured on hardware at 168,400
+    /// bytes before the split.
+    ///
+    /// Production no longer builds this shape. The fixture is retained
+    /// deliberately: deleting it would delete the evidence for WHY the split
+    /// exists, and nothing would then catch a regression that put the receipt
+    /// back inline.
     #[test]
-    fn current_inline_transport_exceeds_the_node_cap() {
+    fn legacy_inline_composition_exceeds_the_node_cap() {
         let bytes = encode_via_production_path(&params_with_receipt(production_sized_receipt_a()));
-        report_budget("inline transfer (CURRENT)", bytes);
+        report_budget("legacy inline composition", bytes);
         assert!(
             bytes > NODE_MAX_ENVELOPE_BYTES,
-            "inline transport measured {bytes} bytes; if this now fits, the shape changed \
-             and this guard must be re-derived rather than deleted"
+            "legacy inline composition measured {bytes} bytes; if this now fits, the fixture \
+             no longer reproduces the shape it exists to document"
         );
     }
 
-    /// ADR 0003 shape 1: the transfer artifact carries a 32-byte evidence
-    /// digest instead of the receipt, and must fit with real margin.
+    /// ADR 0003 shape 1, as PRODUCTION now builds it: no inline receipt, a
+    /// 32-byte role-separated reference in field 12.
     #[test]
     fn adr0003_transfer_envelope_fits_the_node_cap() {
-        let digest = vec![0x5A; 32];
-        let bytes = encode_via_production_path(&params_with_receipt(digest));
+        let params = params_split_shape();
+        assert!(
+            params.receipt_commit.is_empty(),
+            "the split transfer must not carry an inline receipt"
+        );
+        assert_eq!(
+            params.receipt_evidence_digest.len(),
+            32,
+            "the split transfer must carry a 32-byte evidence reference"
+        );
+
+        let bytes = encode_via_production_path(&params);
         report_budget("ADR0003 TransferEnvelope", bytes);
         assert!(
             bytes < NODE_MAX_ENVELOPE_BYTES,
             "TransferEnvelope measured {bytes} bytes, over the {NODE_MAX_ENVELOPE_BYTES} cap"
+        );
+        // ~50.8 KB. Bounded on both sides: a shape that suddenly got much
+        // smaller has probably dropped something the receiver needs.
+        assert!(
+            (45_000..60_000).contains(&bytes),
+            "TransferEnvelope should be ~50.8 KB, measured {bytes}"
+        );
+    }
+
+    /// The evidence builder must REFUSE to construct an artifact the peer could
+    /// never accept. CI asserts the accepted fixtures fit, but production must
+    /// not cheerfully build an oversized artifact and discover it as a 413 that
+    /// no retry can clear.
+    #[test]
+    fn the_evidence_builder_refuses_to_build_over_the_cap() {
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+
+        // A receipt larger than the cap on its own.
+        let oversized = vec![0xAB; MAX_B0X_ENVELOPE_BYTES + 1];
+        let digest = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &oversized,
+        );
+        let err = sdk
+            .build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                "TRANSFER-ID",
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &digest,
+                &oversized,
+            )
+            .expect_err("an over-cap artifact must not be constructible");
+        assert!(
+            format!("{err:?}").contains("envelope cap"),
+            "expected the budget refusal, got: {err:?}"
+        );
+    }
+
+    /// The evidence artifact must be self-consistent before it is frozen: the
+    /// digest it carries has to match the bytes it carries. A mismatch here
+    /// would produce an artifact that can never satisfy the transfer's
+    /// reference.
+    #[test]
+    fn the_evidence_builder_rejects_a_digest_that_does_not_match_its_bytes() {
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+
+        let receipt = production_sized_receipt_a();
+        let wrong_digest = [0x00u8; 32];
+        let err = sdk
+            .build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                "TRANSFER-ID",
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &wrong_digest,
+                &receipt,
+            )
+            .expect_err("a mismatched digest must be refused");
+        assert!(
+            format!("{err:?}").contains("does not match"),
+            "expected the self-consistency refusal, got: {err:?}"
+        );
+    }
+
+    /// The evidence artifact round-trips: it decodes to the EXACT receipt bytes
+    /// the digest was derived from, and carries that digest for self-
+    /// identification before a recipient has paired it with a transfer.
+    #[test]
+    fn the_evidence_artifact_carries_the_exact_bytes_its_digest_binds() {
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+
+        let receipt = production_sized_receipt_a();
+        let digest = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &receipt,
+        );
+        let built = sdk
+            .build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                "TRANSFER-ID",
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &digest,
+                &receipt,
+            )
+            .expect("evidence envelope");
+        report_budget("ADR0003 A-side evidence (built)", built.bytes.len());
+        assert!(built.bytes.len() < NODE_MAX_ENVELOPE_BYTES);
+
+        // Decode back down to the body and compare byte-for-byte.
+        let env = dsm::types::proto::Envelope::decode(built.bytes.as_slice()).expect("decode");
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(utx)) = env.payload else {
+            panic!("expected a UniversalTx payload");
+        };
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = utx.ops[0].kind.clone()
+        else {
+            panic!("expected an Invoke");
+        };
+        assert_eq!(invoke.method, "receipt.evidence.a");
+        let body =
+            dsm::types::proto::ReceiptEvidenceA::decode(invoke.args.expect("args").body.as_slice())
+                .expect("decode ReceiptEvidenceA");
+
+        assert_eq!(
+            body.full_receipt_bytes, receipt,
+            "the artifact must carry the EXACT bytes the digest binds"
+        );
+        assert_eq!(body.receipt_evidence_digest, digest.to_vec());
+        assert_eq!(body.transfer_submission_id, "TRANSFER-ID");
+    }
+
+    /// Byte stability: the same logical send must produce an identical digest
+    /// and identical encoded bytes on every attempt. A retry replays frozen
+    /// bytes, so instability here would mean a retry submits a DIFFERENT
+    /// artifact under the same deterministic id.
+    #[test]
+    fn the_split_transfer_encoding_is_byte_stable_across_attempts() {
+        let d1 = evidence_content_digest_for_test();
+        let d2 = evidence_content_digest_for_test();
+        assert_eq!(d1, d2, "evidence digest must be deterministic");
+
+        let a = encode_via_production_path(&params_split_shape());
+        let b = encode_via_production_path(&params_split_shape());
+        assert_eq!(
+            a, b,
+            "the same logical send must encode to the same number of bytes"
+        );
+
+        // ...and the evidence artifact must be byte-IDENTICAL, not merely the
+        // same length: a retry replays frozen bytes under a deterministic id,
+        // so instability would submit a different artifact under the same id.
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let receipt = production_sized_receipt_a();
+        let build = || {
+            sdk.build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                "TRANSFER-ID",
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &d1,
+                &receipt,
+            )
+            .expect("evidence envelope")
+            .bytes
+        };
+        assert_eq!(
+            build(),
+            build(),
+            "the evidence artifact must encode byte-identically across attempts"
+        );
+
+        // The submission id derived from that digest is stable too.
+        assert_eq!(
+            crate::storage::client_db::derive_artifact_submission_id(&d1),
+            crate::storage::client_db::derive_artifact_submission_id(&d2),
+        );
+    }
+
+    /// The PRODUCTION transfer envelope, decoded from its actual encoded bytes:
+    /// field 10 empty, field 12 exactly 32 bytes. Asserting on the params would
+    /// only prove what was passed in, not what went on the wire.
+    #[test]
+    fn the_encoded_transfer_envelope_carries_the_reference_not_the_receipt() {
+        let params = params_split_shape();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        ensure_test_storage_dir();
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        let built = sdk
+            .build_envelope_for_submission(&params)
+            .expect("build envelope");
+
+        let env = dsm::types::proto::Envelope::decode(built.bytes.as_slice()).expect("decode");
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(utx)) = env.payload else {
+            panic!("expected a UniversalTx payload");
+        };
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = utx.ops[0].kind.clone()
+        else {
+            panic!("expected an Invoke");
+        };
+        let req = dsm::types::proto::OnlineTransferRequest::decode(
+            invoke.args.expect("args").body.as_slice(),
+        )
+        .expect("decode OnlineTransferRequest");
+
+        assert!(
+            req.receipt_commit.is_empty(),
+            "field 10 must be EMPTY on the wire: {} bytes present",
+            req.receipt_commit.len()
+        );
+        assert_eq!(
+            req.receipt_evidence_digest.len(),
+            32,
+            "field 12 must carry a 32-byte evidence reference"
+        );
+        assert_eq!(
+            req.receipt_evidence_digest,
+            evidence_content_digest_for_test().to_vec(),
+            "the wire reference must be the A-role digest of the evidence bytes"
         );
     }
 

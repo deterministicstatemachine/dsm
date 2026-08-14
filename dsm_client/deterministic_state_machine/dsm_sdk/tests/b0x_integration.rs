@@ -129,6 +129,7 @@ async fn test_b0x_integration_full_flow() {
         receipt_commit: vec![],
         routing_address: routing_address.clone(),
         canonical_operation_bytes: vec![],
+        receipt_evidence_digest: Vec::new(),
     };
 
     // 5. Submit
@@ -323,6 +324,7 @@ async fn test_b0x_live_recipient_roundtrip() {
         receipt_commit: vec![],
         routing_address: routing_address.clone(),
         canonical_operation_bytes: vec![],
+        receipt_evidence_digest: Vec::new(),
     };
 
     let tx_id = sender_b0x
