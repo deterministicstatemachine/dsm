@@ -362,7 +362,7 @@ pub(crate) mod tests {
     /// A real `AdvanceOutcome` from a trivial advance. Constructing one by hand
     /// is not possible without duplicating the SMT machinery, and a real one is
     /// closer to what production hands back anyway.
-    fn stub_advance() -> dsm::types::device_state::AdvanceOutcome {
+    pub(crate) fn stub_advance() -> dsm::types::device_state::AdvanceOutcome {
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
         };
