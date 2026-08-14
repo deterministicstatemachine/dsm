@@ -543,6 +543,31 @@ pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) 
     h.finalize().as_bytes()[..16].to_vec()
 }
 
+/// Cross-endpoint merge key for a polled envelope: `(message_id, CONTENT digest)`,
+/// deliberately NOT `message_id` alone.
+///
+/// Identical replicas of one message still collapse to a single entry, so the
+/// honest case is unchanged. Two copies that DISAGREE under one message id are
+/// both surfaced, and the consumer decides which (if either) verifies.
+///
+/// Keying on `message_id` alone made the merge first-responder-wins: whichever
+/// endpoint answered first durably shadowed every other copy of that message.
+/// These ids are DETERMINISTIC (see [`reply_message_id`]), so the shadowing
+/// repeated identically on every poll — a single replica serving a tampered copy
+/// could suppress the honest copies indefinitely, and no amount of retrying
+/// would ever surface a good one. Recovering from a bad acceptance artifact is
+/// meaningless if a correct replacement can never be seen.
+pub(crate) fn envelope_merge_key(env: &dsm::types::proto::Envelope) -> String {
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-envelope-content"));
+    h.update(&env.encode_to_vec());
+    format!(
+        "{}:{}",
+        text_id::encode_base32_crockford(&env.message_id),
+        text_id::encode_base32_crockford(&h.finalize().as_bytes()[..8]),
+    )
+}
+
 /// Transport-local spool id for a cert-resync message, from method + route + a
 /// digest of the body. IMPACT-TABLE ROW B6, same defect and same extraction
 /// reason as [`reply_message_id`].
@@ -2745,8 +2770,7 @@ impl B0xSDK {
                         );
                     }
                     for env in batch.envelopes {
-                        let key = text_id::encode_base32_crockford(&env.message_id);
-                        map.entry(key).or_insert(env);
+                        map.entry(envelope_merge_key(&env)).or_insert(env);
                     }
                     self.circuit_breaker.mark_node_healthy(&epc).await;
                 }
@@ -3608,6 +3632,53 @@ mod tests {
             super::reply_message_id(&c, &t),
             super::reply_message_id(&c, &[0x23u8; 32]),
             "a different projection tip must give a different id"
+        );
+    }
+
+    /// Cross-endpoint merge must not be first-responder-wins.
+    ///
+    /// Because spool ids are deterministic, a merge keyed on `message_id` alone
+    /// let ONE replica serving a tampered copy shadow every honest copy, on every
+    /// poll, forever. That is what made a bad acceptance artifact unrecoverable:
+    /// the corrected copy existed on other replicas and could never be seen.
+    #[test]
+    fn divergent_copies_of_one_message_id_do_not_shadow_each_other() {
+        // `genesis_hash` stands in for "the bytes a middlebox could alter": any
+        // encoded-byte difference under one message id must survive the merge.
+        let envelope = |message_id: &[u8; 16], content: u8| dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: vec![0x11; 32],
+                chain_tip: vec![0u8; 32],
+                genesis_hash: vec![content; 32],
+                seq: 0,
+            }),
+            message_id: message_id.to_vec(),
+            payload: None,
+        };
+        let (id1, id2) = (&[0xA1u8; 16], &[0xB2u8; 16]);
+
+        // Identical replicas of the same message still collapse: the honest
+        // multi-replica case is unchanged.
+        assert_eq!(
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            "identical replicas must still merge to one entry"
+        );
+
+        // A tampered copy under the SAME id gets its own key, so both survive the
+        // merge and the consumer can reject one and accept the other.
+        assert_ne!(
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            super::envelope_merge_key(&envelope(id1, 0xBB)),
+            "two copies that disagree under one message id must BOTH survive"
+        );
+
+        // The message id is still part of the key -- identical bytes under
+        // different ids remain distinct messages.
+        assert_ne!(
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            super::envelope_merge_key(&envelope(id2, 0xAA)),
         );
     }
     use super::*;

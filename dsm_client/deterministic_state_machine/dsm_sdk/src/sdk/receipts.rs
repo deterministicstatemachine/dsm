@@ -2037,6 +2037,99 @@ mod tests {
     /// Mirrors the canonical co-signed receipt that flows back over
     /// `BilateralCommitResponse.counter_signed_receipt` after the receiver
     /// counter-signs the sender's signed bytes.
+    /// REPRODUCER (half 1 of 2) for the stranded-proposal defect.
+    ///
+    /// A signed receipt survives having `kyber_ct_b` DELETED: the B-side
+    /// signature still verifies and the strict wire decoder still accepts it.
+    /// The field is outside every signature, because `compute_commitment` hashes
+    /// the canonical form, which zeroes fields 12-20.
+    ///
+    /// That is what makes the structural gate in `online_finalize` trippable by
+    /// anyone who can touch the bytes -- no key, no forgery. Half 2 is
+    /// `online_finalize::tests::a_stripped_kyber_ct_b_is_rejected_by_the_live_gate`;
+    /// together they are the causal chain that used to strand a sender forever.
+    ///
+    /// This test asserts CURRENT, INTENDED behaviour of the crypto layer. The
+    /// fix is not to make this test fail -- authenticating fields 12-20 is a
+    /// separate protocol-hardening change. The fix is that the resulting
+    /// rejection is now RECOVERABLE.
+    #[test]
+    #[serial_test::serial]
+    fn stripping_kyber_ct_b_leaves_sig_b_valid_and_wire_decodable() {
+        use crate::storage::client_db::reset_database_for_tests;
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+        reset_database_for_tests();
+        setup_signing_identity();
+
+        let (receiver_ak_pk, receiver_ak_sk) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
+
+        let mut receipt = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xAA; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+        let commitment = receipt.compute_commitment().unwrap();
+        let b_out = sign_receipt_with_per_step_ek(&PerStepSigningInputs {
+            commitment: &commitment,
+            h_n: [0xAA; 32],
+            c_pre: [0xBB; 32],
+            devid_sender: [0x22; 32],
+            relationship_key: [0xDA; 32],
+            root_ak_keypair: Some((&receiver_ak_pk, &receiver_ak_sk)),
+            recipient_kyber_pk: &kyber_kp.public_key,
+            session_binding: &TEST_SESSION_BINDING,
+        })
+        .unwrap();
+        receipt.set_ek_pk_b(b_out.ek_pk.clone());
+        receipt.set_ek_cert_b(b_out.ek_cert);
+        receipt.set_kyber_ct_b(b_out.kyber_ct.clone());
+        receipt.add_sig_b(b_out.sig);
+
+        assert!(!b_out.kyber_ct.is_empty(), "fixture must carry a real ct");
+        verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::B,
+            &receiver_ak_pk,
+            &[0xAA; 32],
+            &TEST_SESSION_BINDING,
+        )
+        .expect("baseline: intact receipt must verify");
+
+        // THE STRIP: delete field 19 and nothing else.
+        let mut stripped = receipt.clone();
+        stripped.set_kyber_ct_b(Vec::new());
+
+        assert_eq!(
+            stripped.compute_commitment().unwrap(),
+            commitment,
+            "the commitment is computed over the canonical form, which zeroes 12-20, \
+             so deleting kyber_ct_b does not move it"
+        );
+        verify_per_step_ek_signing(
+            &stripped,
+            BilateralSide::B,
+            &receiver_ak_pk,
+            &[0xAA; 32],
+            &TEST_SESSION_BINDING,
+        )
+        .expect("sig_b still verifies with kyber_ct_b deleted -- the field is unsigned");
+
+        // ...and the stripped receipt is still accepted by the strict wire decoder.
+        let wire = stripped.to_full_protobuf().expect("encode");
+        let round = StitchedReceiptV2::from_canonical_protobuf(&wire)
+            .expect("the strict wire decoder still accepts the stripped receipt");
+        assert!(round.kyber_ct_b.is_empty());
+        assert!(!round.ek_pk_b.is_empty(), "ek_pk_b survives -> gate arms");
+    }
+
     #[test]
     #[serial_test::serial]
     fn verify_per_step_ek_signing_accepts_symmetric_a_and_b_on_same_receipt() {
