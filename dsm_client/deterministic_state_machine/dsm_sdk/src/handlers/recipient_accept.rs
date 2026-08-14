@@ -250,14 +250,14 @@ fn reject(correlation_key: &str, reason: String) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sdk::receipts::{sign_receipt_with_per_step_ek, PerStepSigningInputs};
     use crate::storage::client_db::recipient_staging::{stage_evidence_half, stage_transfer_half};
     use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
     use serial_test::serial;
 
-    fn setup() {
+    pub(crate) fn setup() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -277,7 +277,7 @@ mod tests {
 
     /// A valid A-side receipt signed under `ak`, returned as its CANONICAL
     /// protobuf bytes -- exactly what the sender digests and what staging holds.
-    fn signed_receipt_bytes(ak_pk: &[u8], ak_sk: &[u8]) -> Vec<u8> {
+    pub(crate) fn signed_receipt_bytes(ak_pk: &[u8], ak_sk: &[u8]) -> Vec<u8> {
         let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber");
         let mut receipt = StitchedReceiptV2::new(
             [0x01; 32],
@@ -316,7 +316,7 @@ mod tests {
     }
 
     /// An `OnlineTransferRequest` whose SIG A verifies under `ak`.
-    fn signed_transfer_bytes(ak_sk: &[u8], evidence_digest: &[u8; 32]) -> Vec<u8> {
+    pub(crate) fn signed_transfer_bytes(ak_sk: &[u8], evidence_digest: &[u8; 32]) -> Vec<u8> {
         let op = Operation::Noop;
         let canonical = op.to_bytes();
         let signature =
