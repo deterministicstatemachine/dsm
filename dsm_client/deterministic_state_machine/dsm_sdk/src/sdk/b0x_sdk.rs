@@ -161,6 +161,20 @@ pub struct B0xEntry {
     /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
     /// Receiver uses these directly for SPHINCS+ verification and tip computation.
     pub canonical_operation_bytes: Vec<u8>,
+    /// ADR 0003: the EXACT `OnlineTransferRequest` wire bytes this entry was
+    /// decoded from, retained verbatim.
+    ///
+    /// Not reconstructed fields, and NOT a protobuf re-encode. Recipient staging
+    /// FREEZES the bytes it is handed, and every later check — SIG A over the
+    /// canonical operation, the evidence digest binding — runs against that
+    /// frozen copy. Re-encoding here would mean verifying something the sender
+    /// never signed and the peer never sent, so the original must survive the
+    /// decode. Whether a re-encode would be byte-identical is beside the point:
+    /// the guarantee is that the question never has to be asked.
+    ///
+    /// Empty for entries not decoded from an `OnlineTransferRequest` (locally
+    /// built entries, fixtures). The split path requires it and fails closed.
+    pub transfer_wire_bytes: Vec<u8>,
 }
 
 /// The product of pure envelope construction: the exact canonical wire bytes
@@ -3441,6 +3455,8 @@ impl B0xSDK {
                                         .unwrap_or_else(|| vec![0u8; 32])
                                 };
                                 return Some(B0xEntry {
+                                    // Verbatim, from the SAME buffer the decode read.
+                                    transfer_wire_bytes: arg_pack.body.clone(),
                                     transaction_id: tid,
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
@@ -3524,6 +3540,8 @@ impl B0xSDK {
                                         .unwrap_or_else(|| vec![0u8; 32])
                                 };
                                 return Some(B0xEntry {
+                                    // Verbatim, from the SAME buffer the decode read.
+                                    transfer_wire_bytes: arg_pack.body.clone(),
                                     transaction_id: tid,
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,

@@ -420,6 +420,54 @@ mod tests {
         }
     }
 
+    /// RAW-BYTE FREEZE: what staging stores is byte-for-byte what was handed to
+    /// the dispatcher, and it survives a restart unchanged.
+    ///
+    /// This is the property the whole verification chain rests on: SIG A and the
+    /// evidence digest are checked against the FROZEN copy, so if staging held a
+    /// re-encode rather than the original, verification would be checking bytes
+    /// the sender never signed. Asserting equality here means the question of
+    /// whether prost round-trips byte-identically never has to be asked.
+    #[test]
+    #[serial]
+    fn staging_freezes_the_exact_bytes_and_a_restart_preserves_them() {
+        let (ak_pk, transfer, evidence, _, _) = pair();
+        let key = "MX-FREEZE";
+
+        dispatch_transfer_half(key, &transfer, &ak_pk).expect("t");
+        let staged = recipient_staging::get_staging(key)
+            .expect("load")
+            .expect("row")
+            .transfer_bytes
+            .expect("transfer half");
+        assert_eq!(
+            staged, transfer,
+            "staging must hold the EXACT bytes it was handed, not a re-encode"
+        );
+
+        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk).expect("e");
+        let row = recipient_staging::get_staging(key)
+            .expect("load")
+            .expect("row");
+        assert_eq!(row.evidence_bytes.as_deref(), Some(evidence.as_slice()));
+
+        // "Restart": staging is durable, so re-reading is what the next poll tick
+        // does. The frozen bytes must be identical, not merely equivalent.
+        let after = recipient_staging::get_staging(key)
+            .expect("reload")
+            .expect("row");
+        assert_eq!(after.transfer_bytes.as_deref(), Some(transfer.as_slice()));
+        assert_eq!(after.evidence_bytes.as_deref(), Some(evidence.as_slice()));
+
+        // ...and the frozen copy is what verification consumes.
+        let ran = std::cell::Cell::new(0);
+        assert!(matches!(
+            decide_ack(key, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
+            AckDecision::Ack(_)
+        ));
+        assert_eq!(ran.get(), 1);
+    }
+
     /// MATRIX 1-3: the three never-ACK states, asserted through the same
     /// decision function the live loop uses.
     #[test]
