@@ -52,37 +52,80 @@ pub struct VerifiedTransfer {
     pub receipt: StitchedReceiptV2,
 }
 
+/// How a staged transfer was accepted. A successful apply has TWO semantically
+/// different outcomes and they must not collapse into one.
+///
+/// ```text
+/// Fresh                        -> canonical apply executed      -> AcceptedFresh
+/// AlreadyAppliedSameOperation  -> NO re-execution, converged     -> AcceptedDuplicate
+/// Conflict                     -> fail closed                    -> terminal_reject
+/// ```
+///
+/// `AcceptedDuplicate` is NOT an error: a legitimate retry after a lost ACK has
+/// to converge. It is also NOT permission to manufacture a second value-bearing
+/// result keyed only by the new correlation id. 3c decides what an ACK for each
+/// looks like; this type exists so that decision cannot be made by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acceptance {
+    /// The canonical apply executed for the first time.
+    AcceptedFresh,
+    /// The exact operation identity was already applied. Converged from the
+    /// stored canonical record; nothing re-executed and nothing re-credited.
+    AcceptedDuplicate,
+}
+
 /// Verify a staged transfer, run the caller's canonical apply, and only then
 /// transition to `accepted`.
 ///
-/// `apply` is injected rather than called directly so that this slice stays
-/// verification + transition, and so a test can force the apply to fail at
-/// exactly the boundary where partial application would be most damaging.
+/// The apply returns an [`ApplyOutcome`], not `()`. That is deliberate: the
+/// canonical apply is keyed on AUTHENTICATED material — `canonical_apply_id`
+/// hashes the relationship, tips, precommit and operation digests, both device
+/// ids and the nonce, none of which is transport metadata — so replaying the
+/// same signed operation under a fresh correlation id returns
+/// `AlreadyAppliedSameOperation` rather than applying twice. If this boundary
+/// were `Result<(), _>`, that outcome would be indistinguishable from a fresh
+/// apply and 3c could mint a second finality object for one semantic transfer.
 ///
-/// Ordering is the point: `mark_accepted` runs only after `apply` returns `Ok`.
-/// A failing apply leaves the row `ready_to_verify` — retryable, and not
-/// ACK-able.
+/// Ordering: `mark_accepted` runs only after the apply reports success. A
+/// failing apply leaves the row `ready_to_verify` — retryable, un-ACK-able. A
+/// `Conflict` is a decision about the transfer and is terminal.
 pub fn verify_and_accept<F>(
     correlation_key: &str,
     sender_ak_pk: &[u8],
     apply: F,
-) -> Result<VerifiedTransfer, String>
+) -> Result<(VerifiedTransfer, Acceptance), String>
 where
-    F: FnOnce(&VerifiedTransfer) -> Result<(), String>,
+    F: FnOnce(&VerifiedTransfer) -> Result<crate::sdk::apply_outcome::ApplyOutcome, String>,
 {
     let verified = verify_staged_transfer(correlation_key, sender_ak_pk)?;
 
-    apply(&verified).map_err(|e| {
+    let outcome = apply(&verified).map_err(|e| {
         // Deliberately NOT a terminal reject: the cryptography held, so this is
         // a local failure to apply, not a decision about the transfer. Leaving
         // it `ready_to_verify` keeps it retryable and un-ACK-able.
         format!("canonical apply failed for {correlation_key} (not accepted, retryable): {e}")
     })?;
 
+    let acceptance = match outcome {
+        crate::sdk::apply_outcome::ApplyOutcome::Applied { .. } => Acceptance::AcceptedFresh,
+        crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { .. } => {
+            Acceptance::AcceptedDuplicate
+        }
+        // A conflicting identity reusing this (relationship, parent) or nonce is
+        // a DECISION about the transfer, not a transient failure: it cannot
+        // become valid by being retried.
+        crate::sdk::apply_outcome::ApplyOutcome::Conflict { reason } => {
+            return Err(reject(
+                correlation_key,
+                format!("canonical apply conflict: {reason}"),
+            ));
+        }
+    };
+
     recipient_staging::mark_accepted(correlation_key)
         .map_err(|e| format!("accept transition failed for {correlation_key}: {e}"))?;
 
-    Ok(verified)
+    Ok((verified, acceptance))
 }
 
 /// The verification half, with no apply and no state transition.
@@ -316,6 +359,45 @@ mod tests {
         (ak_pk, evidence)
     }
 
+    /// A real `AdvanceOutcome` from a trivial advance. Constructing one by hand
+    /// is not possible without duplicating the SMT machinery, and a real one is
+    /// closer to what production hands back anyway.
+    fn stub_advance() -> dsm::types::device_state::AdvanceOutcome {
+        use dsm::core::bilateral_transaction_manager::{
+            compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        let me = [0x21u8; 32];
+        let head = dsm::types::device_state::DeviceState::new(me, me, vec![0xAB; 64], 64);
+        head.advance(
+            compute_smt_key(&me, &me),
+            me,
+            dsm::types::operations::Operation::Noop,
+            vec![0x33; 32],
+            None,
+            &[],
+            Some(initial_chain_tip_from_device_ids(&me, &me)),
+            None,
+            None,
+            None,
+        )
+        .expect("stub advance")
+    }
+
+    fn stub_record() -> crate::storage::client_db::CanonicalApplyRecord {
+        crate::storage::client_db::CanonicalApplyRecord {
+            relationship_key: [0x01; 32],
+            parent_tip: [0x02; 32],
+            child_tip: [0x03; 32],
+            precommit_digest: [0x04; 32],
+            operation_digest: [0x05; 32],
+            sender_device: [0x06; 32],
+            recipient_device: [0x07; 32],
+            nonce_hash: [0x08; 32],
+            applied_parent_root_b: [0x09; 32],
+            applied_child_root_b: [0x0A; 32],
+        }
+    }
+
     /// The whole chain holds, apply runs, and ONLY then is the transfer ACK-able.
     #[test]
     #[serial]
@@ -331,16 +413,71 @@ mod tests {
         );
 
         let applied = std::cell::Cell::new(false);
-        verify_and_accept(key, &ak_pk, |_v| {
+        let (_v, acceptance) = verify_and_accept(key, &ak_pk, |_v| {
             applied.set(true);
-            Ok(())
+            Ok(
+                crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation {
+                    record: stub_record(),
+                },
+            )
         })
         .expect("verify + accept");
 
         assert!(applied.get(), "the canonical apply must have run");
+        assert_eq!(
+            acceptance,
+            Acceptance::AcceptedDuplicate,
+            "an AlreadyAppliedSameOperation must NOT be reported as a fresh acceptance"
+        );
         let st = recipient_staging::staging_state(key).expect("state");
         assert_eq!(st, StagingState::Accepted);
         assert!(st.may_ack(), "only a completed acceptance is ACK-able");
+    }
+
+    /// A FRESH apply is classified as fresh, and a duplicate as duplicate. These
+    /// must not collapse: 3c decides what an ACK looks like for each, and a
+    /// duplicate must never mint a second value-bearing result keyed only by the
+    /// new correlation id.
+    #[test]
+    #[serial]
+    fn fresh_and_duplicate_applies_are_classified_distinctly() {
+        let key = "ACC-FRESH";
+        let (ak_pk, _) = stage_valid_pair(key);
+
+        let (_v, acceptance) = verify_and_accept(key, &ak_pk, |_| {
+            Ok(crate::sdk::apply_outcome::ApplyOutcome::Applied {
+                record: stub_record(),
+                advance: Box::new(stub_advance()),
+            })
+        })
+        .expect("fresh accept");
+        assert_eq!(acceptance, Acceptance::AcceptedFresh);
+    }
+
+    /// A canonical-apply Conflict is a DECISION about the transfer -- a different
+    /// operation identity already consumed this (relationship, parent) or nonce.
+    /// It cannot become valid by being retried, so it is terminal, not retryable.
+    #[test]
+    #[serial]
+    fn an_apply_conflict_is_terminal_not_retryable() {
+        let key = "ACC-CONFLICT";
+        let (ak_pk, _) = stage_valid_pair(key);
+
+        let err = verify_and_accept(key, &ak_pk, |_| {
+            Ok(crate::sdk::apply_outcome::ApplyOutcome::Conflict {
+                reason: "nonce already consumed by a different identity".to_string(),
+            })
+        })
+        .expect_err("a conflict must not accept");
+        assert!(err.contains("canonical apply conflict"), "{err}");
+
+        let st = recipient_staging::staging_state(key).expect("state");
+        assert_eq!(
+            st,
+            StagingState::TerminalReject,
+            "a conflicting identity is a decision, not a transient failure"
+        );
+        assert!(!st.may_ack());
     }
 
     /// Valid crypto, but the canonical apply fails: nothing is accepted, nothing
@@ -352,8 +489,10 @@ mod tests {
         let key = "ACC-2";
         let (ak_pk, _) = stage_valid_pair(key);
 
-        let err = verify_and_accept(key, &ak_pk, |_v| Err("disk on fire".to_string()))
-            .expect_err("a failing apply must not accept");
+        let err = verify_and_accept(key, &ak_pk, |_v| {
+            Err::<crate::sdk::apply_outcome::ApplyOutcome, _>("disk on fire".to_string())
+        })
+        .expect_err("a failing apply must not accept");
         assert!(err.contains("canonical apply failed"), "{err}");
 
         let st = recipient_staging::staging_state(key).expect("state");
@@ -384,8 +523,14 @@ mod tests {
         stage_transfer_half(key, &transfer, &digest).expect("stage transfer");
         stage_evidence_half(key, &evidence).expect("stage evidence");
 
-        let err = verify_and_accept(key, &ak_pk, |_| panic!("apply must never run"))
-            .expect_err("a bad SIG A must be refused");
+        let err = verify_and_accept(
+            key,
+            &ak_pk,
+            |_| -> Result<crate::sdk::apply_outcome::ApplyOutcome, String> {
+                panic!("apply must never run")
+            },
+        )
+        .expect_err("a bad SIG A must be refused");
         assert!(err.contains("SIG A does not verify"), "{err}");
 
         let st = recipient_staging::staging_state(key).expect("state");
@@ -421,8 +566,14 @@ mod tests {
         stage_transfer_half(key, &transfer, &digest).expect("stage transfer");
         stage_evidence_half(key, &tampered).expect("stage evidence");
 
-        let err = verify_and_accept(key, &ak_pk, |_| panic!("apply must never run"))
-            .expect_err("a tampered receipt must be refused");
+        let err = verify_and_accept(
+            key,
+            &ak_pk,
+            |_| -> Result<crate::sdk::apply_outcome::ApplyOutcome, String> {
+                panic!("apply must never run")
+            },
+        )
+        .expect_err("a tampered receipt must be refused");
         assert!(
             err.contains("receipt chain does not verify") || err.contains("does not decode"),
             "{err}"
@@ -449,8 +600,14 @@ mod tests {
         stage_transfer_half(key, &signed_transfer_bytes(&ak_sk, &digest), &digest)
             .expect("stage transfer");
 
-        let err = verify_and_accept(key, &ak_pk, |_| panic!("apply must never run"))
-            .expect_err("a single half must not verify");
+        let err = verify_and_accept(
+            key,
+            &ak_pk,
+            |_| -> Result<crate::sdk::apply_outcome::ApplyOutcome, String> {
+                panic!("apply must never run")
+            },
+        )
+        .expect_err("a single half must not verify");
         assert!(err.contains("both halves must be present"), "{err}");
         assert!(!recipient_staging::staging_state(key)
             .expect("state")
