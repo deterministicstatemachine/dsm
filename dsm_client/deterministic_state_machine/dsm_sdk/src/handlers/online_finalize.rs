@@ -280,6 +280,38 @@ mod tests {
         ));
     }
 
+    /// REPRODUCER (half 2 of 2) for the stranded-proposal defect: the live gate
+    /// rejects on a field that no signature covers. Paired with
+    /// `receipts::tests::stripping_kyber_ct_b_leaves_sig_b_valid_and_wire_decodable`,
+    /// which shows sig_b still verifies after the same deletion.
+    ///
+    /// The gate itself is CORRECT and stays. What changed is the consequence:
+    /// this rejection is now recorded as `awaiting_valid_reply` rather than
+    /// leaving the step pinned at `submitted` with no reachable exit.
+    #[test]
+    fn a_stripped_kyber_ct_b_is_rejected_by_the_live_gate() {
+        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
+        let mut receipt = base_receipt(a, b, parent, child);
+        receipt.set_ek_pk_b(vec![0xE1u8; 32]); // arms the gate
+        receipt.set_kyber_ct_b(Vec::new()); // the strip
+
+        // The commitment is computed over the CANONICAL form, which zeroes
+        // fields 12-20 -- so the strip does not move it and the earlier
+        // commitment-binding check still passes. That is precisely why the
+        // Kyber gate is reachable with a stripped receipt.
+        let commitment = receipt.compute_commitment().unwrap();
+        let g = proposal_with_commitment(b, parent, child, commitment);
+        match verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], None, None).unwrap() {
+            ReceiptVerifyOutcome::Rejected { reason } => {
+                assert!(
+                    reason.contains("kyber_ct_b missing"),
+                    "expected the Kyber consistency gate, got: {reason}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_static_key_receipt_without_per_step_ek_artifacts() {
         // The shape today's recipient produces: a raw sig_b with NO ek_pk_b /

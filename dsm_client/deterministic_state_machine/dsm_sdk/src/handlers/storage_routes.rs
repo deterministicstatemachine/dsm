@@ -349,7 +349,36 @@ async fn finalize_from_acceptance_artifact(
     ) {
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason }) => {
-            log::error!("[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained");
+            // The gate is retained (correct — this artifact proved nothing), but
+            // the step must NOT be left stranded at `submitted` with no exit.
+            // Receipt fields 12-20 are outside every signature, so a middlebox or
+            // a single malicious replica can produce an artifact that passes the
+            // signature and the strict decode yet trips a structural check here.
+            // Without this transition, one such artifact pins the proposal at
+            // `submitted` forever: `finalized` is the only other reachable state
+            // and it needs the very reply that was just refused.
+            //
+            // This is NOT a rollback. The recipient may already have applied and
+            // credited the transfer, so nothing is un-spent or reverted; the step
+            // is simply marked as awaiting a VALID replacement artifact for the
+            // same commitment, which can still finalize it.
+            match crate::storage::client_db::mark_sender_proposal_awaiting_valid_reply(
+                &proposal.relationship_key,
+                &proposal.canonical_parent,
+            ) {
+                Ok(true) => log::error!(
+                    "[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained, \
+                     step now awaiting a valid replacement artifact"
+                ),
+                Ok(false) => log::error!(
+                    "[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained; \
+                     proposal status unchanged (already finalized, or never submitted)"
+                ),
+                Err(e) => log::error!(
+                    "[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained, \
+                     but recording the awaiting-valid-reply state FAILED: {e}"
+                ),
+            }
             return;
         }
         Err(e) => {

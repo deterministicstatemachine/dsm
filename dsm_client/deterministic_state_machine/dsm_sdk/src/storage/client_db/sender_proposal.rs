@@ -19,9 +19,26 @@
 //! addressing lineage the gate and b0x addressing use. They must never be
 //! compared across.
 //!
-//! Lifecycle: proposed → submitted → finalized | rolled_back.
+//! Lifecycle: proposed → submitted → finalized | rolled_back,
+//! with `submitted → awaiting_valid_reply → finalized` for a submitted step
+//! whose acceptance artifact was rejected.
 //! A `proposed` row with no message_id after a crash is repaired (or rolled
 //! back) by the startup proposal sweep from durable canonical evidence (BCR).
+//!
+//! # `awaiting_valid_reply` is NOT a rollback
+//!
+//! A rejected acceptance artifact means "the evidence we were handed is bad",
+//! NOT "the transfer never happened" — the recipient may already have applied
+//! and credited it. Treating a bad reply as a rollback would be a correctness
+//! bug, not merely a conservative one.
+//!
+//! So `awaiting_valid_reply` preserves everything the send already committed:
+//! the spent nonce stays spent, the canonical debit stays, the head does not
+//! move backwards, and the `(relationship_key, canonical_parent)` slot stays
+//! OWNED by this proposal — a different logical transfer still fails closed on
+//! it (only `rolled_back` frees a slot, see `insert_sender_proposal_with_conn`).
+//! The only thing it changes is that the step is no longer stranded: a valid
+//! replacement artifact for the SAME commitment can still finalize it.
 
 use super::get_connection;
 use crate::util::deterministic_time::tick;
@@ -32,6 +49,10 @@ pub const PROPOSAL_PROPOSED: &str = "proposed";
 pub const PROPOSAL_SUBMITTED: &str = "submitted";
 pub const PROPOSAL_FINALIZED: &str = "finalized";
 pub const PROPOSAL_ROLLED_BACK: &str = "rolled_back";
+/// A submitted step whose acceptance artifact was REJECTED. The transfer
+/// stands; only the evidence was bad. See the module docs — this is explicitly
+/// not a rollback and does not free the canonical slot.
+pub const PROPOSAL_AWAITING_VALID_REPLY: &str = "awaiting_valid_reply";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenderOnlineProposal {
@@ -313,6 +334,46 @@ pub fn mark_sender_proposal_submitted(
     Ok(())
 }
 
+/// Record that the acceptance artifact for a SUBMITTED step was rejected, so
+/// the step is no longer stranded waiting for a reply that can never arrive.
+///
+/// Mutates the status column and NOTHING else. In particular it does not touch
+/// the spent nonce, the canonical debit, the relationship head, or the
+/// `(relationship_key, canonical_parent)` slot ownership — a rejected artifact
+/// is a statement about the EVIDENCE, not about whether the recipient applied
+/// the transfer. See the module docs.
+///
+/// Legal predecessors are `submitted` (the normal case) and
+/// `awaiting_valid_reply` (idempotent: a second bad artifact for the same step
+/// is not an error). `finalized` is deliberately excluded — a step that already
+/// finalized on a VALID artifact must never be dragged back by a later bad one,
+/// which is the whole reason this is not expressed as `status != finalized`.
+/// `proposed` is excluded too: a step that was never submitted has no reply to
+/// reject, so seeing one means something is wrong upstream and it should stay
+/// visible rather than being quietly absorbed.
+///
+/// Returns whether a row actually transitioned, so the caller can log the
+/// no-op case honestly instead of implying recovery happened.
+pub fn mark_sender_proposal_awaiting_valid_reply(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    let n = conn.execute(
+        "UPDATE sender_online_proposal SET status = ?3
+         WHERE relationship_key = ?1 AND canonical_parent = ?2
+           AND status IN (?4, ?3)",
+        params![
+            relationship_key.as_slice(),
+            canonical_parent.as_slice(),
+            PROPOSAL_AWAITING_VALID_REPLY,
+            PROPOSAL_SUBMITTED,
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 pub fn mark_sender_proposal_rolled_back(
     relationship_key: &[u8; 32],
     canonical_parent: &[u8; 32],
@@ -376,6 +437,121 @@ mod tests {
             status: PROPOSAL_PROPOSED.into(),
             created_at: 0,
         }
+    }
+
+    /// A rejected acceptance artifact must leave the step RECOVERABLE, and must
+    /// still be able to finalize on a valid replacement for the same commitment.
+    ///
+    /// This is the regression for the stranded-sender defect: `finalized` was the
+    /// only state reachable from `submitted`, and reaching it required the very
+    /// reply that had just been refused, so one bad artifact pinned the proposal
+    /// forever.
+    #[test]
+    #[serial]
+    fn a_rejected_reply_is_recoverable_and_still_finalizes() {
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().unwrap();
+        let p = fixture();
+        insert_sender_proposal(&p).unwrap();
+        mark_sender_proposal_submitted(&p.relationship_key, &p.canonical_parent, "MSG1").unwrap();
+
+        // A bad artifact arrives.
+        assert!(
+            mark_sender_proposal_awaiting_valid_reply(&p.relationship_key, &p.canonical_parent)
+                .unwrap(),
+            "a submitted step must accept the awaiting-valid-reply transition"
+        );
+        let loaded = get_sender_proposal_by_commitment(&p.commitment)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, PROPOSAL_AWAITING_VALID_REPLY);
+        assert_ne!(
+            loaded.status, PROPOSAL_ROLLED_BACK,
+            "a bad artifact is NOT a rollback: the recipient may already have credited it"
+        );
+
+        // Idempotent -- a second bad artifact for the same step is not an error.
+        assert!(mark_sender_proposal_awaiting_valid_reply(
+            &p.relationship_key,
+            &p.canonical_parent
+        )
+        .unwrap());
+
+        // THE POINT: a valid replacement artifact still finalizes the step.
+        mark_sender_proposal_finalized_by_canonical(&p.relationship_key, &p.canonical_parent)
+            .unwrap();
+        assert_eq!(
+            get_sender_proposal_by_commitment(&p.commitment)
+                .unwrap()
+                .unwrap()
+                .status,
+            PROPOSAL_FINALIZED,
+            "recovery is only real if a replacement can still finalize"
+        );
+    }
+
+    /// The recovery state must NOT behave like a rollback for slot ownership: a
+    /// DIFFERENT logical transfer must not be able to reuse the canonical step.
+    /// Only `rolled_back` frees a slot.
+    #[test]
+    #[serial]
+    fn awaiting_valid_reply_does_not_free_the_canonical_slot() {
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().unwrap();
+        let p = fixture();
+        insert_sender_proposal(&p).unwrap();
+        mark_sender_proposal_submitted(&p.relationship_key, &p.canonical_parent, "MSG1").unwrap();
+        mark_sender_proposal_awaiting_valid_reply(&p.relationship_key, &p.canonical_parent)
+            .unwrap();
+
+        let mut different = fixture();
+        different.canonical_child = [0x3Au8; 32];
+        different.commitment = [0x6Au8; 32];
+        assert!(
+            insert_sender_proposal(&different).is_err(),
+            "awaiting_valid_reply must still own the (relationship, canonical_parent) slot"
+        );
+
+        // ...whereas an explicit rollback DOES free it. Contrast, so the two
+        // states cannot silently converge in a later refactor.
+        mark_sender_proposal_rolled_back(&p.relationship_key, &p.canonical_parent).unwrap();
+        insert_sender_proposal(&different).expect("rolled_back frees the slot");
+    }
+
+    /// A finalized step must never be dragged back by a later bad artifact --
+    /// which is why the transition is `status IN (submitted, awaiting)` and not
+    /// `status != finalized`. A never-submitted step is refused for the same
+    /// reason: it has no reply to reject.
+    #[test]
+    #[serial]
+    fn awaiting_valid_reply_refuses_finalized_and_unsubmitted_steps() {
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().unwrap();
+        let p = fixture();
+        insert_sender_proposal(&p).unwrap();
+
+        // `proposed`, never submitted.
+        assert!(
+            !mark_sender_proposal_awaiting_valid_reply(&p.relationship_key, &p.canonical_parent)
+                .unwrap(),
+            "a step that was never submitted has no reply to reject"
+        );
+
+        mark_sender_proposal_submitted(&p.relationship_key, &p.canonical_parent, "MSG1").unwrap();
+        mark_sender_proposal_finalized_by_canonical(&p.relationship_key, &p.canonical_parent)
+            .unwrap();
+        assert!(
+            !mark_sender_proposal_awaiting_valid_reply(&p.relationship_key, &p.canonical_parent)
+                .unwrap(),
+            "a finalized step must not be reopened by a later bad artifact"
+        );
+        assert_eq!(
+            get_sender_proposal_by_commitment(&p.commitment)
+                .unwrap()
+                .unwrap()
+                .status,
+            PROPOSAL_FINALIZED
+        );
     }
 
     #[test]
