@@ -535,6 +535,7 @@ mod tests {
             // original wire bytes to retain. The ADR 0003 split path requires
             // them and fails closed on empty rather than re-encoding.
             transfer_wire_bytes: Vec::new(),
+            receipt_evidence_digest: Vec::new(),
             transaction_id: transaction_id.to_string(),
             inbox_key: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
             sender_device_id: sender_device_id.to_string(),
