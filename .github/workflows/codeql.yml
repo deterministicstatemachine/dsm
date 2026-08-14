@@ -88,18 +88,31 @@ jobs:
           # next time the build is slow or breaks.
           #
           # KNOWN DEGRADED, tracked separately — do not read a clean rust job
-          # as clean Rust coverage until this is closed. The first run logged
-          # 15,081 "macro expansion failed" warnings (assert_eq 3412, assert
-          # 2678, vec 2615, format 2300, log::* 1053), leaving 439 of 552 files
-          # carrying at least one warning and only 113 clean. Everything inside
-          # a macro invocation is absent from the AST, and that is exactly
-          # where the March alerts lived: hard-coded crypto in `vec!`/array
-          # literals, cleartext-logging sinks in `log::*`/`format!` arguments.
-          # Suspected cause is the missing `rust-src` component (the extractor
-          # logged `sysroot: None, sysroot_src: None, proc_macro_server: None`),
-          # which is a one-line experiment — but it is deliberately NOT applied
-          # in the same change as the coverage restoration, so the result delta
-          # stays attributable to one variable at a time.
+          # as clean Rust coverage until this is closed. Measured on the
+          # 2026-08-14 full-tree run: 15,081 "macro expansion failed" warnings
+          # (assert_eq 3412, assert 2678, vec 2615, format 2300, log::* 1053),
+          # leaving 439 of 552 files carrying at least one warning and 113
+          # clean. Everything inside a macro invocation is absent from the AST,
+          # and that is exactly where the March findings lived:
+          #
+          #   rust/hard-coded-cryptographic-value   71 -> 64  (mostly intact)
+          #   rust/cleartext-logging               105 ->  0  (sink set gone)
+          #   rust/cleartext-transmission            2 ->  0
+          #
+          # cleartext-logging's sinks — log::__private_api::log,
+          # std::io::stdio::_print, core::panicking::panic_fmt — exist only
+          # inside macro expansions, so losing expansion deletes the query
+          # outright rather than shrinking it.
+          #
+          # `rustup component add rust-src` was TRIED AND MEASURED, and is not
+          # the fix: with the component installed, the run was byte-identical
+          # (15,081 failures, 439/113, same 64 results). The extractor still
+          # reported `sysroot: None, sysroot_src: None, rustc_src: None,
+          # proc_macro_server: None, extract_dependencies_as_source: false` —
+          # those are unset options, not failed discovery. Next candidates are
+          # the explicit CODEQL_EXTRACTOR_RUST_OPTION_* overrides and fetched
+          # dependency sources, one variable at a time against the frozen
+          # baseline of 64.
           #
           # Separately, 31 files under dsm_sdk/src/jni/ and platform/{android,
           # ios} got "semantic analyzer unavailable (not included as a module)"
@@ -133,27 +146,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      # Rust macro bodies are invisible to CodeQL without std/core sources.
-      # Measured on the 2026-08-14 full-tree run of this workflow WITHOUT this
-      # step: /language:rust returned 64 results, all rust/hard-coded-
-      # cryptographic-value — while rust/cleartext-logging returned 0 against
-      # 105 in March, and rust/cleartext-transmission 0 against 2. That is the
-      # expected signature of 15,081 "macro expansion failed" warnings: the
-      # cleartext-logging sinks (log::__private_api::log, std::io::stdio::
-      # _print, core::panicking::panic_fmt) are reachable ONLY through macro
-      # expansion, so losing expansion deletes the entire query's sink set.
-      # The extractor logged `sysroot: None, sysroot_src: None`, and rust-src
-      # is not preinstalled on the ubuntu runner image.
-      #
-      # This targets the ~11,000 std-macro failures (assert_eq 3412, assert
-      # 2678, vec 2615, format 2300). The ~1,800 third-party macro_rules
-      # failures (log 1053, anyhow 448, rusqlite 321) need dependency sources
-      # and are a separate variable — deliberately not changed in the same
-      # step, so the effect of this one stays attributable.
-      - name: Provide Rust sysroot sources for the CodeQL extractor
-        if: matrix.language == 'rust'
-        run: rustup component add rust-src
 
       # Mirrors the existing `android-unit-tests` job in ci.yml, which builds
       # this module green on ubuntu-latest with the same JDK.
